@@ -163,7 +163,9 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
         collectionId,
         teamId,
         issueId,
-        await createWorkItemReader(principal),
+        // Each retry reloads Project access, so a revoked grant is seen as unreadable and
+        // another qualifying grant can authorize the next attempt.
+        await createWorkItemReader(principal, true),
       ))
     } catch (error) {
       return toCollectionErrorResponse(c, error)
@@ -183,7 +185,9 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
         collectionId,
         teamId,
         issueId,
-        await createWorkItemReader(principal),
+        // Each retry reloads Project access, so a revoked grant is seen as unreadable and
+        // another qualifying grant can authorize the next attempt.
+        await createWorkItemReader(principal, true),
       ))
     } catch (error) {
       return toCollectionErrorResponse(c, error)
@@ -290,13 +294,15 @@ function mutationContext(principal: WorkspacePrincipal): CollectionMutationConte
 
 /**
  * Creates a Work Item reader that applies the same Team and Project checks as the
- * Work Item detail route, reading the directory and the caller's Project access once.
+ * Work Item detail route, reading the directory once.
  *
  * @param principal - Authenticated principal.
+ * @param reloadProjectAccess - When true, every read loads the caller's Project access again
+ *   instead of sharing one snapshot, so a retried item change sees a revoked or remaining grant.
  * @returns Reader that returns undefined for missing or unreadable Work Items.
  */
-async function createWorkItemReader(principal: WorkspacePrincipal): Promise<ReadCollectionWorkItem> {
-  return (await createWorkItemReadAccess(principal)).read
+async function createWorkItemReader(principal: WorkspacePrincipal, reloadProjectAccess = false): Promise<ReadCollectionWorkItem> {
+  return (await createWorkItemReadAccess(principal, reloadProjectAccess)).read
 }
 
 /** Caller-scoped Work Item reads that share one directory and Project access snapshot. */
@@ -311,18 +317,27 @@ type WorkItemReadAccess = {
  * Creates caller-scoped Work Item reads over one directory and Project access snapshot.
  *
  * @param principal - Authenticated principal.
+ * @param reloadProjectAccess - When true, each Work Item read uses its own Project access snapshot.
  * @returns The Work Item reader and the readable-Team listing.
  */
-async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<WorkItemReadAccess> {
+async function createWorkItemReadAccess(principal: WorkspacePrincipal, reloadProjectAccess = false): Promise<WorkItemReadAccess> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
-  const readContext = {
-    directory,
-    readProjectAccesses: () => {
-      projectAccesses ??= getEffectiveProjectScopeAccessList(principal)
-      return projectAccesses
-    },
+  /**
+   * Builds a read context whose Project access is loaded at most once.
+   *
+   * @returns Directory and lazily loaded Project access for permission checks.
+   */
+  const createReadContext = () => {
+    let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
+    return {
+      directory,
+      readProjectAccesses: () => {
+        projectAccesses ??= getEffectiveProjectScopeAccessList(principal)
+        return projectAccesses
+      },
+    }
   }
+  const sharedReadContext = createReadContext()
   /**
    * Lists readable Teams from the in-memory directory and Project access snapshot.
    *
@@ -332,7 +347,7 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<
     const teamIds: string[] = []
     for (const team of directory.teams) {
       try {
-        await requireTeamPermission(principal, team.id, 'viewer', readContext)
+        await requireTeamPermission(principal, team.id, 'viewer', sharedReadContext)
         teamIds.push(team.id)
       } catch (error) {
         if (!isUnreadableWorkItemError(error)) throw error
@@ -348,6 +363,7 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<
    * @returns The readable Work Item, or undefined.
    */
   const read: ReadCollectionWorkItem = async (teamId, issueId) => {
+    const readContext = reloadProjectAccess ? createReadContext() : sharedReadContext
     try {
       const teamContext = await requireTeamPermission(principal, teamId, 'viewer', readContext)
       const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(

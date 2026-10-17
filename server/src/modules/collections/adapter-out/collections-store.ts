@@ -185,19 +185,29 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   }
 
   /**
-   * Reads one Collection row.
+   * Reads one Collection row and fails closed when its deletion marker also exists.
+   *
+   * The marker is read before the live row. Deletion atomically removes the row and writes the
+   * marker, and nothing recreates a deleted Collection, so a delete that commits between the two
+   * reads is seen as a missing row, never as both. A live row read after its marker is left by a
+   * restore or manual repair and is reported as `CollectionCorruptState` instead of exposing a
+   * logically deleted Collection.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collectionId - Collection identifier.
    * @returns The Collection, or undefined.
    */
   async get(workspaceId: string, collectionId: string): Promise<StoredCollection | undefined> {
+    const deletion = await this.readDeletion(workspaceId, collectionId)
     const { Item: row } = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: recordKey(collectionId) },
       ConsistentRead: true,
     })).catch((error: unknown) => storageFailure(error))
-    return row === undefined ? undefined : readRow(workspaceId, row)
+    if (row === undefined) return undefined
+    const collection = readRow(workspaceId, row)
+    if (deletion) throw corruptState()
+    return collection
   }
 
   /**
@@ -232,8 +242,9 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * Writes a Collection with a revision condition and the caller conditions.
    *
    * A creation also adjusts the Workspace counter and requires that no deletion marker exists.
-   * When the counter row is missing, it is first rebuilt from the live Collection rows, so a
-   * partition restored without its counter cannot exceed `COLLECTION_LIMIT`. A reference
+   * The counter is first compared with the live Collection rows and the increment requires it
+   * to still hold that verified value, so a partition restored without its counter, or with an
+   * undercounted one, cannot exceed `COLLECTION_LIMIT`. A reference
    * change also requires the canonical Work Item to still be at the observed revision.
    *
    * @param workspaceId - Server-resolved Workspace.
@@ -243,28 +254,29 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   async put(workspaceId: string, collection: StoredCollection, expectedRevision: number, workItemFence?: CollectionWorkItemFence): Promise<void> {
     this.requireChecks()
-    // Every write requires that no deletion marker exists, so a restored live row next to its
-    // marker fails closed instead of being changed after its deletion.
-    const counter = expectedRevision === 0
-      ? [this.counterUpdate(workspaceId, 1), this.notDeletedCheck(workspaceId, collection.collectionId)]
-      : [this.notDeletedCheck(workspaceId, collection.collectionId)]
     const fence = workItemFence ? await this.workItemChecks(workspaceId, workItemFence) : []
-    const transactItems = [{
-      Put: {
-        TableName: this.tableName,
-        Item: {
-          ...collection,
-          workspaceId,
-          recordKey: recordKey(collection.collectionId),
-          entryType: COLLECTION_ENTRY_TYPE,
-          schemaVersion: COLLECTION_SCHEMA_VERSION,
-        },
-        ...revisionCondition(expectedRevision),
-      },
-    }, ...counter, ...fence, ...this.checks]
-    const transactionSize = transactItems.length
-    // A missing counter is rebuilt once and the creation retried; a second miss is unexpected.
+    // A counter that disappears after verification is rebuilt once and the creation retried;
+    // a second miss is unexpected.
     for (let attempt = 1; ; attempt += 1) {
+      // Every write requires that no deletion marker exists, so a restored live row next to its
+      // marker fails closed instead of being changed after its deletion.
+      const counter = expectedRevision === 0
+        ? [this.counterUpdate(workspaceId, 1, await this.verifiedCount(workspaceId)), this.notDeletedCheck(workspaceId, collection.collectionId)]
+        : [this.notDeletedCheck(workspaceId, collection.collectionId)]
+      const transactItems = [{
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            ...collection,
+            workspaceId,
+            recordKey: recordKey(collection.collectionId),
+            entryType: COLLECTION_ENTRY_TYPE,
+            schemaVersion: COLLECTION_SCHEMA_VERSION,
+          },
+          ...revisionCondition(expectedRevision),
+        },
+      }, ...counter, ...fence, ...this.checks]
+      const transactionSize = transactItems.length
       try {
         await this.client.send(new TransactWriteCommand({ TransactItems: transactItems }))
         return
@@ -275,7 +287,6 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
           const failure = await this.classifyCounterFailure(workspaceId)
           if (failure !== 'missing') throw failure
           if (attempt >= 2) throw corruptState()
-          await this.initializeCounter(workspaceId)
           continue
         }
         if (fence.some((_, offset) => isOnlyConditionFailure(error, transactionSize, 1 + counter.length + offset))) {
@@ -326,24 +337,69 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   }
 
   /**
-   * Explains why the creation counter condition failed.
+   * Reads the Workspace counter and verifies it against the live Collection rows.
+   *
+   * A restore or manual repair can leave a structurally valid counter that disagrees with the
+   * rows, and an undercounted one would let creations exceed `COLLECTION_LIMIT`. A missing
+   * counter is rebuilt from the live rows first. Creations and deletions change the counter and
+   * the rows in one transaction, so a mismatch whose counter is unchanged on a second read is
+   * stored state that disagrees and fails closed with `CollectionCorruptState`; a counter that
+   * changed in between was a concurrent write and is reported as `CollectionConflict`.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @returns `missing` when no counter row exists, `CollectionLimitReached` for a valid full
-   *   counter, `CollectionConflict` when a slot has since been freed, otherwise `CollectionCorruptState`.
+   * @returns The verified count, which the increment then requires to be unchanged.
    */
-  private async classifyCounterFailure(workspaceId: string): Promise<CollectionError | 'missing'> {
+  private async verifiedCount(workspaceId: string): Promise<number> {
+    let count = await this.readCounter(workspaceId)
+    if (count === undefined) {
+      await this.initializeCounter(workspaceId)
+      count = await this.readCounter(workspaceId)
+      // The initialization either wrote the row or lost to another one; a miss is unexpected.
+      if (count === undefined) throw corruptState()
+    }
+    const live = (await this.listSummaries(workspaceId)).length
+    if (live !== count) {
+      if ((await this.readCounter(workspaceId)) !== count) throw conflict()
+      throw corruptState()
+    }
+    if (count >= COLLECTION_LIMIT) throw limitReached()
+    return count
+  }
+
+  /**
+   * Reads the Workspace counter row.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @returns The stored count, or undefined when the row is missing.
+   * @throws CollectionError `CollectionCorruptState` when the row is not a valid counter.
+   */
+  private async readCounter(workspaceId: string): Promise<number | undefined> {
     const { Item: row } = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
       ConsistentRead: true,
     })).catch((error: unknown) => storageFailure(error))
-    if (row === undefined) return 'missing'
+    if (row === undefined) return undefined
     const count: unknown = row.count
-    const isValidCounter = row.entryType === COLLECTION_COUNT_ENTRY_TYPE &&
-      typeof count === 'number' && Number.isSafeInteger(count) && count >= 0
-    if (!isValidCounter) return new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
-    // A concurrent delete can free a slot between the failed write and this read; retry then.
+    if (row.entryType !== COLLECTION_COUNT_ENTRY_TYPE || typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+      throw corruptState()
+    }
+    return count
+  }
+
+  /**
+   * Explains why the creation counter condition failed.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @returns `missing` when no counter row exists, `CollectionLimitReached` for a valid full
+   *   counter, otherwise `CollectionConflict` because the counter changed after it was verified.
+   * @throws CollectionError `CollectionCorruptState` when the counter row is invalid.
+   */
+  private async classifyCounterFailure(workspaceId: string): Promise<CollectionError | 'missing'> {
+    // An invalid counter row throws `CollectionCorruptState` from the read.
+    const count = await this.readCounter(workspaceId)
+    if (count === undefined) return 'missing'
+    // A concurrent write can change the counter after it was verified; retry then.
     return count >= COLLECTION_LIMIT ? limitReached() : conflict()
   }
 
@@ -415,27 +471,27 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param delta - 1 when creating, -1 when deleting.
+   * @param verifiedCount - When creating, the count verified against the live rows.
    * @returns Transaction item that adjusts the counter.
    */
-  private counterUpdate(workspaceId: string, delta: 1 | -1) {
+  private counterUpdate(workspaceId: string, delta: 1 | -1, verifiedCount = 0) {
     return {
       Update: {
         TableName: this.tableName,
         Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
         UpdateExpression: 'ADD #count :delta SET #entryType = :entryType',
-        // Both directions need an existing counter. A missing one is rebuilt from the live rows
-        // before a creation, because treating it as an empty Workspace would let a partition
-        // restored without its counter exceed the limit. A decrement also needs a positive
-        // count; otherwise the partition is corrupt and a counter at -1 would allow overflow.
+        // Both directions need an existing counter. A creation requires the count it verified
+        // against the live rows, because a missing or undercounted counter would let a restored
+        // partition exceed the limit. A decrement also needs a positive count; otherwise the
+        // partition is corrupt and a counter at -1 would allow overflow.
         ConditionExpression: delta === 1
-          ? '#entryType = :entryType AND #count >= :zero AND #count < :limit'
+          ? '#entryType = :entryType AND #count = :verified AND #count < :limit'
           : '#count > :zero AND #entryType = :entryType',
         ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
         ExpressionAttributeValues: {
           ':delta': delta,
           ':entryType': COLLECTION_COUNT_ENTRY_TYPE,
-          ':zero': 0,
-          ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : {}),
+          ...(delta === 1 ? { ':verified': verifiedCount, ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
         },
       },
     }

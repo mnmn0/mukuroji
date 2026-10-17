@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getCollectionItems, getCollections, searchCollectionCandidatePage } from '../api/collections'
+import { getCollectionItems, getCollections, invalidResponse, searchCollectionCandidatePage } from '../api/collections'
 import { collectionCandidateKey, toCollectionCandidates, type CollectionCandidate } from '../model/collectionCandidates'
 
 /** Shared SWR key namespace for Collection queries. */
@@ -89,6 +89,7 @@ export function useCollectionCandidates(
  * @param keyword - Search keyword.
  * @param excluded - Candidate keys already in the Collection.
  * @returns Up to `COLLECTION_CANDIDATE_LIMIT` addable candidates.
+ * @throws CollectionApiError When a page is malformed or repeats an earlier cursor.
  */
 export async function searchCollectionCandidates(token: string, keyword: string, excluded: ReadonlySet<string>): Promise<CollectionCandidate[]> {
   const candidates: CollectionCandidate[] = []
@@ -107,7 +108,10 @@ export async function searchCollectionCandidates(token: string, keyword: string,
       candidates.push(candidate)
       if (candidates.length >= COLLECTION_CANDIDATE_LIMIT) break
     }
-    if (!response.nextCursor || seenCursors.has(response.nextCursor)) return candidates
+    if (!response.nextCursor) return candidates
+    // A repeated cursor means the response is malformed or version-skewed, so the results are
+    // truncated rather than complete; reporting it keeps "no matches" from hiding the failure.
+    if (seenCursors.has(response.nextCursor)) throw invalidResponse()
     seenCursors.add(response.nextCursor)
     cursor = response.nextCursor
   }

@@ -421,6 +421,59 @@ test('fences an item change on the Project membership that authorized reading th
   expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toHaveLength(1)
 })
 
+test('reloads Project access before retrying an item change after a membership is revoked', async () => {
+  /**
+   * Configures a member whose Project grants are revoked once their membership is fenced.
+   *
+   * @param grants - Projects that grant the member the core Team.
+   * @returns The Collection items path and the fenced Projects.
+   */
+  const configureRevocableMember = async (grants: string[]) => {
+    configureFakeProjectClients(true, {
+      directoryId: WORKSPACE_ID,
+      teamProjects: grants.map((id) => ({ id, name: id, tone: 'blue' })),
+      projectAccesses: grants.map((projectId) => ({ teamId: 'core-team', projectId, role: 'member' })),
+      unassignedIssue: true,
+    })
+    const { collectionId } = await createCollection('Launch')
+    const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+    const granted = new Set(grants)
+    const fenced: string[] = []
+    setTestAppDependencies({
+      projectDirectory: {
+        ...existingProjectDirectory,
+        async getProjectAccessList(directoryId, memberKey) {
+          const accesses = await existingProjectDirectory.getProjectAccessList(directoryId, memberKey)
+          return accesses.filter((access) => granted.has(access.projectId))
+        },
+        async createProjectAccessConditionCheck(directoryId, projectId, memberKey, minimumRole) {
+          fenced.push(projectId)
+          // The first fenced grant is revoked after the readability check that relied on it.
+          if (fenced.length === 1) granted.delete(projectId)
+          if (!granted.has(projectId)) return undefined
+          return await existingProjectDirectory.createProjectAccessConditionCheck?.(directoryId, projectId, memberKey, minimumRole)
+        },
+      },
+    })
+    return { itemsPath: `/api/collections/${collectionId}/items`, collectionId, fenced }
+  }
+
+  // With no other grant, the retry finds the Work Item unreadable: the documented not-found.
+  const revoked = await configureRevocableMember(['refero'])
+  const notFound = await planningApiRequest(`${revoked.itemsPath}/core-team/onboarding-friction`, 'PUT')
+  expect(notFound.status).toBe(404)
+  expect(await notFound.json()).toMatchObject({ code: 'CollectionWorkItemNotFound' })
+  expect(revoked.fenced).toEqual(['refero'])
+  expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, revoked.collectionId))?.items).toEqual([])
+
+  // Another qualifying grant authorizes the retry instead of the stale snapshot.
+  resetTestApp()
+  const switched = await configureRevocableMember(['refero', 'alpha'])
+  expect((await planningApiRequest(`${switched.itemsPath}/core-team/onboarding-friction`, 'PUT')).status).toBe(200)
+  expect(switched.fenced).toEqual(['refero', 'alpha'])
+  expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, switched.collectionId))?.items).toHaveLength(1)
+})
+
 test('looks an exact candidate up only in readable Teams, beyond the first hundred Teams', async () => {
   // 101 Teams: the member can read only the last one, through its single Project.
   const additionalTeams = Array.from({ length: 100 }, (_, index) => ({

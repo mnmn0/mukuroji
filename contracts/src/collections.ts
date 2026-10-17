@@ -13,6 +13,13 @@ export const COLLECTION_NAME_MAX_LENGTH = 120
 export const COLLECTION_DESCRIPTION_MAX_LENGTH = 1000
 
 /**
+ * Maximum length of a canonical Team or Work Item identifier that a Collection references,
+ * matching Planning input rules; candidate search keywords accept the same length so an
+ * exact Work Item ID can always be entered.
+ */
+export const COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH = 256
+
+/**
  * Organizing folder that references canonical Work Items without owning them.
  *
  * A Collection has no workflow, assignee, or status of its own, and adding a Work Item
