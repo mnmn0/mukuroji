@@ -901,7 +901,7 @@ function PdfPage({
   return (
     <div className="w-full" ref={containerRef}>
       <div
-        className="group relative mx-auto overflow-hidden bg-surface shadow-xl"
+        className="group relative mx-auto overflow-hidden bg-paper shadow-xl"
         style={pageStyle}
       >
         {renderFailed ? (
@@ -909,7 +909,7 @@ function PdfPage({
             {t('files.preview.error')}
           </p>
         ) : page && isNearViewport ? (
-          <canvas aria-label={pageLabel} className="h-full w-full" ref={canvasRef} />
+          <canvas aria-label={pageLabel} className="h-full w-full bg-paper" ref={canvasRef} />
         ) : (
           <div
             aria-label={pageLabel}
