@@ -477,6 +477,78 @@ describe('DynamoDB inbound webhook lifecycle', () => {
     }, 'hijack-key')).rejects.toMatchObject({ code: 'AutomationInboundWebhookTriggerUnavailable' })
   })
 
+  test('stores Triage endpoint rows under their own entry type through the lifecycle', async () => {
+    const probe = createInboundWebhookDocumentProbe()
+    const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)
+    const automation = await client.completeInboundWebhookProvisioning(await client.reserveCreateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', { name: 'Builds' }, 'automation-key', 'https://api.example.com',
+    ))
+    let triage = await client.completeInboundWebhookProvisioning(await client.reserveCreateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', { name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'support' } }, 'triage-key', 'https://api.example.com',
+    ))
+    /**
+     * Returns the stored endpoint rows as [endpoint ID, entry type] pairs.
+     *
+     * @returns The endpoint rows of workspace-1.
+     */
+    const endpointRows = () => [...probe.items.values()]
+      .filter((item) => typeof item.recordKey === 'string' && item.recordKey.startsWith('INBOUND_WEBHOOK#'))
+      .map((item) => [item.id, item.entryType])
+    /**
+     * Asserts both endpoint rows keep their purpose-specific entry types.
+     */
+    const expectRowShapes = () => {
+      expect(endpointRows()).toEqual(expect.arrayContaining([
+        [automation.id, 'inbound-webhook'],
+        [triage.id, 'inbound-webhook-triage'],
+      ]))
+      expect(endpointRows()).toHaveLength(2)
+    }
+    expectRowShapes()
+    // A server from before purposes gets and lists only `inbound-webhook` rows, so after a
+    // rollback it sees only the Automation endpoint.
+    expect(endpointRows().filter(([, entryType]) => entryType === 'inbound-webhook').map(([id]) => id))
+      .toEqual([automation.id])
+
+    expect((await client.listInboundWebhookEndpoints('workspace-1')).map((endpoint) => [endpoint.id, endpoint.purpose]))
+      .toEqual(expect.arrayContaining([[automation.id, 'automation'], [triage.id, 'triage']]))
+    expect(await client.getInboundWebhookEndpoint('workspace-1', triage.id))
+      .toMatchObject({ id: triage.id, purpose: 'triage', triageRouting: { teamId: 'support' } })
+    expect((await client.resolveInboundWebhookEndpoint(triage.opaqueEndpointId))?.id).toBe(triage.id)
+
+    const renamed = await client.updateInboundWebhookEndpoint('workspace-1', triage.id, { expectedRevision: triage.revision, name: 'Status page alerts' })
+    const paused = await client.setInboundWebhookEndpointStatus('workspace-1', triage.id, { expectedRevision: renamed.revision }, 'paused')
+    const resumed = await client.setInboundWebhookEndpointStatus('workspace-1', triage.id, { expectedRevision: paused.revision }, 'active')
+    expectRowShapes()
+    triage = await client.completeInboundWebhookProvisioning(await client.reserveRotateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', triage.id, { expectedRevision: resumed.revision }, 'rotate-key',
+    ))
+    expect(triage).toMatchObject({ name: 'Status page alerts', status: 'active', secretGeneration: 2 })
+    expectRowShapes()
+    // The delivery's active-endpoint condition matches the Triage row's entry type.
+    await client.recordInboundWebhookDelivery(triage, {
+      idempotencyKey: 'delivery-key',
+      bodyFingerprint: fingerprint('raw body'),
+      signatureFingerprint: fingerprint('signature-1'),
+      signatureTimestamp: '1784160000',
+      eventId: 'event-1',
+      auditMutation: auditPut('event-1'),
+    })
+    await client.revokeInboundWebhookEndpoint('workspace-1', triage.id, { expectedRevision: triage.revision })
+    expectRowShapes()
+    expect((await client.resolveAcceptedTriageWebhookDelivery(triage.opaqueEndpointId, 'delivery-key'))?.endpoint)
+      .toMatchObject({ id: triage.id, status: 'revoked' })
+    expect(await client.getInboundWebhookEndpoint('workspace-1', automation.id))
+      .toMatchObject({ id: automation.id, purpose: 'automation', status: 'active' })
+
+    // A row whose entry type does not match its purpose is rejected as invalid data.
+    for (const item of probe.items.values()) {
+      if (item.id === triage.id && item.entryType === 'inbound-webhook-triage') item.entryType = 'inbound-webhook'
+    }
+    await expect(client.getInboundWebhookEndpoint('workspace-1', triage.id))
+      .rejects.toMatchObject({ code: 'StoredAutomationInvalid' })
+  })
+
   test('validates a new endpoint before reserving it but replays without revalidating', async () => {
     const probe = createInboundWebhookDocumentProbe()
     const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)

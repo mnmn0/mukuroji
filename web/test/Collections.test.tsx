@@ -2,7 +2,14 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import type { WorkItemCollection } from '@mukuroji/contracts'
-import { CollectionApiError, addCollectionItem, getCollectionItems, getCollections } from '../src/features/collections/api/collections'
+import {
+  CollectionApiError,
+  addCollectionItem,
+  getCollectionItems,
+  getCollections,
+  removeCollectionItem,
+  updateCollection,
+} from '../src/features/collections/api/collections'
 import { collectionCandidateKey, toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
 import { searchCollectionCandidates } from '../src/features/collections/queries/useCollections'
 import { resolveCollectionErrorMessageKey } from '../src/features/collections/model/collectionErrors'
@@ -175,6 +182,17 @@ describe('Collection API', () => {
       globalThis.fetch = async () => new Response(JSON.stringify(body))
       await expect(addCollectionItem('token', 'c1', 'core-team', 'pricing')).rejects.toMatchObject({ status: 502 })
     }
+  })
+
+  test('rejects update and item-removal responses for another Collection', async () => {
+    const updated = { ...collection, name: 'Renamed', revision: 3 }
+    globalThis.fetch = async () => new Response(JSON.stringify(updated))
+    expect(await updateCollection('token', 'c1', { name: 'Renamed', expectedRevision: 2 })).toEqual(updated)
+    expect(await removeCollectionItem('token', 'c1', 'core-team', 'pricing')).toEqual(updated)
+    // A valid Collection with another ID must not be reported as the changed Collection or cached under its ID.
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...updated, collectionId: 'other' }))
+    await expect(updateCollection('token', 'c1', { name: 'Renamed', expectedRevision: 2 })).rejects.toMatchObject({ status: 502 })
+    await expect(removeCollectionItem('token', 'c1', 'core-team', 'pricing')).rejects.toMatchObject({ status: 502 })
   })
 
   test('maps failures to actionable messages', () => {

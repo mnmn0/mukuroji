@@ -193,6 +193,14 @@ describe('S3AuditExportStore', () => {
       [[{ ...storedPart, index: 2 }], 'numbered from 1 in order'],
       [[{ ...storedPart, index: 1, sha256: 'not-a-digest' }], 'SHA-256 hex digest'],
     ]
+    // A failure is written only with the failed status, so any other pairing is corrupt.
+    for (const mismatched of [
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'completed', failure: { code: 'X', message: 'x' } },
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'failed' },
+    ]) {
+      objects.set(jobPath, { body: JSON.stringify(mismatched), etag: '"f"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its failure')
+    }
     for (const [parts, message] of foreignParts) {
       const foreign = { ...understated, eventCount: parts.length, parts }
       objects.set(jobPath, { body: JSON.stringify(foreign), etag: '"p"' })
@@ -237,7 +245,7 @@ describe('S3AuditExportStore', () => {
 
     const part = await store.putPart('ws-1', exportId, 1, '{"eventId":"e1"}\n')
 
-    expect(part.key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/part-00001-${part.sha256.slice(0, 16)}.ndjson`)
+    expect(part.key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/part-00001-${part.sha256}.ndjson`)
     expect(part.byteLength).toBe(17)
     expect(part.sha256).toMatch(/^[0-9a-f]{64}$/)
     expect(puts.at(-1)).toMatchObject({ ChecksumSHA256: Buffer.from(part.sha256, 'hex').toString('base64') })
@@ -264,6 +272,10 @@ describe('S3AuditExportStore', () => {
     await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, key: orphan.key, index: 1, eventCount: 1 }, 300))
       .rejects.toThrow('does not match the export part')
     await expect(store.createPartDownloadUrl('ws-1', exportId, { ...orphan, index: 1, eventCount: 1 }, 300))
+      .rejects.toThrow('does not match the export part')
+    // Every checksum character is bound, so a stored checksum differing only in its tail is rejected.
+    const tamperedSha256 = `${part.sha256.slice(0, 63)}${part.sha256.endsWith('0') ? '1' : '0'}`
+    await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, sha256: tamperedSha256, index: 1, eventCount: 1 }, 300))
       .rejects.toThrow('does not match the export part')
   })
 })

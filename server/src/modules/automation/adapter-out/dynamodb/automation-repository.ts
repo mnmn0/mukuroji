@@ -141,6 +141,17 @@ export {
   AUTOMATION_SCHEDULE_SHARD_COUNT,
   createAutomationScheduleShard,
 } from '../../application/schedule-shard'
+/** Entry type of the endpoint row of an Automation-purpose endpoint. */
+const INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE = 'inbound-webhook'
+
+/**
+ * Entry type of the endpoint row of a Triage-purpose endpoint.
+ *
+ * Servers from before endpoint purposes get, list, and fence only `inbound-webhook` endpoint
+ * rows and ignore `purpose`. A separate type keeps a Triage endpoint out of their management
+ * list and Automation rule targets after a rollback.
+ */
+const INBOUND_WEBHOOK_TRIAGE_ENDPOINT_ENTRY_TYPE = 'inbound-webhook-triage'
 /** Entry type of the public lookup row of an Automation-purpose endpoint. */
 const INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE = 'inbound-webhook-lookup'
 
@@ -906,13 +917,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
 
   /** Workspace の inbound webhook endpoints を secret metadata なしで返します。 */
   async listInboundWebhookEndpoints(workspaceId: string) {
-    const values = await this.listCurrent<Record<string, unknown>>(
+    const items = await this.listCurrentItems(
       workspaceId,
       'INBOUND_WEBHOOK#',
-      'inbound-webhook',
+      isInboundWebhookEndpointEntryType,
     )
-    return values
-      .map(readInboundWebhookEndpointRecord)
+    return items
+      .map(readInboundWebhookEndpointItem)
       .map(toAutomationInboundWebhookEndpoint)
   }
 
@@ -2439,13 +2450,23 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return result.Item?.entryType === 'bulk-operation' ? readBulkOperation(result.Item) : undefined
   }
 
+  /**
+   * Reads an endpoint row of either purpose.
+   *
+   * @param workspaceId - Workspace that owns the endpoint.
+   * @param endpointId - Endpoint identifier.
+   * @returns The endpoint, or undefined when no endpoint row exists.
+   */
   private async getInboundWebhookEndpointRecord(workspaceId: string, endpointId: string) {
-    const value = await this.getCurrent<Record<string, unknown>>(
-      workspaceId,
-      inboundWebhookEndpointKey(endpointId),
-      'inbound-webhook',
-    )
-    return value ? readInboundWebhookEndpointRecord(value) : undefined
+    await this.ensureTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { scopeKey: automationScopeKey(workspaceId), recordKey: inboundWebhookEndpointKey(endpointId) },
+      ConsistentRead: true,
+    }))
+    return response.Item && isInboundWebhookEndpointEntryType(response.Item.entryType)
+      ? readInboundWebhookEndpointItem(response.Item)
+      : undefined
   }
 
   private async requireInboundWebhookEndpointRecord(workspaceId: string, endpointId: string) {
@@ -2728,8 +2749,25 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
 
   /** Prefix に一致する current rows を返します。 */
   private async listCurrent<T>(workspaceId: string, prefix: string, entryType: string) {
+    const items = await this.listCurrentItems(workspaceId, prefix, (value) => value === entryType)
+    return items.map((item) => stripStorage<T>(item))
+  }
+
+  /**
+   * Returns the stored rows under a record key prefix whose entry type matches.
+   *
+   * @param workspaceId - Workspace whose rows are listed.
+   * @param prefix - Record key prefix.
+   * @param matchesEntryType - Accepts the entry types to keep.
+   * @returns The matching rows, with their storage attributes.
+   */
+  private async listCurrentItems(
+    workspaceId: string,
+    prefix: string,
+    matchesEntryType: (entryType: unknown) => boolean,
+  ) {
     await this.ensureTable()
-    const items: T[] = []
+    const items: Record<string, unknown>[] = []
     const seenCursors = new Set<string>()
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
@@ -2741,9 +2779,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         ExpressionAttributeValues: { ':scopeKey': automationScopeKey(workspaceId), ':prefix': prefix },
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      items.push(...(response.Items ?? [])
-        .filter((item) => item.entryType === entryType)
-        .map((item) => stripStorage<T>(item)))
+      items.push(...(response.Items ?? []).filter((item) => matchesEntryType(item.entryType)))
       exclusiveStartKey = response.LastEvaluatedKey
       if (exclusiveStartKey) {
         const cursorFingerprint = canonicalString(exclusiveStartKey)
@@ -3373,7 +3409,7 @@ function createInboundWebhookEndpointStorageItem(endpoint: AutomationInboundWebh
   return {
     scopeKey: automationScopeKey(endpoint.workspaceId),
     recordKey: inboundWebhookEndpointKey(endpoint.id),
-    entryType: 'inbound-webhook',
+    entryType: inboundWebhookEndpointEntryType(endpoint.purpose),
     ...endpoint,
   }
 }
@@ -3464,7 +3500,7 @@ function createInboundWebhookActiveConditionCheck(
     },
     ExpressionAttributeValues: {
       ':active': 'active',
-      ':entryType': 'inbound-webhook',
+      ':entryType': inboundWebhookEndpointEntryType(endpoint.purpose),
       ':id': endpoint.id,
       ':opaqueEndpointId': endpoint.opaqueEndpointId,
       ':revision': endpoint.revision,
@@ -3495,7 +3531,8 @@ function createInboundWebhookRuleActiveConditionCheck(
       },
       ExpressionAttributeValues: {
         ':active': 'active',
-        ':entryType': 'inbound-webhook',
+        // Rules target only Automation endpoints, so the fence also rejects a Triage endpoint row.
+        ':entryType': INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE,
         ':id': endpoint.id,
       },
     },
@@ -3696,6 +3733,20 @@ function readInboundWebhookEndpointRecord(item: Record<string, unknown>) {
     throw storedInvalid('inbound webhook endpoint')
   }
   return value
+}
+
+/**
+ * Decodes a stored endpoint row and checks that its entry type matches its purpose.
+ *
+ * @param item - Stored endpoint row, including its storage attributes.
+ * @returns The endpoint record.
+ */
+function readInboundWebhookEndpointItem(item: Record<string, unknown>) {
+  const endpoint = readInboundWebhookEndpointRecord(item)
+  if (item.entryType !== inboundWebhookEndpointEntryType(endpoint.purpose)) {
+    throw storedInvalid('inbound webhook endpoint')
+  }
+  return endpoint
 }
 
 function readInboundWebhookProvisioningOperation(item: Record<string, unknown>) {
@@ -4095,4 +4146,24 @@ function createInboundWebhookPurposeFields(
  */
 function inboundWebhookLookupEntryType(purpose: 'automation' | 'triage'): string {
   return purpose === 'triage' ? INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE : INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE
+}
+
+/**
+ * Chooses the endpoint row entry type for an endpoint purpose.
+ *
+ * @param purpose - Endpoint purpose.
+ * @returns The endpoint row entry type that stores that purpose.
+ */
+function inboundWebhookEndpointEntryType(purpose: 'automation' | 'triage'): string {
+  return purpose === 'triage' ? INBOUND_WEBHOOK_TRIAGE_ENDPOINT_ENTRY_TYPE : INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE
+}
+
+/**
+ * Tells whether a stored entry type is an endpoint row of either purpose.
+ *
+ * @param entryType - Stored entry type.
+ * @returns True for an Automation or Triage endpoint row.
+ */
+function isInboundWebhookEndpointEntryType(entryType: unknown): boolean {
+  return entryType === INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE || entryType === INBOUND_WEBHOOK_TRIAGE_ENDPOINT_ENTRY_TYPE
 }

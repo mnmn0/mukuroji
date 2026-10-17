@@ -544,15 +544,30 @@ export function resolveWorkItemPersonOptions(
 export function resolveWorkItemContributorOptions(
   workspaceMembers: readonly WorkspaceMember[],
 ) {
+  return resolveWorkItemContributorDirectory(
+    workspaceMembers.filter((member) => member.status === 'active' && member.role !== 'guest'),
+  )
+}
+
+/**
+ * Lists every known Workspace member so stored contributors stay identifiable.
+ *
+ * Unlike {@link resolveWorkItemContributorOptions}, deactivated and guest members are kept,
+ * because a contributor planned before deactivation must still show their name and email.
+ *
+ * @param workspaceMembers - Workspace members.
+ * @returns Member labels keyed by the member's Workspace member key.
+ */
+export function resolveWorkItemContributorDirectory(
+  workspaceMembers: readonly WorkspaceMember[],
+) {
   // The server resolves contributors by the immutable Workspace member key, which can differ
   // from the member's current email for directory-managed members; the email stays for display.
-  return workspaceMembers
-    .filter((member) => member.status === 'active' && member.role !== 'guest')
-    .map((member) => ({
-      email: member.email,
-      id: member.memberKey,
-      name: member.name ?? member.email,
-    }))
+  return workspaceMembers.map((member) => ({
+    email: member.email,
+    id: member.memberKey,
+    name: member.name ?? member.email,
+  }))
 }
 
 const customFieldValidationMessageKeys: Record<CustomFieldValidationCode, MessageKey> = {

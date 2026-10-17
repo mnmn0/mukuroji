@@ -289,7 +289,8 @@ function exportDirectory(workspaceId: string, exportId: string) {
  * @returns The part object key.
  */
 function partKey(workspaceId: string, exportId: string, index: number, sha256: string) {
-  return `${exportDirectory(workspaceId, exportId)}part-${String(index).padStart(5, '0')}-${sha256.slice(0, 16)}.ndjson`
+  // The full digest binds the key to the recorded checksum, so no stored checksum can disagree with the object.
+  return `${exportDirectory(workspaceId, exportId)}part-${String(index).padStart(5, '0')}-${sha256}.ndjson`
 }
 
 /**

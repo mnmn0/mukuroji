@@ -144,11 +144,11 @@ export async function updateCollection(
   collectionId: string,
   input: UpdateWorkItemCollectionInput,
 ): Promise<WorkItemCollection> {
-  return readCollection(await requestJson(collectionPath(collectionId), accessToken, {
+  return readRequestedCollection(await requestJson(collectionPath(collectionId), accessToken, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
-  }))
+  }), collectionId)
 }
 
 /**
@@ -179,10 +179,10 @@ export async function addCollectionItem(
   issueId: string,
 ): Promise<AddWorkItemCollectionItemResponse> {
   const data = await requestJson(itemPath(collectionId, teamId, issueId), accessToken, { method: 'PUT' })
-  const collection = readCollection(data)
+  const collection = readRequestedCollection(data, collectionId)
   // The returned Work Item must be the one that was added to this Collection.
   if (
-    collection.collectionId !== collectionId || !isRecord(data) || !isCollectionEntry(data.item) ||
+    !isRecord(data) || !isCollectionEntry(data.item) ||
     data.item.teamId !== teamId || data.item.issueId !== issueId
   ) {
     throw invalidResponse()
@@ -211,7 +211,10 @@ export async function addCollectionItem(
  * @returns The Collection after the change.
  */
 export async function removeCollectionItem(accessToken: string, collectionId: string, teamId: string, issueId: string): Promise<WorkItemCollection> {
-  return readCollection(await requestJson(itemPath(collectionId, teamId, issueId), accessToken, { method: 'DELETE' }))
+  return readRequestedCollection(
+    await requestJson(itemPath(collectionId, teamId, issueId), accessToken, { method: 'DELETE' }),
+    collectionId,
+  )
 }
 
 /**
@@ -277,6 +280,22 @@ async function requestJson(url: string, accessToken: string, init: RequestInit =
 function readCollection(value: unknown): WorkItemCollection {
   if (!isCollection(value)) throw invalidResponse()
   return value
+}
+
+/**
+ * Validates a single-Collection response for a mutation of a known Collection.
+ *
+ * A structurally valid Collection with another identifier is rejected, so the caller never reports
+ * success for, or caches, a Collection it did not change.
+ *
+ * @param value - Untrusted JSON body.
+ * @param collectionId - Identifier of the Collection the request changed.
+ * @returns The requested Collection.
+ */
+function readRequestedCollection(value: unknown, collectionId: string): WorkItemCollection {
+  const collection = readCollection(value)
+  if (collection.collectionId !== collectionId) throw invalidResponse()
+  return collection
 }
 
 /**

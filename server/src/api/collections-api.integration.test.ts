@@ -199,16 +199,75 @@ test('offers a readable Work Item by exact ID even when its search projection is
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({ schemaVersion: 1, results: [exact], nextCursor: 'next' })
 
-  // An indexed match is not repeated, and later pages read the index only.
+  // An indexed match is not repeated: the canonical match leads, and later pages never return it again.
   indexed = [{ ...exact, title: 'Indexed title' }]
   expect((await (await planningApiRequest('/api/collections/candidates?keyword=onboarding-friction')).json()).results)
-    .toEqual(indexed)
-  indexed = []
+    .toEqual([exact])
   expect((await (await planningApiRequest('/api/collections/candidates?keyword=onboarding-friction&cursor=next')).json()).results)
     .toEqual([])
 
   // A Work Item the caller cannot read is never offered by its ID.
+  indexed = []
   expect((await (await planningApiRequest('/api/collections/candidates?keyword=hidden-item')).json()).results).toEqual([])
+})
+
+test('keeps exact-ID candidates within the page limit and never repeats them on later pages', async () => {
+  configureMember()
+  const other: WorkspaceSearchResult = {
+    id: 'team/core-team/issue/onboarding-friction-notes',
+    entityType: 'work-item',
+    title: 'Onboarding friction notes',
+    subtitle: 'onboarding-friction-notes',
+    url: '/teams/core-team/issues?issueId=onboarding-friction-notes',
+    teamId: 'core-team',
+    highlights: [],
+  }
+  const indexedExact: WorkspaceSearchResult = {
+    ...other,
+    id: 'team/core-team/issue/onboarding-friction',
+    title: 'Indexed title',
+    subtitle: 'onboarding-friction',
+  }
+  const searches: { limit?: number; cursor?: string }[] = []
+  setTestAppDependencies({
+    workspaceSearch: {
+      ...getTestAppDependencies().workItems.workspaceSearch,
+      async search(input) {
+        searches.push({ ...(input.limit === undefined ? {} : { limit: input.limit }), ...(input.cursor ? { cursor: input.cursor } : {}) })
+        // The index pages hold the exact match on both pages, as when the projection is indexed twice by key order.
+        return input.cursor
+          ? { schemaVersion: 1, results: [indexedExact] }
+          : { schemaVersion: 1, results: [indexedExact, other].slice(0, input.limit), nextCursor: 'index-next' }
+      },
+    },
+  })
+  const path = '/api/collections/candidates?keyword=onboarding-friction'
+
+  // The exact match takes the only slot, so the index is not read until the next page.
+  const first = await (await planningApiRequest(`${path}&limit=1`)).json()
+  expect(first.results.map((result: WorkspaceSearchResult) => result.id)).toEqual([indexedExact.id])
+  expect(first.nextCursor).toBe('exact:1')
+  expect(searches).toEqual([])
+  const second = await (await planningApiRequest(`${path}&limit=1&cursor=${first.nextCursor}`)).json()
+  // The index match of the exact Work Item is dropped rather than shown again.
+  expect(second).toEqual({ schemaVersion: 1, results: [], nextCursor: 'index-next' })
+  expect(searches).toEqual([{ limit: 1 }])
+
+  // With room left, the index fills only the remaining slots.
+  searches.length = 0
+  const mixed = await (await planningApiRequest(`${path}&limit=2`)).json()
+  expect(mixed.results.map((result: WorkspaceSearchResult) => result.id)).toEqual([indexedExact.id])
+  expect(mixed.results[0].title).not.toBe('Indexed title')
+  expect(mixed.nextCursor).toBe('index-next')
+  expect(searches).toEqual([{ limit: 1 }])
+  const later = await (await planningApiRequest(`${path}&limit=2&cursor=index-next`)).json()
+  expect(later).toEqual({ schemaVersion: 1, results: [] })
+  expect(searches).toEqual([{ limit: 1 }, { limit: 2, cursor: 'index-next' }])
+
+  for (const query of ['&cursor=exact:x', '&cursor=exact:101', '&cursor=exact:01', '&limit=101']) {
+    const invalid = await planningApiRequest(`${path}${query}`)
+    expect(invalid.status).toBe(400)
+  }
 })
 
 /** One custom role and where it is assigned to the test member. */

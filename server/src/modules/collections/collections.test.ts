@@ -10,7 +10,7 @@ import {
   updateCollection,
   type ReadCollectionWorkItem,
 } from './application/collections'
-import type { StoredCollection } from './domain/collections'
+import { isStoredCollection, type StoredCollection } from './domain/collections'
 
 const context = { workspaceId: 'w', actor: 'reader', now: '2026-10-16T00:00:00.000Z' }
 
@@ -199,6 +199,81 @@ test('refuses to replay a creation whose live row also has a deletion marker', a
   // A restore puts the live row back next to its marker.
   store.restored = live
   await expect(createCollection(store, context, { name: 'Launch' }, 'key')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+/** Store that commits a deletion of a Collection right after one of its reads, as a concurrent request would. */
+class RacingDeleteCollectionsStore extends InMemoryCollectionsStore {
+  /** Read after which the deletion commits, if a race is armed. */
+  deleteAfter: 'get' | 'readDeletion' | undefined
+
+  /**
+   * Reads the stored Collection, then commits the armed deletion.
+   *
+   * @param workspaceId - Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns The Collection observed before the deletion, or undefined.
+   */
+  override async get(workspaceId: string, collectionId: string) {
+    const collection = await super.get(workspaceId, collectionId)
+    if (this.deleteAfter === 'get') await this.commitDeletion(workspaceId, collectionId)
+    return collection
+  }
+
+  /**
+   * Reads the deletion marker, then commits the armed deletion.
+   *
+   * @param workspaceId - Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns The marker observed before the deletion, or undefined.
+   */
+  override async readDeletion(workspaceId: string, collectionId: string) {
+    const deletion = await super.readDeletion(workspaceId, collectionId)
+    if (this.deleteAfter === 'readDeletion') await this.commitDeletion(workspaceId, collectionId)
+    return deletion
+  }
+
+  /**
+   * Deletes the live Collection once and disarms the race.
+   *
+   * @param workspaceId - Workspace.
+   * @param collectionId - Collection identifier.
+   */
+  private async commitDeletion(workspaceId: string, collectionId: string): Promise<void> {
+    this.deleteAfter = undefined
+    const live = await super.get(workspaceId, collectionId)
+    if (live) await this.delete(workspaceId, collectionId, live.revision, { createFingerprint: live.createFingerprint, deletedRevision: live.revision })
+  }
+}
+
+test('replays a creation consistently when a deletion commits between its live-row and marker reads', async () => {
+  // Deleted after the marker read: the retry sees the deletion, exactly like a retry after the deletion.
+  const afterMarker = new RacingDeleteCollectionsStore()
+  const created = await createCollection(afterMarker, context, { name: 'Launch' }, 'key')
+  afterMarker.deleteAfter = 'readDeletion'
+  await expect(createCollection(afterMarker, context, { name: 'Launch' }, 'key'))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionDeleted' })
+  await expect(createCollection(afterMarker, context, { name: 'Launch' }, 'key'))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionDeleted' })
+
+  // Deleted after the live-row read: the Collection still existed when it was read, so the creation replays.
+  const afterRow = new RacingDeleteCollectionsStore()
+  await createCollection(afterRow, context, { name: 'Launch' }, 'key')
+  afterRow.deleteAfter = 'get'
+  expect((await createCollection(afterRow, context, { name: 'Launch' }, 'key')).collectionId).toBe(created.collectionId)
+  expect(await afterRow.readDeletion('w', created.collectionId)).toBeDefined()
+})
+
+test('keeps the newest reference first when the previous change came from a server with a lagging clock', async () => {
+  const store = new InMemoryCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  await addCollectionItem(store, { ...context, now: '2026-10-16T00:00:05.000Z' }, collectionId, 't', 'a', readWorkItem)
+  // A rename on a lagging server moves updatedAt behind the newest reference.
+  await updateCollection(store, { ...context, now: '2026-10-16T00:00:01.000Z' }, collectionId, { expectedRevision: 2, name: 'Renamed' })
+  const added = await addCollectionItem(store, { ...context, now: '2026-10-16T00:00:03.000Z' }, collectionId, 't', 'b', readWorkItem)
+  expect(added.item.addedAt).toBe('2026-10-16T00:00:05.000Z')
+  const stored = await store.get('w', collectionId)
+  expect(stored && isStoredCollection(stored)).toBe(true)
+  expect(stored?.items.map((item) => item.issueId)).toEqual(['b', 'a'])
 })
 
 test('reports the item limit before a row would exceed the DynamoDB item size', async () => {

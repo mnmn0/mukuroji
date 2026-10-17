@@ -34,6 +34,11 @@ export type WorkItemContributorsEditorProps = {
   jobRoles: readonly WorkItemJobRoleDefinition[]
   /** Active members who can be added as contributors. */
   memberOptions: readonly Pick<ProjectMember, 'email' | 'id' | 'name'>[]
+  /**
+   * Every known member, including deactivated and guest members, used only to label stored
+   * contributors. Defaults to `memberOptions`.
+   */
+  memberDirectory?: readonly Pick<ProjectMember, 'email' | 'id' | 'name'>[]
   /** Workspace user ID of the accountable owner, shown to keep the roles distinct. */
   ownerUserId: string
   /**
@@ -72,6 +77,7 @@ export function WorkItemContributorsEditor({
   formId,
   jobRoles,
   locale,
+  memberDirectory,
   memberOptions,
   onSave,
   ownerUserId,
@@ -110,7 +116,8 @@ export function WorkItemContributorsEditor({
    * @returns The member's name with email, the email alone, or the raw ID when the member is unknown.
    */
   const memberName = (memberUserId: string) => {
-    const member = memberOptions.find((candidate) => candidate.id === memberUserId)
+    const member = memberDirectory?.find((candidate) => candidate.id === memberUserId) ??
+      memberOptions.find((candidate) => candidate.id === memberUserId)
     return member ? formatContributorMemberLabel(member) : memberUserId
   }
   /**
@@ -244,7 +251,7 @@ export function WorkItemContributorsEditor({
                   >
                     <option value="">{t('workItems.contributors.memberUndecided')}</option>
                     {row.memberUserId && !memberOptions.some((member) => member.id === row.memberUserId) ? (
-                      <option value={row.memberUserId}>{row.memberUserId}</option>
+                      <option value={row.memberUserId}>{memberName(row.memberUserId)}</option>
                     ) : null}
                     {memberOptions.map((member) => (
                       <option key={member.id} value={member.id}>{formatContributorMemberLabel(member)}</option>

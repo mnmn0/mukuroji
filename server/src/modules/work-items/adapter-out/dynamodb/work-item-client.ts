@@ -1976,6 +1976,7 @@ export class DynamoDbTeamIssuesClient {
             actorUserId,
             assigneeUserId,
             assignedProjectId,
+            contributorAssignments,
             customFieldValues,
             description,
             dueDate,
@@ -4171,12 +4172,20 @@ export function readIdempotencyResourceId(value: unknown) {
   return value
 }
 
+/**
+ * Checks whether an existing Work Item is the replay of the same idempotent create request.
+ *
+ * @param issue - Work Item already stored under the caller-selected resource ID.
+ * @param expected - Normalized fields of the create request being retried.
+ * @returns Whether every logical create field, including contributors, matches the stored Work Item.
+ */
 function isMatchingIdempotentWorkItemCreate(
   issue: TeamIssueResponseItem,
   expected: {
     actorUserId: string
     assigneeUserId: string
     assignedProjectId: string | null | undefined
+    contributorAssignments: WorkItemContributorAssignment[]
     customFieldValues: Record<string, CustomFieldValue>
     description: string | undefined
     dueDate: string
@@ -4192,6 +4201,10 @@ function isMatchingIdempotentWorkItemCreate(
   return issue.creatorMemberKey === expected.actorUserId &&
     issue.assigneeUserId === expected.assigneeUserId &&
     issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
+    contributorAssignmentListsLogicallyEqual(
+      issue.contributorAssignments ?? [],
+      expected.contributorAssignments,
+    ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
     issue.dueDate === expected.dueDate &&
@@ -4202,6 +4215,38 @@ function isMatchingIdempotentWorkItemCreate(
     issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares contributor lists by their logical content, ignoring server-generated assignment IDs and order.
+ *
+ * @param left - First contributor assignment list.
+ * @param right - Second contributor assignment list.
+ * @returns Whether both lists contain the same contributions.
+ */
+function contributorAssignmentListsLogicallyEqual(
+  left: readonly WorkItemContributorAssignment[],
+  right: readonly WorkItemContributorAssignment[],
+): boolean {
+  if (left.length !== right.length) return false
+  const leftKeys = left.map(toLogicalContributorAssignmentKey).sort()
+  const rightKeys = right.map(toLogicalContributorAssignmentKey).sort()
+  return leftKeys.every((key, index) => key === rightKeys[index])
+}
+
+/**
+ * Serializes the caller-controlled fields of one contributor assignment.
+ *
+ * @param assignment - Contributor assignment to serialize.
+ * @returns A deterministic key that excludes the server-generated assignment ID.
+ */
+function toLogicalContributorAssignmentKey(assignment: WorkItemContributorAssignment): string {
+  return JSON.stringify([
+    assignment.memberUserId?.toLowerCase() ?? null,
+    assignment.jobRoleId ?? null,
+    assignment.plannedEffortMinutes ?? null,
+    assignment.status,
+  ])
 }
 
 /**

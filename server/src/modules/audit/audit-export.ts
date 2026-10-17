@@ -325,7 +325,8 @@ export function parseAuditExportQueueMessage(body: string): AuditExportQueueMess
   const exportId: unknown = Reflect.get(value, 'exportId')
   if (
     version !== 1 ||
-    typeof workspaceId !== 'string' || !workspaceId.trim() || workspaceId.length > 256 ||
+    // A padded ID would address another tenant prefix and be skipped as missing, not dead-lettered.
+    typeof workspaceId !== 'string' || !workspaceId.trim() || workspaceId.trim() !== workspaceId || workspaceId.length > 256 ||
     typeof exportId !== 'string' || !/^[0-9a-f]{32}$/u.test(exportId)
   ) {
     return undefined
@@ -1264,6 +1265,10 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   const parts = record.parts
   if (!Array.isArray(parts)) throw new TypeError('Audit export parts must be an array.')
   const failure = record.failure === undefined ? undefined : requireObject(record.failure, 'Audit export failure')
+  // Only failJob writes a failure, together with the failed status, so any other pairing is corrupt.
+  if ((status === 'failed') !== (failure !== undefined)) {
+    throw new TypeError('Audit export job status does not match its failure.')
+  }
   const exportId = requireString(record.exportId, 'exportId')
   if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) throw new TypeError('Audit export job has an invalid ID.')
   // Deadlines are enforced from these times, so an unreadable or reordered pair is corrupt.
