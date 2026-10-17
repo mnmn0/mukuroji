@@ -2077,6 +2077,12 @@ test('audit export queue backlog alarms well before the 24-hour processing deadl
   if (queueLogicalId === undefined) {
     throw new Error('Audit export queue was not synthesized.');
   }
+  const dlqLogicalId = Object.keys(queues).find((logicalId) =>
+    logicalId.startsWith('AuditExportDlq')
+  );
+  if (dlqLogicalId === undefined) {
+    throw new Error('Audit export DLQ was not synthesized.');
+  }
   /**
    * Builds the mandatory SNS action ARN attached by alarm routing.
    *
@@ -2102,8 +2108,13 @@ test('audit export queue backlog alarms well before the 24-hour processing deadl
   // The same mandatory actions as AuditExportDlqAlarm, so a backlog pages before jobs time out.
   for (const alarm of [
     {
+      AlarmDescription: 'Detects audit export steps that exhausted their queue attempts.',
       MetricName: 'ApproximateNumberOfMessagesVisible',
       ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      Dimensions: [{
+        Name: 'QueueName',
+        Value: { 'Fn::GetAtt': [dlqLogicalId, 'QueueName'] },
+      }],
       Threshold: 1,
     },
     {

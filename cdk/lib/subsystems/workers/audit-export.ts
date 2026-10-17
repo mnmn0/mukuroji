@@ -92,14 +92,11 @@ export function buildAuditExportWorker(
   }));
   // Without ListBucket, S3 answers a missing job.json with 403 instead of NoSuchKey, and a
   // step for an expired or closed job would retry into the DLQ instead of being skipped.
+  // The check S3 makes for a missing object carries no `s3:prefix`, so a prefix condition
+  // would deny it; the bucket holds only audit export objects, so no condition is needed.
   workerFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['s3:ListBucket'],
     resources: [auditExportBucket.bucketArn],
-    conditions: {
-      StringLike: {
-        's3:prefix': ['audit-exports/*'],
-      },
-    },
   }));
   // Steps stop for closing or closed tenants so exports cannot outlive tenant closure.
   workerFunction.addToRolePolicy(new iam.PolicyStatement({
