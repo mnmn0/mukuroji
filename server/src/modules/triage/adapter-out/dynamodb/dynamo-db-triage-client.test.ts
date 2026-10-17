@@ -2458,8 +2458,10 @@ describe('DynamoDbTriageClient source admission', () => {
       expect(transactItems).not.toContain('Old checkout errors')
       expect(transactItems).not.toContain('Alice Requester')
       expect(transactItems).toContain('"redactedAt":"2026-08-09T00:00:00.000Z"')
-      const receipt = harness.commands[2]?.input.TransactItems
-        ?.find((item) => item.Put?.Item?.entryType === 'triage-operation-receipt')
+      const items = harness.commands[2]?.input.TransactItems
+      const receipt = Array.isArray(items)
+        ? items.find((item) => item?.Put?.Item?.entryType === 'triage-operation-receipt')
+        : undefined
       // The replay receipt expires 90 days after admission, not after the old received time.
       expect(receipt?.Put?.Item?.expiresAt).toBe(Math.floor(Date.parse('2026-11-07T00:00:00.000Z') / 1_000))
     } finally {
