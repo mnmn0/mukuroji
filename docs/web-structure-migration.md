@@ -89,7 +89,16 @@
    `web/AGENTS.md` の「移行方針」に従い、fetch を `projects/api/`、`useSWR` と SWR key を `projects/queries/` へ移します。
    取得処理の変更を含むため、フォルダ移動の PR とは分けます。
 1. **route component を `pages/` へ移す。**
-   差分 1 の 5 file と、隣接する story を対応する `pages/<boundary>/` へ移します。
+   差分 1 の 5 file と隣接する story を、route の認証境界に合わせて既存の `pages/workspace/` と `pages/public/` へ移します。
+
+   | 移動元 | route | 移動先 |
+   | --- | --- | --- |
+   | `documents/DocumentPage.tsx` と `DocumentPage.stories.tsx` | `/documents`、`/documents/:documentId`（workspace layout 内） | `pages/workspace/DocumentPage.tsx` と `.stories.tsx` |
+   | `documents/SharedDocumentPage.tsx` と `SharedDocumentPage.stories.tsx` | `/share/documents/:shareToken`（未認証） | `pages/public/SharedDocumentPage.tsx` と `.stories.tsx` |
+   | `requests/RequestIntakePage.tsx` と `RequestIntakePage.stories.tsx` | `/requests`（workspace layout 内） | `pages/workspace/RequestIntakePage.tsx` と `.stories.tsx` |
+   | `requests/PublicRequestFormPage.tsx` と `PublicRequestFormPage.stories.tsx` | `/request/:linkToken`（未認証） | `pages/public/PublicRequestFormPage.tsx` と `.stories.tsx` |
+   | `search/SearchPage.tsx`（story なし） | `/search`（workspace layout 内） | `pages/workspace/SearchPage.tsx` |
+
    移動だけの PR とし、画面固有の取得処理の `queries/` / `mutations/` への切り出しは、移動後の別 PR で行います。
 2. **領域直下の file を下位 layer へ移す。**
    差分 2 の file を、責務に応じて `api/`、`queries/`、`model/`、`shared/lib/` へ移します。
