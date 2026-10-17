@@ -1,4 +1,4 @@
-import type { WorkspaceSearchResult } from '@mukuroji/contracts'
+import { SEARCH_SCHEMA_VERSION, type WorkspaceSearchResponse, type WorkspaceSearchResult } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -23,6 +23,7 @@ import {
 import { normalizeProjectMemberKey, ProjectDataError, type ProjectAccessEntry } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import { WORKSPACE_SEARCH_DEFAULT_LIMIT, WORKSPACE_SEARCH_MAX_LIMIT, WorkspaceSearchError } from '../../modules/workspace-search'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
@@ -72,8 +73,8 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
    *
    * Candidate search follows the Collection permission (`work-items.read`) instead of the
    * Workspace-wide search permission, and returns only Work Items the caller can read.
-   * The search index is a best-effort projection, so the first page also looks the keyword
-   * up as an exact Work Item ID in the canonical Work Items of the caller's readable Teams.
+   * The search index is a best-effort projection, so exact Work Item ID matches from the
+   * canonical Work Items lead the results; see `searchCollectionCandidates` for paging.
    */
   routeApp.get('/api/collections/candidates', async (c) => {
     let principal: WorkspacePrincipal
@@ -85,15 +86,11 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     try {
       const keyword = c.req.query('keyword')?.trim() ?? ''
       if (!keyword) return c.json({ code: 'InvalidCollectionCandidateQuery', message: 'keyword is required.' }, 400)
-      const cursor = c.req.query('cursor')
-      const page = await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
-        limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
-        cursor,
-      })
-      if (cursor) return c.json(page)
-      const exact = await findExactCandidates(principal, keyword)
-      const indexed = new Set(page.results.map((result) => result.id))
-      return c.json({ ...page, results: [...exact.filter((result) => !indexed.has(result.id)), ...page.results] })
+      const limit = readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit') ?? WORKSPACE_SEARCH_DEFAULT_LIMIT
+      if (limit > WORKSPACE_SEARCH_MAX_LIMIT) {
+        throw new WorkspaceSearchError(400, 'InvalidSearchLimit', `Limit must be between 1 and ${WORKSPACE_SEARCH_MAX_LIMIT}.`)
+      }
+      return c.json(await searchCollectionCandidates(principal, keyword, limit, c.req.query('cursor')))
     } catch (error) {
       return toWorkspaceSearchErrorResponse(c, error)
     }
@@ -387,24 +384,98 @@ const EXACT_CANDIDATE_TEAM_LIMIT = 100
 /** Number of exact-ID reads issued at once. */
 const EXACT_CANDIDATE_READ_CONCURRENCY = 10
 
+/** Prefix of a candidate cursor that continues the exact-ID matches before the search index. */
+const EXACT_CANDIDATE_CURSOR_PREFIX = 'exact:'
+
+/**
+ * Reads one page of Collection candidates.
+ *
+ * The search index is only a best-effort projection, so a Work Item whose projection failed
+ * would otherwise never be offered. The keyword is therefore also looked up as an exact Work
+ * Item ID in the canonical Work Items of the caller's first `EXACT_CANDIDATE_TEAM_LIMIT`
+ * readable Teams. Paging stays stable and bounded:
+ *
+ * - Exact matches come first, in readable-Team order. While they remain, the page carries an
+ *   `exact:<offset>` cursor (never a valid index cursor, which is base64url) that continues them.
+ * - The page that exhausts the exact matches fills its remaining slots with the first index
+ *   page, so the page never holds more than `limit` results, and returns the index cursor.
+ * - Every index page drops results that are exact-ID matches of the keyword in those Teams. Such
+ *   a Work Item is either among the exact matches already returned or not readable as a
+ *   canonical Work Item, so no Work Item is returned twice across pages.
+ *
+ * @param principal - Authenticated principal.
+ * @param keyword - Trimmed, non-blank search keyword.
+ * @param limit - Validated page size.
+ * @param cursor - Cursor returned by the previous page, if any.
+ * @returns One page of Work Item search results.
+ */
+async function searchCollectionCandidates(
+  principal: WorkspacePrincipal,
+  keyword: string,
+  limit: number,
+  cursor: string | undefined,
+): Promise<WorkspaceSearchResponse> {
+  const exactOffset = cursor ? readExactCandidateCursor(cursor) : 0
+  const access = isWorkItemReferenceIdentifier(keyword) ? await createWorkItemReadAccess(principal) : undefined
+  // Only Teams the caller can read are looked up, so no Work Item row is read for the rest.
+  const exactTeamIds = new Set(access ? (await access.readableTeamIds()).slice(0, EXACT_CANDIDATE_TEAM_LIMIT) : [])
+  /**
+   * Checks whether an index result is an exact-ID match that the exact lookup owns.
+   *
+   * @param result - Index search result.
+   * @returns Whether the result must not be returned from the index.
+   */
+  const isOwnedByExactLookup = (result: WorkspaceSearchResult): boolean =>
+    result.teamId !== undefined && exactTeamIds.has(result.teamId) &&
+    result.id === `team/${result.teamId}/issue/${keyword}`
+  if (exactOffset === undefined) {
+    const page = await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, { limit, cursor })
+    return { ...page, results: page.results.filter((result) => !isOwnedByExactLookup(result)) }
+  }
+  const exact = access ? await findExactCandidates(access, [...exactTeamIds], keyword) : []
+  const shown = exact.slice(exactOffset, exactOffset + limit)
+  const nextOffset = exactOffset + shown.length
+  if (nextOffset < exact.length || shown.length === limit) {
+    return { schemaVersion: SEARCH_SCHEMA_VERSION, results: shown, nextCursor: `${EXACT_CANDIDATE_CURSOR_PREFIX}${nextOffset}` }
+  }
+  const page = await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
+    limit: limit - shown.length,
+  })
+  return { ...page, results: [...shown, ...page.results.filter((result) => !isOwnedByExactLookup(result))] }
+}
+
+/**
+ * Reads the exact-match offset of a candidate cursor.
+ *
+ * @param cursor - Non-empty cursor from the client.
+ * @returns The offset for an exact-match cursor, or undefined for a search index cursor.
+ */
+function readExactCandidateCursor(cursor: string): number | undefined {
+  if (!cursor.startsWith(EXACT_CANDIDATE_CURSOR_PREFIX)) return undefined
+  const value = cursor.slice(EXACT_CANDIDATE_CURSOR_PREFIX.length)
+  const offset = /^(?:0|[1-9][0-9]{0,2})$/u.test(value) ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(offset) || offset > EXACT_CANDIDATE_TEAM_LIMIT) {
+    throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Cursor is invalid.')
+  }
+  return offset
+}
+
 /**
  * Looks a candidate keyword up as an exact Work Item ID in the canonical Work Items.
  *
- * The search index is only a best-effort projection, so a Work Item whose projection
- * failed would otherwise never be offered. This first narrows the Workspace's Teams to those
- * the caller can read, using the directory and Project access already loaded, and then
- * reads the canonical row in at most `EXACT_CANDIDATE_TEAM_LIMIT` of those Teams, keeping
- * only Work Items the caller can read.
+ * Reads the canonical row in each given readable Team, `EXACT_CANDIDATE_READ_CONCURRENCY`
+ * at a time, keeping only Work Items the caller can read.
  *
- * @param principal - Authenticated principal.
- * @param keyword - Trimmed search keyword.
- * @returns Work Item search results for exact ID matches.
+ * @param access - Caller-scoped Work Item reads.
+ * @param teamIds - Readable Teams to look in, in order.
+ * @param keyword - Trimmed search keyword that is a valid Work Item ID.
+ * @returns Work Item search results for exact ID matches, in Team order.
  */
-async function findExactCandidates(principal: WorkspacePrincipal, keyword: string): Promise<WorkspaceSearchResult[]> {
-  if (!isWorkItemReferenceIdentifier(keyword)) return []
-  const access = await createWorkItemReadAccess(principal)
-  // Only Teams the caller can read are looked up, so no Work Item row is read for the rest.
-  const teamIds = (await access.readableTeamIds()).slice(0, EXACT_CANDIDATE_TEAM_LIMIT)
+async function findExactCandidates(
+  access: WorkItemReadAccess,
+  teamIds: readonly string[],
+  keyword: string,
+): Promise<WorkspaceSearchResult[]> {
   const readWorkItem = access.read
   const results: WorkspaceSearchResult[] = []
   for (let start = 0; start < teamIds.length; start += EXACT_CANDIDATE_READ_CONCURRENCY) {

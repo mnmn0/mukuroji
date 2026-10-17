@@ -182,7 +182,7 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
   // The create fingerprint is a lowercase SHA-256 hex digest; anything else cannot match a retry.
   return isCollectionCreateFingerprint(value.createFingerprint) &&
     Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
-    hasUniqueReferences(value.items) &&
+    hasUniqueReferences(value.items) && isMostRecentlyAddedFirst(value.items) &&
     isCollectionSummary(value)
 }
 
@@ -262,6 +262,20 @@ function isStoredInstant(value: unknown): value is string {
  */
 function hasUniqueReferences(items: readonly StoredCollectionItem[]): boolean {
   return new Set(items.map((item) => JSON.stringify([item.teamId, item.issueId]))).size === items.length
+}
+
+/**
+ * Checks that references are stored most recently added first, as the contract lists them.
+ *
+ * Adding writes the new reference first with an `addedAt` no earlier than any stored one, so
+ * `addedAt` never increases along the list. References added within the same millisecond share
+ * an `addedAt`; their stored position is then their order, so equal timestamps are accepted.
+ *
+ * @param items - Validated stored references.
+ * @returns Whether `addedAt` is non-increasing.
+ */
+function isMostRecentlyAddedFirst(items: readonly StoredCollectionItem[]): boolean {
+  return items.every((item, index) => index === 0 || Date.parse(item.addedAt) <= Date.parse(items[index - 1]?.addedAt ?? item.addedAt))
 }
 
 /**

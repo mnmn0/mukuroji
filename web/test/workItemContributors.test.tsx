@@ -15,7 +15,10 @@ import {
 } from '../src/work-items/model/contributorAssignments'
 import { workspaceWorkItemConfigurationFixture as baseConfiguration } from '../src/work-items/fixtures'
 import { normalizeWorkItemConfigurationForSave } from '../src/work-items/model/workItemConfigurationEditor'
-import { resolveWorkItemContributorOptions } from '../src/work-items/model/workItemDisplay'
+import {
+  resolveWorkItemContributorDirectory,
+  resolveWorkItemContributorOptions,
+} from '../src/work-items/model/workItemDisplay'
 import type { WorkspaceMember } from '../src/workspace/api/access'
 import { JobRolesConfigurationSection } from '../src/work-items/ui/JobRolesConfigurationSection'
 import { WorkItemContributorsEditor } from '../src/work-items/ui/WorkItemContributorsEditor'
@@ -124,6 +127,45 @@ describe('WorkItemContributorsEditor', () => {
     expect(markup).toContain('Edit contributors')
   })
 
+  test('names an assigned deactivated member without offering them as a new contributor', () => {
+    const deactivated = { id: 'former@example.com', email: 'former@example.com', name: 'Former' }
+    const active = { id: 'sato@example.com', email: 'sato@example.com', name: 'Sato' }
+    const stored: WorkItemContributorAssignment[] = [
+      { assignmentId: 'c'.repeat(32), memberUserId: 'former@example.com', status: 'planned' },
+    ]
+    const listMarkup = renderToStaticMarkup(
+      <WorkItemContributorsEditor
+        assignments={stored}
+        jobRoles={jobRoles}
+        locale="en"
+        memberDirectory={[active, deactivated]}
+        memberOptions={[active]}
+        onSave={async () => undefined}
+        ownerUserId="sato@example.com"
+      />,
+    )
+    expect(listMarkup).toContain('Former (former@example.com)')
+
+    const editMarkup = renderToStaticMarkup(
+      <WorkItemContributorsEditor
+        assignments={stored}
+        draftState={{
+          draft: { nextRowNumber: 1, rows: [...toContributorDraftRows(stored), createEmptyContributorDraftRow('new-1')] },
+          setDraft: () => undefined,
+        }}
+        jobRoles={jobRoles}
+        locale="en"
+        memberDirectory={[active, deactivated]}
+        memberOptions={[active]}
+        onSave={async () => undefined}
+        ownerUserId="sato@example.com"
+      />,
+    )
+    // The stored row keeps its labelled value, but the new row is not offered the deactivated member.
+    expect(editMarkup.match(/<option value="former@example.com"[^>]*>Former \(former@example.com\)<\/option>/g)).toHaveLength(1)
+    expect(editMarkup.match(/<option value="sato@example.com"[^>]*>/g)).toHaveLength(2)
+  })
+
   test('hides editing for read-only Work Items and explains an empty list', () => {
     const markup = renderToStaticMarkup(
       <WorkItemContributorsEditor assignments={undefined} jobRoles={[]} locale="ja" memberOptions={[]} ownerUserId="sato@example.com" />,
@@ -187,5 +229,27 @@ describe('contributor options', () => {
     expect(resolveWorkItemContributorOptions([
       { ...member('new-address@example.com', 'member'), memberKey: 'old-address@example.com' },
     ])).toEqual([{ email: 'new-address@example.com', id: 'old-address@example.com', name: 'new-address@example.com' }])
+  })
+
+  test('keep deactivated and guest members in the display directory', () => {
+    /**
+     * Builds a Workspace member fixture.
+     * @param email Member email, also used as the ID and member key.
+     * @param role Workspace role.
+     * @param status Membership status.
+     * @returns The member fixture.
+     */
+    const member = (email: string, role: WorkspaceMember['role'], status: WorkspaceMember['status'] = 'active'): WorkspaceMember => ({
+      id: email, memberKey: email, email, name: email.split('@')[0], role, status, version: 1, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+    })
+    expect(resolveWorkItemContributorDirectory([
+      member('owner@example.com', 'owner'),
+      member('guest@example.com', 'guest'),
+      member('former@example.com', 'member', 'deactivated'),
+    ])).toEqual([
+      { email: 'owner@example.com', id: 'owner@example.com', name: 'owner' },
+      { email: 'guest@example.com', id: 'guest@example.com', name: 'guest' },
+      { email: 'former@example.com', id: 'former@example.com', name: 'former' },
+    ])
   })
 })

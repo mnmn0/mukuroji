@@ -153,8 +153,11 @@ export async function createCollection(
   const createFingerprint = createHash('sha256')
     .update(JSON.stringify([input.name, input.description ?? '']))
     .digest('hex')
-  const existing = await store.get(context.workspaceId, collectionId)
+  // The marker is read before the live row. Deletion atomically removes the row and writes the
+  // marker, and nothing recreates a deleted Collection, so a delete that commits between the two
+  // reads is seen as a missing row, never as both. A row read after its marker is contradictory.
   const deletion = await store.readDeletion(context.workspaceId, collectionId)
+  const existing = await store.get(context.workspaceId, collectionId)
   // A live row next to its deletion marker is contradictory; never replay it as created.
   if (existing && deletion) throw corruptState()
   if (existing) return replayCreatedCollection(existing, context.actor, createFingerprint)
@@ -284,9 +287,10 @@ export async function addCollectionItem(
     if (current.items.length >= COLLECTION_ITEM_LIMIT) {
       throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
     }
-    // A retry rebuilds on newer state, so the new item must not look older than items already
-    // there; most recently added first stays true.
-    const addedAt = laterInstant(context.now, current.updatedAt)
+    // A retry rebuilds on newer state, and another server's clock may lag, so the new item must
+    // not look older than the Collection's last change or the newest item already there; most
+    // recently added first stays true, which the stored-row validator requires.
+    const addedAt = laterInstant(laterInstant(context.now, current.updatedAt), current.items[0]?.addedAt ?? context.now)
     const next = {
       ...current,
       items: [{ teamId, issueId, addedAt, addedBy: context.actor }, ...current.items],

@@ -45,6 +45,7 @@ import {
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
+  resolveWorkItemContributorDirectory,
   resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemTypeDefinition,
@@ -451,6 +452,7 @@ function IssueDetailContent({
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
+  const contributorDirectory = resolveWorkItemContributorDirectory(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -769,6 +771,7 @@ function IssueDetailContent({
       draftState={contributorDraftState}
       key={editorIdentity + ':contributors'}
       locale={locale}
+      memberDirectory={contributorDirectory}
       memberOptions={contributorOptions}
       ownerUserId={issue.assigneeUserId}
       readOnly={isIssueReadOnly}

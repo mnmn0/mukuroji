@@ -51,6 +51,7 @@ import {
   createCustomFieldErrorMessages,
   createVisibleCustomFieldValuePatch,
   resolveEditableWorkflowStatuses,
+  resolveWorkItemContributorDirectory,
   resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
@@ -501,6 +502,7 @@ export function TaskDetailPane({
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
+  const contributorDirectory = resolveWorkItemContributorDirectory(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -982,6 +984,7 @@ export function TaskDetailPane({
       draftState={contributorDraftState}
       key={`contributors:${editorIdentity}`}
       locale={locale}
+      memberDirectory={contributorDirectory}
       memberOptions={contributorOptions}
       ownerUserId={(issue ?? currentTask).assigneeUserId}
       readOnly={isReadOnly}
