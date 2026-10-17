@@ -46,6 +46,7 @@ import {
   type TenantOperationResourceOwnerResult,
 } from '../../application/tenant-operation-resource-owner'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
+import { createAuditExportWorkspacePrefix } from '../../../audit'
 
 const RESOURCE_PAGE_SIZE = 20
 const IDENTITY_PAGE_SIZE = 10
@@ -63,6 +64,8 @@ export type TenantOperationResourceOwnerConfig = {
   fileBucketName: string
   /** Versioned bucket containing transient Work Item import sources. */
   workItemImportBucketName: string
+  /** Bucket containing asynchronous audit export jobs and NDJSON parts. */
+  auditExportBucketName: string
   /** Cognito user pool whose tenant sessions are revoked. */
   cognitoUserPoolId: string
   /** Canonical Work Item table. */
@@ -468,6 +471,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         bucketName: this.config.workItemImportBucketName,
         prefix: `work-item-imports/${workItemImportWorkspaceDigest}/`,
         exportDirectory: 'work-item-import-sources',
+      },
+      {
+        id: 'audit-exports',
+        bucketName: this.config.auditExportBucketName,
+        prefix: createAuditExportWorkspacePrefix(workspaceId),
+        exportDirectory: 'audit-exports',
       },
     ]
   }
