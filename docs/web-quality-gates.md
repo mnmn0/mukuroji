@@ -17,7 +17,7 @@ Web の見た目と配信サイズの回帰を CI で検出するための 2 つ
 
 ```sh
 bun run web:build-storybook
-bun run web:visual:docker -- --update-snapshots
+bun run web:visual:docker --update-snapshots
 ```
 
 比較だけを実行する場合は `bun run web:visual:docker` を使います。

@@ -67,7 +67,7 @@ export function parseBundleBudget(value: unknown): BundleBudget {
       const name: unknown = typeof rule === 'object' && rule !== null ? Reflect.get(rule, 'name') : undefined
       const pattern: unknown = typeof rule === 'object' && rule !== null ? Reflect.get(rule, 'pattern') : undefined
       const maxGzipKiB: unknown = typeof rule === 'object' && rule !== null ? Reflect.get(rule, 'maxGzipKiB') : undefined
-      if (typeof name !== 'string' || typeof pattern !== 'string' || typeof maxGzipKiB !== 'number' || maxGzipKiB <= 0) {
+      if (typeof name !== 'string' || typeof pattern !== 'string' || typeof maxGzipKiB !== 'number' || !Number.isFinite(maxGzipKiB) || maxGzipKiB <= 0) {
         throw new Error(`Bundle budget rule ${index} needs a name, pattern, and positive maxGzipKiB.`)
       }
       new RegExp(pattern, 'u')
