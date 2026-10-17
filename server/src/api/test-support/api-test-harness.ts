@@ -246,6 +246,12 @@ type InboundWebhookEndpointRecordOverrides =
     }
   )
 
+/**
+ * Creates an active Automation inbound webhook endpoint record for API tests.
+ *
+ * @param overrides - Fields that replace the defaults.
+ * @returns The endpoint record.
+ */
 function createInboundWebhookEndpointRecord(
   overrides: InboundWebhookEndpointRecordOverrides = {},
 ): AutomationInboundWebhookEndpointRecord {
