@@ -486,6 +486,7 @@ function createFormTriageClient(
     getConfigurationUpdateReceipt: async () => undefined,
     updateConfiguration: unsupported,
     createManualHandoff: unsupported,
+    createWebhookEntry: unsupported,
     listWorkItemSources: unsupported,
     ...overrides,
   }

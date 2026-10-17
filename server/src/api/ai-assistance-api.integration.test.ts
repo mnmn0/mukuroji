@@ -423,6 +423,7 @@ function createTriageClient(entry: TriageEntry): TriageCompositionClient {
     getConfigurationUpdateReceipt: unsupported,
     updateConfiguration: unsupported,
     createManualHandoff: unsupported,
+    createWebhookEntry: unsupported,
     async listWorkItemSources() {
       return { entries: [entry] }
     },

@@ -229,8 +229,31 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
   return { client }
 }
 
+/** Test overrides for an inbound webhook endpoint; Team routing comes only with the Triage purpose. */
+type InboundWebhookEndpointRecordOverrides =
+  Partial<Omit<AutomationInboundWebhookEndpointRecord, 'purpose' | 'triageRouting'>> & (
+    | {
+      /** Automation purpose, the default. */
+      purpose?: 'automation'
+      /** Automation-purpose endpoints carry no Team routing. */
+      triageRouting?: never
+    }
+    | {
+      /** Triage purpose. */
+      purpose: 'triage'
+      /** Fixed Team routing of the Triage endpoint. */
+      triageRouting: { teamId: string }
+    }
+  )
+
+/**
+ * Creates an active Automation inbound webhook endpoint record for API tests.
+ *
+ * @param overrides - Fields that replace the defaults.
+ * @returns The endpoint record.
+ */
 function createInboundWebhookEndpointRecord(
-  overrides: Partial<AutomationInboundWebhookEndpointRecord> = {},
+  overrides: InboundWebhookEndpointRecordOverrides = {},
 ): AutomationInboundWebhookEndpointRecord {
   return {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -238,6 +261,7 @@ function createInboundWebhookEndpointRecord(
     workspaceId: 'user#demo@example.com',
     opaqueEndpointId: 'A'.repeat(43),
     name: 'Build events',
+    purpose: 'automation',
     status: 'active',
     version: 1,
     secretGeneration: 1,
