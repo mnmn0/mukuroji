@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
-import type { WorkItemCollection } from '@mukuroji/contracts'
+import { COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH, type WorkItemCollection } from '@mukuroji/contracts'
 import {
   CollectionApiError,
   addCollectionItem,
@@ -89,6 +89,13 @@ describe('CollectionsWorkspace', () => {
     const empty = render({ candidates: [{ teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction' }] })
     expect(empty).toContain('No Work Items to add match this search.')
     expect(empty).not.toContain('Add a Work Item')
+  })
+
+  test('accepts a candidate keyword as long as the longest canonical Work Item ID', () => {
+    const markup = render()
+    const search = /<input[^>]*type="search"[^>]*>/u.exec(markup)?.[0] ?? ''
+    expect(search).toContain(`maxLength="${COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH}"`)
+    expect(COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH).toBe(256)
   })
 
   test('shows a permission-denied state instead of a retryable failure', () => {
@@ -241,6 +248,27 @@ describe('searchCollectionCandidates', () => {
         const failure = await searchCollectionCandidates('token', 'x', new Set()).catch((error: unknown) => error)
         expect(failure).toBeInstanceOf(CollectionApiError)
       }
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  test('rejects a repeated cursor as an invalid response instead of ending the search', async () => {
+    const previousFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      // Page 1 returns a candidate, then pages 2 and 3 cycle between the same two cursors.
+      const results = calls === 1
+        ? [{ id: 'team/core/issue/found', entityType: 'work-item', teamId: 'core', title: 'Found', url: '/', highlights: [] }]
+        : []
+      return new Response(JSON.stringify({ schemaVersion: 1, results, nextCursor: calls % 2 === 0 ? 'a' : 'b' }))
+    }
+    try {
+      const failure = await searchCollectionCandidates('token', 'x', new Set()).catch((error: unknown) => error)
+      expect(failure).toBeInstanceOf(CollectionApiError)
+      expect(failure).toMatchObject({ status: 502 })
+      expect(calls).toBe(3)
     } finally {
       globalThis.fetch = previousFetch
     }
