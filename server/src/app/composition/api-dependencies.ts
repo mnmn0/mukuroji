@@ -49,6 +49,7 @@ import {
   recordApiAccess,
   recordApiError,
 } from '../../infrastructure/observability/api-observability'
+import { createXrayApiAccessRecorder } from '../../infrastructure/observability/xray-request-subsegment'
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
 import {
   createStaticRuntimeControlProvider,
@@ -1484,6 +1485,7 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
  */
 export function createProductionOperationalDependencies(): OperationalDependencies {
   const config = loadServerConfig()
+  const recordXrayAccess = createXrayApiAccessRecorder()
   return {
     ...(config.applicationCommitSha === undefined
       ? {}
@@ -1491,7 +1493,12 @@ export function createProductionOperationalDependencies(): OperationalDependenci
     recordRuntimeControl:
       createProductionRuntimeControlObservationRecorder(),
     readiness: createDynamoDbReadinessProbe(),
-    recordAccess: recordApiAccess,
+    recordAccess: recordXrayAccess
+      ? (observation) => {
+        recordApiAccess(observation)
+        recordXrayAccess(observation)
+      }
+      : recordApiAccess,
     recordError: recordApiError,
     runtimeControl: createProductionRuntimeControlProvider('api'),
   }

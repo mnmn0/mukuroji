@@ -12,7 +12,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Request correlation | `/api/*` で client header を信頼せず server が correlation/request ID を生成し、内部 route、response、CORS exposed header へ渡す | 信頼済み service 間で parent correlation を継承する認証済み protocol は未実装 |
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
-| Trace | CDK が管理する全28個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
+| Trace | CDK が管理する全28個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する。API Lambda は sampled trace ごとに `mukuroji-api-request` subsegment を送り、`correlation_id`、`request_id`、`route_group` を annotation として登録する | API 以外の worker Lambda の annotation、unsampled trace の検索は未実装 |
 | Alarm | API、queue、DLQ、async destination、runtime control、restore drill の51 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な50件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
@@ -227,8 +227,13 @@ fields @timestamp, event, correlationId, requestId, invocationId, traceId,
 
 X-Ray は全 Lambda で active です。API log の `traceId` は sampled trace が保存されている場合の
 exact lookup に使い、保存されていない場合は `invocationId` と UTC window から Lambda log を
-起点に調査します。Correlation/request ID 自体を X-Ray annotation として登録していないため、
-correlation ID だけで X-Ray trace を一意検索できるとは記載しません。
+起点に調査します。
+
+API Lambda は sampled trace に `mukuroji-api-request` subsegment を追加し、server が生成した
+correlation ID、request ID、route group を annotation として登録します。sampled trace は
+X-Ray console の filter expression `annotation.correlation_id = "<correlation ID>"` で検索できます。
+unsampled request には subsegment がないため、その場合は上記の log 起点の調査を使います。
+subsegment は X-Ray daemon への UDP 送信で、送信失敗は API response に影響しません。
 
 ## Severity、acknowledge、escalation
 
