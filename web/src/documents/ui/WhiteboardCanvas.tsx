@@ -129,6 +129,18 @@ type WhiteboardTool = WhiteboardObject['type'] | 'frame'
 
 const whiteboardWidth = 1400
 const whiteboardHeight = 900
+/**
+ * Theme-aware colors for the canvas grid, frames, and connectors. The variables are defined for
+ * the light and dark themes in `index.css`; objects keep their fixed paper colors instead.
+ */
+const whiteboardSvgColors = {
+  connector: 'var(--workbench-whiteboard-connector)',
+  frameFill: 'var(--workbench-whiteboard-frame-fill)',
+  frameLabel: 'var(--workbench-whiteboard-frame-label)',
+  frameStroke: 'var(--workbench-whiteboard-frame-stroke)',
+  grid: 'var(--workbench-whiteboard-grid)',
+  selected: 'var(--workbench-whiteboard-selected)',
+}
 const whiteboardTools = [
   'note',
   'text',
@@ -674,7 +686,7 @@ function WhiteboardSvg({
           patternUnits="userSpaceOnUse"
           width="24"
         >
-          <circle cx="1" cy="1" fill="#d9e1de" r="1" />
+          <circle cx="1" cy="1" r="1" style={{ fill: whiteboardSvgColors.grid }} />
         </pattern>
         <marker
           id="whiteboard-arrow"
@@ -684,7 +696,7 @@ function WhiteboardSvg({
           refX="7"
           refY="4"
         >
-          <path d="M0,0 L8,4 L0,8 z" fill="#65716d" />
+          <path d="M0,0 L8,4 L0,8 z" style={{ fill: whiteboardSvgColors.connector }} />
         </marker>
       </defs>
       <rect
@@ -711,22 +723,24 @@ function WhiteboardSvg({
           tabIndex={onSelectFrame ? 0 : undefined}
         >
           <rect
-            fill="#ffffff80"
             height={frame.bounds.height}
             rx="16"
-            stroke={
-              selectedFrameId === frame.id ? '#0f766e' : '#aab9b4'
-            }
             strokeDasharray="10 7"
             strokeWidth={selectedFrameId === frame.id ? 4 : 2}
+            style={{
+              fill: whiteboardSvgColors.frameFill,
+              stroke: selectedFrameId === frame.id
+                ? whiteboardSvgColors.selected
+                : whiteboardSvgColors.frameStroke,
+            }}
             width={frame.bounds.width}
             x={frame.bounds.x}
             y={frame.bounds.y}
           />
           <text
-            fill="#46524e"
             fontSize="18"
             fontWeight="700"
+            style={{ fill: whiteboardSvgColors.frameLabel }}
             x={frame.bounds.x + 16}
             y={frame.bounds.y + 28}
           >
@@ -773,11 +787,15 @@ function WhiteboardSvg({
             />
             <line
               markerEnd="url(#whiteboard-arrow)"
-              stroke={selected ? '#0f766e' : '#65716d'}
               strokeDasharray={
                 connector.lineStyle === 'dashed' ? '8 6' : undefined
               }
               strokeWidth={selected ? 4 : 2.5}
+              style={{
+                stroke: selected
+                  ? whiteboardSvgColors.selected
+                  : whiteboardSvgColors.connector,
+              }}
               x1={from.x}
               x2={to.x}
               y1={from.y}
@@ -785,9 +803,9 @@ function WhiteboardSvg({
             />
             {connector.label ? (
               <text
-                fill="#65716d"
                 fontSize="16"
                 fontWeight="600"
+                style={{ fill: whiteboardSvgColors.connector }}
                 textAnchor="middle"
                 x={(from.x + to.x) / 2}
                 y={(from.y + to.y) / 2 - 8}
