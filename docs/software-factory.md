@@ -115,16 +115,20 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 - Run を開始する operation は、Work Item の `started` への遷移（既存 revision CAS）と Run の
   conditional put、`agent-run.started` audit event を 1 つの DynamoDB transaction で確定する。
   片方だけが成功した状態を作らない。
-- public API の Work Item 更新（PATCH）と comment 作成は任意の `agentRunId` を受け取る。
-  指定された場合、server は Run が `active` で、credential の actor が `assigneeUserId` と一致し、
-  Run の `workItemId` が対象と一致することを強整合 read で検証してから、lease 延長と mutation を
-  同じ transaction で確定する。
-- `agentRunId` を指定せずに別の `active` Run を持つ Work Item を更新する場合、人間の
-  Web 操作や SDK は従来どおり成功する。MCP は常に自分の Run を添えるため、MCP 経由の
-  mutation だけがこの fence の対象になる。既存の client と SDK は変更不要である。
-- 対象 Work Item に別 instance の `active` Run がある状態で MCP が start や mutation を試みた
-  場合は `409 agent_run_conflict` とし、相手 Run の `runtime`、`agentName`、`startedAt`、停滞か
-  どうかだけを返す。`instanceId` hash や credential は返さない。
+- public API の Work Item 更新（PATCH）と comment 作成は任意の `agentRunId` と
+  `agentInstanceId` を受け取る。`agentRunId` が指定された場合、server は Run が `active` で、
+  credential の actor が `assigneeUserId` と一致し、Run の `workItemId` が対象と一致することを
+  強整合 read で検証してから、lease 延長と mutation を同じ transaction で確定する。
+  `workItemId` が一致しない Run は `agent_run_not_active` として拒否する。
+- どちらも指定しない更新（人間の Web 操作、SDK）は、対象 Work Item に `active` Run があっても
+  従来どおり成功する。既存の client と SDK は変更不要である。
+- MCP は mutation に常に `agentInstanceId` を添え、対象 Work Item と `workItemId` が一致する
+  自分の `active` Run がある場合はその `runId` を `agentRunId` として添える。別の Work Item の
+  Run は添えない。
+- start、および `agentRunId` または `agentInstanceId` を伴う mutation は、対象 Work Item に
+  別 instance の `active` Run がある場合に `409 agent_run_conflict` とし、相手 Run の
+  `runtime`、`agentName`、`startedAt`、停滞かどうかだけを返す。`instanceId` hash や
+  credential は返さない。
 
 ### 永続化
 
@@ -167,8 +171,11 @@ Run は Work Item の archive / delete に従う。Work Item を削除する tra
   取得・解決しない。表示時は既存の rich text safety と同じ link 方針に従う。
 - `kind=blocker` と `kind=handoff` は Factory board の「判断待ち」lane に出す。status 変更は
   伴わないため、agent は必要に応じて `move_task` を別途呼ぶ。
-- Run が `active` でない場合の `report_progress` は、従来どおり comment だけを保存し、構造化
-  field は受け付けずに `agent_run_not_active` を返す。agent は停止して人に確認する。
+- `message` だけの `report_progress` は、対象 Work Item と一致する自分の `active` Run の有無に
+  かかわらず、従来どおり comment だけを保存して成功を返す。構造化 field（`verifications`、
+  `artifacts`、`changedFileCount`、または `progress` 以外の `kind`）を含む `report_progress` は、
+  一致する Run がなければ何も保存せずに `agent_run_not_active` を返す。comment だけを保存して
+  error を返す部分保存はしない。agent は停止して人に確認する。
 
 ## 仕様と context
 
@@ -263,7 +270,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | `outcome` 付きの終了。 |
 | `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` | 停滞 Run の引き継ぎ。設定で許可時のみ。 |
-| `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` を追加。 |
+| `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` と `agentInstanceId` を追加。 |
 
 内部 API は `GET /api/teams/{teamId}/agent-runs` と
 `POST /api/teams/{teamId}/agent-runs/{runId}/release` を追加し、Web 画面だけが使う。
@@ -315,8 +322,8 @@ tool は次のとおり変更・追加する。
 | `heartbeat`（新規） | `runId` を受け取り lease を延長する。 |
 | `finish_run`（新規） | `runId`、`outcome`、`idempotencyKey`。`complete_task` の後、または中断・失敗時に呼ぶ。 |
 | `take_over_task`（新規） | 設定で許可された場合だけ登録する。停滞 Run を `superseded` にして新しい Run を開始する。 |
-| `report_progress` | `kind`、`verifications`、`artifacts`、`changedFileCount` を任意で追加。`active` な自分の Run があれば report endpoint、なければ従来の comment endpoint を呼ぶ。 |
-| `update_task` / `move_task` / `complete_task` / `cancel_task` / `reopen_task` | 自分の `active` Run があれば `agentRunId` を添える。 |
+| `report_progress` | `kind`、`verifications`、`artifacts`、`changedFileCount` を任意で追加。対象 Work Item と `workItemId` が一致する自分の `active` Run があれば report endpoint を呼ぶ。なければ `message` だけの場合は従来の comment endpoint（`agentInstanceId` 付き）を呼び、構造化 field がある場合は endpoint を呼ばずに `agent_run_not_active` を返す。 |
+| `update_task` / `move_task` / `complete_task` / `cancel_task` / `reopen_task` | 常に `agentInstanceId` を添え、対象 Work Item と `workItemId` が一致する自分の `active` Run があればその `runId` を `agentRunId` として添える。別の Work Item の Run は使わない。一致する Run がなく対象 Work Item に別 instance の `active` Run がある場合は server の fence で `agent_run_conflict` になる。 |
 
 - MCP process は自分の `active` Run を起動時に `GET /v1/agent-runs?instanceId=` で復元し、
   process 再起動後も同じ Run を継続する。memory だけに持たない。
