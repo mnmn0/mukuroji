@@ -2559,6 +2559,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     }
   }
 
+  /**
+   * Reads a stored inbound webhook delivery receipt with a consistent read.
+   *
+   * @param workspaceId - Workspace that owns the receipt.
+   * @param recordKey - Storage record key of the delivery receipt.
+   * @returns The receipt fields, or undefined when no delivery receipt is stored.
+   */
   private async getInboundWebhookDeliveryReceipt(workspaceId: string, recordKey: string) {
     await this.ensureTable()
     const response = await this.documentClient.send(new GetCommand({
@@ -2890,6 +2897,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return value
   }
 
+  /**
+   * Ensures a webhook trigger references an active Automation inbound webhook endpoint.
+   *
+   * @param workspaceId - Workspace that owns the endpoint.
+   * @param trigger - Automation trigger to check; non-webhook triggers are ignored.
+   */
   private async assertActiveInboundWebhookTrigger(
     workspaceId: string,
     trigger: AutomationTrigger,
@@ -3405,6 +3418,12 @@ function createInboundWebhookEndpointUrl(endpointBaseUrl: string, opaqueEndpoint
   return endpointUrl.toString()
 }
 
+/**
+ * Builds the DynamoDB item that stores an inbound webhook endpoint.
+ *
+ * @param endpoint - Endpoint record to persist.
+ * @returns The storage item with scope, record key, and purpose-specific entry type.
+ */
 function createInboundWebhookEndpointStorageItem(endpoint: AutomationInboundWebhookEndpointRecord) {
   return {
     scopeKey: automationScopeKey(endpoint.workspaceId),
@@ -3476,6 +3495,13 @@ function createInboundWebhookSignatureReceiptStorageItem(
   }
 }
 
+/**
+ * Builds a condition check that the endpoint is still active with the same version, revision, and secret.
+ *
+ * @param tableName - Automation table name.
+ * @param endpoint - Endpoint record whose current state must still hold.
+ * @returns The condition check input.
+ */
 function createInboundWebhookActiveConditionCheck(
   tableName: string,
   endpoint: AutomationInboundWebhookEndpointRecord,
@@ -3511,6 +3537,13 @@ function createInboundWebhookActiveConditionCheck(
   }
 }
 
+/**
+ * Builds a transaction condition check that a rule's webhook endpoint is still active.
+ *
+ * @param tableName - Automation table name.
+ * @param endpoint - Endpoint record referenced by the rule trigger.
+ * @returns The transaction item wrapping the condition check.
+ */
 function createInboundWebhookRuleActiveConditionCheck(
   tableName: string,
   endpoint: AutomationInboundWebhookEndpointRecord,
@@ -3698,6 +3731,12 @@ function readTemplateApplication(item: Record<string, unknown>) {
   return value
 }
 
+/**
+ * Parses and validates a stored inbound webhook endpoint item.
+ *
+ * @param item - Raw DynamoDB item.
+ * @returns The validated endpoint record.
+ */
 function readInboundWebhookEndpointRecord(item: Record<string, unknown>) {
   // Endpoints created before purposes existed deliver to Automation.
   const value = stripStorage<AutomationInboundWebhookEndpointRecord>({ purpose: 'automation', ...item })

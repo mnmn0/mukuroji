@@ -73,6 +73,11 @@ export function AutomationInboundWebhooksPanel({
     dispatchSecret({ readOnly, type: 'access-change' })
   }, [readOnly])
 
+  /**
+   * Creates an inbound webhook endpoint from the form and reveals its one-time secret.
+   *
+   * @param event - Form submit event.
+   */
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const normalizedName = name.trim()

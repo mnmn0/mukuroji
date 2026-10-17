@@ -10,9 +10,21 @@ import {
   createAutomationInboundWebhookSecretId,
 } from './adapter-out/inbound-webhook-secret-id'
 
+/**
+ * Creates an in-memory DynamoDB document client probe for inbound webhook persistence tests.
+ *
+ * @returns The probe client and its inspection helpers.
+ */
 function createInboundWebhookDocumentProbe() {
   const items = new Map<string, Record<string, unknown>>()
   let transactionCalls = 0
+  /**
+   * Derives the in-memory map key for an item or key.
+   *
+   * @param tableName - Table that owns the item.
+   * @param value - Item or key attributes.
+   * @returns The map key.
+   */
   const keyFor = (tableName: string, value: Record<string, unknown>) => {
     if (typeof value.scopeKey === 'string' && typeof value.recordKey === 'string') {
       return `${tableName}\0${value.scopeKey}\0${value.recordKey}`

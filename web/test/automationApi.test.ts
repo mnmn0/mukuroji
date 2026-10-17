@@ -405,6 +405,11 @@ function createRuleInput(): CreateAutomationRuleInput {
   }
 }
 
+/**
+ * Creates an Automation inbound webhook endpoint fixture.
+ *
+ * @returns The endpoint fixture.
+ */
 function createInboundWebhookEndpoint(): AutomationInboundWebhookEndpoint {
   return {
     createdAt: '2026-07-16T00:00:00.000Z',
