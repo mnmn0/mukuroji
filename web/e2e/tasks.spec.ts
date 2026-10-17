@@ -4148,13 +4148,17 @@ test.describe('authenticated task page', () => {
     // A repeated action with the same confirmation text is announced again while the banner stays mounted.
     const firstAnnouncement = page.getByTestId('live-announcer-polite').locator('p')
     const firstAnnouncementId = await firstAnnouncement.getAttribute('data-announcement-id')
+    // Without an ID the "changed" assertion below would compare against nothing and always pass.
+    if (!firstAnnouncementId) {
+      throw new Error('The first announcement has no data-announcement-id.')
+    }
     await wireframeBar.focus()
     await page.keyboard.press('ArrowRight')
     await preview.getByRole('button', { name: '適用', exact: true }).click()
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
     await expect(page.getByTestId('task-action-feedback')).toContainText('変更を保存しました。')
     await expect(page.getByTestId('live-announcer-polite')).toHaveText('変更を保存しました。')
-    await expect(firstAnnouncement).not.toHaveAttribute('data-announcement-id', firstAnnouncementId ?? '')
+    await expect(firstAnnouncement).not.toHaveAttribute('data-announcement-id', firstAnnouncementId)
   })
 
   test('Issue #190: dependency conflict preview は Gantt と Calendar で Cancel に focus する', async ({ page }) => {
