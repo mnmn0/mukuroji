@@ -27,6 +27,7 @@ import {
   resolveEnterpriseSessionErrorsAction,
   type EnterpriseSessionErrorAction,
 } from '../../auth/enterpriseSessionErrors'
+import { buildLoginRedirectPath } from '../../auth/model/loginReturnPath'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
 import type { InboxNotification } from '../../notifications/api'
@@ -883,7 +884,13 @@ export function WorkspaceRouteProvider() {
   ])
 
   if (!session) {
-    return <Navigate replace to="/" />
+    // Keep the requested page so deep links and installed-app shortcuts resume after sign-in.
+    return (
+      <Navigate
+        replace
+        to={buildLoginRedirectPath(`${location.pathname}${location.search}${location.hash}`)}
+      />
+    )
   }
 
   return <Outlet context={contextValue} />
