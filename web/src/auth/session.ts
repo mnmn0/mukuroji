@@ -1,3 +1,5 @@
+import { clearAppBadgeAndNotifyTabs } from '../shared/lib/pwa/appBadge'
+
 /**
  * ブラウザに保存する Cognito 認証セッションです。
  */
@@ -49,6 +51,25 @@ export function getAuthSession() {
 }
 
 /**
+ * Checks, without side effects, that a stored unexpired session still holds this token.
+ *
+ * A tab keeps its token in memory, so another tab's sign-out of a shared remembered
+ * session is visible only in storage.
+ *
+ * @param accessToken - Token the caller is using.
+ * @returns Whether storage still holds an unexpired session with that token.
+ */
+export function hasStoredAuthSession(accessToken: string): boolean {
+  if (typeof window === 'undefined') return false
+  // Each store is checked on its own: another tab's remembered session in localStorage must
+  // not hide this tab's session-only token in sessionStorage.
+  return [window.localStorage, window.sessionStorage].some((storage) => {
+    const session = readSession(storage)
+    return session !== null && session.accessToken === accessToken && session.expiresAt > Date.now()
+  })
+}
+
+/**
  * ユーザーの保持設定に合わせて認証セッションを保存します。
  */
 export function saveAuthSession(session: AuthSession) {
@@ -65,6 +86,9 @@ export function saveAuthSession(session: AuthSession) {
 export function clearAuthSession() {
   window.localStorage.removeItem(storageKey)
   window.sessionStorage.removeItem(storageKey)
+  // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
+  // other tabs that are still signed in republish their own count.
+  void clearAppBadgeAndNotifyTabs()
 }
 
 function readSession(storage: Storage) {
