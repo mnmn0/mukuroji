@@ -85,6 +85,10 @@ function configureExports(workspaceRole?: 'member', readRecordedEvent: () => Aud
   return { accessEvents, queued, service }
 }
 
+/**
+ * Builds request headers for an authenticated Workspace administrator.
+ * @returns Headers accepted by the export routes.
+ */
 const adminHeaders = () => ({
   Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
   'Content-Type': 'application/json',
@@ -112,6 +116,10 @@ test('keeps the export request receipt past every artifact even with a short aud
 })
 
 test('uses the persisted request time after a concurrent first request and rejects receipts past the deadline', async () => {
+  /**
+   * Sends the same export creation request.
+   * @returns The route response.
+   */
   const request = () => app.request('/api/audit/exports', {
     method: 'POST',
     headers: { ...adminHeaders(), 'Idempotency-Key': 'shared-key' },
@@ -277,7 +285,12 @@ test('requires an idempotency key and records the request before creating the jo
   expect(accessEvents).toHaveLength(1)
   expect(queued).toHaveLength(1)
 
-  // The audit identity is scoped to export requests, not the raw header shared with other operations.
+  /**
+   * Hashes an idempotency key the way the audit log stores it.
+   * The audit identity is scoped to export requests, not the raw header shared with other operations.
+   * @param key Idempotency key to hash.
+   * @returns The hex digest recorded on access events.
+   */
   const auditKeyHash = (key: string) => createHash('sha256')
     .update(`audit-idempotency-v1\0${accessEvents[0]?.workspaceId}\0${accessEvents[0]?.actor.id}\0${key}`)
     .digest('hex')
@@ -391,6 +404,10 @@ test('rejects a key whose export expired and maps audit-writer conflicts to 409'
     countEvents: async () => ({ count: 1 }),
   })
   setTestAppDependencies({ auditEvents, auditExports: service })
+  /**
+   * Sends the same export creation request.
+   * @returns The route response.
+   */
   const request = () => app.request('/api/audit/exports', {
     method: 'POST',
     headers: { ...adminHeaders(), 'Idempotency-Key': 'expired-key' },

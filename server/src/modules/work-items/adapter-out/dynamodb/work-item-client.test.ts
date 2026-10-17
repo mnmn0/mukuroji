@@ -2247,6 +2247,12 @@ test('DynamoDB Work Item client keeps the snapshot membership version when the a
       {} as DynamoDBClient,
       false,
     )
+    /**
+     * Builds the expected active-member ConditionCheck for a contributor.
+     * @param memberKey Workspace member key.
+     * @param version Member version the check pins.
+     * @returns The expected transaction item.
+     */
     const memberCheck = (memberKey: string, version: number) => ({
       ConditionCheck: {
         TableName: 'WorkspaceAccessTable',

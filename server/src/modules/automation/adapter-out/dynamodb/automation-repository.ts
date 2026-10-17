@@ -954,7 +954,18 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       : undefined
   }
 
-  /** Create operation と provisioning endpoint を atomic に予約します。 */
+  /**
+   * Create operation と provisioning endpoint を atomic に予約します。
+   * @param workspaceId Workspace that owns the endpoint.
+   * @param actorId Actor requesting the endpoint, scoped into the idempotency identity.
+   * @param input Endpoint creation input.
+   * @param idempotencyKey Client idempotency key for the create operation.
+   * @param endpointBaseUrl Public base URL used to build the endpoint URL.
+   * @param validateNewEndpoint Optional validator run only for a new reservation; the
+   *   ConditionCheck items it returns commit with the reservation as reference fences.
+   * @returns The reserved provisioning endpoint and operation, or the stored replay for a
+   *   repeated request.
+   */
   async reserveCreateInboundWebhookEndpoint(
     workspaceId: string,
     actorId: string,
