@@ -347,6 +347,6 @@ function isCollectionEntry(value: unknown): value is WorkItemCollectionEntry {
  *
  * @returns A 502 Collection API error.
  */
-function invalidResponse(): CollectionApiError {
+export function invalidResponse(): CollectionApiError {
   return new CollectionApiError(502, 'Collection response is invalid.')
 }
