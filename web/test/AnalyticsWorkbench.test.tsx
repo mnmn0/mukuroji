@@ -142,6 +142,12 @@ describe('AnalyticsWorkbench', () => {
     expect(barHtml).toContain('data-testid="analytics-bar-missing-1"')
     expect(barHtml).toContain('data-testid="analytics-bar-2"')
     expect(lineHtml).toContain('>Unavailable</td>')
+    // Chart primitives follow the theme instead of fixed light-palette colors.
+    expect(barHtml).toContain('fill:var(--workbench-chart-series)')
+    expect(barHtml).toContain('stroke:var(--workbench-chart-grid)')
+    expect(barHtml).toContain('stroke:var(--workbench-chart-missing)')
+    expect(lineHtml).toContain('fill:var(--workbench-chart-point-fill);stroke:var(--workbench-chart-series)')
+    expect(`${lineHtml}${barHtml}`).not.toMatch(/(?:fill|stroke)="#(?:dde4e1|0f766e|78837f|ffffff)"/u)
   })
 
   test('renders the report builder palette and every widget editor', () => {

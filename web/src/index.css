@@ -262,6 +262,10 @@
   --workbench-whiteboard-frame-label: #46524e;
   --workbench-whiteboard-connector: #65716d;
   --workbench-whiteboard-selected: #0f766e;
+  --workbench-chart-grid: #dde4e1;
+  --workbench-chart-series: #0f766e;
+  --workbench-chart-missing: #78837f;
+  --workbench-chart-point-fill: #ffffff;
   color-scheme: light;
   --surface: var(--workbench-canvas);
   --ink: var(--workbench-text);
@@ -318,6 +322,10 @@
   --workbench-whiteboard-frame-label: #c9d4d0;
   --workbench-whiteboard-connector: #a3b2ad;
   --workbench-whiteboard-selected: #5fd0c2;
+  --workbench-chart-grid: #2f3b37;
+  --workbench-chart-series: #5fd0c2;
+  --workbench-chart-missing: #8c9a95;
+  --workbench-chart-point-fill: #151d1a;
   --color-fg-amber-200: oklch(92.4% 0.108 95.7);
   --color-fg-amber-500: oklch(76.9% 0.169 70.1);
   --color-fg-amber-600: oklch(74.0% 0.161 58.3);
@@ -561,6 +569,10 @@
     --workbench-whiteboard-frame-label: #c9d4d0;
     --workbench-whiteboard-connector: #a3b2ad;
     --workbench-whiteboard-selected: #5fd0c2;
+    --workbench-chart-grid: #2f3b37;
+    --workbench-chart-series: #5fd0c2;
+    --workbench-chart-missing: #8c9a95;
+    --workbench-chart-point-fill: #151d1a;
     --color-fg-amber-200: oklch(92.4% 0.108 95.7);
     --color-fg-amber-500: oklch(76.9% 0.169 70.1);
     --color-fg-amber-600: oklch(74.0% 0.161 58.3);
