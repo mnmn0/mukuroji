@@ -641,6 +641,34 @@ describe('app badge permission', () => {
     expect(lifecycleStopped).toBe(1)
   })
 
+  test('keeps the pending control offered when the permission changes before the request settles', async () => {
+    let answer: (value: string) => void = () => undefined
+    const notification = {
+      permission: 'default',
+      requestPermission: () => new Promise<string>((resolve) => { answer = resolve }),
+    }
+    let lifecycleChanged: () => void = () => undefined
+    const store = createAppBadgePermissionStore({
+      readEnvironment: () => ({ standalone: true, badgeRequiresNotificationPermission: true, navigator: badgeNavigator, notification }),
+      subscribeLifecycle: (onChange) => {
+        lifecycleChanged = onChange
+        return () => undefined
+      },
+      refreshBadge: () => undefined,
+    })
+    const unsubscribe = store.subscribe(() => undefined)
+    store.request()
+    // A Permissions API change event can arrive before the request promise settles.
+    notification.permission = 'denied'
+    lifecycleChanged()
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: true, blocked: false })
+    answer('denied')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: true, result: 'denied' })
+    unsubscribe()
+  })
+
   test('watches focus, visibility, and Permissions API changes until unsubscribed', async () => {
     const windowTarget = new EventTarget()
     const documentTarget = new EventTarget()

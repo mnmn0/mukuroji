@@ -182,11 +182,14 @@ export function readAppBadgePermissionEnvironment(): AppBadgePermissionEnvironme
 
 /** Badge permission opt-in state for the settings install card. */
 export type AppBadgePermissionSnapshot = {
-  /** Whether the opt-in button can be shown now. */
+  /** Whether the opt-in button can be shown now; always true while a request is pending. */
   offered: boolean
   /** Whether the browser permission dialog is open. */
   pending: boolean
-  /** Whether notifications are currently denied, so the badge cannot appear; read without asking. */
+  /**
+   * Whether notifications are currently denied, so the badge cannot appear; read without asking.
+   * False while a request is pending, since its answer is announced instead.
+   */
   blocked: boolean
   /** Answer from the latest request made on this page, if any and still current. */
   result?: AppBadgePermissionResult
@@ -260,10 +263,13 @@ export function createAppBadgePermissionStore(options: AppBadgePermissionStoreOp
    */
   function buildSnapshot(): AppBadgePermissionSnapshot {
     const environment = readEnvironment()
+    // The permission can change before the request settles, for example when a focus or
+    // Permissions API event arrives first. Keep the focused control mounted, and its outcome
+    // unannounced, until the answer is known.
     return {
-      offered: canRequestAppBadgePermission(environment),
+      offered: pending || canRequestAppBadgePermission(environment),
       pending,
-      blocked: isAppBadgePermissionBlocked(environment),
+      blocked: !pending && isAppBadgePermissionBlocked(environment),
       ...(result ? { result } : {}),
     }
   }
