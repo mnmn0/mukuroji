@@ -67,6 +67,15 @@ const GANTT_BAR_CENTER_OFFSET = 46
 const GANTT_EXTERNAL_STUB_HEIGHT = 44
 const MAX_GANTT_TIMELINE_COLUMNS = 180
 const MILLISECONDS_PER_CALENDAR_DAY = 86_400_000
+/**
+ * Theme-aware dependency connector colors. The variables are defined for the light and dark
+ * themes in `index.css`, so links and their arrow markers keep contrast on either surface.
+ */
+const ganttLinkColors = {
+  conflict: 'var(--workbench-gantt-link-conflict)',
+  critical: 'var(--workbench-gantt-link-critical)',
+  default: 'var(--workbench-gantt-link)',
+}
 
 /** Formats a signed dependency offset without losing lead semantics. */
 function formatSignedLag(lagDays: number, t: TaskGanttTranslator): string {
@@ -840,13 +849,13 @@ export function TaskGanttView({
             >
               <defs>
                 <marker id="gantt-dependency-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5">
-                  <path d="M0 0 L7 3.5 L0 7 Z" fill="#475467" />
+                  <path d="M0 0 L7 3.5 L0 7 Z" style={{ fill: ganttLinkColors.default }} />
                 </marker>
                 <marker id="gantt-dependency-arrow-critical" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5">
-                  <path d="M0 0 L7 3.5 L0 7 Z" fill="#b54708" />
+                  <path d="M0 0 L7 3.5 L0 7 Z" style={{ fill: ganttLinkColors.critical }} />
                 </marker>
                 <marker id="gantt-dependency-arrow-conflict" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5">
-                  <path d="M0 0 L7 3.5 L0 7 Z" fill="#b42318" />
+                  <path d="M0 0 L7 3.5 L0 7 Z" style={{ fill: ganttLinkColors.conflict }} />
                 </marker>
               </defs>
               {dependencyLayout.connectors.map((connector) => (
@@ -862,15 +871,17 @@ export function TaskGanttView({
                     : connector.critical
                       ? 'gantt-dependency-arrow-critical'
                       : 'gantt-dependency-arrow'})`}
-                  stroke={connector.conflictCount > 0
-                    ? '#b42318'
-                    : connector.critical
-                      ? '#b54708'
-                      : '#475467'}
                   strokeDasharray={connector.conflictCount > 0 ? '5 3' : undefined}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   strokeWidth={connector.critical || connector.conflictCount > 0 ? 2.5 : 2}
+                  style={{
+                    stroke: connector.conflictCount > 0
+                      ? ganttLinkColors.conflict
+                      : connector.critical
+                        ? ganttLinkColors.critical
+                        : ganttLinkColors.default,
+                  }}
                 />
               ))}
             </svg>

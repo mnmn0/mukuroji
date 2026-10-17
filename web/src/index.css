@@ -29,6 +29,14 @@
   /* Theme-aware colors. Generated text (fg-*) and hard-coded tone colors keep their
      light values here; dark overrides live in the dark theme block below. */
   --color-surface: var(--workbench-surface);
+  /* Fixed "paper" colors for content that keeps a light surface in every theme, such as
+     PDF pages, whiteboard objects with user fills, and badges tinted with light-palette
+     colors. They intentionally have no dark override. */
+  --color-paper: #ffffff;
+  --color-paper-tint: #e5f7f4;
+  --color-paper-ink: #17201d;
+  --color-paper-muted: #65716d;
+  --color-paper-accent: #0f766e;
   --color-fg-amber-200: var(--color-amber-200);
   --color-fg-amber-500: var(--color-amber-500);
   --color-fg-amber-600: var(--color-amber-600);
@@ -244,6 +252,9 @@
   --workbench-danger-border: #fecaca;
   --workbench-on-primary: #ffffff;
   --workbench-focus-ring: rgba(15, 118, 110, 0.12);
+  --workbench-gantt-link: #475467;
+  --workbench-gantt-link-critical: #b54708;
+  --workbench-gantt-link-conflict: #b42318;
   color-scheme: light;
   --surface: var(--workbench-canvas);
   --ink: var(--workbench-text);
@@ -290,6 +301,9 @@
   --workbench-danger-surface: #33130f;
   --workbench-danger-border: #6e2a22;
   --workbench-focus-ring: rgba(95, 208, 194, 0.24);
+  --workbench-gantt-link: #a3b0c2;
+  --workbench-gantt-link-critical: #fdb022;
+  --workbench-gantt-link-conflict: #fb7a6e;
   --color-fg-amber-200: oklch(92.4% 0.108 95.7);
   --color-fg-amber-500: oklch(76.9% 0.169 70.1);
   --color-fg-amber-600: oklch(74.0% 0.161 58.3);
@@ -523,6 +537,9 @@
     --workbench-danger-surface: #33130f;
     --workbench-danger-border: #6e2a22;
     --workbench-focus-ring: rgba(95, 208, 194, 0.24);
+    --workbench-gantt-link: #a3b0c2;
+    --workbench-gantt-link-critical: #fdb022;
+    --workbench-gantt-link-conflict: #fb7a6e;
     --color-fg-amber-200: oklch(92.4% 0.108 95.7);
     --color-fg-amber-500: oklch(76.9% 0.169 70.1);
     --color-fg-amber-600: oklch(74.0% 0.161 58.3);
