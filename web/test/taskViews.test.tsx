@@ -548,6 +548,8 @@ describe('independent task views', () => {
     expect(svg).toContain('style="fill:var(--workbench-gantt-link-critical)"')
     expect(svg).toContain('style="fill:var(--workbench-gantt-link-conflict)"')
     expect(svg).not.toMatch(/(?:stroke|fill)="#/u)
+    expect(html).toContain('var(--workbench-gantt-grid)')
+    expect(html).not.toContain('#eef0f3')
   })
 
   test('distinguishes filtered Project tasks from external dependency endpoints', () => {
