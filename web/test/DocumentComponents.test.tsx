@@ -317,6 +317,26 @@ describe('Document components', () => {
       expect(label).not.toContain('text-fg-')
     }
   })
+
+  test('colors the whiteboard grid, frames, and connectors with theme-aware variables', () => {
+    if (whiteboardRecordFixture.kind !== 'whiteboard') {
+      throw new Error('Expected a whiteboard fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <WhiteboardCanvas content={whiteboardRecordFixture.whiteboard} t={t} />,
+    )
+    const svg = html.slice(html.indexOf('<svg'), html.indexOf('</svg>'))
+
+    expect(svg).toContain('fill:var(--workbench-whiteboard-grid)')
+    expect(svg).toContain('fill:var(--workbench-whiteboard-connector)')
+    expect(svg).toContain('stroke:var(--workbench-whiteboard-connector)')
+    expect(svg).toContain(
+      'style="fill:var(--workbench-whiteboard-frame-fill);stroke:var(--workbench-whiteboard-frame-stroke)"',
+    )
+    expect(svg).toContain('style="fill:var(--workbench-whiteboard-frame-label)"')
+    // Objects keep their own fills, so only the canvas chrome must avoid fixed hex colors.
+    expect(svg).not.toMatch(/fill="#(?:d9e1de|65716d|46524e|ffffff80)"/u)
+  })
 })
 
 describe('Shared document read-only surface', () => {
