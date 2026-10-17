@@ -47,11 +47,15 @@
    `web/AGENTS.md` では route component は `pages/` に置きます。
    このうち 4 file には隣接する `*.stories.tsx` があり、story も page を import するため、移動は story と一緒に行います。
 2. **領域直下に責務の分からない file がある。**
-   `analytics/liveQuery.ts`、`automation/managementData.ts`、`workload/api.ts` は、`api/`、`queries/`、`model/` のいずれかへ移せます。
-   次の 2 file は既存の layer に当てはまらないため、置き場所を先に決めます。
+   `analytics/liveQuery.ts`、`workload/api.ts` は、`api/`、`queries/`、`model/` のいずれかへ移せます。
+   `automation/managementData.ts` は複数 endpoint の読み込みなので `queries/` が移動先ですが、`ui/AutomationManagementPanel` から `AutomationWorkflowTargetOption` 型を import しています。
+   そのまま `queries/` へ移すと `queries` から `ui` への逆向きの依存が残るため、先にこの型を `model/` へ移す別 PR を行い、その後に移動します。
+   次の file は既存の layer に当てはまらないため、置き場所を先に決めます。
    - `files/pdfRuntime.ts` は PDF.js の worker 設定と読み込みだけを持ち、業務知識を持ちません。`shared/lib/` の「業務領域に依存しない小さなライブラリ関数」に当たるため、`shared/lib/pdf/` へ移します。
    - `auth/session.ts` は `localStorage` / `sessionStorage` への認証 session の永続化です。通信ではないため `api/` ではなく、副作用を持つため `model/` でもありません。
-     `web/AGENTS.md` の領域内 layer にはブラウザ storage の置き場所がないため、移動前に `web/AGENTS.md` へ置き場所（例: `entities/auth/storage/`）を追加する別 PR が必要です。それまでは現在の場所に残します。
+   - `auth/enterpriseSso.ts` も同じく、Enterprise SSO の redirect 中の request state を `sessionStorage` に保存・消費し、callback URL を `window.history.replaceState` で消去します。
+     `web/AGENTS.md` の領域内 layer にはブラウザ storage と URL 操作の置き場所がないため、移動前に `web/AGENTS.md` へ置き場所（例: `entities/session/storage/`）を追加する別 PR が必要です。
+     それまでは 2 file とも現在の場所に残し、`auth` を `entities/session` へ移す手順 7 もその PR の後に行います。
 3. **同じ業務データを複数の領域が持っている。**
    `issues`、`tasks`、`work-items` は、いずれも canonical Work Item の取得・表示・更新を扱います。
    entity へ移すときに一つの `entities/work-item` へ統合します。
@@ -102,7 +106,8 @@
    移動だけの PR とし、画面固有の取得処理の `queries/` / `mutations/` への切り出しは、移動後の別 PR で行います。
 2. **領域直下の file を下位 layer へ移す。**
    差分 2 の file を、責務に応じて `api/`、`queries/`、`model/`、`shared/lib/` へ移します。
-   `auth/session.ts` は置き場所が `web/AGENTS.md` に追加されるまで移しません。
+   `automation/managementData.ts` は、`AutomationWorkflowTargetOption` 型を `model/` へ移す別 PR の後に `queries/` へ移します。
+   `auth/session.ts` と `auth/enterpriseSso.ts` は、置き場所が `web/AGENTS.md` に追加されるまで移しません。
 3. **利用元が pages だけの領域を `features/` へ移す。**
    `analytics`、`automation`、`security`、`workload` は他の領域から import されないため、移動の影響が page と story に限られます。
 4. **feature 候補の領域同士の依存を解消する。**
@@ -135,5 +140,6 @@
   変わるのは import の path と、別 module から参照されるようになった宣言の `export` だけにします。
 - 新しく export した宣言には TSDoc を付けます。
 - Storybook の story は、移動先の `ui/` に component と一緒に置きます。
+  ただし手順 1 の route component の story は、表のとおり `pages/workspace/` / `pages/public/` の page の隣に置きます。
 - `web:build`、`web:lint:ci`、`web:test`、`web:build-storybook` を実行します。
   画面の構成を変える場合は `web:e2e` も実行します。
