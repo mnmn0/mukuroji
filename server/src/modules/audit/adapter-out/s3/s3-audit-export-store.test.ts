@@ -181,10 +181,23 @@ describe('S3AuditExportStore', () => {
       status: 'running',
       nextCursor: 'cursor-1',
       eventCount: 1,
-      parts: [{ index: 0, key: 'k', eventCount: 5, byteLength: 1, sha256: 'a'.repeat(64) }],
+      parts: [{ index: 1, key: 'k', eventCount: 5, byteLength: 1, sha256: 'a'.repeat(64) }],
     }
     objects.set(jobPath, { body: JSON.stringify(understated), etag: '"s"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('event count does not match its parts')
+    // Parts from another writer show as gaps, duplicates, or checksums that are not SHA-256 digests.
+    const storedPart = { key: 'k', eventCount: 1, byteLength: 1, sha256: 'a'.repeat(64) }
+    const foreignParts: [unknown[], string][] = [
+      [[{ ...storedPart, index: 0 }], 'numbered from 1 in order'],
+      [[{ ...storedPart, index: 1 }, { ...storedPart, index: 1 }], 'numbered from 1 in order'],
+      [[{ ...storedPart, index: 2 }], 'numbered from 1 in order'],
+      [[{ ...storedPart, index: 1, sha256: 'not-a-digest' }], 'SHA-256 hex digest'],
+    ]
+    for (const [parts, message] of foreignParts) {
+      const foreign = { ...understated, eventCount: parts.length, parts }
+      objects.set(jobPath, { body: JSON.stringify(foreign), etag: '"p"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow(message)
+    }
     // An empty stored restriction would be dropped by the query and widen the export.
     for (const filters of [{ eventTypes: [] }, { eventTypes: [' '] }, { actorId: '' }]) {
       const widenedByEmpty = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters }
@@ -240,11 +253,17 @@ describe('S3AuditExportStore', () => {
     expect(capped.searchParams.get('X-Amz-Expires')).toBe('42')
     expect(url.searchParams.get('response-content-disposition')).toContain('mukuroji-audit-part-00001.ndjson')
     await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, key: 'workspaces/x/files/a', index: 1, eventCount: 1 }, 300))
-      .rejects.toThrow('outside the export')
+      .rejects.toThrow('does not match the export part')
     // A key from another Workspace's or another export's namespace is rejected too.
     await expect(store.createPartDownloadUrl('ws-2', exportId, { ...part, index: 1, eventCount: 1 }, 300))
-      .rejects.toThrow('outside the export')
+      .rejects.toThrow('does not match the export part')
     await expect(store.createPartDownloadUrl('ws-1', 'd'.repeat(32), { ...part, index: 1, eventCount: 1 }, 300))
-      .rejects.toThrow('outside the export')
+      .rejects.toThrow('does not match the export part')
+    // An orphan part from a discarded scan cannot be served under another part's index or checksum.
+    const orphan = await store.putPart('ws-1', exportId, 2, '{"eventId":"orphan"}\n')
+    await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, key: orphan.key, index: 1, eventCount: 1 }, 300))
+      .rejects.toThrow('does not match the export part')
+    await expect(store.createPartDownloadUrl('ws-1', exportId, { ...orphan, index: 1, eventCount: 1 }, 300))
+      .rejects.toThrow('does not match the export part')
   })
 })
