@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import { isStandaloneDisplay } from './standaloneDisplay'
 
 /** Whether the app can be installed from inside the page; `prompting` while the browser dialog is open. */
 export type AppInstallStatus = 'unavailable' | 'available' | 'prompting' | 'installed'
@@ -119,7 +120,7 @@ export function createAppInstallPromptStore(
 /** Install prompt store for the running page, absent outside a browser. */
 export const appInstallPrompt: AppInstallPromptStore | undefined = typeof window === 'undefined'
   ? undefined
-  : createAppInstallPromptStore(window, () => window.matchMedia?.('(display-mode: standalone)').matches === true)
+  : createAppInstallPromptStore(window, () => isStandaloneDisplay())
 
 /** Starts capturing install events as early as possible. */
 export function startAppInstallPrompt(): void {

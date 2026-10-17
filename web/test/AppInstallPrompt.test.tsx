@@ -14,6 +14,7 @@ import {
 import {
   canRequestAppBadgePermission,
   createAppBadgePermissionStore,
+  isAppBadgePermissionBlocked,
   isNotificationGatedBadgePlatform,
   requestAppBadgePermission,
   subscribeNotificationPermissionChanges,
@@ -23,6 +24,7 @@ import {
   type NotificationPermissionSource,
 } from '../src/shared/lib/pwa/badgePermission'
 import { createAppInstallPromptStore, resolveAppInstallAnnouncement } from '../src/shared/lib/pwa/installPrompt'
+import { isStandaloneDisplay } from '../src/shared/lib/pwa/standaloneDisplay'
 import { AppInstallCard, type AppBadgePermissionSectionProps } from '../src/shared/ui/AppInstallCard'
 
 /**
@@ -490,6 +492,44 @@ describe('app badge permission', () => {
     expect(isNotificationGatedBadgePlatform({ userAgent: iPadDesktop, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: true })).toBe(true)
   })
 
+  test('shows blocked guidance after a reload when notifications were denied earlier, only where the badge needs them', () => {
+    const denied = createNotification('denied')
+    const environment = {
+      standalone: true,
+      badgeRequiresNotificationPermission: true,
+      navigator: badgeNavigator,
+      notification: denied.notification,
+    }
+    expect(isAppBadgePermissionBlocked(environment)).toBe(true)
+    expect(isAppBadgePermissionBlocked({ ...environment, badgeRequiresNotificationPermission: false })).toBe(false)
+    expect(isAppBadgePermissionBlocked({ ...environment, standalone: false })).toBe(false)
+    expect(isAppBadgePermissionBlocked({ ...environment, notification: createNotification('default').notification })).toBe(false)
+    // A fresh store on a reloaded page derives the block without asking.
+    const store = createAppBadgePermissionStore({
+      readEnvironment: () => environment,
+      subscribeLifecycle: () => () => undefined,
+      refreshBadge: () => undefined,
+    })
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: true })
+    expect(denied.requested.count).toBe(0)
+    const chromeDesktop = createAppBadgePermissionStore({
+      readEnvironment: () => ({ ...environment, badgeRequiresNotificationPermission: false }),
+      subscribeLifecycle: () => () => undefined,
+    })
+    expect(chromeDesktop.getSnapshot()).toEqual({ offered: false, pending: false, blocked: false })
+  })
+
+  test('detects standalone from the display-mode query or iOS navigator.standalone', () => {
+    const query = (matches: boolean) => () => ({ matches })
+    expect(isStandaloneDisplay({ matchMedia: query(true), navigator: {} })).toBe(true)
+    // An iOS Home Screen app identified only by `navigator.standalone`.
+    expect(isStandaloneDisplay({ matchMedia: query(false), navigator: { standalone: true } })).toBe(true)
+    expect(isStandaloneDisplay({ navigator: { standalone: true } })).toBe(true)
+    expect(isStandaloneDisplay({ matchMedia: query(false), navigator: { standalone: false } })).toBe(false)
+    expect(isStandaloneDisplay({ matchMedia: query(false) })).toBe(false)
+    expect(isStandaloneDisplay(undefined)).toBe(false)
+  })
+
   test('asks within the calling click and refreshes the badge only after a grant', async () => {
     const granted = createNotification('default', 'granted')
     let refreshed = 0
@@ -541,9 +581,9 @@ describe('app badge permission', () => {
     expect(requested.count).toBe(1)
     await Promise.resolve()
     await Promise.resolve()
-    expect(store.getSnapshot()).toEqual({ offered: true, pending: false, result: 'dismissed' })
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: false, blocked: false, result: 'dismissed' })
     store.request()
-    expect(store.getSnapshot()).toEqual({ offered: true, pending: true })
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: true, blocked: false })
     await Promise.resolve()
     await Promise.resolve()
     expect(store.getSnapshot().result).toBe('dismissed')
@@ -575,7 +615,7 @@ describe('app badge permission', () => {
     store.request()
     await Promise.resolve()
     await Promise.resolve()
-    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, result: 'denied' })
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: true, result: 'denied' })
     // Returning without a permission change keeps the answer and the same snapshot.
     const before = store.getSnapshot()
     lifecycleChanged()
@@ -584,12 +624,12 @@ describe('app badge permission', () => {
     // The user allows notifications in the device settings and returns without reloading.
     notification.permission = 'granted'
     lifecycleChanged()
-    expect(store.getSnapshot()).toEqual({ offered: false, pending: false })
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: false })
     expect(refreshed).toBe(1)
     // A reset back to "ask" offers the button again.
     notification.permission = 'default'
     lifecycleChanged()
-    expect(store.getSnapshot()).toEqual({ offered: true, pending: false })
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: false, blocked: false })
     unsubscribe()
     expect(lifecycleStopped).toBe(1)
   })
@@ -681,6 +721,11 @@ describe('app badge permission', () => {
     expect(renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, offered: false }} status="unavailable" />)).toBe('')
     // A Home Screen app that the install store does not report as installed still offers the opt-in.
     expect(renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={badge} status="unavailable" />)).toContain('>Allow icon badge</button>')
+    // A block found on load shows the guidance as static text, without a live region or button.
+    const blocked = renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, offered: false, blocked: true }} status="installed" />)
+    expect(blocked).toContain('<p class="mt-1 text-sm text-[var(--workbench-text)]">Badge blocked.</p>')
+    expect(blocked).not.toContain('role="status"')
+    expect(blocked).not.toContain('>Allow icon badge</button>')
     const pending = renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, pending: true }} status="installed" />)
     expect(pending).toContain('aria-disabled="true"')
     expect(pending).toContain('>Waiting for your choice</button>')

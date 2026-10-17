@@ -13,7 +13,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
 - install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) に加えて、
   Chromium が `beforeinstallprompt` を発火した場合は設定画面に「アプリとしてインストール」を表示します。
   `main.tsx` の起動時に event を捕捉して browser の mini-infobar を抑止し、利用者が押した時に一度だけ dialog を出します。
-  `appinstalled` 後と standalone 表示中は「インストール済み」を表示し、対応しない browser では何も表示しません。
+  `appinstalled` 後と standalone 表示中（`display-mode: standalone` または iOS の `navigator.standalone`。badge の許可導線と同じ `standaloneDisplay.ts` で判定）は「インストール済み」を表示し、対応しない browser では何も表示しません。
   dialog 表示中は button を `aria-disabled` のまま残してフォーカスを失わせず、閉じた後は承認 / キャンセルの結果を
   `role="status"` で通知してフォーカスを移します。キャンセル直後に Chromium が `beforeinstallprompt` を再発火してインストールが再び可能になっても、結果は次に「インストール」を押すまで通知したままにします。承認後に `appinstalled` が届いた場合も、インストール済みの通知へフォーカスを保ちます（表示言語を切り替えてもフォーカスは移しません）。browser が dialog を開けなかった場合は
   例外を出さずに失敗を通知し、browser のメニューからのインストールを案内します。
@@ -40,7 +40,8 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   button が消える場合もフォーカスを結果へ移します。再試行の開始時に前回の結果を消すため、同じ結果（未選択の繰り返しなど）も再度通知します。
   端末の設定で通知を変更して再読み込みせずに戻った場合は、`focus` / `visibilitychange` と、対応する browser では
   Permissions API の `change` で許可状態を読み直し、一致しなくなった結果を消します（許可に変わった場合は badge も再表示します）。
-  許可済みまたはブロック済みの端末では再度尋ねません。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
+  許可済みまたはブロック済みの端末では再度尋ねません。以前にブロックした端末では、再読み込み後も現在の許可状態から
+  「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
   platform では、不要な通知の許可を求めないよう button を表示しません。
   この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。

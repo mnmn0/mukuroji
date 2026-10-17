@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
 import { refreshAppBadge, type AppBadgeNavigator } from './appBadge'
+import { isStandaloneDisplay } from './standaloneDisplay'
 
 /** Notification surface used to ask whether the installed app may show its icon badge. */
 export type NotificationPermissionSource = {
@@ -35,25 +36,51 @@ export type AppBadgePermissionEnvironment = {
 export type AppBadgePermissionResult = 'granted' | 'denied' | 'dismissed' | 'unsupported'
 
 /**
- * Decides whether the settings page offers allowing notifications for the app badge.
+ * Decides whether the badge permission matters here at all.
  *
  * iOS and iPadOS Home Screen apps expose the Badging API but show the badge only after
- * notification permission is granted. The opt-in is offered only inside the installed app,
- * only on such a platform, only where both the Badging API and `Notification` exist, and only
- * while the user has not answered yet, so it never re-asks after a grant or a block. Platforms
- * that show badges without permission, such as Chromium desktop apps, are never asked.
+ * notification permission is granted. The permission matters only inside the installed app,
+ * only on such a platform, and only where both the Badging API and `Notification` exist.
+ * Platforms that show badges without permission, such as Chromium desktop apps, never qualify.
  *
  * @param environment - Standalone display, platform requirement, navigator, and Notification API.
- * @returns Whether the opt-in button can be shown.
+ * @returns Whether the badge depends on notification permission on this page.
  */
-export function canRequestAppBadgePermission(environment: AppBadgePermissionEnvironment): boolean {
+function isAppBadgePermissionApplicable(environment: AppBadgePermissionEnvironment): boolean {
   const { badgeRequiresNotificationPermission, navigator, notification, standalone } = environment
   return standalone
     && badgeRequiresNotificationPermission
     && typeof navigator?.setAppBadge === 'function'
     && notification !== undefined
     && typeof notification.requestPermission === 'function'
-    && notification.permission === 'default'
+}
+
+/**
+ * Decides whether the settings page offers allowing notifications for the app badge.
+ *
+ * The opt-in is offered only where the badge depends on notification permission (see
+ * `isAppBadgePermissionApplicable`) and only while the user has not answered yet, so it
+ * never re-asks after a grant or a block.
+ *
+ * @param environment - Standalone display, platform requirement, navigator, and Notification API.
+ * @returns Whether the opt-in button can be shown.
+ */
+export function canRequestAppBadgePermission(environment: AppBadgePermissionEnvironment): boolean {
+  return isAppBadgePermissionApplicable(environment) && environment.notification?.permission === 'default'
+}
+
+/**
+ * Decides whether the badge is currently blocked because notifications are denied.
+ *
+ * Derived from the current permission without asking, so a user who denied it earlier still
+ * sees how to enable the badge after a reload. Platforms that do not need the permission
+ * never report a block.
+ *
+ * @param environment - Standalone display, platform requirement, navigator, and Notification API.
+ * @returns Whether the card should explain that notifications are blocked.
+ */
+export function isAppBadgePermissionBlocked(environment: AppBadgePermissionEnvironment): boolean {
+  return isAppBadgePermissionApplicable(environment) && environment.notification?.permission === 'denied'
 }
 
 /**
@@ -124,9 +151,7 @@ export function readAppBadgePermissionEnvironment(): AppBadgePermissionEnvironme
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return { standalone: false, badgeRequiresNotificationPermission: false, navigator: undefined, notification: undefined }
   }
-  // iOS Safari also reports Home Screen apps through the non-standard `navigator.standalone`.
-  const standalone = window.matchMedia?.('(display-mode: standalone)').matches === true
-    || Reflect.get(navigator, 'standalone') === true
+  const standalone = isStandaloneDisplay()
   return {
     standalone,
     badgeRequiresNotificationPermission: isNotificationGatedBadgePlatform({
@@ -146,6 +171,8 @@ export type AppBadgePermissionSnapshot = {
   offered: boolean
   /** Whether the browser permission dialog is open. */
   pending: boolean
+  /** Whether notifications are currently denied, so the badge cannot appear; read without asking. */
+  blocked: boolean
   /** Answer from the latest request made on this page, if any and still current. */
   result?: AppBadgePermissionResult
 }
@@ -217,9 +244,11 @@ export function createAppBadgePermissionStore(options: AppBadgePermissionStoreOp
    * @returns New snapshot.
    */
   function buildSnapshot(): AppBadgePermissionSnapshot {
+    const environment = readEnvironment()
     return {
-      offered: canRequestAppBadgePermission(readEnvironment()),
+      offered: canRequestAppBadgePermission(environment),
       pending,
+      blocked: isAppBadgePermissionBlocked(environment),
       ...(result ? { result } : {}),
     }
   }
@@ -227,7 +256,12 @@ export function createAppBadgePermissionStore(options: AppBadgePermissionStoreOp
   /** Publishes a new snapshot when anything visible changed. */
   function update(): void {
     const next = buildSnapshot()
-    if (next.offered === snapshot.offered && next.pending === snapshot.pending && next.result === snapshot.result) return
+    if (
+      next.offered === snapshot.offered
+      && next.pending === snapshot.pending
+      && next.blocked === snapshot.blocked
+      && next.result === snapshot.result
+    ) return
     snapshot = next
     for (const listener of listeners) listener()
   }

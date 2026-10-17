@@ -8,6 +8,8 @@ export type AppBadgePermissionSectionProps = {
   offered: boolean
   /** Whether the browser permission dialog is open. */
   pending: boolean
+  /** Whether notifications are denied right now; shows the blocked guidance without announcing it. */
+  blocked?: boolean
   /** Answer from the latest request made from this card, if any. */
   result?: AppBadgePermissionResult
   /** Localized explanation of why the badge needs notification permission. */
@@ -92,7 +94,7 @@ export function AppInstallCard(props: AppInstallCardProps) {
 
   const badgePermission = props.badgePermission
   const showsBadgePermission = badgePermission !== undefined
-    && (badgePermission.offered || badgePermission.result !== undefined)
+    && (badgePermission.offered || badgePermission.blocked === true || badgePermission.result !== undefined)
   if (status === 'unavailable' && outcome === undefined && !showsBadgePermission) return null
   return (
     <section aria-labelledby="app-install-title" className="workbench-panel flex flex-wrap items-center justify-between gap-3 p-5" data-testid="app-install-card">
@@ -124,7 +126,8 @@ export function AppInstallCard(props: AppInstallCardProps) {
  *
  * While the permission dialog is open the button stays mounted and focusable but inert.
  * Once the answer is known, focus moves to the announced result, because the button
- * disappears after a grant or a block.
+ * disappears after a grant or a block. A block that already existed when the page loaded is
+ * shown as static guidance, without a live region or a focus move.
  *
  * @param props - Opt-in state, localized copy, and the request action.
  * @returns The opt-in row.
@@ -149,6 +152,9 @@ function AppBadgePermissionSection(props: AppBadgePermissionSectionProps) {
         <p className="text-sm text-[var(--workbench-muted)]">{description}</p>
         {message ? (
           <p className="mt-1 text-sm text-[var(--workbench-text)]" ref={resultRef} role="status" tabIndex={-1}>{message}</p>
+        ) : props.blocked ? (
+          // A block found on load is guidance, not news: shown without a live region or focus move.
+          <p className="mt-1 text-sm text-[var(--workbench-text)]">{props.deniedMessage}</p>
         ) : null}
       </div>
       {offered ? (

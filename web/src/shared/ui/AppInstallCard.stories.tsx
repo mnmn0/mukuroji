@@ -114,3 +114,14 @@ export const BadgePermissionGranted: Story = {
 export const BadgePermissionDenied: Story = {
   args: { status: 'installed', badgePermission: { ...badgePermission, offered: false, result: 'denied', onRequest: fn() } },
 }
+
+/** Notifications were denied before this page loaded; the guidance shows without an announcement. */
+export const BadgePermissionBlockedOnLoad: Story = {
+  args: { status: 'installed', badgePermission: { ...badgePermission, offered: false, blocked: true, onRequest: fn() } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(badgePermission.deniedMessage)).toBeVisible()
+    await expect(canvas.queryByRole('status')).toBeNull()
+    await expect(canvas.queryByRole('button', { name: 'アイコンのバッジを許可' })).toBeNull()
+  },
+}

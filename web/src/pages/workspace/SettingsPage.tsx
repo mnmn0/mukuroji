@@ -42,6 +42,7 @@ export function SettingsPage() {
               badgePermission={{
                 offered: badgePermission.offered,
                 pending: badgePermission.pending,
+                blocked: badgePermission.blocked,
                 ...(badgePermission.result ? { result: badgePermission.result } : {}),
                 description: t('workspace.settings.install.badge.description'),
                 actionLabel: t('workspace.settings.install.badge.action'),
