@@ -12,6 +12,11 @@ export type ThemePreference = (typeof themePreferenceOptions)[number]
 const defaultThemePreference: ThemePreference = 'light'
 /** Browser storage key that persists the theme on this device. */
 const storageKey = 'mukuroji.theme'
+/**
+ * Browser chrome colors that match `--workbench-canvas` in `index.css`. Keep them in sync with
+ * the stylesheet, `public/theme-bootstrap.js`, and `index.html`.
+ */
+const themeColors = { dark: '#0e1412', light: '#f7f9f8' }
 
 /**
  * Resolves the initial theme from the saved preference.
@@ -44,6 +49,24 @@ export function isThemePreference(value: unknown): value is ThemePreference {
  */
 export function applyThemePreference(preference: ThemePreference) {
   document.documentElement.dataset.theme = preference
+  applyThemeColor(preference)
+}
+
+/**
+ * Updates the `theme-color` metas so the browser chrome follows the applied theme.
+ *
+ * `index.html` declares one meta per `prefers-color-scheme` media query. An explicit theme sets
+ * both to that theme's canvas color; `system` restores each meta to its media query's color.
+ *
+ * @param preference - Theme applied to the page.
+ */
+function applyThemeColor(preference: ThemePreference) {
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    const scheme = preference === 'system'
+      ? meta.getAttribute('media')?.includes('dark') ? 'dark' : 'light'
+      : preference
+    meta.setAttribute('content', themeColors[scheme])
+  }
 }
 
 /**
