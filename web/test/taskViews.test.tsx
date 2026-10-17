@@ -530,6 +530,26 @@ describe('independent task views', () => {
     )
   })
 
+  test('colors Gantt dependency links and arrows with theme-aware variables', () => {
+    const html = renderToStaticMarkup(
+      <TaskGanttView
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        planningSnapshot={taskViewStoryPlanningSnapshot}
+        projectId="refero"
+        t={t}
+        tasks={taskViewStoryTasks}
+      />,
+    )
+    const overlay = html.slice(html.indexOf('data-testid="task-gantt-connector-overlay"'))
+    const svg = overlay.slice(0, overlay.indexOf('</svg>'))
+
+    expect(svg).toMatch(/data-testid="task-gantt-connector-[^"]+"[^>]*style="stroke:var\(--workbench-gantt-link/u)
+    expect(svg).toContain('style="fill:var(--workbench-gantt-link)"')
+    expect(svg).toContain('style="fill:var(--workbench-gantt-link-critical)"')
+    expect(svg).toContain('style="fill:var(--workbench-gantt-link-conflict)"')
+    expect(svg).not.toMatch(/(?:stroke|fill)="#/u)
+  })
+
   test('distinguishes filtered Project tasks from external dependency endpoints', () => {
     const sourceWorkItem = taskViewStoryPlanningSnapshot.workItems.find((item) =>
       item.id === 'wireframe'

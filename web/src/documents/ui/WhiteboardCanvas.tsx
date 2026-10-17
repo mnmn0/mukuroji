@@ -936,15 +936,15 @@ function WhiteboardObjectNode({
       >
         <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
           {object.type === 'work-item' && workItemPath ? (
-            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-fg-0f766e">
+            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-paper-accent">
               {t('documents.whiteboard.work-item')}
             </span>
           ) : null}
-          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-fg-17201d">
+          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
             {text}
           </span>
           {object.type === 'work-item' ? (
-            <span className="mt-2 text-xs font-semibold text-fg-65716d">
+            <span className="mt-2 text-xs font-semibold text-paper-muted">
               {t('documents.whiteboard.openWorkItem')}
             </span>
           ) : null}
