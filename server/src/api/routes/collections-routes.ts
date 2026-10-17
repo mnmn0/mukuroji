@@ -299,6 +299,24 @@ function mutationContext(principal: WorkspacePrincipal): CollectionMutationConte
  * @returns Reader that returns undefined for missing or unreadable Work Items.
  */
 async function createWorkItemReader(principal: WorkspacePrincipal): Promise<ReadCollectionWorkItem> {
+  return (await createWorkItemReadAccess(principal)).read
+}
+
+/** Caller-scoped Work Item reads that share one directory and Project access snapshot. */
+type WorkItemReadAccess = {
+  /** Reads one Work Item, or undefined when it is missing or unreadable. */
+  read: ReadCollectionWorkItem
+  /** Lists the Teams whose Work Items the caller may read, without reading any Work Item. */
+  readableTeamIds: () => Promise<string[]>
+}
+
+/**
+ * Creates caller-scoped Work Item reads over one directory and Project access snapshot.
+ *
+ * @param principal - Authenticated principal.
+ * @returns The Work Item reader and the readable-Team listing.
+ */
+async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<WorkItemReadAccess> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
   const readContext = {
@@ -308,7 +326,31 @@ async function createWorkItemReader(principal: WorkspacePrincipal): Promise<Read
       return projectAccesses
     },
   }
-  return async (teamId, issueId) => {
+  /**
+   * Lists readable Teams from the in-memory directory and Project access snapshot.
+   *
+   * @returns Team IDs in directory order.
+   */
+  const readableTeamIds = async (): Promise<string[]> => {
+    const teamIds: string[] = []
+    for (const team of directory.teams) {
+      try {
+        await requireTeamPermission(principal, team.id, 'viewer', readContext)
+        teamIds.push(team.id)
+      } catch (error) {
+        if (!isUnreadableWorkItemError(error)) throw error
+      }
+    }
+    return teamIds
+  }
+  /**
+   * Reads one Work Item for the caller.
+   *
+   * @param teamId - Team that owns the Work Item.
+   * @param issueId - Work Item identifier.
+   * @returns The readable Work Item, or undefined.
+   */
+  const read: ReadCollectionWorkItem = async (teamId, issueId) => {
     try {
       const teamContext = await requireTeamPermission(principal, teamId, 'viewer', readContext)
       const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
@@ -336,6 +378,7 @@ async function createWorkItemReader(principal: WorkspacePrincipal): Promise<Read
       throw error
     }
   }
+  return { read, readableTeamIds }
 }
 
 /** Readable Teams whose canonical Work Items are checked for an exact-ID candidate. */
@@ -348,9 +391,10 @@ const EXACT_CANDIDATE_READ_CONCURRENCY = 10
  * Looks a candidate keyword up as an exact Work Item ID in the canonical Work Items.
  *
  * The search index is only a best-effort projection, so a Work Item whose projection
- * failed would otherwise never be offered. This reads the canonical row directly in each
- * Team of the Workspace, at most `EXACT_CANDIDATE_TEAM_LIMIT` Teams, and keeps only Work
- * Items the caller can read.
+ * failed would otherwise never be offered. This first narrows the Workspace's Teams to those
+ * the caller can read, using the directory and Project access already loaded, and then
+ * reads the canonical row in at most `EXACT_CANDIDATE_TEAM_LIMIT` of those Teams, keeping
+ * only Work Items the caller can read.
  *
  * @param principal - Authenticated principal.
  * @param keyword - Trimmed search keyword.
@@ -358,9 +402,10 @@ const EXACT_CANDIDATE_READ_CONCURRENCY = 10
  */
 async function findExactCandidates(principal: WorkspacePrincipal, keyword: string): Promise<WorkspaceSearchResult[]> {
   if (!isWorkItemReferenceIdentifier(keyword)) return []
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  const teamIds = directory.teams.slice(0, EXACT_CANDIDATE_TEAM_LIMIT).map((team) => team.id)
-  const readWorkItem = await createWorkItemReader(principal)
+  const access = await createWorkItemReadAccess(principal)
+  // Only Teams the caller can read are looked up, so no Work Item row is read for the rest.
+  const teamIds = (await access.readableTeamIds()).slice(0, EXACT_CANDIDATE_TEAM_LIMIT)
+  const readWorkItem = access.read
   const results: WorkspaceSearchResult[] = []
   for (let start = 0; start < teamIds.length; start += EXACT_CANDIDATE_READ_CONCURRENCY) {
     const batch = teamIds.slice(start, start + EXACT_CANDIDATE_READ_CONCURRENCY)

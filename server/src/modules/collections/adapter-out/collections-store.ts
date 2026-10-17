@@ -149,8 +149,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   /**
    * Lists the metadata of every Collection row in the Workspace partition.
    *
-   * Only the summary attributes are projected, so the inline references of up to
-   * `COLLECTION_LIMIT` rows are never read for a listing.
+   * Only the summary attributes are projected, so the inline references are left out of
+   * the response. DynamoDB still reads, charges, and pages by each row's full size including
+   * its references, so a listing of `COLLECTION_LIMIT` large rows costs as much read capacity
+   * as reading them whole; the projection only trims what is transferred and parsed.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @returns Validated Collection metadata.

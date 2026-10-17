@@ -361,3 +361,40 @@ test('fences an item change on the Project membership that authorized reading th
   expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'DELETE')).status).toBe(409)
   expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toHaveLength(1)
 })
+
+test('looks an exact candidate up only in readable Teams, beyond the first hundred Teams', async () => {
+  // 101 Teams: the member can read only the last one, through its single Project.
+  const additionalTeams = Array.from({ length: 100 }, (_, index) => ({
+    id: `team-${index}`,
+    name: `Team ${index}`,
+    projects: [{ id: `project-${index}`, name: `Project ${index}`, tone: 'blue' as const }],
+  }))
+  configureFakeProjectClients(true, {
+    directoryId: WORKSPACE_ID,
+    additionalTeams,
+    projectAccesses: [{ teamId: 'team-99', projectId: 'project-99', role: 'viewer' }],
+    detailAssignedProjectIds: { 'onboarding-friction': 'project-99' },
+  })
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const detailReads: string[] = []
+  setTestAppDependencies({
+    teamIssues: {
+      ...teamIssues,
+      async getTeamIssueDetail(workspaceId, teamId, issueId, options) {
+        detailReads.push(teamId)
+        return await teamIssues.getTeamIssueDetail(workspaceId, teamId, issueId, options)
+      },
+    },
+    workspaceSearch: {
+      ...getTestAppDependencies().workItems.workspaceSearch,
+      async search() {
+        return { schemaVersion: 1, results: [] }
+      },
+    },
+  })
+  const response = await planningApiRequest('/api/collections/candidates?keyword=onboarding-friction')
+  expect(response.status).toBe(200)
+  expect((await response.json()).results).toEqual([expect.objectContaining({ id: 'team/team-99/issue/onboarding-friction', projectId: 'project-99' })])
+  // No Work Item row is read in a Team the member cannot read.
+  expect(detailReads).toEqual(['team-99'])
+})
