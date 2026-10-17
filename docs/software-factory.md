@@ -118,8 +118,10 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 - public API の Work Item 更新（PATCH）と comment 作成は任意の `agentRunId` と
   `agentInstanceId` を受け取る。`agentRunId` が指定された場合、server は Run が `active` で、
   credential の actor が `assigneeUserId` と一致し、Run の `workItemId` が対象と一致することを
-  強整合 read で検証してから、lease 延長と mutation を同じ transaction で確定する。
-  `workItemId` が一致しない Run は `agent_run_not_active` として拒否する。
+  強整合 read で事前検証する。この read は Run を予約しないため、lease 延長と mutation を確定する
+  同じ transaction 内でも、Run の `state=active`、対象 `workItemId`、claim row の `runId` が指定
+  された Run と一致することを条件付きで再検証する。条件を満たさない場合は lease 延長と mutation を
+  行わず、`agent_run_not_active` を返す。`workItemId` が一致しない Run も同じ error で拒否する。
 - どちらも指定しない更新（人間の Web 操作、SDK）は、対象 Work Item に `active` Run があっても
   従来どおり成功する。既存の client と SDK は変更不要である。
 - MCP は mutation に常に `agentInstanceId` を添え、対象 Work Item と `workItemId` が一致する
@@ -171,11 +173,14 @@ Run は Work Item の archive / delete に従う。Work Item を削除する tra
   取得・解決しない。表示時は既存の rich text safety と同じ link 方針に従う。
 - `kind=blocker` と `kind=handoff` は Factory board の「判断待ち」lane に出す。status 変更は
   伴わないため、agent は必要に応じて `move_task` を別途呼ぶ。
-- `message` だけの `report_progress` は、対象 Work Item と一致する自分の `active` Run の有無に
-  かかわらず、従来どおり comment だけを保存して成功を返す。構造化 field（`verifications`、
-  `artifacts`、`changedFileCount`、または `progress` 以外の `kind`）を含む `report_progress` は、
-  一致する Run がなければ何も保存せずに `agent_run_not_active` を返す。comment だけを保存して
-  error を返す部分保存はしない。agent は停止して人に確認する。
+- `message` だけの `report_progress` は、対象 Work Item と一致する自分の `active` Run がある場合、
+  report endpoint を呼び、`AgentRunReport` row と comment を保存して成功を返す。一致する Run がなく、
+  対象 Work Item に別 instance の `active` Run もない場合は、従来どおり comment endpoint で comment
+  だけを保存して成功を返す。別 instance の `active` Run がある場合は、`agentInstanceId` の fence に
+  より `409 agent_run_conflict` を返す。
+  構造化 field（`verifications`、`artifacts`、`changedFileCount`、または `progress` 以外の `kind`）
+  を含む `report_progress` は、一致する Run がなければ何も保存せずに `agent_run_not_active` を返す。
+  comment だけを保存して error を返す部分保存はしない。agent は停止して人に確認する。
 
 ## 仕様と context
 
