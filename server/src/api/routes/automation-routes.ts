@@ -2429,8 +2429,12 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       )
       // A delivery whose receipt already committed finishes before current-secret verification,
       // so a later rotation, pause, or revocation cannot strand it. Every other request,
-      // including any new delivery, is verified or rejected below.
-      const recovery = await completeAcceptedTriageWebhookDelivery(c, opaqueEndpointId)
+      // including any new delivery, is verified or rejected below. Only Triage receipts leave a
+      // recovery marker, and revocation deletes the public lookup, so the marker read runs only
+      // for a Triage endpoint or an ID that no longer resolves.
+      const recovery = !endpoint || endpoint.purpose === 'triage'
+        ? await completeAcceptedTriageWebhookDelivery(c, opaqueEndpointId)
+        : {}
       if (recovery.completed) return recovery.completed
       if (!endpoint || endpoint.status === 'provisioning' || endpoint.status === 'revoked') {
         throw automationInboundWebhookNotFound()

@@ -1407,6 +1407,78 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
   }
 })
 
+test('reads Triage recovery markers only for Triage endpoints or unresolved IDs', async () => {
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    let resolvedEndpoint: ReturnType<typeof createInboundWebhookEndpointRecord> | undefined =
+      createInboundWebhookEndpointRecord()
+    const recoveryReads: string[] = []
+    const signingSecret = Buffer.from('server-issued-secret', 'utf8')
+    setTestAppDependencies({
+      inboundWebhooks: createAutomationInboundWebhookPort({
+        async resolveInboundWebhookEndpoint() {
+          return structuredClone(resolvedEndpoint)
+        },
+        async resolveAcceptedTriageWebhookDelivery(opaqueEndpointId) {
+          recoveryReads.push(opaqueEndpointId)
+          return undefined
+        },
+        async recordInboundWebhookDelivery(_endpoint, input) {
+          return { eventId: input.eventId, replayed: false }
+        },
+      }),
+      automationInboundWebhookSecrets: {
+        async provision() {
+          throw new Error('Public delivery must not provision a secret.')
+        },
+        async get() {
+          return signingSecret
+        },
+        async delete() {
+          throw new Error('Public delivery must not delete a secret.')
+        },
+      },
+      tenantLifecycleEnforcement: { async assertActive() {} },
+    })
+    const rawBody = '{"message":"deploy"}'
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = `sha256=${createHmac('sha256', signingSecret)
+      .update(`${timestamp}.`, 'utf8')
+      .update(rawBody, 'utf8')
+      .digest('hex')}`
+    /**
+     * Sends a signed delivery to the test endpoint's opaque ID.
+     *
+     * @returns The response.
+     */
+    const request = () => app.request(`/api/automation/inbound-webhooks/${'A'.repeat(43)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'sender-delivery-1',
+        'X-Mukuroji-Signature': signature,
+        'X-Mukuroji-Timestamp': timestamp,
+      },
+      body: rawBody,
+    })
+
+    // Automation endpoints never leave recovery markers, so no delivery state reads one.
+    expect((await request()).status).toBe(202)
+    resolvedEndpoint = createInboundWebhookEndpointRecord({ status: 'paused' })
+    expect((await request()).status).toBe(423)
+    expect(recoveryReads).toEqual([])
+
+    // Revocation deletes the public lookup, so an unresolved ID still checks for recovery.
+    resolvedEndpoint = undefined
+    expect((await request()).status).toBe(404)
+    expect(recoveryReads).toEqual(['A'.repeat(43)])
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
+})
+
 test('maps inbound webhook public validation failures without Cognito authentication', async () => {
   const endpoint = createInboundWebhookEndpointRecord()
   let lifecycleChecks = 0
