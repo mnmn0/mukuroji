@@ -167,6 +167,13 @@ describe('contributor options', () => {
   })
 
   test('offer every active non-guest Workspace member, not only Project members', () => {
+    /**
+     * Builds a Workspace member fixture.
+     * @param email Member email, also used as the ID and member key.
+     * @param role Workspace role.
+     * @param status Membership status.
+     * @returns The member fixture.
+     */
     const member = (email: string, role: WorkspaceMember['role'], status: WorkspaceMember['status'] = 'active'): WorkspaceMember => ({
       id: email, memberKey: email, email, role, status, version: 1, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
     })

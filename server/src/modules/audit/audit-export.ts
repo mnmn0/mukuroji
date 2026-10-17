@@ -1376,7 +1376,12 @@ function parseFilters(filters: Record<string, unknown>): AuditExportFilters {
   // A stored key this version does not know could be a restriction that would otherwise be dropped.
   const unknownKey = Object.keys(filters).find((key) => !AUDIT_EXPORT_FILTER_KEYS.has(key))
   if (unknownKey !== undefined) throw new TypeError(`Audit export filters contain an unknown field: ${unknownKey}.`)
-  // Empty stored values would be dropped by the query and widen the export, so they are corrupt.
+  /**
+   * Reads one optional filter value, rejecting empty or non-string values.
+   * Empty stored values would be dropped by the query and widen the export, so they are corrupt.
+   * @param key Filter field name to read.
+   * @returns A partial filter object holding the value, or an empty object when the field is absent.
+   */
   const optional = (key: string) => {
     const value = filters[key]
     if (value === undefined) return {}

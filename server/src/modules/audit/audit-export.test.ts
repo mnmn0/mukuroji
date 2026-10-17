@@ -98,6 +98,10 @@ function createCounter(all: AuditEventV1[], calls: AuditEventCountQuery[] = []) 
 }
 
 const requester = { userKey: 'admin@example.com', displayName: 'Admin' }
+/**
+ * Returns the fixed clock used by the export service tests.
+ * @returns A constant test timestamp.
+ */
 const fixedNow = () => new Date('2026-07-18T00:00:00.000Z')
 
 describe('audit export service', () => {
