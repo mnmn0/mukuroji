@@ -385,6 +385,24 @@ export class AuditExportError extends Error {
 }
 
 /**
+ * Failure of a queue message whose correlation ID differs from the stored job's.
+ *
+ * The step does no work, so the worker reports the message as a batch item failure and the
+ * redrive policy dead-letters it instead of running the job under another request's trace.
+ */
+class AuditExportCorrelationMismatchError extends Error {
+  /**
+   * Creates a correlation mismatch failure.
+   *
+   * @param exportId - Export identifier the message addressed.
+   */
+  constructor(exportId: string) {
+    super(`Audit export ${exportId} queue message correlation ID does not match the stored job.`)
+    this.name = 'AuditExportCorrelationMismatchError'
+  }
+}
+
+/**
  * Dependencies of the audit export service.
  */
 export type AuditExportServiceDependencies = {
@@ -663,15 +681,26 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      *
      * @param workspaceId - Workspace that owns the job.
      * @param exportId - Export identifier.
+     * @param correlationId - Correlation ID the queue message carries. It must match the stored
+     * job's, so a message bound to another request cannot drive the job.
      * @param messageId - Queue message that carries this step. A redelivery of the message
      * that committed the current state only sends the continuation again.
      * @returns What the step did.
+     * @throws AuditExportCorrelationMismatchError When the job exists and its correlation ID
+     * differs from the message's; nothing is read, written, or enqueued.
      */
-    async processExport(workspaceId: string, exportId: string, messageId?: string): Promise<AuditExportStepResult> {
+    async processExport(
+      workspaceId: string,
+      exportId: string,
+      correlationId: string,
+      messageId?: string,
+    ): Promise<AuditExportStepResult> {
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) return 'skipped'
       const tenantActive = dependencies.isTenantActive ? await dependencies.isTenantActive(workspaceId) : true
       const stored = await dependencies.store.readJob(workspaceId, exportId)
       if (!stored || stored.job.workspaceId !== workspaceId) return 'skipped'
+      // Reject before any work so the worker dead-letters the message instead of running the job.
+      if (stored.job.correlationId !== correlationId) throw new AuditExportCorrelationMismatchError(exportId)
       const { job, version } = stored
       if (job.status === 'completed' || job.status === 'failed') return 'skipped'
       const current = now()

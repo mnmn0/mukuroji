@@ -36,7 +36,8 @@ export type AuditExportBatchResponse = {
  * retry after the step committed but its continuation failed to send only sends it again.
  *
  * Failure logs carry the request's correlation ID from the message, so a failed step can be
- * traced back to the audited export request.
+ * traced back to the audited export request. The service also checks that correlation ID
+ * against the stored job and rejects a mismatched message, which then fails like any step.
  *
  * Malformed messages and failed steps are reported as batch item failures, so SQS
  * retries them and the redrive policy quarantines them in the dead-letter queue,
@@ -63,7 +64,7 @@ export function createAuditExportWorker(
       }
       try {
         // The message ID lets a redelivery of a committed step resend only its continuation.
-        await service.processExport(message.workspaceId, message.exportId, record.messageId)
+        await service.processExport(message.workspaceId, message.exportId, message.correlationId, record.messageId)
       } catch (error) {
         log('Audit export step failed and will be retried.', {
           messageId: record.messageId,

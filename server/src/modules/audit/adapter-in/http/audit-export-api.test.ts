@@ -189,7 +189,8 @@ test('requests, reports, and downloads an asynchronous audit export', async () =
   const notReady = await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: adminHeaders() })
   expect(notReady.status).toBe(409)
 
-  expect(await service.processExport('user#demo@example.com', job.exportId)).toBe('completed')
+  const stored = await service.getExport('user#demo@example.com', job.exportId)
+  expect(await service.processExport('user#demo@example.com', job.exportId, stored.correlationId)).toBe('completed')
 
   const status = await app.request(`/api/audit/exports/${job.exportId}`, { headers: adminHeaders() })
   expect((await status.json()).export).toMatchObject({ status: 'completed', eventCount: 1, partCount: 1 })

@@ -132,10 +132,10 @@ describe('audit export service', () => {
     expect(created).toBe(true)
     expect(queued).toEqual([job.exportId])
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('skipped')
 
     const done = await service.getExport('ws-1', job.exportId)
     expect(done.status).toBe('completed')
@@ -173,11 +173,41 @@ describe('audit export service', () => {
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     expect(job.correlationId).toBe(correlationId)
     expect((await store.readJob('ws-1', job.exportId))?.job.correlationId).toBe(correlationId)
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     expect(targets).toEqual([
       expect.objectContaining({ workspaceId: 'ws-1', exportId: job.exportId, correlationId }),
       expect.objectContaining({ workspaceId: 'ws-1', exportId: job.exportId, correlationId }),
     ])
+  })
+
+  test('rejects a queue message whose correlation ID differs from the stored job without doing work', async () => {
+    const store = createMemoryStore()
+    const targets: AuditExportQueueTarget[] = []
+    const reads: AuditEventQuery[] = []
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue(target) { targets.push(target) } },
+      readEvents: createReader(events(3), reads),
+      countEvents: createCounter(events(3)),
+      now: fixedNow,
+      createId: () => 'd'.repeat(32),
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
+    targets.length = 0
+    const before = await store.readJob('ws-1', job.exportId)
+
+    // The worker reports the throw as a batch item failure, so the redrive policy dead-letters it.
+    await expect(service.processExport('ws-1', job.exportId, 'corr-other-request', 'message-1')).rejects.toMatchObject({
+      name: 'AuditExportCorrelationMismatchError',
+    })
+    expect(await store.readJob('ws-1', job.exportId)).toEqual(before)
+    expect(store.parts.size).toBe(0)
+    expect(reads).toEqual([])
+    expect(targets).toEqual([])
+
+    // A missing job keeps its existing behavior whatever the message carries.
+    expect(await service.processExport('ws-1', 'e'.repeat(32), 'corr-other-request')).toBe('skipped')
   })
 
   test('completes an empty export without parts', async () => {
@@ -193,7 +223,7 @@ describe('audit export service', () => {
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     expect((await service.getExport('ws-1', job.exportId)).parts).toEqual([])
   })
 
@@ -246,8 +276,8 @@ describe('audit export service', () => {
     queued.length = 0
 
     const results = await Promise.all([
-      service.processExport('ws-1', job.exportId),
-      service.processExport('ws-1', job.exportId),
+      service.processExport('ws-1', job.exportId, correlationId),
+      service.processExport('ws-1', job.exportId, correlationId),
     ])
 
     expect(results.sort()).toEqual(['advanced', 'skipped'])
@@ -269,8 +299,8 @@ describe('audit export service', () => {
       maxEvents: 25,
     })
     const { job } = await tooLarge.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
-    expect(await tooLarge.processExport('ws-1', job.exportId)).toBe('advanced')
-    expect(await tooLarge.processExport('ws-1', job.exportId)).toBe('failed')
+    expect(await tooLarge.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
+    expect(await tooLarge.processExport('ws-1', job.exportId, correlationId)).toBe('failed')
     expect((await tooLarge.getExport('ws-1', job.exportId)).failure?.code).toBe('AuditExportTooLarge')
 
     const invalid = createAuditExportService({
@@ -284,13 +314,13 @@ describe('audit export service', () => {
     })
     const invalidJob = (await invalid.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })).job
     // A malformed persisted row with valid filters retries so the DLQ can surface it.
-    await expect(invalid.processExport('ws-1', invalidJob.exportId)).rejects.toThrow('Audit event is malformed.')
+    await expect(invalid.processExport('ws-1', invalidJob.exportId, correlationId)).rejects.toThrow('Audit event is malformed.')
     expect((await invalid.getExport('ws-1', invalidJob.exportId)).status).toBe('queued')
     // Filters the query layer rejects (for example, stored before validation existed) are terminal.
     const storedInvalid = store.jobs.get(`ws-1/${invalidJob.exportId}`)
     if (!storedInvalid) throw new Error('missing job')
     storedInvalid.job = { ...storedInvalid.job, filters: { eventTypes: [' '] } }
-    expect(await invalid.processExport('ws-1', invalidJob.exportId)).toBe('failed')
+    expect(await invalid.processExport('ws-1', invalidJob.exportId, correlationId)).toBe('failed')
     expect((await invalid.getExport('ws-1', invalidJob.exportId)).failure?.code).toBe('AuditExportQueryInvalid')
 
     const tooManyParts = createAuditExportService({
@@ -305,9 +335,9 @@ describe('audit export service', () => {
       maxParts: 2,
     })
     const partsJob = (await tooManyParts.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })).job
-    expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('advanced')
-    expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('advanced')
-    expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('failed')
+    expect(await tooManyParts.processExport('ws-1', partsJob.exportId, correlationId)).toBe('advanced')
+    expect(await tooManyParts.processExport('ws-1', partsJob.exportId, correlationId)).toBe('advanced')
+    expect(await tooManyParts.processExport('ws-1', partsJob.exportId, correlationId)).toBe('failed')
     const failedParts = await tooManyParts.getExport('ws-1', partsJob.exportId)
     expect(failedParts.failure?.code).toBe('AuditExportTooManyParts')
     expect(failedParts.parts).toHaveLength(2)
@@ -327,11 +357,11 @@ describe('audit export service', () => {
       eventsPerPart: 10,
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     const beforeDeadline = await store.readJob('ws-1', job.exportId)
     // A worker that recovers days later must not rewrite job.json and restart bucket expiration.
     current = new Date('2026-07-21T00:00:00.000Z')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('skipped')
     expect(await store.readJob('ws-1', job.exportId)).toEqual(beforeDeadline)
     const failed = await service.getExport('ws-1', job.exportId)
     expect(failed.status).toBe('failed')
@@ -362,7 +392,7 @@ describe('audit export service', () => {
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     current = new Date('2026-07-18T23:59:00.000Z')
     const before = await store.readJob('ws-1', job.exportId)
-    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('skipped')
     expect(await store.readJob('ws-1', job.exportId)).toEqual(before)
     expect((await service.getExport('ws-1', job.exportId)).failure?.code).toBe('AuditExportProcessingTimedOut')
   })
@@ -419,7 +449,7 @@ describe('audit export service', () => {
       createId: () => '3'.repeat(32),
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     const completed = await service.getExport('ws-1', job.exportId)
     current = new Date(Date.parse(completed.expiresAt) - 42_000)
     const { parts } = await service.createDownloadLinks(await service.getExport('ws-1', job.exportId))
@@ -438,7 +468,7 @@ describe('audit export service', () => {
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
-    await expect(service.processExport('ws-1', job.exportId)).rejects.toThrow('DynamoDB throttled')
+    await expect(service.processExport('ws-1', job.exportId, correlationId)).rejects.toThrow('DynamoDB throttled')
     expect((await service.getExport('ws-1', job.exportId)).status).toBe('queued')
   })
 
@@ -460,7 +490,7 @@ describe('audit export service', () => {
     current = new Date(fixedNow().getTime() + 8 * 86_400_000)
     await expect(service.getExport('ws-1', job.exportId)).rejects.toMatchObject({ code: 'AuditExportNotFound' })
     expect(await service.listExports('ws-1')).toEqual([])
-    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('skipped')
   })
 
   test('rejects downloads before completion', async () => {
@@ -523,12 +553,12 @@ describe('audit export step safety', () => {
     expect(queued).toEqual([{ exportId: job.exportId, delaySeconds: 30 }])
 
     clock += 10_000
-    expect(await service.processExport('ws-1', job.exportId)).toBe('deferred')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('deferred')
     expect(reads).toEqual([])
     expect(queued.at(-1)).toEqual({ exportId: job.exportId, delaySeconds: 20 })
 
     clock += 20_000
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     expect(reads).toHaveLength(1)
   })
 
@@ -541,7 +571,7 @@ describe('audit export step safety', () => {
       countEvents: createCounter(events(2)),
     })
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('deferred')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('deferred')
     expect(queued.at(-1)).toEqual({ exportId: job.exportId, delaySeconds: 900 })
     expect(reads).toEqual([])
     expect(store.parts.size).toBe(0)
@@ -549,12 +579,12 @@ describe('audit export step safety', () => {
 
     // A reversible closure step restored the tenant; the kept message resumes the job.
     active = true
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
 
     // After closure deletes the export namespace the job is gone and the chain ends.
     store.jobs.clear()
     active = false
-    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('skipped')
   })
 
   test('checkpoints a selective scan after the page budget even without matches', async () => {
@@ -569,7 +599,7 @@ describe('audit export step safety', () => {
       },
     })
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     expect(reads).toHaveLength(3)
     expect(store.parts.size).toBe(0)
     const checkpointed = await service.getExport('ws-1', job.exportId)
@@ -580,7 +610,7 @@ describe('audit export step safety', () => {
   test('closes a part when its serialized byte budget is reached', async () => {
     const { service, job } = await requested({ partByteBudget: 1 }, events(250))
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     // One query page of 100 events exceeds the budget, so the step stops there.
     expect((await service.getExport('ws-1', job.exportId)).parts.map((part) => part.eventCount)).toEqual([100])
   })
@@ -643,14 +673,14 @@ describe('audit export completeness barrier', () => {
     const { service, base, index, queued, job } = await lagging()
 
     // The index is missing the third event, so the consistent count disagrees.
-    expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('restarted')
     const restarted = await service.getExport('ws-1', job.exportId)
     expect(restarted).toMatchObject({ status: 'queued', eventCount: 0, parts: [], scanAttempt: 2 })
     expect(restarted.verification).toBeUndefined()
     expect(queued.at(-1)).toEqual({ delaySeconds: 30 })
 
     index.visible = base
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     const done = await service.getExport('ws-1', job.exportId)
     expect(done).toMatchObject({ status: 'completed', eventCount: 6, scanAttempt: 2 })
     expect(done.verification).toBeUndefined()
@@ -659,9 +689,9 @@ describe('audit export completeness barrier', () => {
   test('fails as incomplete instead of completing when the index keeps missing events', async () => {
     const { service, job } = await lagging()
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('failed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('restarted')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('restarted')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('failed')
     const failed = await service.getExport('ws-1', job.exportId)
     expect(failed.failure?.code).toBe('AuditExportIncomplete')
     expect(failed.verification).toBeUndefined()
@@ -680,13 +710,13 @@ describe('audit export completeness barrier', () => {
     index.visible = base
 
     // One scan page and one count page fit the first step.
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     expect(await service.getExport('ws-1', job.exportId)).toMatchObject({
       status: 'running',
       eventCount: 6,
       verification: { count: 2, cursor: '1' },
     })
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     expect(counts.map((query) => query.cursor)).toEqual([undefined, '1', '2'])
     expect(counts.every((query) => query.to === job.snapshotAt && query.workspaceId === 'ws-1')).toBe(true)
     // Events whose TTL can pass before the processing deadline are left out of the snapshot.
@@ -705,11 +735,11 @@ describe('audit export completeness barrier', () => {
     index.visible = base
 
     // 25 count pages take three steps of at most ten pages, well below the scan budget.
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     expect(counts).toHaveLength(10)
-    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('advanced')
     expect(counts).toHaveLength(20)
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     expect(counts).toHaveLength(25)
   })
 
@@ -738,7 +768,7 @@ describe('audit export completeness barrier', () => {
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId)).toBe('completed')
     expect(await service.getExport('ws-1', job.exportId)).toMatchObject({ eventCount: 3 })
     const written = [...store.parts.values()].join('')
     expect(written).not.toContain(all[0]?.eventId ?? 'missing')
@@ -771,22 +801,22 @@ describe('audit export continuation recovery', () => {
 
     // The step commits its part and cursor, then the continuation send fails.
     sendFails = true
-    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    await expect(service.processExport('ws-1', job.exportId, correlationId, 'message-1')).rejects.toThrow('SQS unavailable')
     const committed = await store.readJob('ws-1', job.exportId)
     expect(committed?.job).toMatchObject({ status: 'running', eventCount: 10, lastStepMessageId: 'message-1' })
 
     // Every redelivery of the same message retries only the send, never another step.
-    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    await expect(service.processExport('ws-1', job.exportId, correlationId, 'message-1')).rejects.toThrow('SQS unavailable')
     sendFails = false
-    expect(await service.processExport('ws-1', job.exportId, 'message-1')).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId, 'message-1')).toBe('advanced')
     expect(await store.readJob('ws-1', job.exportId)).toEqual(committed)
     expect(store.parts.size).toBe(1)
     expect(sends).toBe(1)
 
     // The continuation carries a new message and runs the next step.
-    expect(await service.processExport('ws-1', job.exportId, 'message-2')).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId, 'message-2')).toBe('advanced')
     expect((await service.getExport('ws-1', job.exportId)).eventCount).toBe(20)
-    expect(await service.processExport('ws-1', job.exportId, 'message-3')).toBe('completed')
+    expect(await service.processExport('ws-1', job.exportId, correlationId, 'message-3')).toBe('completed')
     const done = await service.getExport('ws-1', job.exportId)
     expect(done).toMatchObject({ status: 'completed', eventCount: 30 })
     expect(done.lastStepMessageId).toBeUndefined()
@@ -815,7 +845,7 @@ describe('audit export continuation recovery', () => {
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     // The send outage outlasts every receive, so the message reaches the DLQ.
     sendFails = true
-    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    await expect(service.processExport('ws-1', job.exportId, correlationId, 'message-1')).rejects.toThrow('SQS unavailable')
     sendFails = false
     queued.length = 0
 
@@ -830,7 +860,7 @@ describe('audit export continuation recovery', () => {
     expect(queued).toEqual([job.exportId])
 
     // The resumed step continues from the committed cursor.
-    expect(await service.processExport('ws-1', job.exportId, 'message-2')).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId, 'message-2')).toBe('advanced')
     expect((await service.getExport('ws-1', job.exportId)).eventCount).toBe(20)
   })
 
@@ -856,7 +886,7 @@ describe('audit export continuation recovery', () => {
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     sendFails = true
-    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    await expect(service.processExport('ws-1', job.exportId, correlationId, 'message-1')).rejects.toThrow('SQS unavailable')
     queued.length = 0
 
     // The resume claims the job, but its send fails too.
@@ -877,7 +907,7 @@ describe('audit export continuation recovery', () => {
     expect(queued).toHaveLength(1)
 
     // The next step commits and keeps no marker.
-    expect(await service.processExport('ws-1', job.exportId, 'message-2')).toBe('advanced')
+    expect(await service.processExport('ws-1', job.exportId, correlationId, 'message-2')).toBe('advanced')
     expect((await store.readJob('ws-1', job.exportId))?.job).toMatchObject({ eventCount: 20, lastStepMessageId: 'message-2' })
     expect((await store.readJob('ws-1', job.exportId))?.job.continuationPending).toBeUndefined()
   })

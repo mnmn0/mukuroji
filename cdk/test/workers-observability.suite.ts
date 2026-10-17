@@ -2067,6 +2067,72 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
   }
 });
 
+test('audit export queue backlog alarms well before the 24-hour processing deadline', () => {
+  const template = synthesizedTemplate;
+  const queues = template.findResources('AWS::SQS::Queue');
+  const queueLogicalId = Object.keys(queues).find((logicalId) =>
+    logicalId.startsWith('AuditExportQueue')
+  );
+  expect(queueLogicalId).toBeDefined();
+  if (queueLogicalId === undefined) {
+    throw new Error('Audit export queue was not synthesized.');
+  }
+  /**
+   * Builds the mandatory SNS action ARN attached by alarm routing.
+   *
+   * @param topicParameter Stack parameter holding the topic name.
+   * @returns The joined topic ARN expression.
+   */
+  const topicAction = (topicParameter: string) => ({
+    'Fn::Join': [
+      '',
+      [
+        'arn:',
+        { Ref: 'AWS::Partition' },
+        ':sns:',
+        { Ref: 'AWS::Region' },
+        ':',
+        { Ref: 'AWS::AccountId' },
+        ':',
+        { Ref: topicParameter },
+      ],
+    ],
+  });
+
+  // The same mandatory actions as AuditExportDlqAlarm, so a backlog pages before jobs time out.
+  for (const alarm of [
+    {
+      MetricName: 'ApproximateNumberOfMessagesVisible',
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      Threshold: 1,
+    },
+    {
+      AlarmDescription: 'Detects audit export steps waiting in the queue for an hour.',
+      MetricName: 'ApproximateAgeOfOldestMessage',
+      ComparisonOperator: 'GreaterThanThreshold',
+      Dimensions: [{
+        Name: 'QueueName',
+        Value: { 'Fn::GetAtt': [queueLogicalId, 'QueueName'] },
+      }],
+      Threshold: 3600,
+    },
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      ...alarm,
+      Namespace: 'AWS/SQS',
+      Period: 300,
+      Statistic: 'Maximum',
+      EvaluationPeriods: 1,
+      DatapointsToAlarm: 1,
+      TreatMissingData: 'notBreaching',
+      AlarmActions: Match.arrayWith([
+        topicAction('AlarmPrimaryTopicName'),
+        topicAction('AlarmSecondaryTopicName'),
+      ]),
+    });
+  }
+});
+
 test('AI observability consumes only terminal AI rows with bounded stream retries', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;

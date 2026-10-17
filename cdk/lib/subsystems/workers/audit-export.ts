@@ -119,4 +119,18 @@ export function buildAuditExportWorker(
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  // Surfaces a backlog well before queued jobs cross the 24-hour processing deadline. A step
+  // message is delayed by at most 900 s, so an hour-old message means real backlog.
+  new cloudwatch.Alarm(scope, 'AuditExportQueueAgeAlarm', {
+    alarmDescription: 'Detects audit export steps waiting in the queue for an hour.',
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: auditExportQueue.metricApproximateAgeOfOldestMessage({
+      period: cdk.Duration.minutes(5),
+      statistic: 'Maximum',
+    }),
+    threshold: cdk.Duration.hours(1).toSeconds(),
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
 }
