@@ -13102,6 +13102,6 @@ test('未認証の場合はログイン画面へ戻す', async ({ page }) => {
 
   await page.goto('/projects/refero/issues')
 
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL('/?returnTo=%2Fprojects%2Frefero%2Fissues')
   await expect(page.getByRole('heading', { name: 'ログイン' })).toBeVisible()
 })
