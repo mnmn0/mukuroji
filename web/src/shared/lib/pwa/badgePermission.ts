@@ -127,11 +127,13 @@ export type BadgePlatformHints = {
 }
 
 /**
- * Recognizes iOS and iPadOS WebKit, where Home Screen web apps show the badge only after
- * notification permission is granted.
+ * Recognizes Apple WebKit, where installed web apps show the badge only after notification
+ * permission is granted: iOS and iPadOS Home Screen apps and macOS Safari "Add to Dock" apps.
  *
  * WebKit's `navigator.standalone` property marks iOS and iPadOS Safari; the user agent covers
  * iPhone and iPod, and iPadOS with a desktop user agent is recognized by `MacIntel` with touch.
+ * macOS Safari is recognized by its `Version/... Safari/` user agent without a Chromium, Edge,
+ * Opera, or Firefox token, so Chromium desktop apps, which badge without permission, are excluded.
  *
  * @param hints - Navigator details.
  * @returns Whether the badge needs notification permission on this platform.
@@ -139,7 +141,20 @@ export type BadgePlatformHints = {
 export function isNotificationGatedBadgePlatform(hints: BadgePlatformHints): boolean {
   if (hints.hasStandaloneProperty) return true
   if (/\b(?:iPhone|iPad|iPod)\b/u.test(hints.userAgent)) return true
-  return hints.platform === 'MacIntel' && (hints.maxTouchPoints ?? 0) > 1
+  if (hints.platform === 'MacIntel' && (hints.maxTouchPoints ?? 0) > 1) return true
+  return isMacSafariUserAgent(hints.userAgent)
+}
+
+/**
+ * Recognizes desktop Safari on macOS from its user agent.
+ *
+ * @param userAgent - Browser user agent.
+ * @returns Whether the user agent is macOS Safari rather than another macOS browser.
+ */
+function isMacSafariUserAgent(userAgent: string): boolean {
+  return /\bMacintosh\b/u.test(userAgent) &&
+    /\bVersion\/\d[\d.]*\b.*\bSafari\//u.test(userAgent) &&
+    !/\b(?:Chrome|Chromium|CriOS|Edg|EdgiOS|OPR|Firefox|FxiOS)\//u.test(userAgent)
 }
 
 /**

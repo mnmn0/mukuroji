@@ -476,7 +476,7 @@ describe('app badge permission', () => {
     expect(canRequestAppBadgePermission(environment({ notification: createNotification('denied').notification }))).toBe(false)
   })
 
-  test('treats only iOS and iPadOS WebKit as needing notification permission for the badge', () => {
+  test('treats only Apple WebKit as needing notification permission for the badge', () => {
     const chromeWindows = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
     const chromeMac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
     const chromeOs = 'Mozilla/5.0 (X11; CrOS x86_64 16181.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
@@ -490,6 +490,13 @@ describe('app badge permission', () => {
     // iPadOS requesting the desktop site reports a Mac user agent but has touch points.
     expect(isNotificationGatedBadgePlatform({ userAgent: iPadDesktop, platform: 'MacIntel', maxTouchPoints: 5, hasStandaloneProperty: false })).toBe(true)
     expect(isNotificationGatedBadgePlatform({ userAgent: iPadDesktop, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: true })).toBe(true)
+    // macOS Safari web apps badge only with notification permission; other macOS browsers do not need it.
+    const safariMac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15'
+    const edgeMac = `${chromeMac} Edg/140.0.0.0`
+    const firefoxMac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:131.0) Gecko/20100101 Firefox/131.0'
+    expect(isNotificationGatedBadgePlatform({ userAgent: safariMac, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: false })).toBe(true)
+    expect(isNotificationGatedBadgePlatform({ userAgent: edgeMac, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: false })).toBe(false)
+    expect(isNotificationGatedBadgePlatform({ userAgent: firefoxMac, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: false })).toBe(false)
   })
 
   test('shows blocked guidance after a reload when notifications were denied earlier, only where the badge needs them', () => {

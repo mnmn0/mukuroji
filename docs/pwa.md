@@ -30,9 +30,10 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。
-  iOS / iPadOS のホーム画面 web app は `setAppBadge()` を公開していますが、通知の許可がない限り badge を表示しません。
+  iOS / iPadOS のホーム画面 web app と macOS Safari の「Dock に追加」した web app は `setAppBadge()` を公開していますが、通知の許可がない限り badge を表示しません。
   そのため設定画面のインストール card は、installed な standalone app として動作し、badge の表示に通知の許可が必要な platform
-  （iOS / iPadOS の WebKit。`navigator.standalone` の有無、iPhone / iPad / iPod の user agent、または touch 対応の `MacIntel` で判定）で、Badging API と `Notification` があり、
+  （Apple の WebKit。`navigator.standalone` の有無、iPhone / iPad / iPod の user agent、touch 対応の `MacIntel`、
+  または Chromium / Edge / Opera / Firefox の token を含まない macOS Safari の user agent で判定）で、Badging API と `Notification` があり、
   `Notification.permission` が `default`（未回答）の場合だけ「アイコンのバッジを許可」button を表示します
   （`web/src/shared/lib/pwa/badgePermission.ts`）。`Notification.requestPermission()` は button の click handler から同期的に呼び、
   自動では要求しません。許可されると `refreshAppBadge()` でその tab の session が未読数を取得し直して badge を再表示します。
