@@ -2834,7 +2834,7 @@ function DocumentHeader({
           >
             {uniquePresence.slice(0, 4).map((entry) => (
               <span
-                className="grid h-8 w-8 place-items-center rounded-full border-2 border-surface bg-tone-e5f7f4 text-[11px] font-bold text-[var(--workbench-primary-text)]"
+                className="grid h-8 w-8 place-items-center rounded-full border-2 border-surface bg-paper-tint text-[11px] font-bold text-paper-accent"
                 key={entry.userId}
                 style={{ color: entry.color }}
                 title={entry.displayName}
