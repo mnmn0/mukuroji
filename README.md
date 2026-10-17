@@ -16,6 +16,8 @@ SLO、alarm、incident response、migration、deploy、restore drill の運用�
 Bedrock model allowlist、Lambda/local認証、live evaluationの運用契約は
 [`docs/ai-assistance.md`](docs/ai-assistance.md)を参照してください。
 installable PWA の cache 安全境界と hosting 要件は [`docs/pwa.md`](docs/pwa.md) を参照してください。
+ローカルの coding agent を Software factory として運用するための Agent Run、Ready 判定、
+Factory board の設計は [`docs/software-factory.md`](docs/software-factory.md) を参照してください。
 Web の業務領域フォルダを `features/` と `entities/` へ移す順序は
 [`docs/web-structure-migration.md`](docs/web-structure-migration.md) を参照してください。
 
