@@ -197,7 +197,7 @@ export class S3AuditExportStore implements AuditExportStore {
     const bytes = new TextEncoder().encode(body)
     const digest = createHash('sha256').update(bytes).digest()
     // The digest in the key keeps concurrent steps from overwriting a referenced part.
-    const key = `${exportDirectory(workspaceId, exportId)}part-${String(index).padStart(5, '0')}-${digest.toString('hex').slice(0, 16)}.ndjson`
+    const key = partKey(workspaceId, exportId, index, digest.toString('hex'))
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucketName,
       Key: key,
@@ -218,7 +218,7 @@ export class S3AuditExportStore implements AuditExportStore {
    * @param part - Part to download.
    * @param maxLifetimeSeconds - Remaining job lifetime; the URL never outlives it.
    * @returns The presigned URL.
-   * @throws TypeError when the stored key is outside that export.
+   * @throws TypeError when the stored key is not the one written for that export, index, and checksum.
    */
   async createPartDownloadUrl(
     workspaceId: string,
@@ -226,8 +226,10 @@ export class S3AuditExportStore implements AuditExportStore {
     part: AuditExportPart,
     maxLifetimeSeconds: number,
   ): Promise<string> {
-    if (!part.key.startsWith(exportDirectory(workspaceId, exportId)) || !part.key.endsWith('.ndjson')) {
-      throw new TypeError('Audit export part key is outside the export.')
+    // Only the key putPart derives from this export, index, and checksum is signed, so an
+    // orphan object from a discarded scan cannot be served under another part's metadata.
+    if (part.key !== partKey(workspaceId, exportId, part.index, part.sha256)) {
+      throw new TypeError('Audit export part key does not match the export part.')
     }
     return await getSignedUrl(
       this.client,
@@ -275,6 +277,19 @@ function exportDirectory(workspaceId: string, exportId: string) {
     throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
   }
   return `${createAuditExportWorkspacePrefix(workspaceId)}${exportId}/`
+}
+
+/**
+ * Builds the object key of one export part.
+ *
+ * @param workspaceId - Workspace that owns the export.
+ * @param exportId - Export identifier.
+ * @param index - One-based part number.
+ * @param sha256 - Hex SHA-256 digest of the part body.
+ * @returns The part object key.
+ */
+function partKey(workspaceId: string, exportId: string, index: number, sha256: string) {
+  return `${exportDirectory(workspaceId, exportId)}part-${String(index).padStart(5, '0')}-${sha256.slice(0, 16)}.ndjson`
 }
 
 /**
