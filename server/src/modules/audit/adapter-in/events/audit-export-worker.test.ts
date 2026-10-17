@@ -20,6 +20,8 @@ describe('audit export worker', () => {
         { messageId: 'm3', body: '{"version":2}' },
         { messageId: 'm4', body: 'not json' },
         { messageId: 'm5', body: JSON.stringify({ version: 1, workspaceId: 'ws-1', exportId: '../job' }) },
+        // A padded Workspace ID would address another tenant prefix, so it is malformed.
+        { messageId: 'm6', body: JSON.stringify({ version: 1, workspaceId: ' ws-1 ', exportId: 'c'.repeat(32) }) },
       ],
     })
 
@@ -31,7 +33,8 @@ describe('audit export worker', () => {
       { itemIdentifier: 'm3' },
       { itemIdentifier: 'm4' },
       { itemIdentifier: 'm5' },
+      { itemIdentifier: 'm6' },
     ])
-    expect(logs.filter((message) => message.includes('malformed'))).toHaveLength(3)
+    expect(logs.filter((message) => message.includes('malformed'))).toHaveLength(4)
   })
 })
