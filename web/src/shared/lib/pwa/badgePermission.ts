@@ -291,13 +291,14 @@ export function createAppBadgePermissionStore(options: AppBadgePermissionStoreOp
    * Re-reads the environment and clears an answer the current permission no longer matches.
    *
    * A grant made outside the app, for example in device settings after a denial, becomes the
-   * announced `granted` result, so the row that may hold focus stays mounted and says so.
+   * announced `granted` result, and a later revocation or reset replaces a shown answer with the
+   * matching one, so the row that may hold focus stays mounted and says so.
    */
   function reconcile(): void {
     const permission = readEnvironment().notification?.permission
     if (permission !== knownPermission) {
       knownPermission = permission
-      if (!pending) result = permission === 'granted' ? 'granted' : undefined
+      if (!pending) result = resultAfterExternalChange(permission, result)
       if (permission === 'granted') refreshBadge()
     }
     update()
@@ -333,6 +334,27 @@ export function createAppBadgePermissionStore(options: AppBadgePermissionStoreOp
     },
     reconcile,
   }
+}
+
+/**
+ * Maps a permission changed outside the page to the answer to announce.
+ *
+ * A grant is always announced. Any other change replaces an answer already shown, so the
+ * status that may hold focus is not removed, and stays silent when nothing was shown.
+ *
+ * @param permission - Current notification permission, when the browser exposes one.
+ * @param shown - Answer currently announced, if any.
+ * @returns Answer to announce, or `undefined` for none.
+ */
+function resultAfterExternalChange(
+  permission: string | undefined,
+  shown: AppBadgePermissionResult | undefined,
+): AppBadgePermissionResult | undefined {
+  if (permission === 'granted') return 'granted'
+  if (!shown) return undefined
+  if (permission === 'denied') return 'denied'
+  if (permission === 'default') return 'dismissed'
+  return 'unsupported'
 }
 
 /** Page targets watched for permission changes made outside the page. */

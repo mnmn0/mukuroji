@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { clearAuthSession, hasStoredAuthSession } from '../src/auth/session'
+import { clearAuthSession, getAuthSession, hasStoredAuthSession } from '../src/auth/session'
 import {
   clearAppBadgeAndNotifyTabs,
   keepAppBadgePublished,
@@ -634,10 +634,15 @@ describe('app badge permission', () => {
     lifecycleChanged()
     expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: false, result: 'granted' })
     expect(refreshed).toBe(1)
-    // A reset back to "ask" offers the button again.
+    // Revoking it again replaces the shown answer instead of removing the focused status.
+    notification.permission = 'denied'
+    lifecycleChanged()
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: true, result: 'denied' })
+    expect(refreshed).toBe(1)
+    // A reset back to "ask" offers the button again and announces it as unanswered.
     notification.permission = 'default'
     lifecycleChanged()
-    expect(store.getSnapshot()).toEqual({ offered: true, pending: false, blocked: false })
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: false, blocked: false, result: 'dismissed' })
     unsubscribe()
     expect(lifecycleStopped).toBe(1)
   })
@@ -831,6 +836,38 @@ describe('clearAuthSession', () => {
     })
     try {
       clearAuthSession()
+      await Promise.resolve()
+      expect(calls).toEqual(['clear'])
+    } finally {
+      Reflect.set(globalThis, 'window', previousWindow)
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previousNavigator })
+    }
+  })
+})
+
+describe('getAuthSession', () => {
+  test('destroys a malformed stored session and clears the previous badge', async () => {
+    const calls: string[] = []
+    const values = new Map([['mukuroji.auth', '{"accessToken":1}']])
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      removeItem: (key: string) => { values.delete(key) },
+    }
+    const empty = { getItem: () => null, removeItem: () => undefined }
+    const previousWindow = Reflect.get(globalThis, 'window')
+    const previousNavigator = Reflect.get(globalThis, 'navigator')
+    Reflect.set(globalThis, 'window', { localStorage: storage, sessionStorage: empty })
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { clearAppBadge: async () => { calls.push('clear') } },
+    })
+    try {
+      expect(getAuthSession()).toBeNull()
+      await Promise.resolve()
+      expect(calls).toEqual(['clear'])
+      expect(values.size).toBe(0)
+      // With nothing stored, a signed-out tab leaves other tabs' badge alone.
+      expect(getAuthSession()).toBeNull()
       await Promise.resolve()
       expect(calls).toEqual(['clear'])
     } finally {

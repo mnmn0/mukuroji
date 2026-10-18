@@ -39,6 +39,9 @@ export function getAuthSession() {
   const session = readSession(window.localStorage) ?? readSession(window.sessionStorage)
 
   if (!session) {
+    // A stored value that no longer parses still belongs to a previous sign-in, so destroy it
+    // the same way as an expired one and clear that account's badge.
+    if (hasStoredSessionValue()) clearAuthSession()
     return null
   }
 
@@ -89,6 +92,15 @@ export function clearAuthSession() {
   // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
   // other tabs that are still signed in republish their own count.
   void clearAppBadgeAndNotifyTabs()
+}
+
+/**
+ * Checks whether either storage holds a session value, valid or not.
+ *
+ * @returns Whether a stored session value exists.
+ */
+function hasStoredSessionValue(): boolean {
+  return [window.localStorage, window.sessionStorage].some((storage) => storage.getItem(storageKey) !== null)
 }
 
 function readSession(storage: Storage) {
