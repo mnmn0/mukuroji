@@ -10,8 +10,41 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   192px / 512px / maskable 512px の PNG icon と、マイタスク・インボックス・フォーカスへの shortcut を持ちます。
 - `web/src/service-worker/sw.ts`: Vite の別 entry として build し、site root の `/sw.js` に出力します。
   production build かつ secure context の場合だけ `window.load` 後に登録します。開発 server では登録しません。
-- install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) を使います。
-  `beforeinstallprompt` を使う独自の install 導線は後続範囲です。
+- install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) に加えて、
+  Chromium が `beforeinstallprompt` を発火した場合は設定画面に「アプリとしてインストール」を表示します。
+  `main.tsx` の起動時に event を捕捉して browser の mini-infobar を抑止し、利用者が押した時に一度だけ dialog を出します。
+  `appinstalled` 後と standalone 表示中（`display-mode: standalone` または iOS の `navigator.standalone`。badge の許可導線と同じ `standaloneDisplay.ts` で判定）は「インストール済み」を表示し、対応しない browser では何も表示しません。
+  dialog 表示中は button を `aria-disabled` のまま残してフォーカスを失わせず、閉じた後は承認 / キャンセルの結果を
+  `role="status"` で通知してフォーカスを移します。キャンセル直後に Chromium が `beforeinstallprompt` を再発火してインストールが再び可能になっても、結果は次に「インストール」を押すまで通知したままにします。承認後に `appinstalled` が届いた場合も、インストール済みの通知へフォーカスを保ちます（表示言語を切り替えてもフォーカスは移しません）。browser が dialog を開けなかった場合は
+  例外を出さずに失敗を通知し、browser のメニューからのインストールを案内します。
+- badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
+  数値だけを渡すため Workspace の内容は露出せず、読み込みに成功した未読 0 と、session を破棄するすべての経路（`clearAuthSession`）で消去します。badge は installed app 全体で 1 つなので、
+  複数 window の 1 つが閉じても消去しません。tab ごとに別の session がある場合、ある tab の sign-out で badge を消すと
+  `BroadcastChannel`（`mukuroji-app-badge`）で通知し、sign-in したままの tab が自分の未読数を再表示します。
+  通知は badge の消去が終わってから送り、再表示は受け取った tab の token が storage に残っている場合だけ行います
+  （remember した session は tab 間で共有されるため、別 tab の sign-out で破棄された session の未読数は戻しません）。
+  読み込みに成功した未読 0 で badge を消した場合も同じ通知を送り、受け取った tab は未読数を取得し直してから再表示します。
+  通知を受けて取得し直した未読数が 0 の場合も、同じ順序付きの消去（消去の完了後に通知）を使うため、遅れて届いた消去が他の tab の再表示を上書きしません。0 になった tab はその後の通知（自分の通知を含む）に反応しないため、消去の通知が往復し続けることはありません。
+  同じ tab で sign-out 直後に sign-in した場合も、消去の完了後に新しい session が未読数を再表示します。
+  session のない画面（sign-in 前に開いた tab など）は badge に触れず、他の tab の未読数を消しません。再表示の可否は localStorage と sessionStorage の両方で、その tab の token を個別に確認します。
+  未読数の読み込み中や失敗時は前回の badge をそのまま残します。
+  対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
+  install の説明では badge を「対応した端末では」と条件付きで案内します。
+  iOS / iPadOS のホーム画面 web app と macOS Safari の「Dock に追加」した web app は `setAppBadge()` を公開していますが、通知の許可がない限り badge を表示しません。
+  そのため設定画面のインストール card は、installed な standalone app として動作し、badge の表示に通知の許可が必要な platform
+  （Apple の WebKit。`navigator.standalone` の有無、iPhone / iPad / iPod の user agent、touch 対応の `MacIntel`、
+  または Chromium / Edge / Opera / Firefox の token を含まない macOS Safari の user agent で判定）で、Badging API と `Notification` があり、
+  `Notification.permission` が `default`（未回答）の場合だけ「アイコンのバッジを許可」button を表示します
+  （`web/src/shared/lib/pwa/badgePermission.ts`）。`Notification.requestPermission()` は button の click handler から同期的に呼び、
+  自動では要求しません。許可されると `refreshAppBadge()` でその tab の session が未読数を取得し直して badge を再表示します。
+  許可 / ブロック / 未選択 / 確認できない（API がない・browser が拒否した）の結果は `role="status"` で通知し、
+  button が消える場合もフォーカスを結果へ移します。再試行の開始時に前回の結果を消すため、同じ結果（未選択の繰り返しなど）も再度通知します。
+  端末の設定で通知を変更して再読み込みせずに戻った場合は、`focus` / `visibilitychange` と、対応する browser では
+  Permissions API の `change` で許可状態を読み直し、一致しなくなった結果を消します。許可に変わった場合は結果を「許可」として通知し（フォーカスを持ち得る行を消さないため）、badge も再表示します。結果を表示中に取り消し / リセットされた場合も、結果を消さずに「ブロック」/「未選択」へ置き換えて通知します。
+  許可済みまたはブロック済みの端末では再度尋ねません。以前にブロックした端末では、再読み込み後も現在の許可状態から
+  「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
+  platform では、不要な通知の許可を求めないよう button を表示しません。
+  この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。

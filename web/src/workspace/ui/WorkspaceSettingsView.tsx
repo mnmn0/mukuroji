@@ -19,6 +19,8 @@ import { InfoGrid, SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
  * Inputs for the Workspace settings view.
  */
 export type WorkspaceSettingsViewProps = {
+  /** Composed app installation section rendered after display preferences. */
+  appInstallSection?: ReactNode
   /** Composed administrative settings rendered after the security link. */
   configurationSections?: ReactNode
   /** Currently selected font-size preference. */
@@ -60,6 +62,7 @@ const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
  * @returns The complete Workspace settings view.
  */
 export function WorkspaceSettingsView({
+  appInstallSection,
   configurationSections,
   fontSizePreference,
   locale,
@@ -173,6 +176,8 @@ export function WorkspaceSettingsView({
           </label>
         </div>
       </section>
+
+      {appInstallSection}
 
       {notificationSettingsSection}
 
