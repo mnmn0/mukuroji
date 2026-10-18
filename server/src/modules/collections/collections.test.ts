@@ -267,8 +267,9 @@ test('keeps the newest reference first when the previous change came from a serv
   const store = new InMemoryCollectionsStore()
   const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
   await addCollectionItem(store, { ...context, now: '2026-10-16T00:00:05.000Z' }, collectionId, 't', 'a', readWorkItem)
-  // A rename on a lagging server moves updatedAt behind the newest reference.
-  await updateCollection(store, { ...context, now: '2026-10-16T00:00:01.000Z' }, collectionId, { expectedRevision: 2, name: 'Renamed' })
+  // A rename on a lagging server keeps updatedAt at the newest change it replaces.
+  const renamed = await updateCollection(store, { ...context, now: '2026-10-16T00:00:01.000Z' }, collectionId, { expectedRevision: 2, name: 'Renamed' })
+  expect(renamed.updatedAt).toBe('2026-10-16T00:00:05.000Z')
   const added = await addCollectionItem(store, { ...context, now: '2026-10-16T00:00:03.000Z' }, collectionId, 't', 'b', readWorkItem)
   expect(added.item.addedAt).toBe('2026-10-16T00:00:05.000Z')
   const stored = await store.get('w', collectionId)

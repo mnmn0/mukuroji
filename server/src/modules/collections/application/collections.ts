@@ -225,7 +225,8 @@ export async function updateCollection(
     ...(description ? { description } : {}),
     createdBy: current.createdBy,
     createdAt: current.createdAt,
-    updatedAt: context.now,
+    // Another server's clock may lag; the change must not look older than the state it replaces.
+    updatedAt: laterInstant(context.now, current.updatedAt),
     revision: nextRevision(current.revision),
     items: current.items,
     createFingerprint: current.createFingerprint,

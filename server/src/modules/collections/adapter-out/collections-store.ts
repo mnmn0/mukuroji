@@ -1,4 +1,5 @@
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -49,12 +50,18 @@ const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 const COLLECTION_COUNT_ENTRY_TYPE = 'work-item-collection-count'
 
 /**
- * Exclusive upper bound of a stored counter generation.
+ * Exclusive upper bound of a counter generation that a create or delete may still increment.
  *
- * Every create and delete adds one, so a stored generation must leave room for that write to
- * stay a valid generation.
+ * Any safe integer is a valid stored generation; a write requires the stored one to be below
+ * this bound, so the incremented value is still a safe integer.
  */
-const COLLECTION_COUNTER_GENERATION_LIMIT = Number.MAX_SAFE_INTEGER - 1
+const COLLECTION_COUNTER_GENERATION_LIMIT = Number.MAX_SAFE_INTEGER
+
+/** Maximum keys in one DynamoDB `BatchGetItem` request. */
+const DYNAMODB_BATCH_GET_LIMIT = 100
+
+/** Attempts to read the keys DynamoDB leaves unprocessed in a batch read. */
+const BATCH_GET_ATTEMPTS = 5
 
 /** Validated state of the per-Workspace Collection counter row. */
 type CollectionCounter = {
@@ -206,7 +213,51 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       }
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey)
-    return collections
+    return await this.withoutDeletedSummaries(workspaceId, collections)
+  }
+
+  /**
+   * Fails closed when a listed Collection also has a deletion marker.
+   *
+   * A restore or manual repair can leave a live row beside its marker; listing it would expose
+   * a logically deleted Collection and let counter reconciliation count it. The markers are
+   * read after the rows, so a delete that commits in between also shows both; such a row is
+   * read again and dropped once it is gone, and only a row that is still live is corrupt.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param collections - Listed Collection metadata.
+   * @returns The Collections without ones deleted while listing.
+   * @throws CollectionError `CollectionCorruptState` when a live row has a deletion marker.
+   */
+  private async withoutDeletedSummaries(workspaceId: string, collections: WorkItemCollection[]): Promise<WorkItemCollection[]> {
+    const deleted = new Set<string>()
+    for (let index = 0; index < collections.length; index += DYNAMODB_BATCH_GET_LIMIT) {
+      let keys: Record<string, unknown>[] = collections
+        .slice(index, index + DYNAMODB_BATCH_GET_LIMIT)
+        .map((collection) => ({ workspaceId, recordKey: tombstoneKey(collection.collectionId) }))
+      for (let attempt = 0; keys.length > 0 && attempt < BATCH_GET_ATTEMPTS; attempt += 1) {
+        const response = await this.client.send(new BatchGetCommand({
+          RequestItems: { [this.tableName]: { Keys: keys, ConsistentRead: true, ProjectionExpression: 'collectionId' } },
+        })).catch((error: unknown) => storageFailure(error))
+        for (const marker of response.Responses?.[this.tableName] ?? []) {
+          if (typeof marker.collectionId !== 'string') throw corruptState()
+          deleted.add(marker.collectionId)
+        }
+        keys = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
+      }
+      if (keys.length > 0) throw retryable()
+    }
+    if (deleted.size === 0) return collections
+    for (const collectionId of deleted) {
+      const { Item: row } = await this.client.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: recordKey(collectionId) },
+        ConsistentRead: true,
+        ProjectionExpression: 'recordKey',
+      })).catch((error: unknown) => storageFailure(error))
+      if (row !== undefined) throw corruptState()
+    }
+    return collections.filter((collection) => !deleted.has(collection.collectionId))
   }
 
   /**
@@ -394,6 +445,8 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       throw corruptState()
     }
     if (counter.count >= COLLECTION_LIMIT) throw limitReached()
+    // The creation increments the generation it verified; one at the bound has no room left.
+    if (counter.generation >= COLLECTION_COUNTER_GENERATION_LIMIT) throw corruptState()
     return counter
   }
 
@@ -419,7 +472,6 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       row.entryType !== COLLECTION_COUNT_ENTRY_TYPE ||
       typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 ||
       typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0 ||
-      generation >= COLLECTION_COUNTER_GENERATION_LIMIT ||
       (row.generation !== undefined && generation === 0)
     ) {
       throw corruptState()

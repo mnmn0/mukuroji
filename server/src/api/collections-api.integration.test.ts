@@ -358,6 +358,38 @@ test('lets a Workspace-scoped Work Item role add and read Collection items', asy
   expect(listed.items).toEqual([expect.objectContaining({ teamId: 'core-team', issueId: 'onboarding-friction' })])
 })
 
+test('fences the primary Project when a direct Team grant authorized reading the Work Item', async () => {
+  configureFakeProjectClients(false, { directoryId: WORKSPACE_ID, workspaceRole: 'admin', projectAccesses: [] })
+  setTestAppDependencies({
+    enterpriseIdentity: await createWorkItemRoleIdentity(WORKSPACE_ID, [
+      { roleId: 'custom:collection-editor', permissions: ['work-items.read', 'work-items.write'], kind: 'workspace', targetId: WORKSPACE_ID },
+      { roleId: 'custom:team-reader', permissions: ['work-items.read', 'teams.read'], kind: 'team', targetId: 'core-team' },
+    ]),
+  })
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const activeChecked: unknown[] = []
+  let projectArchived = false
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        activeChecked.push([teamId, projectId])
+        if (projectArchived) throw new ProjectDataError(404, 'ProjectNotFound', 'Project was not found.')
+        return [{ ConditionCheck: { TableName: 'DirectoryTable', Key: { directoryId, entryKey: `PROJECT#${projectId}` }, ConditionExpression: 'attribute_exists(directoryId)' } }]
+      },
+    },
+  })
+  const { collectionId } = await createCollection('Launch')
+  const itemPath = `/api/collections/${collectionId}/items/core-team/onboarding-friction`
+  // The Work Item's primary Project is archived after the readability check.
+  projectArchived = true
+  expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(409)
+  projectArchived = false
+  activeChecked.length = 0
+  expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(200)
+  expect(activeChecked).toEqual([['core-team', 'refero']])
+})
+
 test('does not let a Team-scoped Work Item grant change Workspace-wide Collections', async () => {
   configureFakeProjectClients(false, { directoryId: WORKSPACE_ID, workspaceRole: 'admin', projectAccesses: [] })
   const { collectionId } = await createCollection('Launch')

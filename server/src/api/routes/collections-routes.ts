@@ -281,8 +281,9 @@ function workItemChanged(): CollectionError {
  * Non-Enterprise members reach a Team and its Work Items only through Project membership
  * rows, which the Workspace membership fence does not cover. An Enterprise Project grant is
  * covered by the Enterprise control fence instead, but archiving its Project changes neither,
- * so that Project is still returned to fence its active state. A system administrator or a
- * direct Team grant does not depend on a Project.
+ * so that Project is still returned to fence its active state. A direct Team grant does not
+ * depend on a Project for the Team, but reading the Work Item still requires its primary
+ * Project to exist, so that Project is fenced too. A system administrator depends on neither.
  *
  * @param principal - Authenticated principal.
  * @param teamContext - Team authorization used for the read.
@@ -294,7 +295,10 @@ function resolveAccessProject(
   teamContext: TeamPermissionContext,
   assignedProjectId: string | undefined,
 ): { projectId: string; membership: boolean } | undefined {
-  if (principal.isSystemAdmin || teamContext.directTeamGrant) return undefined
+  if (principal.isSystemAdmin) return undefined
+  if (teamContext.directTeamGrant) {
+    return assignedProjectId === undefined ? undefined : { projectId: assignedProjectId, membership: false }
+  }
   const candidates = (teamContext.projectAccesses ?? [])
     .filter((access) => projectAccessAllows(access, 'viewer'))
     .map((access) => access.projectId)
