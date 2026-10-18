@@ -43,12 +43,13 @@ export function useCollectionActions(
   }, [])
 
   /**
-   * Runs one mutation and refreshes Collection queries whatever the outcome.
+   * Runs one mutation and refreshes the affected Collection queries whatever the outcome.
    *
    * @param request - Mutation to run with the current token.
+   * @param collectionId - Collection whose item list the mutation can change, if any.
    * @returns The mutation result, or undefined when it failed or was skipped.
    */
-  const run = async <T,>(request: (token: string) => Promise<T>): Promise<T | undefined> => {
+  const run = async <T,>(request: (token: string) => Promise<T>, collectionId?: string): Promise<T | undefined> => {
     if (!accessToken || busy.current) return undefined
     busy.current = true
     setPending(true)
@@ -59,11 +60,13 @@ export function useCollectionActions(
       if (active.current) setError(failure)
       return undefined
     } finally {
-      // Revalidate the list and item queries without replacing cached data, so loaded state
-      // stays visible meanwhile. Candidate searches are not revalidated: every keyword and
-      // excluded-item set is its own key, and the next search derives a fresh one anyway.
+      // Revalidate the list and the changed Collection's items without replacing cached data,
+      // so loaded state stays visible meanwhile. Other Collections' items cannot change, and
+      // candidate searches are not revalidated: every keyword and excluded-item set is its own
+      // key, and the next search derives a fresh one anyway.
       await mutate(
-        (key) => Array.isArray(key) && key[0] === COLLECTIONS_QUERY_KEY && key[1] === accessToken && key[2] !== 'candidates',
+        (key) => Array.isArray(key) && key[0] === COLLECTIONS_QUERY_KEY && key[1] === accessToken &&
+          (key[2] === 'list' || (collectionId !== undefined && key[2] === 'items' && key[3] === collectionId)),
       ).catch(() => undefined)
       busy.current = false
       if (active.current) setPending(false)
@@ -171,7 +174,7 @@ export function useCollectionActions(
       run(async (token) => await cacheCollection(
         token,
         await updateCollection(token, collection.collectionId, { expectedRevision: collection.revision, name, description }),
-      )),
+      ), collection.collectionId),
     /**
      * Deletes a Collection.
      *
@@ -190,7 +193,7 @@ export function useCollectionActions(
           { revalidate: false },
         )
         return true
-      })) === true,
+      }, collection.collectionId)) === true,
     /**
      * Adds a Work Item to a Collection.
      *
@@ -209,7 +212,7 @@ export function useCollectionActions(
           item,
         ))
         return await cacheCollection(token, updated)
-      }),
+      }, collectionId),
     /**
      * Removes a Work Item reference from a Collection.
      *
@@ -223,7 +226,7 @@ export function useCollectionActions(
         const updated = await removeCollectionItem(token, collectionId, teamId, issueId)
         await cacheItems(token, updated, (items) => items.filter((entry) => entry.teamId !== teamId || entry.issueId !== issueId))
         return await cacheCollection(token, updated)
-      }),
+      }, collectionId),
   }
 }
 

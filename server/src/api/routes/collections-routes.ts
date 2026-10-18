@@ -236,7 +236,7 @@ function writeStore(principal: WorkspacePrincipal): CollectionsStore {
         throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
       }
       const membershipChecks: PlanningCallerAuthorizationConditionCheck[] = []
-      if (membership) {
+      if (membership && projectId !== undefined) {
         const check = await projectDirectory.createProjectAccessConditionCheck.call(
           projectDirectory,
           workspaceId,
@@ -281,23 +281,24 @@ function workItemChanged(): CollectionError {
  * Non-Enterprise members reach a Team and its Work Items only through Project membership
  * rows, which the Workspace membership fence does not cover. An Enterprise Project grant is
  * covered by the Enterprise control fence instead, but archiving its Project changes neither,
- * so that Project is still returned to fence its active state. A direct Team grant does not
- * depend on a Project for the Team, but reading the Work Item still requires its primary
- * Project to exist, so that Project is fenced too. A system administrator depends on neither.
+ * so that Project is still returned to fence its active state. A direct Team grant depends on
+ * the Team staying active and, for an assigned Work Item, on its primary Project too, so it
+ * returns that Project or no Project at all. A system administrator depends on neither.
  *
  * @param principal - Authenticated principal.
  * @param teamContext - Team authorization used for the read.
  * @param assignedProjectId - Primary Project of the Work Item, if any.
- * @returns The authorizing Project and whether a direct membership granted it, or undefined.
+ * @returns The authorizing Project, if any, and whether a direct membership granted it, or
+ *   undefined when no Team or Project must stay active.
  */
 function resolveAccessProject(
   principal: WorkspacePrincipal,
   teamContext: TeamPermissionContext,
   assignedProjectId: string | undefined,
-): { projectId: string; membership: boolean } | undefined {
+): { projectId?: string; membership: boolean } | undefined {
   if (principal.isSystemAdmin) return undefined
   if (teamContext.directTeamGrant) {
-    return assignedProjectId === undefined ? undefined : { projectId: assignedProjectId, membership: false }
+    return assignedProjectId === undefined ? { membership: false } : { projectId: assignedProjectId, membership: false }
   }
   const candidates = (teamContext.projectAccesses ?? [])
     .filter((access) => projectAccessAllows(access, 'viewer'))
@@ -417,9 +418,11 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal, reloadPro
         revision: detail.issue.revision,
         ...(accessProject === undefined
           ? {}
-          : accessProject.membership
-            ? { accessProjectId: accessProject.projectId }
-            : { activeProjectId: accessProject.projectId }),
+          : accessProject.projectId === undefined
+            ? { activeTeamOnly: true }
+            : accessProject.membership
+              ? { accessProjectId: accessProject.projectId }
+              : { activeProjectId: accessProject.projectId }),
       }
     } catch (error) {
       if (isUnreadableWorkItemError(error)) return undefined

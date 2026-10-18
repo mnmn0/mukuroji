@@ -419,6 +419,10 @@ test('fences a reference change on the Project membership that authorized the re
   requested.length = 0
   await store.put('w', { ...collection, revision: 2 }, 1, { teamId: 'core-team', issueId: 'item-1', revision: 4, activeProjectId: 'refero' })
   expect(requested).toEqual([['w', 'core-team', 'refero', false]])
+  // A direct Team grant on an unassigned Work Item fences only the Team.
+  requested.length = 0
+  await store.put('w', { ...collection, revision: 2 }, 1, { teamId: 'core-team', issueId: 'item-1', revision: 4, activeTeamOnly: true })
+  expect(requested).toEqual([['w', 'core-team', undefined, false]])
   // A fence that names a Project cannot be written without the membership builder.
   await expect(new DynamoDbCollectionsStore('planning', client, checks, () => revisionCheck).put('w', { ...collection, revision: 2 }, 1, fence))
     .rejects.toMatchObject({ status: 503 })
@@ -525,14 +529,15 @@ test('fails closed when a listed Collection also has a deletion marker', async (
    * Store whose listing returns two rows while one of them has a deletion marker.
    *
    * @param stillLive - Whether the marked row is still live when it is read again.
+   * @param marker - Marker row returned for the batch read.
    * @returns The store.
    */
-  const storeWithMarker = (stillLive: boolean) => new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
+  const storeWithMarker = (stillLive: boolean, marker: Record<string, unknown> = { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c2', collectionId: 'c2' }) => new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
     if (command instanceof QueryCommand) return { Items: [storedRow(1), storedRow(2)] }
     if (command instanceof BatchGetCommand) {
       const keys = command.input.RequestItems?.planning?.Keys ?? []
       expect(keys).toEqual([{ workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' }, { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c2' }])
-      return { Responses: { planning: [{ collectionId: 'c2' }] } }
+      return { Responses: { planning: [marker] } }
     }
     if (command instanceof GetCommand && command.input.Key?.recordKey === 'COLLECTION#c2') {
       return stillLive ? { Item: { recordKey: 'COLLECTION#c2' } } : {}
@@ -543,4 +548,35 @@ test('fails closed when a listed Collection also has a deletion marker', async (
   await expect(storeWithMarker(true).listSummaries('w')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   // A delete that committed after the rows were listed is dropped, not reported as corrupt.
   expect((await storeWithMarker(false).listSummaries('w')).map((entry) => entry.collectionId)).toEqual(['c1'])
+  // A marker whose own identity disagrees with its key is corrupt, not a deletion of another row.
+  await expect(storeWithMarker(false, { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', collectionId: 'c2' }).listSummaries('w'))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+test('retries unprocessed deletion-marker keys and reports exhaustion as retryable', async () => {
+  /**
+   * Store whose marker batch reads leave every key unprocessed for the first `throttled` calls.
+   *
+   * @param throttled - Number of batch reads that process nothing.
+   * @returns The store and the number of batch reads it received.
+   */
+  const storeThrottled = (throttled: number) => {
+    const reads = { count: 0 }
+    const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
+      if (command instanceof QueryCommand) return { Items: [storedRow(1)] }
+      if (command instanceof BatchGetCommand) {
+        reads.count += 1
+        const keys = command.input.RequestItems?.planning?.Keys ?? []
+        return reads.count <= throttled ? { Responses: {}, UnprocessedKeys: { planning: { Keys: keys } } } : { Responses: { planning: [] } }
+      }
+      throw new Error('Unexpected command')
+    }, true), checks)
+    return { store, reads }
+  }
+  const recovered = storeThrottled(2)
+  expect((await recovered.store.listSummaries('w')).map((entry) => entry.collectionId)).toEqual(['c1'])
+  expect(recovered.reads.count).toBe(3)
+  const exhausted = storeThrottled(5)
+  await expect(exhausted.store.listSummaries('w')).rejects.toMatchObject({ status: 503 })
+  expect(exhausted.reads.count).toBe(5)
 })

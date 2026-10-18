@@ -95,6 +95,11 @@ export type ObservedCollectionWorkItem = {
    * membership; it must still be active when the change commits.
    */
   activeProjectId?: string
+  /**
+   * Whether a direct Team grant authorized reading an unassigned Work Item, so only its Team
+   * must still be active when the change commits.
+   */
+  activeTeamOnly?: boolean
 }
 
 /** Canonical Work Item state that a reference change requires to be unchanged when it commits. */
@@ -109,6 +114,8 @@ export type CollectionWorkItemFence = {
   accessProjectId?: string
   /** Project whose Enterprise grant authorized the readability check, when any. */
   activeProjectId?: string
+  /** Whether only the Work Item's Team must stay active, for a direct Team grant. */
+  activeTeamOnly?: boolean
 }
 
 /**
@@ -394,6 +401,7 @@ async function applyItemChange(
         revision: observed.revision,
         ...(observed.accessProjectId === undefined ? {} : { accessProjectId: observed.accessProjectId }),
         ...(observed.activeProjectId === undefined ? {} : { activeProjectId: observed.activeProjectId }),
+        ...(observed.activeTeamOnly ? { activeTeamOnly: true } : {}),
       })
       return { collection: next, observed }
     } catch (error) {

@@ -63,6 +63,9 @@ const DYNAMODB_BATCH_GET_LIMIT = 100
 /** Attempts to read the keys DynamoDB leaves unprocessed in a batch read. */
 const BATCH_GET_ATTEMPTS = 5
 
+/** Base delay in milliseconds before retrying unprocessed batch-read keys; it doubles per attempt. */
+const BATCH_GET_BACKOFF_MS = 20
+
 /** Validated state of the per-Workspace Collection counter row. */
 type CollectionCounter = {
   /** Number of live Collections in the Workspace. */
@@ -102,14 +105,14 @@ const COLLECTION_SUMMARY_ATTRIBUTES = [
  *
  * @param workspaceId - Server-resolved Workspace.
  * @param teamId - Team that owns the Work Item and the Project.
- * @param projectId - Project that authorized the read.
+ * @param projectId - Project that authorized the read, or undefined when only the Team did.
  * @param membership - Whether a direct Project membership authorized the read.
  * @returns Transaction condition checks on the membership, Team and Project rows.
  */
 export type CollectionProjectAccessCheck = (
   workspaceId: string,
   teamId: string,
-  projectId: string,
+  projectId: string | undefined,
   membership: boolean,
 ) => Promise<readonly PlanningCallerAuthorizationConditionCheck[]>
 
@@ -231,19 +234,29 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   private async withoutDeletedSummaries(workspaceId: string, collections: WorkItemCollection[]): Promise<WorkItemCollection[]> {
     const deleted = new Set<string>()
+    const requested = new Map(collections.map((collection) => [tombstoneKey(collection.collectionId), collection.collectionId]))
     for (let index = 0; index < collections.length; index += DYNAMODB_BATCH_GET_LIMIT) {
       let keys: Record<string, unknown>[] = collections
         .slice(index, index + DYNAMODB_BATCH_GET_LIMIT)
         .map((collection) => ({ workspaceId, recordKey: tombstoneKey(collection.collectionId) }))
       for (let attempt = 0; keys.length > 0 && attempt < BATCH_GET_ATTEMPTS; attempt += 1) {
         const response = await this.client.send(new BatchGetCommand({
-          RequestItems: { [this.tableName]: { Keys: keys, ConsistentRead: true, ProjectionExpression: 'collectionId' } },
+          RequestItems: { [this.tableName]: { Keys: keys, ConsistentRead: true } },
         })).catch((error: unknown) => storageFailure(error))
         for (const marker of response.Responses?.[this.tableName] ?? []) {
-          if (typeof marker.collectionId !== 'string') throw corruptState()
-          deleted.add(marker.collectionId)
+          // Any row at a requested marker key is a deletion of that Collection; one whose own
+          // identity disagrees with its key is corrupt, the same as for a single-Collection read.
+          const collectionId = requested.get(typeof marker.recordKey === 'string' ? marker.recordKey : '')
+          if (collectionId === undefined || marker.workspaceId !== workspaceId || marker.collectionId !== collectionId) {
+            throw corruptState()
+          }
+          deleted.add(collectionId)
         }
         keys = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
+        // Unprocessed keys mean throttling; back off with jitter before the next attempt.
+        if (keys.length > 0 && attempt + 1 < BATCH_GET_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, Math.random() * BATCH_GET_BACKOFF_MS * 2 ** attempt))
+        }
       }
       if (keys.length > 0) throw retryable()
     }
@@ -532,11 +545,12 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   private async workItemChecks(workspaceId: string, fence: CollectionWorkItemFence): Promise<CollectionTransactItem[]> {
     // Without either fence a stale readability check could commit; refuse instead.
     const projectId = fence.accessProjectId ?? fence.activeProjectId
-    if (!this.workItemFenceCheck || (projectId !== undefined && !this.projectAccessCheck)) {
+    const fenced = projectId !== undefined || fence.activeTeamOnly === true
+    if (!this.workItemFenceCheck || (fenced && !this.projectAccessCheck)) {
       throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
     }
     const checks: CollectionTransactItem[] = [this.workItemFenceCheck(workspaceId, fence)]
-    if (projectId !== undefined && this.projectAccessCheck) {
+    if (fenced && this.projectAccessCheck) {
       checks.push(...await this.projectAccessCheck(workspaceId, fence.teamId, projectId, fence.accessProjectId !== undefined))
     }
     return checks
@@ -651,7 +665,7 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
       delete: (workspaceId, collectionId, expectedRevision, deletion) => this.delete(workspaceId, collectionId, expectedRevision, deletion),
       put: async (workspaceId, collection, expectedRevision, workItemFence) => {
         const projectId = workItemFence?.accessProjectId ?? workItemFence?.activeProjectId
-        if (workItemFence && projectId !== undefined) {
+        if (workItemFence && (projectId !== undefined || workItemFence.activeTeamOnly === true)) {
           await projectAccessCheck(workspaceId, workItemFence.teamId, projectId, workItemFence.accessProjectId !== undefined)
         }
         await this.put(workspaceId, collection, expectedRevision, workItemFence)
