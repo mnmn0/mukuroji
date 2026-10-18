@@ -5,6 +5,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ApiProblem,
   type CanonicalWorkItem,
+  type PublicWorkItem,
   type CreateWorkItemInput,
   type PublicWorkItemTypeCatalog,
   type ResolvedWorkItemConfiguration,
@@ -306,10 +307,25 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    items: page.issues,
+    // Contributors are internal planning data and are documented as excluded from exports.
+    items: page.issues.map(omitWorkItemContributors),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
+}
+
+/**
+ * Removes contributor assignments from a Work Item export row.
+ *
+ * @param workItem - Work Item read for the export page.
+ * @returns The Work Item without its contributor assignments.
+ */
+function omitWorkItemContributors<T extends { readonly contributorAssignments?: unknown }>(
+  workItem: T,
+): Omit<T, 'contributorAssignments'> {
+  const { contributorAssignments: _contributorAssignments, ...exported } = workItem
+  void _contributorAssignments
+  return exported
 }
 
 function encodeWorkItemExportContinuation(value: WorkItemExportContinuation) {
@@ -481,7 +497,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'createdAt',
   'updatedAt',
   'source',
-] satisfies readonly (keyof CanonicalWorkItem)[]
+] satisfies readonly (keyof PublicWorkItem)[]
 
 /**
  * Projects one canonical Work Item onto the closed public response schema.
@@ -489,7 +505,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
  * @param workItem - Internal canonical Work Item containing optional server-only fields.
  * @returns Detached public response without causal, archive, intake, or approval state.
  */
-function projectPublicWorkItem(workItem: CanonicalWorkItem): CanonicalWorkItem {
+function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkItem {
   return {
     schemaVersion: workItem.schemaVersion,
     revision: workItem.revision,

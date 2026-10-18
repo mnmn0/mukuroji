@@ -272,6 +272,10 @@ import {
   type TeamPermissionContext,
   validateRequestRoutingTarget,
 } from '../shared/workspace-access'
+import {
+  readContributorAssignmentChange,
+  withContributorAssignmentChange,
+} from '../shared/work-item-contributors'
 
 /** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
 const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
@@ -4238,6 +4242,12 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       )
       const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
       await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
+      const contributorChange = await readContributorAssignmentChange(
+        principal.directoryId,
+        configuredBody,
+        resolvedConfiguration,
+        [],
+      )
       const response = await hydrateCreateTeamIssueResponse(
         await workItemDependencies.teamIssues.createTeamIssue(
           principal.directoryId,
@@ -4245,6 +4255,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           {
             ...configuredBody,
             assigneeUserId,
+            ...withContributorAssignmentChange(configuredBody, contributorChange),
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),
@@ -4706,6 +4717,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           readTeamIssueAssigneeUserId(configuredBody),
         )
       }
+      if ('contributorAssignments' in configuredBody && detail.issue.revision !== expectedRevision) {
+        // Assignment IDs refer to the observed list, so a stale request is a revision conflict.
+        throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
+      }
+      const contributorChange = await readContributorAssignmentChange(
+        principal.directoryId,
+        configuredBody,
+        resolvedConfiguration,
+        detail.issue.contributorAssignments ?? [],
+      )
 
       const response = await hydrateUpdateTeamIssueResponse(
         await workItemDependencies.teamIssues.updateTeamIssue(
@@ -4714,6 +4735,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           issueId,
           {
             ...configuredBody,
+            ...withContributorAssignmentChange(configuredBody, contributorChange),
             expectedRevision,
             ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
           },

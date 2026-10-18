@@ -1742,6 +1742,15 @@ async function mockAuthenticatedTaskPage(
       const updatedIssue = {
         ...issue,
         ...patch,
+        ...(patch.contributorAssignments
+          ? {
+              contributorAssignments: patch.contributorAssignments.map((assignment, index) => ({
+                ...assignment,
+                assignmentId: assignment.assignmentId ??
+                  `${issue.revision + 1}${index}`.padStart(32, '0'),
+              })),
+            }
+          : {}),
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
@@ -5243,6 +5252,177 @@ test.describe('authenticated task page', () => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
     }))
     await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
+  })
+
+  test('Issue #239: 責任者の説明を支援技術にも伝える', async ({ page }) => {
+    const ownerHelp = '結果に最終責任を持つ 1 人です。作業の分担は Contributor に設定します。'
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const taskOwner = page.getByTestId('task-detail-pane').getByRole('combobox', { name: '責任者', exact: true })
+    await expect(taskOwner).toHaveAccessibleDescription(ownerHelp)
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const issueOwner = page.getByTestId('team-issue-detail-pane').getByRole('combobox', { name: '責任者', exact: true })
+    await expect(issueOwner).toHaveAccessibleDescription(ownerHelp)
+  })
+
+  test('Issue #239: 責任者とは別に Contributor を計画して保存する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        jobRoles: [
+          { id: 'designer', name: 'デザイナー' },
+          { id: 'legacy-writer', name: 'ライター', archived: true },
+        ],
+      },
+    })
+    const patchBodies: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
+        patchBodies.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const contributors = detailPane.getByTestId('work-item-contributors')
+
+    const owner = detailPane.getByRole('combobox', { name: '責任者', exact: true })
+    await expect(owner).toHaveAccessibleDescription('結果に最終責任を持つ 1 人です。作業の分担は Contributor に設定します。')
+    await expect(contributors).toContainText('Contributor はまだいません。')
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await contributors.getByRole('button', { name: 'Contributor を追加' }).click()
+    const row = contributors.getByTestId('work-item-contributor-row')
+    await expect(row.locator('select').nth(1).locator('option')).toHaveText(['なし', 'デザイナー'])
+    await row.locator('select').nth(1).selectOption('designer')
+    await row.locator('input').fill('1.5')
+    // Contributors are saved with the rest of the form, so an unsaved title edit is kept.
+    await detailPane.locator('input[name="title"]').fill('Contributor と一緒に保存する')
+    await expect(contributors).toContainText('「変更を保存」で Contributor の変更も保存されます。')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect(contributors.getByTestId('work-item-contributor-list')).toContainText('未定（ジョブロールで計画）')
+    await expect(contributors).toContainText('デザイナー')
+    await expect(contributors).toContainText('合計 1.5 時間')
+    await expect(detailPane.locator('input[name="title"]')).toHaveValue('Contributor と一緒に保存する')
+    // The generic inverse patch cannot restore contributors, so the save offers no Undo.
+    await expect(page.getByTestId('task-action-feedback')).toBeVisible()
+    await expect(page.getByTestId('task-action-feedback').getByRole('button', { name: '元に戻す', exact: true })).toHaveCount(0)
+    expect(patchBodies).toHaveLength(1)
+    expect(patchBodies[0]).toMatchObject({
+      title: 'Contributor と一緒に保存する',
+      contributorAssignments: [{ jobRoleId: 'designer', plannedEffortMinutes: 90, status: 'planned' }],
+      expectedRevision: expect.any(Number),
+    })
+  })
+
+  test('Issue #239: overview を持たない Work Item Type でも Contributor を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        jobRoles: [{ id: 'designer', name: 'デザイナー' }],
+        workItemTypes: [{
+          ...DEFAULT_WORK_ITEM_TYPE,
+          detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'overview'),
+        }],
+      },
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    await expect(detailPane.getByRole('combobox', { name: '責任者', exact: true })).toHaveCount(0)
+    const contributors = detailPane.getByTestId('work-item-contributors')
+    await expect(contributors).toContainText('Contributor はまだいません。')
+    await expect(contributors.getByRole('button', { name: 'Contributor を編集' })).toBeVisible()
+  })
+
+  test('Issue #239: overview の有無が変わる種別変更でも Contributor 下書きを保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        jobRoles: [{ id: 'designer', name: 'デザイナー' }],
+        workItemTypes: [
+          DEFAULT_WORK_ITEM_TYPE,
+          {
+            ...DEFAULT_WORK_ITEM_TYPE,
+            id: 'compact',
+            name: 'Compact',
+            detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'overview'),
+          },
+        ],
+      },
+    })
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/work-item-type-preview$/u, (route) => route.fulfill({
+      json: {
+        approvalCompletionTransitionConflict: false,
+        currentWorkflowStatusId: 'active',
+        currentWorkItemTypeId: DEFAULT_WORK_ITEM_TYPE.id,
+        expectedRevision: 1,
+        lostCustomFieldIds: [],
+        missingRequiredCustomFieldDefinitions: [],
+        missingRequiredCustomFieldIds: [],
+        requiresResolution: false,
+        targetInitialWorkflowStatusId: 'todo',
+        targetWorkItemTypeId: 'compact',
+      },
+    }))
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const contributors = detailPane.getByTestId('work-item-contributors')
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await contributors.getByRole('button', { name: 'Contributor を追加' }).click()
+    const row = contributors.getByTestId('work-item-contributor-row')
+    await row.locator('select').nth(1).selectOption('designer')
+    await row.locator('input').fill('2')
+
+    // The editor moves out of the overview section, but the unsaved row must stay.
+    await detailPane.getByRole('combobox', { name: 'Work Item Type' }).selectOption('compact')
+    await expect(detailPane.getByRole('combobox', { name: '責任者', exact: true })).toHaveCount(0)
+    await expect(row).toHaveCount(1)
+    await expect(row.locator('select').nth(1)).toHaveValue('designer')
+    await expect(row.locator('input')).toHaveValue('2')
+  })
+
+  test('Issue #239: 取り消した Contributor 下書きの保存エラーを再表示しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: { ...defaultWorkItemConfiguration, jobRoles: [{ id: 'designer', name: 'デザイナー' }] },
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const contributors = detailPane.getByTestId('work-item-contributors')
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await contributors.getByRole('button', { name: 'Contributor を追加' }).click()
+    // An empty row cannot be saved, so the form reports it next to the contributors.
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await expect(contributors).toContainText('メンバーかジョブロールのどちらかを選んでください。')
+    await contributors.getByRole('button', { name: 'キャンセル' }).click()
+    // A new draft starts without the abandoned draft's error.
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await expect(contributors).not.toContainText('メンバーかジョブロールのどちらかを選んでください。')
+  })
+
+  test('Issue #239: Team Issue の保存中は保存ボタンを無効にする', async ({ page }) => {
+    let releaseUpdate: (() => void) | undefined
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve
+    })
+    let updateRequests = 0
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe$/u, async (route) => {
+      if (route.request().method() !== 'PATCH') {
+        await route.fallback()
+        return
+      }
+      updateRequests += 1
+      await updateGate
+      await route.fallback()
+    })
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    const saveButton = detailPane.getByRole('button', { name: '変更を保存' })
+    await detailPane.locator('input[name="title"]').fill('保存中に二重送信しない')
+    await saveButton.click()
+    await expect.poll(() => updateRequests).toBe(1)
+    // The button lives outside the disabled fieldset, so it needs its own pending guard.
+    await expect(saveButton).toBeDisabled()
+    releaseUpdate?.()
+    await expect(saveButton).toBeEnabled()
+    expect(updateRequests).toBe(1)
   })
 
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {

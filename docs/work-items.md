@@ -28,7 +28,8 @@ Canonical row は次の field を持つ。
 | `assignedProjectId` / `directoryProjectId` | no | 遂行先 project と project GSI key。未割当 Work Item では持たない。 |
 | `title` | yes | Literal title。canonical row は `titleKey` を持たない。 |
 | `description` | no | 詳細説明。 |
-| `assigneeUserId` | yes | Workspace member の安定 ID。 |
+| `assigneeUserId` | yes | 最終責任者（accountable owner）である Workspace member の安定 ID。Work Item ごとに 1 人だけ。 |
+| `contributorAssignments` | no | 作業を分担する Contributor の配列。空の場合は属性を持たない。詳細は「責任者と Contributor」を参照。 |
 | `creatorMemberKey` | yes | Work Item を作成した Workspace member key。 |
 | `sourceTriageEntryId` | no | Team Triage から作成された場合の source Entry ID。 |
 | `sourceRequestId` | no | Form source から作成された場合の Request submission ID。 |
@@ -95,6 +96,40 @@ Work Item update は `expectedRevision` を必須にする。State update、acti
 | `503` | `InvalidTeamIssue` | Canonical table の row が strict schema を満たさない。 |
 
 Web は list/detail response の revision を mutation body に含める。`WorkItemRevisionConflict` では optimistic state を戻して再取得し、新しい revision で明示的に再試行する。
+
+## 責任者と Contributor
+
+`assigneeUserId` は Work Item の最終責任者で、常に 1 人である。複数人で作業する場合も責任者を複数にせず、作業の分担は `contributorAssignments` に分けて保存する（#239）。
+
+各 Contributor は次の値を持つ。
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `assignmentId` | yes | Work Item 内で安定する 32 桁 hex ID。server が採番する。 |
+| `memberUserId` | no | 担当メンバーの Workspace user ID。未定なら持たない。 |
+| `jobRoleId` | no | Work Item configuration の `jobRoles` の stable ID。 |
+| `plannedEffortMinutes` | no | 予定工数（分）。0 以上 60,000 以下の整数。 |
+| `status` | yes | `planned`、`in-progress`、`done`。 |
+
+- `memberUserId` と `jobRoleId` の少なくとも一方が必要である。ロールだけの Contributor は、担当者が未定の段階の計画に使う。
+- 同じメンバーは 1 つの Work Item に 1 回だけ設定できる。Contributor は最大 20 件。
+- 更新では `contributorAssignments` に完全な置換リストを送る。既存の Contributor は `assignmentId` を付けて残し、新規の Contributor は `assignmentId` を省略する。存在しない `assignmentId` は拒否する。フィールドを省略した更新は保存済みの Contributor を変更しない。
+- 新しく追加するメンバーは active な non-guest member でなければならない。検証時に読んだ member row の version・status・role を Work Item 書き込みと同じ transaction の `ConditionCheck` で固定するため、検証後 commit 前に無効化されたメンバーは保存せず `409 WorkItemAuthorizationChanged` を返す。追加後に無効化されたメンバーは、元の `assignmentId` を付けて送れば他の変更をしても残せる。`assignmentId` を省略して同じメンバーを送り直した場合や、既存の `assignmentId` に別のメンバーを設定した場合は新しい割り当てとして再検証する。再割り当ては別の flow で扱う。
+- archive 済みのジョブロールは既存の Contributor に残せるが、新しく設定できない。
+- Contributor の変更は `work-item.updated` audit event の `contributorAssignments` field change として記録する。
+- Public API は `contributorAssignments` を受け付けず、返さない。
+- ジョブロールは archive で廃止する。名称変更と archive は Contributor が参照中でも保存でき、保存済み Contributor は `id` で参照するため影響を受けない。Contributor が参照しているジョブロールを設定から削除する保存は `409 WorkItemConfigurationInUse` で拒否する。Contributor を変更する作成・更新は、ジョブロールの検証に使った configuration revision と `CONFIG_WRITE_LOCK` を同じ transaction で guard するため、設定保存の usage 検証と並行して削除予定のジョブロールを割り当てることはできない（[Work Item configuration](./work-item-configuration.md) の lock 手順を参照）。
+- 保存済み contributor の member ID は trim・小文字化済み・256 文字以内・制御文字なし、ジョブロール ID は設定 ID の文法に従う必要があり、外れた row は読み取り時に失敗する。
+- contributor を変更する更新で `expectedRevision` が古い場合は、assignment ID の検証より先に `409 WorkItemRevisionConflict` を返す。
+
+まだ実装していない範囲は次のとおり。
+
+- workload / capacity への planned effort の集計
+- My Tasks / Focus での区別
+- automation、template、bulk action からの設定
+- member 無効化や Team 移動時の再割り当て
+- 通知の分離
+- Work Item の CSV export / import（Contributor は出力・取り込みしない）
 
 ## Read model
 

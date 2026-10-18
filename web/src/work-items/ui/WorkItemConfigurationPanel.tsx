@@ -34,6 +34,7 @@ import {
   sortCustomFieldOptions,
 } from '../model/workItemConfigurationEditor'
 import { WorkItemTypeIcon } from './WorkItemTypeIcon'
+import { JobRolesConfigurationSection } from './JobRolesConfigurationSection'
 
 /**
  * Configuration panel の scope selector に表示する選択肢です。
@@ -168,6 +169,10 @@ function WorkItemConfigurationPanelContent({
   )
   const [isSaving, setIsSaving] = useState(false)
   const [localErrorMessage, setLocalErrorMessage] = useState<string | undefined>()
+  const savedJobRoleIds = useMemo(
+    () => new Set((configuration?.jobRoles ?? []).map((jobRole) => jobRole.id)),
+    [configuration],
+  )
 
   const handleSave = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -250,6 +255,12 @@ function WorkItemConfigurationPanelContent({
               configuration={draft}
               locale={locale}
               onChange={setDraft}
+            />
+            <JobRolesConfigurationSection
+              configuration={draft}
+              locale={locale}
+              onChange={setDraft}
+              savedJobRoleIds={savedJobRoleIds}
             />
             <WorkItemTypesConfigurationSection
               configuration={draft}

@@ -1328,8 +1328,10 @@ export type ListPublicWorkItemsRequest = {
 
 /**
  * Public Work Item create endpoint の request body です。
+ *
+ * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type CreatePublicWorkItemRequest = CreateWorkItemInput & {
+export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments'> & {
   /**
    * Work Item を所有する Team ID です。
    */
@@ -1338,8 +1340,10 @@ export type CreatePublicWorkItemRequest = CreateWorkItemInput & {
 
 /**
  * Public Work Item update endpoint の request body です。
+ *
+ * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type UpdatePublicWorkItemRequest = WorkItemPatch & {
+export type UpdatePublicWorkItemRequest = Omit<WorkItemPatch, 'contributorAssignments'> & {
   /**
    * 読み込み時点の Work Item revision です。
    */
@@ -1403,9 +1407,17 @@ export type DeletePublicWorkItemRequest = {
 }
 
 /**
+ * Public API が返す Work Item です。
+ *
+ * Contributors are managed only through the Workspace API, so public responses never
+ * contain `contributorAssignments`.
+ */
+export type PublicWorkItem = Omit<CanonicalWorkItem, 'contributorAssignments'>
+
+/**
  * Public Work Item list endpoint の cursor page です。
  */
-export type PublicWorkItemPage = CursorPage<CanonicalWorkItem>
+export type PublicWorkItemPage = CursorPage<PublicWorkItem>
 
 /**
  * Developer settings UI で actor に許可する管理操作です。

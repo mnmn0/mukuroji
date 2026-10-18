@@ -855,6 +855,23 @@ describe('Work Items integrity manifest core', () => {
     })
   })
 
+  test('accepts contributor lists and rejects a non-list encoding', async () => {
+    const contributor = mapAttribute({
+      assignmentId: stringAttribute('a'.repeat(32)),
+      jobRoleId: stringAttribute('designer'),
+      plannedEffortMinutes: numberAttribute('90'),
+      status: stringAttribute('planned'),
+    })
+    const listedItem = createCanonicalItem()
+    listedItem.contributorAssignments = listAttribute([contributor])
+    await expect(createManifestFixture({ role: 'source', items: [listedItem] })).resolves.toBeDefined()
+
+    const mapItem = createCanonicalItem()
+    mapItem.contributorAssignments = mapAttribute({ first: contributor })
+    const mapAttempt = startManifestCreation({ role: 'source', items: [mapItem] })
+    await expect(mapAttempt.promise).rejects.toMatchObject({ code: 'INVALID_WORK_ITEM_RECORD' })
+  })
+
   test('requires schema-v2 schedules whose derived due-date projection matches', async () => {
     const legacyItem = createCanonicalItem()
     legacyItem.schemaVersion = numberAttribute('1')
