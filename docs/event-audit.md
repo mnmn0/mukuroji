@@ -183,7 +183,8 @@ job と worker の動作は次のとおり。
 - part は内容の SHA-256 を含む `part-NNNNN-<digest>.ndjson` として保存する。同じ step が重複して実行されても、条件付き書き込みに勝った job が参照する object を上書きできない。job は件数・byte 長・checksum を記録する。
 - download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒（job の有効期限までの残り時間がそれより短い場合はその残り時間）。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
 - worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かない。closing は取り消されて active に戻り得るため、job が残っていれば 15 分後に同じ step を再投入して再開できる状態を保つ。tenant closure が export namespace を削除した後は job が存在しないため chain は終わり、object を作り直さない。処理期限を過ぎた job も再投入しない。
-- 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
+- queue message は `version`（`1`）、`workspaceId`、`exportId`、`correlationId` を持つ。`correlationId` は `audit.export-requested` event の correlation ID（`X-Correlation-Id`、または記録済み event の値）で、job にも保存し、worker の失敗ログに含めて step を依頼元の request まで辿れるようにする。保存済み job の `correlationId` と異なる message は step を実行せずに失敗として返し、redrive policy で DLQ に送る。
+- 読めない queue message（`correlationId` が欠けている、空、前後に余白がある、256 文字を超える場合を含む）は失敗として返し、redrive policy で DLQ に送る。
 - step が job を条件付きで書き込んだ後に次の step の `SendMessage` が失敗した場合に備え、job は直前の step を確定した SQS message ID（`lastStepMessageId`）を保持する。同じ message が再配送されたときは step を再実行せず、続きの message の送信だけをやり直すため、cursor を進め直して part を重複させない。
 - 送信の失敗が `maxReceiveCount` まで続いて message が DLQ に移ると、続きの message がないまま job が `queued` / `running` に残る。`GET /api/audit/exports/:exportId` と `GET /api/audit/exports` は、処理期限内の未完了 job が 20 分（SQS の最大遅延 900 秒と worker の timeout 5 分より長い）書き込まれていない場合、`updatedAt` と `continuationPending` を条件付きで書き込んでから続きを enqueue する。条件付き更新に勝った読み取りだけが enqueue するため、同時に読まれても 1 回しか再開しない。`continuationPending` は送信が成功した後、または次の step が job を確定したときにだけ外す。送信が失敗した場合は印が残り、20 分を待たずに次の読み取りが再び送信する。重複した message は ETag の条件付き書き込みで 1 つだけが step を確定する。誰も読まない job は処理期限後に `AuditExportProcessingTimedOut` として返る。
 - job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。期限後に遅れて届いた message でも worker は失敗状態を書き込まず（`job.json` を書き換えると lifecycle の期限が延びるため）、API が期限を過ぎた未完了の job を読み取り時に `failed` として返す。step の途中で期限を過ぎた場合も、part と job の書き込みの直前に期限を再確認して書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で current version を削除し、noncurrent version をさらに 1 日後に消すため、artifact は作成から最長約 10 日で消える。
@@ -195,11 +196,13 @@ job と worker の動作は次のとおり。
 - job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が処理期限（24 時間）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、実行されない job や新しい snapshot の export を作らない。同じ key の最初の要求が同時に届き、他方の audit event が先に記録された場合も、job の `snapshotAt` には記録済み event の時刻を使う。同じ key で filter が異なる場合は、audit writer が冪等 key の競合として返す `AuditEventIdempotencyConflictError` も含めて `409 AuditExportIdempotencyConflict` を返す。それ以外の audit 書き込み失敗は 409 にせず 5xx として返す。
 - S3 の条件付き書き込みは 412 だけを既存 / 変更済みとして扱い、409 `ConditionalRequestConflict` は再試行対象としてそのまま失敗させる。
 - 保存済み job の `requestFingerprint` が保存済み filter から計算した値と一致しない場合は、壊れた job として読み込みを拒否する。
-- 保存済み job の `createdAt` / `expiresAt` などの時刻が読めない場合や、`expiresAt` が `createdAt` 以前の場合は壊れた job として読み込みを拒否する。
+- 保存済み job の `eventCount` が 1,000,000 件（`AUDIT_EXPORT_MAX_EVENTS`）を超える場合や part が 10,000 個（`AUDIT_EXPORT_MAX_PARTS`）を超える場合も、走査では作られない状態のため壊れた job として拒否する。
+- 保存済み job の `createdAt` / `expiresAt` などの時刻が読めない場合や、`expiresAt` が `createdAt` のちょうど 7 日（`AUDIT_EXPORT_RETENTION_DAYS`）後でない場合、`updatedAt` が `createdAt` より前の場合は壊れた job として読み込みを拒否する。`queued` / `running` の job の `updatedAt` が処理期限（作成から 24 時間）より後の場合も拒否する。未来の更新時刻は、続きの message を失った job を古い job として再開させなくするため。worker は未完了状態の `updatedAt` を処理期限で頭打ちにし、`completed` / `failed` は実際の時刻を書く。
+- 保存済み job の `correlationId` が空、前後に余白がある、または 256 文字を超える場合も壊れた job として読み込みを拒否する。
 - index marker は存在しない場合だけ作成し、再送で書き直して lifecycle の期限を延ばさない。
 - 保存済み job の filter に未知の key がある場合は壊れた job として読み込みを拒否し、未知の条件を黙って捨てた広い export を作らない。
 - worker は保存済み filter を query 層が拒否する場合だけ `AuditExportQueryInvalid` で終了し、壊れた audit row などそれ以外の失敗は再試行させて DLQ に届ける。
-- `audit.export-downloaded` event は、`Idempotency-Key` があれば `audit-export-download:<exportId>:<fromPart>:<key hash>` を audit の冪等 key とし、同じ key で `nextPart` を辿っても page ごとに別 event になる。key が無い download は発行のたびに記録する。
+- `audit.export-downloaded` event は、応答のたびに新しい署名付き URL を発行するため、client が `Idempotency-Key` を再利用しても発行ごとに別 event として記録する（audit の冪等 key は request ごとに新しく生成し、client の key から導出しない）。
 - job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportBucket` は versioning を有効にし、tenant closure はすべての version を削除する。lifecycle は noncurrent version を 1 日で、期限切れの delete marker も削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
 - 行 projection は同期 export と同じ public DTO を使う。
 - export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。`exportId`、`filtered`、`fromPart`、`partCount`、`eventCount` は public metadata として audit query と export に含める。

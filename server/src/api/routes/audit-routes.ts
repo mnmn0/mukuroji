@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { createAuditRouter } from '../../modules/audit/adapter-in/http/audit-router'
@@ -297,8 +297,8 @@ function requireAuditExporter(principal: ProjectPrincipal) {
  * @param metadata - Safe action metadata.
  * @param idempotencyKeyOverride - Operation-scoped audit idempotency key, if any.
  * @param replayGuard - For export requests, whether the export job still exists.
- * @returns When the request was first recorded: the earlier event's time on a retry,
- * otherwise this event's time.
+ * @returns When and under which correlation ID the request was first recorded: the earlier
+ * event's values on a retry, otherwise this event's.
  */
 async function recordAuditExportAction(
   c: Context,
@@ -307,7 +307,7 @@ async function recordAuditExportAction(
   metadata: Record<string, string | number | boolean>,
   idempotencyKeyOverride?: string,
   replayGuard?: { readonly jobExists: boolean },
-): Promise<string> {
+): Promise<{ readonly occurredAt: string, readonly correlationId: string }> {
   if (!workspaceDependencies.auditEvents.putEvent) {
     throw new ProjectDataError(
       503,
@@ -362,7 +362,9 @@ async function recordAuditExportAction(
     // this one as a duplicate, so the persisted time, not this attempt's, is the request time.
     recorded = await workspaceDependencies.auditEvents.getEvent(principal.directoryId, event.eventId)
   }
-  return recorded?.occurredAt ?? event.occurredAt
+  return recorded
+    ? { occurredAt: recorded.occurredAt, correlationId: recorded.correlationId }
+    : { occurredAt: event.occurredAt, correlationId: event.correlationId }
 }
 
 /**
@@ -458,13 +460,18 @@ export function registerAuditRoutes(routeApp: Hono): void {
       // even before the job exists.
       const prepared = await service.prepareExport(request)
       // A retry after the request was recorded but its job was not created keeps the original
-      // request time, so the export snapshot matches the recorded request.
-      const requestedAt = await recordAuditExportAction(c, principal, 'audit.export-requested', {
+      // request time and correlation ID, so the export snapshot and step logs match the
+      // recorded request.
+      const recorded = await recordAuditExportAction(c, principal, 'audit.export-requested', {
         exportId: prepared.exportId,
         filtered: Object.keys(prepared.filters).length > 0,
         filtersDigest: prepared.requestFingerprint,
       }, `audit-export-request:${prepared.exportId}`, { jobExists: prepared.jobExists })
-      const { job, created } = await service.requestExport({ ...request, requestedAt })
+      const { job, created } = await service.requestExport({
+        ...request,
+        requestedAt: recorded.occurredAt,
+        correlationId: recorded.correlationId,
+      })
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),
     list: (c) => handleAuditExportJobRequest(c, async (principal, service) =>
@@ -477,18 +484,15 @@ export function registerAuditRoutes(routeApp: Hono): void {
       const job = await service.getExport(principal.directoryId, c.req.param('exportId') ?? '')
       const fromPart = readFromPartQuery(c.req.query('fromPart'))
       const page = await service.createDownloadLinks(job, fromPart)
-      // A client key is scoped to this export page, so one key reused while following
-      // nextPart neither collides across pages nor with other audited operations.
-      // Without a key, every issuance is recorded as its own event.
-      const downloadKey = c.req.header('Idempotency-Key')
+      // Each response carries newly signed URLs, so each issuance is audited separately even
+      // when a client reuses an Idempotency-Key. A fresh audit identity is generated per request
+      // instead of falling back to the client's key.
       await recordAuditExportAction(c, principal, 'audit.export-downloaded', {
         exportId: job.exportId,
         fromPart,
         partCount: page.parts.length,
         eventCount: job.eventCount,
-      }, downloadKey === undefined
-        ? undefined
-        : `audit-export-download:${job.exportId}:${fromPart}:${createHash('sha256').update(downloadKey).digest('hex')}`)
+      }, `audit-export-download:${randomUUID()}`)
       return c.json({ export: toAuditExportView(job), ...page })
     }),
   }))
