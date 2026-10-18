@@ -870,7 +870,7 @@ function IssueDetailContent({
         return (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('issues.create.description')}
@@ -888,7 +888,7 @@ function IssueDetailContent({
         return hasCustomFields ? (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <div className="workbench-panel-muted p-4">
               <WorkItemFieldsEditor
@@ -908,7 +908,7 @@ function IssueDetailContent({
         return (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('tasks.column.status')}
