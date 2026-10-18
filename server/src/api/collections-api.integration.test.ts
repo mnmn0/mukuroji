@@ -338,9 +338,22 @@ test('lets a Workspace-scoped Work Item role add and read Collection items', asy
       targetId: WORKSPACE_ID,
     }]),
   })
+  // The Enterprise grant reaches the Work Item through the Refero Project, which stays active.
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const activeChecked: unknown[] = []
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        activeChecked.push([teamId, projectId])
+        return [{ ConditionCheck: { TableName: 'DirectoryTable', Key: { directoryId, entryKey: `PROJECT#${projectId}` }, ConditionExpression: 'attribute_exists(directoryId)' } }]
+      },
+    },
+  })
   const { collectionId } = await createCollection('Launch')
   const itemsPath = `/api/collections/${collectionId}/items`
   expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')).status).toBe(200)
+  expect(activeChecked).toEqual([['core-team', 'refero']])
   const listed = await (await planningApiRequest(itemsPath)).json()
   expect(listed.items).toEqual([expect.objectContaining({ teamId: 'core-team', issueId: 'onboarding-friction' })])
 })

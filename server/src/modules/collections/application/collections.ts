@@ -90,6 +90,11 @@ export type ObservedCollectionWorkItem = {
    * must still hold when the change commits; undefined when no Project membership is involved.
    */
   accessProjectId?: string
+  /**
+   * Project whose Enterprise grant authorized reading the Work Item without a direct
+   * membership; it must still be active when the change commits.
+   */
+  activeProjectId?: string
 }
 
 /** Canonical Work Item state that a reference change requires to be unchanged when it commits. */
@@ -102,6 +107,8 @@ export type CollectionWorkItemFence = {
   revision: number
   /** Project whose direct membership authorized the readability check, when any. */
   accessProjectId?: string
+  /** Project whose Enterprise grant authorized the readability check, when any. */
+  activeProjectId?: string
 }
 
 /**
@@ -385,6 +392,7 @@ async function applyItemChange(
         issueId,
         revision: observed.revision,
         ...(observed.accessProjectId === undefined ? {} : { accessProjectId: observed.accessProjectId }),
+        ...(observed.activeProjectId === undefined ? {} : { activeProjectId: observed.activeProjectId }),
       })
       return { collection: next, observed }
     } catch (error) {

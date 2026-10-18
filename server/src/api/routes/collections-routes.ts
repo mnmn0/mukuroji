@@ -21,6 +21,7 @@ import {
   type ReadCollectionWorkItem,
 } from '../../modules/collections'
 import { normalizeProjectMemberKey, ProjectDataError, type ProjectAccessEntry } from '../../modules/directory'
+import type { PlanningCallerAuthorizationConditionCheck } from '../../modules/planning'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { WORKSPACE_SEARCH_DEFAULT_LIMIT, WORKSPACE_SEARCH_MAX_LIMIT, WorkspaceSearchError } from '../../modules/workspace-search'
@@ -229,21 +230,25 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 function writeStore(principal: WorkspacePrincipal): CollectionsStore {
   return workItemDependencies.collections.withCallerAuthorization(
     createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'),
-    async (workspaceId, teamId, projectId) => {
+    async (workspaceId, teamId, projectId, membership) => {
       const projectDirectory = workspaceDependencies.projectDirectory
       if (!projectDirectory.createProjectAccessConditionCheck || !projectDirectory.createActiveReferenceConditionChecks) {
         throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
       }
-      const check = await projectDirectory.createProjectAccessConditionCheck.call(
-        projectDirectory,
-        workspaceId,
-        projectId,
-        normalizeProjectMemberKey(principal.userKey),
-        'viewer',
-      )
-      // A membership that is already gone is the same race as one revoked before commit:
-      // the change is retried with a fresh readability check.
-      if (!check?.ConditionCheck) throw workItemChanged()
+      const membershipChecks: PlanningCallerAuthorizationConditionCheck[] = []
+      if (membership) {
+        const check = await projectDirectory.createProjectAccessConditionCheck.call(
+          projectDirectory,
+          workspaceId,
+          projectId,
+          normalizeProjectMemberKey(principal.userKey),
+          'viewer',
+        )
+        // A membership that is already gone is the same race as one revoked before commit:
+        // the change is retried with a fresh readability check.
+        if (!check?.ConditionCheck) throw workItemChanged()
+        membershipChecks.push({ ConditionCheck: check.ConditionCheck })
+      }
       // Archiving the Project changes its own row, not the membership row, so the Team and
       // Project must also still be active at commit; one archived before the write is the same
       // race and is retried with a fresh readability check.
@@ -253,7 +258,7 @@ function writeStore(principal: WorkspacePrincipal): CollectionsStore {
           if (error instanceof ProjectDataError && error.status === 404) throw workItemChanged()
           throw error
         })
-      return [{ ConditionCheck: check.ConditionCheck }, ...activeReferences.map((item) => {
+      return [...membershipChecks, ...activeReferences.map((item) => {
         if (!item.ConditionCheck) throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
         return { ConditionCheck: item.ConditionCheck }
       })]
@@ -271,23 +276,24 @@ function workItemChanged(): CollectionError {
 }
 
 /**
- * Picks the Project whose direct membership authorized reading a Work Item.
+ * Picks the Project that authorized reading a Work Item and how it was granted.
  *
  * Non-Enterprise members reach a Team and its Work Items only through Project membership
- * rows, which the Workspace membership fence does not cover. A system administrator, a
- * direct Team grant, or an Enterprise Project grant is covered by the Enterprise control
- * fence instead, so no Project membership is returned for them.
+ * rows, which the Workspace membership fence does not cover. An Enterprise Project grant is
+ * covered by the Enterprise control fence instead, but archiving its Project changes neither,
+ * so that Project is still returned to fence its active state. A system administrator or a
+ * direct Team grant does not depend on a Project.
  *
  * @param principal - Authenticated principal.
  * @param teamContext - Team authorization used for the read.
  * @param assignedProjectId - Primary Project of the Work Item, if any.
- * @returns The Project membership to fence, or undefined when none authorized the read.
+ * @returns The authorizing Project and whether a direct membership granted it, or undefined.
  */
-function resolveAccessProjectId(
+function resolveAccessProject(
   principal: WorkspacePrincipal,
   teamContext: TeamPermissionContext,
   assignedProjectId: string | undefined,
-): string | undefined {
+): { projectId: string; membership: boolean } | undefined {
   if (principal.isSystemAdmin || teamContext.directTeamGrant) return undefined
   const candidates = (teamContext.projectAccesses ?? [])
     .filter((access) => projectAccessAllows(access, 'viewer'))
@@ -298,8 +304,9 @@ function resolveAccessProjectId(
   const enterpriseProjectIds = new Set((principal.enterpriseProjectAccesses ?? [])
     .filter((access) => projectAccessAllows(access, 'viewer'))
     .map((access) => access.projectId))
-  if (candidates.some((projectId) => enterpriseProjectIds.has(projectId))) return undefined
-  return candidates[0]
+  const enterpriseProjectId = candidates.find((projectId) => enterpriseProjectIds.has(projectId))
+  if (enterpriseProjectId !== undefined) return { projectId: enterpriseProjectId, membership: false }
+  return candidates[0] === undefined ? undefined : { projectId: candidates[0], membership: true }
 }
 
 /**
@@ -394,7 +401,7 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal, reloadPro
       )
       if (detail.issue.teamId !== teamId || detail.issue.id !== issueId) return undefined
       requireAssignedProjectPermission(principal, teamContext, detail.issue.assignedProjectId, 'viewer')
-      const accessProjectId = resolveAccessProjectId(principal, teamContext, detail.issue.assignedProjectId)
+      const accessProject = resolveAccessProject(principal, teamContext, detail.issue.assignedProjectId)
       return {
         entry: {
           teamId,
@@ -404,7 +411,11 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal, reloadPro
           ...(detail.issue.assignedProjectId ? { assignedProjectId: detail.issue.assignedProjectId } : {}),
         },
         revision: detail.issue.revision,
-        ...(accessProjectId === undefined ? {} : { accessProjectId }),
+        ...(accessProject === undefined
+          ? {}
+          : accessProject.membership
+            ? { accessProjectId: accessProject.projectId }
+            : { activeProjectId: accessProject.projectId }),
       }
     } catch (error) {
       if (isUnreadableWorkItemError(error)) return undefined

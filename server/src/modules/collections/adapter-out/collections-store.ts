@@ -48,6 +48,14 @@ const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 /** Entry type stored on the per-Workspace Collection counter row. */
 const COLLECTION_COUNT_ENTRY_TYPE = 'work-item-collection-count'
 
+/**
+ * Exclusive upper bound of a stored counter generation.
+ *
+ * Every create and delete adds one, so a stored generation must leave room for that write to
+ * stay a valid generation.
+ */
+const COLLECTION_COUNTER_GENERATION_LIMIT = Number.MAX_SAFE_INTEGER - 1
+
 /** Validated state of the per-Workspace Collection counter row. */
 type CollectionCounter = {
   /** Number of live Collections in the Workspace. */
@@ -78,21 +86,24 @@ const COLLECTION_SUMMARY_ATTRIBUTES = [
 ] as const
 
 /**
- * Builds the conditions that the caller still holds the Project membership that authorized
- * reading a Work Item, and that the Team and that Project are still active.
+ * Builds the conditions that the Team and the Project that authorized reading a Work Item are
+ * still active and, for a direct membership, that the caller still holds it.
  *
- * Archiving a Project changes the Project row, not its membership rows, so both are fenced.
- * Throws `409 CollectionWorkItemChanged` when the membership or the Project no longer exists.
+ * Archiving a Project changes the Project row, not its membership rows or an Enterprise
+ * grant, so the Project row is always fenced. Throws `409 CollectionWorkItemChanged` when the
+ * membership or the Project no longer exists.
  *
  * @param workspaceId - Server-resolved Workspace.
  * @param teamId - Team that owns the Work Item and the Project.
- * @param projectId - Project whose membership authorized the read.
+ * @param projectId - Project that authorized the read.
+ * @param membership - Whether a direct Project membership authorized the read.
  * @returns Transaction condition checks on the membership, Team and Project rows.
  */
 export type CollectionProjectAccessCheck = (
   workspaceId: string,
   teamId: string,
   projectId: string,
+  membership: boolean,
 ) => Promise<readonly PlanningCallerAuthorizationConditionCheck[]>
 
 /** Composition-only binding for fresh caller authorization conditions. */
@@ -408,6 +419,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       row.entryType !== COLLECTION_COUNT_ENTRY_TYPE ||
       typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 ||
       typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0 ||
+      generation >= COLLECTION_COUNTER_GENERATION_LIMIT ||
       (row.generation !== undefined && generation === 0)
     ) {
       throw corruptState()
@@ -467,12 +479,13 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   private async workItemChecks(workspaceId: string, fence: CollectionWorkItemFence): Promise<CollectionTransactItem[]> {
     // Without either fence a stale readability check could commit; refuse instead.
-    if (!this.workItemFenceCheck || (fence.accessProjectId !== undefined && !this.projectAccessCheck)) {
+    const projectId = fence.accessProjectId ?? fence.activeProjectId
+    if (!this.workItemFenceCheck || (projectId !== undefined && !this.projectAccessCheck)) {
       throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
     }
     const checks: CollectionTransactItem[] = [this.workItemFenceCheck(workspaceId, fence)]
-    if (fence.accessProjectId !== undefined && this.projectAccessCheck) {
-      checks.push(...await this.projectAccessCheck(workspaceId, fence.teamId, fence.accessProjectId))
+    if (projectId !== undefined && this.projectAccessCheck) {
+      checks.push(...await this.projectAccessCheck(workspaceId, fence.teamId, projectId, fence.accessProjectId !== undefined))
     }
     return checks
   }
@@ -520,13 +533,18 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         ConditionExpression: delta === 1
           ? '#entryType = :entryType AND #count = :verified AND #count < :limit AND ' +
             (verified.generation === 0 ? 'attribute_not_exists(#generation)' : '#generation = :generation')
-          : '#count > :zero AND #entryType = :entryType',
+          // A decrement does not read the counter first, so the condition itself keeps room for
+          // the generation increment; a creation's verified generation already passed the read.
+          : '#count > :zero AND #entryType = :entryType AND ' +
+            '(attribute_not_exists(#generation) OR #generation < :generationLimit)',
         ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType', '#generation': 'generation' },
         ExpressionAttributeValues: {
           ':delta': delta,
           ':one': 1,
           ':entryType': COLLECTION_COUNT_ENTRY_TYPE,
-          ...(delta === 1 ? { ':verified': verified.count, ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
+          ...(delta === 1
+            ? { ':verified': verified.count, ':limit': COLLECTION_LIMIT }
+            : { ':zero': 0, ':generationLimit': COLLECTION_COUNTER_GENERATION_LIMIT }),
           ...(delta === 1 && verified.generation !== 0 ? { ':generation': verified.generation } : {}),
         },
       },
@@ -580,8 +598,9 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
       readDeletion: (workspaceId, collectionId) => this.readDeletion(workspaceId, collectionId),
       delete: (workspaceId, collectionId, expectedRevision, deletion) => this.delete(workspaceId, collectionId, expectedRevision, deletion),
       put: async (workspaceId, collection, expectedRevision, workItemFence) => {
-        if (workItemFence?.accessProjectId !== undefined) {
-          await projectAccessCheck(workspaceId, workItemFence.teamId, workItemFence.accessProjectId)
+        const projectId = workItemFence?.accessProjectId ?? workItemFence?.activeProjectId
+        if (workItemFence && projectId !== undefined) {
+          await projectAccessCheck(workspaceId, workItemFence.teamId, projectId, workItemFence.accessProjectId !== undefined)
         }
         await this.put(workspaceId, collection, expectedRevision, workItemFence)
       },

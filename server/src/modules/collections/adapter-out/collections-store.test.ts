@@ -101,7 +101,7 @@ test('maps a failed counter condition on creation to the limit only for a valid 
   await expect(storeWithCounter({ ...full, count: 199 }).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
   // A negative or foreign counter row, or one with a generation this store never writes, is
   // corrupt state, not a full Workspace.
-  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }, { ...full, generation: 0 }, { ...full, generation: 1.5 }]) {
+  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }, { ...full, generation: 0 }, { ...full, generation: 1.5 }, { ...full, generation: Number.MAX_SAFE_INTEGER - 1 }]) {
     await expect(storeWithCounter(counter).put('w', collection, 0)).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   }
 })
@@ -167,7 +167,7 @@ test('requires an existing positive counter before a deletion decrements it', as
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   expect(transactions).toEqual([[
     expect.anything(),
-    { Update: expect.objectContaining({ ConditionExpression: '#count > :zero AND #entryType = :entryType' }) },
+    { Update: expect.objectContaining({ ConditionExpression: '#count > :zero AND #entryType = :entryType AND (attribute_not_exists(#generation) OR #generation < :generationLimit)', ExpressionAttributeValues: expect.objectContaining({ ':generationLimit': Number.MAX_SAFE_INTEGER - 1 }) }) },
     expect.anything(),
     ...checks,
   ]])
@@ -391,18 +391,23 @@ test('fences a reference change on the Project membership that authorized the re
   })
   const requested: unknown[] = []
   const store = new DynamoDbCollectionsStore('planning', client, [], () => revisionCheck)
-    .withCallerAuthorization(checks, async (workspaceId, teamId, projectId) => {
-      requested.push([workspaceId, teamId, projectId])
+    .withCallerAuthorization(checks, async (workspaceId, teamId, projectId, membership) => {
+      requested.push([workspaceId, teamId, projectId, membership])
       return [membershipCheck]
     })
   const fence = { teamId: 'core-team', issueId: 'item-1', revision: 4, accessProjectId: 'refero' }
   await store.put('w', { ...collection, revision: 2 }, 1, fence)
-  expect(requested).toEqual([['w', 'core-team', 'refero']])
+  expect(requested).toEqual([['w', 'core-team', 'refero', true]])
   expect(transactions).toEqual([[expect.objectContaining({ Put: expect.anything() }), expect.anything(), revisionCheck, membershipCheck, ...checks]])
   // A revoked membership fails only its check: retry with a fresh read, not a lost Workspace grant.
   failMembership = true
   await expect(store.put('w', { ...collection, revision: 2 }, 1, fence))
     .rejects.toMatchObject({ status: 409, code: 'CollectionWorkItemChanged' })
+  // An Enterprise grant fences its Project's active state without a membership check.
+  failMembership = false
+  requested.length = 0
+  await store.put('w', { ...collection, revision: 2 }, 1, { teamId: 'core-team', issueId: 'item-1', revision: 4, activeProjectId: 'refero' })
+  expect(requested).toEqual([['w', 'core-team', 'refero', false]])
   // A fence that names a Project cannot be written without the membership builder.
   await expect(new DynamoDbCollectionsStore('planning', client, checks, () => revisionCheck).put('w', { ...collection, revision: 2 }, 1, fence))
     .rejects.toMatchObject({ status: 503 })
