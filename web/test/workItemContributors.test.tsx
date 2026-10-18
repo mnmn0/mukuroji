@@ -226,9 +226,12 @@ describe('contributor options', () => {
       member('former@example.com', 'member', 'deactivated'),
     ]).map((option) => option.id)).toEqual(['owner@example.com', 'outside-project@example.com'])
     // A directory-managed member whose email changed is still identified by the member key.
-    expect(resolveWorkItemContributorOptions([
+    // A nameless member keeps no name, so the label falls back to the email alone.
+    const [renamedMember] = resolveWorkItemContributorOptions([
       { ...member('new-address@example.com', 'member'), memberKey: 'old-address@example.com' },
-    ])).toEqual([{ email: 'new-address@example.com', id: 'old-address@example.com', name: 'new-address@example.com' }])
+    ])
+    expect(renamedMember).toEqual({ email: 'new-address@example.com', id: 'old-address@example.com' })
+    expect(renamedMember && formatContributorMemberLabel(renamedMember)).toBe('new-address@example.com')
   })
 
   test('keep deactivated and guest members in the display directory', () => {

@@ -1,4 +1,5 @@
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -48,6 +49,31 @@ const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 /** Entry type stored on the per-Workspace Collection counter row. */
 const COLLECTION_COUNT_ENTRY_TYPE = 'work-item-collection-count'
 
+/**
+ * Exclusive upper bound of a counter generation that a create or delete may still increment.
+ *
+ * Any safe integer is a valid stored generation; a write requires the stored one to be below
+ * this bound, so the incremented value is still a safe integer.
+ */
+const COLLECTION_COUNTER_GENERATION_LIMIT = Number.MAX_SAFE_INTEGER
+
+/** Maximum keys in one DynamoDB `BatchGetItem` request. */
+const DYNAMODB_BATCH_GET_LIMIT = 100
+
+/** Attempts to read the keys DynamoDB leaves unprocessed in a batch read. */
+const BATCH_GET_ATTEMPTS = 5
+
+/** Base delay in milliseconds before retrying unprocessed batch-read keys; it doubles per attempt. */
+const BATCH_GET_BACKOFF_MS = 20
+
+/** Validated state of the per-Workspace Collection counter row. */
+type CollectionCounter = {
+  /** Number of live Collections in the Workspace. */
+  count: number
+  /** Number of creates and deletes applied to the counter; it only grows. */
+  generation: number
+}
+
 /** Entry type stored on Collection rows. */
 const COLLECTION_ENTRY_TYPE = 'work-item-collection'
 
@@ -70,16 +96,25 @@ const COLLECTION_SUMMARY_ATTRIBUTES = [
 ] as const
 
 /**
- * Builds the condition that the caller still holds the Project membership that authorized
- * reading a Work Item.
+ * Builds the conditions that the Team and the Project that authorized reading a Work Item are
+ * still active and, for a direct membership, that the caller still holds it.
  *
- * Throws `409 CollectionWorkItemChanged` when the membership no longer exists.
+ * Archiving a Project changes the Project row, not its membership rows or an Enterprise
+ * grant, so the Project row is always fenced. Throws `409 CollectionWorkItemChanged` when the
+ * membership or the Project no longer exists.
  *
  * @param workspaceId - Server-resolved Workspace.
- * @param projectId - Project whose membership authorized the read.
- * @returns Transaction condition check on the membership row.
+ * @param teamId - Team that owns the Work Item and the Project.
+ * @param projectId - Project that authorized the read, or undefined when only the Team did.
+ * @param membership - Whether a direct Project membership authorized the read.
+ * @returns Transaction condition checks on the membership, Team and Project rows.
  */
-export type CollectionProjectAccessCheck = (workspaceId: string, projectId: string) => Promise<PlanningCallerAuthorizationConditionCheck>
+export type CollectionProjectAccessCheck = (
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+  membership: boolean,
+) => Promise<readonly PlanningCallerAuthorizationConditionCheck[]>
 
 /** Composition-only binding for fresh caller authorization conditions. */
 export interface CollectionsPersistence extends CollectionsStore {
@@ -181,7 +216,61 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       }
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey)
-    return collections
+    return await this.withoutDeletedSummaries(workspaceId, collections)
+  }
+
+  /**
+   * Fails closed when a listed Collection also has a deletion marker.
+   *
+   * A restore or manual repair can leave a live row beside its marker; listing it would expose
+   * a logically deleted Collection and let counter reconciliation count it. The markers are
+   * read after the rows, so a delete that commits in between also shows both; such a row is
+   * read again and dropped once it is gone, and only a row that is still live is corrupt.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param collections - Listed Collection metadata.
+   * @returns The Collections without ones deleted while listing.
+   * @throws CollectionError `CollectionCorruptState` when a live row has a deletion marker.
+   */
+  private async withoutDeletedSummaries(workspaceId: string, collections: WorkItemCollection[]): Promise<WorkItemCollection[]> {
+    const deleted = new Set<string>()
+    const requested = new Map(collections.map((collection) => [tombstoneKey(collection.collectionId), collection.collectionId]))
+    for (let index = 0; index < collections.length; index += DYNAMODB_BATCH_GET_LIMIT) {
+      let keys: Record<string, unknown>[] = collections
+        .slice(index, index + DYNAMODB_BATCH_GET_LIMIT)
+        .map((collection) => ({ workspaceId, recordKey: tombstoneKey(collection.collectionId) }))
+      for (let attempt = 0; keys.length > 0 && attempt < BATCH_GET_ATTEMPTS; attempt += 1) {
+        const response = await this.client.send(new BatchGetCommand({
+          RequestItems: { [this.tableName]: { Keys: keys, ConsistentRead: true } },
+        })).catch((error: unknown) => storageFailure(error))
+        for (const marker of response.Responses?.[this.tableName] ?? []) {
+          // Any row at a requested marker key is a deletion of that Collection; one whose own
+          // identity disagrees with its key is corrupt, the same as for a single-Collection read.
+          const collectionId = requested.get(typeof marker.recordKey === 'string' ? marker.recordKey : '')
+          if (collectionId === undefined || marker.workspaceId !== workspaceId || marker.collectionId !== collectionId) {
+            throw corruptState()
+          }
+          deleted.add(collectionId)
+        }
+        keys = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
+        // Unprocessed keys mean throttling; back off with jitter before the next attempt.
+        if (keys.length > 0 && attempt + 1 < BATCH_GET_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, Math.random() * BATCH_GET_BACKOFF_MS * 2 ** attempt))
+        }
+      }
+      if (keys.length > 0) throw retryable()
+    }
+    if (deleted.size === 0) return collections
+    for (const collectionId of deleted) {
+      const { Item: row } = await this.client.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: recordKey(collectionId) },
+        ConsistentRead: true,
+        ProjectionExpression: 'recordKey',
+      })).catch((error: unknown) => storageFailure(error))
+      if (row !== undefined) throw corruptState()
+    }
+    return collections.filter((collection) => !deleted.has(collection.collectionId))
   }
 
   /**
@@ -344,36 +433,44 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * counter is rebuilt from the live rows first. Creations and deletions change the counter and
    * the rows in one transaction, so a mismatch whose counter is unchanged on a second read is
    * stored state that disagrees and fails closed with `CollectionCorruptState`; a counter that
-   * changed in between was a concurrent write and is reported as `CollectionConflict`.
+   * changed in between was a concurrent write and is reported as `CollectionConflict`. The
+   * listing can span several pages, so a delete and a create during it can leave the count
+   * unchanged while the listing missed a row; every write also advances the counter's
+   * generation, which tells that churn apart from corrupt state.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @returns The verified count, which the increment then requires to be unchanged.
+   * @returns The verified count and generation, which the increment then requires to be
+   *   unchanged, so a write that overlapped the listing fails the creation instead of
+   *   committing on a count the listing did not really observe.
    */
-  private async verifiedCount(workspaceId: string): Promise<number> {
-    let count = await this.readCounter(workspaceId)
-    if (count === undefined) {
+  private async verifiedCount(workspaceId: string): Promise<CollectionCounter> {
+    let counter = await this.readCounter(workspaceId)
+    if (counter === undefined) {
       await this.initializeCounter(workspaceId)
-      count = await this.readCounter(workspaceId)
+      counter = await this.readCounter(workspaceId)
       // The initialization either wrote the row or lost to another one; a miss is unexpected.
-      if (count === undefined) throw corruptState()
+      if (counter === undefined) throw corruptState()
     }
     const live = (await this.listSummaries(workspaceId)).length
-    if (live !== count) {
-      if ((await this.readCounter(workspaceId)) !== count) throw conflict()
+    if (live !== counter.count) {
+      const reread = await this.readCounter(workspaceId)
+      if (reread?.count !== counter.count || reread.generation !== counter.generation) throw conflict()
       throw corruptState()
     }
-    if (count >= COLLECTION_LIMIT) throw limitReached()
-    return count
+    if (counter.count >= COLLECTION_LIMIT) throw limitReached()
+    // The creation increments the generation it verified; one at the bound has no room left.
+    if (counter.generation >= COLLECTION_COUNTER_GENERATION_LIMIT) throw corruptState()
+    return counter
   }
 
   /**
    * Reads the Workspace counter row.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @returns The stored count, or undefined when the row is missing.
+   * @returns The stored count and write generation, or undefined when the row is missing.
    * @throws CollectionError `CollectionCorruptState` when the row is not a valid counter.
    */
-  private async readCounter(workspaceId: string): Promise<number | undefined> {
+  private async readCounter(workspaceId: string): Promise<CollectionCounter | undefined> {
     const { Item: row } = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
@@ -381,10 +478,18 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     })).catch((error: unknown) => storageFailure(error))
     if (row === undefined) return undefined
     const count: unknown = row.count
-    if (row.entryType !== COLLECTION_COUNT_ENTRY_TYPE || typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+    // A counter no create or delete has touched has no generation yet; `ADD` then writes 1, so
+    // a stored generation is always positive.
+    const generation: unknown = row.generation ?? 0
+    if (
+      row.entryType !== COLLECTION_COUNT_ENTRY_TYPE ||
+      typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 ||
+      typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0 ||
+      (row.generation !== undefined && generation === 0)
+    ) {
       throw corruptState()
     }
-    return count
+    return { count, generation }
   }
 
   /**
@@ -397,10 +502,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   private async classifyCounterFailure(workspaceId: string): Promise<CollectionError | 'missing'> {
     // An invalid counter row throws `CollectionCorruptState` from the read.
-    const count = await this.readCounter(workspaceId)
-    if (count === undefined) return 'missing'
+    const counter = await this.readCounter(workspaceId)
+    if (counter === undefined) return 'missing'
     // A concurrent write can change the counter after it was verified; retry then.
-    return count >= COLLECTION_LIMIT ? limitReached() : conflict()
+    return counter.count >= COLLECTION_LIMIT ? limitReached() : conflict()
   }
 
   /**
@@ -439,12 +544,14 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   private async workItemChecks(workspaceId: string, fence: CollectionWorkItemFence): Promise<CollectionTransactItem[]> {
     // Without either fence a stale readability check could commit; refuse instead.
-    if (!this.workItemFenceCheck || (fence.accessProjectId !== undefined && !this.projectAccessCheck)) {
+    const projectId = fence.accessProjectId ?? fence.activeProjectId
+    const fenced = projectId !== undefined || fence.activeTeamOnly === true
+    if (!this.workItemFenceCheck || (fenced && !this.projectAccessCheck)) {
       throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
     }
     const checks: CollectionTransactItem[] = [this.workItemFenceCheck(workspaceId, fence)]
-    if (fence.accessProjectId !== undefined && this.projectAccessCheck) {
-      checks.push(await this.projectAccessCheck(workspaceId, fence.accessProjectId))
+    if (fenced && this.projectAccessCheck) {
+      checks.push(...await this.projectAccessCheck(workspaceId, fence.teamId, projectId, fence.accessProjectId !== undefined))
     }
     return checks
   }
@@ -471,27 +578,40 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param delta - 1 when creating, -1 when deleting.
-   * @param verifiedCount - When creating, the count verified against the live rows.
+   * @param verified - When creating, the counter state verified against the live rows.
    * @returns Transaction item that adjusts the counter.
    */
-  private counterUpdate(workspaceId: string, delta: 1 | -1, verifiedCount = 0) {
+  private counterUpdate(workspaceId: string, delta: 1 | -1, verified: CollectionCounter = { count: 0, generation: 0 }) {
     return {
       Update: {
         TableName: this.tableName,
         Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
-        UpdateExpression: 'ADD #count :delta SET #entryType = :entryType',
+        // Every create and delete advances the generation, so a reconciliation can detect writes
+        // that left the count unchanged.
+        UpdateExpression: 'ADD #count :delta, #generation :one SET #entryType = :entryType',
         // Both directions need an existing counter. A creation requires the count it verified
         // against the live rows, because a missing or undercounted counter would let a restored
         // partition exceed the limit. A decrement also needs a positive count; otherwise the
         // partition is corrupt and a counter at -1 would allow overflow.
+        // A creation also requires the generation it verified: a delete and a create during the
+        // paged reconciliation leave the count unchanged but advance the generation. A counter
+        // that no create or delete has touched yet has no generation attribute.
         ConditionExpression: delta === 1
-          ? '#entryType = :entryType AND #count = :verified AND #count < :limit'
-          : '#count > :zero AND #entryType = :entryType',
-        ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
+          ? '#entryType = :entryType AND #count = :verified AND #count < :limit AND ' +
+            (verified.generation === 0 ? 'attribute_not_exists(#generation)' : '#generation = :generation')
+          // A decrement does not read the counter first, so the condition itself keeps room for
+          // the generation increment; a creation's verified generation already passed the read.
+          : '#count > :zero AND #entryType = :entryType AND ' +
+            '(attribute_not_exists(#generation) OR #generation < :generationLimit)',
+        ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType', '#generation': 'generation' },
         ExpressionAttributeValues: {
           ':delta': delta,
+          ':one': 1,
           ':entryType': COLLECTION_COUNT_ENTRY_TYPE,
-          ...(delta === 1 ? { ':verified': verifiedCount, ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
+          ...(delta === 1
+            ? { ':verified': verified.count, ':limit': COLLECTION_LIMIT }
+            : { ':zero': 0, ':generationLimit': COLLECTION_COUNTER_GENERATION_LIMIT }),
+          ...(delta === 1 && verified.generation !== 0 ? { ':generation': verified.generation } : {}),
         },
       },
     }
@@ -544,7 +664,10 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
       readDeletion: (workspaceId, collectionId) => this.readDeletion(workspaceId, collectionId),
       delete: (workspaceId, collectionId, expectedRevision, deletion) => this.delete(workspaceId, collectionId, expectedRevision, deletion),
       put: async (workspaceId, collection, expectedRevision, workItemFence) => {
-        if (workItemFence?.accessProjectId !== undefined) await projectAccessCheck(workspaceId, workItemFence.accessProjectId)
+        const projectId = workItemFence?.accessProjectId ?? workItemFence?.activeProjectId
+        if (workItemFence && (projectId !== undefined || workItemFence.activeTeamOnly === true)) {
+          await projectAccessCheck(workspaceId, workItemFence.teamId, projectId, workItemFence.accessProjectId !== undefined)
+        }
         await this.put(workspaceId, collection, expectedRevision, workItemFence)
       },
     }

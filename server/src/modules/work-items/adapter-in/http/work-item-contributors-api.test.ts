@@ -303,6 +303,23 @@ test('fences newly added contributor members in the Work Item write', async () =
   expect(creates).toEqual([['MEMBER#suzuki@example.com']])
 })
 
+test('reports unavailable contributor membership fencing as a retryable 503', async () => {
+  const updates: unknown[] = []
+  configureFakeProjectClients(true, {
+    jobRoles,
+    withoutMemberFence: true,
+    issueUpdateHook: (input) => {
+      updates.push(input)
+    },
+  })
+
+  const response = await patchWorkItem({ contributorAssignments: [{ memberUserId: 'sato@example.com' }] })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({ code: 'ContributorMembershipFenceUnavailable' })
+  expect(updates).toEqual([])
+})
+
 test('rejects a contributor deactivated before the membership fence is built', async () => {
   const updates: unknown[] = []
   configureFakeProjectClients(true, {

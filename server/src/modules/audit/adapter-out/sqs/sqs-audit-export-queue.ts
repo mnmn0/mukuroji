@@ -1,5 +1,5 @@
 import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs'
-import type { AuditExportQueue, AuditExportQueueMessage } from '../../audit-export'
+import type { AuditExportQueue, AuditExportQueueMessage, AuditExportQueueTarget } from '../../audit-export'
 
 /**
  * Schedules export steps on an SQS queue.
@@ -24,12 +24,16 @@ export class SqsAuditExportQueue implements AuditExportQueue {
   /**
    * Sends one step message.
    *
-   * @param workspaceId - Workspace that owns the job.
-   * @param exportId - Export identifier.
+   * @param target - Workspace, export identifier, and request correlation ID of the job.
    * @param delaySeconds - Optional delivery delay, capped at the SQS maximum of 900 seconds.
    */
-  async enqueue(workspaceId: string, exportId: string, delaySeconds?: number): Promise<void> {
-    const message: AuditExportQueueMessage = { version: 1, workspaceId, exportId }
+  async enqueue(target: AuditExportQueueTarget, delaySeconds?: number): Promise<void> {
+    const message: AuditExportQueueMessage = {
+      version: 1,
+      workspaceId: target.workspaceId,
+      exportId: target.exportId,
+      correlationId: target.correlationId,
+    }
     await this.client.send(new SendMessageCommand({
       QueueUrl: this.queueUrl,
       MessageBody: JSON.stringify(message),

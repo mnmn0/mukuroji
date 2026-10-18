@@ -171,7 +171,7 @@ async function expectProtectedHistoryEntryReplaced(page: Page) {
 test('missing session replaces a protected Workspace route with login entry', async ({ page }) => {
   await openProtectedRoute(page, '/help')
 
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL('/?returnTo=%2Fhelp')
   await expect(readStoredAuthSession(page)).resolves.toEqual({
     local: null,
     session: null,
@@ -182,12 +182,35 @@ test('missing session replaces a protected Workspace route with login entry', as
 test('expired session is cleared before replacing a protected Workspace route', async ({ page }) => {
   await openProtectedRoute(page, '/help', expiredAuthSession)
 
-  await expect(page).toHaveURL('/')
+  await expect(page).toHaveURL('/?returnTo=%2Fhelp')
   await expect(readStoredAuthSession(page)).resolves.toEqual({
     local: null,
     session: null,
   })
   await expectProtectedHistoryEntryReplaced(page)
+})
+
+test('missing session returns to the requested Workspace route after sign-in', async ({ page }) => {
+  await mockWorkspaceSessionApis(page)
+  await openProtectedRoute(page, '/my-tasks')
+
+  await expect(page).toHaveURL('/?returnTo=%2Fmy-tasks')
+
+  // A stored session makes the login page continue to its return path, as a successful sign-in does.
+  await page.evaluate((storedSession) => {
+    window.localStorage.setItem('mukuroji.auth', JSON.stringify(storedSession))
+  }, activeAuthSession)
+  await page.reload()
+
+  await expect(page).toHaveURL('/my-tasks')
+})
+
+test('missing session uses the plain login entry for routes outside the return allowlist', async ({
+  page,
+}) => {
+  await openProtectedRoute(page, '/customers')
+
+  await expect(page).toHaveURL('/')
 })
 
 test('current-user 401 clears the session and replaces history with fresh login', async ({ page }) => {
