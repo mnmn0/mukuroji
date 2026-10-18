@@ -1,5 +1,7 @@
 /** Workspace Search module public application and domain surface. */
 export {
+  WORKSPACE_SEARCH_DEFAULT_LIMIT,
+  WORKSPACE_SEARCH_MAX_LIMIT,
   WorkspaceSearchError,
   createCommentWorkspaceSearchEntityId,
   createCommentWorkspaceSearchDocument,

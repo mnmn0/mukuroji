@@ -466,6 +466,29 @@ export async function isWorkspaceSearchAuthorizationCurrent(
 }
 
 /**
+ * Splits an indexed Work Item ID using the Team recorded on the search document.
+ *
+ * Work Item IDs may contain `/`, which the plain grammar cannot split. When the document
+ * carries its Team, the Team prefix is matched literally and the rest is the Work Item ID,
+ * and an ID that names another Team is rejected; only a document without a Team uses the
+ * plain grammar. Search identities are only written for Team IDs
+ * without `/`, because such an identity could also belong to another `(teamId, issueId)`
+ * pair; a document naming such a Team is not resolved.
+ *
+ * @param value - Indexed ID in the form `team/<teamId>/issue/<issueId>`.
+ * @param teamId - Team recorded on the search document, when present.
+ * @returns The Team and Work Item IDs, or undefined when the ID does not match.
+ */
+export function parseSearchWorkItemEntityIdForTeam(value: string | undefined, teamId: string | undefined) {
+  if (!teamId) return parseSearchWorkItemEntityId(value)
+  if (teamId.includes('/')) return undefined
+  // A document whose ID names another Team is inconsistent and is not resolved.
+  const prefix = `team/${teamId}/issue/`
+  const issueId = value?.startsWith(prefix) ? value.slice(prefix.length) : undefined
+  return issueId ? { teamId, issueId } : undefined
+}
+
+/**
  * Parses a Work Item search entity ID into its Team and Work Item IDs.
  *
  * @param value - Raw input value.

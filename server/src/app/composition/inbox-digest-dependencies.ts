@@ -38,7 +38,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(),
       focusState: unavailable(), workspaceSearch: unavailable(), documents: unavailable(), workspaceSearchProjectionEnabled: false,
       workItemConfigurations: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
-      requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(),
+      requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(), collections: unavailable(),
     },
     operational: { recordRuntimeControl: unsupported, readiness: unavailable(), runtimeControl: unavailable(), recordAccess: unsupported, recordError: unsupported },
     automation: { ruleTemplates: unavailable(), inboundWebhooks: unavailable(), recurringSchedules: unavailable(), executions: unavailable(), bulkOperations: unavailable(), automationInboundWebhookSecrets: unavailable() },

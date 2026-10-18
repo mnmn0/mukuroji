@@ -27,6 +27,7 @@ import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
+import { CollectionsPage } from '../pages/workspace/CollectionsPage'
 import { CustomerPage } from '../pages/workspace/CustomerPage'
 import { EnterpriseSsoCallbackPage } from '../pages/auth/EnterpriseSsoCallbackPage'
 import { DocumentPage } from '../documents/DocumentPage'
@@ -128,6 +129,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/customers/:customerId',
                 element: <CustomerPage />,
+              },
+              {
+                path: '/collections',
+                element: <CollectionsPage />,
               },
               {
                 path: '/search',
