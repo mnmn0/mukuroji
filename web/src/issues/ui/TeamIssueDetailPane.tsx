@@ -702,7 +702,7 @@ function IssueDetailContent({
                         <input
                           checked={checked}
                           className="mt-0.5"
-                          disabled={isIssueReadOnly || isAiSummaryOperationPending}
+                          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
                           form={editorFormId}
                           onChange={(event) => {
                             const nextIds = event.target.checked
@@ -727,7 +727,7 @@ function IssueDetailContent({
                   {t('tasks.detail.typeChange.invalidStatus')}
                   <select
                     className="workbench-input h-9 px-3"
-                    disabled={isIssueReadOnly || isAiSummaryOperationPending}
+                    disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
                     form={editorFormId}
                     name="typeChangeWorkflowStatusId"
                     onChange={(event) => setTypeChangeState((current) => ({
