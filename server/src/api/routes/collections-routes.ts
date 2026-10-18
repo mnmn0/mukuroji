@@ -1,4 +1,5 @@
 import { SEARCH_SCHEMA_VERSION, type WorkspaceSearchResponse, type WorkspaceSearchResult } from '@mukuroji/contracts'
+import { createHash } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -450,7 +451,9 @@ const EXACT_CANDIDATE_CURSOR_PREFIX = 'exact:'
  * readable Teams. Paging stays stable and bounded:
  *
  * - Exact matches come first, in readable-Team order. While they remain, the page carries an
- *   `exact:<offset>` cursor (never a valid index cursor, which is base64url) that continues them.
+ *   `exact:<offset>.<context>` cursor (never a valid index cursor, which is base64url) that
+ *   continues them. The context binds it to the Workspace, caller and keyword that produced it,
+ *   so it cannot skip matches of another search.
  * - The page that exhausts the exact matches fills its remaining slots with the first index
  *   page, so the page never holds more than `limit` results, and returns the index cursor.
  * - Every index page drops results that are exact-ID matches of the keyword in those Teams. Such
@@ -469,7 +472,8 @@ async function searchCollectionCandidates(
   limit: number,
   cursor: string | undefined,
 ): Promise<WorkspaceSearchResponse> {
-  const exactOffset = cursor ? readExactCandidateCursor(cursor) : 0
+  const cursorContext = exactCandidateCursorContext(principal, keyword)
+  const exactOffset = cursor ? readExactCandidateCursor(cursor, cursorContext) : 0
   const access = isWorkItemReferenceIdentifier(keyword) ? await createWorkItemReadAccess(principal) : undefined
   // Only Teams the caller can read are looked up, so no Work Item row is read for the rest.
   const exactTeamIds = new Set(access ? (await access.readableTeamIds()).slice(0, EXACT_CANDIDATE_TEAM_LIMIT) : [])
@@ -490,7 +494,7 @@ async function searchCollectionCandidates(
   const shown = exact.slice(exactOffset, exactOffset + limit)
   const nextOffset = exactOffset + shown.length
   if (nextOffset < exact.length || shown.length === limit) {
-    return { schemaVersion: SEARCH_SCHEMA_VERSION, results: shown, nextCursor: `${EXACT_CANDIDATE_CURSOR_PREFIX}${nextOffset}` }
+    return { schemaVersion: SEARCH_SCHEMA_VERSION, results: shown, nextCursor: `${EXACT_CANDIDATE_CURSOR_PREFIX}${nextOffset}.${cursorContext}` }
   }
   const page = await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
     limit: limit - shown.length,
@@ -499,16 +503,34 @@ async function searchCollectionCandidates(
 }
 
 /**
+ * Derives the search context an exact-match cursor is bound to.
+ *
+ * @param principal - Authenticated principal.
+ * @param keyword - Trimmed search keyword.
+ * @returns A URL-safe digest of the Workspace, caller and keyword.
+ */
+function exactCandidateCursorContext(principal: WorkspacePrincipal, keyword: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([principal.directoryId, principal.userKey, keyword]))
+    .digest('base64url')
+    .slice(0, 22)
+}
+
+/**
  * Reads the exact-match offset of a candidate cursor.
  *
  * @param cursor - Non-empty cursor from the client.
+ * @param context - Context digest of the current search.
  * @returns The offset for an exact-match cursor, or undefined for a search index cursor.
+ * @throws WorkspaceSearchError `InvalidSearchCursor` for a malformed cursor or one issued for
+ *   another Workspace, caller or keyword.
  */
-function readExactCandidateCursor(cursor: string): number | undefined {
+function readExactCandidateCursor(cursor: string, context: string): number | undefined {
   if (!cursor.startsWith(EXACT_CANDIDATE_CURSOR_PREFIX)) return undefined
-  const value = cursor.slice(EXACT_CANDIDATE_CURSOR_PREFIX.length)
+  const parts = cursor.slice(EXACT_CANDIDATE_CURSOR_PREFIX.length).split('.')
+  const [value = '', cursorContext] = parts.length === 2 ? parts : []
   const offset = /^(?:0|[1-9][0-9]{0,2})$/u.test(value) ? Number(value) : Number.NaN
-  if (!Number.isSafeInteger(offset) || offset > EXACT_CANDIDATE_TEAM_LIMIT) {
+  if (!Number.isSafeInteger(offset) || offset > EXACT_CANDIDATE_TEAM_LIMIT || cursorContext !== context) {
     throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Cursor is invalid.')
   }
   return offset

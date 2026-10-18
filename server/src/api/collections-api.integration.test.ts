@@ -247,7 +247,7 @@ test('keeps exact-ID candidates within the page limit and never repeats them on 
   // The exact match takes the only slot, so the index is not read until the next page.
   const first = await (await planningApiRequest(`${path}&limit=1`)).json()
   expect(first.results.map((result: WorkspaceSearchResult) => result.id)).toEqual([indexedExact.id])
-  expect(first.nextCursor).toBe('exact:1')
+  expect(first.nextCursor).toMatch(/^exact:1\.[A-Za-z0-9_-]{22}$/u)
   expect(searches).toEqual([])
   const second = await (await planningApiRequest(`${path}&limit=1&cursor=${first.nextCursor}`)).json()
   // The index match of the exact Work Item is dropped rather than shown again.
@@ -265,10 +265,14 @@ test('keeps exact-ID candidates within the page limit and never repeats them on 
   expect(later).toEqual({ schemaVersion: 1, results: [] })
   expect(searches).toEqual([{ limit: 1 }, { limit: 2, cursor: 'index-next' }])
 
-  for (const query of ['&cursor=exact:x', '&cursor=exact:101', '&cursor=exact:01', '&limit=101']) {
+  for (const query of ['&cursor=exact:x', '&cursor=exact:101', '&cursor=exact:01', '&cursor=exact:1', '&limit=101']) {
     const invalid = await planningApiRequest(`${path}${query}`)
     expect(invalid.status).toBe(400)
   }
+  // An exact-match cursor is bound to its keyword, so another search cannot skip its matches.
+  const otherKeyword = await planningApiRequest(`/api/collections/candidates?keyword=other-item&limit=1&cursor=${first.nextCursor}`)
+  expect(otherKeyword.status).toBe(400)
+  expect((await planningApiRequest(`${path}&limit=1&cursor=${first.nextCursor}.extra`)).status).toBe(400)
 })
 
 /** One custom role and where it is assigned to the test member. */
@@ -388,6 +392,34 @@ test('fences the primary Project when a direct Team grant authorized reading the
   activeChecked.length = 0
   expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(200)
   expect(activeChecked).toEqual([['core-team', 'refero']])
+})
+
+test('serves Workspace-scoped Collection metadata without reading the Project directory', async () => {
+  configureFakeProjectClients(false, { directoryId: WORKSPACE_ID, workspaceRole: 'admin', projectAccesses: [] })
+  setTestAppDependencies({
+    enterpriseIdentity: await createWorkItemRoleIdentity(WORKSPACE_ID, [{
+      roleId: 'custom:work-item-editor',
+      permissions: ['work-items.read', 'work-items.write'],
+      kind: 'workspace',
+      targetId: WORKSPACE_ID,
+    }]),
+  })
+  const { collectionId } = await createCollection('Launch')
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  let directoryReads = 0
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async getProjectDirectory(...args) {
+        directoryReads += 1
+        return await existingProjectDirectory.getProjectDirectory(...args)
+      },
+    },
+  })
+  // Listing, renaming and reading metadata use only Workspace-scoped rows.
+  expect((await planningApiRequest('/api/collections')).status).toBe(200)
+  expect((await planningApiRequest(`/api/collections/${collectionId}`, 'PATCH', { expectedRevision: 1, name: 'Renamed' })).status).toBe(200)
+  expect(directoryReads).toBe(0)
 })
 
 test('does not let a Team-scoped Work Item grant change Workspace-wide Collections', async () => {
