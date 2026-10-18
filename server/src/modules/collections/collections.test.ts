@@ -328,3 +328,39 @@ test('does not commit a reference change after the Work Item is deleted or moved
     .rejects.toMatchObject({ status: 404, code: 'CollectionWorkItemNotFound' })
   expect((await store.get('w', collectionId))?.items.map((item) => item.issueId)).toEqual(['b'])
 })
+
+test('rejects a change before writing a revision the stored-row validator would refuse', async () => {
+  const lastRevision = Number.MAX_SAFE_INTEGER - 1
+  let writes = 0
+  /** Store whose Collection is at the last revision the stored-row validator accepts. */
+  class ExhaustedRevisionStore extends InMemoryCollectionsStore {
+    /**
+     * Reads the Collection at the last valid revision.
+     * @param workspaceId Workspace identifier.
+     * @param collectionId Collection identifier.
+     * @returns The Collection with its revision moved to the last valid value.
+     */
+    override async get(workspaceId: string, collectionId: string): Promise<StoredCollection | undefined> {
+      const stored = await super.get(workspaceId, collectionId)
+      return stored ? { ...stored, revision: lastRevision } : undefined
+    }
+
+    /**
+     * Counts writes that reach the store.
+     * @param args Write arguments.
+     */
+    override async put(...args: Parameters<InMemoryCollectionsStore['put']>): Promise<void> {
+      writes += 1
+      await super.put(...args)
+    }
+  }
+  const store = new ExhaustedRevisionStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  writes = 0
+  expect(isStoredCollection(await store.get('w', collectionId))).toBe(true)
+  await expect(updateCollection(store, context, collectionId, { expectedRevision: lastRevision, name: 'Renamed' }))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  await expect(addCollectionItem(store, context, collectionId, 'core-team', 'item-1', readWorkItem))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  expect(writes).toBe(0)
+})

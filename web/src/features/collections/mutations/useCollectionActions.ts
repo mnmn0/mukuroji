@@ -202,11 +202,12 @@ export function useCollectionActions(
     addItem: (collectionId: string, teamId: string, issueId: string) =>
       run(async (token) => {
         const { item, ...updated } = await addCollectionItem(token, collectionId, teamId, issueId)
-        // Most recently added first, matching the item list order.
-        await cacheItems(token, updated, (items) => [
+        // Most recently added first, matching the item list order. An idempotent add can return
+        // an older reference, so it is placed by its `addedAt` instead of always at the top.
+        await cacheItems(token, updated, (items) => insertByAddedAt(
+          items.filter((entry) => entry.teamId !== teamId || entry.issueId !== issueId),
           item,
-          ...items.filter((entry) => entry.teamId !== teamId || entry.issueId !== issueId),
-        ])
+        ))
         return await cacheCollection(token, updated)
       }),
     /**
@@ -224,4 +225,23 @@ export function useCollectionActions(
         return await cacheCollection(token, updated)
       }),
   }
+}
+
+/**
+ * Inserts a Collection item into a most-recently-added-first list.
+ *
+ * The item goes before the first entry that is not newer than it, so a fresh add stays on top
+ * and an existing older reference returned by an idempotent add keeps its place in time.
+ *
+ * @param items - Items ordered most recently added first, without the inserted item.
+ * @param item - Item to insert.
+ * @returns A new list with the item in `addedAt` order.
+ */
+export function insertByAddedAt(
+  items: readonly WorkItemCollectionEntry[],
+  item: WorkItemCollectionEntry,
+): WorkItemCollectionEntry[] {
+  const addedAt = Date.parse(item.addedAt)
+  const index = items.findIndex((entry) => Date.parse(entry.addedAt) <= addedAt)
+  return index === -1 ? [...items, item] : [...items.slice(0, index), item, ...items.slice(index)]
 }

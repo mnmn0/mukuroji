@@ -65,7 +65,7 @@ test('writes require caller checks and carry a revision condition', async () => 
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
-      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: '#entryType = :entryType AND #count = :verified AND #count < :limit', ExpressionAttributeValues: { ':delta': 1, ':entryType': 'work-item-collection-count', ':verified': 2, ':limit': 200 } }) },
+      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: '#entryType = :entryType AND #count = :verified AND #count < :limit', UpdateExpression: 'ADD #count :delta, #generation :one SET #entryType = :entryType', ExpressionAttributeValues: { ':delta': 1, ':one': 1, ':entryType': 'work-item-collection-count', ':verified': 2, ':limit': 200 } }) },
       { ConditionCheck: { TableName: 'planning', Key: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
@@ -413,17 +413,19 @@ test('fails closed before creating when an existing counter disagrees with the l
    *
    * @param counts - Counter values returned by successive counter reads.
    * @param liveRows - Number of live Collection rows.
+   * @param generations - Write generations returned by successive counter reads.
    * @returns The store and the commands it received.
    */
-  const storeWith = (counts: number[], liveRows: number) => {
+  const storeWith = (counts: number[], liveRows: number, generations: number[] = [0]) => {
     const commands: unknown[] = []
     let reads = 0
     const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
       commands.push(command)
       if (command instanceof GetCommand) {
         const count = counts[Math.min(reads, counts.length - 1)]
+        const generation = generations[Math.min(reads, generations.length - 1)]
         reads += 1
-        return { Item: { ...validCounter, count } }
+        return { Item: { ...validCounter, count, generation } }
       }
       if (command instanceof QueryCommand) return { Items: Array.from({ length: liveRows }, (_, index) => storedRow(index)) }
       if (command instanceof TransactWriteCommand) return {}
@@ -441,6 +443,11 @@ test('fails closed before creating when an existing counter disagrees with the l
   const raced = storeWith([3, 4], 4)
   await expect(raced.store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
   expect(raced.commands.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+  // A delete and a create during a paged listing leave the count unchanged but advance the
+  // generation; that is a retryable conflict, not corrupt state.
+  const churned = storeWith([3], 2, [7, 9])
+  await expect(churned.store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
+  expect(churned.commands.some((command) => command instanceof TransactWriteCommand)).toBe(false)
   // A full, consistent counter reports the limit without writing.
   const full = storeWith([COLLECTION_LIMIT], COLLECTION_LIMIT)
   await expect(full.store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })

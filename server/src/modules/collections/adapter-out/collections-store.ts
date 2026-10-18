@@ -48,6 +48,14 @@ const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 /** Entry type stored on the per-Workspace Collection counter row. */
 const COLLECTION_COUNT_ENTRY_TYPE = 'work-item-collection-count'
 
+/** Validated state of the per-Workspace Collection counter row. */
+type CollectionCounter = {
+  /** Number of live Collections in the Workspace. */
+  count: number
+  /** Number of creates and deletes applied to the counter; it only grows. */
+  generation: number
+}
+
 /** Entry type stored on Collection rows. */
 const COLLECTION_ENTRY_TYPE = 'work-item-collection'
 
@@ -344,36 +352,40 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * counter is rebuilt from the live rows first. Creations and deletions change the counter and
    * the rows in one transaction, so a mismatch whose counter is unchanged on a second read is
    * stored state that disagrees and fails closed with `CollectionCorruptState`; a counter that
-   * changed in between was a concurrent write and is reported as `CollectionConflict`.
+   * changed in between was a concurrent write and is reported as `CollectionConflict`. The
+   * listing can span several pages, so a delete and a create during it can leave the count
+   * unchanged while the listing missed a row; every write also advances the counter's
+   * generation, which tells that churn apart from corrupt state.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @returns The verified count, which the increment then requires to be unchanged.
    */
   private async verifiedCount(workspaceId: string): Promise<number> {
-    let count = await this.readCounter(workspaceId)
-    if (count === undefined) {
+    let counter = await this.readCounter(workspaceId)
+    if (counter === undefined) {
       await this.initializeCounter(workspaceId)
-      count = await this.readCounter(workspaceId)
+      counter = await this.readCounter(workspaceId)
       // The initialization either wrote the row or lost to another one; a miss is unexpected.
-      if (count === undefined) throw corruptState()
+      if (counter === undefined) throw corruptState()
     }
     const live = (await this.listSummaries(workspaceId)).length
-    if (live !== count) {
-      if ((await this.readCounter(workspaceId)) !== count) throw conflict()
+    if (live !== counter.count) {
+      const reread = await this.readCounter(workspaceId)
+      if (reread?.count !== counter.count || reread.generation !== counter.generation) throw conflict()
       throw corruptState()
     }
-    if (count >= COLLECTION_LIMIT) throw limitReached()
-    return count
+    if (counter.count >= COLLECTION_LIMIT) throw limitReached()
+    return counter.count
   }
 
   /**
    * Reads the Workspace counter row.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @returns The stored count, or undefined when the row is missing.
+   * @returns The stored count and write generation, or undefined when the row is missing.
    * @throws CollectionError `CollectionCorruptState` when the row is not a valid counter.
    */
-  private async readCounter(workspaceId: string): Promise<number | undefined> {
+  private async readCounter(workspaceId: string): Promise<CollectionCounter | undefined> {
     const { Item: row } = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
@@ -381,10 +393,16 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     })).catch((error: unknown) => storageFailure(error))
     if (row === undefined) return undefined
     const count: unknown = row.count
-    if (row.entryType !== COLLECTION_COUNT_ENTRY_TYPE || typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+    // A counter written before any create or delete has no generation yet; `ADD` starts it at 0.
+    const generation: unknown = row.generation ?? 0
+    if (
+      row.entryType !== COLLECTION_COUNT_ENTRY_TYPE ||
+      typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 ||
+      typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0
+    ) {
       throw corruptState()
     }
-    return count
+    return { count, generation }
   }
 
   /**
@@ -397,10 +415,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   private async classifyCounterFailure(workspaceId: string): Promise<CollectionError | 'missing'> {
     // An invalid counter row throws `CollectionCorruptState` from the read.
-    const count = await this.readCounter(workspaceId)
-    if (count === undefined) return 'missing'
+    const counter = await this.readCounter(workspaceId)
+    if (counter === undefined) return 'missing'
     // A concurrent write can change the counter after it was verified; retry then.
-    return count >= COLLECTION_LIMIT ? limitReached() : conflict()
+    return counter.count >= COLLECTION_LIMIT ? limitReached() : conflict()
   }
 
   /**
@@ -479,7 +497,9 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       Update: {
         TableName: this.tableName,
         Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
-        UpdateExpression: 'ADD #count :delta SET #entryType = :entryType',
+        // Every create and delete advances the generation, so a reconciliation can detect writes
+        // that left the count unchanged.
+        UpdateExpression: 'ADD #count :delta, #generation :one SET #entryType = :entryType',
         // Both directions need an existing counter. A creation requires the count it verified
         // against the live rows, because a missing or undercounted counter would let a restored
         // partition exceed the limit. A decrement also needs a positive count; otherwise the
@@ -487,9 +507,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         ConditionExpression: delta === 1
           ? '#entryType = :entryType AND #count = :verified AND #count < :limit'
           : '#count > :zero AND #entryType = :entryType',
-        ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
+        ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType', '#generation': 'generation' },
         ExpressionAttributeValues: {
           ':delta': delta,
+          ':one': 1,
           ':entryType': COLLECTION_COUNT_ENTRY_TYPE,
           ...(delta === 1 ? { ':verified': verifiedCount, ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
         },
