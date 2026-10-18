@@ -566,7 +566,8 @@ export function resolveWorkItemContributorDirectory(
   return workspaceMembers.map((member) => ({
     email: member.email,
     id: member.memberKey,
-    name: member.name ?? member.email,
+    // Keep a missing name absent so the contributor label falls back to the email alone.
+    ...(member.name ? { name: member.name } : {}),
   }))
 }
 
