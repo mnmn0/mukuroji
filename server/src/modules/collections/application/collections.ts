@@ -90,6 +90,16 @@ export type ObservedCollectionWorkItem = {
    * must still hold when the change commits; undefined when no Project membership is involved.
    */
   accessProjectId?: string
+  /**
+   * Project whose Enterprise grant authorized reading the Work Item without a direct
+   * membership; it must still be active when the change commits.
+   */
+  activeProjectId?: string
+  /**
+   * Whether a direct Team grant authorized reading an unassigned Work Item, so only its Team
+   * must still be active when the change commits.
+   */
+  activeTeamOnly?: boolean
 }
 
 /** Canonical Work Item state that a reference change requires to be unchanged when it commits. */
@@ -102,6 +112,10 @@ export type CollectionWorkItemFence = {
   revision: number
   /** Project whose direct membership authorized the readability check, when any. */
   accessProjectId?: string
+  /** Project whose Enterprise grant authorized the readability check, when any. */
+  activeProjectId?: string
+  /** Whether only the Work Item's Team must stay active, for a direct Team grant. */
+  activeTeamOnly?: boolean
 }
 
 /**
@@ -218,8 +232,9 @@ export async function updateCollection(
     ...(description ? { description } : {}),
     createdBy: current.createdBy,
     createdAt: current.createdAt,
-    updatedAt: context.now,
-    revision: current.revision + 1,
+    // Another server's clock may lag; the change must not look older than the state it replaces.
+    updatedAt: laterInstant(context.now, current.updatedAt),
+    revision: nextRevision(current.revision),
     items: current.items,
     createFingerprint: current.createFingerprint,
   }
@@ -295,7 +310,7 @@ export async function addCollectionItem(
       ...current,
       items: [{ teamId, issueId, addedAt, addedBy: context.actor }, ...current.items],
       updatedAt: addedAt,
-      revision: current.revision + 1,
+      revision: nextRevision(current.revision),
     }
     // References are stored inline, so long identifiers can reach DynamoDB's 400 KB item limit
     // before the count limit; report that as the same item-limit conflict.
@@ -336,7 +351,7 @@ export async function removeCollectionItem(
   const { collection } = await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
     const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
     if (items.length === current.items.length) return undefined
-    return { ...current, items, updatedAt: laterInstant(context.now, current.updatedAt), revision: current.revision + 1 }
+    return { ...current, items, updatedAt: laterInstant(context.now, current.updatedAt), revision: nextRevision(current.revision) }
   })
   return toPublicCollection(collection)
 }
@@ -385,6 +400,8 @@ async function applyItemChange(
         issueId,
         revision: observed.revision,
         ...(observed.accessProjectId === undefined ? {} : { accessProjectId: observed.accessProjectId }),
+        ...(observed.activeProjectId === undefined ? {} : { activeProjectId: observed.activeProjectId }),
+        ...(observed.activeTeamOnly ? { activeTeamOnly: true } : {}),
       })
       return { collection: next, observed }
     } catch (error) {
@@ -482,6 +499,21 @@ function replayDeletedCollection(deletion: CollectionDeletion, createFingerprint
  */
 function conflict(): CollectionError {
   return new CollectionError(409, 'CollectionConflict', 'The Collection changed. Reload and try again.')
+}
+
+/**
+ * Computes the revision a change writes.
+ *
+ * The stored-row validator only accepts revisions below `Number.MAX_SAFE_INTEGER`, so a change
+ * that would write one is rejected before the write instead of leaving an unreadable row.
+ *
+ * @param revision - Revision of the state being replaced.
+ * @returns The next revision.
+ * @throws CollectionError `CollectionCorruptState` when no valid next revision remains.
+ */
+function nextRevision(revision: number): number {
+  if (revision + 1 >= Number.MAX_SAFE_INTEGER) throw corruptState()
+  return revision + 1
 }
 
 /**

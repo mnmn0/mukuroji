@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs'
-import { join, normalize, resolve } from 'node:path'
+import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 
 /**
  * Resolves a request path to a file inside the served directory.
@@ -11,7 +11,9 @@ import { join, normalize, resolve } from 'node:path'
 export function resolveStaticFile(root: string, pathname: string): string | undefined {
   const relativePath = normalize(pathname === '/' ? '/index.html' : pathname)
   const candidate = resolve(join(root, relativePath))
-  if (candidate !== root && !candidate.startsWith(`${root}/`)) return undefined
+  // `relative` uses the platform separator, so the containment check also holds on Windows.
+  const fromRoot = relative(root, candidate)
+  if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) return undefined
   if (!existsSync(candidate) || !statSync(candidate).isFile()) return undefined
   return candidate
 }

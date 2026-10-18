@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
-import { COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH, type WorkItemCollection } from '@mukuroji/contracts'
+import { COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH, type WorkItemCollection, type WorkItemCollectionEntry } from '@mukuroji/contracts'
 import {
   CollectionApiError,
   addCollectionItem,
@@ -12,6 +12,7 @@ import {
 } from '../src/features/collections/api/collections'
 import { collectionCandidateKey, toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
 import { searchCollectionCandidates } from '../src/features/collections/queries/useCollections'
+import { insertByAddedAt } from '../src/features/collections/mutations/useCollectionActions'
 import { resolveCollectionErrorMessageKey } from '../src/features/collections/model/collectionErrors'
 import { CollectionsWorkspace, type CollectionsWorkspaceProps } from '../src/features/collections/ui/CollectionsWorkspace'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -314,5 +315,32 @@ describe('searchCollectionCandidates', () => {
     } finally {
       globalThis.fetch = previousFetch
     }
+  })
+})
+
+describe('insertByAddedAt', () => {
+  /**
+   * Builds a Collection item fixture.
+   * @param issueId Work Item identifier.
+   * @param addedAt ISO timestamp when the reference was added.
+   * @returns The item fixture.
+   */
+  const entry = (issueId: string, addedAt: string): WorkItemCollectionEntry => ({
+    teamId: 't1', issueId, title: issueId, statusCategory: 'started', addedAt,
+  })
+  const items = [entry('new', '2026-10-18T03:00:00.000Z'), entry('old', '2026-10-18T01:00:00.000Z')]
+
+  test('puts a fresh or same-time add on top', () => {
+    expect(insertByAddedAt(items, entry('fresh', '2026-10-18T04:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['fresh', 'new', 'old'])
+    expect(insertByAddedAt(items, entry('tie', '2026-10-18T03:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['tie', 'new', 'old'])
+  })
+
+  test('keeps an older existing reference in time order', () => {
+    expect(insertByAddedAt(items, entry('middle', '2026-10-18T02:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['new', 'middle', 'old'])
+    expect(insertByAddedAt(items, entry('oldest', '2026-10-18T00:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['new', 'old', 'oldest'])
   })
 })

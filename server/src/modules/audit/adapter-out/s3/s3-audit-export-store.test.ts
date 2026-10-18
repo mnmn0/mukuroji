@@ -5,7 +5,15 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3'
-import { createAuditExportRequestFingerprint, createAuditExportWorkspacePrefix, type AuditExportJob } from '../../audit-export'
+import {
+  AUDIT_EXPORT_MAX_EVENTS,
+  AUDIT_EXPORT_MAX_PARTS,
+  AUDIT_EXPORT_PROCESSING_HOURS,
+  AUDIT_EXPORT_RETENTION_DAYS,
+  createAuditExportRequestFingerprint,
+  createAuditExportWorkspacePrefix,
+  type AuditExportJob,
+} from '../../audit-export'
 import { S3AuditExportStore } from './s3-audit-export-store'
 
 /** S3 failure with the name and status the SDK reports. */
@@ -65,10 +73,11 @@ function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditEx
     filters: { eventTypes: ['work-item.updated'] },
     requestFingerprint: createAuditExportRequestFingerprint({ eventTypes: ['work-item.updated'] }),
     snapshotAt: createdAt,
+    correlationId: 'corr-export-request',
     requestedBy: { userKey: 'admin@example.com', displayName: 'admin@example.com' },
     createdAt,
     updatedAt: createdAt,
-    expiresAt: '2099-01-01T00:00:00.000Z',
+    expiresAt: new Date(Date.parse(createdAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000).toISOString(),
     eventCount: 0,
     parts: [],
     scanAttempt: 1,
@@ -113,6 +122,44 @@ describe('S3AuditExportStore', () => {
     await expect(store.replaceJob(conflicted, '"etag-1"')).rejects.toMatchObject({ name: 'ConditionalRequestConflict' })
   })
 
+  test('rejects a stored expiration other than the retention period after creation', async () => {
+    const { store, objects } = createStore()
+    const exportId = 'c'.repeat(32)
+    const jobPath = `${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`
+    const createdAt = '2026-07-18T00:00:00.000Z'
+    const retained = Date.parse(createdAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000
+    // A later expiration would keep the export visible and downloadable past its lifetime.
+    for (const expiresAt of [retained + 1, retained - 1, Date.parse(createdAt)]) {
+      const stored = { ...job(exportId, createdAt), expiresAt: new Date(expiresAt).toISOString() }
+      objects.set(jobPath, { body: JSON.stringify(stored), etag: '"a"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow(`must expire ${AUDIT_EXPORT_RETENTION_DAYS} days after`)
+    }
+    objects.set(jobPath, { body: JSON.stringify(job(exportId, createdAt)), etag: '"b"' })
+    expect((await store.readJob('ws-1', exportId))?.job.expiresAt).toBe(new Date(retained).toISOString())
+  })
+
+  test('rejects stored jobs beyond the export event or part limits', async () => {
+    const { store, objects } = createStore()
+    const exportId = 'd'.repeat(32)
+    const jobPath = `${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`
+    const createdAt = '2026-07-18T00:00:00.000Z'
+    const part = (index: number, eventCount: number) => ({ index, key: 'k', eventCount, byteLength: 1, sha256: 'a'.repeat(64) })
+    const tooManyEvents = [part(1, AUDIT_EXPORT_MAX_EVENTS + 1)]
+    const tooManyParts = Array.from({ length: AUDIT_EXPORT_MAX_PARTS + 1 }, (_, position) => part(position + 1, 1))
+    for (const parts of [tooManyEvents, tooManyParts]) {
+      const eventCount = parts.reduce((total, entry) => total + entry.eventCount, 0)
+      const stored = { ...job(exportId, createdAt), status: 'completed', parts, eventCount }
+      objects.set(jobPath, { body: JSON.stringify(stored), etag: '"a"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('exceeds the export limits')
+    }
+    const atLimit = [part(1, AUDIT_EXPORT_MAX_EVENTS)]
+    objects.set(jobPath, {
+      body: JSON.stringify({ ...job(exportId, createdAt), status: 'completed', parts: atLimit, eventCount: AUDIT_EXPORT_MAX_EVENTS }),
+      etag: '"b"',
+    })
+    expect((await store.readJob('ws-1', exportId))?.job.eventCount).toBe(AUDIT_EXPORT_MAX_EVENTS)
+  })
+
   test('returns undefined for a missing job and rejects malformed stored jobs', async () => {
     const { store, objects } = createStore()
     const exportId = 'b'.repeat(32)
@@ -131,7 +178,7 @@ describe('S3AuditExportStore', () => {
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('createdAt must be an ISO timestamp.')
     const reordered = { ...job(exportId, '2026-07-18T00:00:00.000Z'), expiresAt: '2026-07-17T00:00:00.000Z' }
     objects.set(jobPath, { body: JSON.stringify(reordered), etag: '"w"' })
-    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('expires before it was created')
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow(`must expire ${AUDIT_EXPORT_RETENTION_DAYS} days after`)
     // The snapshot bounds the exported events, so it must be the time the request was recorded.
     const laterSnapshot = { ...job(exportId, '2026-07-18T00:00:00.000Z'), snapshotAt: '2026-07-18T00:00:01.000Z' }
     objects.set(jobPath, { body: JSON.stringify(laterSnapshot), etag: '"u"' })
@@ -215,6 +262,44 @@ describe('S3AuditExportStore', () => {
       const widenedByEmpty = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters }
       objects.set(jobPath, { body: JSON.stringify(widenedByEmpty), etag: '"r"' })
       await expect(store.readJob('ws-1', exportId)).rejects.toThrow('must not be empty')
+    }
+  })
+
+  test('rejects stored update times outside the job lifetime and malformed correlation IDs', async () => {
+    const { store, objects } = createStore()
+    const exportId = 'b'.repeat(32)
+    const jobPath = `${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`
+    const createdAt = '2026-07-18T00:00:00.000Z'
+    const pastDeadline = new Date(Date.parse(createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 + 1).toISOString()
+    const atDeadline = new Date(Date.parse(createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000).toISOString()
+    const updatedBeforeCreation = { ...job(exportId, createdAt), updatedAt: '2026-07-17T23:59:59.999Z' }
+    objects.set(jobPath, { body: JSON.stringify(updatedBeforeCreation), etag: '"a"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('updated before it was created')
+    // A future update time on an unfinished job would keep it from ever being resumed as stale.
+    for (const unfinished of [
+      { ...job(exportId, createdAt), updatedAt: pastDeadline },
+      { ...job(exportId, createdAt), status: 'running', nextCursor: 'cursor-1', updatedAt: pastDeadline },
+    ]) {
+      objects.set(jobPath, { body: JSON.stringify(unfinished), etag: '"b"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('updated after its processing deadline')
+    }
+    objects.set(jobPath, { body: JSON.stringify({ ...job(exportId, createdAt), updatedAt: atDeadline }), etag: '"c"' })
+    expect((await store.readJob('ws-1', exportId))?.job.updatedAt).toBe(atDeadline)
+    // Terminal states keep their real write time, which may be past the deadline.
+    for (const terminal of [
+      { ...job(exportId, createdAt), status: 'completed', updatedAt: pastDeadline },
+      { ...job(exportId, createdAt), status: 'failed', failure: { code: 'X', message: 'x' }, updatedAt: pastDeadline },
+    ]) {
+      objects.set(jobPath, { body: JSON.stringify(terminal), etag: '"d"' })
+      expect((await store.readJob('ws-1', exportId))?.job).toMatchObject({ status: terminal.status, updatedAt: pastDeadline })
+    }
+    const { correlationId: _correlationId, ...withoutCorrelation } = job(exportId, createdAt)
+    void _correlationId
+    objects.set(jobPath, { body: JSON.stringify(withoutCorrelation), etag: '"e"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('correlationId must be a string')
+    for (const correlationId of ['', ' ', ' corr', 'c'.repeat(257)]) {
+      objects.set(jobPath, { body: JSON.stringify({ ...job(exportId, createdAt), correlationId }), etag: '"f"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('correlationId must be 1 to 256 unpadded characters')
     }
   })
 

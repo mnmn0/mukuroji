@@ -231,6 +231,17 @@ export type AnalyticsWorkItemTypeOption = {
   label: string
 }
 
+/**
+ * Theme-aware chart colors. The variables are defined for the light and dark themes in
+ * `index.css`, so the grid stays secondary to the data series on either surface.
+ */
+const analyticsChartColors = {
+  grid: 'var(--workbench-chart-grid)',
+  missing: 'var(--workbench-chart-missing)',
+  pointFill: 'var(--workbench-chart-point-fill)',
+  series: 'var(--workbench-chart-series)',
+}
+
 const metricKeys = [
   'throughput',
   'cycle-time',
@@ -1886,8 +1897,8 @@ function AccessibleChart({
           {[0, 0.5, 1].map((ratio) => (
             <line
               key={ratio}
-              stroke="#dde4e1"
               strokeDasharray="4 5"
+              style={{ stroke: analyticsChartColors.grid }}
               x1={padding}
               x2={width - padding}
               y1={padding + chartHeight * ratio}
@@ -1905,9 +1916,9 @@ function AccessibleChart({
                       aria-hidden="true"
                       data-testid={`analytics-bar-missing-${index}`}
                       key={`${point.label}-${index}`}
-                      stroke="#78837f"
                       strokeLinecap="round"
                       strokeWidth="2"
+                      style={{ stroke: analyticsChartColors.missing }}
                     >
                       <line
                         x1={point.x - markerRadius}
@@ -1928,10 +1939,10 @@ function AccessibleChart({
                 return (
                   <rect
                     data-testid={`analytics-bar-${index}`}
-                    fill="#0f766e"
                     height={barHeight}
                     key={`${point.label}-${index}`}
                     rx="4"
+                    style={{ fill: analyticsChartColors.series }}
                     width={barWidth}
                     x={point.x - barWidth / 2}
                     y={padding + chartHeight - barHeight}
@@ -1946,10 +1957,10 @@ function AccessibleChart({
                     data-testid={`analytics-line-segment-${index}`}
                     fill="none"
                     key={path}
-                    stroke="#0f766e"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth="4"
+                    style={{ stroke: analyticsChartColors.series }}
                   />
                 ))}
                 {coordinates.map((point) => point.y === undefined ? null : (
@@ -1957,11 +1968,10 @@ function AccessibleChart({
                     cx={point.x}
                     cy={point.y}
                     data-testid={`analytics-line-point-${point.index}`}
-                    fill="#ffffff"
                     key={`${point.label}-${point.index}`}
                     r="5"
-                    stroke="#0f766e"
                     strokeWidth="3"
+                    style={{ fill: analyticsChartColors.pointFill, stroke: analyticsChartColors.series }}
                   />
                 ))}
               </>

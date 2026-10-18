@@ -49,6 +49,8 @@ describe('parseBundleBudget', () => {
     expect(() => parseBundleBudget([])).toThrow('JSON object')
     expect(() => parseBundleBudget({ rules: [], totalJavaScriptAndCssGzipKiB: 1 })).toThrow('at least one rule')
     expect(() => parseBundleBudget({ rules: [{ name: 'x', pattern: '.', maxGzipKiB: 0 }], totalJavaScriptAndCssGzipKiB: 1 })).toThrow('positive maxGzipKiB')
+    // JSON.parse turns 1e309 into Infinity, which would never flag an oversized file.
+    expect(() => parseBundleBudget({ rules: [{ name: 'x', pattern: '.', maxGzipKiB: Number.POSITIVE_INFINITY }], totalJavaScriptAndCssGzipKiB: 1 })).toThrow('positive maxGzipKiB')
     expect(() => parseBundleBudget({ rules: [{ name: 'x', pattern: '.', maxGzipKiB: 1 }], totalJavaScriptAndCssGzipKiB: -1 })).toThrow('positive number')
   })
 })

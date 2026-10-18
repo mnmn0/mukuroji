@@ -1316,6 +1316,8 @@ function configureFakeProjectClients(
     inactiveWorkspaceMemberKeys?: string[]
     /** Members that read as active but are deactivated before their commit-time fence is built. */
     deactivatedBeforeFenceMemberKeys?: string[]
+    /** Omits the Workspace access membership fence, as an adapter without fencing support would. */
+    withoutMemberFence?: boolean
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
@@ -2162,18 +2164,20 @@ function configureFakeProjectClients(
       },
     },
     workspaceAccess: {
-      async createActiveMemberConditionCheck(workspaceId, memberKey) {
-        const member = createWorkspaceMember(memberKey)
-        if (member.status !== 'active') return undefined
-        if (options.deactivatedBeforeFenceMemberKeys?.includes(memberKey)) return undefined
-        return {
-          ConditionCheck: {
-            TableName: 'WorkspaceAccessTable',
-            Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
-            ConditionExpression: 'attribute_exists(workspaceId)',
-          },
-        }
-      },
+      ...(options.withoutMemberFence ? {} : {
+        async createActiveMemberConditionCheck(workspaceId: string, memberKey: string) {
+          const member = createWorkspaceMember(memberKey)
+          if (member.status !== 'active') return undefined
+          if (options.deactivatedBeforeFenceMemberKeys?.includes(memberKey)) return undefined
+          return {
+            ConditionCheck: {
+              TableName: 'WorkspaceAccessTable',
+              Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+              ConditionExpression: 'attribute_exists(workspaceId)',
+            },
+          }
+        },
+      }),
       async getMember(_workspaceId, memberKey) {
         return createWorkspaceMember(memberKey)
       },

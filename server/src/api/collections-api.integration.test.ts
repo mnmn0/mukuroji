@@ -1,6 +1,7 @@
 import type { EnterprisePermissionId, EnterpriseRoleAssignment, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
+import { ProjectDataError } from '../modules/directory'
 import { createApiTestHarness } from './test-support/api-test-harness'
 
 const {
@@ -246,7 +247,7 @@ test('keeps exact-ID candidates within the page limit and never repeats them on 
   // The exact match takes the only slot, so the index is not read until the next page.
   const first = await (await planningApiRequest(`${path}&limit=1`)).json()
   expect(first.results.map((result: WorkspaceSearchResult) => result.id)).toEqual([indexedExact.id])
-  expect(first.nextCursor).toBe('exact:1')
+  expect(first.nextCursor).toMatch(/^exact:1\.[A-Za-z0-9_-]{22}$/u)
   expect(searches).toEqual([])
   const second = await (await planningApiRequest(`${path}&limit=1&cursor=${first.nextCursor}`)).json()
   // The index match of the exact Work Item is dropped rather than shown again.
@@ -264,10 +265,14 @@ test('keeps exact-ID candidates within the page limit and never repeats them on 
   expect(later).toEqual({ schemaVersion: 1, results: [] })
   expect(searches).toEqual([{ limit: 1 }, { limit: 2, cursor: 'index-next' }])
 
-  for (const query of ['&cursor=exact:x', '&cursor=exact:101', '&cursor=exact:01', '&limit=101']) {
+  for (const query of ['&cursor=exact:x', '&cursor=exact:101', '&cursor=exact:01', '&cursor=exact:1', '&limit=101']) {
     const invalid = await planningApiRequest(`${path}${query}`)
     expect(invalid.status).toBe(400)
   }
+  // An exact-match cursor is bound to its keyword, so another search cannot skip its matches.
+  const otherKeyword = await planningApiRequest(`/api/collections/candidates?keyword=other-item&limit=1&cursor=${first.nextCursor}`)
+  expect(otherKeyword.status).toBe(400)
+  expect((await planningApiRequest(`${path}&limit=1&cursor=${first.nextCursor}.extra`)).status).toBe(400)
 })
 
 /** One custom role and where it is assigned to the test member. */
@@ -337,11 +342,84 @@ test('lets a Workspace-scoped Work Item role add and read Collection items', asy
       targetId: WORKSPACE_ID,
     }]),
   })
+  // The Enterprise grant reaches the Work Item through the Refero Project, which stays active.
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const activeChecked: unknown[] = []
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        activeChecked.push([teamId, projectId])
+        return [{ ConditionCheck: { TableName: 'DirectoryTable', Key: { directoryId, entryKey: `PROJECT#${projectId}` }, ConditionExpression: 'attribute_exists(directoryId)' } }]
+      },
+    },
+  })
   const { collectionId } = await createCollection('Launch')
   const itemsPath = `/api/collections/${collectionId}/items`
   expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')).status).toBe(200)
+  expect(activeChecked).toEqual([['core-team', 'refero']])
   const listed = await (await planningApiRequest(itemsPath)).json()
   expect(listed.items).toEqual([expect.objectContaining({ teamId: 'core-team', issueId: 'onboarding-friction' })])
+})
+
+test('fences the primary Project when a direct Team grant authorized reading the Work Item', async () => {
+  configureFakeProjectClients(false, { directoryId: WORKSPACE_ID, workspaceRole: 'admin', projectAccesses: [] })
+  setTestAppDependencies({
+    enterpriseIdentity: await createWorkItemRoleIdentity(WORKSPACE_ID, [
+      { roleId: 'custom:collection-editor', permissions: ['work-items.read', 'work-items.write'], kind: 'workspace', targetId: WORKSPACE_ID },
+      { roleId: 'custom:team-reader', permissions: ['work-items.read', 'teams.read'], kind: 'team', targetId: 'core-team' },
+    ]),
+  })
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const activeChecked: unknown[] = []
+  let projectArchived = false
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        activeChecked.push([teamId, projectId])
+        if (projectArchived) throw new ProjectDataError(404, 'ProjectNotFound', 'Project was not found.')
+        return [{ ConditionCheck: { TableName: 'DirectoryTable', Key: { directoryId, entryKey: `PROJECT#${projectId}` }, ConditionExpression: 'attribute_exists(directoryId)' } }]
+      },
+    },
+  })
+  const { collectionId } = await createCollection('Launch')
+  const itemPath = `/api/collections/${collectionId}/items/core-team/onboarding-friction`
+  // The Work Item's primary Project is archived after the readability check.
+  projectArchived = true
+  expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(409)
+  projectArchived = false
+  activeChecked.length = 0
+  expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(200)
+  expect(activeChecked).toEqual([['core-team', 'refero']])
+})
+
+test('serves Workspace-scoped Collection metadata without reading the Project directory', async () => {
+  configureFakeProjectClients(false, { directoryId: WORKSPACE_ID, workspaceRole: 'admin', projectAccesses: [] })
+  setTestAppDependencies({
+    enterpriseIdentity: await createWorkItemRoleIdentity(WORKSPACE_ID, [{
+      roleId: 'custom:work-item-editor',
+      permissions: ['work-items.read', 'work-items.write'],
+      kind: 'workspace',
+      targetId: WORKSPACE_ID,
+    }]),
+  })
+  const { collectionId } = await createCollection('Launch')
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  let directoryReads = 0
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async getProjectDirectory(...args) {
+        directoryReads += 1
+        return await existingProjectDirectory.getProjectDirectory(...args)
+      },
+    },
+  })
+  // Listing, renaming and reading metadata use only Workspace-scoped rows.
+  expect((await planningApiRequest('/api/collections')).status).toBe(200)
+  expect((await planningApiRequest(`/api/collections/${collectionId}`, 'PATCH', { expectedRevision: 1, name: 'Renamed' })).status).toBe(200)
+  expect(directoryReads).toBe(0)
 })
 
 test('does not let a Team-scoped Work Item grant change Workspace-wide Collections', async () => {
@@ -419,6 +497,38 @@ test('fences an item change on the Project membership that authorized reading th
   membershipRevoked = true
   expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'DELETE')).status).toBe(409)
   expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toHaveLength(1)
+})
+
+test('fences an item change on the authorizing Project staying active', async () => {
+  // Archiving a Project changes the Project row, not the member's membership row.
+  configureMember()
+  const { collectionId } = await createCollection('Launch')
+  const itemPath = `/api/collections/${collectionId}/items/core-team/onboarding-friction`
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const fenced: unknown[] = []
+  let projectArchived = false
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        fenced.push([teamId, projectId])
+        // The Project was archived after the readability check.
+        if (projectArchived) throw new ProjectDataError(404, 'ProjectNotFound', 'Project was not found.')
+        return await existingProjectDirectory.createActiveReferenceConditionChecks?.(directoryId, teamId, projectId) ?? []
+      },
+    },
+  })
+
+  projectArchived = true
+  const archived = await planningApiRequest(itemPath, 'PUT')
+  expect(archived.status).toBe(409)
+  expect(await archived.json()).toMatchObject({ code: 'CollectionWorkItemChanged' })
+  expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toEqual([])
+
+  projectArchived = false
+  fenced.length = 0
+  expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(200)
+  expect(fenced).toEqual([['core-team', 'refero']])
 })
 
 test('reloads Project access before retrying an item change after a membership is revoked', async () => {
