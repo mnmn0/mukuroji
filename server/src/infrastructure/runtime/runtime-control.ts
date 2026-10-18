@@ -18,6 +18,7 @@ export type RuntimeControlStatus =
 export type RuntimeControlSurface =
   | 'analytics-schedule'
   | 'api'
+  | 'audit-export'
   | 'audit-projection'
   | 'automation-event'
   | 'automation-schedule'

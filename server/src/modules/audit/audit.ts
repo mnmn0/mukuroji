@@ -656,6 +656,33 @@ export type AuditEventPage = {
 }
 
 /**
+ * Query that counts matching events on the base table with strongly consistent reads.
+ *
+ * It applies the same filters and time range as {@link AuditEventQuery}, but reads the
+ * canonical rows instead of an eventually consistent index.
+ */
+export type AuditEventCountQuery = Omit<AuditEventQuery, 'limit' | 'direction'> & {
+  /**
+   * Epoch seconds; only events without a TTL or whose `expiresAt` is later are counted.
+   */
+  durableAfter: number
+}
+
+/**
+ * One page of a consistent event count.
+ */
+export type AuditEventCountPage = {
+  /**
+   * Matching events in this page.
+   */
+  count: number
+  /**
+   * Opaque cursor of the next page, absent after the last page.
+   */
+  nextCursor?: string
+}
+
+/**
  * environment ごとに差し替え可能な audit GSI 名です。
  */
 export type AuditIndexNames = {
@@ -1089,6 +1116,20 @@ export function createAuditConsumerReceiptTransactPut(
 }
 
 /**
+ * Raised when an idempotent audit write reuses an event identity with a different request.
+ *
+ * It extends `TypeError` so existing callers keep their handling, while adapters can tell a
+ * real idempotency conflict apart from a malformed stored row.
+ */
+export class AuditEventIdempotencyConflictError extends TypeError {
+  /** Creates the conflict error. */
+  constructor() {
+    super('Audit event idempotency key conflicts with an existing event.')
+    this.name = 'AuditEventIdempotencyConflictError'
+  }
+}
+
+/**
  * DynamoDB の audit timeline を GSI と opaque cursor で検索します。
  */
 export class DynamoDbAuditEventsClient {
@@ -1163,7 +1204,7 @@ export class DynamoDbAuditEventsClient {
         existing?.entity.type !== event.entity.type ||
         existing?.entity.id !== event.entity.id
       ) {
-        throw new TypeError('Audit event idempotency key conflicts with an existing event.')
+        throw new AuditEventIdempotencyConflictError()
       }
     }
   }
@@ -1268,6 +1309,113 @@ export class DynamoDbAuditEventsClient {
         : {}),
     }
   }
+
+  /**
+   * Counts one page of matching events on the base table with a strongly consistent read.
+   *
+   * The predicate is the one {@link query} evaluates on its index: the index partition key,
+   * the timeline sort key range, and the same filters, all applied to the canonical rows of
+   * the Workspace partition. Unlike the index, the result reflects every committed event.
+   *
+   * @param input - Filters, durability threshold, and optional cursor.
+   * @returns The page count and the next cursor when more rows remain.
+   */
+  async countEventsConsistently(input: AuditEventCountQuery): Promise<AuditEventCountPage> {
+    if (this.bootstrapLocalTables && this.dynamoDbClient) {
+      await ensureLocalAuditEventsTable(this.tableName, this.dynamoDbClient)
+    }
+    if (!Number.isSafeInteger(input.durableAfter) || input.durableAfter < 0) {
+      throw new RangeError('Audit durableAfter must be a non-negative integer epoch timestamp.')
+    }
+    const { durableAfter, cursor, ...queryInput } = input
+    const normalizedInput = normalizeAuditQuery(queryInput)
+    const plan = createAuditQueryPlan(normalizedInput, this.indexNames)
+    const scopeHash = hashCanonical({
+      ...normalizedInput,
+      limit: undefined,
+      direction: undefined,
+      indexName: plan.indexName,
+      durableAfter,
+      kind: 'consistent-count',
+    })
+    const names: Record<string, string> = {
+      '#directoryId': 'directoryId',
+      '#partitionKey': plan.partitionName,
+      '#timelineKey': plan.sortName,
+      '#expiresAt': 'expiresAt',
+    }
+    const values: Record<string, unknown> = {
+      ':workspaceId': normalizedInput.workspaceId,
+      ':partitionValue': plan.partitionValue,
+      ':durableAfter': durableAfter,
+    }
+    const filters = ['#partitionKey = :partitionValue']
+    addTimeKeyCondition(filters, values, normalizedInput.from, normalizedInput.to)
+    addAuditQueryFilters(filters, names, values, normalizedInput, plan)
+    filters.push('(attribute_not_exists(#expiresAt) OR #expiresAt > :durableAfter)')
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: '#directoryId = :workspaceId',
+      FilterExpression: filters.join(' AND '),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+      ConsistentRead: true,
+      Select: 'COUNT',
+      ...(cursor
+        ? { ExclusiveStartKey: decodeAuditCountCursor(cursor, scopeHash, normalizedInput.workspaceId) }
+        : {}),
+    }))
+    const lastEventId: unknown = response.LastEvaluatedKey?.eventId
+    if (response.LastEvaluatedKey && typeof lastEventId !== 'string') {
+      throw new TypeError('Audit count page ended at an unreadable key.')
+    }
+    return {
+      count: response.Count ?? 0,
+      ...(typeof lastEventId === 'string'
+        ? { nextCursor: encodeAuditCountCursor(scopeHash, lastEventId) }
+        : {}),
+    }
+  }
+}
+
+/**
+ * Encodes the position of a consistent count.
+ *
+ * @param scopeHash - Hash of the count predicate.
+ * @param eventId - Base-table sort key where the page ended.
+ * @returns Opaque base64url cursor.
+ */
+function encodeAuditCountCursor(scopeHash: string, eventId: string) {
+  return Buffer.from(JSON.stringify({ version: 1, kind: 'consistent-count', scopeHash, eventId }), 'utf8')
+    .toString('base64url')
+}
+
+/**
+ * Decodes a consistent count cursor and checks that it belongs to the same predicate.
+ *
+ * @param cursor - Opaque cursor.
+ * @param scopeHash - Hash of the current count predicate.
+ * @param workspaceId - Workspace partition being counted.
+ * @returns The base-table start key.
+ */
+function decodeAuditCountCursor(cursor: string, scopeHash: string, workspaceId: string) {
+  let value: unknown
+  try {
+    value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    throw new TypeError('Audit count cursor is invalid.')
+  }
+  const payload = requireRecord(value, 'Audit count cursor')
+  if (
+    payload.version !== 1 ||
+    payload.kind !== 'consistent-count' ||
+    payload.scopeHash !== scopeHash ||
+    typeof payload.eventId !== 'string' ||
+    !payload.eventId
+  ) {
+    throw new TypeError('Audit count cursor does not match the query.')
+  }
+  return { directoryId: workspaceId, eventId: payload.eventId }
 }
 
 /**
@@ -1439,8 +1587,14 @@ const publicAuditMetadataFields = new Set([
   'acceptedCommentId',
   'commentId',
   'contextItemId',
+  'eventCount',
+  'exportId',
+  'filtered',
+  'filtersDigest',
+  'fromPart',
   'kind',
   'memberKey',
+  'partCount',
   'projectId',
   'rootCommentId',
   'teamId',
@@ -1618,6 +1772,16 @@ type AuditCursorPayload = {
    * DynamoDB LastEvaluatedKey です。
    */
   lastEvaluatedKey: NonNullable<QueryCommandInput['ExclusiveStartKey']>
+}
+
+/**
+ * Validates audit query filters with the same rules the query layer applies.
+ *
+ * @param input - Query whose filters are checked.
+ * @throws TypeError or RangeError when a filter would be rejected by a query.
+ */
+export function assertValidAuditQueryFilters(input: AuditEventQuery): void {
+  normalizeAuditQuery(input)
 }
 
 function normalizeAuditQuery(input: AuditEventQuery): NormalizedAuditQuery {

@@ -41,6 +41,7 @@ import {
   aliasAiAssistanceTextIdentifiers,
   classifyAiAssistanceSensitivePromptField,
   createAiAssistancePrivateTextAliases,
+  createAiAssistanceProviderAlias,
   createAiAssistanceRouter,
   redactAiAssistancePromptFieldValue,
   redactAiAssistanceText,
@@ -1772,11 +1773,6 @@ async function createAiAssistanceDirectoryReferenceAuthorizationConditions(
       expectedAbsentAttributes: ['archivedAt'],
     }
   })
-}
-
-/** Creates one cryptographically random, provider-safe member alias. */
-function createAiAssistanceProviderAlias(): string {
-  return `U_${randomUUID().replaceAll('-', '')}`
 }
 
 /**

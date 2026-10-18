@@ -18,6 +18,7 @@ import {
 export type RuntimeControlScope =
   | 'analytics-schedule'
   | 'api'
+  | 'audit-export'
   | 'audit-projection'
   | 'automation-event'
   | 'automation-schedule'

@@ -32,6 +32,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     tenantExportBucketName: 'tenant-export',
     fileBucketName: 'tenant-files',
     workItemImportBucketName: 'work-item-imports',
+    auditExportBucketName: 'audit-exports',
     cognitoUserPoolId: 'user-pool-1',
     workItemsTableName: 'work-items',
     workItemEventsTableName: 'work-item-events',

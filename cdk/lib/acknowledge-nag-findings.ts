@@ -17,12 +17,14 @@ const deadLetterQueuePaths = [
   'NotificationScheduleDlq/Resource',
   'SlackNotificationDlq/Resource',
   'RequestEmailIngestionDlq/Resource',
+  'AuditExportDlq/Resource',
 ] as const;
 const lambdaPaths = [
   'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
   'ApiFunction/Resource',
+  'AuditExportWorkerFunction/Resource',
   'WorkItemImportFunction/Resource',
   'RealtimeHandlerFunction/Resource',
   'CollaborationProjectionFunction/Resource',
@@ -43,6 +45,7 @@ const managedPolicyRolePaths = [
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
   'ApiFunction/ServiceRole/Resource',
+  'AuditExportWorkerFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
   'RealtimeHandlerFunction/ServiceRole/Resource',
   'CollaborationProjectionFunction/ServiceRole/Resource',
@@ -98,6 +101,15 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<AuditExportBucketC2429A66.Arn>/audit-exports/*]',
+    [
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
@@ -106,6 +118,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
       'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -388,6 +401,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:events:<AWS::Region>:<AWS::AccountId>:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*]',
     'AwsSolutions-IAM5[Resource::<FileBucketCDFCD6DE.Arn>/workspaces/*]',
     'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
+    'AwsSolutions-IAM5[Resource::<AuditExportBucketC2429A66.Arn>/audit-exports/*]',
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',

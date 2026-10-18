@@ -250,6 +250,8 @@ const expectedDataConfiguration = {
 };
 
 const expectedWorkflowConfiguration = {
+  AUDIT_EXPORT_BUCKET_NAME: base64(ref('AuditExportBucketC2429A66')),
+  AUDIT_EXPORT_QUEUE_URL: base64(ref('AuditExportQueueD1DB7896')),
   DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET: nestedSecret(
     ref(DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID),
   ),

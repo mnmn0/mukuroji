@@ -1056,6 +1056,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: [
       {
+        'Fn::GetAtt': ['AuditExportQueueD1DB7896', 'Arn'],
+      },
+      {
         'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],
       },
       {

@@ -77,6 +77,7 @@ import type {
 import type {
   RuntimeControlProvider,
 } from '../../infrastructure/runtime/runtime-control'
+import type { AuditExportService } from '../../modules/audit/audit-export'
 
 /** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
 type AutomationCompositionTransactionItem =
@@ -124,6 +125,8 @@ export interface WorkspaceDependencies {
   projectDirectory: ProjectDirectoryClient
   /** Provides append-only audit persistence. */
   auditEvents: AuditEventsClient
+  /** Runs asynchronous audit exports when the export bucket and queue are deployed. */
+  auditExports?: AuditExportService
   /** Provides Workspace membership persistence. */
   workspaceAccess: WorkspaceAccessClient
   /** Provides capability-scoped Enterprise Identity application ports. */
