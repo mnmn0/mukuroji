@@ -69,7 +69,12 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
 
   const manifestHref = await page.locator('link[rel="manifest"]').getAttribute('href')
   expect(manifestHref).toBe('/manifest.webmanifest')
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f7f9f8')
+  // index.html declares one theme-color per color scheme; with the default light theme the
+  // bootstrap points both at the light canvas so the browser chrome matches the page.
+  const themeColors = page.locator('meta[name="theme-color"]')
+  await expect(themeColors).toHaveCount(2)
+  await expect(themeColors.and(page.locator('[media="(prefers-color-scheme: light)"]'))).toHaveAttribute('content', '#f7f9f8')
+  await expect(themeColors.and(page.locator('[media="(prefers-color-scheme: dark)"]'))).toHaveAttribute('content', '#f7f9f8')
 
   const manifestResponse = await request.get('/manifest.webmanifest')
   expect(manifestResponse.ok()).toBe(true)

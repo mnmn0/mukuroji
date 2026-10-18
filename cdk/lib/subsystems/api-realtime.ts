@@ -1068,15 +1068,12 @@ export function buildApiRuntime(
       resources: [auditExportBucket.arnForObjects('audit-exports/*')],
     }),
   );
+  // A missing job must read as NoSuchKey, and the check S3 makes for a missing object carries
+  // no `s3:prefix`, so this grant has no prefix condition; the bucket holds only audit exports.
   apiFunction.addToRolePolicy(
     new iam.PolicyStatement({
       actions: ['s3:ListBucket'],
       resources: [auditExportBucket.bucketArn],
-      conditions: {
-        StringLike: {
-          's3:prefix': ['audit-exports/*'],
-        },
-      },
     }),
   );
   apiFunction.addToRolePolicy(

@@ -108,7 +108,8 @@ Job role は Work Item の Contributor を、担当メンバーが決まる前�
 
 - 名称変更は `name` だけを変更する。保存済み Contributor は `id` で参照するため影響を受けない。
 - 使わなくなったロールは削除せず `archived: true` にする。archive 済みロールは既存の Contributor に残せるが、新しい Contributor には設定できない。
-- Configuration から削除されたロールを参照する Contributor は読み取りでは保持し、画面では「不明なジョブロール」と表示する。
+- Contributor が参照しているロールを Configuration から削除する保存は `409 WorkItemConfigurationInUse` で拒否する。参照がなくなってから削除するか、archive する。
+- それでも削除済みロールを参照する既存の Contributor は読み取りでは保持し、画面では「不明なジョブロール」と表示する。
 
 ## Custom field
 

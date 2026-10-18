@@ -23,7 +23,7 @@ const cachePrefix = 'mukuroji-'
  * Version of the cache layout. Bump it whenever cached content or naming changes so the
  * activate step discards caches written by older workers.
  */
-const cacheLayoutVersion = 'v1'
+const cacheLayoutVersion = 'v2'
 
 /** Cache holding the static offline fallback page and the files it loads. */
 const shellCacheName = `${cachePrefix}shell-${cacheLayoutVersion}`
