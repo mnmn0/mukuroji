@@ -287,12 +287,17 @@ export function createAppBadgePermissionStore(options: AppBadgePermissionStoreOp
     for (const listener of listeners) listener()
   }
 
-  /** Re-reads the environment and clears an answer the current permission no longer matches. */
+  /**
+   * Re-reads the environment and clears an answer the current permission no longer matches.
+   *
+   * A grant made outside the app, for example in device settings after a denial, becomes the
+   * announced `granted` result, so the row that may hold focus stays mounted and says so.
+   */
   function reconcile(): void {
     const permission = readEnvironment().notification?.permission
     if (permission !== knownPermission) {
       knownPermission = permission
-      if (!pending) result = undefined
+      if (!pending) result = permission === 'granted' ? 'granted' : undefined
       if (permission === 'granted') refreshBadge()
     }
     update()

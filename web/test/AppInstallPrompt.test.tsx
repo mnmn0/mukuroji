@@ -599,7 +599,7 @@ describe('app badge permission', () => {
     unsubscribe()
   })
 
-  test('clears a stale denied answer and refreshes the badge after notifications are allowed in device settings', async () => {
+  test('announces a grant from device settings in place of the denied answer and refreshes the badge', async () => {
     const notification = {
       permission: 'default',
       requestPermission: async () => {
@@ -628,10 +628,11 @@ describe('app badge permission', () => {
     lifecycleChanged()
     expect(store.getSnapshot()).toBe(before)
     expect(refreshed).toBe(0)
-    // The user allows notifications in the device settings and returns without reloading.
+    // The user allows notifications in the device settings and returns without reloading. The
+    // row that may hold focus stays mounted and announces the grant.
     notification.permission = 'granted'
     lifecycleChanged()
-    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: false })
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, blocked: false, result: 'granted' })
     expect(refreshed).toBe(1)
     // A reset back to "ask" offers the button again.
     notification.permission = 'default'
