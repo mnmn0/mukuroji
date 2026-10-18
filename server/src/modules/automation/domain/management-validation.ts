@@ -16,6 +16,9 @@ import { isAutomationValue } from './automation-value'
 import { validateRecurringSchedule } from './recurring-schedule'
 import { normalizeAutomationWorkItemSchedule } from './work-item-schedule-validation'
 
+/** Longest routing Team ID; matches the Triage identifier boundary and canonical Team IDs. */
+const TRIAGE_ROUTING_TEAM_ID_MAX_LENGTH = 200
+
 /**
  * Validates and normalizes an untrusted Automation template definition.
  *
@@ -249,8 +252,22 @@ export function validateCreateAutomationInboundWebhookEndpointInput(
   value: unknown,
 ): CreateAutomationInboundWebhookEndpointInput {
   const input = requireRecord(value, 'Inbound webhook endpoint')
-  assertOnlyKeys(input, ['name'], 'Inbound webhook endpoint')
-  return { name: requireBoundedText(input.name, 'Inbound webhook endpoint name', 160) }
+  assertOnlyKeys(input, ['name', 'purpose', 'triageRouting'], 'Inbound webhook endpoint')
+  const name = requireBoundedText(input.name, 'Inbound webhook endpoint name', 160)
+  const purpose = input.purpose === undefined ? 'automation' : input.purpose
+  if (purpose !== 'automation' && purpose !== 'triage') {
+    throw new AutomationError('invalid-input', 'AutomationInboundWebhookPurposeInvalid', 'Inbound webhook purpose must be automation or triage.')
+  }
+  if (purpose === 'automation') {
+    if (input.triageRouting !== undefined) {
+      throw new AutomationError('invalid-input', 'AutomationInboundWebhookRoutingInvalid', 'Only Triage endpoints take Triage routing.')
+    }
+    // Automation stays the implicit default so existing create fingerprints are unchanged.
+    return { name }
+  }
+  const routing = requireRecord(input.triageRouting, 'Inbound webhook Triage routing')
+  assertOnlyKeys(routing, ['teamId'], 'Inbound webhook Triage routing')
+  return { name, purpose, triageRouting: { teamId: requireBoundedText(routing.teamId, 'Triage routing Team ID', TRIAGE_ROUTING_TEAM_ID_MAX_LENGTH) } }
 }
 
 /**

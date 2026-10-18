@@ -47,6 +47,7 @@ import type {
   AutomationActionExecutionContext,
 } from '../../application/ports'
 import { AutomationError } from '../../domain/automation-error'
+import { TriageError } from '../../../triage'
 import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
 import type {
   AutomationInboundWebhookSecretStore,
@@ -57,6 +58,8 @@ import type {
   AutomationTemplateApplicationResult,
   BulkOperation,
   BulkOperationRequest,
+  CreateWebhookTriageEntryInput,
+  TriageEntry,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
@@ -69,6 +72,7 @@ import {
   test,
 } from 'bun:test'
 import {
+  createHash,
   createHmac,
 } from 'node:crypto'
 
@@ -311,6 +315,15 @@ function createAutomationInboundWebhookPort(
     },
     async resolveInboundWebhookEndpoint() {
       return unexpectedAutomationPortCall()
+    },
+    /**
+     * Reports that no Triage delivery was accepted for the request.
+     *
+     * @returns Undefined.
+     */
+    async resolveAcceptedTriageWebhookDelivery() {
+      // Most tests send no delivery to an inactive endpoint, so none was accepted.
+      return undefined
     },
     async reserveCreateInboundWebhookEndpoint() {
       return unexpectedAutomationPortCall()
@@ -1393,6 +1406,106 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
     expect((await request()).status).toBe(423)
     resolvedEndpoint = { ...resolvedEndpoint, status: 'provisioning' }
     expect((await request()).status).toBe(404)
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
+})
+
+test('reads Triage recovery markers only for Triage endpoints or unresolved IDs', async () => {
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    let resolvedEndpoint: ReturnType<typeof createInboundWebhookEndpointRecord> | undefined =
+      createInboundWebhookEndpointRecord()
+    const recoveryReads: string[] = []
+    const signingSecret = Buffer.from('server-issued-secret', 'utf8')
+    setTestAppDependencies({
+      inboundWebhooks: createAutomationInboundWebhookPort({
+        /**
+         * Resolves the endpoint configured by the test.
+         *
+         * @returns A copy of the current endpoint.
+         */
+        async resolveInboundWebhookEndpoint() {
+          return structuredClone(resolvedEndpoint)
+        },
+        /**
+         * Records the recovery-marker lookup and reports no accepted delivery.
+         *
+         * @param opaqueEndpointId - Opaque endpoint ID being looked up.
+         * @returns Undefined.
+         */
+        async resolveAcceptedTriageWebhookDelivery(opaqueEndpointId) {
+          recoveryReads.push(opaqueEndpointId)
+          return undefined
+        },
+        /**
+         * Records a new delivery.
+         *
+         * @param _endpoint - Endpoint receiving the delivery.
+         * @param input - Delivery input.
+         * @returns A non-replayed delivery result.
+         */
+        async recordInboundWebhookDelivery(_endpoint, input) {
+          return { eventId: input.eventId, replayed: false }
+        },
+      }),
+      automationInboundWebhookSecrets: {
+        /** Fails because public delivery must not provision a secret. */
+        async provision() {
+          throw new Error('Public delivery must not provision a secret.')
+        },
+        /**
+         * Returns the signing secret.
+         *
+         * @returns The signing secret.
+         */
+        async get() {
+          return signingSecret
+        },
+        /** Fails because public delivery must not delete a secret. */
+        async delete() {
+          throw new Error('Public delivery must not delete a secret.')
+        },
+      },
+      tenantLifecycleEnforcement: {
+        /** Accepts the tenant as active. */
+        async assertActive() {},
+      },
+    })
+    const rawBody = '{"message":"deploy"}'
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = `sha256=${createHmac('sha256', signingSecret)
+      .update(`${timestamp}.`, 'utf8')
+      .update(rawBody, 'utf8')
+      .digest('hex')}`
+    /**
+     * Sends a signed delivery to the test endpoint's opaque ID.
+     *
+     * @returns The response.
+     */
+    const request = () => app.request(`/api/automation/inbound-webhooks/${'A'.repeat(43)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'sender-delivery-1',
+        'X-Mukuroji-Signature': signature,
+        'X-Mukuroji-Timestamp': timestamp,
+      },
+      body: rawBody,
+    })
+
+    // Automation endpoints never leave recovery markers, so no delivery state reads one.
+    expect((await request()).status).toBe(202)
+    resolvedEndpoint = createInboundWebhookEndpointRecord({ status: 'paused' })
+    expect((await request()).status).toBe(423)
+    expect(recoveryReads).toEqual([])
+
+    // Revocation deletes the public lookup, so an unresolved ID still checks for recovery.
+    resolvedEndpoint = undefined
+    expect((await request()).status).toBe(404)
+    expect(recoveryReads).toEqual(['A'.repeat(43)])
   } finally {
     if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
     else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
@@ -2842,4 +2955,584 @@ test('rejects inactive automation approval reviewers before creating durable sta
     status: 409,
   })
   expect(createCalls).toBe(0)
+})
+
+test('turns a signed Triage-purpose delivery into a Triage entry without an Automation event', async () => {
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    configureFakeProjectClients(true)
+    const endpoint = createInboundWebhookEndpointRecord({
+      name: 'Status page',
+      purpose: 'triage',
+      triageRouting: { teamId: 'core-team' },
+    })
+    const signingSecret = Buffer.from('server-issued-secret', 'utf8')
+    const deliveries: Parameters<TestAutomationInboundWebhookPort['recordInboundWebhookDelivery']>[1][] = []
+    const created: { teamId: string; input: CreateWebhookTriageEntryInput }[] = []
+    const admissions: { key: string; receivedAt: string | undefined }[] = []
+    let admissionFailure: Error | undefined
+    const now = '2026-10-16T00:00:00.000Z'
+    const entry: TriageEntry = {
+      schemaVersion: 1,
+      id: 'triage-webhook-1',
+      workspaceId: endpoint.workspaceId,
+      source: { kind: 'webhook', sourceId: `${endpoint.id}:evt-1`, connectorId: endpoint.id },
+      sourcePreview: { title: 'Checkout errors', body: 'Customers see 500.', attachmentCount: 0, commentCount: 0, watcherCount: 0, sanitized: true, truncated: false },
+      requester: { displayName: 'Status page', guest: true },
+      receivedAt: now,
+      lastActivityAt: now,
+      state: 'pending',
+      routing: { reason: 'Received by inbound webhook.', candidates: [] },
+      teamId: 'core-team',
+      permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: now },
+      retention: { expiresAt: '2027-10-16T00:00:00.000Z' },
+      capabilities: { canAssign: true, canAcceptCreate: true, canAcceptLink: true, canMarkDuplicate: true, canDecline: true, canSnooze: true, canRequestInformation: false, canReply: false, canViewInternalContext: true },
+      events: [],
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    }
+    /**
+     * Fails on a Triage client call the test does not expect.
+     *
+     * @returns Never; always throws.
+     */
+    const unexpected = async (): Promise<never> => {
+      throw new Error('Unexpected Triage client call.')
+    }
+    setTestAppDependencies({
+      inboundWebhooks: createAutomationInboundWebhookPort({
+        /**
+         * Resolves the endpoint configured by the test.
+         *
+         * @returns A copy of the current endpoint.
+         */
+        async resolveInboundWebhookEndpoint() {
+          return structuredClone(endpoint)
+        },
+        /**
+         * Captures a new delivery and accepts it.
+         *
+         * @param _endpoint - Endpoint receiving the delivery.
+         * @param input - Delivery input.
+         * @returns A non-replayed delivery result with its acceptance time.
+         */
+        async recordInboundWebhookDelivery(_endpoint, input) {
+          deliveries.push(input)
+          return { eventId: input.eventId, replayed: false, acceptedAt: '2026-10-15T23:00:00.000Z' }
+        },
+      }),
+      automationInboundWebhookSecrets: {
+        /** Fails because this test does not expect the call. */
+        async provision() { throw new Error('unexpected') },
+        /**
+         * Returns the signing secret.
+         *
+         * @returns The signing secret.
+         */
+        async get() { return signingSecret },
+        /** Fails because this test does not expect the call. */
+        async delete() { throw new Error('unexpected') },
+      },
+      tenantLifecycleEnforcement: {
+        /** Accepts the tenant as active. */
+        async assertActive() {},
+      },
+      triage: {
+        listEntries: unexpected,
+        getEntry: unexpected,
+        getEntryForMutation: unexpected,
+        applyAction: unexpected,
+        getActionReceipt: unexpected,
+        applyBulkAction: unexpected,
+        getConfiguration: unexpected,
+        getConfigurationUpdateReceipt: unexpected,
+        updateConfiguration: unexpected,
+        createManualHandoff: unexpected,
+        listWorkItemSources: unexpected,
+        /**
+         * Admits a Triage webhook entry, mirroring store replay and Team checks.
+         *
+         * @param _workspaceId - Workspace of the entry.
+         * @param teamId - Routing Team.
+         * @param _endpoint - Endpoint that received the delivery.
+         * @param input - Normalized Triage webhook input.
+         * @param idempotency - Admission idempotency key.
+         * @param options - Admission options.
+         * @returns The created or replayed entry.
+         */
+        async createWebhookEntry(_workspaceId, teamId, _endpoint, input, idempotency, options) {
+          // Mirrors the store: a committed source replays before any current-state check.
+          if (created.some((item) => item.input.eventId === input.eventId)) return { entry, replayed: true }
+          if (admissionFailure) throw admissionFailure
+          // Mirrors the admission validator's commit-time Team check.
+          if (teamId !== 'core-team') throw new TriageError(409, 'TriageAdmissionTeamUnavailable', 'The target Triage Team is not active.')
+          admissions.push({ key: idempotency.key, receivedAt: options?.receivedAt })
+          created.push({ teamId, input })
+          return { entry, replayed: false }
+        },
+      },
+    })
+    /**
+     * Sends a signed delivery.
+     *
+     * @param body - Raw JSON body.
+     * @returns The response.
+     */
+    const deliver = (body: string) => {
+      const timestamp = String(Math.floor(Date.now() / 1_000))
+      const signature = `sha256=${createHmac('sha256', signingSecret).update(`${timestamp}.`, 'utf8').update(body, 'utf8').digest('hex')}`
+      return app.request(`/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `delivery-${deliveries.length + created.length}`,
+          'X-Mukuroji-Signature': signature,
+          'X-Mukuroji-Timestamp': timestamp,
+        },
+        body,
+      })
+    }
+
+    const response = await deliver(JSON.stringify({
+      eventId: 'evt-1',
+      title: 'Checkout errors',
+      body: 'Customers see 500.',
+      requester: { name: 'Status page' },
+    }))
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({ eventId: deliveries[0]?.eventId, triageEntryId: 'triage-webhook-1' })
+    expect(created).toEqual([{ teamId: 'core-team', input: { eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requesterDisplayName: 'Status page' } }])
+    // The Triage receipt gets a fixed-length key digest and the delivery's first accepted time.
+    expect(admissions).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{64}$/u), receivedAt: '2026-10-15T23:00:00.000Z' }])
+    const auditItem = JSON.stringify(deliveries[0]?.auditMutation)
+    expect(auditItem).toContain('triage.webhook-received')
+    expect(auditItem).not.toContain('webhook.received"')
+    expect(auditItem).not.toContain('Customers see 500.')
+
+    const hijack = await deliver(JSON.stringify({
+      eventId: 'evt-2',
+      title: 'Reroute me',
+      body: 'x',
+      requester: { name: 'Attacker' },
+      teamId: 'other-team',
+    }))
+    expect(hijack.status).toBe(400)
+    expect(await hijack.json()).toMatchObject({ code: 'InvalidTriageWebhookEnvelope' })
+    expect(created).toHaveLength(1)
+
+    // After the routing Team disappears, a redelivery of the admitted event still returns
+    // its entry, while a new event fails closed.
+    endpoint.triageRouting = { teamId: 'removed-team' }
+    const replay = await deliver(JSON.stringify({
+      eventId: 'evt-1',
+      title: 'Checkout errors',
+      body: 'Customers see 500.',
+      requester: { name: 'Status page' },
+    }))
+    expect(replay.status).toBe(202)
+    expect(await replay.json()).toMatchObject({ triageEntryId: 'triage-webhook-1' })
+    const fresh = await deliver(JSON.stringify({ eventId: 'evt-3', title: 'New', body: 'x', requester: { name: 'Status page' } }))
+    expect(fresh.status).toBe(409)
+    expect(await fresh.json()).toMatchObject({ code: 'TriageAdmissionTeamUnavailable' })
+    expect(created).toHaveLength(1)
+
+    // Infrastructure failures during admission use the Triage error envelope.
+    endpoint.triageRouting = { teamId: 'core-team' }
+    admissionFailure = new Error('ProvisionedThroughputExceededException')
+    const throttled = await deliver(JSON.stringify({ eventId: 'evt-4', title: 'New', body: 'x', requester: { name: 'Status page' } }))
+    expect(throttled.status).toBe(503)
+    expect(await throttled.json()).toMatchObject({ code: 'TriageUnavailable' })
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
+})
+
+test('fences the Triage routing Team in the endpoint reservation', async () => {
+  configureFakeProjectClients(true)
+  const endpoint = createInboundWebhookEndpointRecord({
+    name: 'Status page',
+    purpose: 'triage',
+    triageRouting: { teamId: 'core-team' },
+  })
+  const fences: unknown[] = []
+  setTestAppDependencies({
+    inboundWebhooks: createAutomationInboundWebhookPort({
+      /**
+       * Captures the reservation fences and reserves the endpoint.
+       *
+       * @param _workspaceId - Workspace of the endpoint.
+       * @param _actorId - Acting user.
+       * @param _input - Create input.
+       * @param _key - Idempotency key.
+       * @param _baseUrl - Public base URL.
+       * @param validateNewEndpoint - Callback returning commit-time fences.
+       * @returns The create provisioning.
+       */
+      async reserveCreateInboundWebhookEndpoint(_workspaceId, _actorId, _input, _key, _baseUrl, validateNewEndpoint) {
+        fences.push(...(await validateNewEndpoint?.() ?? []))
+        return createInboundWebhookProvisioning(endpoint, 'create')
+      },
+      /**
+       * Activates the provisioned endpoint.
+       *
+       * @param provisioning - Provisioning to complete.
+       * @returns The active endpoint.
+       */
+      async completeInboundWebhookProvisioning(provisioning) {
+        return { ...provisioning.endpoint, status: 'active' }
+      },
+    }),
+    automationInboundWebhookSecrets: {
+      /**
+       * Returns a one-time secret.
+       *
+       * @returns The secret.
+       */
+      async provision() { return 'one-time-secret' },
+      /** Fails because this test does not expect the call. */
+      async get() { throw new Error('unexpected') },
+      /** Fails because this test does not expect the call. */
+      async delete() { throw new Error('unexpected') },
+    },
+  })
+  const response = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'triage-endpoint-1',
+    },
+    body: JSON.stringify({ name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'core-team' } }),
+  })
+  expect(response.status).toBe(201)
+  // The Team check is a commit-time condition of the reservation, not only a preflight read.
+  expect(fences).toEqual([expect.objectContaining({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'DirectoryTable',
+      Key: expect.objectContaining({ entryKey: 'TEAM#core-team' }),
+    }),
+  })])
+})
+
+test('finishes an accepted Triage delivery after its endpoint is revoked', async () => {
+  configureFakeProjectClients(true)
+  const endpoint = createInboundWebhookEndpointRecord({
+    name: 'Status page',
+    purpose: 'triage',
+    triageRouting: { teamId: 'core-team' },
+    status: 'revoked',
+    revokedAt: '2026-10-16T01:00:00.000Z',
+  })
+  const body = JSON.stringify({ eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requester: { name: 'Status page' } })
+  const admissions: { eventId: string; receivedAt: string | undefined }[] = []
+  /**
+   * Fails on a Triage client call the test does not expect.
+   *
+   * @returns Never; always throws.
+   */
+  const unexpected = async (): Promise<never> => {
+    throw new Error('Unexpected Triage client call.')
+  }
+  setTestAppDependencies({
+    inboundWebhooks: createAutomationInboundWebhookPort({
+      /**
+       * Resolves nothing because revocation removed the opaque lookup.
+       *
+       * @returns Undefined.
+       */
+      async resolveInboundWebhookEndpoint() {
+        return undefined
+      },
+      /**
+       * Returns the accepted delivery for the accepted idempotency key only.
+       *
+       * @param _opaqueEndpointId - Opaque endpoint ID.
+       * @param idempotencyKey - Sender idempotency key.
+       * @returns The accepted delivery, or undefined.
+       */
+      async resolveAcceptedTriageWebhookDelivery(_opaqueEndpointId, idempotencyKey) {
+        if (idempotencyKey !== 'accepted-key') return undefined
+        return {
+          endpoint: structuredClone(endpoint),
+          eventId: 'event-accepted',
+          bodyFingerprint: createHash('sha256').update(body).digest('hex'),
+          acceptedAt: '2026-10-16T00:00:00.000Z',
+        }
+      },
+      /** Fails because a revoked endpoint must not record a new delivery. */
+      async recordInboundWebhookDelivery() {
+        throw new Error('A revoked endpoint must not record a new delivery.')
+      },
+    }),
+    automationInboundWebhookSecrets: {
+      /** Fails because this test does not expect the call. */
+      async provision() { throw new Error('unexpected') },
+      /** Fails because the revoked endpoint's secret is gone. */
+      async get() { throw new Error('A revoked endpoint has no signing secret.') },
+      /** Fails because this test does not expect the call. */
+      async delete() { throw new Error('unexpected') },
+    },
+    tenantLifecycleEnforcement: {
+      /** Accepts the tenant as active. */
+      async assertActive() {},
+    },
+    triage: {
+      listEntries: unexpected,
+      getEntry: unexpected,
+      getEntryForMutation: unexpected,
+      applyAction: unexpected,
+      getActionReceipt: unexpected,
+      applyBulkAction: unexpected,
+      getConfiguration: unexpected,
+      getConfigurationUpdateReceipt: unexpected,
+      updateConfiguration: unexpected,
+      createManualHandoff: unexpected,
+      listWorkItemSources: unexpected,
+      /**
+       * Records the admission and returns the created Triage entry.
+       *
+       * @param _workspaceId - Workspace of the entry.
+       * @param _teamId - Routing Team.
+       * @param _endpoint - Endpoint that received the delivery.
+       * @param input - Normalized Triage webhook input.
+       * @param _idempotency - Admission idempotency key.
+       * @param options - Admission options.
+       * @returns The created entry.
+       */
+      async createWebhookEntry(_workspaceId, _teamId, _endpoint, input, _idempotency, options) {
+        admissions.push({ eventId: input.eventId, receivedAt: options?.receivedAt })
+        return {
+          entry: {
+            schemaVersion: 1,
+            id: 'triage-webhook-1',
+            workspaceId: endpoint.workspaceId,
+            source: { kind: 'webhook', sourceId: `${endpoint.id}:evt-1`, connectorId: endpoint.id },
+            sourcePreview: { title: 'Checkout errors', body: 'Customers see 500.', attachmentCount: 0, commentCount: 0, watcherCount: 0, sanitized: true, truncated: false },
+            requester: { displayName: 'Status page', guest: true },
+            receivedAt: '2026-10-16T00:00:00.000Z',
+            lastActivityAt: '2026-10-16T00:00:00.000Z',
+            state: 'pending',
+            routing: { reason: 'Received by inbound webhook.', candidates: [] },
+            teamId: 'core-team',
+            permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: '2026-10-16T00:00:00.000Z' },
+            retention: { expiresAt: '2027-10-16T00:00:00.000Z' },
+            capabilities: { canAssign: true, canAcceptCreate: true, canAcceptLink: true, canMarkDuplicate: true, canDecline: true, canSnooze: true, canRequestInformation: false, canReply: false, canViewInternalContext: true },
+            events: [],
+            revision: 1,
+            createdAt: '2026-10-16T00:00:00.000Z',
+            updatedAt: '2026-10-16T00:00:00.000Z',
+          },
+          replayed: false,
+        }
+      },
+    },
+  })
+  /**
+   * Retries a delivery to the revoked endpoint.
+   *
+   * @param idempotencyKey - Sender idempotency key.
+   * @param requestBody - Raw JSON body.
+   * @returns The response.
+   */
+  const retry = (idempotencyKey: string, requestBody: string) =>
+    app.request(`/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+        'X-Mukuroji-Signature': `sha256=${'0'.repeat(64)}`,
+        'X-Mukuroji-Timestamp': String(Math.floor(Date.now() / 1_000)),
+      },
+      body: requestBody,
+    })
+
+  const completed = await retry('accepted-key', body)
+  expect(completed.status).toBe(202)
+  expect(await completed.json()).toEqual({ eventId: 'event-accepted', triageEntryId: 'triage-webhook-1' })
+  expect(admissions).toEqual([{ eventId: 'evt-1', receivedAt: '2026-10-16T00:00:00.000Z' }])
+
+  // A new delivery, or a different body under the accepted key, is still rejected.
+  const fresh = await retry('new-key', JSON.stringify({ eventId: 'evt-2', title: 'New', body: 'x', requester: { name: 'Status page' } }))
+  expect(fresh.status).toBe(404)
+  expect(await fresh.json()).toMatchObject({ code: 'AutomationInboundWebhookNotFound' })
+  const altered = await retry('accepted-key', JSON.stringify({ eventId: 'evt-1', title: 'Altered', body: 'x', requester: { name: 'Status page' } }))
+  expect(altered.status).toBe(404)
+  expect(admissions).toHaveLength(1)
+})
+
+test('finishes an accepted Triage delivery after the endpoint secret is rotated', async () => {
+  configureFakeProjectClients(true)
+  const endpoint = createInboundWebhookEndpointRecord({
+    name: 'Status page',
+    purpose: 'triage',
+    triageRouting: { teamId: 'core-team' },
+    secretGeneration: 2,
+  })
+  const previousSecret = Buffer.from('previous-secret', 'utf8')
+  const currentSecret = Buffer.from('current-secret', 'utf8')
+  const body = JSON.stringify({ eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requester: { name: 'Status page' } })
+  const admissions: string[] = []
+  const recordedBodies: string[] = []
+  /**
+   * Fails on a Triage client call the test does not expect.
+   *
+   * @returns Never; always throws.
+   */
+  const unexpected = async (): Promise<never> => {
+    throw new Error('Unexpected Triage client call.')
+  }
+  setTestAppDependencies({
+    inboundWebhooks: createAutomationInboundWebhookPort({
+      /**
+       * Resolves the endpoint configured by the test.
+       *
+       * @returns A copy of the current endpoint.
+       */
+      async resolveInboundWebhookEndpoint() {
+        return structuredClone(endpoint)
+      },
+      /**
+       * Returns the accepted delivery for the accepted idempotency key only.
+       *
+       * @param _opaqueEndpointId - Opaque endpoint ID.
+       * @param idempotencyKey - Sender idempotency key.
+       * @returns The accepted delivery, or undefined.
+       */
+      async resolveAcceptedTriageWebhookDelivery(_opaqueEndpointId, idempotencyKey) {
+        if (idempotencyKey !== 'accepted-key') return undefined
+        return {
+          endpoint: structuredClone(endpoint),
+          eventId: 'event-accepted',
+          bodyFingerprint: createHash('sha256').update(body).digest('hex'),
+          acceptedAt: '2026-10-16T00:00:00.000Z',
+        }
+      },
+      /**
+       * Captures the body fingerprint and rejects it as an idempotency conflict.
+       *
+       * @param _endpoint - Endpoint receiving the delivery.
+       * @param input - Delivery input.
+       */
+      async recordInboundWebhookDelivery(_endpoint, input) {
+        recordedBodies.push(input.bodyFingerprint)
+        throw new AutomationError(
+          'conflict',
+          'AutomationInboundWebhookIdempotencyConflict',
+          'Idempotency key was already used with a different request body.',
+        )
+      },
+    }),
+    automationInboundWebhookSecrets: {
+      /** Fails because this test does not expect the call. */
+      async provision() { throw new Error('unexpected') },
+      /**
+       * Returns the current signing secret.
+       *
+       * @returns The current secret.
+       */
+      async get() { return currentSecret },
+      /** Fails because this test does not expect the call. */
+      async delete() { throw new Error('unexpected') },
+    },
+    tenantLifecycleEnforcement: {
+      /** Accepts the tenant as active. */
+      async assertActive() {},
+    },
+    triage: {
+      listEntries: unexpected,
+      getEntry: unexpected,
+      getEntryForMutation: unexpected,
+      applyAction: unexpected,
+      getActionReceipt: unexpected,
+      applyBulkAction: unexpected,
+      getConfiguration: unexpected,
+      getConfigurationUpdateReceipt: unexpected,
+      updateConfiguration: unexpected,
+      createManualHandoff: unexpected,
+      listWorkItemSources: unexpected,
+      /**
+       * Records the admission and returns the created Triage entry.
+       *
+       * @param _workspaceId - Workspace of the entry.
+       * @param _teamId - Routing Team.
+       * @param _endpoint - Endpoint that received the delivery.
+       * @param input - Normalized Triage webhook input.
+       * @returns The created entry.
+       */
+      async createWebhookEntry(_workspaceId, _teamId, _endpoint, input) {
+        admissions.push(input.eventId)
+        return {
+          entry: {
+            schemaVersion: 1,
+            id: 'triage-webhook-1',
+            workspaceId: endpoint.workspaceId,
+            source: { kind: 'webhook', sourceId: `${endpoint.id}:evt-1`, connectorId: endpoint.id },
+            sourcePreview: { title: 'Checkout errors', body: 'Customers see 500.', attachmentCount: 0, commentCount: 0, watcherCount: 0, sanitized: true, truncated: false },
+            requester: { displayName: 'Status page', guest: true },
+            receivedAt: '2026-10-16T00:00:00.000Z',
+            lastActivityAt: '2026-10-16T00:00:00.000Z',
+            state: 'pending',
+            routing: { reason: 'Received by inbound webhook.', candidates: [] },
+            teamId: 'core-team',
+            permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: '2026-10-16T00:00:00.000Z' },
+            retention: { expiresAt: '2027-10-16T00:00:00.000Z' },
+            capabilities: { canAssign: true, canAcceptCreate: true, canAcceptLink: true, canMarkDuplicate: true, canDecline: true, canSnooze: true, canRequestInformation: false, canReply: false, canViewInternalContext: true },
+            events: [],
+            revision: 1,
+            createdAt: '2026-10-16T00:00:00.000Z',
+            updatedAt: '2026-10-16T00:00:00.000Z',
+          },
+          replayed: false,
+        }
+      },
+    },
+  })
+  /**
+   * Sends a delivery signed with the given secret.
+   *
+   * @param secret - Signing secret.
+   * @param idempotencyKey - Sender idempotency key.
+   * @param requestBody - Raw JSON body.
+   * @returns The response.
+   */
+  const deliver = (secret: Buffer, idempotencyKey: string, requestBody: string) => {
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = `sha256=${createHmac('sha256', secret).update(`${timestamp}.`, 'utf8').update(requestBody, 'utf8').digest('hex')}`
+    return app.request(`/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+        'X-Mukuroji-Signature': signature,
+        'X-Mukuroji-Timestamp': timestamp,
+      },
+      body: requestBody,
+    })
+  }
+
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    // The accepted delivery's retry is still signed with the secret from before the rotation.
+    const completed = await deliver(previousSecret, 'accepted-key', body)
+    expect(completed.status).toBe(202)
+    expect(await completed.json()).toEqual({ eventId: 'event-accepted', triageEntryId: 'triage-webhook-1' })
+    expect(admissions).toEqual(['evt-1'])
+
+    // A new delivery signed with the old secret fails verification.
+    const fresh = await deliver(previousSecret, 'new-key', body)
+    expect(fresh.status).toBe(401)
+    // A different body under the accepted key goes through normal verification with its bytes intact.
+    const altered = JSON.stringify({ eventId: 'evt-1', title: 'Altered', body: 'x', requester: { name: 'Status page' } })
+    const conflict = await deliver(currentSecret, 'accepted-key', altered)
+    expect(conflict.status).toBe(409)
+    expect(recordedBodies).toEqual([createHash('sha256').update(altered).digest('hex')])
+    expect(admissions).toHaveLength(1)
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
 })

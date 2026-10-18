@@ -166,6 +166,7 @@ function createTriageClient(
     getConfigurationUpdateReceipt: async () => undefined,
     updateConfiguration: async () => createConfiguration(),
     createManualHandoff: async () => ({ entry, replayed: false }),
+    createWebhookEntry: async () => ({ entry, replayed: false }),
     listWorkItemSources: async () => ({ entries: [entry] }),
   }
 }

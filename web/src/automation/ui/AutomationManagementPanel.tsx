@@ -302,7 +302,7 @@ export function AutomationManagementPanel({
             readOnly={readOnly}
             rules={rules}
             teams={teams}
-            webhookEndpoints={webhooks}
+            webhookEndpoints={webhooks.filter((endpoint) => endpoint.purpose !== 'triage')}
             onCreate={onCreateRule}
             onToggle={onToggleRule}
           />
@@ -313,6 +313,7 @@ export function AutomationManagementPanel({
             endpoints={webhooks}
             locale={locale}
             readOnly={readOnly}
+            teams={teams}
             onCreate={onCreateWebhook}
             onPause={onPauseWebhook}
             onResume={onResumeWebhook}
