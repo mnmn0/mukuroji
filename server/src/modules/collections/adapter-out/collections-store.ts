@@ -78,16 +78,22 @@ const COLLECTION_SUMMARY_ATTRIBUTES = [
 ] as const
 
 /**
- * Builds the condition that the caller still holds the Project membership that authorized
- * reading a Work Item.
+ * Builds the conditions that the caller still holds the Project membership that authorized
+ * reading a Work Item, and that the Team and that Project are still active.
  *
- * Throws `409 CollectionWorkItemChanged` when the membership no longer exists.
+ * Archiving a Project changes the Project row, not its membership rows, so both are fenced.
+ * Throws `409 CollectionWorkItemChanged` when the membership or the Project no longer exists.
  *
  * @param workspaceId - Server-resolved Workspace.
+ * @param teamId - Team that owns the Work Item and the Project.
  * @param projectId - Project whose membership authorized the read.
- * @returns Transaction condition check on the membership row.
+ * @returns Transaction condition checks on the membership, Team and Project rows.
  */
-export type CollectionProjectAccessCheck = (workspaceId: string, projectId: string) => Promise<PlanningCallerAuthorizationConditionCheck>
+export type CollectionProjectAccessCheck = (
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+) => Promise<readonly PlanningCallerAuthorizationConditionCheck[]>
 
 /** Composition-only binding for fresh caller authorization conditions. */
 export interface CollectionsPersistence extends CollectionsStore {
@@ -358,9 +364,11 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * generation, which tells that churn apart from corrupt state.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @returns The verified count, which the increment then requires to be unchanged.
+   * @returns The verified count and generation, which the increment then requires to be
+   *   unchanged, so a write that overlapped the listing fails the creation instead of
+   *   committing on a count the listing did not really observe.
    */
-  private async verifiedCount(workspaceId: string): Promise<number> {
+  private async verifiedCount(workspaceId: string): Promise<CollectionCounter> {
     let counter = await this.readCounter(workspaceId)
     if (counter === undefined) {
       await this.initializeCounter(workspaceId)
@@ -375,7 +383,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       throw corruptState()
     }
     if (counter.count >= COLLECTION_LIMIT) throw limitReached()
-    return counter.count
+    return counter
   }
 
   /**
@@ -393,12 +401,14 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     })).catch((error: unknown) => storageFailure(error))
     if (row === undefined) return undefined
     const count: unknown = row.count
-    // A counter written before any create or delete has no generation yet; `ADD` starts it at 0.
+    // A counter no create or delete has touched has no generation yet; `ADD` then writes 1, so
+    // a stored generation is always positive.
     const generation: unknown = row.generation ?? 0
     if (
       row.entryType !== COLLECTION_COUNT_ENTRY_TYPE ||
       typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 ||
-      typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0
+      typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0 ||
+      (row.generation !== undefined && generation === 0)
     ) {
       throw corruptState()
     }
@@ -462,7 +472,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     }
     const checks: CollectionTransactItem[] = [this.workItemFenceCheck(workspaceId, fence)]
     if (fence.accessProjectId !== undefined && this.projectAccessCheck) {
-      checks.push(await this.projectAccessCheck(workspaceId, fence.accessProjectId))
+      checks.push(...await this.projectAccessCheck(workspaceId, fence.teamId, fence.accessProjectId))
     }
     return checks
   }
@@ -489,10 +499,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param delta - 1 when creating, -1 when deleting.
-   * @param verifiedCount - When creating, the count verified against the live rows.
+   * @param verified - When creating, the counter state verified against the live rows.
    * @returns Transaction item that adjusts the counter.
    */
-  private counterUpdate(workspaceId: string, delta: 1 | -1, verifiedCount = 0) {
+  private counterUpdate(workspaceId: string, delta: 1 | -1, verified: CollectionCounter = { count: 0, generation: 0 }) {
     return {
       Update: {
         TableName: this.tableName,
@@ -504,15 +514,20 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         // against the live rows, because a missing or undercounted counter would let a restored
         // partition exceed the limit. A decrement also needs a positive count; otherwise the
         // partition is corrupt and a counter at -1 would allow overflow.
+        // A creation also requires the generation it verified: a delete and a create during the
+        // paged reconciliation leave the count unchanged but advance the generation. A counter
+        // that no create or delete has touched yet has no generation attribute.
         ConditionExpression: delta === 1
-          ? '#entryType = :entryType AND #count = :verified AND #count < :limit'
+          ? '#entryType = :entryType AND #count = :verified AND #count < :limit AND ' +
+            (verified.generation === 0 ? 'attribute_not_exists(#generation)' : '#generation = :generation')
           : '#count > :zero AND #entryType = :entryType',
         ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType', '#generation': 'generation' },
         ExpressionAttributeValues: {
           ':delta': delta,
           ':one': 1,
           ':entryType': COLLECTION_COUNT_ENTRY_TYPE,
-          ...(delta === 1 ? { ':verified': verifiedCount, ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
+          ...(delta === 1 ? { ':verified': verified.count, ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
+          ...(delta === 1 && verified.generation !== 0 ? { ':generation': verified.generation } : {}),
         },
       },
     }
@@ -565,7 +580,9 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
       readDeletion: (workspaceId, collectionId) => this.readDeletion(workspaceId, collectionId),
       delete: (workspaceId, collectionId, expectedRevision, deletion) => this.delete(workspaceId, collectionId, expectedRevision, deletion),
       put: async (workspaceId, collection, expectedRevision, workItemFence) => {
-        if (workItemFence?.accessProjectId !== undefined) await projectAccessCheck(workspaceId, workItemFence.accessProjectId)
+        if (workItemFence?.accessProjectId !== undefined) {
+          await projectAccessCheck(workspaceId, workItemFence.teamId, workItemFence.accessProjectId)
+        }
         await this.put(workspaceId, collection, expectedRevision, workItemFence)
       },
     }

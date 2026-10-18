@@ -65,7 +65,7 @@ test('writes require caller checks and carry a revision condition', async () => 
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
-      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: '#entryType = :entryType AND #count = :verified AND #count < :limit', UpdateExpression: 'ADD #count :delta, #generation :one SET #entryType = :entryType', ExpressionAttributeValues: { ':delta': 1, ':one': 1, ':entryType': 'work-item-collection-count', ':verified': 2, ':limit': 200 } }) },
+      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: '#entryType = :entryType AND #count = :verified AND #count < :limit AND attribute_not_exists(#generation)', UpdateExpression: 'ADD #count :delta, #generation :one SET #entryType = :entryType', ExpressionAttributeValues: { ':delta': 1, ':one': 1, ':entryType': 'work-item-collection-count', ':verified': 2, ':limit': 200 } }) },
       { ConditionCheck: { TableName: 'planning', Key: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
@@ -99,8 +99,9 @@ test('maps a failed counter condition on creation to the limit only for a valid 
   await expect(storeWithCounter(full).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
   // A concurrent delete freed a slot after the failed write: retry, not corruption.
   await expect(storeWithCounter({ ...full, count: 199 }).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
-  // A negative or foreign counter row is corrupt state, not a full Workspace.
-  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }]) {
+  // A negative or foreign counter row, or one with a generation this store never writes, is
+  // corrupt state, not a full Workspace.
+  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }, { ...full, generation: 0 }, { ...full, generation: 1.5 }]) {
     await expect(storeWithCounter(counter).put('w', collection, 0)).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   }
 })
@@ -390,13 +391,13 @@ test('fences a reference change on the Project membership that authorized the re
   })
   const requested: unknown[] = []
   const store = new DynamoDbCollectionsStore('planning', client, [], () => revisionCheck)
-    .withCallerAuthorization(checks, async (workspaceId, projectId) => {
-      requested.push([workspaceId, projectId])
-      return membershipCheck
+    .withCallerAuthorization(checks, async (workspaceId, teamId, projectId) => {
+      requested.push([workspaceId, teamId, projectId])
+      return [membershipCheck]
     })
   const fence = { teamId: 'core-team', issueId: 'item-1', revision: 4, accessProjectId: 'refero' }
   await store.put('w', { ...collection, revision: 2 }, 1, fence)
-  expect(requested).toEqual([['w', 'refero']])
+  expect(requested).toEqual([['w', 'core-team', 'refero']])
   expect(transactions).toEqual([[expect.objectContaining({ Put: expect.anything() }), expect.anything(), revisionCheck, membershipCheck, ...checks]])
   // A revoked membership fails only its check: retry with a fresh read, not a lost Workspace grant.
   failMembership = true
@@ -425,7 +426,7 @@ test('fails closed before creating when an existing counter disagrees with the l
         const count = counts[Math.min(reads, counts.length - 1)]
         const generation = generations[Math.min(reads, generations.length - 1)]
         reads += 1
-        return { Item: { ...validCounter, count, generation } }
+        return { Item: { ...validCounter, count, ...(generation === 0 ? {} : { generation }) } }
       }
       if (command instanceof QueryCommand) return { Items: Array.from({ length: liveRows }, (_, index) => storedRow(index)) }
       if (command instanceof TransactWriteCommand) return {}
@@ -452,6 +453,11 @@ test('fails closed before creating when an existing counter disagrees with the l
   const full = storeWith([COLLECTION_LIMIT], COLLECTION_LIMIT)
   await expect(full.store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
   expect(full.commands.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+  // A creation is bound to the generation it verified, so churn after the listing fails it.
+  const generationBound = storeWith([2], 2, [5])
+  await generationBound.store.put('w', collection, 0)
+  expect(generationBound.commands.find((command) => command instanceof TransactWriteCommand)?.input.TransactItems?.[1])
+    .toMatchObject({ Update: { ConditionExpression: '#entryType = :entryType AND #count = :verified AND #count < :limit AND #generation = :generation', ExpressionAttributeValues: expect.objectContaining({ ':verified': 2, ':generation': 5 }) } })
   // An updated row never needs the counter.
   const update = storeWith([1], COLLECTION_LIMIT)
   await update.store.put('w', { ...collection, revision: 2 }, 1)

@@ -220,7 +220,8 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 
 /**
  * Binds Collection writes to the caller's current Workspace membership and, for item
- * changes, to the Project membership that authorized reading the Work Item.
+ * changes, to the Project membership that authorized reading the Work Item and to that
+ * Project and its Team staying active.
  *
  * @param principal - Authenticated principal.
  * @returns Request-local Collection store.
@@ -228,9 +229,9 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 function writeStore(principal: WorkspacePrincipal): CollectionsStore {
   return workItemDependencies.collections.withCallerAuthorization(
     createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'),
-    async (workspaceId, projectId) => {
+    async (workspaceId, teamId, projectId) => {
       const projectDirectory = workspaceDependencies.projectDirectory
-      if (!projectDirectory.createProjectAccessConditionCheck) {
+      if (!projectDirectory.createProjectAccessConditionCheck || !projectDirectory.createActiveReferenceConditionChecks) {
         throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
       }
       const check = await projectDirectory.createProjectAccessConditionCheck.call(
@@ -242,12 +243,31 @@ function writeStore(principal: WorkspacePrincipal): CollectionsStore {
       )
       // A membership that is already gone is the same race as one revoked before commit:
       // the change is retried with a fresh readability check.
-      if (!check?.ConditionCheck) {
-        throw new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
-      }
-      return { ConditionCheck: check.ConditionCheck }
+      if (!check?.ConditionCheck) throw workItemChanged()
+      // Archiving the Project changes its own row, not the membership row, so the Team and
+      // Project must also still be active at commit; one archived before the write is the same
+      // race and is retried with a fresh readability check.
+      const activeReferences = await projectDirectory.createActiveReferenceConditionChecks
+        .call(projectDirectory, workspaceId, teamId, projectId)
+        .catch((error: unknown) => {
+          if (error instanceof ProjectDataError && error.status === 404) throw workItemChanged()
+          throw error
+        })
+      return [{ ConditionCheck: check.ConditionCheck }, ...activeReferences.map((item) => {
+        if (!item.ConditionCheck) throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
+        return { ConditionCheck: item.ConditionCheck }
+      })]
     },
   )
+}
+
+/**
+ * Creates the error for a Work Item whose readability changed before the write.
+ *
+ * @returns A 409 Collection error that asks the client to reload and retry.
+ */
+function workItemChanged(): CollectionError {
+  return new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
 }
 
 /**

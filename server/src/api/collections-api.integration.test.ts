@@ -1,6 +1,7 @@
 import type { EnterprisePermissionId, EnterpriseRoleAssignment, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
+import { ProjectDataError } from '../modules/directory'
 import { createApiTestHarness } from './test-support/api-test-harness'
 
 const {
@@ -419,6 +420,38 @@ test('fences an item change on the Project membership that authorized reading th
   membershipRevoked = true
   expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'DELETE')).status).toBe(409)
   expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toHaveLength(1)
+})
+
+test('fences an item change on the authorizing Project staying active', async () => {
+  // Archiving a Project changes the Project row, not the member's membership row.
+  configureMember()
+  const { collectionId } = await createCollection('Launch')
+  const itemPath = `/api/collections/${collectionId}/items/core-team/onboarding-friction`
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const fenced: unknown[] = []
+  let projectArchived = false
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        fenced.push([teamId, projectId])
+        // The Project was archived after the readability check.
+        if (projectArchived) throw new ProjectDataError(404, 'ProjectNotFound', 'Project was not found.')
+        return await existingProjectDirectory.createActiveReferenceConditionChecks?.(directoryId, teamId, projectId) ?? []
+      },
+    },
+  })
+
+  projectArchived = true
+  const archived = await planningApiRequest(itemPath, 'PUT')
+  expect(archived.status).toBe(409)
+  expect(await archived.json()).toMatchObject({ code: 'CollectionWorkItemChanged' })
+  expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toEqual([])
+
+  projectArchived = false
+  fenced.length = 0
+  expect((await planningApiRequest(itemPath, 'PUT')).status).toBe(200)
+  expect(fenced).toEqual([['core-team', 'refero']])
 })
 
 test('reloads Project access before retrying an item change after a membership is revoked', async () => {
