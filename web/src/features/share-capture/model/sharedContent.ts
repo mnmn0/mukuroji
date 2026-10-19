@@ -74,10 +74,11 @@ export function readSharedContent(fields: StoredSharedFields | undefined): Share
  *
  * A share received through the share target uses its stored ID as the source, so every tab or
  * window that opens it sends the same logical handoff and the server's source claim lets only
- * one entry exist. The fallback retention is rounded to the UTC day for the same reason.
+ * one entry exist. For the same reason a stored share passes the time the worker received it,
+ * so the fallback retention, rounded to the UTC day, is the same in every tab on every day.
  *
  * @param sharedId - ID of the stored share, or empty when nothing was shared.
- * @param now - Current time.
+ * @param now - When the worker received the share, or the current time without a stored share.
  * @param createId - UUID factory for a handoff without a stored share.
  * @returns Source identifier and fallback retention deadline.
  */

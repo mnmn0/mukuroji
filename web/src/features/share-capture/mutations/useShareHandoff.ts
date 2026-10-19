@@ -78,6 +78,11 @@ export type UseShareHandoffOptions = {
    * never restored and replayed after another account signs in on the same tab.
    */
   readonly accountKey: string
+  /**
+   * When the worker received the stored share, in epoch milliseconds; it fixes the fallback
+   * retention so every tab sends the same handoff.
+   */
+  readonly receivedAt?: number
   /** Storage for the attempted send; defaults to the tab's session storage. */
   readonly storage?: ShareHandoffStorage
 }
@@ -193,7 +198,7 @@ function loadAttempt(storage: ShareHandoffStorage | undefined, key: string): Loc
  * updates, until it succeeds, so a saved entry is replayed rather than duplicated. A first
  * send the server refused created nothing, so it is forgotten and the form can be edited.
  *
- * @param options - Access token, session guard, requester name, share key, and account key.
+ * @param options - Access token, session guard, requester name, share key, account key, and receive time.
  * @returns The handoff state and send action.
  */
 export function useShareHandoff({
@@ -202,6 +207,7 @@ export function useShareHandoff({
   requesterDisplayName,
   handoffKey,
   accountKey,
+  receivedAt,
   storage = readPageStorage(),
 }: UseShareHandoffOptions): ShareHandoffController {
   const storageKey = `${attemptStorageKeyPrefix}${encodeURIComponent(accountKey)}:${handoffKey}`
@@ -223,7 +229,7 @@ export function useShareHandoff({
     const attempt = locked ?? {
       teamId,
       draft,
-      input: createShareHandoffInput(draft, createShareHandoffIdentity(handoffKey), requesterDisplayName),
+      input: createShareHandoffInput(draft, createShareHandoffIdentity(handoffKey, receivedAt === undefined ? undefined : new Date(receivedAt)), requesterDisplayName),
       context: createMutationRequestContext(),
     }
     if (!wasLocked && !save(attempt)) {

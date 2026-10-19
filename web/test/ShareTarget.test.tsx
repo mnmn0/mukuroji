@@ -17,7 +17,9 @@ import {
 import { ShareCaptureForm } from '../src/features/share-capture/ui/ShareCaptureForm'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import {
+  cancelStoredSharedContent,
   discardStoredSharedContent,
+  isStoredSharedContentCancelled,
   readStoredSharedContent,
   sharedContentCacheName,
   sharedContentKeyPrefix,
@@ -126,6 +128,13 @@ describe('createShareHandoffInput', () => {
     expect(morning.sourceId).toBe('share:0f8fad5b')
   })
 
+  test('derives retention from when the share was received, so a later day sends the same handoff', () => {
+    const receivedAt = new Date('2026-10-19T23:59:00.000Z')
+    expect(createShareHandoffIdentity('0f8fad5b', receivedAt, () => 'uuid-a'))
+      .toEqual(createShareHandoffIdentity('0f8fad5b', new Date(receivedAt.getTime()), () => 'uuid-b'))
+    expect(createShareHandoffIdentity('0f8fad5b', receivedAt).retentionExpiresAt).toBe('2026-11-18T00:00:00.000Z')
+  })
+
   test('falls back to a requester name the API accepts', () => {
     const identity = createShareHandoffIdentity('', new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
     expect(createShareHandoffInput({ title: 'Bug', body: '' }, identity, ' ').requesterDisplayName).toBe('mukuroji')
@@ -184,6 +193,9 @@ function createCacheStorage(entries: Record<string, string>) {
       const body = store.get(String(key))
       return body === undefined ? undefined : new Response(body)
     },
+    put: async (key: RequestInfo | URL, response: Response) => {
+      store.set(String(key), await response.text())
+    },
     delete: async (key: RequestInfo | URL) => store.delete(String(key)),
   }
   const storage: SharedContentCacheStorage = {
@@ -202,7 +214,7 @@ describe('shared content inbox', () => {
     const { storage, opened } = createCacheStorage({
       [`${sharedContentKeyPrefix}${sharedId}`]: JSON.stringify({ title: 'Bug', text: 7, url: 'https://example.com', receivedAt: 1 }),
     })
-    expect(await readStoredSharedContent(sharedId, storage, 1_000)).toEqual({ title: 'Bug', text: '', url: 'https://example.com' })
+    expect(await readStoredSharedContent(sharedId, storage, 1_000)).toEqual({ title: 'Bug', text: '', url: 'https://example.com', receivedAt: 1 })
     expect(opened).toEqual([sharedContentCacheName])
   })
 
@@ -211,7 +223,7 @@ describe('shared content inbox', () => {
     const { storage, store } = createCacheStorage({
       [key]: JSON.stringify({ title: 'Old', text: '', url: '', receivedAt: 0 }),
     })
-    expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds)).toEqual({ title: 'Old', text: '', url: '' })
+    expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds)).toEqual({ title: 'Old', text: '', url: '', receivedAt: 0 })
     expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds + 1)).toBeUndefined()
     expect(store.has(key)).toBe(false)
   })
@@ -230,6 +242,19 @@ describe('shared content inbox', () => {
     expect(opened).toEqual([])
     expect(await readStoredSharedContent(sharedId, storage)).toBeUndefined()
     expect(await readStoredSharedContent(sharedId, undefined)).toBeUndefined()
+  })
+
+  test('cancels a share for every tab with a marker that reads as missing', async () => {
+    const key = `${sharedContentKeyPrefix}${sharedId}`
+    const { storage, store } = createCacheStorage({
+      [key]: JSON.stringify({ title: 'Bug', text: '', url: '', receivedAt: 1 }),
+    })
+    expect(await isStoredSharedContentCancelled(sharedId, storage)).toBe(false)
+    await cancelStoredSharedContent(sharedId, storage, 5)
+    expect(JSON.parse(store.get(key) ?? '{}')).toEqual({ cancelled: true, receivedAt: 5 })
+    expect(await isStoredSharedContentCancelled(sharedId, storage)).toBe(true)
+    expect(await readStoredSharedContent(sharedId, storage, 10)).toBeUndefined()
+    expect(await isStoredSharedContentCancelled('../secret', storage)).toBe(false)
   })
 
   test('deletes a share after use', async () => {

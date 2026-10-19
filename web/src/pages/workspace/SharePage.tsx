@@ -3,7 +3,9 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { createTranslator, type MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTriagePath } from '../../shared/routing/paths'
 import {
+  cancelStoredSharedContent,
   discardStoredSharedContent,
+  isStoredSharedContentCancelled,
   readStoredSharedContent,
   sharedContentNotSavedStatus,
 } from '../../shared/lib/pwa/sharedContentInbox'
@@ -106,6 +108,8 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const [content, setContent] = useState<SharedContent>()
   const [loadFailed, setLoadFailed] = useState(false)
   const [missing, setMissing] = useState(false)
+  const [cancelled, setCancelled] = useState(false)
+  const [receivedAt, setReceivedAt] = useState<number>()
   const [loadAttempt, setLoadAttempt] = useState(0)
   const mountedRef = useRef(true)
   const access = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
@@ -115,6 +119,7 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
     requesterDisplayName: workspace.userLabel,
     handoffKey: sharedId,
     accountKey: `${workspace.workspaceId ?? ''}/${workspace.userKey ?? ''}`,
+    receivedAt,
   })
   const teams = useMemo(
     () => workspace.teams.map((team) => ({ id: team.id, name: team.name })),
@@ -126,8 +131,9 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const loadErrorKey: MessageKey | undefined = loadFailed && !content
     ? 'triage.share.loadError'
     : accessFailed ? 'triage.share.accessError' : undefined
-  // A locked attempt keeps its own copy of the content, so it can still be resent.
-  const isMissing = missing && !handoff.locked
+  // A locked attempt keeps its own copy of the content, so it can still be resent unless the
+  // person cancelled the share in another tab.
+  const isMissing = cancelled || (missing && !handoff.locked)
 
   useEffect(() => {
     mountedRef.current = true
@@ -143,6 +149,7 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
         // A share ID whose content is gone (expired, already sent, or never stored) must not
         // become a blank form that looks like the share.
         setMissing(sharedId !== '' && fields === undefined)
+        setReceivedAt(fields?.receivedAt)
         setContent(readSharedContent(fields))
       },
       () => {
@@ -153,10 +160,10 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
     return () => { active = false }
   }, [loadAttempt, sharedId])
 
-  /** Leaves the form, ending the handoff and deleting the stored content and attempt. */
+  /** Leaves the form, ending the handoff in every tab and deleting the stored attempt. */
   function leave() {
     handoff.abandon()
-    void discardStoredSharedContent(sharedId)
+    void cancelStoredSharedContent(sharedId)
     void navigate('/home', { replace: true })
   }
 
@@ -206,7 +213,13 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
             lockedSend={handoff.locked}
             onCancel={leave}
             onSubmit={(teamId, draft) => {
-              void handoff.submit(teamId, draft).then((result) => {
+              void isStoredSharedContentCancelled(sharedId).then((wasCancelled) => {
+                if (!wasCancelled) return handoff.submit(teamId, draft)
+                // Cancel in another tab ends the handoff here too.
+                handoff.abandon()
+                setCancelled(true)
+                return undefined
+              }).then((result) => {
                 if (!result) return
                 // The handoff forgot its replay state, so the share must not be sendable again.
                 void discardStoredSharedContent(sharedId)

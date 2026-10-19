@@ -24,10 +24,16 @@ export type StoredSharedFields = {
   readonly url: string
 }
 
+/** Shared fields with the time the worker received them. */
+export type StoredSharedContent = StoredSharedFields & {
+  /** When the worker stored the share, in epoch milliseconds. */
+  readonly receivedAt: number
+}
+
 /** Cache Storage operations the inbox uses. */
 export type SharedContentCacheStorage = {
-  /** Opens the named cache; only reads and deletes are used. */
-  readonly open: (cacheName: string) => Promise<Pick<Cache, 'match' | 'delete'>>
+  /** Opens the named cache; only reads, writes of cancellation markers, and deletes are used. */
+  readonly open: (cacheName: string) => Promise<Pick<Cache, 'match' | 'put' | 'delete'>>
 }
 
 /** Shape of the opaque IDs the worker issues. */
@@ -56,18 +62,19 @@ export function isSharedContentId(id: string): boolean {
  * Reads shared content the service worker stored for the confirmation form.
  *
  * Content past the retention window is deleted and treated as missing, so a share whose
- * cleanup failed earlier never comes back.
+ * cleanup failed earlier never comes back. A share cancelled in any tab also reads as missing.
  *
  * @param id - Opaque ID from the form URL.
  * @param storage - Cache Storage; defaults to the page's.
  * @param now - Current time in epoch milliseconds.
- * @returns The shared fields, or `undefined` when the ID is invalid, nothing is stored, or it expired.
+ * @returns The shared fields and receive time, or `undefined` when the ID is invalid, nothing is
+ * stored, it expired, or it was cancelled.
  */
 export async function readStoredSharedContent(
   id: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
   now: number = Date.now(),
-): Promise<StoredSharedFields | undefined> {
+): Promise<StoredSharedContent | undefined> {
   if (!storage || !isSharedContentId(id)) return undefined
   const cache = await storage.open(sharedContentCacheName)
   const key = `${sharedContentKeyPrefix}${id}`
@@ -80,11 +87,12 @@ export async function readStoredSharedContent(
     await cache.delete(key).catch(() => false)
     return undefined
   }
+  if (Reflect.get(value, 'cancelled') === true) return undefined
   const field = (name: string) => {
     const fieldValue: unknown = Reflect.get(value, name)
     return typeof fieldValue === 'string' ? fieldValue : ''
   }
-  return { title: field('title'), text: field('text'), url: field('url') }
+  return { title: field('title'), text: field('text'), url: field('url'), receivedAt }
 }
 
 /**
@@ -104,5 +112,54 @@ export async function discardStoredSharedContent(
     await cache.delete(`${sharedContentKeyPrefix}${id}`)
   } catch {
     // Unread content expires in the worker; nothing else depends on this delete.
+  }
+}
+
+/**
+ * Cancels a share in every tab and window by replacing its content with a cancellation marker.
+ *
+ * Other tabs that already loaded the share check the marker before sending, so a share the
+ * person cancelled is never sent afterwards. The marker expires like any stored share.
+ *
+ * @param id - Opaque ID from the form URL.
+ * @param storage - Cache Storage; defaults to the page's.
+ * @param now - Current time in epoch milliseconds.
+ * @returns A promise that settles once the marker is stored; failures fall back to deleting.
+ */
+export async function cancelStoredSharedContent(
+  id: string,
+  storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
+  now: number = Date.now(),
+): Promise<void> {
+  if (!storage || !isSharedContentId(id)) return
+  try {
+    const cache = await storage.open(sharedContentCacheName)
+    await cache.put(
+      `${sharedContentKeyPrefix}${id}`,
+      new Response(JSON.stringify({ cancelled: true, receivedAt: now }), { headers: { 'Content-Type': 'application/json' } }),
+    )
+  } catch {
+    await discardStoredSharedContent(id, storage)
+  }
+}
+
+/**
+ * Returns whether a share was cancelled in any tab or window.
+ *
+ * @param id - Opaque ID from the form URL.
+ * @param storage - Cache Storage; defaults to the page's.
+ * @returns `true` when a cancellation marker is stored; a storage failure reads as not cancelled.
+ */
+export async function isStoredSharedContentCancelled(
+  id: string,
+  storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
+): Promise<boolean> {
+  if (!storage || !isSharedContentId(id)) return false
+  try {
+    const response = await (await storage.open(sharedContentCacheName)).match(`${sharedContentKeyPrefix}${id}`)
+    const value: unknown = await response?.json().catch(() => undefined)
+    return typeof value === 'object' && value !== null && Reflect.get(value, 'cancelled') === true
+  } catch {
+    return false
   }
 }
