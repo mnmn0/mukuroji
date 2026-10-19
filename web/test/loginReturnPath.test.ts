@@ -67,7 +67,7 @@ describe('buildLoginRedirectPath', () => {
   })
 
   test('round-trips through the login return path resolver', () => {
-    for (const path of ['/inbox', '/focus?teamId=core-team', '/help']) {
+    for (const path of ['/inbox', '/focus?teamId=core-team', '/help', '/share?title=Bug&text=Steps&url=https%3A%2F%2Fexample.com']) {
       const returnTo = new URL(buildLoginRedirectPath(path), 'https://mukuroji.invalid')
         .searchParams.get('returnTo')
 

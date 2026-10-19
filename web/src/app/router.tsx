@@ -9,6 +9,7 @@ import { DashboardPage } from '../pages/workspace/DashboardPage'
 import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPage'
 import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../pages/workspace/HelpPage'
+import { SharePage } from '../pages/workspace/SharePage'
 import { HomePage } from '../pages/workspace/HomePage'
 import { FocusPage } from '../pages/workspace/FocusPage'
 import { UpdateFeedPage } from '../pages/workspace/UpdateFeedPage'
@@ -89,6 +90,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/help',
                 element: <HelpPage />,
+              },
+              {
+                path: '/share',
+                element: <SharePage />,
               },
               {
                 path: '/settings',
