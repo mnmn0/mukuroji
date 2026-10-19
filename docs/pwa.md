@@ -55,6 +55,11 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   担当・SLA・保持期限は server がチーム設定から決めます。`sourceId`（`share:<UUID>`）と `Idempotency-Key` は
   フォームごとに固定し、応答が失われた再送でも Entry は 1 件だけ作られます。成功するとその Entry を選択した
   Triage 画面へ移動します。ファイルの共有（`POST` / `multipart/form-data`）は受け付けません。
+- 接続状態: `navigator.onLine` と `online` / `offline` event を `web/src/shared/lib/pwa/connectivity.ts` で購読し、
+  接続が切れている間は画面上部に「オフラインです。表示中の内容は最新でない可能性があり、接続が戻るまで変更は保存できません。」を表示します
+  （`web/src/app/pwa/ConnectivityNotice.tsx`。操作を妨げないよう pointer event を受けません）。
+  切断と復帰は app 共通の live region（`announce`）で読み上げます。読み込み時点でオフラインの場合も読み上げ、復帰は切断を読み上げた後だけ読み上げます。
+  復帰後の再取得は SWR の `revalidateOnReconnect`（既定で有効）に任せます。offline 中の閲覧 cache と変更の保留は後続範囲です。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
