@@ -19,7 +19,7 @@ type ManifestIcon = {
  * @param value - Parsed manifest JSON.
  * @returns Manifest fields, or `null` when the shape is invalid.
  */
-function readManifest(value: unknown): { startUrl: unknown, scope: unknown, display: unknown, icons: ManifestIcon[] } | null {
+function readManifest(value: unknown): { startUrl: unknown, scope: unknown, display: unknown, shareTarget: unknown, icons: ManifestIcon[] } | null {
   if (typeof value !== 'object' || value === null || !('icons' in value) || !Array.isArray(value.icons)) {
     return null
   }
@@ -41,6 +41,7 @@ function readManifest(value: unknown): { startUrl: unknown, scope: unknown, disp
     startUrl: 'start_url' in value ? value.start_url : undefined,
     scope: 'scope' in value ? value.scope : undefined,
     display: 'display' in value ? value.display : undefined,
+    shareTarget: 'share_target' in value ? value.share_target : undefined,
     icons,
   }
 }
@@ -84,6 +85,9 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   expect(manifest?.startUrl).toBe('/home')
   expect(manifest?.scope).toBe('/')
   expect(manifest?.display).toBe('standalone')
+  // The share target is advertised only after a release whose worker handles `POST /share`
+  // has activated everywhere; see "share target" in docs/pwa.md.
+  expect(manifest?.shareTarget).toBeUndefined()
   expect(manifest?.icons.map((icon) => icon.sizes)).toEqual(expect.arrayContaining(['192x192', '512x512']))
   expect(manifest?.icons.some((icon) => icon.purpose === 'maskable')).toBe(true)
 
@@ -149,4 +153,40 @@ test('service workerはページやAPI応答を保存せず、静的なbuild成�
   for (const path of cachedPaths) {
     expect(offlineShellPaths.includes(path) || path.startsWith('/assets/'), path).toBe(true)
   }
+})
+
+test('共有された内容はURLに載せずworkerが端末内に保持し、確認画面へIDだけを渡す', async ({ page }) => {
+  await page.goto('/support')
+  await waitForServiceWorkerControl(page)
+
+  // Submit the same multipart form the share sheet posts to the manifest share target.
+  await page.evaluate(() => {
+    const form = document.createElement('form')
+    form.method = 'POST'
+    form.action = '/share'
+    form.enctype = 'multipart/form-data'
+    for (const [name, value] of [['title', 'Secret bug'], ['text', 'confidential details'], ['url', 'https://example.com/x']]) {
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = name
+      input.value = value
+      form.append(input)
+    }
+    document.body.append(form)
+    form.submit()
+  })
+
+  // Signed out, the form sends the person to sign-in and keeps only the opaque ID for the return.
+  await page.waitForURL((url) => url.pathname === '/' && (url.searchParams.get('returnTo') ?? '').startsWith('/share?shared='))
+  const returnTo = new URL(page.url()).searchParams.get('returnTo') ?? ''
+  expect(returnTo).toMatch(/^\/share\?shared=[0-9a-f-]{36}$/)
+  expect(page.url()).not.toContain('confidential')
+  expect(page.url()).not.toContain('Secret')
+
+  const stored = await page.evaluate(async (id) => {
+    const cache = await caches.open('mukuroji-share-inbox-v1')
+    const response = await cache.match(`/__mukuroji/share/${id}`)
+    return response ? await response.json() : null
+  }, new URLSearchParams(returnTo.split('?')[1]).get('shared'))
+  expect(stored).toMatchObject({ title: 'Secret bug', text: 'confidential details', url: 'https://example.com/x' })
 })

@@ -1,13 +1,25 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSerialRunner,
+  hasSharedContentCapacity,
+  maxPendingSharedContent,
+  createSharedContentFailurePath,
+  createSharedContentRedirectPath,
   isCacheableAssetResponse,
   isSkipWaitingMessage,
+  readSharedFormFields,
   selectEvictedEntries,
+  selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
+  sharedContentCacheName,
+  sharedContentKeyPrefix,
+  sharedContentMaxAgeMilliseconds,
+  sharedContentNotSavedStatus,
   skipWaitingMessageType,
   type RequestDescriptor,
 } from '../src/service-worker/model/requestStrategy'
+import * as sharedContentInbox from '../src/shared/lib/pwa/sharedContentInbox'
 
 const origin = 'https://app.mukuroji.example'
 
@@ -103,5 +115,111 @@ describe('isSkipWaitingMessage', () => {
     expect(isSkipWaitingMessage({ type: 'other' })).toBe(false)
     expect(isSkipWaitingMessage(skipWaitingMessageType)).toBe(false)
     expect(isSkipWaitingMessage(null)).toBe(false)
+  })
+})
+
+describe('share target', () => {
+  test('handles only a same-origin POST /share navigation', () => {
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share`, mode: 'navigate' }), origin))
+      .toBe('share-target')
+    expect(selectRequestStrategy(request({ method: 'post', url: `${origin}/share`, mode: 'navigate' }), origin))
+      .toBe('share-target')
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share`, mode: 'cors' }), origin))
+      .toBe('passthrough')
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share?x=1`, mode: 'navigate' }), origin))
+      .toBe('passthrough')
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share/x`, mode: 'navigate' }), origin))
+      .toBe('passthrough')
+    expect(selectRequestStrategy(request({ method: 'POST', url: 'https://evil.example/share', mode: 'navigate' }), origin))
+      .toBe('passthrough')
+    // A GET /share navigation is the confirmation form itself.
+    expect(selectRequestStrategy(request({ url: `${origin}/share?shared=abc`, mode: 'navigate' }), origin))
+      .toBe('network-first-navigation')
+  })
+
+  test('reads only text fields and bounds their length', () => {
+    const values = new Map<string, unknown>([
+      ['title', 'Bug'],
+      ['text', 'x'.repeat(20_000)],
+      ['url', new Blob(['not text'])],
+    ])
+    const fields = readSharedFormFields((name) => values.get(name) ?? null)
+    expect(fields.title).toBe('Bug')
+    expect(fields.text.length).toBe(16_000)
+    expect(fields.url).toBe('')
+  })
+
+  test('passes only the opaque ID to the confirmation form', () => {
+    expect(createSharedContentRedirectPath('a-b')).toBe('/share?shared=a-b')
+  })
+
+  test('sends a share the worker could not keep to an explanation', () => {
+    expect(createSharedContentFailurePath()).toBe('/share?status=not-saved')
+  })
+
+  test('expires unread content after the retention window', () => {
+    const now = 10 * sharedContentMaxAgeMilliseconds
+    expect(selectExpiredSharedContent([
+      { key: 'fresh', receivedAt: now - 1_000 },
+      { key: 'edge', receivedAt: now - sharedContentMaxAgeMilliseconds },
+      { key: 'old', receivedAt: now - sharedContentMaxAgeMilliseconds - 1 },
+      { key: 'unknown', receivedAt: undefined },
+    ], now)).toEqual(['old', 'unknown'])
+  })
+
+  test('bounds the number of pending shares', () => {
+    expect(hasSharedContentCapacity(0)).toBe(true)
+    expect(hasSharedContentCapacity(maxPendingSharedContent - 1)).toBe(true)
+    expect(hasSharedContentCapacity(maxPendingSharedContent)).toBe(false)
+  })
+
+  test('admits concurrent shares one at a time so the capacity check cannot be raced', async () => {
+    const run = createSerialRunner()
+    const stored: string[] = []
+    let releaseFirst: () => void = () => undefined
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+
+    /**
+     * Stores a share when the inbox has room, after an optional delay between check and write.
+     *
+     * @param id - Share ID.
+     * @param gate - Settles when the write may proceed.
+     * @returns Whether the share was stored.
+     */
+    async function store(id: string, gate: Promise<void>): Promise<boolean> {
+      const hasRoom = stored.length < 1
+      await gate
+      if (!hasRoom) return false
+      stored.push(id)
+      return true
+    }
+
+    const first = run(() => store('first', firstGate))
+    const second = run(() => store('second', Promise.resolve()))
+    releaseFirst()
+
+    expect(await first).toBe(true)
+    expect(await second).toBe(false)
+    expect(stored).toEqual(['first'])
+  })
+
+  test('keeps admitting shares after a failed write', async () => {
+    const run = createSerialRunner()
+    const failed = run(() => Promise.reject(new Error('quota')))
+    const next = run(() => Promise.resolve('stored'))
+
+    await expect(failed).rejects.toThrow('quota')
+    expect(await next).toBe('stored')
+  })
+
+  test('shares the cache name and key prefix with the app', () => {
+    expect(sharedContentInbox.sharedContentCacheName).toBe(sharedContentCacheName)
+    expect(sharedContentInbox.sharedContentKeyPrefix).toBe(sharedContentKeyPrefix)
+    expect(sharedContentInbox.sharedContentMaxAgeMilliseconds).toBe(sharedContentMaxAgeMilliseconds)
+    expect(sharedContentInbox.sharedContentNotSavedStatus).toBe(sharedContentNotSavedStatus)
+    // An earlier worker deletes the inbox on activation, so a rollback never strands shared content;
+    // the current worker keeps it.
+    expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [])).toEqual([sharedContentCacheName])
+    expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [sharedContentCacheName])).toEqual([])
   })
 })

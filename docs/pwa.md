@@ -1,7 +1,7 @@
 # Installable PWA
 
 mukuroji の Web は manifest と service worker を持ち、mobile / desktop へ install できます。
-この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push、share target、
+この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push、file / camera capture、
 offline read cache、encrypted mutation queue は Issue #38 の後続範囲です。
 
 ## 現在の範囲
@@ -45,6 +45,54 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
   platform では、不要な通知の許可を求めないよう button を表示しません。
   この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
+- share target: `POST /share`（`multipart/form-data`）で `title` / `text` / `url` を受け取ります。
+  **段階的に公開します**: 既存の install では更新された worker が利用者の承認まで待機するため、manifest が先に更新されると
+  旧 worker が `POST /share` を素通しして共有内容が失われます。この release では worker の受け口だけを入れ、manifest には
+  `share_target` を載せません。この worker が配布・有効化された後の release で、manifest に次を追加します。
+
+  ```json
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+  ```
+
+  service worker が request を受け取り（`requestStrategy.ts` の `share-target`、同一 origin・query なしの navigation だけ）、
+  text field だけを読んで端末内の専用 cache（`mukuroji-share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
+  共有内容そのものは URL、browser history、frontend / CDN の access log、login の `returnTo` に載りません。
+  cache 名は worker が所有する `mukuroji-` prefix を使います。この inbox を知らない旧 worker へ rollback すると activate 時に削除されるため、
+  共有内容が保持期限を超えて残ることはありません（未送信の共有は失われ、元のアプリから共有し直します）。
+  どのページからでも `/share` へ POST できるため、未送信の共有は最大 20 件までとし、それを超える共有は保存せず `/share?status=not-saved` へ移動します。
+  未読のまま 24 時間を過ぎた内容は worker の activate 時と次の共有を受け取った時に削除し、フォームも期限切れの内容を読まずに削除します
+  （削除に失敗した内容が後から読めることはありません）。送信後はフォームが削除し、キャンセルでは内容を取り消し済みの印に置き換えます。
+  期限切れの session の後始末（`clearAuthSession`）では削除しないため、sign-in し直した後も同じ共有を確認できます。
+  共有は sign-in 前に保存されるため、sign-in 後に最初に読んだ account（Workspace と利用者）に結び付け、別の account では見つからない扱いにします。
+  読み取りと結び付けは Web Locks API の origin 全体の lock の中で行うため、別の account の tab が同時に開いても一方にしか表示されません。
+  別の account は内容を表示・送信できず、キャンセルしても元の account の共有を取り消しません。
+  cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。共有 ID の内容が見つからない
+  （期限切れ・送信済み・破棄済み）場合も空のフォームにせず、元のアプリからもう一度共有するよう案内します。
+  worker の activate 時の期限切れ削除は best-effort で、失敗しても activate を止めません。worker が cache に保存できなかった場合は
+  browser の network error にせず、`/share?status=not-saved` へ移動して、元のアプリからもう一度共有するよう案内します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
+  `/share` は認証済み Workspace の route で、未 sign-in の場合は sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
+  確認フォーム（`web/src/features/share-capture/`）は共有内容をすべて plain text として扱い、tab / 改行以外の制御文字を除いて
+  API の上限（タイトル 500 文字、本文 8,000 文字）に切り詰めます。タイトルは共有されたタイトル、なければ本文の最初の行、
+  なければ URL を初期値にし、URL は本文に同じ URL が単語として含まれない場合だけ本文の末尾に加えます（本文の上限では URL ではなく本文側を切り詰めます）。
+  送り先のチームを選んで送信するまでチームには共有されません。ゲストアカウントには送れない旨とキャンセルだけを表示し、
+  役割を確認できなかった場合はフォームを出さずに再読み込みを表示します。
+  送信は `POST /api/teams/{teamId}/triage-entries/manual-handoffs` の manual handoff で、担当・SLA・保持期限は server がチーム設定から決めます。
+  `sourceId` は共有 ID から `share:<共有 ID>` とし、保持期限の初期値は worker が共有を受け取った時刻から UTC の日単位で決めるため、同じ共有を別の tab や
+  window で別の日に開いても同じ引き継ぎになり、server の source claim で Entry は 1 件だけになります（内容が異なれば `409`）。
+  送信前に request 本体と `Idempotency-Key` を tab の sessionStorage に、Workspace と利用者で分けた key で保存し、
+  成功するまでは再試行・再読み込み・app 更新の後も同じ request だけを読み取り専用で再送できます。Entry は 1 件だけ作られます。
+  sessionStorage に保存できない場合は、応答が失われた後の再読み込みで重複を作らないよう、送信せずに理由を表示します。
+  初回の送信が権限なし（401 / 403）や入力不正（400 / 404 / 413 / 422）で拒否された場合は何も作られていないため、保存した request を破棄し、
+  編集して新しい引き継ぎとして送り直せます。保存済みの request の再送が拒否された場合は、前回の送信が保存された可能性があるため固定したままにします。
+  別の account で sign-in し直した場合、前の account の保存済み request は復元・再送しません。キャンセルすると
+  保存済みの request も削除し、その共有の引き継ぎを終了します。共有内容が見つからない場合は、固定した再送があっても内容を表示せずに破棄します。送信の直前には、共有内容が期限内のまま残っていて取り消されていないことを必ず確認し、
+  別の tab でキャンセル・送信済み・期限切れになった共有（固定した再送を含む）は送信せずに見つからない旨を表示します。
+  cache を読めず確認できない場合も送信せず、再試行できる旨を表示します。確認中は送信と同様にキャンセルできず、確認中に画面を離れた場合は送信しません。送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
@@ -59,9 +107,11 @@ worker が保存するのは tenant に依存しない静的 build 成果物だ�
 | `/offline.css`、`/offline.js`、`/pwa-192x192.png` (query なし、GET) | install 時に `/offline.html` と一緒に precache し、cache-first で返す |
 | 同一 origin の `/assets/*` (query なし、GET) | cache-first。200 の `basic` response だけを最大 120 件保存 |
 | `/api/*`、`/v1/*`、`/developer/*`、その他 | 介入しない |
-| GET 以外、`Range` 付き、cross-origin | 介入しない |
+| 同一 origin・query なしの `POST /share` navigation | 共有内容を `mukuroji-share-inbox-v1` に保存して `/share?shared=<UUID>` へ `303` |
+| その他の GET 以外、`Range` 付き、cross-origin | 介入しない |
 
-ページ HTML、API response、share link、request intake link は保存しません。cache の形式を変える場合は
+ページ HTML、API response、share link、request intake link は保存しません。share target で受け取った共有内容だけは、
+確認フォームが読むまで端末内に一時保存します（上記）。cache の形式を変える場合は
 `sw.ts` の `cacheLayoutVersion` を上げ、activate 時に旧 cache を削除させます。
 
 `sw.js` は classic worker として登録するため、他 chunk を import できません。`src/service-worker/` を app

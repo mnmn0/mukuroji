@@ -43,15 +43,156 @@ export function isSkipWaitingMessage(data: unknown): boolean {
   )
 }
 
+/** Path the manifest `share_target` posts to. */
+export const shareTargetPath = '/share'
+
+/**
+ * Cache holding shared content until the confirmation form reads it. The app reads the same
+ * cache, so `web/src/shared/lib/pwa/sharedContentInbox.ts` repeats this name and a unit test
+ * keeps the two equal. It uses the worker-owned `mukuroji-` prefix, so a rollback to an earlier
+ * worker, which knows nothing about this inbox, deletes it on activation instead of leaving
+ * shared content past its retention window. The current worker keeps it.
+ */
+export const sharedContentCacheName = 'mukuroji-share-inbox-v1'
+
+/** Path prefix of the cache keys for stored shared content. */
+export const sharedContentKeyPrefix = '/__mukuroji/share/'
+
+/** How long unread shared content is kept before the worker discards it. */
+export const sharedContentMaxAgeMilliseconds = 24 * 60 * 60 * 1000
+
+/** Longest value kept for each shared field, well above the form limits. */
+const sharedFieldMaxLength = 16_000
+
+/** Text fields a share can carry. */
+export type SharedContentFields = {
+  /** Shared title. */
+  readonly title: string
+  /** Shared text. */
+  readonly text: string
+  /** Shared link. */
+  readonly url: string
+}
+
+/** Shared content as stored for the confirmation form. */
+export type StoredSharedContent = SharedContentFields & {
+  /** Time the worker received the share, in epoch milliseconds. */
+  readonly receivedAt: number
+}
+
+/**
+ * Reads the text fields of a share target form, ignoring files and anything else.
+ *
+ * @param read - Returns the first value of a form field.
+ * @returns Text fields cut to a bounded length; missing or non-text values are empty.
+ */
+export function readSharedFormFields(read: (name: string) => unknown): SharedContentFields {
+  const field = (name: string) => {
+    const value = read(name)
+    return typeof value === 'string' ? value.slice(0, sharedFieldMaxLength) : ''
+  }
+  return { title: field('title'), text: field('text'), url: field('url') }
+}
+
+/**
+ * Builds the confirmation form URL for stored shared content; only the opaque ID enters the URL.
+ *
+ * @param id - Stored content ID.
+ * @returns Same-origin path of the confirmation form.
+ */
+export function createSharedContentRedirectPath(id: string): string {
+  return `${shareTargetPath}?${new URLSearchParams({ shared: id }).toString()}`
+}
+
+/** Query value the confirmation form shows when the worker could not keep a share. */
+export const sharedContentNotSavedStatus = 'not-saved'
+
+/**
+ * Builds the confirmation form URL for a share the worker could not keep.
+ *
+ * @returns Same-origin path that explains the failure.
+ */
+export function createSharedContentFailurePath(): string {
+  return `${shareTargetPath}?${new URLSearchParams({ status: sharedContentNotSavedStatus }).toString()}`
+}
+
+/**
+ * Most pending shares kept at once. Any page can post to `/share`, so the inbox is bounded and a
+ * flood of submissions cannot fill the origin's storage; legitimate shares are rare and short-lived.
+ */
+export const maxPendingSharedContent = 20
+
+/**
+ * Returns whether the inbox can accept another share.
+ *
+ * @param pendingCount - Unexpired shares currently stored.
+ * @returns `true` while fewer than `maxPendingSharedContent` shares are pending.
+ */
+export function hasSharedContentCapacity(pendingCount: number): boolean {
+  return pendingCount < maxPendingSharedContent
+}
+
+/** Runs asynchronous tasks one after another. */
+export type SerialRunner = <Result>(task: () => Promise<Result>) => Promise<Result>
+
+/**
+ * Creates a runner that starts each task only after every earlier task has settled.
+ *
+ * Fetch events can overlap, so a read-then-write such as the share inbox's capacity check and
+ * store must run through one queue. A failed task does not block later ones; each caller still
+ * receives its own result or failure.
+ *
+ * @returns The serial runner.
+ */
+export function createSerialRunner(): SerialRunner {
+  let tail: Promise<unknown> = Promise.resolve()
+  return <Result>(task: () => Promise<Result>): Promise<Result> => {
+    const run = tail.then(task, task)
+    tail = run.catch(() => undefined)
+    return run
+  }
+}
+
+/**
+ * Selects stored shared content older than the retention window.
+ *
+ * @param entries - Stored content keys with their receive time; unknown times are treated as expired.
+ * @param now - Current time in epoch milliseconds.
+ * @returns Keys to delete.
+ */
+export function selectExpiredSharedContent<T>(
+  entries: readonly { readonly key: T, readonly receivedAt: number | undefined }[],
+  now: number,
+): T[] {
+  return entries
+    .filter((entry) => entry.receivedAt === undefined || now - entry.receivedAt > sharedContentMaxAgeMilliseconds)
+    .map((entry) => entry.key)
+}
+
+/**
+ * Returns whether a request is the manifest share target submission.
+ *
+ * @param request - Request attributes observed in the fetch event.
+ * @param workerOrigin - Origin that the service worker is registered on.
+ * @returns `true` for a same-origin `POST /share` navigation without a query.
+ */
+function isShareTargetRequest(request: RequestDescriptor, workerOrigin: string): boolean {
+  if (request.method.toUpperCase() !== 'POST' || request.mode !== 'navigate') return false
+  const url = parseUrl(request.url)
+  return url !== null && url.origin === workerOrigin && url.pathname === shareTargetPath && url.search === ''
+}
+
 /**
  * How the service worker should answer one request.
  *
+ * - `share-target`: store content another app shared and redirect to the confirmation form.
  * - `network-first-navigation`: always fetch the page, fall back to the offline page only on network failure.
  * - `cache-first-asset`: serve immutable hashed build output from the cache, filling it on first use.
  * - `cache-first-offline-resource`: serve a precached file used by the offline page.
  * - `passthrough`: do not intercept; the browser handles the request as if no worker existed.
  */
 export type RequestStrategy =
+  | 'share-target'
   | 'network-first-navigation'
   | 'cache-first-asset'
   | 'cache-first-offline-resource'
@@ -82,6 +223,10 @@ export function selectRequestStrategy(
   request: RequestDescriptor,
   workerOrigin: string,
 ): RequestStrategy {
+  if (isShareTargetRequest(request, workerOrigin)) {
+    return 'share-target'
+  }
+
   if (request.method.toUpperCase() !== 'GET' || request.hasRangeHeader) {
     return 'passthrough'
   }

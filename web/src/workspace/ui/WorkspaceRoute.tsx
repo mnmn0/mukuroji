@@ -107,6 +107,11 @@ const helpRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.help.title',
   descriptionKey: 'workspace.help.description',
 }
+const shareRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'triage.eyebrow',
+  titleKey: 'triage.share.title',
+  descriptionKey: 'triage.share.description',
+}
 const settingsRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'settings',
   eyebrowKey: 'workspace.settings.eyebrow',
@@ -692,6 +697,10 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/help', pathname)) {
     return helpRouteMetadata
+  }
+
+  if (matchPath('/share', pathname)) {
+    return shareRouteMetadata
   }
 
   if (matchPath('/settings', pathname)) {
