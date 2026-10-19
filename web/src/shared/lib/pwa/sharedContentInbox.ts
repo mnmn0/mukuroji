@@ -80,8 +80,45 @@ export async function readStoredSharedContent(
   accountKey: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
   now: number = Date.now(),
+  runExclusive: ExclusiveRunner = runWithSharedContentLock,
 ): Promise<StoredSharedContent | undefined> {
   if (!storage || !isSharedContentId(id)) return undefined
+  // Reading and binding run under one cross-tab lock, so two accounts can never both claim it.
+  return await runExclusive(`mukuroji-share-${id}`, async () => await readAndBind(id, accountKey, storage, now))
+}
+
+/** Runs a task while holding an origin-wide lock with the given name. */
+export type ExclusiveRunner = <Result>(name: string, task: () => Promise<Result>) => Promise<Result>
+
+/**
+ * Runs a task under a Web Locks API lock shared by every tab of the origin; without the API,
+ * runs it directly.
+ *
+ * @param name - Lock name.
+ * @param task - Task to run.
+ * @returns The task result.
+ */
+async function runWithSharedContentLock<Result>(name: string, task: () => Promise<Result>): Promise<Result> {
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+  if (!locks) return await task()
+  return await locks.request(name, task)
+}
+
+/**
+ * Reads a share and binds it to the account when it is still unbound.
+ *
+ * @param id - Opaque ID from the form URL.
+ * @param accountKey - Workspace and member of the signed-in account.
+ * @param storage - Cache Storage.
+ * @param now - Current time in epoch milliseconds.
+ * @returns The content, or `undefined` when missing, expired, cancelled, or another account's.
+ */
+async function readAndBind(
+  id: string,
+  accountKey: string,
+  storage: SharedContentCacheStorage,
+  now: number,
+): Promise<StoredSharedContent | undefined> {
   const cache = await storage.open(sharedContentCacheName)
   const key = `${sharedContentKeyPrefix}${id}`
   const response = await cache.match(key)

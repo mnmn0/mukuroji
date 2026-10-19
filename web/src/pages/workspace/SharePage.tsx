@@ -139,9 +139,13 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const loadErrorKey: MessageKey | undefined = loadFailed && !content
     ? 'triage.share.loadError'
     : accessFailed ? 'triage.share.accessError' : undefined
-  // A locked attempt keeps its own copy of the content, so it stays on screen; sending still
-  // requires the share to be live.
-  const isMissing = cancelled || (missing && !handoff.locked)
+  // Sending requires a live share, so a missing one is shown as missing even when this tab kept a
+  // locked attempt; its stored copy is abandoned so cancelled content never reappears.
+  const isMissing = cancelled || missing
+
+  useEffect(() => {
+    if (missing && handoff.locked) handoff.abandon()
+  }, [handoff, missing])
 
   useEffect(() => {
     mountedRef.current = true

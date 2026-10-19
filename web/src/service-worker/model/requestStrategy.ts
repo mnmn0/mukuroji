@@ -117,6 +117,22 @@ export function createSharedContentFailurePath(): string {
 }
 
 /**
+ * Most pending shares kept at once. Any page can post to `/share`, so the inbox is bounded and a
+ * flood of submissions cannot fill the origin's storage; legitimate shares are rare and short-lived.
+ */
+export const maxPendingSharedContent = 20
+
+/**
+ * Returns whether the inbox can accept another share.
+ *
+ * @param pendingCount - Unexpired shares currently stored.
+ * @returns `true` while fewer than `maxPendingSharedContent` shares are pending.
+ */
+export function hasSharedContentCapacity(pendingCount: number): boolean {
+  return pendingCount < maxPendingSharedContent
+}
+
+/**
  * Selects stored shared content older than the retention window.
  *
  * @param entries - Stored content keys with their receive time; unknown times are treated as expired.

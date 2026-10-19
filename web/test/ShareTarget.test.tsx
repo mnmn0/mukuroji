@@ -284,6 +284,28 @@ describe('shared content inbox', () => {
     expect(await readStoredSharedContent(sharedId, account, storage, 10)).toMatchObject({ title: 'Secret' })
   })
 
+  test('serializes the first binding so two accounts reading at once cannot both see a share', async () => {
+    const key = `${sharedContentKeyPrefix}${sharedId}`
+    const { storage } = createCacheStorage({
+      [key]: JSON.stringify({ title: 'Secret', text: '', url: '', receivedAt: 1 }),
+    })
+    let queue: Promise<unknown> = Promise.resolve()
+    const lockNames: string[] = []
+    const runExclusive = <Result,>(name: string, task: () => Promise<Result>): Promise<Result> => {
+      lockNames.push(name)
+      const run = queue.then(task)
+      queue = run.catch(() => undefined)
+      return run
+    }
+    const [first, second] = await Promise.all([
+      readStoredSharedContent(sharedId, account, storage, 10, runExclusive),
+      readStoredSharedContent(sharedId, 'workspace-2/bob', storage, 10, runExclusive),
+    ])
+    expect(first).toMatchObject({ title: 'Secret' })
+    expect(second).toBeUndefined()
+    expect(lockNames).toEqual([`mukuroji-share-${sharedId}`, `mukuroji-share-${sharedId}`])
+  })
+
   test('deletes a share after use', async () => {
     const { storage, store } = createCacheStorage({
       [`${sharedContentKeyPrefix}${sharedId}`]: '{}',

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  hasSharedContentCapacity,
+  maxPendingSharedContent,
   createSharedContentFailurePath,
   createSharedContentRedirectPath,
   isCacheableAssetResponse,
@@ -162,6 +164,12 @@ describe('share target', () => {
       { key: 'old', receivedAt: now - sharedContentMaxAgeMilliseconds - 1 },
       { key: 'unknown', receivedAt: undefined },
     ], now)).toEqual(['old', 'unknown'])
+  })
+
+  test('bounds the number of pending shares', () => {
+    expect(hasSharedContentCapacity(0)).toBe(true)
+    expect(hasSharedContentCapacity(maxPendingSharedContent - 1)).toBe(true)
+    expect(hasSharedContentCapacity(maxPendingSharedContent)).toBe(false)
   })
 
   test('shares the cache name and key prefix with the app', () => {

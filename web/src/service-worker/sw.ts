@@ -10,6 +10,7 @@ import {
   offlineShellResourcePaths,
   readSharedFormFields,
   selectEvictedEntries,
+  hasSharedContentCapacity,
   selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
@@ -141,7 +142,9 @@ async function receiveSharedContent(request: Request): Promise<Response> {
     const id = self.crypto.randomUUID()
     const cache = await caches.open(sharedContentCacheName)
 
-    await discardExpiredSharedContent(cache, content.receivedAt)
+    const pendingCount = await discardExpiredSharedContent(cache, content.receivedAt)
+    // A full inbox refuses the share instead of growing without bound.
+    if (!hasSharedContentCapacity(pendingCount)) return redirectTo(createSharedContentFailurePath())
     await cache.put(
       new Request(`${sharedContentKeyPrefix}${id}`),
       new Response(JSON.stringify(content), { headers: { 'Content-Type': 'application/json' } }),
@@ -171,9 +174,9 @@ function redirectTo(path: string): Response {
  *
  * @param cache - Shared content cache.
  * @param now - Current time in epoch milliseconds.
- * @returns A promise that settles once expired entries are deleted.
+ * @returns Number of shares still stored after expired ones are deleted.
  */
-async function discardExpiredSharedContent(cache: Cache, now: number): Promise<void> {
+async function discardExpiredSharedContent(cache: Cache, now: number): Promise<number> {
   const keys = await cache.keys()
   const entries = await Promise.all(keys.map(async (key) => {
     const response = await cache.match(key)
@@ -181,7 +184,9 @@ async function discardExpiredSharedContent(cache: Cache, now: number): Promise<v
     return { key, receivedAt: readReceivedAt(value) }
   }))
 
-  await Promise.all(selectExpiredSharedContent(entries, now).map((key) => cache.delete(key)))
+  const expired = selectExpiredSharedContent(entries, now)
+  await Promise.all(expired.map((key) => cache.delete(key)))
+  return entries.length - expired.length
 }
 
 /**
