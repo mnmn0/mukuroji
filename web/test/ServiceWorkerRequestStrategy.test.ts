@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSerialRunner,
   hasSharedContentCapacity,
   maxPendingSharedContent,
   createSharedContentFailurePath,
@@ -170,6 +171,45 @@ describe('share target', () => {
     expect(hasSharedContentCapacity(0)).toBe(true)
     expect(hasSharedContentCapacity(maxPendingSharedContent - 1)).toBe(true)
     expect(hasSharedContentCapacity(maxPendingSharedContent)).toBe(false)
+  })
+
+  test('admits concurrent shares one at a time so the capacity check cannot be raced', async () => {
+    const run = createSerialRunner()
+    const stored: string[] = []
+    let releaseFirst: () => void = () => undefined
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+
+    /**
+     * Stores a share when the inbox has room, after an optional delay between check and write.
+     *
+     * @param id - Share ID.
+     * @param gate - Settles when the write may proceed.
+     * @returns Whether the share was stored.
+     */
+    async function store(id: string, gate: Promise<void>): Promise<boolean> {
+      const hasRoom = stored.length < 1
+      await gate
+      if (!hasRoom) return false
+      stored.push(id)
+      return true
+    }
+
+    const first = run(() => store('first', firstGate))
+    const second = run(() => store('second', Promise.resolve()))
+    releaseFirst()
+
+    expect(await first).toBe(true)
+    expect(await second).toBe(false)
+    expect(stored).toEqual(['first'])
+  })
+
+  test('keeps admitting shares after a failed write', async () => {
+    const run = createSerialRunner()
+    const failed = run(() => Promise.reject(new Error('quota')))
+    const next = run(() => Promise.resolve('stored'))
+
+    await expect(failed).rejects.toThrow('quota')
+    expect(await next).toBe('stored')
   })
 
   test('shares the cache name and key prefix with the app', () => {

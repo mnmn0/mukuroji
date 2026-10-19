@@ -132,6 +132,27 @@ export function hasSharedContentCapacity(pendingCount: number): boolean {
   return pendingCount < maxPendingSharedContent
 }
 
+/** Runs asynchronous tasks one after another. */
+export type SerialRunner = <Result>(task: () => Promise<Result>) => Promise<Result>
+
+/**
+ * Creates a runner that starts each task only after every earlier task has settled.
+ *
+ * Fetch events can overlap, so a read-then-write such as the share inbox's capacity check and
+ * store must run through one queue. A failed task does not block later ones; each caller still
+ * receives its own result or failure.
+ *
+ * @returns The serial runner.
+ */
+export function createSerialRunner(): SerialRunner {
+  let tail: Promise<unknown> = Promise.resolve()
+  return <Result>(task: () => Promise<Result>): Promise<Result> => {
+    const run = tail.then(task, task)
+    tail = run.catch(() => undefined)
+    return run
+  }
+}
+
 /**
  * Selects stored shared content older than the retention window.
  *

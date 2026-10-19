@@ -42,18 +42,25 @@ const lockedFailureMessageKeys: Record<ShareHandoffFailure, MessageKey> = {
  * Renders the Web Share Target route that hands shared content off to a Team Triage queue.
  *
  * The service worker stores the shared content and passes only its opaque ID in `shared`, so
- * each new share remounts the form with fresh content and a fresh handoff identity.
+ * each new share remounts the form with fresh content and a fresh handoff identity. The form
+ * also remounts when the signed-in account becomes known or changes, so its handoff state is
+ * always the one saved for that account.
  *
  * @returns The share confirmation form inside the Workspace shell.
  */
 export function SharePage() {
   const [searchParams] = useSearchParams()
+  const workspace = useWorkspaceRouteContext()
   const sharedId = searchParams.get('shared') ?? ''
+  // The share is read only once the signed-in account is known, so it is bound to that account.
+  const accountKey = workspace.workspaceId && workspace.userKey
+    ? `${workspace.workspaceId}/${workspace.userKey}`
+    : undefined
 
   // The worker could not keep the share, so there is nothing to confirm.
   if (searchParams.get('status') === sharedContentNotSavedStatus) return <ShareNotSaved />
 
-  return <ShareCapture key={sharedId} sharedId={sharedId} />
+  return <ShareCapture accountKey={accountKey} key={`${sharedId}:${accountKey ?? ''}`} sharedId={sharedId} />
 }
 
 /**
@@ -90,6 +97,8 @@ function ShareNotSaved() {
 type ShareCaptureProps = {
   /** Opaque ID of the stored shared content; empty when nothing was shared. */
   readonly sharedId: string
+  /** Signed-in account the share is bound to; `undefined` until the account is known. */
+  readonly accountKey: string | undefined
 }
 
 /**
@@ -98,10 +107,10 @@ type ShareCaptureProps = {
  * Nothing is sent until the person confirms the form. The stored content is deleted once it
  * is sent or the person leaves through Cancel.
  *
- * @param props - Stored content ID.
+ * @param props - Stored content ID and signed-in account.
  * @returns The share confirmation form.
  */
-function ShareCapture({ sharedId }: ShareCaptureProps) {
+function ShareCapture({ sharedId, accountKey }: ShareCaptureProps) {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
@@ -116,10 +125,6 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const mountedRef = useRef(true)
   // Set once the person leaves, so a send waiting on its liveness check never starts.
   const leftRef = useRef(false)
-  // The share is read only once the signed-in account is known, so it is bound to that account.
-  const accountKey = workspace.workspaceId && workspace.userKey
-    ? `${workspace.workspaceId}/${workspace.userKey}`
-    : undefined
   const access = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
   const handoff = useShareHandoff({
     accessToken: workspace.accessToken,

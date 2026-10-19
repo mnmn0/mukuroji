@@ -14,6 +14,7 @@ import {
   selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
+  createSerialRunner,
   sharedContentCacheName,
   sharedContentKeyPrefix,
   type StoredSharedContent,
@@ -123,6 +124,9 @@ async function activateCurrentVersion(): Promise<void> {
   await self.clients.claim()
 }
 
+/** Admits one share at a time, so concurrent shares cannot both pass the capacity check. */
+const runSharedContentWrite = createSerialRunner()
+
 /**
  * Stores content another app shared and redirects to the confirmation form.
  *
@@ -140,17 +144,19 @@ async function receiveSharedContent(request: Request): Promise<Response> {
       receivedAt: Date.now(),
     }
     const id = self.crypto.randomUUID()
-    const cache = await caches.open(sharedContentCacheName)
+    const stored = await runSharedContentWrite(async () => {
+      const cache = await caches.open(sharedContentCacheName)
+      const pendingCount = await discardExpiredSharedContent(cache, content.receivedAt)
+      // A full inbox refuses the share instead of growing without bound.
+      if (!hasSharedContentCapacity(pendingCount)) return false
+      await cache.put(
+        new Request(`${sharedContentKeyPrefix}${id}`),
+        new Response(JSON.stringify(content), { headers: { 'Content-Type': 'application/json' } }),
+      )
+      return true
+    })
 
-    const pendingCount = await discardExpiredSharedContent(cache, content.receivedAt)
-    // A full inbox refuses the share instead of growing without bound.
-    if (!hasSharedContentCapacity(pendingCount)) return redirectTo(createSharedContentFailurePath())
-    await cache.put(
-      new Request(`${sharedContentKeyPrefix}${id}`),
-      new Response(JSON.stringify(content), { headers: { 'Content-Type': 'application/json' } }),
-    )
-
-    return redirectTo(createSharedContentRedirectPath(id))
+    return redirectTo(stored ? createSharedContentRedirectPath(id) : createSharedContentFailurePath())
   } catch {
     // A full or unavailable cache must not end in a browser network error; explain it in the app.
     return redirectTo(createSharedContentFailurePath())
