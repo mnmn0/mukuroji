@@ -33,9 +33,9 @@ export type ConnectivityNoticeProps = {
 /**
  * Shows that the app is offline and announces when the connection is lost or comes back.
  *
- * The visible notice stays in the bottom-left corner while offline, clear of the headers and
- * their controls, and swallows taps instead of passing them to the content beneath. It steps
- * aside while the update notice occupies the bottom edge. Announcements go through the app's
+ * The visible notice uses the same bottom-right slot as the update notice while offline, clear
+ * of the headers and the Workspace sidebar's bottom navigation, and swallows taps instead of
+ * passing them to the content beneath. It steps aside while the update notice uses that slot. Announcements go through the app's
  * persistent live regions, so they are read even though the notice mounts at the same moment.
  *
  * @param props - Connectivity source and update notice state.
@@ -64,7 +64,7 @@ export function ConnectivityNotice({
 
   return (
     <p
-      className="workbench-panel fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-4 z-50 m-0 max-w-[min(24rem,calc(100vw-2rem))] px-4 py-2 text-sm leading-6 shadow-lg"
+      className="workbench-panel fixed inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] z-50 m-0 px-4 py-2 text-sm leading-6 shadow-lg sm:left-auto sm:max-w-md"
       data-testid="connectivity-notice"
     >
       {offlineMessage}

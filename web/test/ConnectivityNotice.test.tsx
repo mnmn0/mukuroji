@@ -74,9 +74,12 @@ describe('ConnectivityNotice', () => {
     expect(renderToStaticMarkup(<ConnectivityNotice connectivity={fixedConnectivity(true)} />)).toBe('')
     expect(renderToStaticMarkup(<ConnectivityNotice connectivity={fixedConnectivity(false)} isUpdateNoticeShown />)).toBe('')
     const markup = renderToStaticMarkup(<ConnectivityNotice connectivity={fixedConnectivity(false)} />)
-    // It sits at the bottom edge, clear of the headers, and does not pass taps through.
+    // It shares the update notice's bottom-right slot, clear of the headers and the sidebar's
+    // bottom-left navigation, and does not pass taps through.
     expect(markup).toContain('bottom-[max(1rem,env(safe-area-inset-bottom))]')
+    expect(markup).toContain('sm:left-auto')
     expect(markup).not.toContain('top-0')
+    expect(markup).not.toMatch(/(^|\s)left-4(\s|")/)
     expect(markup).not.toContain('pointer-events-none')
     expect(markup).toContain('data-testid="connectivity-notice"')
     expect(markup).toContain('オフラインです。')
