@@ -10,9 +10,11 @@ import {
   offlineShellResourcePaths,
   readSharedFormFields,
   selectEvictedEntries,
+  hasSharedContentCapacity,
   selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
+  createSerialRunner,
   sharedContentCacheName,
   sharedContentKeyPrefix,
   type StoredSharedContent,
@@ -109,6 +111,7 @@ async function activateCurrentVersion(): Promise<void> {
   const staleNames = selectStaleCaches(await caches.keys(), cachePrefix, [
     shellCacheName,
     assetCacheName,
+    sharedContentCacheName,
   ])
 
   await Promise.all(staleNames.map((name) => caches.delete(name)))
@@ -120,6 +123,9 @@ async function activateCurrentVersion(): Promise<void> {
   }
   await self.clients.claim()
 }
+
+/** Admits one share at a time, so concurrent shares cannot both pass the capacity check. */
+const runSharedContentWrite = createSerialRunner()
 
 /**
  * Stores content another app shared and redirects to the confirmation form.
@@ -138,15 +144,19 @@ async function receiveSharedContent(request: Request): Promise<Response> {
       receivedAt: Date.now(),
     }
     const id = self.crypto.randomUUID()
-    const cache = await caches.open(sharedContentCacheName)
+    const stored = await runSharedContentWrite(async () => {
+      const cache = await caches.open(sharedContentCacheName)
+      const pendingCount = await discardExpiredSharedContent(cache, content.receivedAt)
+      // A full inbox refuses the share instead of growing without bound.
+      if (!hasSharedContentCapacity(pendingCount)) return false
+      await cache.put(
+        new Request(`${sharedContentKeyPrefix}${id}`),
+        new Response(JSON.stringify(content), { headers: { 'Content-Type': 'application/json' } }),
+      )
+      return true
+    })
 
-    await discardExpiredSharedContent(cache, content.receivedAt)
-    await cache.put(
-      new Request(`${sharedContentKeyPrefix}${id}`),
-      new Response(JSON.stringify(content), { headers: { 'Content-Type': 'application/json' } }),
-    )
-
-    return redirectTo(createSharedContentRedirectPath(id))
+    return redirectTo(stored ? createSharedContentRedirectPath(id) : createSharedContentFailurePath())
   } catch {
     // A full or unavailable cache must not end in a browser network error; explain it in the app.
     return redirectTo(createSharedContentFailurePath())
@@ -170,9 +180,9 @@ function redirectTo(path: string): Response {
  *
  * @param cache - Shared content cache.
  * @param now - Current time in epoch milliseconds.
- * @returns A promise that settles once expired entries are deleted.
+ * @returns Number of shares still stored after expired ones are deleted.
  */
-async function discardExpiredSharedContent(cache: Cache, now: number): Promise<void> {
+async function discardExpiredSharedContent(cache: Cache, now: number): Promise<number> {
   const keys = await cache.keys()
   const entries = await Promise.all(keys.map(async (key) => {
     const response = await cache.match(key)
@@ -180,7 +190,9 @@ async function discardExpiredSharedContent(cache: Cache, now: number): Promise<v
     return { key, receivedAt: readReceivedAt(value) }
   }))
 
-  await Promise.all(selectExpiredSharedContent(entries, now).map((key) => cache.delete(key)))
+  const expired = selectExpiredSharedContent(entries, now)
+  await Promise.all(expired.map((key) => cache.delete(key)))
+  return entries.length - expired.length
 }
 
 /**

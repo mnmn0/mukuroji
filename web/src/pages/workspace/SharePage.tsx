@@ -3,7 +3,9 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { createTranslator, type MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTriagePath } from '../../shared/routing/paths'
 import {
+  cancelStoredSharedContent,
   discardStoredSharedContent,
+  readSharedContentSendState,
   readStoredSharedContent,
   sharedContentNotSavedStatus,
 } from '../../shared/lib/pwa/sharedContentInbox'
@@ -40,18 +42,25 @@ const lockedFailureMessageKeys: Record<ShareHandoffFailure, MessageKey> = {
  * Renders the Web Share Target route that hands shared content off to a Team Triage queue.
  *
  * The service worker stores the shared content and passes only its opaque ID in `shared`, so
- * each new share remounts the form with fresh content and a fresh handoff identity.
+ * each new share remounts the form with fresh content and a fresh handoff identity. The form
+ * also remounts when the signed-in account becomes known or changes, so its handoff state is
+ * always the one saved for that account.
  *
  * @returns The share confirmation form inside the Workspace shell.
  */
 export function SharePage() {
   const [searchParams] = useSearchParams()
+  const workspace = useWorkspaceRouteContext()
   const sharedId = searchParams.get('shared') ?? ''
+  // The share is read only once the signed-in account is known, so it is bound to that account.
+  const accountKey = workspace.workspaceId && workspace.userKey
+    ? `${workspace.workspaceId}/${workspace.userKey}`
+    : undefined
 
   // The worker could not keep the share, so there is nothing to confirm.
   if (searchParams.get('status') === sharedContentNotSavedStatus) return <ShareNotSaved />
 
-  return <ShareCapture key={sharedId} sharedId={sharedId} />
+  return <ShareCapture accountKey={accountKey} key={`${sharedId}:${accountKey ?? ''}`} sharedId={sharedId} />
 }
 
 /**
@@ -88,6 +97,8 @@ function ShareNotSaved() {
 type ShareCaptureProps = {
   /** Opaque ID of the stored shared content; empty when nothing was shared. */
   readonly sharedId: string
+  /** Signed-in account the share is bound to; `undefined` until the account is known. */
+  readonly accountKey: string | undefined
 }
 
 /**
@@ -96,25 +107,32 @@ type ShareCaptureProps = {
  * Nothing is sent until the person confirms the form. The stored content is deleted once it
  * is sent or the person leaves through Cancel.
  *
- * @param props - Stored content ID.
+ * @param props - Stored content ID and signed-in account.
  * @returns The share confirmation form.
  */
-function ShareCapture({ sharedId }: ShareCaptureProps) {
+function ShareCapture({ sharedId, accountKey }: ShareCaptureProps) {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const [content, setContent] = useState<SharedContent>()
   const [loadFailed, setLoadFailed] = useState(false)
   const [missing, setMissing] = useState(false)
+  const [cancelled, setCancelled] = useState(false)
+  const [verifyFailed, setVerifyFailed] = useState(false)
+  const [receivedAt, setReceivedAt] = useState<number>()
   const [loadAttempt, setLoadAttempt] = useState(0)
+  const [verifying, setVerifying] = useState(false)
   const mountedRef = useRef(true)
+  // Set once the person leaves, so a send waiting on its liveness check never starts.
+  const leftRef = useRef(false)
   const access = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
   const handoff = useShareHandoff({
     accessToken: workspace.accessToken,
     guardEnterpriseSession: workspace.guardEnterpriseSession,
     requesterDisplayName: workspace.userLabel,
     handoffKey: sharedId,
-    accountKey: `${workspace.workspaceId ?? ''}/${workspace.userKey ?? ''}`,
+    accountKey: accountKey ?? '',
+    receivedAt,
   })
   const teams = useMemo(
     () => workspace.teams.map((team) => ({ id: team.id, name: team.name })),
@@ -126,8 +144,13 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const loadErrorKey: MessageKey | undefined = loadFailed && !content
     ? 'triage.share.loadError'
     : accessFailed ? 'triage.share.accessError' : undefined
-  // A locked attempt keeps its own copy of the content, so it can still be resent.
-  const isMissing = missing && !handoff.locked
+  // Sending requires a live share, so a missing one is shown as missing even when this tab kept a
+  // locked attempt; its stored copy is abandoned so cancelled content never reappears.
+  const isMissing = cancelled || missing
+
+  useEffect(() => {
+    if (missing && handoff.locked) handoff.abandon()
+  }, [handoff, missing])
 
   useEffect(() => {
     mountedRef.current = true
@@ -135,14 +158,16 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   }, [])
 
   useEffect(() => {
+    if (!accountKey) return undefined
     let active = true
-    readStoredSharedContent(sharedId).then(
+    readStoredSharedContent(sharedId, accountKey).then(
       (fields) => {
         if (!active) return
         setLoadFailed(false)
-        // A share ID whose content is gone (expired, already sent, or never stored) must not
-        // become a blank form that looks like the share.
+        // A share ID whose content is gone (expired, already sent, never stored, or bound to
+        // another account) must not become a blank form that looks like the share.
         setMissing(sharedId !== '' && fields === undefined)
+        setReceivedAt(fields?.receivedAt)
         setContent(readSharedContent(fields))
       },
       () => {
@@ -151,12 +176,13 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
       },
     )
     return () => { active = false }
-  }, [loadAttempt, sharedId])
+  }, [accountKey, loadAttempt, sharedId])
 
-  /** Leaves the form, ending the handoff and deleting the stored content and attempt. */
+  /** Leaves the form, ending the handoff in every tab and deleting the stored attempt. */
   function leave() {
+    leftRef.current = true
     handoff.abandon()
-    void discardStoredSharedContent(sharedId)
+    if (accountKey) void cancelStoredSharedContent(sharedId, accountKey)
     void navigate('/home', { replace: true })
   }
 
@@ -198,15 +224,34 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
         ) : null}
         {content && !loadErrorKey && !isMissing ? (
           <ShareCaptureForm
-            errorMessage={handoff.failure
-              ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])
-              : undefined}
+            errorMessage={verifyFailed
+              ? t('triage.share.verifyError')
+              : handoff.failure
+                ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])
+                : undefined}
             initialContent={content}
-            isSubmitting={handoff.isSubmitting}
+            isSubmitting={handoff.isSubmitting || verifying}
             lockedSend={handoff.locked}
             onCancel={leave}
             onSubmit={(teamId, draft) => {
-              void handoff.submit(teamId, draft).then((result) => {
+              if (!accountKey || verifying) return
+              setVerifyFailed(false)
+              setVerifying(true)
+              void readSharedContentSendState(sharedId, accountKey).then((state) => {
+                setVerifying(false)
+                // Leaving while the check ran, through Cancel or the shell, drops the pending send.
+                if (leftRef.current || !mountedRef.current) return undefined
+                if (state === 'live') return handoff.submit(teamId, draft)
+                if (state === 'unverified') {
+                  // Without proof the share is still live, nothing is sent; the person can retry.
+                  setVerifyFailed(true)
+                  return undefined
+                }
+                // Cancelled, sent, or expired in any tab ends the handoff here too.
+                handoff.abandon()
+                setCancelled(true)
+                return undefined
+              }).then((result) => {
                 if (!result) return
                 // The handoff forgot its replay state, so the share must not be sendable again.
                 void discardStoredSharedContent(sharedId)

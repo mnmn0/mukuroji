@@ -49,10 +49,11 @@ export const shareTargetPath = '/share'
 /**
  * Cache holding shared content until the confirmation form reads it. The app reads the same
  * cache, so `web/src/shared/lib/pwa/sharedContentInbox.ts` repeats this name and a unit test
- * keeps the two equal. It deliberately avoids the `mukuroji-` prefix, which earlier workers
- * delete on activation, so rolling back to one of them keeps unsent shares.
+ * keeps the two equal. It uses the worker-owned `mukuroji-` prefix, so a rollback to an earlier
+ * worker, which knows nothing about this inbox, deletes it on activation instead of leaving
+ * shared content past its retention window. The current worker keeps it.
  */
-export const sharedContentCacheName = 'mukuroji.share-inbox-v1'
+export const sharedContentCacheName = 'mukuroji-share-inbox-v1'
 
 /** Path prefix of the cache keys for stored shared content. */
 export const sharedContentKeyPrefix = '/__mukuroji/share/'
@@ -113,6 +114,43 @@ export const sharedContentNotSavedStatus = 'not-saved'
  */
 export function createSharedContentFailurePath(): string {
   return `${shareTargetPath}?${new URLSearchParams({ status: sharedContentNotSavedStatus }).toString()}`
+}
+
+/**
+ * Most pending shares kept at once. Any page can post to `/share`, so the inbox is bounded and a
+ * flood of submissions cannot fill the origin's storage; legitimate shares are rare and short-lived.
+ */
+export const maxPendingSharedContent = 20
+
+/**
+ * Returns whether the inbox can accept another share.
+ *
+ * @param pendingCount - Unexpired shares currently stored.
+ * @returns `true` while fewer than `maxPendingSharedContent` shares are pending.
+ */
+export function hasSharedContentCapacity(pendingCount: number): boolean {
+  return pendingCount < maxPendingSharedContent
+}
+
+/** Runs asynchronous tasks one after another. */
+export type SerialRunner = <Result>(task: () => Promise<Result>) => Promise<Result>
+
+/**
+ * Creates a runner that starts each task only after every earlier task has settled.
+ *
+ * Fetch events can overlap, so a read-then-write such as the share inbox's capacity check and
+ * store must run through one queue. A failed task does not block later ones; each caller still
+ * receives its own result or failure.
+ *
+ * @returns The serial runner.
+ */
+export function createSerialRunner(): SerialRunner {
+  let tail: Promise<unknown> = Promise.resolve()
+  return <Result>(task: () => Promise<Result>): Promise<Result> => {
+    const run = tail.then(task, task)
+    tail = run.catch(() => undefined)
+    return run
+  }
 }
 
 /**
