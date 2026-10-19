@@ -161,6 +161,8 @@ describe('share target', () => {
   test('shares the cache name and key prefix with the app', () => {
     expect(sharedContentInbox.sharedContentCacheName).toBe(sharedContentCacheName)
     expect(sharedContentInbox.sharedContentKeyPrefix).toBe(sharedContentKeyPrefix)
-    expect(sharedContentCacheName.startsWith('mukuroji-')).toBe(true)
+    expect(sharedContentInbox.sharedContentMaxAgeMilliseconds).toBe(sharedContentMaxAgeMilliseconds)
+    // Earlier workers delete every `mukuroji-` cache on activation; a rollback must keep shares.
+    expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [])).toEqual([])
   })
 })

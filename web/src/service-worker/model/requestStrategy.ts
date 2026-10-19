@@ -49,9 +49,10 @@ export const shareTargetPath = '/share'
 /**
  * Cache holding shared content until the confirmation form reads it. The app reads the same
  * cache, so `web/src/shared/lib/pwa/sharedContentInbox.ts` repeats this name and a unit test
- * keeps the two equal.
+ * keeps the two equal. It deliberately avoids the `mukuroji-` prefix, which earlier workers
+ * delete on activation, so rolling back to one of them keeps unsent shares.
  */
-export const sharedContentCacheName = 'mukuroji-share-inbox-v1'
+export const sharedContentCacheName = 'mukuroji.share-inbox-v1'
 
 /** Path prefix of the cache keys for stored shared content. */
 export const sharedContentKeyPrefix = '/__mukuroji/share/'

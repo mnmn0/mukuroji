@@ -108,10 +108,10 @@ async function activateCurrentVersion(): Promise<void> {
   const staleNames = selectStaleCaches(await caches.keys(), cachePrefix, [
     shellCacheName,
     assetCacheName,
-    sharedContentCacheName,
   ])
 
   await Promise.all(staleNames.map((name) => caches.delete(name)))
+  await discardExpiredSharedContent(await caches.open(sharedContentCacheName), Date.now())
   await self.clients.claim()
 }
 
@@ -143,7 +143,9 @@ async function receiveSharedContent(request: Request): Promise<Response> {
 }
 
 /**
- * Deletes shared content that was never read within the retention window.
+ * Deletes shared content that was never sent or discarded within the retention window.
+ *
+ * Runs on activation and before each new share; the form also refuses expired content.
  *
  * @param cache - Shared content cache.
  * @param now - Current time in epoch milliseconds.

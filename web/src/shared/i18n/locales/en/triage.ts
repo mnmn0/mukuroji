@@ -220,4 +220,6 @@ export const triageMessages = {
   'triage.share.lockedForbidden': 'You can’t send to this Team’s Triage. The earlier send may have been saved, so send the same content again once your access is back.',
   'triage.share.loadError': 'Couldn’t load the shared content.',
   'triage.share.reload': 'Load again',
+  'triage.share.unsaved': 'This device can’t keep the send state, so the send was stopped to avoid a duplicate. Allow site data in your browser settings and try again.',
+  'triage.share.accessError': 'Couldn’t check your account permissions.',
 } as const
