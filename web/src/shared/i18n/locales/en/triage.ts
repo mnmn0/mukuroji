@@ -222,4 +222,5 @@ export const triageMessages = {
   'triage.share.reload': 'Load again',
   'triage.share.unsaved': 'This device can’t keep the send state, so the send was stopped to avoid a duplicate. Allow site data in your browser settings and try again.',
   'triage.share.accessError': 'Couldn’t check your account permissions.',
+  'triage.share.notSaved': 'The shared content couldn’t be kept on this device, so it wasn’t received. Check the free storage and share again from the original app.',
 } as const

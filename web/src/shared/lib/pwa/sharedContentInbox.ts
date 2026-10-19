@@ -8,6 +8,9 @@ export const sharedContentCacheName = 'mukuroji.share-inbox-v1'
 /** Path prefix of the cache keys for stored shared content; repeats the worker's value. */
 export const sharedContentKeyPrefix = '/__mukuroji/share/'
 
+/** Query `status` the worker sets when it could not keep a share; repeats the worker's value. */
+export const sharedContentNotSavedStatus = 'not-saved'
+
 /** How long shared content stays readable; repeats the worker's retention window. */
 export const sharedContentMaxAgeMilliseconds = 24 * 60 * 60 * 1000
 
