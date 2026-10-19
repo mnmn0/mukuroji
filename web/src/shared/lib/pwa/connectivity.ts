@@ -52,6 +52,12 @@ export function createConnectivityStore(
   }
 
   return {
+    /**
+     * Registers a listener for connectivity changes, attaching the browser events for the first one.
+     *
+     * @param listener - Called after the connectivity changes.
+     * @returns A function that removes the listener and detaches the events after the last one.
+     */
     subscribe(listener) {
       if (listeners.size === 0) {
         environment.target?.addEventListener('online', handleChange)
@@ -68,6 +74,11 @@ export function createConnectivityStore(
         }
       }
     },
+    /**
+     * Reads the connectivity last observed.
+     *
+     * @returns Whether the page is online.
+     */
     getSnapshot: () => online,
   }
 }
