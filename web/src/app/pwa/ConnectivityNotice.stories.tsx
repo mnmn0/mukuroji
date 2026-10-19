@@ -27,15 +27,26 @@ type Story = StoryObj<typeof meta>
 
 /** The device is offline; the bar stays until the connection returns. */
 export const Offline: Story = {
-  args: { connectivity: fixedConnectivity(false) },
+  args: { connectivity: fixedConnectivity(false), isUpdateNoticeShown: false },
   play: async ({ canvasElement }) => {
-    await expect(within(canvasElement).getByTestId('connectivity-notice')).toHaveTextContent('オフラインです。')
+    // The copy follows the saved or browser locale, so only its presence is asserted.
+    const notice = within(canvasElement).getByTestId('connectivity-notice')
+    await expect(notice).toBeVisible()
+    await expect(notice.textContent?.trim()).not.toBe('')
+  },
+}
+
+/** The update notice occupies the bottom edge, so the offline notice steps aside. */
+export const BehindUpdateNotice: Story = {
+  args: { connectivity: fixedConnectivity(false), isUpdateNoticeShown: true },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).queryByTestId('connectivity-notice')).toBeNull()
   },
 }
 
 /** The device is online; nothing is shown. */
 export const Online: Story = {
-  args: { connectivity: fixedConnectivity(true) },
+  args: { connectivity: fixedConnectivity(true), isUpdateNoticeShown: false },
   play: async ({ canvasElement }) => {
     await expect(within(canvasElement).queryByTestId('connectivity-notice')).toBeNull()
   },

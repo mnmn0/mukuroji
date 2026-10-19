@@ -7,34 +7,7 @@ import {
 } from '../../shared/i18n/i18n'
 import { AppUpdateNotice } from '../../shared/ui/AppUpdateNotice'
 import { appServiceWorkerUpdates } from './appServiceWorker'
-
-/**
- * Subscribes to update availability, tolerating browsers without service workers.
- *
- * @param listener - Callback invoked when availability may have changed.
- * @returns Unsubscribe function.
- */
-function subscribeToUpdates(listener: () => void): () => void {
-  return appServiceWorkerUpdates?.subscribe(listener) ?? (() => undefined)
-}
-
-/**
- * Reads whether an update is ready to apply.
- *
- * @returns `true` when a new version is waiting and has not been dismissed.
- */
-function readUpdateReady(): boolean {
-  return appServiceWorkerUpdates?.getSnapshot() ?? false
-}
-
-/**
- * Reports that no update is pending during server rendering.
- *
- * @returns Always `false`.
- */
-function readServerUpdateReady(): boolean {
-  return false
-}
+import { useServiceWorkerUpdateReady } from './useServiceWorkerUpdateReady'
 
 /**
  * Reports the default locale during server rendering.
@@ -54,7 +27,7 @@ function readServerLocale(): Locale {
  * @returns The localized notice, or nothing while no update is pending.
  */
 export function ServiceWorkerUpdateNotice() {
-  const updateReady = useSyncExternalStore(subscribeToUpdates, readUpdateReady, readServerUpdateReady)
+  const updateReady = useServiceWorkerUpdateReady()
   const locale = useSyncExternalStore(subscribeToLocalePreference, getInitialLocale, readServerLocale)
 
   if (!updateReady || appServiceWorkerUpdates === null) {

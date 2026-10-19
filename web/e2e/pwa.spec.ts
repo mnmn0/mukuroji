@@ -102,7 +102,7 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   }
 })
 
-test('接続が切れると画面上部にオフラインの案内を出し、復帰すると消して読み上げる', async ({ page, context }) => {
+test('接続が切れると画面下部にオフラインの案内を出し、復帰すると消して読み上げる', async ({ page, context }) => {
   await page.goto('/support')
   await expect(page.getByTestId('connectivity-notice')).toHaveCount(0)
 

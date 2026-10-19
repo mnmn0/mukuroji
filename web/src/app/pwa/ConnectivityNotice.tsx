@@ -11,6 +11,7 @@ import {
   resolveConnectivityAnnouncement,
   type ConnectivityStore,
 } from '../../shared/lib/pwa/connectivity'
+import { useServiceWorkerUpdateReady } from './useServiceWorkerUpdateReady'
 
 /**
  * Reports the default locale during server rendering.
@@ -25,18 +26,26 @@ function readServerLocale(): Locale {
 export type ConnectivityNoticeProps = {
   /** Connectivity source; defaults to the running page. */
   readonly connectivity?: ConnectivityStore
+  /** Whether the update notice occupies the bottom edge; defaults to the app's update state. */
+  readonly isUpdateNoticeShown?: boolean
 }
 
 /**
  * Shows that the app is offline and announces when the connection is lost or comes back.
  *
- * The visible bar stays while offline. Announcements go through the app's persistent live
- * regions, so they are read even though the bar mounts at the same moment.
+ * The visible notice stays in the bottom-left corner while offline, clear of the headers and
+ * their controls, and swallows taps instead of passing them to the content beneath. It steps
+ * aside while the update notice occupies the bottom edge. Announcements go through the app's
+ * persistent live regions, so they are read even though the notice mounts at the same moment.
  *
- * @param props - Connectivity source.
- * @returns The offline bar, or nothing while online.
+ * @param props - Connectivity source and update notice state.
+ * @returns The offline notice, or nothing while online.
  */
-export function ConnectivityNotice({ connectivity = appConnectivity }: ConnectivityNoticeProps) {
+export function ConnectivityNotice({
+  connectivity = appConnectivity,
+  isUpdateNoticeShown,
+}: ConnectivityNoticeProps) {
+  const updateReady = useServiceWorkerUpdateReady()
   const online = useSyncExternalStore(connectivity.subscribe, connectivity.getSnapshot, connectivity.getSnapshot)
   const locale = useSyncExternalStore(subscribeToLocalePreference, getInitialLocale, readServerLocale)
   const t = createTranslator(locale)
@@ -51,14 +60,14 @@ export function ConnectivityNotice({ connectivity = appConnectivity }: Connectiv
     announce(change === 'online' ? onlineMessage : offlineMessage, 'polite', Date.now(), 'connectivity')
   }, [offlineMessage, online, onlineMessage])
 
-  if (online) return null
+  if (online || (isUpdateNoticeShown ?? updateReady)) return null
 
   return (
-    <div
-      className="pointer-events-none fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-[max(0.5rem,env(safe-area-inset-top))]"
+    <p
+      className="workbench-panel fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-4 z-50 m-0 max-w-[min(24rem,calc(100vw-2rem))] px-4 py-2 text-sm leading-6 shadow-lg"
       data-testid="connectivity-notice"
     >
-      <p className="workbench-panel m-0 max-w-xl px-4 py-2 text-sm leading-6 shadow-lg">{offlineMessage}</p>
-    </div>
+      {offlineMessage}
+    </p>
   )
 }

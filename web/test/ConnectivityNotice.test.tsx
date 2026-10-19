@@ -70,9 +70,14 @@ describe('resolveConnectivityAnnouncement', () => {
 })
 
 describe('ConnectivityNotice', () => {
-  test('shows the offline bar only while offline', () => {
+  test('shows the offline notice only while offline and the update notice is not showing', () => {
     expect(renderToStaticMarkup(<ConnectivityNotice connectivity={fixedConnectivity(true)} />)).toBe('')
+    expect(renderToStaticMarkup(<ConnectivityNotice connectivity={fixedConnectivity(false)} isUpdateNoticeShown />)).toBe('')
     const markup = renderToStaticMarkup(<ConnectivityNotice connectivity={fixedConnectivity(false)} />)
+    // It sits at the bottom edge, clear of the headers, and does not pass taps through.
+    expect(markup).toContain('bottom-[max(1rem,env(safe-area-inset-bottom))]')
+    expect(markup).not.toContain('top-0')
+    expect(markup).not.toContain('pointer-events-none')
     expect(markup).toContain('data-testid="connectivity-notice"')
     expect(markup).toContain('オフラインです。')
     // The bar itself is not a live region; announcements use the persistent regions.
