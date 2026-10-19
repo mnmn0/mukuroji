@@ -425,6 +425,8 @@ function buildTenantOperationCapabilityFunction(
         input.dataStores.teamIssueEventsTable.tableName,
       NOTIFICATIONS_TABLE_NAME: input.dataStores.notificationsTable.tableName,
       PLANNING_TABLE_NAME: input.dataStores.planningTable.tableName,
+      PUSH_SUBSCRIPTIONS_TABLE_NAME:
+        input.dataStores.pushSubscriptionsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME:
         input.dataStores.projectDirectoryTable.tableName,
       REALTIME_SESSIONS_TABLE_NAME:
@@ -509,6 +511,7 @@ function grantTenantResourceOwner(
     stores.workspaceSearchTable,
     stores.notificationsTable,
     stores.focusTable,
+    stores.pushSubscriptionsTable,
     stores.realtimeSessionsTable,
     stores.fileProofingTable,
   ];

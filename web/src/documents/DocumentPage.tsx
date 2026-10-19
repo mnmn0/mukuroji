@@ -28,6 +28,7 @@ import {
 } from '../auth/api'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
   MobileSidebarButton,
   useWorkspaceSidebarController,
@@ -1357,7 +1358,7 @@ export function DocumentPage() {
         loadMoreDocuments: handleLoadMoreDocuments,
         loadMoreVersions: handleLoadMoreVersions,
         logout: () => {
-          clearAuthSession()
+          signOutWithPushCleanup(accessToken)
           navigate('/', { replace: true })
         },
         moveDocument: handleMoveDocument,

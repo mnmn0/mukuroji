@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createECDH, createHash } from 'node:crypto'
 import type { PushConfiguration, PushSubscriptionInput } from '@mukuroji/contracts'
 import { NotificationError } from '../notifications'
 
@@ -156,7 +156,8 @@ function invalidSubscription(): NotificationError {
 /**
  * Builds the push configuration from the deployment's VAPID public key.
  *
- * A missing or malformed key disables push instead of handing browsers a key they cannot use.
+ * A missing or malformed key, or one that is not a point on P-256, disables push instead of
+ * handing browsers a key they cannot use.
  *
  * @param vapidPublicKey - Configured base64url-encoded uncompressed P-256 public key.
  * @returns Push configuration for clients.
@@ -165,8 +166,31 @@ export function createPushConfiguration(vapidPublicKey: string | undefined): Pus
   const key = vapidPublicKey?.trim() ?? ''
   if (!/^[A-Za-z0-9_-]+$/.test(key)) return { enabled: false }
   const decoded = Buffer.from(key, 'base64url')
-  if (decoded.length !== p256dhByteLength || decoded[0] !== 0x04 || decoded.toString('base64url') !== key) {
+  if (
+    decoded.length !== p256dhByteLength ||
+    decoded[0] !== 0x04 ||
+    decoded.toString('base64url') !== key ||
+    !isP256Point(decoded)
+  ) {
     return { enabled: false }
   }
   return { enabled: true, vapidPublicKey: key }
+}
+
+/**
+ * Returns whether bytes encode a point on the P-256 curve, so a mistyped key that browsers
+ * would reject leaves push disabled instead of offering a feature that cannot subscribe.
+ *
+ * @param publicKey - Uncompressed point bytes.
+ * @returns `true` when ECDH accepts the point.
+ */
+function isP256Point(publicKey: Buffer): boolean {
+  try {
+    const ecdh = createECDH('prime256v1')
+    ecdh.generateKeys()
+    ecdh.computeSecret(publicKey)
+    return true
+  } catch {
+    return false
+  }
 }

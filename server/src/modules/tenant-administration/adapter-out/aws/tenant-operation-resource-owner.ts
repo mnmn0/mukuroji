@@ -110,6 +110,8 @@ export type TenantOperationResourceOwnerConfig = {
   notificationsTableName: string
   /** Focus queue state table. */
   focusTableName: string
+  /** Web Push subscriptions and endpoint owners. */
+  pushSubscriptionsTableName: string
   /** Realtime session table. */
   realtimeSessionsTableName: string
   /** File proofing metadata table. */
@@ -402,6 +404,10 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         [workspaceSelector('scopeKey', 'prefix', 'WORKSPACE#', '#')],
       ),
       exactTarget('tenant-administration', this.config.tenantAdministrationTableName, 'workspaceId', 'recordKey'),
+      // Member subscriptions and endpoint owner rows both carry the owning Workspace ID.
+      attributeTarget('push-subscriptions', this.config.pushSubscriptionsTableName, 'pk', 'sk', [
+        workspaceSelector('workspaceId', 'equals'),
+      ]),
     ]
   }
 

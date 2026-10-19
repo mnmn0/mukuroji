@@ -55,6 +55,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     workspaceSearchTableName: 'workspace-search',
     notificationsTableName: 'notifications',
     focusTableName: 'focus',
+    pushSubscriptionsTableName: 'push-subscriptions',
     realtimeSessionsTableName: 'realtime-sessions',
     fileProofingTableName: 'file-proofing',
   }
@@ -794,7 +795,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: operation.operationId,
       step: 'snapshot',
       cursor: {
-        targetIndex: 22,
+        targetIndex: 23,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -835,7 +836,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(copiedPaths[1]).toContain(
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(26)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -912,7 +913,7 @@ describe('AwsTenantOperationResourceOwner', () => {
 
     try {
       const regularFiles = await owner.execute(
-        createDataJob(17, workspaceId),
+        createDataJob(18, workspaceId),
         operation,
       )
       if (regularFiles.status !== 'continuing') {
@@ -943,7 +944,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(deletionBodies[0]).toContain('version-2')
       expect(deletionBodies[1]).toContain(importObjectKey)
       expect(deletionBodies[1]).toContain('version-3')
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(20)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(21)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1034,7 +1035,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 20 },
+      cursor: { targetIndex: 20, processedCount: 20 },
     }
 
     try {
@@ -1248,7 +1249,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 20 },
+      cursor: { targetIndex: 20, processedCount: 20 },
     }
 
     try {

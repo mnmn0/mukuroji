@@ -112,7 +112,8 @@ async function showPushNotification(data: PushMessageData | null): Promise<void>
 }
 
 /**
- * Opens a clicked notification's target in an existing app window, or in a new one.
+ * Opens a clicked notification's target in an existing app window, or in a new one when no
+ * window can navigate to it.
  *
  * @param data - Data stored on the notification.
  * @returns A promise that settles once a window shows the target.
@@ -124,8 +125,8 @@ async function openNotificationTarget(data: unknown): Promise<void> {
   if (client) {
     try {
       const focused = await client.focus()
-      await focused.navigate(url)
-      return
+      // `navigate` resolves to null when the window cannot show the target; open one instead.
+      if (await focused.navigate(url)) return
     } catch {
       // Uncontrolled or closing windows cannot navigate; open a new one instead.
     }

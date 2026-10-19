@@ -10,12 +10,23 @@ import {
   type ValidatedPushSubscription,
 } from '../../domain/push-subscription'
 import { NotificationError } from '../../notifications'
+import type { PushSubscriptionStore } from '../../application/push-subscriptions'
 
 /** Days a subscription is kept without being registered again by its browser. */
 const subscriptionRetentionDays = 180
 
+/**
+ * Extra days an endpoint owner row outlives the member rows it guards. DynamoDB deletes expired
+ * items independently and late, so the margin keeps an owner from expiring before its member row
+ * and letting another member register the endpoint without removing the earlier registration.
+ */
+const ownerRetentionMarginDays = 30
+
 /** Attempts to win the endpoint ownership race before reporting a conflict. */
 const maxOwnershipAttempts = 3
+
+/** Sort key of a member's registration version, bumped by every new device registration. */
+const memberVersionSortKey = 'devices'
 
 /** Minimal DynamoDB command boundary used by the push subscription store. */
 type PushSubscriptionDocumentClient = {
@@ -25,6 +36,8 @@ type PushSubscriptionDocumentClient = {
     Item?: Record<string, unknown>
     /** Number of items matched by a count query. */
     Count?: number
+    /** Key of the last item read when the query stopped early. */
+    LastEvaluatedKey?: Record<string, unknown>
   }>
 }
 
@@ -34,17 +47,6 @@ type EndpointOwner = {
   workspaceId: string
   /** Owning member. */
   memberKey: string
-}
-
-/** Push subscription storage used by the subscription routes. */
-export type PushSubscriptionStore = {
-  /**
-   * Registers or refreshes a subscription for a member, taking the endpoint over from any other
-   * member so one device never receives two people's notifications.
-   */
-  register(workspaceId: string, memberKey: string, subscription: ValidatedPushSubscription, now: Date): Promise<void>
-  /** Removes a member's subscription for an endpoint; removing a missing one succeeds. */
-  remove(workspaceId: string, memberKey: string, endpoint: string): Promise<void>
 }
 
 /**
@@ -105,7 +107,10 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
     for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
       const owner = await this.#readOwner(subscription.subscriptionId)
       const ownedByMember = owner?.workspaceId === workspaceId && owner.memberKey === memberKey
-      if (!ownedByMember && await this.#countSubscriptions(partition) >= MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER) {
+      // A new device is counted against the limit and fenced by the member's registration
+      // version, so two devices registering at once cannot both pass the same count.
+      const version = ownedByMember ? undefined : await this.#readMemberVersion(partition)
+      if (version !== undefined && await this.#countSubscriptions(partition) >= MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER) {
         throw new NotificationError(409, 'PushSubscriptionLimitExceeded', 'Too many devices receive push notifications.')
       }
       const ownerItem = {
@@ -113,7 +118,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
         sk: 'owner',
         workspaceId,
         memberKey,
-        expiresAt,
+        expiresAt: expiresAt + ownerRetentionMarginDays * 86_400,
       }
       try {
         await this.#client.send(new TransactWriteCommand({
@@ -148,6 +153,23 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
                 },
               },
             },
+            ...(version !== undefined
+              ? [{
+                  Update: {
+                    TableName: this.#tableName,
+                    Key: { pk: partition, sk: memberVersionSortKey },
+                    UpdateExpression: 'SET version = :next, workspaceId = :workspace',
+                    ConditionExpression: version === 0
+                      ? 'attribute_not_exists(version)'
+                      : 'version = :current',
+                    ExpressionAttributeValues: {
+                      ':next': version + 1,
+                      ':workspace': workspaceId,
+                      ...(version === 0 ? {} : { ':current': version }),
+                    },
+                  },
+                }]
+              : []),
             ...(owner && !ownedByMember
               ? [{
                   Delete: {
@@ -222,14 +244,41 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
    * @returns Number of subscriptions.
    */
   async #countSubscriptions(partition: string): Promise<number> {
-    const { Count } = await this.#client.send(new QueryCommand({
+    let total = 0
+    let startKey: Record<string, unknown> | undefined
+    do {
+      const { Count, LastEvaluatedKey } = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+        ExpressionAttributeValues: { ':pk': partition, ':prefix': 'subscription#' },
+        Select: 'COUNT',
+        ConsistentRead: true,
+        ...(startKey ? { ExclusiveStartKey: startKey } : {}),
+      }))
+      total += Count ?? 0
+      startKey = LastEvaluatedKey
+    } while (startKey)
+    return total
+  }
+
+  /**
+   * Strongly reads a member's registration version.
+   *
+   * @param partition - Member partition.
+   * @returns The version, or 0 before the first registration.
+   */
+  async #readMemberVersion(partition: string): Promise<number> {
+    const { Item } = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
-      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-      ExpressionAttributeValues: { ':pk': partition, ':prefix': 'subscription#' },
-      Select: 'COUNT',
+      Key: { pk: partition, sk: memberVersionSortKey },
       ConsistentRead: true,
     }))
-    return Count ?? 0
+    const version = Item?.version
+    if (version === undefined) return 0
+    if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
+      throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
+    }
+    return version
   }
 }
 
@@ -243,12 +292,27 @@ function isConditionalCheckFailure(error: unknown): boolean {
   return error instanceof Error && error.name === 'ConditionalCheckFailedException'
 }
 
+/** Cancellation reasons that mean another registration changed the guarded rows first. */
+const raceCancellationCodes: readonly string[] = ['ConditionalCheckFailed', 'TransactionConflict']
+
 /**
- * Returns whether a transaction was cancelled by a failed condition or a concurrent write.
+ * Returns whether a transaction lost a race with a concurrent registration.
+ *
+ * Only failed conditions and transaction conflicts are retried. A cancellation caused by
+ * throttling, validation, or capacity is rethrown so it stays a retryable infrastructure failure
+ * instead of becoming an ownership conflict.
  *
  * @param error - Error thrown by DynamoDB.
- * @returns `true` for a cancelled transaction.
+ * @returns `true` when every reported reason is a race.
  */
 function isTransactionConflict(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'TransactionCanceledException' || error.name === 'TransactionConflictException')
+  if (!(error instanceof Error)) return false
+  if (error.name === 'TransactionConflictException') return true
+  if (error.name !== 'TransactionCanceledException') return false
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(reasons)) return false
+  const codes = reasons.map((reason: unknown) =>
+    typeof reason === 'object' && reason !== null ? Reflect.get(reason, 'Code') : undefined)
+  return codes.some((code) => typeof code === 'string' && raceCancellationCodes.includes(code)) &&
+    codes.every((code) => code === undefined || code === 'None' || (typeof code === 'string' && raceCancellationCodes.includes(code)))
 }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { createECDH } from 'node:crypto'
 import { Hono } from 'hono'
 import {
   DeleteCommand,
@@ -7,10 +8,8 @@ import {
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { createPushSubscriptionRouter } from './adapter-in/http/push-subscription-router'
-import {
-  DynamoDbPushSubscriptionStore,
-  type PushSubscriptionStore,
-} from './adapter-out/dynamodb/push-subscription-store'
+import { DynamoDbPushSubscriptionStore } from './adapter-out/dynamodb/push-subscription-store'
+import type { PushSubscriptionStore } from './application/push-subscriptions'
 import {
   MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER,
   createPushConfiguration,
@@ -21,8 +20,19 @@ import {
 } from './domain/push-subscription'
 import { NotificationError } from './notifications'
 
-const p256dh = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 1)]).toString('base64url')
+const p256dh = createP256PublicKey()
 const auth = Buffer.alloc(16, 2).toString('base64url')
+
+/**
+ * Creates a valid uncompressed P-256 public key.
+ *
+ * @returns base64url-encoded key.
+ */
+function createP256PublicKey(): string {
+  const ecdh = createECDH('prime256v1')
+  ecdh.generateKeys()
+  return ecdh.getPublicKey().toString('base64url')
+}
 const endpoint = 'https://fcm.googleapis.com/fcm/send/device-token'
 
 describe('push subscription validation', () => {
@@ -74,6 +84,9 @@ describe('push subscription validation', () => {
     expect(createPushConfiguration('')).toEqual({ enabled: false })
     expect(createPushConfiguration(undefined)).toEqual({ enabled: false })
     expect(createPushConfiguration(auth)).toEqual({ enabled: false })
+    // 65 bytes starting with 0x04 that are not a point on the curve, like a mistyped key.
+    const offCurve = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 1)]).toString('base64url')
+    expect(createPushConfiguration(offCurve)).toEqual({ enabled: false })
   })
 })
 
@@ -103,11 +116,13 @@ function createClient(respond: (command: SentCommand) => Promise<Record<string, 
  * Creates an error shaped like an AWS SDK exception.
  *
  * @param name - Exception name.
+ * @param cancellationCodes - Transaction cancellation reason codes, if any.
  * @returns The error.
  */
-function awsError(name: string): Error {
+function awsError(name: string, cancellationCodes?: string[]): Error {
   const error = new Error(name)
   error.name = name
+  if (cancellationCodes) Reflect.set(error, 'CancellationReasons', cancellationCodes.map((Code) => ({ Code })))
   return error
 }
 
@@ -124,11 +139,15 @@ describe('DynamoDbPushSubscriptionStore', () => {
     await new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now)
     const transaction = sent.find((command) => command instanceof TransactWriteCommand)
     const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
-    expect(items).toHaveLength(3)
-    expect(items[0]?.Put?.Item).toMatchObject({ pk: `endpoint#${subscription.subscriptionId}`, workspaceId: 'ws-1', memberKey: 'ada' })
+    const memberExpiresAt = Math.floor(now.getTime() / 1_000) + 180 * 86_400
+    expect(items).toHaveLength(4)
+    // The owner outlives the member rows it guards, so TTL never splits ownership.
+    expect(items[0]?.Put?.Item).toMatchObject({ pk: `endpoint#${subscription.subscriptionId}`, workspaceId: 'ws-1', memberKey: 'ada', expiresAt: memberExpiresAt + 30 * 86_400 })
     expect(items[0]?.Put?.ConditionExpression).toBe('workspaceId = :ownerWorkspace AND memberKey = :ownerMember')
-    expect(items[1]?.Put?.Item).toMatchObject({ pk: 'member#ws-1#ada', endpoint, p256dh, auth, expiresAt: Math.floor(now.getTime() / 1_000) + 180 * 86_400 })
-    expect(items[2]?.Delete?.Key).toEqual({ pk: 'member#ws-1#bob', sk: `subscription#${subscription.subscriptionId}` })
+    expect(items[1]?.Put?.Item).toMatchObject({ pk: 'member#ws-1#ada', endpoint, p256dh, auth, expiresAt: memberExpiresAt })
+    // A new device bumps the member's registration version, fencing the device count.
+    expect(items[2]?.Update).toMatchObject({ Key: { pk: 'member#ws-1#ada', sk: 'devices' }, ConditionExpression: 'attribute_not_exists(version)' })
+    expect(items[3]?.Delete?.Key).toEqual({ pk: 'member#ws-1#bob', sk: `subscription#${subscription.subscriptionId}` })
   })
 
   test('refreshes the member’s own subscription without counting it against the limit', async () => {
@@ -151,18 +170,47 @@ describe('DynamoDbPushSubscriptionStore', () => {
       .rejects.toMatchObject({ status: 409, code: 'PushSubscriptionLimitExceeded' })
   })
 
+  test('fences new devices with the registration version read alongside the count', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'devices') return { Item: { version: 7 } }
+      if (command instanceof QueryCommand) return { Count: MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER - 1 }
+      return {}
+    })
+    await new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now)
+    const transaction = sent.find((command) => command instanceof TransactWriteCommand)
+    const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
+    expect(items[2]?.Update).toMatchObject({
+      ConditionExpression: 'version = :current',
+      ExpressionAttributeValues: { ':current': 7, ':next': 8, ':workspace': 'ws-1' },
+    })
+  })
+
   test('retries a lost ownership race, then reports a conflict', async () => {
     let transactions = 0
     const { client } = createClient(async (command) => {
       if (command instanceof TransactWriteCommand) {
         transactions += 1
-        throw awsError('TransactionCanceledException')
+        throw awsError('TransactionCanceledException', ['None', 'ConditionalCheckFailed', 'None'])
       }
       return {}
     })
     await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
       .rejects.toMatchObject({ status: 409, code: 'PushSubscriptionConflict' })
     expect(transactions).toBe(3)
+  })
+
+  test('keeps throttling and other non-race cancellations as infrastructure failures', async () => {
+    let transactions = 0
+    const { client } = createClient(async (command) => {
+      if (command instanceof TransactWriteCommand) {
+        transactions += 1
+        throw awsError('TransactionCanceledException', ['ThrottlingError', 'None', 'None'])
+      }
+      return {}
+    })
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+      .rejects.toMatchObject({ name: 'TransactionCanceledException' })
+    expect(transactions).toBe(1)
   })
 
   test('removes the member’s subscription and releases the endpoint only while still owned', async () => {

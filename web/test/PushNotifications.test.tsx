@@ -22,6 +22,7 @@ import {
 import { isSafeApplicationPath } from '../src/shared/routing/applicationPath'
 import {
   decodeBase64Url,
+  readServiceWorkerRegistration,
   matchesApplicationServerKey,
   readPushSubscriptionInput,
   type BrowserPushManager,
@@ -159,7 +160,51 @@ describe('push device controller', () => {
     const { api, calls } = createApi()
     expect(await enablePushDevice('t', vapidPublicKey, environment, api)).toBe('enabled')
     expect(log).toEqual(['request', 'unsubscribe old', 'subscribe 65'])
-    expect(calls).toEqual([`register t ${endpoint}`])
+    // The old endpoint is removed on the server too, so it stops counting and receiving.
+    expect(calls).toEqual([`remove t ${endpoint}`, `register t ${endpoint}`])
+  })
+
+  test('recreates an existing subscription whose keys the browser no longer exposes', async () => {
+    const { environment, log } = createEnvironment({ permission: 'granted' })
+    const keyless: BrowserPushSubscription = {
+      ...createSubscription(vapidPublicKey, log),
+      toJSON: () => ({ endpoint }),
+    }
+    const pushManager: BrowserPushManager = {
+      getSubscription: async () => keyless,
+      subscribe: async () => {
+        log.push('subscribe')
+        return createSubscription(vapidPublicKey, log)
+      },
+    }
+    const { api, calls } = createApi()
+    expect(await enablePushDevice('t', vapidPublicKey, { ...environment, getPushManager: async () => pushManager }, api)).toBe('enabled')
+    expect(log).toEqual(['unsubscribe current', 'subscribe'])
+    expect(calls).toEqual([`remove t ${endpoint}`, `register t ${endpoint}`])
+  })
+
+  test('reports an unreadable push store as a retryable load error', async () => {
+    const { environment } = createEnvironment({ permission: 'granted' })
+    const failing: BrowserPushManager = {
+      getSubscription: async () => { throw new Error('unavailable') },
+      subscribe: async () => { throw new Error('unused') },
+    }
+    expect((await loadPushDevice('t', { ...environment, getPushManager: async () => failing }, createApi().api)).status)
+      .toBe('load-error')
+  })
+
+  test('waits for the first service worker registration, but not forever', async () => {
+    const registration = { pushManager: {} }
+    const later = {
+      getRegistration: async (): Promise<typeof registration | undefined> => undefined,
+      ready: Promise.resolve(registration),
+    }
+    expect(await readServiceWorkerRegistration(later, 50)).toBe(registration)
+    const never = {
+      getRegistration: async (): Promise<typeof registration | undefined> => undefined,
+      ready: new Promise<typeof registration>(() => undefined),
+    }
+    expect(await readServiceWorkerRegistration(never, 10)).toBeUndefined()
   })
 
   test('reports a dismissed or denied permission without subscribing', async () => {

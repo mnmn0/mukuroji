@@ -83,7 +83,45 @@ export function readPushEnvironment(): PushEnvironment {
   return {
     supported: true,
     notification: Notification,
-    getPushManager: async () => (await navigator.serviceWorker.getRegistration())?.pushManager,
+    getPushManager: async () => (await readServiceWorkerRegistration(navigator.serviceWorker))?.pushManager,
+  }
+}
+
+/** How long to wait for the app's first service worker registration before giving up. */
+export const serviceWorkerRegistrationWaitMilliseconds = 10_000
+
+/**
+ * Resolves the page's service worker registration, waiting for the first registration.
+ *
+ * The app registers its worker after the window `load` event, so on a first visit the settings
+ * can mount before any registration exists. Waiting for `ready` covers that; the bounded wait
+ * keeps pages without a worker, such as the development server, from loading forever.
+ *
+ * @param container - Service worker container of the page, or an equivalent.
+ * @param waitMilliseconds - Longest wait for a first registration.
+ * @returns The registration, or `undefined` when none appeared in time.
+ */
+export async function readServiceWorkerRegistration<Registration>(
+  container: {
+    /** Resolves the current registration, if any. */
+    getRegistration: () => Promise<Registration | undefined>
+    /** Settles once a registration is active. */
+    ready: Promise<Registration>
+  },
+  waitMilliseconds = serviceWorkerRegistrationWaitMilliseconds,
+): Promise<Registration | undefined> {
+  const registration = await container.getRegistration()
+  if (registration) return registration
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      container.ready,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), waitMilliseconds)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 

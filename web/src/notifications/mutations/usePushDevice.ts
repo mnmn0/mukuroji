@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PushConfiguration, PushSubscriptionInput, PushSubscriptionRemovalInput } from '@mukuroji/contracts'
+import { clearAuthSession } from '../../auth/session'
 import { NotificationsApiError } from '../api/errors'
 import {
   getPushConfiguration,
@@ -79,7 +80,13 @@ export async function loadPushDevice(
   const pushManager = await environment.getPushManager().catch(() => undefined)
   if (!pushManager) return { status: 'unsupported' }
   if (environment.notification?.permission === 'denied') return { status: 'blocked', vapidPublicKey }
-  const subscription = await pushManager.getSubscription().catch(() => null)
+  let subscription: Awaited<ReturnType<typeof pushManager.getSubscription>>
+  try {
+    subscription = await pushManager.getSubscription()
+  } catch {
+    // An unreadable push store is not the same as no subscription; let the person retry.
+    return { status: 'load-error', vapidPublicKey }
+  }
   const input = subscription ? readPushSubscriptionInput(subscription) : undefined
   if (
     !subscription ||
@@ -129,7 +136,8 @@ function readRefreshFailureStatus(error: unknown): Exclude<PushDeviceStatus, 'lo
  *
  * The permission dialog is requested before any await so it stays inside the user's click.
  * A subscription created here is cancelled again when the server rejects it, so the browser
- * never holds a subscription the server does not know.
+ * never holds a subscription the server does not know. An unusable existing subscription, made
+ * for an earlier key or missing its keys, is removed on the server and replaced.
  *
  * @param accessToken - Access token for the API.
  * @param vapidPublicKey - Current VAPID public key.
@@ -158,7 +166,13 @@ export async function enablePushDevice(
     const pushManager = await environment.getPushManager()
     if (!pushManager) return 'failed'
     let subscription = await pushManager.getSubscription()
-    if (subscription && !matchesApplicationServerKey(subscription, vapidPublicKey)) {
+    // A subscription for an earlier key, or one whose keys the browser no longer exposes, can
+    // never be registered; remove it on the server and in the browser, then create a new one.
+    if (
+      subscription &&
+      (!matchesApplicationServerKey(subscription, vapidPublicKey) || !readPushSubscriptionInput(subscription))
+    ) {
+      await api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
       await subscription.unsubscribe()
       subscription = null
     }
@@ -233,6 +247,18 @@ export async function disconnectPushDeviceOnSignOut(
   } catch {
     // Sign-out never waits on or fails because of push cleanup.
   }
+}
+
+/**
+ * Signs the member out on an explicit sign-out action. Every sign-out control uses this, so
+ * this device's push registration is always removed with the token being discarded, before
+ * the session is cleared. Expiry-driven session cleanup keeps calling `clearAuthSession`.
+ *
+ * @param accessToken - Access token of the session being signed out, if known.
+ */
+export function signOutWithPushCleanup(accessToken: string | undefined): void {
+  void disconnectPushDeviceOnSignOut(accessToken)
+  clearAuthSession()
 }
 
 /**

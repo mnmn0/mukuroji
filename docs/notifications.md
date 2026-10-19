@@ -97,17 +97,25 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 - 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
   共有端末で別の人の通知が届き続けることはありません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
-- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。購読は 180 日で TTL 失効し、
-  購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
+  再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
+- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。新しいデバイスの登録は member ごとの登録 version
+  （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
+  購読は 180 日で TTL 失効し、所有者の行はその 30 日後に失効します。DynamoDB は期限切れの行を個別に遅れて削除するため、
+  所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
+  その member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
+- tenant の export・削除・検証の対象に含めます（member 行・所有者行・登録 version はすべて `workspaceId` を持ちます）。
 - `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合だけ endpoint の所有者も解放します。
-  明示的なサインアウトでも、破棄前の token でこの削除を送ってから browser の購読を解除します。期限切れによるサインアウトでは解除しません。
-- 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読は解除して作り直し、
-  server が登録を拒否した場合はその場で作った購読を解除します。停止では server の削除が失敗しても browser の購読を解除し、
+  明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、破棄前の token でこの削除を送ってから browser の購読を解除します。
+  期限切れによるサインアウトでは解除しません。
+- 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
+  server からも削除してから解除し、作り直します。server が登録を拒否した場合はその場で作った購読を解除します。
+  push の購読状態を読めない場合は「未登録」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
+  最大 10 秒待ってから対応状況を判定します。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
   失効した endpoint は配信 worker が push service の応答から削除します。
 
 Service worker は `push` を受けると payload（`PushNotificationPayload`: `title`、`body`、`path`、`tag`）を通知として表示します。
 payload がない・壊れている場合も browser の要件どおり汎用の通知を表示します。`path` は app の deep link と同じ同一 origin path 判定を通ったものだけを使い、
-それ以外はインボックスを開きます。通知の click では、focus 中の app window を優先して再利用し、遷移できない場合は新しい window を開きます。
+それ以外はインボックスを開きます。通知の click では、focus 中の app window を優先して再利用し、遷移できない場合（`navigate` が失敗または `null` を返した場合）は新しい window を開きます。
 
 ## Slack 配信
 

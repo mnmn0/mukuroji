@@ -1,21 +1,11 @@
 import { Hono, type Context } from 'hono'
 import type { PushConfiguration } from '@mukuroji/contracts'
-import type { PushSubscriptionStore } from '../../adapter-out/dynamodb/push-subscription-store'
 import {
-  readPushSubscriptionInput,
-  readPushSubscriptionRemoval,
-} from '../../domain/push-subscription'
-import { NotificationError } from '../../notifications'
-
-/** Authenticated principal fields the push subscription routes use. */
-export type PushSubscriptionPrincipal = {
-  /** Canonical Workspace ID. */
-  directoryId: string
-  /** Canonical Workspace member key. */
-  userKey: string
-  /** Kind of principal; only people may register devices. */
-  principalKind?: string
-}
+  registerPushDevice,
+  removePushDevice,
+  type PushSubscriptionPrincipal,
+  type PushSubscriptionStore,
+} from '../../application/push-subscriptions'
 
 /** Dependencies of the push subscription routes. */
 export type PushSubscriptionRouterDependencies<Principal extends PushSubscriptionPrincipal> = {
@@ -34,10 +24,8 @@ export type PushSubscriptionRouterDependencies<Principal extends PushSubscriptio
 }
 
 /**
- * Creates the routes that let a member register this device for Web Push.
- *
- * Subscriptions are always stored for the authenticated member; the request never names a
- * member or Workspace.
+ * Creates the routes that let a member register this device for Web Push. The routes only
+ * authenticate and parse the request; the use cases decide who may register and what is stored.
  *
  * @param dependencies - Authentication, store, configuration, and HTTP helpers.
  * @returns Hono router with the push routes.
@@ -62,10 +50,14 @@ export function createPushSubscriptionRouter<Principal extends PushSubscriptionP
     const accessToken = readBearerAccessToken(context)
     if (!accessToken) return context.json({ message: 'Bearer token is required.' }, 401)
     try {
-      const principal = requirePerson(await dependencies.authenticate(accessToken, context))
-      requireEnabled(dependencies.getConfiguration())
-      const subscription = readPushSubscriptionInput(await dependencies.readJson(context.req))
-      await dependencies.getStore().register(principal.directoryId, principal.userKey, subscription, dependencies.now())
+      const principal = await dependencies.authenticate(accessToken, context)
+      await registerPushDevice(
+        dependencies.getStore(),
+        dependencies.getConfiguration(),
+        principal,
+        await dependencies.readJson(context.req),
+        dependencies.now(),
+      )
       return context.body(null, 204)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -76,9 +68,8 @@ export function createPushSubscriptionRouter<Principal extends PushSubscriptionP
     const accessToken = readBearerAccessToken(context)
     if (!accessToken) return context.json({ message: 'Bearer token is required.' }, 401)
     try {
-      const principal = requirePerson(await dependencies.authenticate(accessToken, context))
-      const endpoint = readPushSubscriptionRemoval(await dependencies.readJson(context.req))
-      await dependencies.getStore().remove(principal.directoryId, principal.userKey, endpoint)
+      const principal = await dependencies.authenticate(accessToken, context)
+      await removePushDevice(dependencies.getStore(), principal, await dependencies.readJson(context.req))
       return context.body(null, 204)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -86,30 +77,6 @@ export function createPushSubscriptionRouter<Principal extends PushSubscriptionP
   })
 
   return router
-}
-
-/**
- * Rejects service accounts and other non-person principals.
- *
- * @param principal - Authenticated principal.
- * @returns The principal when it is a person.
- */
-function requirePerson<Principal extends PushSubscriptionPrincipal>(principal: Principal): Principal {
-  if (principal.principalKind !== undefined && principal.principalKind !== 'member') {
-    throw new NotificationError(403, 'PushSubscriptionForbidden', 'Only people can register devices for push notifications.')
-  }
-  return principal
-}
-
-/**
- * Rejects registration while the deployment has no VAPID key.
- *
- * @param configuration - Push configuration.
- */
-function requireEnabled(configuration: PushConfiguration): void {
-  if (!configuration.enabled) {
-    throw new NotificationError(409, 'PushNotificationsDisabled', 'Push notifications are not enabled.')
-  }
 }
 
 /**
