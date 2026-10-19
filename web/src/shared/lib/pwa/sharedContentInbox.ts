@@ -72,6 +72,8 @@ export function isSharedContentId(id: string): boolean {
  * @param accountKey - Workspace and member of the signed-in account.
  * @param storage - Cache Storage; defaults to the page's.
  * @param now - Current time in epoch milliseconds.
+ * @param runExclusive - Runs the read and account binding under a cross-tab lock; defaults to the
+ * shared-content Web Lock.
  * @returns The shared fields and receive time, or `undefined` when the ID is invalid, nothing is
  * stored, it expired, it was cancelled, or it belongs to another account.
  */
