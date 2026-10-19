@@ -45,7 +45,20 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
   platform では、不要な通知の許可を求めないよう button を表示しません。
   この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
-- share target: manifest の `share_target` は `POST /share`（`multipart/form-data`）に `title` / `text` / `url` を送ります。
+- share target: `POST /share`（`multipart/form-data`）で `title` / `text` / `url` を受け取ります。
+  **段階的に公開します**: 既存の install では更新された worker が利用者の承認まで待機するため、manifest が先に更新されると
+  旧 worker が `POST /share` を素通しして共有内容が失われます。この release では worker の受け口だけを入れ、manifest には
+  `share_target` を載せません。この worker が配布・有効化された後の release で、manifest に次を追加します。
+
+  ```json
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+  ```
+
   service worker が request を受け取り（`requestStrategy.ts` の `share-target`、同一 origin・query なしの navigation だけ）、
   text field だけを読んで端末内の専用 cache（`mukuroji.share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
   共有内容そのものは URL、browser history、frontend / CDN の access log、login の `returnTo` に載りません。
@@ -53,7 +66,8 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   未読のまま 24 時間を過ぎた内容は worker の activate 時と次の共有を受け取った時に削除し、フォームも期限切れの内容を読まずに削除します
   （削除に失敗した内容が後から読めることはありません）。送信・キャンセル後はフォームが削除します。
   期限切れの session の後始末（`clearAuthSession`）では削除しないため、sign-in し直した後も同じ共有を確認できます。
-  cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
+  cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。worker が cache に保存できなかった場合は
+  browser の network error にせず、`/share?status=not-saved` へ移動して、元のアプリからもう一度共有するよう案内します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
   `/share` は認証済み Workspace の route で、未 sign-in の場合は sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
   確認フォーム（`web/src/features/share-capture/`）は共有内容をすべて plain text として扱い、tab / 改行以外の制御文字を除いて
   API の上限（タイトル 500 文字、本文 8,000 文字）に切り詰めます。タイトルは共有されたタイトル、なければ本文の最初の行、

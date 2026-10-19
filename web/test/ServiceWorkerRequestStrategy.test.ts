@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSharedContentFailurePath,
   createSharedContentRedirectPath,
   isCacheableAssetResponse,
   isSkipWaitingMessage,
@@ -11,6 +12,7 @@ import {
   sharedContentCacheName,
   sharedContentKeyPrefix,
   sharedContentMaxAgeMilliseconds,
+  sharedContentNotSavedStatus,
   skipWaitingMessageType,
   type RequestDescriptor,
 } from '../src/service-worker/model/requestStrategy'
@@ -148,6 +150,10 @@ describe('share target', () => {
     expect(createSharedContentRedirectPath('a-b')).toBe('/share?shared=a-b')
   })
 
+  test('sends a share the worker could not keep to an explanation', () => {
+    expect(createSharedContentFailurePath()).toBe('/share?status=not-saved')
+  })
+
   test('expires unread content after the retention window', () => {
     const now = 10 * sharedContentMaxAgeMilliseconds
     expect(selectExpiredSharedContent([
@@ -162,6 +168,7 @@ describe('share target', () => {
     expect(sharedContentInbox.sharedContentCacheName).toBe(sharedContentCacheName)
     expect(sharedContentInbox.sharedContentKeyPrefix).toBe(sharedContentKeyPrefix)
     expect(sharedContentInbox.sharedContentMaxAgeMilliseconds).toBe(sharedContentMaxAgeMilliseconds)
+    expect(sharedContentInbox.sharedContentNotSavedStatus).toBe(sharedContentNotSavedStatus)
     // Earlier workers delete every `mukuroji-` cache on activation; a rollback must keep shares.
     expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [])).toEqual([])
   })

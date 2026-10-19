@@ -5,6 +5,7 @@ import { createTeamTriagePath } from '../../shared/routing/paths'
 import {
   discardStoredSharedContent,
   readStoredSharedContent,
+  sharedContentNotSavedStatus,
 } from '../../shared/lib/pwa/sharedContentInbox'
 import {
   readSharedContent,
@@ -47,7 +48,40 @@ export function SharePage() {
   const [searchParams] = useSearchParams()
   const sharedId = searchParams.get('shared') ?? ''
 
+  // The worker could not keep the share, so there is nothing to confirm.
+  if (searchParams.get('status') === sharedContentNotSavedStatus) return <ShareNotSaved />
+
   return <ShareCapture key={sharedId} sharedId={sharedId} />
+}
+
+/**
+ * Explains that the service worker could not keep a share and offers a way out.
+ *
+ * @returns The storage failure message inside the Workspace shell.
+ */
+function ShareNotSaved() {
+  const workspace = useWorkspaceRouteContext()
+  const navigate = useNavigate()
+  const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+
+  return (
+    <WorkspaceRouteContent isLoading={workspace.isLoading}>
+      <div className="mx-auto grid w-full max-w-2xl gap-5 px-[clamp(16px,3vw,34px)] py-5">
+        <section aria-label={t('triage.share.title')} className="workbench-panel grid gap-4 p-5" data-testid="share-capture">
+          <p className="text-sm text-[var(--workbench-text)]" role="alert">{t('triage.share.notSaved')}</p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <button
+              className="workbench-button-secondary min-h-11 px-4"
+              onClick={() => { void navigate('/home', { replace: true }) }}
+              type="button"
+            >
+              {t('triage.share.cancel')}
+            </button>
+          </div>
+        </section>
+      </div>
+    </WorkspaceRouteContent>
+  )
 }
 
 /** Props of one share confirmation. */
@@ -155,9 +189,11 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
             onCancel={leave}
             onSubmit={(teamId, draft) => {
               void handoff.submit(teamId, draft).then((result) => {
-                // Leaving through the shell mid-send must not be undone by a late success.
-                if (!result || !mountedRef.current) return
+                if (!result) return
+                // The handoff forgot its replay state, so the share must not be sendable again.
                 void discardStoredSharedContent(sharedId)
+                // Leaving through the shell mid-send must not be undone by a late success.
+                if (!mountedRef.current) return
                 void navigate(createTeamTriagePath(result.teamId, result.receipt.entry.id), { replace: true })
               })
             }}

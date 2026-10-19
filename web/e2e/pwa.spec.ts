@@ -85,13 +85,9 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   expect(manifest?.startUrl).toBe('/home')
   expect(manifest?.scope).toBe('/')
   expect(manifest?.display).toBe('standalone')
-  // The worker keeps shared content out of the URL and opens the confirmation form.
-  expect(manifest?.shareTarget).toEqual({
-    action: '/share',
-    method: 'POST',
-    enctype: 'multipart/form-data',
-    params: { title: 'title', text: 'text', url: 'url' },
-  })
+  // The share target is advertised only after a release whose worker handles `POST /share`
+  // has activated everywhere; see "share target" in docs/pwa.md.
+  expect(manifest?.shareTarget).toBeUndefined()
   expect(manifest?.icons.map((icon) => icon.sizes)).toEqual(expect.arrayContaining(['192x192', '512x512']))
   expect(manifest?.icons.some((icon) => icon.purpose === 'maskable')).toBe(true)
 

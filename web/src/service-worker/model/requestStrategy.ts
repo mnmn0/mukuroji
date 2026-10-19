@@ -103,6 +103,18 @@ export function createSharedContentRedirectPath(id: string): string {
   return `${shareTargetPath}?${new URLSearchParams({ shared: id }).toString()}`
 }
 
+/** Query value the confirmation form shows when the worker could not keep a share. */
+export const sharedContentNotSavedStatus = 'not-saved'
+
+/**
+ * Builds the confirmation form URL for a share the worker could not keep.
+ *
+ * @returns Same-origin path that explains the failure.
+ */
+export function createSharedContentFailurePath(): string {
+  return `${shareTargetPath}?${new URLSearchParams({ status: sharedContentNotSavedStatus }).toString()}`
+}
+
 /**
  * Selects stored shared content older than the retention window.
  *
