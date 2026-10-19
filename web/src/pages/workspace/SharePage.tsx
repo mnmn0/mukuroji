@@ -112,14 +112,21 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const [verifyFailed, setVerifyFailed] = useState(false)
   const [receivedAt, setReceivedAt] = useState<number>()
   const [loadAttempt, setLoadAttempt] = useState(0)
+  const [verifying, setVerifying] = useState(false)
   const mountedRef = useRef(true)
+  // Set once the person leaves, so a send waiting on its liveness check never starts.
+  const leftRef = useRef(false)
+  // The share is read only once the signed-in account is known, so it is bound to that account.
+  const accountKey = workspace.workspaceId && workspace.userKey
+    ? `${workspace.workspaceId}/${workspace.userKey}`
+    : undefined
   const access = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
   const handoff = useShareHandoff({
     accessToken: workspace.accessToken,
     guardEnterpriseSession: workspace.guardEnterpriseSession,
     requesterDisplayName: workspace.userLabel,
     handoffKey: sharedId,
-    accountKey: `${workspace.workspaceId ?? ''}/${workspace.userKey ?? ''}`,
+    accountKey: accountKey ?? '',
     receivedAt,
   })
   const teams = useMemo(
@@ -142,13 +149,14 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   }, [])
 
   useEffect(() => {
+    if (!accountKey) return undefined
     let active = true
-    readStoredSharedContent(sharedId).then(
+    readStoredSharedContent(sharedId, accountKey).then(
       (fields) => {
         if (!active) return
         setLoadFailed(false)
-        // A share ID whose content is gone (expired, already sent, or never stored) must not
-        // become a blank form that looks like the share.
+        // A share ID whose content is gone (expired, already sent, never stored, or bound to
+        // another account) must not become a blank form that looks like the share.
         setMissing(sharedId !== '' && fields === undefined)
         setReceivedAt(fields?.receivedAt)
         setContent(readSharedContent(fields))
@@ -159,12 +167,13 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
       },
     )
     return () => { active = false }
-  }, [loadAttempt, sharedId])
+  }, [accountKey, loadAttempt, sharedId])
 
   /** Leaves the form, ending the handoff in every tab and deleting the stored attempt. */
   function leave() {
+    leftRef.current = true
     handoff.abandon()
-    void cancelStoredSharedContent(sharedId)
+    if (accountKey) void cancelStoredSharedContent(sharedId, accountKey)
     void navigate('/home', { replace: true })
   }
 
@@ -212,12 +221,17 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
                 ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])
                 : undefined}
             initialContent={content}
-            isSubmitting={handoff.isSubmitting}
+            isSubmitting={handoff.isSubmitting || verifying}
             lockedSend={handoff.locked}
             onCancel={leave}
             onSubmit={(teamId, draft) => {
+              if (!accountKey || verifying) return
               setVerifyFailed(false)
-              void readSharedContentSendState(sharedId).then((state) => {
+              setVerifying(true)
+              void readSharedContentSendState(sharedId, accountKey).then((state) => {
+                setVerifying(false)
+                // Leaving while the check ran, through Cancel or the shell, drops the pending send.
+                if (leftRef.current || !mountedRef.current) return undefined
                 if (state === 'live') return handoff.submit(teamId, draft)
                 if (state === 'unverified') {
                   // Without proof the share is still live, nothing is sent; the person can retry.

@@ -64,14 +64,20 @@ export function isSharedContentId(id: string): boolean {
  * Content past the retention window is deleted and treated as missing, so a share whose
  * cleanup failed earlier never comes back. A share cancelled in any tab also reads as missing.
  *
+ * The worker stores a share before anyone signs in, so the first signed-in read binds it to
+ * that account, and any other account reads it as missing. A share received while one account
+ * was signed in is never shown to, or sent by, the next account on the device.
+ *
  * @param id - Opaque ID from the form URL.
+ * @param accountKey - Workspace and member of the signed-in account.
  * @param storage - Cache Storage; defaults to the page's.
  * @param now - Current time in epoch milliseconds.
  * @returns The shared fields and receive time, or `undefined` when the ID is invalid, nothing is
- * stored, it expired, or it was cancelled.
+ * stored, it expired, it was cancelled, or it belongs to another account.
  */
 export async function readStoredSharedContent(
   id: string,
+  accountKey: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
   now: number = Date.now(),
 ): Promise<StoredSharedContent | undefined> {
@@ -92,7 +98,22 @@ export async function readStoredSharedContent(
     const fieldValue: unknown = Reflect.get(value, name)
     return typeof fieldValue === 'string' ? fieldValue : ''
   }
-  return { title: field('title'), text: field('text'), url: field('url'), receivedAt }
+  const content = { title: field('title'), text: field('text'), url: field('url'), receivedAt }
+  const boundAccount: unknown = Reflect.get(value, 'accountKey')
+  if (boundAccount !== undefined) return boundAccount === accountKey ? content : undefined
+  // A failed bind throws, so the share is never shown without being bound first.
+  await cache.put(key, createJsonResponse({ ...content, accountKey }))
+  return content
+}
+
+/**
+ * Creates a JSON cache entry.
+ *
+ * @param value - Value to store.
+ * @returns The response to cache.
+ */
+function createJsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
 }
 
 /**
@@ -121,23 +142,29 @@ export async function discardStoredSharedContent(
  * Other tabs that already loaded the share check the marker before sending, so a share the
  * person cancelled is never sent afterwards. The marker expires like any stored share.
  *
+ * Only the account a share is bound to cancels it; another account leaving the form never
+ * touches it.
+ *
  * @param id - Opaque ID from the form URL.
+ * @param accountKey - Workspace and member of the signed-in account.
  * @param storage - Cache Storage; defaults to the page's.
  * @param now - Current time in epoch milliseconds.
  * @returns A promise that settles once the marker is stored; failures fall back to deleting.
  */
 export async function cancelStoredSharedContent(
   id: string,
+  accountKey: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
   now: number = Date.now(),
 ): Promise<void> {
   if (!storage || !isSharedContentId(id)) return
   try {
     const cache = await storage.open(sharedContentCacheName)
-    await cache.put(
-      `${sharedContentKeyPrefix}${id}`,
-      new Response(JSON.stringify({ cancelled: true, receivedAt: now }), { headers: { 'Content-Type': 'application/json' } }),
-    )
+    const key = `${sharedContentKeyPrefix}${id}`
+    const stored: unknown = await (await cache.match(key))?.json().catch(() => undefined)
+    const boundAccount = typeof stored === 'object' && stored !== null ? Reflect.get(stored, 'accountKey') : undefined
+    if (boundAccount !== undefined && boundAccount !== accountKey) return
+    await cache.put(key, createJsonResponse({ cancelled: true, receivedAt: now }))
   } catch {
     await discardStoredSharedContent(id, storage)
   }
@@ -155,18 +182,20 @@ export type SharedContentSendState = 'live' | 'gone' | 'unverified'
  * expired in any tab is never sent, and a storage failure never counts as permission to send.
  *
  * @param id - Opaque ID from the form URL; empty for a form opened without a share.
+ * @param accountKey - Workspace and member of the signed-in account; another account's share is `gone`.
  * @param storage - Cache Storage; defaults to the page's.
  * @param now - Current time in epoch milliseconds.
  * @returns The send state.
  */
 export async function readSharedContentSendState(
   id: string,
+  accountKey: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
   now: number = Date.now(),
 ): Promise<SharedContentSendState> {
   if (id === '') return 'live'
   try {
-    return await readStoredSharedContent(id, storage, now) ? 'live' : 'gone'
+    return await readStoredSharedContent(id, accountKey, storage, now) ? 'live' : 'gone'
   } catch {
     return 'unverified'
   }

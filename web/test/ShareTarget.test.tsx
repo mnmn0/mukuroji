@@ -208,13 +208,14 @@ function createCacheStorage(entries: Record<string, string>) {
 }
 
 const sharedId = '0f8fad5b-d9cb-469f-a165-70867728950e'
+const account = 'workspace-1/ada'
 
 describe('shared content inbox', () => {
   test('reads only the text fields the worker stored', async () => {
     const { storage, opened } = createCacheStorage({
       [`${sharedContentKeyPrefix}${sharedId}`]: JSON.stringify({ title: 'Bug', text: 7, url: 'https://example.com', receivedAt: 1 }),
     })
-    expect(await readStoredSharedContent(sharedId, storage, 1_000)).toEqual({ title: 'Bug', text: '', url: 'https://example.com', receivedAt: 1 })
+    expect(await readStoredSharedContent(sharedId, account, storage, 1_000)).toEqual({ title: 'Bug', text: '', url: 'https://example.com', receivedAt: 1 })
     expect(opened).toEqual([sharedContentCacheName])
   })
 
@@ -223,8 +224,8 @@ describe('shared content inbox', () => {
     const { storage, store } = createCacheStorage({
       [key]: JSON.stringify({ title: 'Old', text: '', url: '', receivedAt: 0 }),
     })
-    expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds)).toEqual({ title: 'Old', text: '', url: '', receivedAt: 0 })
-    expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds + 1)).toBeUndefined()
+    expect(await readStoredSharedContent(sharedId, account, storage, sharedContentMaxAgeMilliseconds)).toEqual({ title: 'Old', text: '', url: '', receivedAt: 0 })
+    expect(await readStoredSharedContent(sharedId, account, storage, sharedContentMaxAgeMilliseconds + 1)).toBeUndefined()
     expect(store.has(key)).toBe(false)
   })
 
@@ -232,16 +233,16 @@ describe('shared content inbox', () => {
     const { storage } = createCacheStorage({
       [`${sharedContentKeyPrefix}${sharedId}`]: JSON.stringify({ title: 'Bug', text: '', url: '' }),
     })
-    expect(await readStoredSharedContent(sharedId, storage, 1_000)).toBeUndefined()
+    expect(await readStoredSharedContent(sharedId, account, storage, 1_000)).toBeUndefined()
   })
 
   test('ignores IDs the worker could not have issued and missing content', async () => {
     const { storage, opened } = createCacheStorage({ '/__mukuroji/share/../secret': '{}' })
-    expect(await readStoredSharedContent('../secret', storage)).toBeUndefined()
-    expect(await readStoredSharedContent('', storage)).toBeUndefined()
+    expect(await readStoredSharedContent('../secret', account, storage)).toBeUndefined()
+    expect(await readStoredSharedContent('', account, storage)).toBeUndefined()
     expect(opened).toEqual([])
-    expect(await readStoredSharedContent(sharedId, storage)).toBeUndefined()
-    expect(await readStoredSharedContent(sharedId, undefined)).toBeUndefined()
+    expect(await readStoredSharedContent(sharedId, account, storage)).toBeUndefined()
+    expect(await readStoredSharedContent(sharedId, account, undefined)).toBeUndefined()
   })
 
   test('cancels a share for every tab with a marker that reads as missing', async () => {
@@ -249,11 +250,11 @@ describe('shared content inbox', () => {
     const { storage, store } = createCacheStorage({
       [key]: JSON.stringify({ title: 'Bug', text: '', url: '', receivedAt: 1 }),
     })
-    expect(await readSharedContentSendState(sharedId, storage, 10)).toBe('live')
-    await cancelStoredSharedContent(sharedId, storage, 5)
+    expect(await readSharedContentSendState(sharedId, account, storage, 10)).toBe('live')
+    await cancelStoredSharedContent(sharedId, account, storage, 5)
     expect(JSON.parse(store.get(key) ?? '{}')).toEqual({ cancelled: true, receivedAt: 5 })
-    expect(await readSharedContentSendState(sharedId, storage, 10)).toBe('gone')
-    expect(await readStoredSharedContent(sharedId, storage, 10)).toBeUndefined()
+    expect(await readSharedContentSendState(sharedId, account, storage, 10)).toBe('gone')
+    expect(await readStoredSharedContent(sharedId, account, storage, 10)).toBeUndefined()
   })
 
   test('sends only a live share and fails closed when storage cannot be read', async () => {
@@ -261,12 +262,26 @@ describe('shared content inbox', () => {
     const { storage, store } = createCacheStorage({
       [key]: JSON.stringify({ title: 'Bug', text: '', url: '', receivedAt: 0 }),
     })
-    expect(await readSharedContentSendState(sharedId, storage, sharedContentMaxAgeMilliseconds + 1)).toBe('gone')
+    expect(await readSharedContentSendState(sharedId, account, storage, sharedContentMaxAgeMilliseconds + 1)).toBe('gone')
     store.delete(key)
-    expect(await readSharedContentSendState(sharedId, storage, 1)).toBe('gone')
-    expect(await readSharedContentSendState('', storage)).toBe('live')
+    expect(await readSharedContentSendState(sharedId, account, storage, 1)).toBe('gone')
+    expect(await readSharedContentSendState('', account, storage)).toBe('live')
     const broken: SharedContentCacheStorage = { open: async () => { throw new Error('blocked') } }
-    expect(await readSharedContentSendState(sharedId, broken)).toBe('unverified')
+    expect(await readSharedContentSendState(sharedId, account, broken)).toBe('unverified')
+  })
+
+  test('binds a share to the first signed-in account and hides it from others', async () => {
+    const key = `${sharedContentKeyPrefix}${sharedId}`
+    const { storage, store } = createCacheStorage({
+      [key]: JSON.stringify({ title: 'Secret', text: '', url: '', receivedAt: 1 }),
+    })
+    expect(await readStoredSharedContent(sharedId, account, storage, 10)).toMatchObject({ title: 'Secret' })
+    expect(JSON.parse(store.get(key) ?? '{}')).toMatchObject({ accountKey: account })
+    expect(await readStoredSharedContent(sharedId, 'workspace-2/bob', storage, 10)).toBeUndefined()
+    expect(await readSharedContentSendState(sharedId, 'workspace-2/bob', storage, 10)).toBe('gone')
+    // Another account leaving the form never cancels the share.
+    await cancelStoredSharedContent(sharedId, 'workspace-2/bob', storage, 20)
+    expect(await readStoredSharedContent(sharedId, account, storage, 10)).toMatchObject({ title: 'Secret' })
   })
 
   test('deletes a share after use', async () => {
