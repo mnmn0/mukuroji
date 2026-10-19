@@ -24,6 +24,7 @@ const failureMessageKeys: Record<ShareHandoffFailure, MessageKey> = {
   forbidden: 'triage.share.forbidden',
   rejected: 'triage.share.error',
   uncertain: 'triage.share.uncertain',
+  unsaved: 'triage.share.unsaved',
 }
 
 /** Message shown for each failed retry of a send that may already be saved. */
@@ -31,6 +32,7 @@ const lockedFailureMessageKeys: Record<ShareHandoffFailure, MessageKey> = {
   forbidden: 'triage.share.lockedForbidden',
   rejected: 'triage.share.uncertain',
   uncertain: 'triage.share.uncertain',
+  unsaved: 'triage.share.uncertain',
 }
 
 /**
@@ -83,6 +85,11 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
     [workspace.teams],
   )
   const isGuest = access.data?.currentMember.role === 'guest'
+  // The form stays unavailable until both the content and the person's role are known.
+  const accessFailed = access.error !== undefined && !access.data
+  const loadErrorKey: MessageKey | undefined = loadFailed && !content
+    ? 'triage.share.loadError'
+    : accessFailed ? 'triage.share.accessError' : undefined
 
   useEffect(() => {
     mountedRef.current = true
@@ -117,16 +124,19 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
       sessionErrors={access.error ? [access.error] : undefined}
     >
       <div className="mx-auto grid w-full max-w-2xl gap-5 px-[clamp(16px,3vw,34px)] py-5">
-        {loadFailed && !content ? (
+        {loadErrorKey ? (
           <section aria-label={t('triage.share.title')} className="workbench-panel grid gap-4 p-5" data-testid="share-capture">
-            <p className="text-sm text-[var(--workbench-text)]" role="alert">{t('triage.share.loadError')}</p>
+            <p className="text-sm text-[var(--workbench-text)]" role="alert">{t(loadErrorKey)}</p>
             <div className="flex flex-wrap justify-end gap-2">
               <button className="workbench-button-secondary min-h-11 px-4" onClick={leave} type="button">
                 {t('triage.share.cancel')}
               </button>
               <button
                 className="workbench-button-primary min-h-11 px-4"
-                onClick={() => { setLoadAttempt((attempt) => attempt + 1) }}
+                onClick={() => {
+                  if (loadFailed) setLoadAttempt((attempt) => attempt + 1)
+                  if (accessFailed) void access.mutate()
+                }}
                 type="button"
               >
                 {t('triage.share.reload')}
@@ -134,7 +144,7 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
             </div>
           </section>
         ) : null}
-        {content ? (
+        {content && !loadErrorKey ? (
           <ShareCaptureForm
             errorMessage={handoff.failure
               ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])

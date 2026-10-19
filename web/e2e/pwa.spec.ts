@@ -201,7 +201,7 @@ test('共有された内容はURLに載せずworkerが端末内に保持し、�
   expect(page.url()).not.toContain('Secret')
 
   const stored = await page.evaluate(async (id) => {
-    const cache = await caches.open('mukuroji-share-inbox-v1')
+    const cache = await caches.open('mukuroji.share-inbox-v1')
     const response = await cache.match(`/__mukuroji/share/${id}`)
     return response ? await response.json() : null
   }, new URLSearchParams(returnTo.split('?')[1]).get('shared'))

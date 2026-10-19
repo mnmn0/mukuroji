@@ -18,8 +18,9 @@ import {
  * - `forbidden`: the person may not send to that Team.
  * - `rejected`: the server refused the content.
  * - `uncertain`: the request may have been saved; only the same request may be sent again.
+ * - `unsaved`: the replay state could not be kept on the device, so nothing was sent.
  */
-export type ShareHandoffFailure = 'forbidden' | 'rejected' | 'uncertain'
+export type ShareHandoffFailure = 'forbidden' | 'rejected' | 'uncertain' | 'unsaved'
 
 /** A send that was attempted and must be retried unchanged until it succeeds. */
 export type LockedShareHandoff = {
@@ -217,10 +218,10 @@ export function useShareHandoff({
       input: createShareHandoffInput(draft, createShareHandoffIdentity(), requesterDisplayName),
       context: createMutationRequestContext(),
     }
-    try {
-      storage?.setItem(storageKey, JSON.stringify(attempt))
-    } catch {
-      // Without storage the lock still holds for this page; only a reload can lose it.
+    if (!wasLocked && !save(attempt)) {
+      // Without a stored replay state, a reload after a lost response could send a duplicate.
+      setFailure('unsaved')
+      return undefined
     }
     inFlightRef.current = true
     setIsSubmitting(true)
@@ -244,6 +245,22 @@ export function useShareHandoff({
     } finally {
       inFlightRef.current = false
       setIsSubmitting(false)
+    }
+  }
+
+  /**
+   * Stores an attempted send before it is sent.
+   *
+   * @param attempt - Send to keep for replay.
+   * @returns Whether it was stored.
+   */
+  function save(attempt: LockedShareHandoff): boolean {
+    try {
+      if (!storage) return false
+      storage.setItem(storageKey, JSON.stringify(attempt))
+      return true
+    } catch {
+      return false
     }
   }
 

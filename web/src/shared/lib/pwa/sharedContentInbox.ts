@@ -3,10 +3,13 @@
  * `sharedContentCacheName`, because app code must not import the worker; a unit test keeps the
  * two equal.
  */
-export const sharedContentCacheName = 'mukuroji-share-inbox-v1'
+export const sharedContentCacheName = 'mukuroji.share-inbox-v1'
 
 /** Path prefix of the cache keys for stored shared content; repeats the worker's value. */
 export const sharedContentKeyPrefix = '/__mukuroji/share/'
+
+/** How long shared content stays readable; repeats the worker's retention window. */
+export const sharedContentMaxAgeMilliseconds = 24 * 60 * 60 * 1000
 
 /** Text fields another app shared. */
 export type StoredSharedFields = {
@@ -49,20 +52,31 @@ export function isSharedContentId(id: string): boolean {
 /**
  * Reads shared content the service worker stored for the confirmation form.
  *
+ * Content past the retention window is deleted and treated as missing, so a share whose
+ * cleanup failed earlier never comes back.
+ *
  * @param id - Opaque ID from the form URL.
  * @param storage - Cache Storage; defaults to the page's.
- * @returns The shared fields, or `undefined` when the ID is invalid or nothing is stored.
+ * @param now - Current time in epoch milliseconds.
+ * @returns The shared fields, or `undefined` when the ID is invalid, nothing is stored, or it expired.
  */
 export async function readStoredSharedContent(
   id: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
+  now: number = Date.now(),
 ): Promise<StoredSharedFields | undefined> {
   if (!storage || !isSharedContentId(id)) return undefined
   const cache = await storage.open(sharedContentCacheName)
-  const response = await cache.match(`${sharedContentKeyPrefix}${id}`)
+  const key = `${sharedContentKeyPrefix}${id}`
+  const response = await cache.match(key)
   if (!response) return undefined
   const value: unknown = await response.json().catch(() => undefined)
   if (typeof value !== 'object' || value === null) return undefined
+  const receivedAt: unknown = Reflect.get(value, 'receivedAt')
+  if (typeof receivedAt !== 'number' || now - receivedAt > sharedContentMaxAgeMilliseconds) {
+    await cache.delete(key).catch(() => false)
+    return undefined
+  }
   const field = (name: string) => {
     const fieldValue: unknown = Reflect.get(value, name)
     return typeof fieldValue === 'string' ? fieldValue : ''

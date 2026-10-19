@@ -47,19 +47,23 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
 - share target: manifest の `share_target` は `POST /share`（`multipart/form-data`）に `title` / `text` / `url` を送ります。
   service worker が request を受け取り（`requestStrategy.ts` の `share-target`、同一 origin・query なしの navigation だけ）、
-  text field だけを読んで端末内の専用 cache（`mukuroji-share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
+  text field だけを読んで端末内の専用 cache（`mukuroji.share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
   共有内容そのものは URL、browser history、frontend / CDN の access log、login の `returnTo` に載りません。
-  未読のまま 24 時間を過ぎた内容は次の共有を受け取った時に worker が削除し、送信・キャンセル後はフォームが削除します。
+  cache 名は旧 worker が activate 時に削除する `mukuroji-` prefix を避けているため、rollback しても未送信の共有は残ります。
+  未読のまま 24 時間を過ぎた内容は worker の activate 時と次の共有を受け取った時に削除し、フォームも期限切れの内容を読まずに削除します
+  （削除に失敗した内容が後から読めることはありません）。送信・キャンセル後はフォームが削除します。
   期限切れの session の後始末（`clearAuthSession`）では削除しないため、sign-in し直した後も同じ共有を確認できます。
   cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
   `/share` は認証済み Workspace の route で、未 sign-in の場合は sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
   確認フォーム（`web/src/features/share-capture/`）は共有内容をすべて plain text として扱い、tab / 改行以外の制御文字を除いて
   API の上限（タイトル 500 文字、本文 8,000 文字）に切り詰めます。タイトルは共有されたタイトル、なければ本文の最初の行、
   なければ URL を初期値にし、URL は本文に同じ URL が単語として含まれない場合だけ本文の末尾に加えます（本文の上限では URL ではなく本文側を切り詰めます）。
-  送り先のチームを選んで送信するまでチームには共有されません。ゲストアカウントには送れない旨とキャンセルだけを表示します。
+  送り先のチームを選んで送信するまでチームには共有されません。ゲストアカウントには送れない旨とキャンセルだけを表示し、
+  役割を確認できなかった場合はフォームを出さずに再読み込みを表示します。
   送信は `POST /api/teams/{teamId}/triage-entries/manual-handoffs` の manual handoff で、担当・SLA・保持期限は server がチーム設定から決めます。
   送信前に request 本体（`sourceId` = `share:<UUID>` を含む）と `Idempotency-Key` を tab の sessionStorage に保存し、
   成功するまでは再試行・再読み込み・app 更新の後も同じ request だけを読み取り専用で再送できます。Entry は 1 件だけ作られます。
+  sessionStorage に保存できない場合は、応答が失われた後の再読み込みで重複を作らないよう、送信せずに理由を表示します。
   初回の送信が権限なし（401 / 403）や入力不正（400 / 404 / 413 / 422）で拒否された場合は何も作られていないため、保存した request を破棄し、
   編集して新しい引き継ぎとして送り直せます。保存済みの request の再送が拒否された場合は、前回の送信が保存された可能性があるため固定したままにします。
   送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
@@ -83,7 +87,7 @@ worker が保存するのは tenant に依存しない静的 build 成果物だ�
 | `/offline.css`、`/offline.js`、`/pwa-192x192.png` (query なし、GET) | install 時に `/offline.html` と一緒に precache し、cache-first で返す |
 | 同一 origin の `/assets/*` (query なし、GET) | cache-first。200 の `basic` response だけを最大 120 件保存 |
 | `/api/*`、`/v1/*`、`/developer/*`、その他 | 介入しない |
-| 同一 origin・query なしの `POST /share` navigation | 共有内容を `mukuroji-share-inbox-v1` に保存して `/share?shared=<UUID>` へ `303` |
+| 同一 origin・query なしの `POST /share` navigation | 共有内容を `mukuroji.share-inbox-v1` に保存して `/share?shared=<UUID>` へ `303` |
 | その他の GET 以外、`Range` 付き、cross-origin | 介入しない |
 
 ページ HTML、API response、share link、request intake link は保存しません。share target で受け取った共有内容だけは、

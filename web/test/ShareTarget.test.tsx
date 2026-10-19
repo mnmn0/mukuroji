@@ -21,6 +21,7 @@ import {
   readStoredSharedContent,
   sharedContentCacheName,
   sharedContentKeyPrefix,
+  sharedContentMaxAgeMilliseconds,
   type SharedContentCacheStorage,
 } from '../src/shared/lib/pwa/sharedContentInbox'
 import { createTriageManualHandoff, TriageApiError } from '../src/triage/api'
@@ -194,8 +195,25 @@ describe('shared content inbox', () => {
     const { storage, opened } = createCacheStorage({
       [`${sharedContentKeyPrefix}${sharedId}`]: JSON.stringify({ title: 'Bug', text: 7, url: 'https://example.com', receivedAt: 1 }),
     })
-    expect(await readStoredSharedContent(sharedId, storage)).toEqual({ title: 'Bug', text: '', url: 'https://example.com' })
+    expect(await readStoredSharedContent(sharedId, storage, 1_000)).toEqual({ title: 'Bug', text: '', url: 'https://example.com' })
     expect(opened).toEqual([sharedContentCacheName])
+  })
+
+  test('deletes and ignores content past the retention window', async () => {
+    const key = `${sharedContentKeyPrefix}${sharedId}`
+    const { storage, store } = createCacheStorage({
+      [key]: JSON.stringify({ title: 'Old', text: '', url: '', receivedAt: 0 }),
+    })
+    expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds)).toEqual({ title: 'Old', text: '', url: '' })
+    expect(await readStoredSharedContent(sharedId, storage, sharedContentMaxAgeMilliseconds + 1)).toBeUndefined()
+    expect(store.has(key)).toBe(false)
+  })
+
+  test('treats content without a receive time as expired', async () => {
+    const { storage } = createCacheStorage({
+      [`${sharedContentKeyPrefix}${sharedId}`]: JSON.stringify({ title: 'Bug', text: '', url: '' }),
+    })
+    expect(await readStoredSharedContent(sharedId, storage, 1_000)).toBeUndefined()
   })
 
   test('ignores IDs the worker could not have issued and missing content', async () => {
@@ -390,5 +408,39 @@ describe('attempted share handoffs', () => {
     expect(seen['share-1']).toEqual({ locked: storedAttempt, failure: 'uncertain' })
     expect(seen['share-2']).toEqual({ locked: undefined, failure: undefined })
     expect(seen.broken).toEqual({ locked: undefined, failure: undefined })
+  })
+
+  test('refuses a first send when its replay state cannot be stored', async () => {
+    const requests: string[] = []
+    globalThis.fetch = async (input) => {
+      requests.push(String(input))
+      return new Response('{}', { status: 500 })
+    }
+    const failing: ShareHandoffStorage = {
+      getItem: () => null,
+      setItem: () => { throw new Error('QuotaExceededError') },
+      removeItem: () => undefined,
+    }
+    let controller: ReturnType<typeof useShareHandoff> | undefined
+
+    /**
+     * Captures the hook controller.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      controller = useShareHandoff({
+        accessToken: 'token-1',
+        guardEnterpriseSession: (request) => request,
+        requesterDisplayName: 'Ada',
+        handoffKey: 'share-1',
+        storage: failing,
+      })
+      return null
+    }
+
+    renderToStaticMarkup(<Probe />)
+    expect(await controller?.submit('team-a', { title: 'Bug', body: '' })).toBeUndefined()
+    expect(requests).toEqual([])
   })
 })

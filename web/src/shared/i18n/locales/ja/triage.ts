@@ -220,4 +220,6 @@ export const triageMessages = {
   'triage.share.lockedForbidden': 'このチームの Triage へ送る権限がありません。前回の送信が保存された可能性があるため、権限が戻ってから同じ内容で再送してください。',
   'triage.share.loadError': '共有された内容を読み込めませんでした。',
   'triage.share.reload': 'もう一度読み込む',
+  'triage.share.unsaved': 'この端末では送信状態を保存できないため、重複を防ぐために送信を中止しました。ブラウザの設定でサイトデータの保存を許可してから再度お試しください。',
+  'triage.share.accessError': 'アカウントの権限を確認できませんでした。',
 } as const
