@@ -217,4 +217,7 @@ export const triageMessages = {
   'triage.share.forbidden': 'You can’t send to this Team’s Triage. Choose another Team.',
   'triage.share.uncertain': 'We couldn’t confirm the send. To avoid a duplicate, send the same content again.',
   'triage.share.guest': 'Guest accounts can’t send to Triage.',
+  'triage.share.lockedForbidden': 'You can’t send to this Team’s Triage. The earlier send may have been saved, so send the same content again once your access is back.',
+  'triage.share.loadError': 'Couldn’t load the shared content.',
+  'triage.share.reload': 'Load again',
 } as const

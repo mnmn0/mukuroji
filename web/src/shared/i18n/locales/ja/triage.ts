@@ -217,4 +217,7 @@ export const triageMessages = {
   'triage.share.forbidden': 'このチームの Triage へ送る権限がありません。別のチームを選んでください。',
   'triage.share.uncertain': '送信できたか確認できませんでした。重複を防ぐため、同じ内容のまま再送してください。',
   'triage.share.guest': 'ゲストアカウントでは Triage へ送れません。',
+  'triage.share.lockedForbidden': 'このチームの Triage へ送る権限がありません。前回の送信が保存された可能性があるため、権限が戻ってから同じ内容で再送してください。',
+  'triage.share.loadError': '共有された内容を読み込めませんでした。',
+  'triage.share.reload': 'もう一度読み込む',
 } as const

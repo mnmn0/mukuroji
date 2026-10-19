@@ -1,5 +1,4 @@
 import { clearAppBadgeAndNotifyTabs } from '../shared/lib/pwa/appBadge'
-import { clearStoredSharedContent } from '../shared/lib/pwa/sharedContentInbox'
 
 /**
  * ブラウザに保存する Cognito 認証セッションです。
@@ -93,8 +92,6 @@ export function clearAuthSession() {
   // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
   // other tabs that are still signed in republish their own count.
   void clearAppBadgeAndNotifyTabs()
-  // Shared content that was never sent must not outlive the session it was shared into.
-  void clearStoredSharedContent()
 }
 
 /**

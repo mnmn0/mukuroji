@@ -7,11 +7,16 @@ import {
   sharedBodyMaxLength,
   sharedTitleMaxLength,
 } from '../src/features/share-capture/model/sharedContent'
-import { classifyShareHandoffFailure } from '../src/features/share-capture/mutations/useShareHandoff'
+import {
+  classifyShareHandoffFailure,
+  readLockedShareHandoff,
+  resolveFailedAttempt,
+  useShareHandoff,
+  type ShareHandoffStorage,
+} from '../src/features/share-capture/mutations/useShareHandoff'
 import { ShareCaptureForm } from '../src/features/share-capture/ui/ShareCaptureForm'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import {
-  clearStoredSharedContent,
   discardStoredSharedContent,
   readStoredSharedContent,
   sharedContentCacheName,
@@ -65,6 +70,13 @@ describe('readSharedContent', () => {
       url: 'https://example.com/article',
     })
     expect(content.body).toBe('Old: https://example.com/article-old\n\nhttps://example.com/article')
+  })
+
+  test('cuts the text, not a separately shared link, at the body limit', () => {
+    const url = 'https://example.com/report'
+    const content = readSharedContent({ title: '', text: 'z'.repeat(9_000), url })
+    expect(content.body.length).toBe(sharedBodyMaxLength)
+    expect(content.body.endsWith(`\n\n${url}`)).toBe(true)
   })
 
   test('removes control characters and cuts values to the API limits', () => {
@@ -159,7 +171,6 @@ describe('createTriageManualHandoff', () => {
 function createCacheStorage(entries: Record<string, string>) {
   const store = new Map(Object.entries(entries))
   const opened: string[] = []
-  const deleted: string[] = []
   const cache = {
     match: async (key: RequestInfo | URL) => {
       const body = store.get(String(key))
@@ -172,12 +183,8 @@ function createCacheStorage(entries: Record<string, string>) {
       opened.push(name)
       return cache
     },
-    delete: async (name: string) => {
-      deleted.push(name)
-      return true
-    },
   }
-  return { storage, store, opened, deleted }
+  return { storage, store, opened }
 }
 
 const sharedId = '0f8fad5b-d9cb-469f-a165-70867728950e'
@@ -200,14 +207,12 @@ describe('shared content inbox', () => {
     expect(await readStoredSharedContent(sharedId, undefined)).toBeUndefined()
   })
 
-  test('deletes one share after use and every share at sign-out', async () => {
-    const { storage, store, deleted } = createCacheStorage({
+  test('deletes a share after use', async () => {
+    const { storage, store } = createCacheStorage({
       [`${sharedContentKeyPrefix}${sharedId}`]: '{}',
     })
     await discardStoredSharedContent(sharedId, storage)
     expect(store.size).toBe(0)
-    await clearStoredSharedContent(storage)
-    expect(deleted).toEqual([sharedContentCacheName])
   })
 })
 
@@ -308,5 +313,82 @@ describe('ShareCaptureForm', () => {
     expect(markup).toContain('<fieldset class="contents" disabled=""')
     expect(markup).toMatch(/<button aria-disabled="true"[^>]*type="button">Cancel<\/button>/)
     expect(markup).toContain('Sending…')
+  })
+})
+
+/**
+ * Creates session storage backed by a map.
+ *
+ * @param entries - Initial entries.
+ * @returns The storage and its backing map.
+ */
+function createSessionStorage(entries: Record<string, string> = {}) {
+  const values = new Map(Object.entries(entries))
+  const storage: ShareHandoffStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value) },
+    removeItem: (key) => { values.delete(key) },
+  }
+  return { storage, values }
+}
+
+const storedAttempt = {
+  teamId: 'team-b',
+  draft: { title: 'Sent title', body: 'Sent body' },
+  input: {
+    sourceId: 'share:uuid-1',
+    title: 'Sent title',
+    body: 'Sent body',
+    requesterDisplayName: 'Ada',
+    routingReason: 'Shared to mukuroji from a device',
+    retentionExpiresAt: '2026-11-18T00:00:00.000Z',
+  },
+  context: { idempotencyKey: 'key-1', correlationId: 'key-1' },
+}
+
+describe('attempted share handoffs', () => {
+  test('keeps a retried send locked even when the server now refuses it', () => {
+    expect(resolveFailedAttempt(false, 'uncertain')).toBe('lock')
+    expect(resolveFailedAttempt(false, 'forbidden')).toBe('forget')
+    expect(resolveFailedAttempt(false, 'rejected')).toBe('forget')
+    expect(resolveFailedAttempt(true, 'forbidden')).toBe('lock')
+    expect(resolveFailedAttempt(true, 'rejected')).toBe('lock')
+  })
+
+  test('validates a stored attempt', () => {
+    expect(readLockedShareHandoff(storedAttempt)).toEqual(storedAttempt)
+    expect(readLockedShareHandoff({ ...storedAttempt, context: { idempotencyKey: '' } })).toBeUndefined()
+    expect(readLockedShareHandoff({ ...storedAttempt, input: { ...storedAttempt.input, sourceId: 7 } })).toBeUndefined()
+    expect(readLockedShareHandoff('nope')).toBeUndefined()
+  })
+
+  test('restores the locked send of the same share after a reload', () => {
+    const { storage } = createSessionStorage({
+      'mukuroji.shareHandoff:share-1': JSON.stringify(storedAttempt),
+      'mukuroji.shareHandoff:broken': '{',
+    })
+    const seen: Record<string, unknown> = {}
+
+    /**
+     * Renders the hook state for one share key.
+     *
+     * @param props - Share key.
+     * @returns Nothing visible.
+     */
+    function Probe({ handoffKey }: { readonly handoffKey: string }) {
+      const controller = useShareHandoff({
+        guardEnterpriseSession: (request) => request,
+        requesterDisplayName: 'Ada',
+        handoffKey,
+        storage,
+      })
+      seen[handoffKey] = { locked: controller.locked, failure: controller.failure }
+      return null
+    }
+
+    renderToStaticMarkup(<><Probe handoffKey="share-1" /><Probe handoffKey="share-2" /><Probe handoffKey="broken" /></>)
+    expect(seen['share-1']).toEqual({ locked: storedAttempt, failure: 'uncertain' })
+    expect(seen['share-2']).toEqual({ locked: undefined, failure: undefined })
+    expect(seen.broken).toEqual({ locked: undefined, failure: undefined })
   })
 })

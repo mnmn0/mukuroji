@@ -22,8 +22,6 @@ export type StoredSharedFields = {
 export type SharedContentCacheStorage = {
   /** Opens the named cache; only reads and deletes are used. */
   readonly open: (cacheName: string) => Promise<Pick<Cache, 'match' | 'delete'>>
-  /** Deletes the named cache. */
-  readonly delete: (cacheName: string) => Promise<boolean>
 }
 
 /** Shape of the opaque IDs the worker issues. */
@@ -89,22 +87,5 @@ export async function discardStoredSharedContent(
     await cache.delete(`${sharedContentKeyPrefix}${id}`)
   } catch {
     // Unread content expires in the worker; nothing else depends on this delete.
-  }
-}
-
-/**
- * Deletes every stored share, for example when the session ends.
- *
- * @param storage - Cache Storage; defaults to the page's.
- * @returns A promise that settles once the cache is deleted; failures are ignored.
- */
-export async function clearStoredSharedContent(
-  storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
-): Promise<void> {
-  if (!storage) return
-  try {
-    await storage.delete(sharedContentCacheName)
-  } catch {
-    // Unread content expires in the worker; sign-out must not fail on cache errors.
   }
 }

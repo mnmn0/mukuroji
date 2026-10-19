@@ -56,13 +56,16 @@ export function readSharedContent(fields: StoredSharedFields | undefined): Share
   const firstTextLine = text.split('\n').map((line) => line.trim()).find(Boolean) ?? ''
   const title = sharedTitle || toSingleLine(firstTextLine) || url
   // Only an exact link token counts as already included; a longer URL that merely starts with it does not.
-  const body = [text, url && !text.split(/\s+/).includes(url) ? url : '']
+  const link = url && !text.split(/\s+/).includes(url) ? truncate(url, sharedBodyMaxLength) : ''
+  // The link is shared on its own, so cut the text to leave room for it instead of cutting the link.
+  const linkSpace = link ? link.length + (text ? 2 : 0) : 0
+  const body = [truncate(text, Math.max(0, sharedBodyMaxLength - linkSpace)), link]
     .filter(Boolean)
     .join('\n\n')
 
   return {
     title: truncate(title, sharedTitleMaxLength),
-    body: truncate(body, sharedBodyMaxLength),
+    body,
   }
 }
 
