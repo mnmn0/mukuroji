@@ -112,7 +112,12 @@ async function activateCurrentVersion(): Promise<void> {
   ])
 
   await Promise.all(staleNames.map((name) => caches.delete(name)))
-  await discardExpiredSharedContent(await caches.open(sharedContentCacheName), Date.now())
+  try {
+    await discardExpiredSharedContent(await caches.open(sharedContentCacheName), Date.now())
+  } catch {
+    // Expiry cleanup is best-effort; the form also refuses expired shares, and activation must
+    // still take control so `POST /share` reaches this worker.
+  }
   await self.clients.claim()
 }
 

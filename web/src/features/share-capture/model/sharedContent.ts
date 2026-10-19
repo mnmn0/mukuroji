@@ -72,18 +72,24 @@ export function readSharedContent(fields: StoredSharedFields | undefined): Share
 /**
  * Creates the values that must stay the same across retries of one share.
  *
+ * A share received through the share target uses its stored ID as the source, so every tab or
+ * window that opens it sends the same logical handoff and the server's source claim lets only
+ * one entry exist. The fallback retention is rounded to the UTC day for the same reason.
+ *
+ * @param sharedId - ID of the stored share, or empty when nothing was shared.
  * @param now - Current time.
- * @param createId - UUID factory.
+ * @param createId - UUID factory for a handoff without a stored share.
  * @returns Source identifier and fallback retention deadline.
  */
 export function createShareHandoffIdentity(
+  sharedId = '',
   now: Date = new Date(),
   createId: () => string = () => globalThis.crypto.randomUUID(),
 ): ShareHandoffIdentity {
-  const retentionExpiresAt = new Date(now)
+  const retentionExpiresAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
   retentionExpiresAt.setUTCDate(retentionExpiresAt.getUTCDate() + fallbackRetentionDays)
   return {
-    sourceId: `share:${createId()}`,
+    sourceId: `share:${sharedId || createId()}`,
     retentionExpiresAt: retentionExpiresAt.toISOString(),
   }
 }

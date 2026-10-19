@@ -56,6 +56,8 @@ export type ShareHandoffController = {
    * @returns The result, or `undefined` when the send did not complete.
    */
   readonly submit: (teamId: string, draft: ShareHandoffDraft) => Promise<ShareHandoffResult | undefined>
+  /** Ends the handoff without sending and deletes its stored attempt, for example on Cancel. */
+  readonly abandon: () => void
 }
 
 /** Session storage operations used to keep an attempted send across reloads. */
@@ -69,8 +71,13 @@ export type UseShareHandoffOptions = {
   readonly guardEnterpriseSession: <Result>(request: Promise<Result>) => Promise<Result>
   /** Display name of the person sharing. */
   readonly requesterDisplayName: string
-  /** Identifies this share, so a reload of the same share finds its attempted send. */
+  /** Stored share ID; it keys the attempted send and becomes the handoff's source ID. */
   readonly handoffKey: string
+  /**
+   * Identifies the signed-in account, so an attempt made in one Workspace or by one person is
+   * never restored and replayed after another account signs in on the same tab.
+   */
+  readonly accountKey: string
   /** Storage for the attempted send; defaults to the tab's session storage. */
   readonly storage?: ShareHandoffStorage
 }
@@ -186,7 +193,7 @@ function loadAttempt(storage: ShareHandoffStorage | undefined, key: string): Loc
  * updates, until it succeeds, so a saved entry is replayed rather than duplicated. A first
  * send the server refused created nothing, so it is forgotten and the form can be edited.
  *
- * @param options - Access token, session guard, requester name, and share key.
+ * @param options - Access token, session guard, requester name, share key, and account key.
  * @returns The handoff state and send action.
  */
 export function useShareHandoff({
@@ -194,9 +201,10 @@ export function useShareHandoff({
   guardEnterpriseSession,
   requesterDisplayName,
   handoffKey,
+  accountKey,
   storage = readPageStorage(),
 }: UseShareHandoffOptions): ShareHandoffController {
-  const storageKey = `${attemptStorageKeyPrefix}${handoffKey}`
+  const storageKey = `${attemptStorageKeyPrefix}${encodeURIComponent(accountKey)}:${handoffKey}`
   const [locked, setLocked] = useState(() => loadAttempt(storage, storageKey))
   const [failure, setFailure] = useState<ShareHandoffFailure | undefined>(() => (locked ? 'uncertain' : undefined))
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -215,7 +223,7 @@ export function useShareHandoff({
     const attempt = locked ?? {
       teamId,
       draft,
-      input: createShareHandoffInput(draft, createShareHandoffIdentity(), requesterDisplayName),
+      input: createShareHandoffInput(draft, createShareHandoffIdentity(handoffKey), requesterDisplayName),
       context: createMutationRequestContext(),
     }
     if (!wasLocked && !save(attempt)) {
@@ -273,10 +281,18 @@ export function useShareHandoff({
     }
   }
 
+  /** Ends the handoff without sending and deletes its stored attempt. */
+  function abandon() {
+    forget()
+    setLocked(undefined)
+    setFailure(undefined)
+  }
+
   return {
     isSubmitting,
     ...(failure ? { failure } : {}),
     ...(locked ? { locked } : {}),
     submit,
+    abandon,
   }
 }

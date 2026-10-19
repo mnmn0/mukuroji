@@ -66,7 +66,9 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   未読のまま 24 時間を過ぎた内容は worker の activate 時と次の共有を受け取った時に削除し、フォームも期限切れの内容を読まずに削除します
   （削除に失敗した内容が後から読めることはありません）。送信・キャンセル後はフォームが削除します。
   期限切れの session の後始末（`clearAuthSession`）では削除しないため、sign-in し直した後も同じ共有を確認できます。
-  cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。worker が cache に保存できなかった場合は
+  cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。共有 ID の内容が見つからない
+  （期限切れ・送信済み・破棄済み）場合も空のフォームにせず、元のアプリからもう一度共有するよう案内します。
+  worker の activate 時の期限切れ削除は best-effort で、失敗しても activate を止めません。worker が cache に保存できなかった場合は
   browser の network error にせず、`/share?status=not-saved` へ移動して、元のアプリからもう一度共有するよう案内します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
   `/share` は認証済み Workspace の route で、未 sign-in の場合は sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
   確認フォーム（`web/src/features/share-capture/`）は共有内容をすべて plain text として扱い、tab / 改行以外の制御文字を除いて
@@ -75,12 +77,15 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   送り先のチームを選んで送信するまでチームには共有されません。ゲストアカウントには送れない旨とキャンセルだけを表示し、
   役割を確認できなかった場合はフォームを出さずに再読み込みを表示します。
   送信は `POST /api/teams/{teamId}/triage-entries/manual-handoffs` の manual handoff で、担当・SLA・保持期限は server がチーム設定から決めます。
-  送信前に request 本体（`sourceId` = `share:<UUID>` を含む）と `Idempotency-Key` を tab の sessionStorage に保存し、
+  `sourceId` は共有 ID から `share:<共有 ID>` とし、保持期限の初期値は UTC の日単位に丸めるため、同じ共有を別の tab や
+  window で開いても同じ引き継ぎになり、server の source claim で Entry は 1 件だけになります（内容が異なれば `409`）。
+  送信前に request 本体と `Idempotency-Key` を tab の sessionStorage に、Workspace と利用者で分けた key で保存し、
   成功するまでは再試行・再読み込み・app 更新の後も同じ request だけを読み取り専用で再送できます。Entry は 1 件だけ作られます。
   sessionStorage に保存できない場合は、応答が失われた後の再読み込みで重複を作らないよう、送信せずに理由を表示します。
   初回の送信が権限なし（401 / 403）や入力不正（400 / 404 / 413 / 422）で拒否された場合は何も作られていないため、保存した request を破棄し、
   編集して新しい引き継ぎとして送り直せます。保存済みの request の再送が拒否された場合は、前回の送信が保存された可能性があるため固定したままにします。
-  送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
+  別の account で sign-in し直した場合、前の account の保存済み request は復元・再送しません。キャンセルすると
+  保存済みの request も削除し、その共有の引き継ぎを終了します。送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
