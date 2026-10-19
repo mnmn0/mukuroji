@@ -1,7 +1,7 @@
 # Installable PWA
 
 mukuroji の Web は manifest と service worker を持ち、mobile / desktop へ install できます。
-この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push、share target、
+この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push、file / camera capture、
 offline read cache、encrypted mutation queue は Issue #38 の後続範囲です。
 
 ## 現在の範囲
@@ -45,6 +45,16 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
   platform では、不要な通知の許可を求めないよう button を表示しません。
   この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
+- share target: manifest の `share_target` は `GET /share` に `title` / `text` / `url` を渡します。
+  install 済み app を他の app の共有先に選ぶと、認証済み Workspace の `/share` が開き、共有内容をチームの
+  Triage キューへ引き継ぐ確認フォームを表示します（`web/src/features/share-capture/`）。未 sign-in の場合は
+  sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
+  共有内容はすべて plain text として扱い、tab / 改行以外の制御文字を除いて API の上限（タイトル 500 文字、本文 8,000 文字）に切り詰めます。
+  タイトルは共有されたタイトル、なければ本文の最初の行、なければ URL を初期値にします。送り先のチームを選んで
+  送信するまで何も保存しません。送信は `POST /api/teams/{teamId}/triage-entries/manual-handoffs` の manual handoff で、
+  担当・SLA・保持期限は server がチーム設定から決めます。`sourceId`（`share:<UUID>`）と `Idempotency-Key` は
+  フォームごとに固定し、応答が失われた再送でも Entry は 1 件だけ作られます。成功するとその Entry を選択した
+  Triage 画面へ移動します。ファイルの共有（`POST` / `multipart/form-data`）は受け付けません。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。

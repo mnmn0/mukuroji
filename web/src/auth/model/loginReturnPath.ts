@@ -29,6 +29,7 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
         '/help',
         '/settings',
         '/updates',
+        '/share',
       ].some(
         (path) =>
           candidate.pathname === path ||

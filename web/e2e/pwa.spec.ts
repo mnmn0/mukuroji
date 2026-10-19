@@ -19,7 +19,7 @@ type ManifestIcon = {
  * @param value - Parsed manifest JSON.
  * @returns Manifest fields, or `null` when the shape is invalid.
  */
-function readManifest(value: unknown): { startUrl: unknown, scope: unknown, display: unknown, icons: ManifestIcon[] } | null {
+function readManifest(value: unknown): { startUrl: unknown, scope: unknown, display: unknown, shareTarget: unknown, icons: ManifestIcon[] } | null {
   if (typeof value !== 'object' || value === null || !('icons' in value) || !Array.isArray(value.icons)) {
     return null
   }
@@ -41,6 +41,7 @@ function readManifest(value: unknown): { startUrl: unknown, scope: unknown, disp
     startUrl: 'start_url' in value ? value.start_url : undefined,
     scope: 'scope' in value ? value.scope : undefined,
     display: 'display' in value ? value.display : undefined,
+    shareTarget: 'share_target' in value ? value.share_target : undefined,
     icons,
   }
 }
@@ -84,6 +85,12 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   expect(manifest?.startUrl).toBe('/home')
   expect(manifest?.scope).toBe('/')
   expect(manifest?.display).toBe('standalone')
+  // Shared content opens the confirmation form; nothing is posted until the person sends it.
+  expect(manifest?.shareTarget).toEqual({
+    action: '/share',
+    method: 'GET',
+    params: { title: 'title', text: 'text', url: 'url' },
+  })
   expect(manifest?.icons.map((icon) => icon.sizes)).toEqual(expect.arrayContaining(['192x192', '512x512']))
   expect(manifest?.icons.some((icon) => icon.purpose === 'maskable')).toBe(true)
 

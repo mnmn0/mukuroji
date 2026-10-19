@@ -1,4 +1,5 @@
 import type {
+  CreateManualTriageEntryInput,
   TriageBulkActionInput,
   TriageActionInput,
   TriageEntryListInput,
@@ -157,6 +158,35 @@ export function applyTriageBulkAction(
 }
 
 /**
+ * Hands off caller-provided content to a Team triage queue as a new entry.
+ *
+ * The server derives the owner, SLA, and retention from the Team configuration, so those
+ * fields are only a fallback. Send the same input and context on retry so the handoff is
+ * created once.
+ *
+ * @param teamId - Team whose queue receives the entry.
+ * @param input - Retry-stable handoff content.
+ * @param accessToken - Access token used by the triage API.
+ * @param context - Idempotency and correlation context retained across retries.
+ * @returns The created entry, or the existing one for a replayed request.
+ */
+export function createTriageManualHandoff(
+  teamId: string,
+  input: CreateManualTriageEntryInput,
+  accessToken: string,
+  context: MutationRequestContext,
+) {
+  return requestJson(
+    `${triageTeamPath(teamId)}/triage-entries/manual-handoffs`,
+    {
+      accessToken,
+      init: createMutationInit(input, context),
+    },
+    readTriageMutationReceipt,
+  )
+}
+
+/**
  * Loads versioned routing, rotation, SLA, and escalation settings for a Team.
  *
  * @param teamId - Team whose triage settings should be loaded.
@@ -232,7 +262,11 @@ async function requestJson<Result>(
 
 /** Builds a JSON mutation request with replay-safe headers. */
 function createMutationInit(
-  input: TriageActionInput | TriageBulkActionInput | UpdateTriageConfigurationInput,
+  input:
+    | CreateManualTriageEntryInput
+    | TriageActionInput
+    | TriageBulkActionInput
+    | UpdateTriageConfigurationInput,
   context: MutationRequestContext,
 ): RequestInit {
   return {
