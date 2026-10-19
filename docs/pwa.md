@@ -49,18 +49,20 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   service worker が request を受け取り（`requestStrategy.ts` の `share-target`、同一 origin・query なしの navigation だけ）、
   text field だけを読んで端末内の専用 cache（`mukuroji-share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
   共有内容そのものは URL、browser history、frontend / CDN の access log、login の `returnTo` に載りません。
-  未読のまま 24 時間を過ぎた内容は次の共有を受け取った時に worker が削除し、送信・キャンセル後はフォームが、sign-out 時は
-  `clearAuthSession` が削除します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
+  未読のまま 24 時間を過ぎた内容は次の共有を受け取った時に worker が削除し、送信・キャンセル後はフォームが削除します。
+  期限切れの session の後始末（`clearAuthSession`）では削除しないため、sign-in し直した後も同じ共有を確認できます。
+  cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
   `/share` は認証済み Workspace の route で、未 sign-in の場合は sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
   確認フォーム（`web/src/features/share-capture/`）は共有内容をすべて plain text として扱い、tab / 改行以外の制御文字を除いて
   API の上限（タイトル 500 文字、本文 8,000 文字）に切り詰めます。タイトルは共有されたタイトル、なければ本文の最初の行、
-  なければ URL を初期値にし、URL は本文に同じ URL が単語として含まれない場合だけ本文の末尾に加えます。
+  なければ URL を初期値にし、URL は本文に同じ URL が単語として含まれない場合だけ本文の末尾に加えます（本文の上限では URL ではなく本文側を切り詰めます）。
   送り先のチームを選んで送信するまでチームには共有されません。ゲストアカウントには送れない旨とキャンセルだけを表示します。
   送信は `POST /api/teams/{teamId}/triage-entries/manual-handoffs` の manual handoff で、担当・SLA・保持期限は server がチーム設定から決めます。
-  `sourceId`（`share:<UUID>`）と `Idempotency-Key` は 1 回の引き継ぎで固定します。結果を確認できない失敗（network、5xx など）の後は
-  送った内容をそのまま読み取り専用にして同じ request だけを再送できるようにし、Entry は 1 件だけ作られます。
-  権限なし（401 / 403）や入力不正（400 / 404 / 413 / 422）で拒否された場合は何も作られていないため、編集して新しい引き継ぎとして送り直せます。
-  送信中はキャンセルできません。成功するとその Entry を選択した Triage 画面へ移動します。
+  送信前に request 本体（`sourceId` = `share:<UUID>` を含む）と `Idempotency-Key` を tab の sessionStorage に保存し、
+  成功するまでは再試行・再読み込み・app 更新の後も同じ request だけを読み取り専用で再送できます。Entry は 1 件だけ作られます。
+  初回の送信が権限なし（401 / 403）や入力不正（400 / 404 / 413 / 422）で拒否された場合は何も作られていないため、保存した request を破棄し、
+  編集して新しい引き継ぎとして送り直せます。保存済みの request の再送が拒否された場合は、前回の送信が保存された可能性があるため固定したままにします。
+  送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
 - 接続状態: `navigator.onLine` と `online` / `offline` event を `web/src/shared/lib/pwa/connectivity.ts` で購読し、
   接続が切れている間は画面上部に「オフラインです。表示中の内容は最新でない可能性があり、接続が戻るまで変更は保存できません。」を表示します
   （`web/src/app/pwa/ConnectivityNotice.tsx`。操作を妨げないよう pointer event を受けません）。
