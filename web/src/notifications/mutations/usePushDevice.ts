@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PushConfiguration, PushSubscriptionInput, PushSubscriptionRemovalInput } from '@mukuroji/contracts'
+import { NotificationsApiError } from '../api/errors'
 import {
   getPushConfiguration,
   registerPushSubscription,
@@ -88,9 +89,39 @@ export async function loadPushDevice(
   ) {
     return { status: 'off', vapidPublicKey }
   }
-  // The device stays on even when the refresh fails; the next visit retries it.
-  if (refresh) await api.register(accessToken, input).catch(() => undefined)
+  if (refresh) {
+    try {
+      await api.register(accessToken, input)
+    } catch (error: unknown) {
+      return { status: readRefreshFailureStatus(error), vapidPublicKey }
+    }
+  }
   return { status: 'on', vapidPublicKey }
+}
+
+/**
+ * Maps a failed registration refresh to the device status it reveals.
+ *
+ * A network error or server failure says nothing about the registration, so the device stays
+ * on and the next visit retries. A refusal means the server does not hold this device: the
+ * deployment turned push off, or the subscription is invalid, not allowed, over the device
+ * limit, or lost an ownership race. Any other refusal leaves the state unknown.
+ *
+ * @param error - Error thrown by the refresh.
+ * @returns The status to show.
+ */
+function readRefreshFailureStatus(error: unknown): Exclude<PushDeviceStatus, 'loading'> {
+  if (!(error instanceof NotificationsApiError) || error.status >= 500) return 'on'
+  if (error.code === 'PushNotificationsDisabled') return 'disabled'
+  if (
+    error.code === 'InvalidPushSubscription' ||
+    error.code === 'PushSubscriptionForbidden' ||
+    error.code === 'PushSubscriptionLimitExceeded' ||
+    error.code === 'PushSubscriptionConflict'
+  ) {
+    return 'off'
+  }
+  return 'load-error'
 }
 
 /**

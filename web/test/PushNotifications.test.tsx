@@ -9,6 +9,7 @@ import {
   type PushDeviceApi,
   type PushDeviceController,
 } from '../src/notifications/mutations/usePushDevice'
+import { NotificationsApiError } from '../src/notifications/api/errors'
 import { PushDeviceSettings } from '../src/notifications/ui/PushDeviceSettings'
 import {
   defaultNotificationPath,
@@ -135,6 +136,22 @@ describe('push device controller', () => {
     const stale = createApi()
     expect((await loadPushDevice('t', createEnvironment({ permission: 'granted', existingKey: otherKey }).environment, stale.api)).status).toBe('off')
     expect(stale.calls).toEqual([])
+  })
+
+  test('shows what a refused refresh reveals and keeps the device on after transient failures', async () => {
+    const environment = () => createEnvironment({ permission: 'granted', existingKey: vapidPublicKey }).environment
+    const failing = (error: unknown): PushDeviceApi => ({
+      ...createApi().api,
+      register: async () => { throw error },
+    })
+    const statusAfter = async (error: unknown) => (await loadPushDevice('t', environment(), failing(error))).status
+    expect(await statusAfter(new Error('offline'))).toBe('on')
+    expect(await statusAfter(new NotificationsApiError(503, 'down'))).toBe('on')
+    expect(await statusAfter(new NotificationsApiError(409, 'off', 'PushNotificationsDisabled'))).toBe('disabled')
+    for (const code of ['InvalidPushSubscription', 'PushSubscriptionForbidden', 'PushSubscriptionLimitExceeded', 'PushSubscriptionConflict']) {
+      expect(await statusAfter(new NotificationsApiError(code === 'InvalidPushSubscription' ? 400 : 409, code, code)), code).toBe('off')
+    }
+    expect(await statusAfter(new NotificationsApiError(401, 'expired'))).toBe('load-error')
   })
 
   test('enables after permission, replacing a subscription made for an old key', async () => {
