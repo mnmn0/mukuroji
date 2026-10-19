@@ -7,9 +7,18 @@ import {
   sharedBodyMaxLength,
   sharedTitleMaxLength,
 } from '../src/features/share-capture/model/sharedContent'
+import { classifyShareHandoffFailure } from '../src/features/share-capture/mutations/useShareHandoff'
 import { ShareCaptureForm } from '../src/features/share-capture/ui/ShareCaptureForm'
 import { createTranslator } from '../src/shared/i18n/i18n'
-import { createTriageManualHandoff } from '../src/triage/api'
+import {
+  clearStoredSharedContent,
+  discardStoredSharedContent,
+  readStoredSharedContent,
+  sharedContentCacheName,
+  sharedContentKeyPrefix,
+  type SharedContentCacheStorage,
+} from '../src/shared/lib/pwa/sharedContentInbox'
+import { createTriageManualHandoff, TriageApiError } from '../src/triage/api'
 import { triageEntryFixtures } from '../src/triage/fixtures'
 
 const originalFetch = globalThis.fetch
@@ -21,11 +30,11 @@ afterEach(() => {
 
 describe('readSharedContent', () => {
   test('uses the shared title and keeps the text and link in the body', () => {
-    const content = readSharedContent(new URLSearchParams({
+    const content = readSharedContent({
       title: '  Checkout\nfails ',
       text: 'Steps:\r\n1. Open the cart',
       url: 'https://example.com/cart',
-    }))
+    })
     expect(content).toEqual({
       title: 'Checkout fails',
       body: 'Steps:\n1. Open the cart\n\nhttps://example.com/cart',
@@ -33,26 +42,37 @@ describe('readSharedContent', () => {
   })
 
   test('falls back to the first text line, then the link, for the title', () => {
-    expect(readSharedContent(new URLSearchParams({ text: '\n  First line \nSecond' })).title).toBe('First line')
-    expect(readSharedContent(new URLSearchParams({ url: 'https://example.com/a' }))).toEqual({
+    expect(readSharedContent({ title: '', text: '\n  First line \nSecond', url: '' }).title).toBe('First line')
+    expect(readSharedContent({ title: '', text: '', url: 'https://example.com/a' })).toEqual({
       title: 'https://example.com/a',
       body: 'https://example.com/a',
     })
   })
 
   test('does not repeat a link the text already contains', () => {
-    const content = readSharedContent(new URLSearchParams({
+    const content = readSharedContent({
+      title: '',
       text: 'See https://example.com/a',
       url: 'https://example.com/a',
-    }))
+    })
     expect(content.body).toBe('See https://example.com/a')
   })
 
+  test('keeps a link that only prefixes a longer URL in the text', () => {
+    const content = readSharedContent({
+      title: 'Article',
+      text: 'Old: https://example.com/article-old',
+      url: 'https://example.com/article',
+    })
+    expect(content.body).toBe('Old: https://example.com/article-old\n\nhttps://example.com/article')
+  })
+
   test('removes control characters and cuts values to the API limits', () => {
-    const content = readSharedContent(new URLSearchParams({
+    const content = readSharedContent({
       title: `a\u0000b\u001b${'x'.repeat(600)}`,
       text: `line\u0007\t${'y'.repeat(9_000)}`,
-    }))
+      url: '',
+    })
     expect(content.title.startsWith('ab')).toBe(true)
     expect(content.title.length).toBe(sharedTitleMaxLength)
     expect(content.body.startsWith('line\t')).toBe(true)
@@ -61,11 +81,11 @@ describe('readSharedContent', () => {
 
   test('does not split a surrogate pair at the limit', () => {
     const title = `${'x'.repeat(sharedTitleMaxLength - 1)}😀`
-    expect(readSharedContent(new URLSearchParams({ title })).title).toBe('x'.repeat(sharedTitleMaxLength - 1))
+    expect(readSharedContent({ title, text: '', url: '' }).title).toBe('x'.repeat(sharedTitleMaxLength - 1))
   })
 
   test('returns empty values when nothing was shared', () => {
-    expect(readSharedContent(new URLSearchParams())).toEqual({ title: '', body: '' })
+    expect(readSharedContent(undefined)).toEqual({ title: '', body: '' })
   })
 })
 
@@ -130,6 +150,79 @@ describe('createTriageManualHandoff', () => {
   })
 })
 
+/**
+ * Creates an in-memory Cache Storage holding one cache of JSON responses.
+ *
+ * @param entries - Initial key and JSON body pairs.
+ * @returns The storage and its backing map.
+ */
+function createCacheStorage(entries: Record<string, string>) {
+  const store = new Map(Object.entries(entries))
+  const opened: string[] = []
+  const deleted: string[] = []
+  const cache = {
+    match: async (key: RequestInfo | URL) => {
+      const body = store.get(String(key))
+      return body === undefined ? undefined : new Response(body)
+    },
+    delete: async (key: RequestInfo | URL) => store.delete(String(key)),
+  }
+  const storage: SharedContentCacheStorage = {
+    open: async (name: string) => {
+      opened.push(name)
+      return cache
+    },
+    delete: async (name: string) => {
+      deleted.push(name)
+      return true
+    },
+  }
+  return { storage, store, opened, deleted }
+}
+
+const sharedId = '0f8fad5b-d9cb-469f-a165-70867728950e'
+
+describe('shared content inbox', () => {
+  test('reads only the text fields the worker stored', async () => {
+    const { storage, opened } = createCacheStorage({
+      [`${sharedContentKeyPrefix}${sharedId}`]: JSON.stringify({ title: 'Bug', text: 7, url: 'https://example.com', receivedAt: 1 }),
+    })
+    expect(await readStoredSharedContent(sharedId, storage)).toEqual({ title: 'Bug', text: '', url: 'https://example.com' })
+    expect(opened).toEqual([sharedContentCacheName])
+  })
+
+  test('ignores IDs the worker could not have issued and missing content', async () => {
+    const { storage, opened } = createCacheStorage({ '/__mukuroji/share/../secret': '{}' })
+    expect(await readStoredSharedContent('../secret', storage)).toBeUndefined()
+    expect(await readStoredSharedContent('', storage)).toBeUndefined()
+    expect(opened).toEqual([])
+    expect(await readStoredSharedContent(sharedId, storage)).toBeUndefined()
+    expect(await readStoredSharedContent(sharedId, undefined)).toBeUndefined()
+  })
+
+  test('deletes one share after use and every share at sign-out', async () => {
+    const { storage, store, deleted } = createCacheStorage({
+      [`${sharedContentKeyPrefix}${sharedId}`]: '{}',
+    })
+    await discardStoredSharedContent(sharedId, storage)
+    expect(store.size).toBe(0)
+    await clearStoredSharedContent(storage)
+    expect(deleted).toEqual([sharedContentCacheName])
+  })
+})
+
+describe('classifyShareHandoffFailure', () => {
+  test('separates refused sends from ones that may have been saved', () => {
+    expect(classifyShareHandoffFailure(new TriageApiError(403, 'No access', 'Forbidden'))).toBe('forbidden')
+    expect(classifyShareHandoffFailure(new TriageApiError(401, 'Expired'))).toBe('forbidden')
+    expect(classifyShareHandoffFailure(new TriageApiError(400, 'Invalid'))).toBe('rejected')
+    expect(classifyShareHandoffFailure(new TriageApiError(422, 'Invalid'))).toBe('rejected')
+    expect(classifyShareHandoffFailure(new TriageApiError(500, 'Down'))).toBe('uncertain')
+    expect(classifyShareHandoffFailure(new TriageApiError(409, 'Conflict', 'TriageSourceConflict'))).toBe('uncertain')
+    expect(classifyShareHandoffFailure(new TypeError('Failed to fetch'))).toBe('uncertain')
+  })
+})
+
 describe('ShareCaptureForm', () => {
   test('preselects the only Team and fills in the shared content', () => {
     const markup = renderToStaticMarkup(
@@ -145,6 +238,7 @@ describe('ShareCaptureForm', () => {
     expect(markup).toContain('<option value="team-a" selected="">Core</option>')
     expect(markup).toContain('value="Bug"')
     expect(markup).toContain('>Details</textarea>')
+    expect(markup).toContain('aria-label="Send to Triage"')
   })
 
   test('asks for a Team when there are several', () => {
@@ -161,25 +255,48 @@ describe('ShareCaptureForm', () => {
     expect(markup).toContain('<option disabled="" value="" selected="">Select a Team</option>')
   })
 
-  test('explains when there is no destination Team', () => {
+  test('keeps Cancel when there is no destination or sending is unavailable', () => {
+    for (const props of [{ teams: [] }, { teams: [{ id: 'team-a', name: 'Core' }], unavailableMessage: 'Guest accounts can’t send to Triage.' }]) {
+      const markup = renderToStaticMarkup(
+        <ShareCaptureForm
+          initialContent={{ title: 'Bug', body: '' }}
+          isSubmitting={false}
+          onCancel={() => undefined}
+          onSubmit={() => undefined}
+          t={t}
+          {...props}
+        />,
+      )
+      expect(markup).not.toContain('<form')
+      expect(markup).toContain('role="status"')
+      expect(markup).toContain('>Cancel</button>')
+    }
+  })
+
+  test('shows an uncertain send read-only and offers to resend it unchanged', () => {
     const markup = renderToStaticMarkup(
       <ShareCaptureForm
-        initialContent={{ title: 'Bug', body: '' }}
+        errorMessage="We couldn’t confirm the send."
+        initialContent={{ title: 'Original', body: 'Original body' }}
         isSubmitting={false}
+        lockedSend={{ teamId: 'team-b', draft: { title: 'Sent title', body: 'Sent body' } }}
         onCancel={() => undefined}
         onSubmit={() => undefined}
         t={t}
-        teams={[]}
+        teams={[{ id: 'team-a', name: 'Core' }, { id: 'team-b', name: 'Ops' }]}
       />,
     )
-    expect(markup).toContain('There is no Team you can send to.')
-    expect(markup).not.toContain('<form')
+    expect(markup).toContain('<fieldset class="contents" disabled=""')
+    expect(markup).toContain('<option value="team-b" selected="">Ops</option>')
+    expect(markup).toContain('value="Sent title"')
+    expect(markup).toContain('>Sent body</textarea>')
+    expect(markup).toContain('Send the same content again')
+    expect(markup).toContain('role="alert"')
   })
 
-  test('announces a failed send and keeps the form disabled while sending', () => {
+  test('keeps the form and Cancel inert while sending', () => {
     const markup = renderToStaticMarkup(
       <ShareCaptureForm
-        errorMessage="Could not send to Triage. Try again."
         initialContent={{ title: 'Bug', body: '' }}
         isSubmitting
         onCancel={() => undefined}
@@ -188,8 +305,8 @@ describe('ShareCaptureForm', () => {
         teams={[{ id: 'team-a', name: 'Core' }]}
       />,
     )
-    expect(markup).toContain('role="alert"')
     expect(markup).toContain('<fieldset class="contents" disabled=""')
+    expect(markup).toMatch(/<button aria-disabled="true"[^>]*type="button">Cancel<\/button>/)
     expect(markup).toContain('Sending…')
   })
 })

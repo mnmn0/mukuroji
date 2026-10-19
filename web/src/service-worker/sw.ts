@@ -1,14 +1,20 @@
 /// <reference lib="webworker" />
 
 import {
+  createSharedContentRedirectPath,
   isCacheableAssetResponse,
   isSkipWaitingMessage,
   maxCachedAssetEntries,
   offlineFallbackPath,
   offlineShellResourcePaths,
+  readSharedFormFields,
   selectEvictedEntries,
+  selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
+  sharedContentCacheName,
+  sharedContentKeyPrefix,
+  type StoredSharedContent,
 } from './model/requestStrategy'
 
 /**
@@ -58,6 +64,11 @@ self.addEventListener('fetch', (event) => {
     self.location.origin,
   )
 
+  if (strategy === 'share-target') {
+    event.respondWith(receiveSharedContent(request))
+    return
+  }
+
   if (strategy === 'network-first-navigation') {
     event.respondWith(fetchNavigation(request))
     return
@@ -97,10 +108,67 @@ async function activateCurrentVersion(): Promise<void> {
   const staleNames = selectStaleCaches(await caches.keys(), cachePrefix, [
     shellCacheName,
     assetCacheName,
+    sharedContentCacheName,
   ])
 
   await Promise.all(staleNames.map((name) => caches.delete(name)))
   await self.clients.claim()
+}
+
+/**
+ * Stores content another app shared and redirects to the confirmation form.
+ *
+ * The content stays on the device in a dedicated cache, so it never appears in a URL, browser
+ * history, or a server log; only an opaque ID is passed to the form. Files are ignored.
+ *
+ * @param request - `POST /share` navigation from the share sheet.
+ * @returns A redirect to the confirmation form.
+ */
+async function receiveSharedContent(request: Request): Promise<Response> {
+  const form = await request.formData()
+  const content: StoredSharedContent = {
+    ...readSharedFormFields((name) => form.get(name)),
+    receivedAt: Date.now(),
+  }
+  const id = self.crypto.randomUUID()
+  const cache = await caches.open(sharedContentCacheName)
+
+  await discardExpiredSharedContent(cache, content.receivedAt)
+  await cache.put(
+    new Request(`${sharedContentKeyPrefix}${id}`),
+    new Response(JSON.stringify(content), { headers: { 'Content-Type': 'application/json' } }),
+  )
+
+  return Response.redirect(new URL(createSharedContentRedirectPath(id), self.location.origin).href, 303)
+}
+
+/**
+ * Deletes shared content that was never read within the retention window.
+ *
+ * @param cache - Shared content cache.
+ * @param now - Current time in epoch milliseconds.
+ * @returns A promise that settles once expired entries are deleted.
+ */
+async function discardExpiredSharedContent(cache: Cache, now: number): Promise<void> {
+  const keys = await cache.keys()
+  const entries = await Promise.all(keys.map(async (key) => {
+    const response = await cache.match(key)
+    const value: unknown = response ? await response.json().catch(() => undefined) : undefined
+    return { key, receivedAt: readReceivedAt(value) }
+  }))
+
+  await Promise.all(selectExpiredSharedContent(entries, now).map((key) => cache.delete(key)))
+}
+
+/**
+ * Reads the receive time of stored shared content.
+ *
+ * @param value - Parsed stored content.
+ * @returns Receive time in epoch milliseconds, or `undefined` when missing.
+ */
+function readReceivedAt(value: unknown): number | undefined {
+  if (typeof value !== 'object' || value === null || !('receivedAt' in value)) return undefined
+  return typeof value.receivedAt === 'number' ? value.receivedAt : undefined
 }
 
 /**

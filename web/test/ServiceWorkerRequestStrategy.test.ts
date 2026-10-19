@@ -1,13 +1,20 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSharedContentRedirectPath,
   isCacheableAssetResponse,
   isSkipWaitingMessage,
+  readSharedFormFields,
   selectEvictedEntries,
+  selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
+  sharedContentCacheName,
+  sharedContentKeyPrefix,
+  sharedContentMaxAgeMilliseconds,
   skipWaitingMessageType,
   type RequestDescriptor,
 } from '../src/service-worker/model/requestStrategy'
+import * as sharedContentInbox from '../src/shared/lib/pwa/sharedContentInbox'
 
 const origin = 'https://app.mukuroji.example'
 
@@ -103,5 +110,57 @@ describe('isSkipWaitingMessage', () => {
     expect(isSkipWaitingMessage({ type: 'other' })).toBe(false)
     expect(isSkipWaitingMessage(skipWaitingMessageType)).toBe(false)
     expect(isSkipWaitingMessage(null)).toBe(false)
+  })
+})
+
+describe('share target', () => {
+  test('handles only a same-origin POST /share navigation', () => {
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share`, mode: 'navigate' }), origin))
+      .toBe('share-target')
+    expect(selectRequestStrategy(request({ method: 'post', url: `${origin}/share`, mode: 'navigate' }), origin))
+      .toBe('share-target')
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share`, mode: 'cors' }), origin))
+      .toBe('passthrough')
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share?x=1`, mode: 'navigate' }), origin))
+      .toBe('passthrough')
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}/share/x`, mode: 'navigate' }), origin))
+      .toBe('passthrough')
+    expect(selectRequestStrategy(request({ method: 'POST', url: 'https://evil.example/share', mode: 'navigate' }), origin))
+      .toBe('passthrough')
+    // A GET /share navigation is the confirmation form itself.
+    expect(selectRequestStrategy(request({ url: `${origin}/share?shared=abc`, mode: 'navigate' }), origin))
+      .toBe('network-first-navigation')
+  })
+
+  test('reads only text fields and bounds their length', () => {
+    const values = new Map<string, unknown>([
+      ['title', 'Bug'],
+      ['text', 'x'.repeat(20_000)],
+      ['url', new Blob(['not text'])],
+    ])
+    const fields = readSharedFormFields((name) => values.get(name) ?? null)
+    expect(fields.title).toBe('Bug')
+    expect(fields.text.length).toBe(16_000)
+    expect(fields.url).toBe('')
+  })
+
+  test('passes only the opaque ID to the confirmation form', () => {
+    expect(createSharedContentRedirectPath('a-b')).toBe('/share?shared=a-b')
+  })
+
+  test('expires unread content after the retention window', () => {
+    const now = 10 * sharedContentMaxAgeMilliseconds
+    expect(selectExpiredSharedContent([
+      { key: 'fresh', receivedAt: now - 1_000 },
+      { key: 'edge', receivedAt: now - sharedContentMaxAgeMilliseconds },
+      { key: 'old', receivedAt: now - sharedContentMaxAgeMilliseconds - 1 },
+      { key: 'unknown', receivedAt: undefined },
+    ], now)).toEqual(['old', 'unknown'])
+  })
+
+  test('shares the cache name and key prefix with the app', () => {
+    expect(sharedContentInbox.sharedContentCacheName).toBe(sharedContentCacheName)
+    expect(sharedContentInbox.sharedContentKeyPrefix).toBe(sharedContentKeyPrefix)
+    expect(sharedContentCacheName.startsWith('mukuroji-')).toBe(true)
   })
 })

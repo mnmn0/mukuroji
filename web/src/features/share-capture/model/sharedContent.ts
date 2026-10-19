@@ -1,4 +1,5 @@
 import type { CreateManualTriageEntryInput } from '@mukuroji/contracts'
+import type { StoredSharedFields } from '../../../shared/lib/pwa/sharedContentInbox'
 
 /** Longest title the manual handoff API accepts. */
 export const sharedTitleMaxLength = 500
@@ -40,21 +41,22 @@ export type ShareHandoffIdentity = {
 }
 
 /**
- * Reads the `title`, `text`, and `url` fields a share target receives.
+ * Prepares the `title`, `text`, and `url` fields a share target received for the form.
  *
  * Every value is treated as plain text. Control characters other than tabs and line breaks
  * are removed, and the result is cut to the API limits.
  *
- * @param searchParams - Query of the share target URL.
+ * @param fields - Shared fields; `undefined` when nothing was shared.
  * @returns Suggested title and body, empty when nothing was shared.
  */
-export function readSharedContent(searchParams: URLSearchParams): SharedContent {
-  const sharedTitle = toSingleLine(sanitize(searchParams.get('title')))
-  const text = sanitize(searchParams.get('text')).trim()
-  const url = toSingleLine(sanitize(searchParams.get('url')))
+export function readSharedContent(fields: StoredSharedFields | undefined): SharedContent {
+  const sharedTitle = toSingleLine(sanitize(fields?.title))
+  const text = sanitize(fields?.text).trim()
+  const url = toSingleLine(sanitize(fields?.url))
   const firstTextLine = text.split('\n').map((line) => line.trim()).find(Boolean) ?? ''
   const title = sharedTitle || toSingleLine(firstTextLine) || url
-  const body = [text, url && !text.includes(url) ? url : '']
+  // Only an exact link token counts as already included; a longer URL that merely starts with it does not.
+  const body = [text, url && !text.split(/\s+/).includes(url) ? url : '']
     .filter(Boolean)
     .join('\n\n')
 
@@ -112,7 +114,7 @@ export function createShareHandoffInput(
  * @param value - Raw shared value.
  * @returns Sanitized text, empty for a missing value.
  */
-function sanitize(value: string | null): string {
+function sanitize(value: string | undefined): string {
   if (!value) return ''
   // eslint-disable-next-line no-control-regex
   return value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
