@@ -305,6 +305,7 @@ function bindApiRuntimeConfiguration(
     focusTable,
     planningTable,
     projectDirectoryTable,
+    pushSubscriptionsTable,
     realtimeSessionsTable,
     requestIntakeTable,
     teamIssueEventsTable,
@@ -337,6 +338,7 @@ function bindApiRuntimeConfiguration(
     fileUploadUrlTtlSeconds,
     requestRateLimitPerHour,
     requestTokenHashSecret,
+    webPushVapidPublicKey,
     systemAdminGroups,
     apiAllowedOrigins,
     workspaceAuditPseudonymKey,
@@ -490,6 +492,8 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      PUSH_SUBSCRIPTIONS_TABLE_NAME: pushSubscriptionsTable.tableName,
+      WEB_PUSH_VAPID_PUBLIC_KEY: webPushVapidPublicKey.valueAsString,
       FOCUS_TABLE_NAME: focusTable.tableName,
       CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
@@ -576,6 +580,7 @@ export function buildApiRuntime(
     enterpriseIdentityTable,
     tenantAdministrationTable,
     notificationsTable,
+    pushSubscriptionsTable,
     focusTable,
     planningTable,
     projectDirectoryTable,
@@ -708,6 +713,7 @@ export function buildApiRuntime(
   customersTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
+  pushSubscriptionsTable.grants.readWriteData(apiFunction);
   apiFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',

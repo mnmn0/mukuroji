@@ -1,8 +1,9 @@
 # Installable PWA
 
 mukuroji の Web は manifest と service worker を持ち、mobile / desktop へ install できます。
-この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push、share target、
-offline read cache、encrypted mutation queue は Issue #38 の後続範囲です。
+この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push の配信、share target、
+offline read cache、encrypted mutation queue は Issue #38 の後続範囲です。push の購読登録と service worker での表示は
+[Notifications](./notifications.md#web-push-の購読) を参照してください。
 
 ## 現在の範囲
 

@@ -67,6 +67,8 @@ export type DataStoreResources = {
   readonly workspaceSearchTable: dynamodb.Table;
   /** Durable collaboration notification table. */
   readonly notificationsTable: dynamodb.Table;
+  /** Web Push device subscriptions and exclusive endpoint ownership records. */
+  readonly pushSubscriptionsTable: dynamodb.Table;
   /** User and Team Focus queue preferences and snooze state. */
   readonly focusTable: dynamodb.Table;
   /** Realtime connection and one-time ticket table. */
@@ -483,6 +485,16 @@ export function buildDataStores(
     timeToLiveAttribute: 'expiresAt',
   });
 
+  const pushSubscriptionsTable = new dynamodb.Table(stack, 'PushSubscriptionsTable', {
+    partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    timeToLiveAttribute: 'expiresAt',
+  });
+
   notificationsTable.addGlobalSecondaryIndex({
     indexName: 'RecipientStatusIndex',
     partitionKey: { name: 'recipientStatusKey', type: dynamodb.AttributeType.STRING },
@@ -563,6 +575,7 @@ export function buildDataStores(
     collaborationTable,
     workspaceSearchTable,
     notificationsTable,
+    pushSubscriptionsTable,
     focusTable,
     realtimeSessionsTable,
     fileProofingTable,

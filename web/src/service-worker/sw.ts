@@ -10,6 +10,12 @@ import {
   selectRequestStrategy,
   selectStaleCaches,
 } from './model/requestStrategy'
+import {
+  notificationIconPath,
+  readNotificationClickPath,
+  readPushNotification,
+  selectNotificationClient,
+} from './model/pushNotification'
 
 /**
  * Service worker global scope; the module-level declaration narrows the generic worker `self`.
@@ -72,6 +78,60 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(fetchOfflineResource(request))
   }
 })
+
+self.addEventListener('push', (event) => {
+  event.waitUntil(showPushNotification(event.data))
+})
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  event.waitUntil(openNotificationTarget(event.notification.data))
+})
+
+/**
+ * Shows a push message as a notification. A message without a usable JSON body still shows a
+ * generic notification, because browsers require one for every push.
+ *
+ * @param data - Push message data, if any.
+ * @returns A promise that settles once the notification is shown.
+ */
+async function showPushNotification(data: PushMessageData | null): Promise<void> {
+  let message: unknown
+  try {
+    message = data?.json()
+  } catch {
+    message = undefined
+  }
+  const notification = readPushNotification(message)
+  await self.registration.showNotification(notification.title, {
+    icon: notificationIconPath,
+    data: { path: notification.path },
+    ...(notification.body ? { body: notification.body } : {}),
+    ...(notification.tag ? { tag: notification.tag } : {}),
+  })
+}
+
+/**
+ * Opens a clicked notification's target in an existing app window, or in a new one.
+ *
+ * @param data - Data stored on the notification.
+ * @returns A promise that settles once a window shows the target.
+ */
+async function openNotificationTarget(data: unknown): Promise<void> {
+  const url = new URL(readNotificationClickPath(data), self.location.origin).href
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  const client = selectNotificationClient(windows, self.location.origin)
+  if (client) {
+    try {
+      const focused = await client.focus()
+      await focused.navigate(url)
+      return
+    } catch {
+      // Uncontrolled or closing windows cannot navigate; open a new one instead.
+    }
+  }
+  await self.clients.openWindow(url)
+}
 
 /**
  * Stores the offline fallback page and the files it loads, fetched directly from the network.

@@ -424,7 +424,7 @@ export const workspaceMessages = {
   'workspace.settings.notifications.channel.slackDescription':
     '同じ通知を自分のSlack送信先にも配信します。管理者による接続設定が必要です。',
   'workspace.settings.notifications.channel.pushDescription':
-    'PWA の push 購読接続後に使う受信設定を保存します。',
+    '下の「このデバイスのプッシュ通知」で登録したデバイスに、プッシュ配信の開始後に届きます。',
   'workspace.settings.notifications.frequencyTitle': '配信頻度',
   'workspace.settings.notifications.frequencyDescription':
     '即時配信またはまとめて受け取る間隔を選びます。',
@@ -446,6 +446,26 @@ export const workspaceMessages = {
   'workspace.settings.notifications.saveHint': '変更は保存するまで配信へ反映されません。',
   'workspace.settings.notifications.saving': '保存中',
   'workspace.settings.notifications.save': '変更を保存',
+  'workspace.settings.notifications.pushDevice.title': 'このデバイスのプッシュ通知',
+  'workspace.settings.notifications.pushDevice.description':
+    'このブラウザまたはインストールしたアプリを購読として登録します。配信チャネルの「プッシュ」もオンにしてください。プッシュ配信の開始後にこのデバイスへ届きます。',
+  'workspace.settings.notifications.pushDevice.loading': 'このデバイスの状態を確認しています。',
+  'workspace.settings.notifications.pushDevice.unsupported':
+    'このブラウザはプッシュ通知に対応していません。対応ブラウザ、またはホーム画面に追加したアプリで開いてください。',
+  'workspace.settings.notifications.pushDevice.disabled': 'この環境ではプッシュ通知が有効になっていません。',
+  'workspace.settings.notifications.pushDevice.blocked':
+    '通知がブロックされています。ブラウザまたは端末の設定で、このサイトの通知を許可してください。',
+  'workspace.settings.notifications.pushDevice.loadError': 'プッシュ通知の状態を読み込めませんでした。',
+  'workspace.settings.notifications.pushDevice.off': 'このデバイスでは受け取っていません。',
+  'workspace.settings.notifications.pushDevice.on': 'このデバイスで受け取ります。',
+  'workspace.settings.notifications.pushDevice.enable': 'このデバイスで受け取る',
+  'workspace.settings.notifications.pushDevice.disable': 'このデバイスでの受信を停止',
+  'workspace.settings.notifications.pushDevice.pending': '処理中',
+  'workspace.settings.notifications.pushDevice.result.enabled': 'このデバイスを登録しました。',
+  'workspace.settings.notifications.pushDevice.result.disabled': 'このデバイスの登録を解除しました。',
+  'workspace.settings.notifications.pushDevice.result.dismissed': '通知の許可が選ばれなかったため、登録していません。',
+  'workspace.settings.notifications.pushDevice.result.denied': '通知が拒否されたため、登録していません。',
+  'workspace.settings.notifications.pushDevice.result.failed': 'このデバイスの設定を変更できませんでした。もう一度お試しください。',
   'workspace.settings.permissionTitle': '権限セット',
   'workspace.settings.permissionDescription':
     'チーム別の編集、承認、閲覧権限を管理します。',

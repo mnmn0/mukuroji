@@ -44,6 +44,9 @@ PATCH /api/notifications/{notificationId}
 POST /api/notifications/mark-all-read
 GET  /api/notification-preferences
 PUT  /api/notification-preferences
+GET  /api/push/config
+PUT  /api/push-subscriptions
+DELETE /api/push-subscriptions
 ```
 
 PATCH action は `mark-read`、`mark-unread`、`archive`、`restore`、`snooze` です。`snooze` は future ISO 8601 timestamp を要求します。
@@ -78,7 +81,33 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - frequency: instant、hourly、daily、weekly
 - quiet hours: enabled、start、end、IANA time zone
 
-in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport と subscription は installable PWA の実装範囲で接続します。
+in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+
+## Web Push の購読
+
+設定画面の **このデバイスのプッシュ通知** で、ブラウザまたはインストールしたアプリを購読として登録します。
+配信チャネルの **プッシュ** は member 単位の受信設定、購読はデバイス単位の宛先です。
+
+- `GET /api/push/config` は `{ enabled, vapidPublicKey? }` を返します。runtime 設定 `WEB_PUSH_VAPID_PUBLIC_KEY`
+  （CloudFormation parameter `WebPushVapidPublicKey`）が空または不正な場合は `enabled: false` で、登録は `409 PushNotificationsDisabled` です。
+- `PUT /api/push-subscriptions` は browser の `PushSubscription.toJSON()` と同じ `{ endpoint, keys: { p256dh, auth } }` だけを受け付けます。
+  member や Workspace は request に含めず、認証済み member に保存します。service account など人以外は `403` です。
+- endpoint は HTTPS かつ既知の push service（FCM、Mozilla、Apple、Windows）の host だけを許可し、認証情報・port・正規化で変わる URL を拒否します。
+  配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵、`auth` は 16 byte で、どちらも padding なし base64url です。
+- 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`）と endpoint の所有者
+  （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
+  共有端末で別の人の通知が届き続けることはありません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。購読は 180 日で TTL 失効し、
+  購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
+- `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合だけ endpoint の所有者も解放します。
+  明示的なサインアウトでも、破棄前の token でこの削除を送ってから browser の購読を解除します。期限切れによるサインアウトでは解除しません。
+- 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読は解除して作り直し、
+  server が登録を拒否した場合はその場で作った購読を解除します。停止では server の削除が失敗しても browser の購読を解除し、
+  失効した endpoint は配信 worker が push service の応答から削除します。
+
+Service worker は `push` を受けると payload（`PushNotificationPayload`: `title`、`body`、`path`、`tag`）を通知として表示します。
+payload がない・壊れている場合も browser の要件どおり汎用の通知を表示します。`path` は app の deep link と同じ同一 origin path 判定を通ったものだけを使い、
+それ以外はインボックスを開きます。通知の click では、focus 中の app window を優先して再利用し、遷移できない場合は新しい window を開きます。
 
 ## Slack 配信
 

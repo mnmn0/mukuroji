@@ -228,14 +228,16 @@ function parseApiRuntimeConfigurationGroup(
       throw createInvalidApiRuntimeEnvironmentError()
     }
 
-    const optionalSsoValue = kind === 'value' && [
+    // Optional features are disabled by an empty value, which CloudFormation encodes as ''.
+    const optionalValue = kind === 'value' && [
       'COGNITO_SSO_CLIENT_ID',
       'COGNITO_HOSTED_UI_DOMAIN',
       'COGNITO_SSO_REDIRECT_URI',
       'COGNITO_ENTERPRISE_IDP_NAME',
       'ENTERPRISE_SSO_STATE_SECRET',
+      'WEB_PUSH_VAPID_PUBLIC_KEY',
     ].includes(name)
-    const decodedValue = optionalSsoValue && encodedValue === ''
+    const decodedValue = optionalValue && encodedValue === ''
       ? ''
       : decodeApiRuntimeConfigurationValue(encodedValue)
     configuredNames.add(name)

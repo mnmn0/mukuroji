@@ -33,6 +33,7 @@ import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession, hasStoredAuthSession, type AuthSession } from '../../auth/session'
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
+import { disconnectPushDeviceOnSignOut, refreshPushDevice } from '../../notifications/mutations/usePushDevice'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
 import {
   clearAppBadgeAndNotifyTabs,
@@ -449,11 +450,18 @@ export function WorkspaceRouteProvider() {
     ) ||
     Boolean(user && isProjectDirectoryLoading)
 
+  const signedInAccessToken = user ? session?.accessToken : undefined
+  useEffect(() => {
+    if (signedInAccessToken) void refreshPushDevice(signedInAccessToken)
+  }, [signedInAccessToken])
+
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {
+    // Remove this device's push registration with the token that is about to be discarded.
+    void disconnectPushDeviceOnSignOut(session?.accessToken)
     clearAuthSession()
     navigate('/', { replace: true })
-  }, [navigate])
+  }, [navigate, session?.accessToken])
 
   /** Applies the navigation and storage policy of a resolved enterprise session action. */
   const handleSessionErrorAction = useCallback((action: EnterpriseSessionErrorAction) => {

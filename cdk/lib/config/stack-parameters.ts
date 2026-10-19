@@ -131,6 +131,8 @@ export interface StackParameters {
   readonly aiBedrockDestinationModelArnsConfigured: cdk.CfnCondition;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
+  /** Web Push VAPID public key; empty disables push subscriptions. */
+  readonly webPushVapidPublicKey: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks. */
   readonly requestEmailWebhookSecret: cdk.CfnParameter;
   /** Secret used to hash public request and reply tokens. */
@@ -502,6 +504,17 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     maxValue: 10_000,
     description: 'Maximum anonymous request submissions accepted per capability and hour.',
   });
+  const webPushVapidPublicKey = new cdk.CfnParameter(stack, 'WebPushVapidPublicKey', {
+    type: 'String',
+    default: '',
+    minLength: 0,
+    maxLength: 87,
+    allowedPattern: '^(?:|B[A-Za-z0-9_-]{86})$',
+    constraintDescription:
+      'WebPushVapidPublicKey must be empty or an unpadded base64url uncompressed P-256 public key.',
+    description:
+      'VAPID application server public key browsers use to subscribe to Web Push. Empty disables push subscriptions.',
+  });
   const requestEmailWebhookSecret = new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
     type: 'String',
     minLength: 32,
@@ -698,6 +711,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     aiBedrockDestinationModelArns,
     aiBedrockDestinationModelArnsConfigured,
     requestRateLimitPerHour,
+    webPushVapidPublicKey,
     requestEmailWebhookSecret,
     requestTokenHashSecret,
     enterpriseIdentityTokenHashSecret,
