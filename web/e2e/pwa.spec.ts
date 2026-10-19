@@ -85,10 +85,11 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   expect(manifest?.startUrl).toBe('/home')
   expect(manifest?.scope).toBe('/')
   expect(manifest?.display).toBe('standalone')
-  // Shared content opens the confirmation form; nothing is posted until the person sends it.
+  // The worker keeps shared content out of the URL and opens the confirmation form.
   expect(manifest?.shareTarget).toEqual({
     action: '/share',
-    method: 'GET',
+    method: 'POST',
+    enctype: 'multipart/form-data',
     params: { title: 'title', text: 'text', url: 'url' },
   })
   expect(manifest?.icons.map((icon) => icon.sizes)).toEqual(expect.arrayContaining(['192x192', '512x512']))
@@ -169,4 +170,40 @@ test('service workerはページやAPI応答を保存せず、静的なbuild成�
   for (const path of cachedPaths) {
     expect(offlineShellPaths.includes(path) || path.startsWith('/assets/'), path).toBe(true)
   }
+})
+
+test('共有された内容はURLに載せずworkerが端末内に保持し、確認画面へIDだけを渡す', async ({ page }) => {
+  await page.goto('/support')
+  await waitForServiceWorkerControl(page)
+
+  // Submit the same multipart form the share sheet posts to the manifest share target.
+  await page.evaluate(() => {
+    const form = document.createElement('form')
+    form.method = 'POST'
+    form.action = '/share'
+    form.enctype = 'multipart/form-data'
+    for (const [name, value] of [['title', 'Secret bug'], ['text', 'confidential details'], ['url', 'https://example.com/x']]) {
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = name
+      input.value = value
+      form.append(input)
+    }
+    document.body.append(form)
+    form.submit()
+  })
+
+  // Signed out, the form sends the person to sign-in and keeps only the opaque ID for the return.
+  await page.waitForURL((url) => url.pathname === '/' && (url.searchParams.get('returnTo') ?? '').startsWith('/share?shared='))
+  const returnTo = new URL(page.url()).searchParams.get('returnTo') ?? ''
+  expect(returnTo).toMatch(/^\/share\?shared=[0-9a-f-]{36}$/)
+  expect(page.url()).not.toContain('confidential')
+  expect(page.url()).not.toContain('Secret')
+
+  const stored = await page.evaluate(async (id) => {
+    const cache = await caches.open('mukuroji-share-inbox-v1')
+    const response = await cache.match(`/__mukuroji/share/${id}`)
+    return response ? await response.json() : null
+  }, new URLSearchParams(returnTo.split('?')[1]).get('shared'))
+  expect(stored).toMatchObject({ title: 'Secret bug', text: 'confidential details', url: 'https://example.com/x' })
 })

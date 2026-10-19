@@ -4,7 +4,7 @@ import { createTranslator } from '../../../shared/i18n/i18n'
 import { ShareCaptureForm } from './ShareCaptureForm'
 
 const meta = {
-  title: 'Features/Share Capture Form',
+  title: 'Application/Triage/Share Capture Form',
   component: ShareCaptureForm,
   args: {
     initialContent: {
@@ -49,4 +49,24 @@ export const Failed: Story = {
 /** The person has no Team to send to. */
 export const NoTeams: Story = {
   args: { teams: [] },
+}
+
+/** The previous send could not be confirmed, so only the same content can be sent again. */
+export const Uncertain: Story = {
+  args: {
+    errorMessage: '送信できたか確認できませんでした。重複を防ぐため、同じ内容のまま再送してください。',
+    lockedSend: {
+      teamId: 'team-ops',
+      draft: { title: 'Checkout fails on Safari', body: 'Steps:\n1. Open the cart' },
+    },
+  },
+}
+
+/** Guest accounts cannot send to Triage, but can still leave the flow. */
+export const Guest: Story = {
+  args: { unavailableMessage: 'ゲストアカウントでは Triage へ送れません。' },
+  play: async ({ args, canvasElement }) => {
+    await userEvent.click(within(canvasElement).getByRole('button', { name: 'キャンセル' }))
+    await expect(args.onCancel).toHaveBeenCalledOnce()
+  },
 }
