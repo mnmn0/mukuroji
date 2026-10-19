@@ -104,7 +104,7 @@ describe('readSharedContent', () => {
 
 describe('createShareHandoffInput', () => {
   test('builds a bounded handoff with retry-stable identity', () => {
-    const identity = createShareHandoffIdentity(new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
+    const identity = createShareHandoffIdentity('', new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
     expect(identity).toEqual({
       sourceId: 'share:uuid-1',
       retentionExpiresAt: '2026-11-18T00:00:00.000Z',
@@ -119,8 +119,15 @@ describe('createShareHandoffInput', () => {
     })
   })
 
+  test('uses the stored share ID as the source in every tab and rounds retention to the day', () => {
+    const morning = createShareHandoffIdentity('0f8fad5b', new Date('2026-10-19T01:00:00.000Z'), () => 'uuid-a')
+    const evening = createShareHandoffIdentity('0f8fad5b', new Date('2026-10-19T23:00:00.000Z'), () => 'uuid-b')
+    expect(morning).toEqual(evening)
+    expect(morning.sourceId).toBe('share:0f8fad5b')
+  })
+
   test('falls back to a requester name the API accepts', () => {
-    const identity = createShareHandoffIdentity(new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
+    const identity = createShareHandoffIdentity('', new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
     expect(createShareHandoffInput({ title: 'Bug', body: '' }, identity, ' ').requesterDisplayName).toBe('mukuroji')
   })
 })
@@ -133,7 +140,7 @@ describe('createTriageManualHandoff', () => {
       requests.push(new Request(new URL(String(input), 'https://mukuroji.test'), init))
       return new Response(JSON.stringify({ entry, replayed: false }), { status: 201 })
     }
-    const identity = createShareHandoffIdentity(new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
+    const identity = createShareHandoffIdentity('', new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
     const input = createShareHandoffInput({ title: 'Bug', body: 'Details' }, identity, 'Ada')
 
     const receipt = await createTriageManualHandoff('team/a', input, 'token-1', {
@@ -153,7 +160,7 @@ describe('createTriageManualHandoff', () => {
 
   test('surfaces the API error code', async () => {
     globalThis.fetch = async () => new Response(JSON.stringify({ code: 'Forbidden', message: 'No access' }), { status: 403 })
-    const identity = createShareHandoffIdentity(new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
+    const identity = createShareHandoffIdentity('', new Date('2026-10-19T00:00:00.000Z'), () => 'uuid-1')
     const input = createShareHandoffInput({ title: 'Bug', body: '' }, identity, 'Ada')
 
     await expect(createTriageManualHandoff('team-a', input, 'token-1', {
@@ -382,8 +389,8 @@ describe('attempted share handoffs', () => {
 
   test('restores the locked send of the same share after a reload', () => {
     const { storage } = createSessionStorage({
-      'mukuroji.shareHandoff:share-1': JSON.stringify(storedAttempt),
-      'mukuroji.shareHandoff:broken': '{',
+      'mukuroji.shareHandoff:ws-1%2Fada:share-1': JSON.stringify(storedAttempt),
+      'mukuroji.shareHandoff:ws-1%2Fada:broken': '{',
     })
     const seen: Record<string, unknown> = {}
 
@@ -393,21 +400,53 @@ describe('attempted share handoffs', () => {
      * @param props - Share key.
      * @returns Nothing visible.
      */
-    function Probe({ handoffKey }: { readonly handoffKey: string }) {
+    function Probe({ handoffKey, accountKey = 'ws-1/ada' }: { readonly handoffKey: string, readonly accountKey?: string }) {
       const controller = useShareHandoff({
         guardEnterpriseSession: (request) => request,
         requesterDisplayName: 'Ada',
         handoffKey,
+        accountKey,
         storage,
       })
-      seen[handoffKey] = { locked: controller.locked, failure: controller.failure }
+      seen[`${accountKey}:${handoffKey}`] = { locked: controller.locked, failure: controller.failure }
+      if (handoffKey === 'share-1' && accountKey === 'ws-1/ada') seen.controller = controller
       return null
     }
 
-    renderToStaticMarkup(<><Probe handoffKey="share-1" /><Probe handoffKey="share-2" /><Probe handoffKey="broken" /></>)
-    expect(seen['share-1']).toEqual({ locked: storedAttempt, failure: 'uncertain' })
-    expect(seen['share-2']).toEqual({ locked: undefined, failure: undefined })
-    expect(seen.broken).toEqual({ locked: undefined, failure: undefined })
+    renderToStaticMarkup(<><Probe handoffKey="share-1" /><Probe handoffKey="share-2" /><Probe handoffKey="broken" /><Probe accountKey="ws-2/bob" handoffKey="share-1" /></>)
+    expect(seen['ws-1/ada:share-1']).toEqual({ locked: storedAttempt, failure: 'uncertain' })
+    // Another account signed in on the same tab never restores the first account's send.
+    expect(seen['ws-2/bob:share-1']).toEqual({ locked: undefined, failure: undefined })
+    expect(seen['ws-1/ada:share-2']).toEqual({ locked: undefined, failure: undefined })
+    expect(seen['ws-1/ada:broken']).toEqual({ locked: undefined, failure: undefined })
+  })
+
+  test('abandoning a share deletes its stored attempt', () => {
+    const { storage, values } = createSessionStorage({
+      'mukuroji.shareHandoff:ws-1%2Fada:share-1': JSON.stringify(storedAttempt),
+    })
+    let controller: ReturnType<typeof useShareHandoff> | undefined
+
+    /**
+     * Captures the hook controller.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      controller = useShareHandoff({
+        guardEnterpriseSession: (request) => request,
+        requesterDisplayName: 'Ada',
+        handoffKey: 'share-1',
+        accountKey: 'ws-1/ada',
+        storage,
+      })
+      return null
+    }
+
+    renderToStaticMarkup(<Probe />)
+    expect(controller?.locked).toEqual(storedAttempt)
+    controller?.abandon()
+    expect(values.size).toBe(0)
   })
 
   test('refuses a first send when its replay state cannot be stored', async () => {
@@ -434,6 +473,7 @@ describe('attempted share handoffs', () => {
         guardEnterpriseSession: (request) => request,
         requesterDisplayName: 'Ada',
         handoffKey: 'share-1',
+        accountKey: 'ws-1/ada',
         storage: failing,
       })
       return null

@@ -105,6 +105,7 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const [content, setContent] = useState<SharedContent>()
   const [loadFailed, setLoadFailed] = useState(false)
+  const [missing, setMissing] = useState(false)
   const [loadAttempt, setLoadAttempt] = useState(0)
   const mountedRef = useRef(true)
   const access = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
@@ -113,6 +114,7 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
     guardEnterpriseSession: workspace.guardEnterpriseSession,
     requesterDisplayName: workspace.userLabel,
     handoffKey: sharedId,
+    accountKey: `${workspace.workspaceId ?? ''}/${workspace.userKey ?? ''}`,
   })
   const teams = useMemo(
     () => workspace.teams.map((team) => ({ id: team.id, name: team.name })),
@@ -124,6 +126,8 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const loadErrorKey: MessageKey | undefined = loadFailed && !content
     ? 'triage.share.loadError'
     : accessFailed ? 'triage.share.accessError' : undefined
+  // A locked attempt keeps its own copy of the content, so it can still be resent.
+  const isMissing = missing && !handoff.locked
 
   useEffect(() => {
     mountedRef.current = true
@@ -136,6 +140,9 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
       (fields) => {
         if (!active) return
         setLoadFailed(false)
+        // A share ID whose content is gone (expired, already sent, or never stored) must not
+        // become a blank form that looks like the share.
+        setMissing(sharedId !== '' && fields === undefined)
         setContent(readSharedContent(fields))
       },
       () => {
@@ -146,8 +153,9 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
     return () => { active = false }
   }, [loadAttempt, sharedId])
 
-  /** Leaves the form and deletes the stored content. */
+  /** Leaves the form, ending the handoff and deleting the stored content and attempt. */
   function leave() {
+    handoff.abandon()
     void discardStoredSharedContent(sharedId)
     void navigate('/home', { replace: true })
   }
@@ -178,7 +186,17 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
             </div>
           </section>
         ) : null}
-        {content && !loadErrorKey ? (
+        {isMissing && !loadErrorKey ? (
+          <section aria-label={t('triage.share.title')} className="workbench-panel grid gap-4 p-5" data-testid="share-capture">
+            <p className="text-sm text-[var(--workbench-text)]" role="alert">{t('triage.share.missing')}</p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button className="workbench-button-secondary min-h-11 px-4" onClick={leave} type="button">
+                {t('triage.share.cancel')}
+              </button>
+            </div>
+          </section>
+        ) : null}
+        {content && !loadErrorKey && !isMissing ? (
           <ShareCaptureForm
             errorMessage={handoff.failure
               ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])
