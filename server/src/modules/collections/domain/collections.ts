@@ -2,6 +2,7 @@ import {
   COLLECTION_DESCRIPTION_MAX_LENGTH,
   COLLECTION_ITEM_LIMIT,
   COLLECTION_NAME_MAX_LENGTH,
+  COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH,
   type CreateWorkItemCollectionInput,
   type UpdateWorkItemCollectionInput,
   type WorkItemCollection,
@@ -70,9 +71,6 @@ export function isCollectionCreateFingerprint(value: unknown): value is string {
 /** Pattern for server-generated Collection identifiers. */
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 
-/** Maximum length of a canonical Team or Work Item identifier, matching Planning input rules. */
-const WORK_ITEM_REFERENCE_IDENTIFIER_MAX_LENGTH = 256
-
 /**
  * Checks whether a value is a safe Collection identifier.
  *
@@ -108,7 +106,7 @@ export function readCollectionIdentifier(value: string | undefined, code: string
 export function isWorkItemReferenceIdentifier(value: unknown): value is string {
   return typeof value === 'string' &&
     value.length > 0 &&
-    value.length <= WORK_ITEM_REFERENCE_IDENTIFIER_MAX_LENGTH &&
+    value.length <= COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH &&
     value === value.trim() &&
     !hasControlCharacter(value)
 }

@@ -5,6 +5,7 @@ import { AuditEventIdempotencyConflictError, type AuditEventQuery, type AuditEve
 import {
   createAuditExportService,
   type AuditExportJob,
+  type AuditExportQueueTarget,
   type AuditExportStore,
 } from '../../audit-export'
 
@@ -56,12 +57,14 @@ function createMemoryStore(): AuditExportStore {
  * Configures the app with an in-memory export service and audit writer.
  *
  * @param workspaceRole - Optional Workspace role of the caller.
- * @returns Recorded access events, queued export IDs, and the service.
+ * @param readRecordedEvent - Returns the request event the audit store already holds, if any.
+ * @returns Recorded access events, queued export IDs and targets, and the service.
  */
 function configureExports(workspaceRole?: 'member', readRecordedEvent: () => AuditEventV1 | undefined = () => undefined) {
   configureFakeProjectClients(true, workspaceRole ? { workspaceRole } : {})
   const accessEvents: AuditEventV1[] = []
   const queued: string[] = []
+  const targets: AuditExportQueueTarget[] = []
   const event = createFakeAuditEvent()
   const auditEvents = {
     async putEvent(accessEvent: AuditEventV1) {
@@ -77,12 +80,17 @@ function configureExports(workspaceRole?: 'member', readRecordedEvent: () => Aud
   const service = createAuditExportService({
     settleSeconds: 0,
     store: createMemoryStore(),
-    queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
+    queue: {
+      async enqueue(target) {
+        queued.push(target.exportId)
+        targets.push(target)
+      },
+    },
     readEvents: (query) => auditEvents.query(query),
     countEvents: async () => ({ count: 1 }),
   })
   setTestAppDependencies({ auditEvents, auditExports: service })
-  return { accessEvents, queued, service }
+  return { accessEvents, queued, targets, service }
 }
 
 /**
@@ -133,12 +141,21 @@ test('uses the persisted request time after a concurrent first request and rejec
 
   // A concurrent first request wrote the receipt a minute earlier; the pre-read missed it and
   // the writer accepted this request as a duplicate. The job snapshot uses the persisted time.
-  const earlier = { ...recorded, occurredAt: new Date(Date.parse(recorded.occurredAt) - 60_000).toISOString() }
+  const earlier = {
+    ...recorded,
+    occurredAt: new Date(Date.parse(recorded.occurredAt) - 60_000).toISOString(),
+    correlationId: 'corr-first-request',
+  }
   let reads = 0
-  configureExports(undefined, () => (reads++ === 0 ? undefined : earlier))
+  const second = configureExports(undefined, () => (reads++ === 0 ? undefined : earlier))
   const concurrent = await request()
   expect(concurrent.status).toBe(202)
-  expect((await concurrent.json()).export.snapshotAt).toBe(earlier.occurredAt)
+  const concurrentJob = (await concurrent.json()).export
+  expect(concurrentJob.snapshotAt).toBe(earlier.occurredAt)
+  // Step logs trace back to the persisted request, so its correlation ID is kept as well.
+  expect((await second.service.getExport('user#demo@example.com', concurrentJob.exportId)).correlationId)
+    .toBe('corr-first-request')
+  expect(second.targets.map((target) => target.correlationId)).toEqual(['corr-first-request'])
 
   // A receipt whose job was never created cannot start one after the processing deadline.
   const stale = { ...recorded, occurredAt: new Date(Date.now() - 25 * 3_600_000).toISOString() }
@@ -172,7 +189,8 @@ test('requests, reports, and downloads an asynchronous audit export', async () =
   const notReady = await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: adminHeaders() })
   expect(notReady.status).toBe(409)
 
-  expect(await service.processExport('user#demo@example.com', job.exportId)).toBe('completed')
+  const stored = await service.getExport('user#demo@example.com', job.exportId)
+  expect(await service.processExport('user#demo@example.com', job.exportId, stored.correlationId)).toBe('completed')
 
   const status = await app.request(`/api/audit/exports/${job.exportId}`, { headers: adminHeaders() })
   expect((await status.json()).export).toMatchObject({ status: 'completed', eventCount: 1, partCount: 1 })
@@ -354,13 +372,16 @@ test('pages download links for exports with many parts', async () => {
   }
   expect(accessEvents.at(-1)).toMatchObject({ metadata: { exportId: job.exportId, fromPart: 100, partCount: 50 } })
 
-  // One client key reused while following nextPart is scoped per page.
+  // Every response signs new URLs, so a client key reused for the same page is audited each time.
   const keyed = { ...adminHeaders(), 'Idempotency-Key': 'download-key' }
+  const before = accessEvents.length
   const firstKeyed = await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: keyed })
-  const secondKeyed = await app.request(`/api/audit/exports/${job.exportId}/download?fromPart=100`, { headers: keyed })
+  const secondKeyed = await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: keyed })
   expect([firstKeyed.status, secondKeyed.status]).toEqual([200, 200])
-  const [firstEvent, secondEvent] = accessEvents.slice(-2)
-  expect(firstEvent?.idempotencyKeyHash).not.toBe(secondEvent?.idempotencyKeyHash)
+  const keyedEvents = accessEvents.slice(before)
+  expect(keyedEvents.map((event) => event.eventType)).toEqual(['audit.export-downloaded', 'audit.export-downloaded'])
+  expect(keyedEvents[0]?.eventId).not.toBe(keyedEvents[1]?.eventId)
+  expect(keyedEvents[0]?.idempotencyKeyHash).not.toBe(keyedEvents[1]?.idempotencyKeyHash)
 })
 
 test('reports asynchronous export as unavailable when it is not deployed', async () => {
@@ -435,6 +456,27 @@ test('rejects a key whose export expired and maps audit-writer conflicts to 409'
   rejectWrites = new TypeError('Audit event is malformed.')
   const corrupted = await request()
   expect(corrupted.status).toBeGreaterThanOrEqual(500)
+})
+
+test('carries the request correlation ID to the job and its queued step', async () => {
+  const { accessEvents, targets, service } = configureExports()
+  const created = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'correlated', 'X-Correlation-Id': 'corr-client-1' },
+    body: JSON.stringify({ filters: {} }),
+  })
+  expect(created.status).toBe(202)
+  const { export: view } = await created.json()
+  // The middleware replaces client identifiers with a server correlation ID, which the
+  // response, the audit event, the job, and its queued step all share.
+  const correlationId = created.headers.get('X-Correlation-Id')
+  if (!correlationId) throw new Error('The response has no correlation ID.')
+  expect(correlationId).not.toBe('corr-client-1')
+  expect(accessEvents[0]?.correlationId).toBe(correlationId)
+  expect((await service.getExport('user#demo@example.com', view.exportId)).correlationId).toBe(correlationId)
+  expect(targets).toEqual([expect.objectContaining({ exportId: view.exportId, correlationId })])
+  // The public view does not expose internal tracing fields.
+  expect(view).not.toHaveProperty('correlationId')
 })
 
 test('shows the requester by member name instead of the login key', async () => {

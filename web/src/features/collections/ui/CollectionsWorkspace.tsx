@@ -1,4 +1,4 @@
-import type { WorkItemCollection, WorkItemCollectionEntry } from '@mukuroji/contracts'
+import { COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH, type WorkItemCollection, type WorkItemCollectionEntry } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import type { MessageKey } from '../../../shared/i18n/i18n'
@@ -302,7 +302,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
         <form className="flex flex-wrap items-end gap-2" onSubmit={search} role="search">
           <label className="grid min-w-[240px] flex-1 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
             {t('collections.add.search')}
-            <input className="workbench-input min-h-10 px-3" maxLength={200} onChange={(event) => setKeyword(event.target.value)} type="search" value={keyword} />
+            <input className="workbench-input min-h-10 px-3" maxLength={COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH} onChange={(event) => setKeyword(event.target.value)} type="search" value={keyword} />
           </label>
           <button className="workbench-button-secondary min-h-10 px-4" disabled={!keyword.trim()} type="submit">
             {t('collections.add.searchSubmit')}

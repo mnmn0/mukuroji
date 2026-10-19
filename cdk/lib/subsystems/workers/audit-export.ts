@@ -92,14 +92,11 @@ export function buildAuditExportWorker(
   }));
   // Without ListBucket, S3 answers a missing job.json with 403 instead of NoSuchKey, and a
   // step for an expired or closed job would retry into the DLQ instead of being skipped.
+  // The check S3 makes for a missing object carries no `s3:prefix`, so a prefix condition
+  // would deny it; the bucket holds only audit export objects, so no condition is needed.
   workerFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['s3:ListBucket'],
     resources: [auditExportBucket.bucketArn],
-    conditions: {
-      StringLike: {
-        's3:prefix': ['audit-exports/*'],
-      },
-    },
   }));
   // Steps stop for closing or closed tenants so exports cannot outlive tenant closure.
   workerFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -117,6 +114,20 @@ export function buildAuditExportWorker(
       statistic: 'Maximum',
     }),
     threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  // Surfaces a backlog well before queued jobs cross the 24-hour processing deadline. A step
+  // message is delayed by at most 900 s, so an hour-old message means real backlog.
+  new cloudwatch.Alarm(scope, 'AuditExportQueueAgeAlarm', {
+    alarmDescription: 'Detects audit export steps waiting in the queue for an hour.',
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: auditExportQueue.metricApproximateAgeOfOldestMessage({
+      period: cdk.Duration.minutes(5),
+      statistic: 'Maximum',
+    }),
+    threshold: cdk.Duration.hours(1).toSeconds(),
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
 }

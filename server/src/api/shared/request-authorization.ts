@@ -1391,7 +1391,11 @@ function shouldEvaluateEnterpriseProjectScopes(
   resource: EnterpriseAuthorizationResource,
 ) {
   if (resource.kind === 'project') return true
-  return /^\/api\/(?:analytics|approvals|bulk-operations|collections|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
+  // Collection metadata is Workspace-scoped; only candidate and item routes read Work Items.
+  if (/^\/api\/collections(?:\/|$)/u.test(path)) {
+    return /^\/api\/collections\/(?:candidates|[^/]+\/items)(?:\/|$)/u.test(path)
+  }
+  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }
 

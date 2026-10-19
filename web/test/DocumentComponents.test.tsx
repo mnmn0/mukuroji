@@ -8,6 +8,7 @@ import { DocumentTree } from '../src/documents/ui/DocumentTree'
 import { WhiteboardCanvas } from '../src/documents/ui/WhiteboardCanvas'
 import {
   documentCommentFixtures,
+  documentPresenceFixtures,
   documentRecordFixture,
   documentSummaryFixtures,
   editableDocumentCapabilities,
@@ -101,6 +102,43 @@ describe('Document components', () => {
     expect(html).toContain('aria-label="More actions"')
     expect(html).not.toContain('aria-label="Archive"')
     expect(html).not.toContain('>Export <!-- -->▾<')
+  })
+
+  test('keeps collaborator presence badges on a fixed light surface', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <DocumentScreen
+          actions={{
+            archiveDocument: async () => undefined,
+            exportDocument: async () => undefined,
+            logout: () => undefined,
+            restoreDocument: async () => undefined,
+            selectDocument: () => undefined,
+          }}
+          data={{
+            backlinks: [],
+            canCreateDocuments: false,
+            comments: [],
+            documents: documentSummaryFixtures,
+            presence: documentPresenceFixtures,
+            selectedDocument: documentRecordFixture,
+            shares: [],
+            teams: projectDirectoryFixtures,
+            versions: [],
+          }}
+          locale="en"
+          userInitial="D"
+          userLabel="demo@example.com"
+        />
+      </MemoryRouter>,
+    )
+    const badges = html.match(/<span class="[^"]*"[^>]*style="color:#[0-9a-f]{6}"[^>]*>/gu) ?? []
+
+    expect(badges.length).toBeGreaterThan(0)
+    for (const badge of badges) {
+      expect(badge).toContain('bg-paper-tint')
+      expect(badge).not.toContain('bg-tone-')
+    }
   })
 
   test('allows an active workspace member to create the first document', () => {
@@ -262,6 +300,42 @@ describe('Document components', () => {
     expect(html).toContain('aria-pressed="false"')
     expect(html).toContain('title="Multi-select"')
     expect(html).toContain('role="application"')
+  })
+
+  test('keeps whiteboard object labels dark on their light or user-chosen fills', () => {
+    if (whiteboardRecordFixture.kind !== 'whiteboard') {
+      throw new Error('Expected a whiteboard fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <WhiteboardCanvas content={whiteboardRecordFixture.whiteboard} t={t} />,
+    )
+    const labels = html.match(/<span class="whitespace-pre-wrap[^"]*"/gu) ?? []
+
+    expect(labels.length).toBeGreaterThan(0)
+    for (const label of labels) {
+      expect(label).toContain('text-paper-ink')
+      expect(label).not.toContain('text-fg-')
+    }
+  })
+
+  test('colors the whiteboard grid, frames, and connectors with theme-aware variables', () => {
+    if (whiteboardRecordFixture.kind !== 'whiteboard') {
+      throw new Error('Expected a whiteboard fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <WhiteboardCanvas content={whiteboardRecordFixture.whiteboard} t={t} />,
+    )
+    const svg = html.slice(html.indexOf('<svg'), html.indexOf('</svg>'))
+
+    expect(svg).toContain('fill:var(--workbench-whiteboard-grid)')
+    expect(svg).toContain('fill:var(--workbench-whiteboard-connector)')
+    expect(svg).toContain('stroke:var(--workbench-whiteboard-connector)')
+    expect(svg).toContain(
+      'style="fill:var(--workbench-whiteboard-frame-fill);stroke:var(--workbench-whiteboard-frame-stroke)"',
+    )
+    expect(svg).toContain('style="fill:var(--workbench-whiteboard-frame-label)"')
+    // Objects keep their own fills, so only the canvas chrome must avoid fixed hex colors.
+    expect(svg).not.toMatch(/fill="#(?:d9e1de|65716d|46524e|ffffff80)"/u)
   })
 })
 

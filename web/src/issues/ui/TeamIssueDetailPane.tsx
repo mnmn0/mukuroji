@@ -702,7 +702,7 @@ function IssueDetailContent({
                         <input
                           checked={checked}
                           className="mt-0.5"
-                          disabled={isIssueReadOnly || isAiSummaryOperationPending}
+                          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
                           form={editorFormId}
                           onChange={(event) => {
                             const nextIds = event.target.checked
@@ -727,7 +727,7 @@ function IssueDetailContent({
                   {t('tasks.detail.typeChange.invalidStatus')}
                   <select
                     className="workbench-input h-9 px-3"
-                    disabled={isIssueReadOnly || isAiSummaryOperationPending}
+                    disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
                     form={editorFormId}
                     name="typeChangeWorkflowStatusId"
                     onChange={(event) => setTypeChangeState((current) => ({
@@ -870,7 +870,7 @@ function IssueDetailContent({
         return (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('issues.create.description')}
@@ -888,7 +888,7 @@ function IssueDetailContent({
         return hasCustomFields ? (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <div className="workbench-panel-muted p-4">
               <WorkItemFieldsEditor
@@ -908,7 +908,7 @@ function IssueDetailContent({
         return (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('tasks.column.status')}

@@ -150,6 +150,8 @@ export type AuditExportJob = {
   readonly requestFingerprint: string
   /** Request time; events after it are never included. */
   readonly snapshotAt: string
+  /** Correlation ID of the recorded request, carried by every step message for log tracing. */
+  readonly correlationId: string
   /** Member who requested the export. */
   readonly requestedBy: {
     /** Workspace member key of the requester. */
@@ -281,17 +283,21 @@ export interface AuditExportStore {
 }
 
 /**
+ * Job fields a queue message carries to address and trace one export step.
+ */
+export type AuditExportQueueTarget = Pick<AuditExportJob, 'workspaceId' | 'exportId' | 'correlationId'>
+
+/**
  * Queue that schedules the next export step.
  */
 export interface AuditExportQueue {
   /**
    * Schedules processing of one export job.
    *
-   * @param workspaceId - Workspace that owns the job.
-   * @param exportId - Export identifier.
+   * @param target - Workspace, export identifier, and request correlation ID of the job.
    * @param delaySeconds - Optional delivery delay, at most 900 seconds.
    */
-  enqueue(workspaceId: string, exportId: string, delaySeconds?: number): Promise<void>
+  enqueue(target: AuditExportQueueTarget, delaySeconds?: number): Promise<void>
 }
 
 /**
@@ -304,6 +310,8 @@ export type AuditExportQueueMessage = {
   readonly workspaceId: string
   /** Export identifier. */
   readonly exportId: string
+  /** Correlation ID of the recorded export request, used to trace the step in logs. */
+  readonly correlationId: string
 }
 
 /**
@@ -323,15 +331,17 @@ export function parseAuditExportQueueMessage(body: string): AuditExportQueueMess
   const version: unknown = Reflect.get(value, 'version')
   const workspaceId: unknown = Reflect.get(value, 'workspaceId')
   const exportId: unknown = Reflect.get(value, 'exportId')
+  const correlationId: unknown = Reflect.get(value, 'correlationId')
   if (
     version !== 1 ||
     // A padded ID would address another tenant prefix and be skipped as missing, not dead-lettered.
     typeof workspaceId !== 'string' || !workspaceId.trim() || workspaceId.trim() !== workspaceId || workspaceId.length > 256 ||
-    typeof exportId !== 'string' || !/^[0-9a-f]{32}$/u.test(exportId)
+    typeof exportId !== 'string' || !/^[0-9a-f]{32}$/u.test(exportId) ||
+    typeof correlationId !== 'string' || !isValidCorrelationId(correlationId)
   ) {
     return undefined
   }
-  return { version: 1, workspaceId, exportId }
+  return { version: 1, workspaceId, exportId, correlationId }
 }
 
 /**
@@ -371,6 +381,24 @@ export class AuditExportError extends Error {
     this.name = 'AuditExportError'
     this.status = status
     this.code = code
+  }
+}
+
+/**
+ * Failure of a queue message whose correlation ID differs from the stored job's.
+ *
+ * The step does no work, so the worker reports the message as a batch item failure and the
+ * redrive policy dead-letters it instead of running the job under another request's trace.
+ */
+class AuditExportCorrelationMismatchError extends Error {
+  /**
+   * Creates a correlation mismatch failure.
+   *
+   * @param exportId - Export identifier the message addressed.
+   */
+  constructor(exportId: string) {
+    super(`Audit export ${exportId} queue message correlation ID does not match the stored job.`)
+    this.name = 'AuditExportCorrelationMismatchError'
   }
 }
 
@@ -425,6 +453,8 @@ export type AuditExportRequest = {
   readonly idempotencyKey?: string
   /** ISO time the request was first recorded; a retry keeps it as the snapshot time. */
   readonly requestedAt?: string
+  /** Correlation ID of the recorded request, stored on the job and its step messages. */
+  readonly correlationId: string
 }
 
 /** Result of one processing step. */
@@ -503,6 +533,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         filters,
         requestFingerprint,
         snapshotAt,
+        correlationId: request.correlationId,
         requestedBy: request.requestedBy,
         createdAt: snapshotAt,
         updatedAt: snapshotAt,
@@ -513,7 +544,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       }
       if (await dependencies.store.createJob(job) === 'created') {
         try {
-          await dependencies.queue.enqueue(job.workspaceId, job.exportId, settleSeconds)
+          await dependencies.queue.enqueue(job, settleSeconds)
         } catch (error) {
           // With an idempotency key, retrying the request re-enqueues the queued job.
           // Without one a retry creates a new job, so this one must not stay queued forever.
@@ -541,7 +572,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       }
       if (existing.job.status === 'queued') {
         // A previous attempt may have stored the job but failed to enqueue it.
-        await dependencies.queue.enqueue(existing.job.workspaceId, existing.job.exportId, settleSeconds)
+        await dependencies.queue.enqueue(existing.job, settleSeconds)
       }
       return { job: existing.job, created: false }
     },
@@ -569,7 +600,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      * @returns The export identifier, the normalized filters, their fingerprint, and whether
      * the job still exists.
      */
-    async prepareExport(request: AuditExportRequest & { readonly idempotencyKey: string }) {
+    async prepareExport(request: Omit<AuditExportRequest, 'correlationId' | 'requestedAt'> & { readonly idempotencyKey: string }) {
       const filters = normalizeAuditExportFilters(request.filters, now())
       const idempotencyKey = requireIdempotencyKey(request.idempotencyKey)
       const exportId = deriveAuditExportId(request.workspaceId, request.requestedBy.userKey, idempotencyKey)
@@ -650,15 +681,26 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      *
      * @param workspaceId - Workspace that owns the job.
      * @param exportId - Export identifier.
+     * @param correlationId - Correlation ID the queue message carries. It must match the stored
+     * job's, so a message bound to another request cannot drive the job.
      * @param messageId - Queue message that carries this step. A redelivery of the message
      * that committed the current state only sends the continuation again.
      * @returns What the step did.
+     * @throws AuditExportCorrelationMismatchError When the job exists and its correlation ID
+     * differs from the message's; nothing is read, written, or enqueued.
      */
-    async processExport(workspaceId: string, exportId: string, messageId?: string): Promise<AuditExportStepResult> {
+    async processExport(
+      workspaceId: string,
+      exportId: string,
+      correlationId: string,
+      messageId?: string,
+    ): Promise<AuditExportStepResult> {
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) return 'skipped'
       const tenantActive = dependencies.isTenantActive ? await dependencies.isTenantActive(workspaceId) : true
       const stored = await dependencies.store.readJob(workspaceId, exportId)
       if (!stored || stored.job.workspaceId !== workspaceId) return 'skipped'
+      // Reject before any work so the worker dead-letters the message instead of running the job.
+      if (stored.job.correlationId !== correlationId) throw new AuditExportCorrelationMismatchError(exportId)
       const { job, version } = stored
       if (job.status === 'completed' || job.status === 'failed') return 'skipped'
       const current = now()
@@ -667,7 +709,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         // Once closure deletes the export namespace the job is gone, and past the processing
         // deadline nothing would be written anyway, so the chain ends.
         if (isExpired(job, current) || isPastProcessingDeadline(job, current)) return 'skipped'
-        await dependencies.queue.enqueue(job.workspaceId, job.exportId, AUDIT_EXPORT_INACTIVE_TENANT_RETRY_SECONDS)
+        await dependencies.queue.enqueue(job, AUDIT_EXPORT_INACTIVE_TENANT_RETRY_SECONDS)
         return 'deferred'
       }
       if (isExpired(job, current) || isPastProcessingDeadline(job, current)) {
@@ -686,7 +728,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       )
       if (settleRemainingSeconds > 0) {
         // Index reads are eventually consistent; most pre-snapshot events propagate within the delay.
-        await dependencies.queue.enqueue(job.workspaceId, job.exportId, Math.min(settleRemainingSeconds, 900))
+        await dependencies.queue.enqueue(job, Math.min(settleRemainingSeconds, 900))
         return 'deferred'
       }
 
@@ -744,12 +786,11 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
         if (events.length > 0) {
           const index = parts.length + 1
-          const part = await dependencies.store.putPart(
-            job.workspaceId,
-            job.exportId,
-            index,
-            await auditEventsToNdjson(events),
-          )
+          const body = await auditEventsToNdjson(events)
+          // Serializing a large page takes time too; an unreferenced part written past the deadline
+          // would restart its lifecycle clock, so check again immediately before the write.
+          if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
+          const part = await dependencies.store.putPart(job.workspaceId, job.exportId, index, body)
           parts.push({ index, eventCount: events.length, ...part })
         }
         const { nextCursor: _previousCursor, ...withoutCursor } = job
@@ -759,7 +800,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           status: 'running',
           parts,
           eventCount: job.eventCount + events.length,
-          updatedAt: now().toISOString(),
+          updatedAt: unfinishedUpdateTime(job, now()),
           ...(hasMore && cursor ? { nextCursor: cursor } : { verification: { count: 0 } }),
         }
         if (scanned.nextCursor !== undefined) return await finish(job, version, scanned, messageId)
@@ -790,14 +831,20 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       } catch (error) {
         return await failInvalidQuery(job, version, error, messageId)
       }
-      const updatedAt = now().toISOString()
+      const completedAt = now()
+      // Unfinished states never record a time past the deadline; the parser rejects such a job.
+      const updatedAt = unfinishedUpdateTime(job, completedAt)
       if (!verified) {
         return await finish(job, version, { ...scanned, verification, updatedAt }, messageId)
       }
       const { verification: _verification, ...withoutVerification } = scanned
       void _verification
       if (verification.count === scanned.eventCount) {
-        return await finish(job, version, { ...withoutVerification, status: 'completed', updatedAt }, messageId)
+        return await finish(job, version, {
+          ...withoutVerification,
+          status: 'completed',
+          updatedAt: completedAt.toISOString(),
+        }, messageId)
       }
       if (scanned.scanAttempt >= AUDIT_EXPORT_MAX_SCAN_ATTEMPTS) {
         return await finish(job, version, failJob(
@@ -850,10 +897,10 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
    */
   async function enqueueContinuation(job: AuditExportJob): Promise<void> {
     if (job.status === 'queued') {
-      await dependencies.queue.enqueue(job.workspaceId, job.exportId, settleSeconds)
+      await dependencies.queue.enqueue(job, settleSeconds)
       return
     }
-    await dependencies.queue.enqueue(job.workspaceId, job.exportId)
+    await dependencies.queue.enqueue(job)
   }
 
   /**
@@ -1182,7 +1229,38 @@ function areQueryFiltersValid(job: AuditExportJob): boolean {
  * @returns Whether the job may no longer write parts.
  */
 function isPastProcessingDeadline(job: AuditExportJob, current: Date) {
-  return Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 <= current.getTime()
+  return processingDeadline(job) <= current.getTime()
+}
+
+/**
+ * Computes the update time an unfinished job state may record.
+ *
+ * @param job - Stored job.
+ * @param current - Current time.
+ * @returns The ISO time of the earlier of `current` and the job's processing deadline.
+ */
+function unfinishedUpdateTime(job: AuditExportJob, current: Date): string {
+  return new Date(Math.min(current.getTime(), processingDeadline(job))).toISOString()
+}
+
+/**
+ * Computes when a job's processing deadline passes.
+ *
+ * @param job - Stored job.
+ * @returns Epoch milliseconds of the deadline.
+ */
+function processingDeadline(job: Pick<AuditExportJob, 'createdAt'>): number {
+  return Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000
+}
+
+/**
+ * Checks whether a stored correlation ID is usable.
+ *
+ * @param value - Candidate correlation ID.
+ * @returns Whether it is non-empty, unpadded, and at most 256 characters.
+ */
+function isValidCorrelationId(value: string): boolean {
+  return value.trim() !== '' && value.trim() === value && value.length <= 256
 }
 
 /**
@@ -1280,8 +1358,29 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   }
   const createdAt = requireInstant(record.createdAt, 'createdAt')
   const expiresAt = requireInstant(record.expiresAt, 'expiresAt')
-  if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
-    throw new TypeError('Audit export job expires before it was created.')
+  // Every writer sets the expiration to exactly the retention period after creation; a later one
+  // would keep a finished export visible and downloadable past its documented lifetime.
+  if (Date.parse(expiresAt) !== Date.parse(createdAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000) {
+    throw new TypeError(`Audit export job must expire ${AUDIT_EXPORT_RETENTION_DAYS} days after it was created.`)
+  }
+  const updatedAt = requireInstant(record.updatedAt, 'updatedAt')
+  if (Date.parse(updatedAt) < Date.parse(createdAt)) {
+    throw new TypeError('Audit export job was updated before it was created.')
+  }
+  // Unfinished writers clamp to the deadline. A later update time would keep `isStale` from
+  // re-enqueueing a job whose continuation was lost, so it is corrupt.
+  if ((status === 'queued' || status === 'running') && Date.parse(updatedAt) > processingDeadline({ createdAt })) {
+    throw new TypeError('Unfinished audit export job was updated after its processing deadline.')
+  }
+  const correlationId = requireString(record.correlationId, 'correlationId')
+  if (!isValidCorrelationId(correlationId)) {
+    throw new TypeError('Audit export job correlationId must be 1 to 256 unpadded characters.')
+  }
+  const snapshotAt = requireInstant(record.snapshotAt, 'snapshotAt')
+  // Every writer takes the snapshot when it records the request; a later snapshot would export
+  // events created after the request, and a far-future one would defer the job until it expires.
+  if (snapshotAt !== createdAt) {
+    throw new TypeError('Audit export job snapshot does not match its creation time.')
   }
   const eventCount = requireCount(record.eventCount, 'eventCount')
   const parsedParts = parts.map((entry: unknown, position: number) => {
@@ -1330,6 +1429,10 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0)) {
     throw new TypeError('Queued audit export job already has progress.')
   }
+  // The scan enforces these bounds before each write, so a larger stored job did not come from it.
+  if (eventCount > AUDIT_EXPORT_MAX_EVENTS || parsedParts.length > AUDIT_EXPORT_MAX_PARTS) {
+    throw new TypeError('Audit export job exceeds the export limits.')
+  }
   // The event limit is enforced from the job total, so it must account for every part.
   if (parsedParts.reduce((total, part) => total + part.eventCount, 0) !== eventCount) {
     throw new TypeError('Audit export job event count does not match its parts.')
@@ -1341,13 +1444,14 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     status,
     filters: parsedFilters,
     requestFingerprint,
-    snapshotAt: requireInstant(record.snapshotAt, 'snapshotAt'),
+    snapshotAt,
+    correlationId,
     requestedBy: {
       userKey: requireString(requestedBy.userKey, 'requestedBy.userKey'),
       displayName: requireString(requestedBy.displayName, 'requestedBy.displayName'),
     },
     createdAt,
-    updatedAt: requireInstant(record.updatedAt, 'updatedAt'),
+    updatedAt,
     expiresAt,
     eventCount,
     parts: parsedParts,

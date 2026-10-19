@@ -1,4 +1,5 @@
 import { SEARCH_SCHEMA_VERSION, type WorkspaceSearchResponse, type WorkspaceSearchResult } from '@mukuroji/contracts'
+import { createHash } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -21,6 +22,7 @@ import {
   type ReadCollectionWorkItem,
 } from '../../modules/collections'
 import { normalizeProjectMemberKey, ProjectDataError, type ProjectAccessEntry } from '../../modules/directory'
+import type { PlanningCallerAuthorizationConditionCheck } from '../../modules/planning'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { WORKSPACE_SEARCH_DEFAULT_LIMIT, WORKSPACE_SEARCH_MAX_LIMIT, WorkspaceSearchError } from '../../modules/workspace-search'
@@ -163,7 +165,9 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
         collectionId,
         teamId,
         issueId,
-        await createWorkItemReader(principal),
+        // Each retry reloads Project access, so a revoked grant is seen as unreadable and
+        // another qualifying grant can authorize the next attempt.
+        await createWorkItemReader(principal, true),
       ))
     } catch (error) {
       return toCollectionErrorResponse(c, error)
@@ -183,7 +187,9 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
         collectionId,
         teamId,
         issueId,
-        await createWorkItemReader(principal),
+        // Each retry reloads Project access, so a revoked grant is seen as unreadable and
+        // another qualifying grant can authorize the next attempt.
+        await createWorkItemReader(principal, true),
       ))
     } catch (error) {
       return toCollectionErrorResponse(c, error)
@@ -216,7 +222,8 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 
 /**
  * Binds Collection writes to the caller's current Workspace membership and, for item
- * changes, to the Project membership that authorized reading the Work Item.
+ * changes, to the Project membership that authorized reading the Work Item and to that
+ * Project and its Team staying active.
  *
  * @param principal - Authenticated principal.
  * @returns Request-local Collection store.
@@ -224,47 +231,76 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 function writeStore(principal: WorkspacePrincipal): CollectionsStore {
   return workItemDependencies.collections.withCallerAuthorization(
     createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'),
-    async (workspaceId, projectId) => {
+    async (workspaceId, teamId, projectId, membership) => {
       const projectDirectory = workspaceDependencies.projectDirectory
-      if (!projectDirectory.createProjectAccessConditionCheck) {
+      if (!projectDirectory.createProjectAccessConditionCheck || !projectDirectory.createActiveReferenceConditionChecks) {
         throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
       }
-      const check = await projectDirectory.createProjectAccessConditionCheck.call(
-        projectDirectory,
-        workspaceId,
-        projectId,
-        normalizeProjectMemberKey(principal.userKey),
-        'viewer',
-      )
-      // A membership that is already gone is the same race as one revoked before commit:
-      // the change is retried with a fresh readability check.
-      if (!check?.ConditionCheck) {
-        throw new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
+      const membershipChecks: PlanningCallerAuthorizationConditionCheck[] = []
+      if (membership && projectId !== undefined) {
+        const check = await projectDirectory.createProjectAccessConditionCheck.call(
+          projectDirectory,
+          workspaceId,
+          projectId,
+          normalizeProjectMemberKey(principal.userKey),
+          'viewer',
+        )
+        // A membership that is already gone is the same race as one revoked before commit:
+        // the change is retried with a fresh readability check.
+        if (!check?.ConditionCheck) throw workItemChanged()
+        membershipChecks.push({ ConditionCheck: check.ConditionCheck })
       }
-      return { ConditionCheck: check.ConditionCheck }
+      // Archiving the Project changes its own row, not the membership row, so the Team and
+      // Project must also still be active at commit; one archived before the write is the same
+      // race and is retried with a fresh readability check.
+      const activeReferences = await projectDirectory.createActiveReferenceConditionChecks
+        .call(projectDirectory, workspaceId, teamId, projectId)
+        .catch((error: unknown) => {
+          if (error instanceof ProjectDataError && error.status === 404) throw workItemChanged()
+          throw error
+        })
+      return [...membershipChecks, ...activeReferences.map((item) => {
+        if (!item.ConditionCheck) throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
+        return { ConditionCheck: item.ConditionCheck }
+      })]
     },
   )
 }
 
 /**
- * Picks the Project whose direct membership authorized reading a Work Item.
+ * Creates the error for a Work Item whose readability changed before the write.
+ *
+ * @returns A 409 Collection error that asks the client to reload and retry.
+ */
+function workItemChanged(): CollectionError {
+  return new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
+}
+
+/**
+ * Picks the Project that authorized reading a Work Item and how it was granted.
  *
  * Non-Enterprise members reach a Team and its Work Items only through Project membership
- * rows, which the Workspace membership fence does not cover. A system administrator, a
- * direct Team grant, or an Enterprise Project grant is covered by the Enterprise control
- * fence instead, so no Project membership is returned for them.
+ * rows, which the Workspace membership fence does not cover. An Enterprise Project grant is
+ * covered by the Enterprise control fence instead, but archiving its Project changes neither,
+ * so that Project is still returned to fence its active state. A direct Team grant depends on
+ * the Team staying active and, for an assigned Work Item, on its primary Project too, so it
+ * returns that Project or no Project at all. A system administrator depends on neither.
  *
  * @param principal - Authenticated principal.
  * @param teamContext - Team authorization used for the read.
  * @param assignedProjectId - Primary Project of the Work Item, if any.
- * @returns The Project membership to fence, or undefined when none authorized the read.
+ * @returns The authorizing Project, if any, and whether a direct membership granted it, or
+ *   undefined when no Team or Project must stay active.
  */
-function resolveAccessProjectId(
+function resolveAccessProject(
   principal: WorkspacePrincipal,
   teamContext: TeamPermissionContext,
   assignedProjectId: string | undefined,
-): string | undefined {
-  if (principal.isSystemAdmin || teamContext.directTeamGrant) return undefined
+): { projectId?: string; membership: boolean } | undefined {
+  if (principal.isSystemAdmin) return undefined
+  if (teamContext.directTeamGrant) {
+    return assignedProjectId === undefined ? { membership: false } : { projectId: assignedProjectId, membership: false }
+  }
   const candidates = (teamContext.projectAccesses ?? [])
     .filter((access) => projectAccessAllows(access, 'viewer'))
     .map((access) => access.projectId)
@@ -274,8 +310,9 @@ function resolveAccessProjectId(
   const enterpriseProjectIds = new Set((principal.enterpriseProjectAccesses ?? [])
     .filter((access) => projectAccessAllows(access, 'viewer'))
     .map((access) => access.projectId))
-  if (candidates.some((projectId) => enterpriseProjectIds.has(projectId))) return undefined
-  return candidates[0]
+  const enterpriseProjectId = candidates.find((projectId) => enterpriseProjectIds.has(projectId))
+  if (enterpriseProjectId !== undefined) return { projectId: enterpriseProjectId, membership: false }
+  return candidates[0] === undefined ? undefined : { projectId: candidates[0], membership: true }
 }
 
 /**
@@ -290,13 +327,15 @@ function mutationContext(principal: WorkspacePrincipal): CollectionMutationConte
 
 /**
  * Creates a Work Item reader that applies the same Team and Project checks as the
- * Work Item detail route, reading the directory and the caller's Project access once.
+ * Work Item detail route, reading the directory once.
  *
  * @param principal - Authenticated principal.
+ * @param reloadProjectAccess - When true, every read loads the caller's Project access again
+ *   instead of sharing one snapshot, so a retried item change sees a revoked or remaining grant.
  * @returns Reader that returns undefined for missing or unreadable Work Items.
  */
-async function createWorkItemReader(principal: WorkspacePrincipal): Promise<ReadCollectionWorkItem> {
-  return (await createWorkItemReadAccess(principal)).read
+async function createWorkItemReader(principal: WorkspacePrincipal, reloadProjectAccess = false): Promise<ReadCollectionWorkItem> {
+  return (await createWorkItemReadAccess(principal, reloadProjectAccess)).read
 }
 
 /** Caller-scoped Work Item reads that share one directory and Project access snapshot. */
@@ -311,18 +350,27 @@ type WorkItemReadAccess = {
  * Creates caller-scoped Work Item reads over one directory and Project access snapshot.
  *
  * @param principal - Authenticated principal.
+ * @param reloadProjectAccess - When true, each Work Item read uses its own Project access snapshot.
  * @returns The Work Item reader and the readable-Team listing.
  */
-async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<WorkItemReadAccess> {
+async function createWorkItemReadAccess(principal: WorkspacePrincipal, reloadProjectAccess = false): Promise<WorkItemReadAccess> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
-  const readContext = {
-    directory,
-    readProjectAccesses: () => {
-      projectAccesses ??= getEffectiveProjectScopeAccessList(principal)
-      return projectAccesses
-    },
+  /**
+   * Builds a read context whose Project access is loaded at most once.
+   *
+   * @returns Directory and lazily loaded Project access for permission checks.
+   */
+  const createReadContext = () => {
+    let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
+    return {
+      directory,
+      readProjectAccesses: () => {
+        projectAccesses ??= getEffectiveProjectScopeAccessList(principal)
+        return projectAccesses
+      },
+    }
   }
+  const sharedReadContext = createReadContext()
   /**
    * Lists readable Teams from the in-memory directory and Project access snapshot.
    *
@@ -332,7 +380,7 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<
     const teamIds: string[] = []
     for (const team of directory.teams) {
       try {
-        await requireTeamPermission(principal, team.id, 'viewer', readContext)
+        await requireTeamPermission(principal, team.id, 'viewer', sharedReadContext)
         teamIds.push(team.id)
       } catch (error) {
         if (!isUnreadableWorkItemError(error)) throw error
@@ -348,6 +396,7 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<
    * @returns The readable Work Item, or undefined.
    */
   const read: ReadCollectionWorkItem = async (teamId, issueId) => {
+    const readContext = reloadProjectAccess ? createReadContext() : sharedReadContext
     try {
       const teamContext = await requireTeamPermission(principal, teamId, 'viewer', readContext)
       const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
@@ -358,7 +407,7 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<
       )
       if (detail.issue.teamId !== teamId || detail.issue.id !== issueId) return undefined
       requireAssignedProjectPermission(principal, teamContext, detail.issue.assignedProjectId, 'viewer')
-      const accessProjectId = resolveAccessProjectId(principal, teamContext, detail.issue.assignedProjectId)
+      const accessProject = resolveAccessProject(principal, teamContext, detail.issue.assignedProjectId)
       return {
         entry: {
           teamId,
@@ -368,7 +417,13 @@ async function createWorkItemReadAccess(principal: WorkspacePrincipal): Promise<
           ...(detail.issue.assignedProjectId ? { assignedProjectId: detail.issue.assignedProjectId } : {}),
         },
         revision: detail.issue.revision,
-        ...(accessProjectId === undefined ? {} : { accessProjectId }),
+        ...(accessProject === undefined
+          ? {}
+          : accessProject.projectId === undefined
+            ? { activeTeamOnly: true }
+            : accessProject.membership
+              ? { accessProjectId: accessProject.projectId }
+              : { activeProjectId: accessProject.projectId }),
       }
     } catch (error) {
       if (isUnreadableWorkItemError(error)) return undefined
@@ -396,7 +451,9 @@ const EXACT_CANDIDATE_CURSOR_PREFIX = 'exact:'
  * readable Teams. Paging stays stable and bounded:
  *
  * - Exact matches come first, in readable-Team order. While they remain, the page carries an
- *   `exact:<offset>` cursor (never a valid index cursor, which is base64url) that continues them.
+ *   `exact:<offset>.<context>` cursor (never a valid index cursor, which is base64url) that
+ *   continues them. The context binds it to the Workspace, caller and keyword that produced it,
+ *   so it cannot skip matches of another search.
  * - The page that exhausts the exact matches fills its remaining slots with the first index
  *   page, so the page never holds more than `limit` results, and returns the index cursor.
  * - Every index page drops results that are exact-ID matches of the keyword in those Teams. Such
@@ -415,7 +472,8 @@ async function searchCollectionCandidates(
   limit: number,
   cursor: string | undefined,
 ): Promise<WorkspaceSearchResponse> {
-  const exactOffset = cursor ? readExactCandidateCursor(cursor) : 0
+  const cursorContext = exactCandidateCursorContext(principal, keyword)
+  const exactOffset = cursor ? readExactCandidateCursor(cursor, cursorContext) : 0
   const access = isWorkItemReferenceIdentifier(keyword) ? await createWorkItemReadAccess(principal) : undefined
   // Only Teams the caller can read are looked up, so no Work Item row is read for the rest.
   const exactTeamIds = new Set(access ? (await access.readableTeamIds()).slice(0, EXACT_CANDIDATE_TEAM_LIMIT) : [])
@@ -436,7 +494,7 @@ async function searchCollectionCandidates(
   const shown = exact.slice(exactOffset, exactOffset + limit)
   const nextOffset = exactOffset + shown.length
   if (nextOffset < exact.length || shown.length === limit) {
-    return { schemaVersion: SEARCH_SCHEMA_VERSION, results: shown, nextCursor: `${EXACT_CANDIDATE_CURSOR_PREFIX}${nextOffset}` }
+    return { schemaVersion: SEARCH_SCHEMA_VERSION, results: shown, nextCursor: `${EXACT_CANDIDATE_CURSOR_PREFIX}${nextOffset}.${cursorContext}` }
   }
   const page = await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
     limit: limit - shown.length,
@@ -445,16 +503,34 @@ async function searchCollectionCandidates(
 }
 
 /**
+ * Derives the search context an exact-match cursor is bound to.
+ *
+ * @param principal - Authenticated principal.
+ * @param keyword - Trimmed search keyword.
+ * @returns A URL-safe digest of the Workspace, caller and keyword.
+ */
+function exactCandidateCursorContext(principal: WorkspacePrincipal, keyword: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([principal.directoryId, principal.userKey, keyword]))
+    .digest('base64url')
+    .slice(0, 22)
+}
+
+/**
  * Reads the exact-match offset of a candidate cursor.
  *
  * @param cursor - Non-empty cursor from the client.
+ * @param context - Context digest of the current search.
  * @returns The offset for an exact-match cursor, or undefined for a search index cursor.
+ * @throws WorkspaceSearchError `InvalidSearchCursor` for a malformed cursor or one issued for
+ *   another Workspace, caller or keyword.
  */
-function readExactCandidateCursor(cursor: string): number | undefined {
+function readExactCandidateCursor(cursor: string, context: string): number | undefined {
   if (!cursor.startsWith(EXACT_CANDIDATE_CURSOR_PREFIX)) return undefined
-  const value = cursor.slice(EXACT_CANDIDATE_CURSOR_PREFIX.length)
+  const parts = cursor.slice(EXACT_CANDIDATE_CURSOR_PREFIX.length).split('.')
+  const [value = '', cursorContext] = parts.length === 2 ? parts : []
   const offset = /^(?:0|[1-9][0-9]{0,2})$/u.test(value) ? Number(value) : Number.NaN
-  if (!Number.isSafeInteger(offset) || offset > EXACT_CANDIDATE_TEAM_LIMIT) {
+  if (!Number.isSafeInteger(offset) || offset > EXACT_CANDIDATE_TEAM_LIMIT || cursorContext !== context) {
     throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Cursor is invalid.')
   }
   return offset
