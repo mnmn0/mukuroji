@@ -1,5 +1,4 @@
 import {
-  DeleteCommand,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -30,8 +29,8 @@ const memberVersionSortKey = 'devices'
 
 /** Minimal DynamoDB command boundary used by the push subscription store. */
 type PushSubscriptionDocumentClient = {
-  /** Sends one read, query, delete, or transaction. */
-  send(command: GetCommand | QueryCommand | DeleteCommand | TransactWriteCommand): Promise<{
+  /** Sends one read, query, or transaction. */
+  send(command: GetCommand | QueryCommand | TransactWriteCommand): Promise<{
     /** Strongly read item. */
     Item?: Record<string, unknown>
     /** Number of items matched by a count query. */
@@ -107,9 +106,12 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
     for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
       const owner = await this.#readOwner(subscription.subscriptionId)
       const ownedByMember = owner?.workspaceId === workspaceId && owner.memberKey === memberKey
+      // Only a stored subscription is refreshed. An owner can outlive an expired member row, and
+      // that device counts again as new; the transaction re-checks the row still exists.
+      const refresh = ownedByMember && await this.#hasSubscription(partition, subscription.subscriptionId)
       // A new device is counted against the limit and fenced by the member's registration
       // version, so two devices registering at once cannot both pass the same count.
-      const version = ownedByMember ? undefined : await this.#readMemberVersion(partition)
+      const version = refresh ? undefined : await this.#readMemberVersion(partition)
       if (version !== undefined && await this.#countSubscriptions(partition) >= MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER) {
         throw new NotificationError(409, 'PushSubscriptionLimitExceeded', 'Too many devices receive push notifications.')
       }
@@ -151,6 +153,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
                   updatedAt: now.toISOString(),
                   expiresAt,
                 },
+                ...(refresh ? { ConditionExpression: 'attribute_exists(sk)' } : {}),
               },
             },
             ...(version !== undefined
@@ -200,21 +203,67 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
    */
   async remove(workspaceId: string, memberKey: string, endpoint: string): Promise<void> {
     const subscriptionId = createPushSubscriptionId(endpoint)
-    await this.#client.send(new DeleteCommand({
-      TableName: this.#tableName,
-      Key: { pk: memberPartition(workspaceId, memberKey), sk: `subscription#${subscriptionId}` },
-    }))
-    try {
-      // Release the endpoint only while this member still owns it.
-      await this.#client.send(new DeleteCommand({
-        TableName: this.#tableName,
-        Key: { pk: endpointPartition(subscriptionId), sk: 'owner' },
-        ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
-        ExpressionAttributeValues: { ':workspace': workspaceId, ':member': memberKey },
-      }))
-    } catch (error: unknown) {
-      if (!isConditionalCheckFailure(error)) throw error
+    const ownerKey = { pk: endpointPartition(subscriptionId), sk: 'owner' }
+    for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
+      const owner = await this.#readOwner(subscriptionId)
+      const ownedByMember = owner?.workspaceId === workspaceId && owner.memberKey === memberKey
+      // The member row and, while this member owns the endpoint, the owner row are deleted in one
+      // transaction fenced on the owner read, so a concurrent refresh can never leave either alone.
+      const ownerOperation = ownedByMember
+        ? {
+            Delete: {
+              TableName: this.#tableName,
+              Key: ownerKey,
+              ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
+              ExpressionAttributeValues: { ':workspace': workspaceId, ':member': memberKey },
+            },
+          }
+        : {
+            ConditionCheck: {
+              TableName: this.#tableName,
+              Key: ownerKey,
+              ...(owner
+                ? {
+                    ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
+                    ExpressionAttributeValues: { ':workspace': owner.workspaceId, ':member': owner.memberKey },
+                  }
+                : { ConditionExpression: 'attribute_not_exists(pk)' }),
+            },
+          }
+      try {
+        await this.#client.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              Delete: {
+                TableName: this.#tableName,
+                Key: { pk: memberPartition(workspaceId, memberKey), sk: `subscription#${subscriptionId}` },
+              },
+            },
+            ownerOperation,
+          ],
+        }))
+        return
+      } catch (error: unknown) {
+        if (!isTransactionConflict(error)) throw error
+      }
     }
+    throw new NotificationError(409, 'PushSubscriptionConflict', 'The push subscription changed while it was being removed.')
+  }
+
+  /**
+   * Strongly checks whether a member still stores a subscription.
+   *
+   * @param partition - Member partition.
+   * @param subscriptionId - Endpoint-derived subscription ID.
+   * @returns `true` when the subscription row exists.
+   */
+  async #hasSubscription(partition: string, subscriptionId: string): Promise<boolean> {
+    const { Item } = await this.#client.send(new GetCommand({
+      TableName: this.#tableName,
+      Key: { pk: partition, sk: `subscription#${subscriptionId}` },
+      ConsistentRead: true,
+    }))
+    return Item !== undefined
   }
 
   /**
@@ -280,16 +329,6 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
     }
     return version
   }
-}
-
-/**
- * Returns whether an error is a conditional write failure.
- *
- * @param error - Error thrown by DynamoDB.
- * @returns `true` for `ConditionalCheckFailedException`.
- */
-function isConditionalCheckFailure(error: unknown): boolean {
-  return error instanceof Error && error.name === 'ConditionalCheckFailedException'
 }
 
 /** Cancellation reasons that mean another registration changed the guarded rows first. */

@@ -33,7 +33,7 @@ import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession, hasStoredAuthSession, type AuthSession } from '../../auth/session'
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
-import { refreshPushDevice, signOutWithPushCleanup } from '../../notifications/mutations/usePushDevice'
+import { signOutWithPushCleanup, usePushDeviceRefresh } from '../../notifications/mutations/usePushDevice'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
 import {
   clearAppBadgeAndNotifyTabs,
@@ -450,10 +450,7 @@ export function WorkspaceRouteProvider() {
     ) ||
     Boolean(user && isProjectDirectoryLoading)
 
-  const signedInAccessToken = user ? session?.accessToken : undefined
-  useEffect(() => {
-    if (signedInAccessToken) void refreshPushDevice(signedInAccessToken)
-  }, [signedInAccessToken])
+  usePushDeviceRefresh(user ? session?.accessToken : undefined)
 
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {

@@ -404,7 +404,17 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         [workspaceSelector('scopeKey', 'prefix', 'WORKSPACE#', '#')],
       ),
       exactTarget('tenant-administration', this.config.tenantAdministrationTableName, 'workspaceId', 'recordKey'),
-      // Member subscriptions and endpoint owner rows both carry the owning Workspace ID.
+    ]
+  }
+
+  /**
+   * Returns tenant tables added after durable cursors existed. They run after the file
+   * namespaces, so a job queued before they were added keeps its numeric cursor meaning: every
+   * earlier table and namespace keeps its index, and the new tables follow the last namespace.
+   */
+  private trailingTargets(): TenantDynamoTarget[] {
+    return [
+      // Member subscriptions, endpoint owners, and registration versions all carry the Workspace ID.
       attributeTarget('push-subscriptions', this.config.pushSubscriptionsTableName, 'pk', 'sk', [
         workspaceSelector('workspaceId', 'equals'),
       ]),
@@ -628,13 +638,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult | number> {
     const targets = this.exportTargets()
     const fileNamespaces = this.fileNamespaces(operation.workspaceId)
+    const trailing = this.trailingTargets()
     const cursor = job.cursor ?? {
       targetIndex: 0,
       phase: 'snapshot',
       processedCount: 0,
     }
-    if (cursor.targetIndex < targets.length) {
-      const target = targets[cursor.targetIndex]
+    const trailingTarget = trailing[cursor.targetIndex - targets.length - fileNamespaces.length]
+    if (cursor.targetIndex < targets.length || trailingTarget) {
+      const target = targets[cursor.targetIndex] ?? trailingTarget
       if (!target) {
         throw new TenantAdministrationError(
           503,
@@ -682,10 +694,10 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       }
     }
     const namespaceIndex = cursor.targetIndex - targets.length
-    if (namespaceIndex > fileNamespaces.length) {
+    if (namespaceIndex > fileNamespaces.length + trailing.length) {
       return { status: 'failed', failureCode: 'EXPORT_FILE_CURSOR_INVALID' }
     }
-    if (namespaceIndex === fileNamespaces.length) return cursor.processedCount
+    if (namespaceIndex === fileNamespaces.length + trailing.length) return cursor.processedCount
     const namespace = fileNamespaces[namespaceIndex]
     if (!namespace) {
       return { status: 'failed', failureCode: 'EXPORT_FILE_NAMESPACE_INVALID' }
@@ -1035,9 +1047,11 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult> {
     const targets = this.dataDeletionTargets()
     const fileNamespaces = this.fileNamespaces(operation.workspaceId)
+    const trailing = this.trailingTargets()
     const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
-    if (cursor.targetIndex < targets.length) {
-      const target = targets[cursor.targetIndex]
+    const trailingTarget = trailing[cursor.targetIndex - targets.length - fileNamespaces.length]
+    if (cursor.targetIndex < targets.length || trailingTarget) {
+      const target = targets[cursor.targetIndex] ?? trailingTarget
       if (!target) return { status: 'failed', failureCode: 'DATA_TARGET_INVALID' }
       const page = await this.readDynamoPage(
         target,
@@ -1132,7 +1146,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         }),
       }
     }
-    if (namespaceIndex === fileNamespaces.length) {
+    if (namespaceIndex === fileNamespaces.length + trailing.length) {
       return await this.completeWithEvidence(job, {
         deletedResources: cursor.processedCount,
         fileNamespaces: fileNamespaces.map((namespace) => namespace.id),
@@ -1237,9 +1251,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult> {
     const dataTargets = this.dataDeletionTargets()
     const secretTargets = this.secretDeletionTargets()
+    // Trailing tables follow the secret tables. Every earlier index keeps its meaning; only the
+    // final namespace check, which carries no continuation position, moves after them.
     const targets = [
       ...dataTargets,
       ...secretTargets,
+      ...this.trailingTargets(),
     ]
     const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
     if (cursor.targetIndex < targets.length) {
@@ -1257,7 +1274,8 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       if (page.items.length > 0) {
         return {
           status: 'repair',
-          step: cursor.targetIndex < dataTargets.length
+          step: cursor.targetIndex < dataTargets.length ||
+              cursor.targetIndex >= dataTargets.length + secretTargets.length
             ? 'delete-data'
             : 'delete-secrets',
         }

@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test'
 import { createECDH } from 'node:crypto'
 import { Hono } from 'hono'
 import {
-  DeleteCommand,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -91,7 +90,7 @@ describe('push subscription validation', () => {
 })
 
 /** One recorded DynamoDB command. */
-type SentCommand = GetCommand | QueryCommand | DeleteCommand | TransactWriteCommand
+type SentCommand = GetCommand | QueryCommand | TransactWriteCommand
 
 /**
  * Creates a fake document client backed by scripted responses.
@@ -158,7 +157,10 @@ describe('DynamoDbPushSubscriptionStore', () => {
     await new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now)
     expect(sent.some((command) => command instanceof QueryCommand)).toBe(false)
     const transaction = sent.find((command) => command instanceof TransactWriteCommand)
-    expect(transaction instanceof TransactWriteCommand ? transaction.input.TransactItems?.length : 0).toBe(2)
+    const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
+    expect(items).toHaveLength(2)
+    // The refresh re-checks in the transaction that the member row still exists.
+    expect(items[1]?.Put?.ConditionExpression).toBe('attribute_exists(sk)')
   })
 
   test('limits the devices one member registers', async () => {
@@ -213,16 +215,43 @@ describe('DynamoDbPushSubscriptionStore', () => {
     expect(transactions).toBe(1)
   })
 
-  test('removes the member’s subscription and releases the endpoint only while still owned', async () => {
+  test('removes the member row and its owner row together while the member owns the endpoint', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof DeleteCommand && command.input.ConditionExpression) throw awsError('ConditionalCheckFailedException')
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada' } }
       return {}
     })
     await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint)
-    expect(sent.map((command) => command instanceof DeleteCommand ? command.input.Key : undefined)).toEqual([
-      { pk: 'member#ws-1#ada', sk: `subscription#${subscription.subscriptionId}` },
-      { pk: `endpoint#${subscription.subscriptionId}`, sk: 'owner' },
-    ])
+    const transaction = sent.find((command) => command instanceof TransactWriteCommand)
+    const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
+    expect(items[0]?.Delete?.Key).toEqual({ pk: 'member#ws-1#ada', sk: `subscription#${subscription.subscriptionId}` })
+    expect(items[1]?.Delete).toMatchObject({
+      Key: { pk: `endpoint#${subscription.subscriptionId}`, sk: 'owner' },
+      ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
+    })
+  })
+
+  test('removes only the member row, fenced on the other owner, when the endpoint moved on', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'bob' } }
+      return {}
+    })
+    await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint)
+    const transaction = sent.find((command) => command instanceof TransactWriteCommand)
+    const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
+    expect(items[1]?.ConditionCheck).toMatchObject({
+      ExpressionAttributeValues: { ':workspace': 'ws-1', ':member': 'bob' },
+    })
+  })
+
+  test('counts a device again when its owner outlived the expired member row', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'ada' } }
+      if (command instanceof QueryCommand) return { Count: MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER }
+      return {}
+    })
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+      .rejects.toMatchObject({ code: 'PushSubscriptionLimitExceeded' })
+    expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
   })
 })
 

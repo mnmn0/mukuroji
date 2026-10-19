@@ -293,6 +293,17 @@ describe('AwsTenantOperationResourceOwner', () => {
           ':tenant0': { S: 'WORKSPACE#workspace/one#' },
         },
       })
+
+      // Tables added after cursors existed run after every file namespace, so queued jobs keep
+      // their indexes; with 17 data tables and 4 file namespaces the push table is index 21.
+      await owner.execute(createDataJob(21), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'push-subscriptions',
+        FilterExpression: '(#tenant0 = :tenant0)',
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'workspace/one' },
+        },
+      })
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -795,7 +806,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: operation.operationId,
       step: 'snapshot',
       cursor: {
-        targetIndex: 23,
+        targetIndex: 22,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -836,7 +847,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(copiedPaths[1]).toContain(
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(26)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -913,7 +924,7 @@ describe('AwsTenantOperationResourceOwner', () => {
 
     try {
       const regularFiles = await owner.execute(
-        createDataJob(18, workspaceId),
+        createDataJob(17, workspaceId),
         operation,
       )
       if (regularFiles.status !== 'continuing') {
@@ -944,7 +955,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(deletionBodies[0]).toContain('version-2')
       expect(deletionBodies[1]).toContain(importObjectKey)
       expect(deletionBodies[1]).toContain('version-3')
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(21)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(20)
     } finally {
       documentClient.destroy()
       s3Client.destroy()

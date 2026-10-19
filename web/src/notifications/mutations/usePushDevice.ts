@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
+import useSWR from 'swr'
 import type { PushConfiguration, PushSubscriptionInput, PushSubscriptionRemovalInput } from '@mukuroji/contracts'
 import { clearAuthSession } from '../../auth/session'
 import { NotificationsApiError } from '../api/errors'
@@ -321,33 +322,25 @@ export type PushDeviceOptions = {
 export function usePushDevice(accessToken: string, options: PushDeviceOptions = {}): PushDeviceController {
   const [environment] = useState(() => options.environment ?? readPushEnvironment())
   const [api] = useState(() => options.api ?? defaultPushDeviceApi)
-  const [loaded, setLoaded] = useState<{
-    /** Load the snapshot belongs to. */
-    key: string
-    /** Settled status. */
-    snapshot: PushDeviceSnapshot
-  } | undefined>()
   const [pending, setPending] = useState(false)
   const [result, setResult] = useState<PushDeviceResult | undefined>()
-  const [loadCount, setLoadCount] = useState(0)
   const pendingRef = useRef(false)
-
-  const loadKey = `${accessToken}:${loadCount}`
-  // A snapshot from an earlier token or attempt reads as loading until the current load settles.
-  const snapshot = loaded?.key === loadKey ? loaded.snapshot : undefined
-
-  useEffect(() => {
-    let active = true
-    void loadPushDevice(accessToken, environment, api).then((next) => {
-      if (active) setLoaded({ key: loadKey, snapshot: next })
-    })
-    return () => {
-      active = false
-    }
-  }, [accessToken, api, environment, loadKey])
+  // SWR owns the load: it deduplicates repeated mounts and keeps one cached status per session.
+  const query = useSWR(
+    ['push-device', accessToken] as const,
+    ([, token]) => loadPushDevice(token, environment, api),
+    {
+      dedupingInterval: 60_000,
+      revalidateIfStale: false,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      shouldRetryOnError: false,
+    },
+  )
+  const { mutate } = query
 
   /**
-   * Runs one action and reloads the status after it settles.
+   * Runs one action and stores the status read after it settles.
    *
    * @param action - Enable or disable action.
    */
@@ -358,16 +351,19 @@ export function usePushDevice(accessToken: string, options: PushDeviceOptions = 
     setResult(undefined)
     void action().then(async (outcome) => {
       const next = await loadPushDevice(accessToken, environment, api, false)
+      await mutate(next, { revalidate: false })
       pendingRef.current = false
-      setLoaded({ key: loadKey, snapshot: next })
       setResult(outcome)
       setPending(false)
     })
-  }, [accessToken, api, environment, loadKey])
+  }, [accessToken, api, environment, mutate])
 
+  const snapshot = query.data
   const vapidPublicKey = snapshot?.vapidPublicKey
+  // A retry after a load error shows loading until the new read settles.
+  const reloading = query.isValidating && snapshot?.status === 'load-error'
   return {
-    status: snapshot?.status ?? 'loading',
+    status: reloading || !snapshot ? 'loading' : snapshot.status,
     pending,
     ...(result ? { result } : {}),
     enable: useCallback(() => {
@@ -377,6 +373,28 @@ export function usePushDevice(accessToken: string, options: PushDeviceOptions = 
     disable: useCallback(() => {
       run(() => disablePushDevice(accessToken, environment, api))
     }, [accessToken, api, environment, run]),
-    retry: useCallback(() => setLoadCount((count) => count + 1), []),
+    retry: useCallback(() => {
+      void mutate()
+    }, [mutate]),
   }
+}
+
+/**
+ * Refreshes this device's registration once per signed-in session through SWR, so the shell
+ * never sends it from an Effect and repeated mounts share one request.
+ *
+ * @param accessToken - Access token of the signed-in member, or `undefined` before sign-in.
+ */
+export function usePushDeviceRefresh(accessToken: string | undefined): void {
+  useSWR(
+    accessToken ? ['push-device-refresh', accessToken] as const : null,
+    ([, token]) => refreshPushDevice(token),
+    {
+      dedupingInterval: 60 * 60_000,
+      revalidateIfStale: false,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      shouldRetryOnError: false,
+    },
+  )
 }
