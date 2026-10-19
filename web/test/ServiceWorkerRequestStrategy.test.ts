@@ -169,7 +169,9 @@ describe('share target', () => {
     expect(sharedContentInbox.sharedContentKeyPrefix).toBe(sharedContentKeyPrefix)
     expect(sharedContentInbox.sharedContentMaxAgeMilliseconds).toBe(sharedContentMaxAgeMilliseconds)
     expect(sharedContentInbox.sharedContentNotSavedStatus).toBe(sharedContentNotSavedStatus)
-    // Earlier workers delete every `mukuroji-` cache on activation; a rollback must keep shares.
-    expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [])).toEqual([])
+    // An earlier worker deletes the inbox on activation, so a rollback never strands shared content;
+    // the current worker keeps it.
+    expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [])).toEqual([sharedContentCacheName])
+    expect(selectStaleCaches([sharedContentCacheName], 'mukuroji-', [sharedContentCacheName])).toEqual([])
   })
 })

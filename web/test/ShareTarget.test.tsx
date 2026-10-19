@@ -19,7 +19,7 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 import {
   cancelStoredSharedContent,
   discardStoredSharedContent,
-  isStoredSharedContentCancelled,
+  readSharedContentSendState,
   readStoredSharedContent,
   sharedContentCacheName,
   sharedContentKeyPrefix,
@@ -249,12 +249,24 @@ describe('shared content inbox', () => {
     const { storage, store } = createCacheStorage({
       [key]: JSON.stringify({ title: 'Bug', text: '', url: '', receivedAt: 1 }),
     })
-    expect(await isStoredSharedContentCancelled(sharedId, storage)).toBe(false)
+    expect(await readSharedContentSendState(sharedId, storage, 10)).toBe('live')
     await cancelStoredSharedContent(sharedId, storage, 5)
     expect(JSON.parse(store.get(key) ?? '{}')).toEqual({ cancelled: true, receivedAt: 5 })
-    expect(await isStoredSharedContentCancelled(sharedId, storage)).toBe(true)
+    expect(await readSharedContentSendState(sharedId, storage, 10)).toBe('gone')
     expect(await readStoredSharedContent(sharedId, storage, 10)).toBeUndefined()
-    expect(await isStoredSharedContentCancelled('../secret', storage)).toBe(false)
+  })
+
+  test('sends only a live share and fails closed when storage cannot be read', async () => {
+    const key = `${sharedContentKeyPrefix}${sharedId}`
+    const { storage, store } = createCacheStorage({
+      [key]: JSON.stringify({ title: 'Bug', text: '', url: '', receivedAt: 0 }),
+    })
+    expect(await readSharedContentSendState(sharedId, storage, sharedContentMaxAgeMilliseconds + 1)).toBe('gone')
+    store.delete(key)
+    expect(await readSharedContentSendState(sharedId, storage, 1)).toBe('gone')
+    expect(await readSharedContentSendState('', storage)).toBe('live')
+    const broken: SharedContentCacheStorage = { open: async () => { throw new Error('blocked') } }
+    expect(await readSharedContentSendState(sharedId, broken)).toBe('unverified')
   })
 
   test('deletes a share after use', async () => {

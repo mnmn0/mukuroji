@@ -5,7 +5,7 @@ import { createTeamTriagePath } from '../../shared/routing/paths'
 import {
   cancelStoredSharedContent,
   discardStoredSharedContent,
-  isStoredSharedContentCancelled,
+  readSharedContentSendState,
   readStoredSharedContent,
   sharedContentNotSavedStatus,
 } from '../../shared/lib/pwa/sharedContentInbox'
@@ -109,6 +109,7 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const [loadFailed, setLoadFailed] = useState(false)
   const [missing, setMissing] = useState(false)
   const [cancelled, setCancelled] = useState(false)
+  const [verifyFailed, setVerifyFailed] = useState(false)
   const [receivedAt, setReceivedAt] = useState<number>()
   const [loadAttempt, setLoadAttempt] = useState(0)
   const mountedRef = useRef(true)
@@ -131,8 +132,8 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
   const loadErrorKey: MessageKey | undefined = loadFailed && !content
     ? 'triage.share.loadError'
     : accessFailed ? 'triage.share.accessError' : undefined
-  // A locked attempt keeps its own copy of the content, so it can still be resent unless the
-  // person cancelled the share in another tab.
+  // A locked attempt keeps its own copy of the content, so it stays on screen; sending still
+  // requires the share to be live.
   const isMissing = cancelled || (missing && !handoff.locked)
 
   useEffect(() => {
@@ -205,17 +206,25 @@ function ShareCapture({ sharedId }: ShareCaptureProps) {
         ) : null}
         {content && !loadErrorKey && !isMissing ? (
           <ShareCaptureForm
-            errorMessage={handoff.failure
-              ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])
-              : undefined}
+            errorMessage={verifyFailed
+              ? t('triage.share.verifyError')
+              : handoff.failure
+                ? t((handoff.locked ? lockedFailureMessageKeys : failureMessageKeys)[handoff.failure])
+                : undefined}
             initialContent={content}
             isSubmitting={handoff.isSubmitting}
             lockedSend={handoff.locked}
             onCancel={leave}
             onSubmit={(teamId, draft) => {
-              void isStoredSharedContentCancelled(sharedId).then((wasCancelled) => {
-                if (!wasCancelled) return handoff.submit(teamId, draft)
-                // Cancel in another tab ends the handoff here too.
+              setVerifyFailed(false)
+              void readSharedContentSendState(sharedId).then((state) => {
+                if (state === 'live') return handoff.submit(teamId, draft)
+                if (state === 'unverified') {
+                  // Without proof the share is still live, nothing is sent; the person can retry.
+                  setVerifyFailed(true)
+                  return undefined
+                }
+                // Cancelled, sent, or expired in any tab ends the handoff here too.
                 handoff.abandon()
                 setCancelled(true)
                 return undefined

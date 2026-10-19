@@ -3,7 +3,7 @@
  * `sharedContentCacheName`, because app code must not import the worker; a unit test keeps the
  * two equal.
  */
-export const sharedContentCacheName = 'mukuroji.share-inbox-v1'
+export const sharedContentCacheName = 'mukuroji-share-inbox-v1'
 
 /** Path prefix of the cache keys for stored shared content; repeats the worker's value. */
 export const sharedContentKeyPrefix = '/__mukuroji/share/'
@@ -144,22 +144,30 @@ export async function cancelStoredSharedContent(
 }
 
 /**
- * Returns whether a share was cancelled in any tab or window.
- *
- * @param id - Opaque ID from the form URL.
- * @param storage - Cache Storage; defaults to the page's.
- * @returns `true` when a cancellation marker is stored; a storage failure reads as not cancelled.
+ * Whether a share may still be sent: `live` while its content is stored, unexpired and not
+ * cancelled; `gone` once it expired, was sent, or was cancelled in any tab; `unverified` when
+ * storage could not be read.
  */
-export async function isStoredSharedContentCancelled(
+export type SharedContentSendState = 'live' | 'gone' | 'unverified'
+
+/**
+ * Checks right before sending that a share is still live, so a share cancelled, sent, or
+ * expired in any tab is never sent, and a storage failure never counts as permission to send.
+ *
+ * @param id - Opaque ID from the form URL; empty for a form opened without a share.
+ * @param storage - Cache Storage; defaults to the page's.
+ * @param now - Current time in epoch milliseconds.
+ * @returns The send state.
+ */
+export async function readSharedContentSendState(
   id: string,
   storage: SharedContentCacheStorage | undefined = readPageCacheStorage(),
-): Promise<boolean> {
-  if (!storage || !isSharedContentId(id)) return false
+  now: number = Date.now(),
+): Promise<SharedContentSendState> {
+  if (id === '') return 'live'
   try {
-    const response = await (await storage.open(sharedContentCacheName)).match(`${sharedContentKeyPrefix}${id}`)
-    const value: unknown = await response?.json().catch(() => undefined)
-    return typeof value === 'object' && value !== null && Reflect.get(value, 'cancelled') === true
+    return await readStoredSharedContent(id, storage, now) ? 'live' : 'gone'
   } catch {
-    return false
+    return 'unverified'
   }
 }

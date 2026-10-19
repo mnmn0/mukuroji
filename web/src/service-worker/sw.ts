@@ -109,6 +109,7 @@ async function activateCurrentVersion(): Promise<void> {
   const staleNames = selectStaleCaches(await caches.keys(), cachePrefix, [
     shellCacheName,
     assetCacheName,
+    sharedContentCacheName,
   ])
 
   await Promise.all(staleNames.map((name) => caches.delete(name)))

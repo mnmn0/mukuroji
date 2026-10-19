@@ -60,9 +60,10 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   ```
 
   service worker が request を受け取り（`requestStrategy.ts` の `share-target`、同一 origin・query なしの navigation だけ）、
-  text field だけを読んで端末内の専用 cache（`mukuroji.share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
+  text field だけを読んで端末内の専用 cache（`mukuroji-share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
   共有内容そのものは URL、browser history、frontend / CDN の access log、login の `returnTo` に載りません。
-  cache 名は旧 worker が activate 時に削除する `mukuroji-` prefix を避けているため、rollback しても未送信の共有は残ります。
+  cache 名は worker が所有する `mukuroji-` prefix を使います。この inbox を知らない旧 worker へ rollback すると activate 時に削除されるため、
+  共有内容が保持期限を超えて残ることはありません（未送信の共有は失われ、元のアプリから共有し直します）。
   未読のまま 24 時間を過ぎた内容は worker の activate 時と次の共有を受け取った時に削除し、フォームも期限切れの内容を読まずに削除します
   （削除に失敗した内容が後から読めることはありません）。送信後はフォームが削除し、キャンセルでは内容を取り消し済みの印に置き換えます。
   期限切れの session の後始末（`clearAuthSession`）では削除しないため、sign-in し直した後も同じ共有を確認できます。
@@ -85,8 +86,9 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   初回の送信が権限なし（401 / 403）や入力不正（400 / 404 / 413 / 422）で拒否された場合は何も作られていないため、保存した request を破棄し、
   編集して新しい引き継ぎとして送り直せます。保存済みの request の再送が拒否された場合は、前回の送信が保存された可能性があるため固定したままにします。
   別の account で sign-in し直した場合、前の account の保存済み request は復元・再送しません。キャンセルすると
-  保存済みの request も削除し、その共有の引き継ぎを終了します。取り消し済みの印はすべての tab と window が送信の直前に確認するため、
-  別の tab で既に開いていた同じ共有（固定した再送を含む）も、キャンセル後は送信せずに見つからない旨を表示します。送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
+  保存済みの request も削除し、その共有の引き継ぎを終了します。送信の直前には、共有内容が期限内のまま残っていて取り消されていないことを必ず確認し、
+  別の tab でキャンセル・送信済み・期限切れになった共有（固定した再送を含む）は送信せずに見つからない旨を表示します。
+  cache を読めず確認できない場合も送信せず、再試行できる旨を表示します。送信中はキャンセルできず、送信中に shell の操作で別の画面へ移った場合は完了後も移動しません。成功するとその Entry を選択した Triage 画面へ移動します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
@@ -101,7 +103,7 @@ worker が保存するのは tenant に依存しない静的 build 成果物だ�
 | `/offline.css`、`/offline.js`、`/pwa-192x192.png` (query なし、GET) | install 時に `/offline.html` と一緒に precache し、cache-first で返す |
 | 同一 origin の `/assets/*` (query なし、GET) | cache-first。200 の `basic` response だけを最大 120 件保存 |
 | `/api/*`、`/v1/*`、`/developer/*`、その他 | 介入しない |
-| 同一 origin・query なしの `POST /share` navigation | 共有内容を `mukuroji.share-inbox-v1` に保存して `/share?shared=<UUID>` へ `303` |
+| 同一 origin・query なしの `POST /share` navigation | 共有内容を `mukuroji-share-inbox-v1` に保存して `/share?shared=<UUID>` へ `303` |
 | その他の GET 以外、`Range` 付き、cross-origin | 介入しない |
 
 ページ HTML、API response、share link、request intake link は保存しません。share target で受け取った共有内容だけは、
