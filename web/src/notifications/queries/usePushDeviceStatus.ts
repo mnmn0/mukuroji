@@ -38,6 +38,25 @@ export const defaultPushDeviceApi: PushDeviceApi = {
   remove: removePushSubscription,
 }
 
+/** Runs an authenticated request and reports session failures to the shared session boundary. */
+export type PushRequestGuard = <Result>(request: Promise<Result>) => Promise<Result>
+
+/**
+ * Wraps push API calls with a session guard, so an expired or policy-invalid session found by a
+ * push request sends the member to reauthenticate like the other settings requests.
+ *
+ * @param api - Server calls to guard.
+ * @param guardRequest - Session guard of the signed-in shell.
+ * @returns The guarded server calls.
+ */
+export function guardPushDeviceApi(api: PushDeviceApi, guardRequest: PushRequestGuard): PushDeviceApi {
+  return {
+    getConfiguration: (accessToken) => guardRequest(api.getConfiguration(accessToken)),
+    register: (accessToken, subscription) => guardRequest(api.register(accessToken, subscription)),
+    remove: (accessToken, removal) => guardRequest(api.remove(accessToken, removal)),
+  }
+}
+
 /** Settled push state of this device and the key it is bound to. */
 export type PushDeviceSnapshot = {
   /** Current status. */
@@ -130,8 +149,9 @@ export async function loadPushDevice(
   }
   if (refresh) {
     try {
-      await trackPushRegistration(api.register(accessToken, input))
+      // Claim the shared subscription before the request; see `enablePushDevice`.
       environment.registeredEndpoint?.write({ endpoint: input.endpoint, registrant: readAccessTokenSubject(accessToken) })
+      await trackPushRegistration(api.register(accessToken, input))
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }

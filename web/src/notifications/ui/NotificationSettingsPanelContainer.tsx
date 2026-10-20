@@ -4,6 +4,7 @@ import { usePushDevice } from '../mutations/usePushDevice'
 import type {
   NotificationPreferencesSessionErrorReporter,
 } from '../queries/useNotificationPreferences'
+import type { PushRequestGuard } from '../queries/usePushDeviceStatus'
 import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 import { PushDeviceSettings } from './PushDeviceSettings'
 
@@ -17,6 +18,8 @@ export type NotificationSettingsPanelContainerProps = {
   locale: Locale
   /** Optional callback that forwards session-policy errors to the Workspace shell. */
   onSessionError?: NotificationPreferencesSessionErrorReporter
+  /** Optional session guard that reports push request session failures to the Workspace shell. */
+  guardRequest?: PushRequestGuard
 }
 
 /**
@@ -30,13 +33,14 @@ export function NotificationSettingsPanelContainer({
   accessToken,
   locale,
   onSessionError,
+  guardRequest,
 }: NotificationSettingsPanelContainerProps) {
   const controller = useNotificationPreferences(
     accessToken,
     true,
     onSessionError,
   )
-  const pushDevice = usePushDevice(accessToken)
+  const pushDevice = usePushDevice(accessToken, guardRequest ? { guardRequest } : {})
 
   return (
     <div className="grid gap-4">

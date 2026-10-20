@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { clearAuthSession, readAccessTokenSubject } from '../../auth/session'
 import {
   decodeBase64Url,
@@ -10,6 +10,7 @@ import {
 } from '../../shared/lib/pwa/pushSubscription'
 import {
   defaultPushDeviceApi,
+  guardPushDeviceApi,
   loadPushDevice,
   readRefreshFailureStatus,
   settlePushRegistrations,
@@ -17,6 +18,7 @@ import {
   usePushDeviceStatusQuery,
   type PushDeviceApi,
   type PushDeviceStatus,
+  type PushRequestGuard,
 } from '../queries/usePushDeviceStatus'
 
 /** Outcome of the latest enable or disable action on this page. */
@@ -79,11 +81,16 @@ export async function enablePushDevice(
     const input = readPushSubscriptionInput(subscription)
     try {
       if (!input) throw new Error('The browser did not provide subscription keys.')
-      await trackPushRegistration(api.register(accessToken, input))
+      // Claim the shared subscription before the request, so another tab's sign-out that runs
+      // while it is in flight leaves the subscription to this account.
       environment.registeredEndpoint?.write({ endpoint: input.endpoint, registrant: readAccessTokenSubject(accessToken) })
+      await trackPushRegistration(api.register(accessToken, input))
     } catch (error) {
       // A network failure says nothing about an existing registration, so only a refusal drops it.
-      if (created || isRegistrationRefusal(error)) await subscription.unsubscribe().catch(() => false)
+      if (created || isRegistrationRefusal(error)) {
+        await subscription.unsubscribe().catch(() => false)
+        environment.registeredEndpoint?.write(undefined)
+      }
       throw error
     }
     return 'enabled'
@@ -175,12 +182,11 @@ export async function disconnectPushDeviceOnSignOut(
         (async () => {
           if (!accessToken || !endpoint) return
           const removal = api.remove(accessToken, { endpoint })
-          if (await settlePushRegistrations()) {
-            await removal.catch(() => undefined)
-            await api.remove(accessToken, { endpoint })
-          } else {
-            await removal
-          }
+          // The follow-up never waits on the first removal, which may stall.
+          const followUp = settlePushRegistrations().then((waited) => (
+            waited ? api.remove(accessToken, { endpoint }) : undefined
+          ))
+          await Promise.allSettled([removal, followUp])
         })(),
       ])
     })(),
@@ -263,6 +269,8 @@ export type PushDeviceOptions = {
   environment?: PushEnvironment
   /** Server calls; defaults to the push API. */
   api?: PushDeviceApi
+  /** Session guard that reports expired or policy-invalid sessions to the signed-in shell. */
+  guardRequest?: PushRequestGuard
 }
 
 /**
@@ -274,7 +282,12 @@ export type PushDeviceOptions = {
  */
 export function usePushDevice(accessToken: string, options: PushDeviceOptions = {}): PushDeviceController {
   const [environment] = useState(() => options.environment ?? readPushEnvironment())
-  const [api] = useState(() => options.api ?? defaultPushDeviceApi)
+  const [baseApi] = useState(() => options.api ?? defaultPushDeviceApi)
+  const { guardRequest } = options
+  const api = useMemo(
+    () => (guardRequest ? guardPushDeviceApi(baseApi, guardRequest) : baseApi),
+    [baseApi, guardRequest],
+  )
   const [pending, setPending] = useState(false)
   const [result, setResult] = useState<PushDeviceResult | undefined>()
   const pendingRef = useRef(false)

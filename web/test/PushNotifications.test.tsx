@@ -8,6 +8,7 @@ import {
   type PushDeviceController,
 } from '../src/notifications/mutations/usePushDevice'
 import {
+  guardPushDeviceApi,
   loadPushDevice,
   refreshPushDevice,
   trackPushRegistration,
@@ -458,6 +459,67 @@ describe('push configuration and cleanup fallbacks', () => {
     await disconnectPushDeviceOnSignOut(bob, { ...shared.environment, registeredEndpoint: memory }, api)
     expect(shared.log).toEqual(['unsubscribe current'])
     expect(memory.read()).toBeUndefined()
+  })
+
+  test('sends the follow-up removal once registrations settle, even when the first removal stalls', async () => {
+    const { environment } = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const removals: string[] = []
+    let finishRefresh: () => void = () => undefined
+    void trackPushRegistration(new Promise<void>((resolve) => { finishRefresh = resolve }))
+    void disconnectPushDeviceOnSignOut('t', environment, {
+      ...createApi().api,
+      remove: (_token, removal) => {
+        removals.push(removal.endpoint)
+        // The first removal never answers.
+        return removals.length === 1 ? new Promise<void>(() => undefined) : Promise.resolve()
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(removals).toEqual([endpoint])
+    finishRefresh()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(removals).toEqual([endpoint, endpoint])
+  })
+
+  test('claims the shared subscription before the registration request is answered', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'ada' })
+    const bob = createToken('bob')
+    const { environment } = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    let claimedDuringRequest: unknown
+    const api: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { claimedDuringRequest = memory.read() },
+    }
+    expect(await enablePushDevice(bob, vapidPublicKey, { ...environment, registeredEndpoint: memory }, api)).toBe('enabled')
+    expect(claimedDuringRequest).toEqual({ endpoint, registrant: 'bob' })
+    // A refused registration gives the claim up with the subscription.
+    const refusing: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { throw new NotificationsApiError(409, 'limit', 'PushSubscriptionLimitExceeded') },
+    }
+    expect(await enablePushDevice(bob, vapidPublicKey, { ...environment, registeredEndpoint: memory }, refusing)).toBe('failed')
+    expect(memory.read()).toBeUndefined()
+  })
+
+  test('reports push request failures to the session guard and keeps the rejection', async () => {
+    const reported: unknown[] = []
+    const expired = new NotificationsApiError(401, 'expired')
+    const guarded = guardPushDeviceApi({
+      getConfiguration: async () => { throw expired },
+      register: async () => undefined,
+      remove: async () => undefined,
+    }, async (request) => {
+      try {
+        return await request
+      } catch (error) {
+        reported.push(error)
+        throw error
+      }
+    })
+    await expect(guarded.getConfiguration('t')).rejects.toBe(expired)
+    await guarded.register('t', { endpoint, keys: { p256dh: 'p', auth: 'a' } })
+    expect(reported).toEqual([expired])
   })
 
   test('reads the registrant from the token and the memory, ignoring malformed values', () => {
