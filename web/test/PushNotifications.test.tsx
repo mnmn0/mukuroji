@@ -701,6 +701,32 @@ describe('push configuration and cleanup fallbacks', () => {
     expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
   })
 
+  test('keeps another account\'s subscription when this account\'s takeover is refused', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'bob' })
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const refusing: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { throw new NotificationsApiError(409, 'limit', 'PushSubscriptionLimitExceeded') },
+    }
+    expect(await enablePushDevice(createToken('ada'), vapidPublicKey, { ...shared.environment, registeredEndpoint: memory }, refusing))
+      .toBe('failed')
+    expect(shared.log).toEqual([])
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+  })
+
+  test('removes the device again on disable once this account\'s refresh settles', async () => {
+    const { environment } = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const { api, calls } = createApi()
+    let finishRefresh: () => void = () => undefined
+    void trackPushRegistration(new Promise<void>((resolve) => { finishRefresh = resolve }))
+    expect(await disablePushDevice('t', environment, api)).toBe('disabled')
+    expect(calls).toEqual([`remove t ${endpoint}`])
+    finishRefresh()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls).toEqual([`remove t ${endpoint}`, `remove t ${endpoint}`])
+  })
+
   test('keeps the endpoint after sign-out when the subscription could not be cancelled', async () => {
     const memory = createMemory()
     memory.write({ endpoint })

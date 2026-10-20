@@ -326,6 +326,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
    *
    * Rows past their `expiresAt` are left out: DynamoDB deletes expired items only eventually, and
    * a subscription past its retention must not keep a member from registering a new device.
+   * Rows whose expiry is missing or malformed are counted.
    *
    * @param partition - Member partition.
    * @param now - Server time of the request.
@@ -338,10 +339,13 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       const { Count, LastEvaluatedKey } = await this.#client.send(new QueryCommand({
         TableName: this.#tableName,
         KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-        FilterExpression: 'expiresAt > :now',
+        // Only a row with a numeric expiry in the past is left out; a row with a missing or
+        // malformed expiry still takes a slot, so corrupt data never lets a member exceed the limit.
+        FilterExpression: 'NOT (attribute_type(expiresAt, :number) AND expiresAt <= :now)',
         ExpressionAttributeValues: {
           ':pk': partition,
           ':prefix': 'subscription#',
+          ':number': 'N',
           ':now': Math.floor(now.getTime() / 1_000),
         },
         Select: 'COUNT',

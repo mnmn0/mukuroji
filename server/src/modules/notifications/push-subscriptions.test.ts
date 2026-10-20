@@ -310,8 +310,9 @@ describe('DynamoDbPushSubscriptionStore', () => {
     // Rows past their retention are not counted while DynamoDB has yet to delete them.
     const count = sent.find((command) => command instanceof QueryCommand)
     expect(count instanceof QueryCommand ? count.input : undefined).toMatchObject({
-      FilterExpression: 'expiresAt > :now',
-      ExpressionAttributeValues: { ':now': Math.floor(now.getTime() / 1_000) },
+      // A missing or malformed expiry is counted rather than skipped.
+      FilterExpression: 'NOT (attribute_type(expiresAt, :number) AND expiresAt <= :now)',
+      ExpressionAttributeValues: { ':number': 'N', ':now': Math.floor(now.getTime() / 1_000) },
     })
   })
 })

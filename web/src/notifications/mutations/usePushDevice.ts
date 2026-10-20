@@ -119,7 +119,9 @@ async function replaceAndRegister(
     await registerPushDevice(accessToken, input, environment, api)
   } catch (error) {
     // A network failure says nothing about an existing registration, so only a refusal drops it.
-    if (created || isRegistrationRefusal(error)) {
+    // A reused subscription another account still holds stays with it when this takeover fails.
+    const keptByAnotherAccount = !created && isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)
+    if (!keptByAnotherAccount && (created || isRegistrationRefusal(error))) {
       // Only a cancelled subscription is forgotten; one still live keeps its endpoint so a
       // later sign-out can remove it on the server.
       if (await subscription.unsubscribe().catch(() => false)) environment.registeredEndpoint?.write(undefined)
@@ -161,8 +163,12 @@ export async function disablePushDevice(
       return 'disabled'
     }
     // The browser unsubscribe stops notifications on this device, so it never waits on the
-    // best-effort server removal, which may stall.
+    // best-effort server removal, which may stall. A refresh of this account still in flight can
+    // reach the server after it, so the removal is sent again once registrations settle.
     void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+    void settlePushRegistrations()
+      .then((waited) => (waited ? api.remove(accessToken, { endpoint: subscription.endpoint }) : undefined))
+      .catch(() => undefined)
     // The decision waits, bounded, for another tab's registration to settle its claim.
     return await afterPushRegistrations(environment, async () => {
       // Another account registered the shared subscription since this page loaded; removing this
