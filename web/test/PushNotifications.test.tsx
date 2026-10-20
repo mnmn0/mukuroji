@@ -10,6 +10,7 @@ import {
 import {
   loadPushDevice,
   refreshPushDevice,
+  trackPushRegistration,
   type PushDeviceApi,
 } from '../src/notifications/queries/usePushDeviceStatus'
 import { NotificationsApiError } from '../src/notifications/api/errors'
@@ -230,6 +231,25 @@ describe('push device controller', () => {
     expect(log).toEqual(['subscribe 65', 'unsubscribe current'])
   })
 
+  test('drops an existing subscription the server refuses, but keeps it through a network failure', async () => {
+    const refused = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const limit: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { throw new NotificationsApiError(409, 'limit', 'PushSubscriptionLimitExceeded') },
+    }
+    expect(await enablePushDevice('t', vapidPublicKey, refused.environment, limit)).toBe('failed')
+    // The device then reads as off instead of on without a registration.
+    expect(refused.log).toEqual(['unsubscribe current'])
+
+    const unreachable = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const down: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { throw new NotificationsApiError(503, 'down') },
+    }
+    expect(await enablePushDevice('t', vapidPublicKey, unreachable.environment, down)).toBe('failed')
+    expect(unreachable.log).toEqual([])
+  })
+
   test('disables on the server and in the browser', async () => {
     const { environment, log } = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
     const { api, calls } = createApi()
@@ -254,6 +274,25 @@ describe('push device controller', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(hanging.log).toEqual(['unsubscribe current'])
     void pending
+
+    // A registration still in flight is settled before the removal, so it cannot recreate the
+    // registration afterwards; notifications on screen are closed and the browser unsubscribes at once.
+    const racing = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const closed: string[] = []
+    const racingApi = createApi()
+    let finishRefresh: () => void = () => undefined
+    void trackPushRegistration(new Promise<void>((resolve) => { finishRefresh = resolve }))
+    const signingOut = disconnectPushDeviceOnSignOut('t', {
+      ...racing.environment,
+      getDisplayedNotifications: async () => [{ close: () => { closed.push('closed') } }],
+    }, racingApi.api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(racing.log).toEqual(['unsubscribe current'])
+    expect(closed).toEqual(['closed'])
+    expect(racingApi.calls).toEqual([])
+    finishRefresh()
+    await signingOut
+    expect(racingApi.calls).toEqual([`remove t ${endpoint}`])
 
     const notOptedIn = createApi()
     await refreshPushDevice('t', createEnvironment({ permission: 'granted' }).environment, notOptedIn.api)

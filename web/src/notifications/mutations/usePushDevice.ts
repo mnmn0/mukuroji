@@ -10,6 +10,9 @@ import {
 import {
   defaultPushDeviceApi,
   loadPushDevice,
+  readRefreshFailureStatus,
+  settlePushRegistrations,
+  trackPushRegistration,
   usePushDeviceStatusQuery,
   type PushDeviceApi,
   type PushDeviceStatus,
@@ -22,8 +25,9 @@ export type PushDeviceResult = 'enabled' | 'disabled' | 'dismissed' | 'denied' |
  * Asks for notification permission, subscribes this browser, and registers it on the server.
  *
  * The permission dialog is requested before any await so it stays inside the user's click.
- * A subscription created here is cancelled again when the server rejects it, so the browser
- * never holds a subscription the server does not know. An unusable existing subscription, made
+ * A subscription created here is cancelled again when the server rejects it, and so is an
+ * existing one the server refuses, so the browser never holds a subscription the server does not
+ * know and the device never reads as on without a registration. An unusable existing subscription, made
  * for an earlier key or missing its keys, is removed on the server and replaced.
  *
  * @param accessToken - Access token for the API.
@@ -73,9 +77,10 @@ export async function enablePushDevice(
     const input = readPushSubscriptionInput(subscription)
     try {
       if (!input) throw new Error('The browser did not provide subscription keys.')
-      await api.register(accessToken, input)
+      await trackPushRegistration(api.register(accessToken, input))
     } catch (error) {
-      if (created) await subscription.unsubscribe().catch(() => false)
+      // A network failure says nothing about an existing registration, so only a refusal drops it.
+      if (created || isRegistrationRefusal(error)) await subscription.unsubscribe().catch(() => false)
       throw error
     }
     return 'enabled'
@@ -119,8 +124,10 @@ export const signOutPushCleanupWaitMilliseconds = 3_000
  * Removes this device's push subscription when the member signs out, so a shared device does
  * not keep showing the previous member's notifications. Never rejects.
  *
- * The browser subscription is cancelled alongside the server removal rather than after it, so
- * the step that stops notifications on this device never waits on the network.
+ * Notifications already on screen are closed, and the browser subscription is cancelled
+ * straight away, so the steps that stop notifications on this device never wait on the network.
+ * The server removal is sent only after every registration still in flight has settled, so an
+ * older refresh cannot recreate the registration after it was removed.
  *
  * @param accessToken - Access token of the session being signed out, if still known.
  * @param environment - Browser capabilities; defaults to the running page.
@@ -132,16 +139,44 @@ export async function disconnectPushDeviceOnSignOut(
   api: PushDeviceApi = defaultPushDeviceApi,
 ): Promise<void> {
   if (!environment.supported) return
-  try {
-    const subscription = await (await environment.getPushManager())?.getSubscription()
-    if (!subscription) return
-    await Promise.allSettled([
-      accessToken ? api.remove(accessToken, { endpoint: subscription.endpoint }) : Promise.resolve(),
-      subscription.unsubscribe(),
-    ])
-  } catch {
-    // Push cleanup never fails a sign-out.
-  }
+  await Promise.allSettled([
+    closeDisplayedNotifications(environment),
+    (async () => {
+      const subscription = await (await environment.getPushManager())?.getSubscription()
+      if (!subscription) return
+      await Promise.allSettled([
+        subscription.unsubscribe(),
+        (async () => {
+          if (!accessToken) return
+          await settlePushRegistrations()
+          await api.remove(accessToken, { endpoint: subscription.endpoint })
+        })(),
+      ])
+    })(),
+  ])
+}
+
+/**
+ * Closes the app's notifications still on screen, so the previous member's titles and bodies
+ * do not stay in the system's notification list after sign-out.
+ *
+ * @param environment - Browser capabilities.
+ */
+async function closeDisplayedNotifications(environment: PushEnvironment): Promise<void> {
+  const notifications = await environment.getDisplayedNotifications?.() ?? []
+  for (const notification of notifications) notification.close()
+}
+
+/**
+ * Returns whether the server refused to hold this device's registration, as opposed to being
+ * unreachable, failing, or rejecting the session.
+ *
+ * @param error - Error thrown by the registration.
+ * @returns Whether the device cannot be registered as it is.
+ */
+function isRegistrationRefusal(error: unknown): boolean {
+  const status = readRefreshFailureStatus(error)
+  return status === 'off' || status === 'disabled'
 }
 
 /**

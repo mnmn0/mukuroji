@@ -45,6 +45,34 @@ export type PushDeviceSnapshot = {
   vapidPublicKey?: string
 }
 
+/** Registrations of this browser's subscription that the server may still be processing. */
+const pendingRegistrations = new Set<Promise<unknown>>()
+
+/**
+ * Tracks a registration request until it settles, so a sign-out can order its removal after it.
+ *
+ * @param registration - Registration request.
+ * @returns The same request.
+ */
+export function trackPushRegistration<Result>(registration: Promise<Result>): Promise<Result> {
+  pendingRegistrations.add(registration)
+  const forget = () => { pendingRegistrations.delete(registration) }
+  registration.then(forget, forget)
+  return registration
+}
+
+/**
+ * Waits until every tracked registration has settled. A removal sent afterwards cannot be
+ * overtaken by an older registration, including the retries the server makes for it.
+ *
+ * @returns A promise that settles once no registration is in flight.
+ */
+export async function settlePushRegistrations(): Promise<void> {
+  while (pendingRegistrations.size > 0) {
+    await Promise.allSettled([...pendingRegistrations])
+  }
+}
+
 /**
  * Reads this device's push status and refreshes an active registration on the server.
  *
@@ -99,7 +127,7 @@ export async function loadPushDevice(
   }
   if (refresh) {
     try {
-      await api.register(accessToken, input)
+      await trackPushRegistration(api.register(accessToken, input))
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }
@@ -118,7 +146,7 @@ export async function loadPushDevice(
  * @param error - Error thrown by the refresh.
  * @returns The status to show.
  */
-function readRefreshFailureStatus(error: unknown): Exclude<PushDeviceStatus, 'loading'> {
+export function readRefreshFailureStatus(error: unknown): Exclude<PushDeviceStatus, 'loading'> {
   if (!(error instanceof NotificationsApiError) || error.status >= 500) return 'on'
   if (error.code === 'PushNotificationsDisabled') return 'disabled'
   if (

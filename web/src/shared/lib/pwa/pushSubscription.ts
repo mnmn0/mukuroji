@@ -63,6 +63,18 @@ export type PushEnvironment = {
    * @returns The push manager, or `undefined` when no worker is registered.
    */
   getPushManager: () => Promise<BrowserPushManager | undefined>
+  /**
+   * Lists the notifications this app is currently showing; omitted where there are none to read.
+   *
+   * @returns Notifications that can be closed.
+   */
+  getDisplayedNotifications?: () => Promise<readonly DisplayedNotification[]>
+}
+
+/** Notification the app is currently showing. */
+export type DisplayedNotification = {
+  /** Removes the notification from the system's notification list. */
+  close: () => void
 }
 
 /**
@@ -84,6 +96,8 @@ export function readPushEnvironment(): PushEnvironment {
     supported: true,
     notification: Notification,
     getPushManager: async () => (await readServiceWorkerRegistration(navigator.serviceWorker))?.pushManager,
+    getDisplayedNotifications: async () =>
+      (await readServiceWorkerRegistration(navigator.serviceWorker))?.getNotifications() ?? [],
   }
 }
 
