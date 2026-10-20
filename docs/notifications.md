@@ -94,18 +94,20 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   member や Workspace は request に含めず、認証済み member に保存します。service account など人以外は `403` です。
 - endpoint は HTTPS かつ既知の push service（FCM、Mozilla、Apple、Windows）の host だけを許可し、認証情報・port・fragment（`#`。push service へ送られないため、同じ endpoint が別の ID を得てしまいます）・正規化で変わる URL を拒否します。
   配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
-- 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`）と endpoint の所有者
+- 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`。各 ID は URL エンコードし、`#` を含む ID でも区切りがずれません）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
-  共有端末で別の人の通知が届き続けることはありません。所有者の行には server の登録時刻を記録し、request の開始より後に別の member が登録していた場合は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻しません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+  共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）を記録し、所有者の行への書き込みはすべて読んだ `changedAt` を条件にするため、変更は必ず順番に適用されます。request の開始より後に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
 - 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
   購読は 180 日で TTL 失効し、所有者の行はその 30 日後に失効します。DynamoDB は期限切れの行を個別に遅れて削除するため、
   所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
-  その member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
-- tenant の export・削除・検証の対象に含めます（member 行・所有者行・登録 version はすべて `workspaceId` を持ちます）。
+  tombstone でなくその member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
+- tenant の export・削除・検証の対象に含めます（member 行・所有者行（tombstone を含む）・登録 version はすべて `workspaceId` を持ちます）。
+  検証は Workspace ID の filter 付き scan のため、1 回の job で最大 1,000 行を評価します（scan の limit は filter の前に適用されるため、1 行ずつでは共有 table の行数だけ job が続きます）。
   所有者行の key は endpoint だけで決まり、scan の後に別 Workspace が同じ endpoint を引き継ぐことがあるため、削除はまだ閉鎖する Workspace の行である場合だけ条件付きで行い、引き継がれた行は残します。
-- `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合だけ endpoint の所有者も解放します。
+- `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合は所有者の行を削除時刻付きの tombstone（`removed: true`）に置き換えます。
+  別の tab や再試行で削除より前に始まった登録は tombstone より古いため、削除の後に購読を作り直せません。request の開始より後に変更があった削除は古い request として、その新しい状態を変えません。
   明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、表示中の app の通知を閉じ、browser の購読をすぐに解除し、
   送信中の登録（Workspace を開いた時の再登録や有効化）が完了してから破棄前の token でこの削除を送ります（古い登録が削除の後に購読を作り直さないため）。
   その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。

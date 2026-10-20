@@ -69,7 +69,7 @@ export function createPushSubscriptionRouter<Principal extends PushSubscriptionP
     if (!accessToken) return context.json({ message: 'Bearer token is required.' }, 401)
     try {
       const principal = await dependencies.authenticate(accessToken, context)
-      await removePushDevice(dependencies.getStore(), principal, await dependencies.readJson(context.req))
+      await removePushDevice(dependencies.getStore(), principal, await dependencies.readJson(context.req), dependencies.now())
       return context.body(null, 204)
     } catch (error) {
       return dependencies.mapError(context, error)

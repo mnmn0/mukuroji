@@ -545,6 +545,65 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
+  test('verifies filtered scan targets a bounded page per job instead of one evaluated row', async () => {
+    const requests: Array<{ target: string | undefined, body: unknown }> = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push({ target: readHttpHeader(request, 'x-amz-target'), body: readJsonRequestBody(request) })
+          return {
+            response: { body: new TextEncoder().encode('{"Items":[]}'), headers: {}, statusCode: 200 },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const cognitoClient = new CognitoIdentityProviderClient({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'verification',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(),
+      currentStep: 'verify',
+      completedSteps: ['export', 'revoke-access', 'anonymize-members', 'delete-data', 'delete-secrets'],
+      revision: 6,
+    }
+    let job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: operation.workspaceId,
+      operationId: operation.operationId,
+      step: 'verify',
+    }
+
+    try {
+      for (let step = 0; step < 60; step += 1) {
+        if (requests.some(({ body }) => isRecord(body) && body.TableName === 'push-subscriptions')) break
+        const result = await owner.execute(job, operation)
+        if (result.status !== 'continuing') break
+        job = result.nextJob
+      }
+      const pushScan = requests.find(({ body }) => isRecord(body) && body.TableName === 'push-subscriptions')
+      expect(pushScan?.target).toBe('DynamoDB_20120810.Scan')
+      expect(pushScan?.body).toMatchObject({ Limit: 1_000 })
+      // A target read by its partition key still stops at the first residual row.
+      const partitionQuery = requests.find(({ target }) => target === 'DynamoDB_20120810.Query')
+      expect(partitionQuery?.body).toMatchObject({ Limit: 1 })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
   test('continues filtered verification scans and repairs a discovered residual row', async () => {
     let requestCount = 0
     const lowLevelClient = new DynamoDBClient({

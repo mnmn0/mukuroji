@@ -136,7 +136,7 @@ const now = new Date('2026-10-19T00:00:00.000Z')
 describe('DynamoDbPushSubscriptionStore', () => {
   test('takes an endpoint over from another member so one device never gets two people’s pushes', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'bob' } }
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'bob', changedAt: now.getTime() - 60_000 } }
       if (command instanceof QueryCommand) return { Count: 1 }
       return {}
     })
@@ -147,7 +147,9 @@ describe('DynamoDbPushSubscriptionStore', () => {
     expect(items).toHaveLength(4)
     // The owner outlives the member rows it guards, so TTL never splits ownership.
     expect(items[0]?.Put?.Item).toMatchObject({ pk: `endpoint#${subscription.subscriptionId}`, workspaceId: 'ws-1', memberKey: 'ada', expiresAt: memberExpiresAt + 30 * 86_400 })
-    expect(items[0]?.Put?.ConditionExpression).toBe('workspaceId = :ownerWorkspace AND memberKey = :ownerMember')
+    expect(items[0]?.Put?.Item).toMatchObject({ changedAt: now.getTime() })
+    // Every owner write is fenced on the exact record read, so changes apply in order.
+    expect(items[0]?.Put).toMatchObject({ ConditionExpression: 'changedAt = :ownerChangedAt', ExpressionAttributeValues: { ':ownerChangedAt': now.getTime() - 60_000 } })
     expect(items[1]?.Put?.Item).toMatchObject({ pk: 'member#ws-1#ada', endpoint, p256dh, auth, expiresAt: memberExpiresAt })
     // A new device bumps the member's registration version, fencing the device count.
     expect(items[2]?.Update).toMatchObject({ Key: { pk: 'member#ws-1#ada', sk: 'devices' }, ConditionExpression: 'attribute_not_exists(version)' })
@@ -156,7 +158,7 @@ describe('DynamoDbPushSubscriptionStore', () => {
 
   test('refreshes the member’s own subscription without counting it against the limit', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada' } }
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000 } }
       return {}
     })
     await new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now)
@@ -215,7 +217,7 @@ describe('DynamoDbPushSubscriptionStore', () => {
         // Bob registered the same endpoint after this request started, and won the race.
         return ownerReads === 1
           ? {}
-          : { Item: { workspaceId: 'ws-1', memberKey: 'bob', registeredAt: now.getTime() + 1_000 } }
+          : { Item: { workspaceId: 'ws-1', memberKey: 'bob', changedAt: now.getTime() + 1_000 } }
       }
       if (command instanceof TransactWriteCommand) {
         transactions += 1
@@ -243,43 +245,104 @@ describe('DynamoDbPushSubscriptionStore', () => {
     expect(transactions).toBe(1)
   })
 
-  test('removes the member row and its owner row together while the member owns the endpoint', async () => {
+  test('removes the member row and leaves a tombstone owner while the member owns the endpoint', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada' } }
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000 } }
       return {}
     })
-    await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint)
+    await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint, now)
     const transaction = sent.find((command) => command instanceof TransactWriteCommand)
     const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
     expect(items[0]?.Delete?.Key).toEqual({ pk: 'member#ws-1#ada', sk: `subscription#${subscription.subscriptionId}` })
-    expect(items[1]?.Delete).toMatchObject({
-      Key: { pk: `endpoint#${subscription.subscriptionId}`, sk: 'owner' },
-      ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
+    // The tombstone keeps the removal time, so a registration that started earlier cannot recreate it.
+    expect(items[1]?.Put).toMatchObject({
+      Item: { pk: `endpoint#${subscription.subscriptionId}`, sk: 'owner', workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime(), removed: true },
+      ConditionExpression: 'changedAt = :ownerChangedAt',
+      ExpressionAttributeValues: { ':ownerChangedAt': now.getTime() - 60_000 },
     })
   })
 
   test('removes only the member row, fenced on the other owner, when the endpoint moved on', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'bob' } }
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'bob', changedAt: now.getTime() - 60_000 } }
       return {}
     })
-    await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint)
+    await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint, now)
     const transaction = sent.find((command) => command instanceof TransactWriteCommand)
     const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
     expect(items[1]?.ConditionCheck).toMatchObject({
-      ExpressionAttributeValues: { ':workspace': 'ws-1', ':member': 'bob' },
+      ConditionExpression: 'changedAt = :ownerChangedAt',
+      ExpressionAttributeValues: { ':ownerChangedAt': now.getTime() - 60_000 },
     })
   })
 
   test('counts a device again when its owner outlived the expired member row', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'ada' } }
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000 } }
       if (command instanceof QueryCommand) return { Count: MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER }
       return {}
     })
     await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
       .rejects.toMatchObject({ code: 'PushSubscriptionLimitExceeded' })
     expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+  })
+})
+
+describe('DynamoDbPushSubscriptionStore ordering', () => {
+  test('treats any change after the request started as newer, including the same member and removals', async () => {
+    for (const later of [
+      { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() + 1 },
+      { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() + 1, removed: true },
+    ]) {
+      const { client, sent } = createClient(async (command) => {
+        if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: later }
+        return {}
+      })
+      await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+        .rejects.toMatchObject({ code: 'PushSubscriptionConflict' })
+      expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+    }
+  })
+
+  test('registers again after a removal that happened before the request', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') {
+        return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 1, removed: true } }
+      }
+      if (command instanceof QueryCommand) return { Count: 0 }
+      return {}
+    })
+    await new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now)
+    const transaction = sent.find((command) => command instanceof TransactWriteCommand)
+    const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
+    // The tombstone is not an owner, so nobody else's row is deleted, and the device counts as new.
+    expect(items.some((item) => item.Delete)).toBe(false)
+    expect(items[0]?.Put?.Item).not.toHaveProperty('removed')
+  })
+
+  test('leaves a newer registration alone when a removal is stale', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() + 1 } }
+      return {}
+    })
+    await new DynamoDbPushSubscriptionStore(client, 'push').remove('ws-1', 'ada', endpoint, now)
+    expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+  })
+
+  test('keeps member partitions distinct when IDs contain the separator', async () => {
+    const partitions: unknown[] = []
+    const { client } = createClient(async (command) => {
+      if (command instanceof TransactWriteCommand) {
+        partitions.push(command.input.TransactItems?.[1]?.Put?.Item?.pk)
+      }
+      if (command instanceof QueryCommand) return { Count: 0 }
+      return {}
+    })
+    const store = new DynamoDbPushSubscriptionStore(client, 'push')
+    await store.register('acme#prod', 'user@example.com', subscription, now)
+    await store.register('acme', 'prod#user@example.com', subscription, now)
+    expect(partitions[0]).not.toBe(partitions[1])
+    expect(partitions[0]).toBe('member#acme%23prod#user%40example.com')
   })
 })
 

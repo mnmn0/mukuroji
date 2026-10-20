@@ -49,6 +49,9 @@ import { TenantAdministrationError } from '../../domain/tenant-administration'
 import { createAuditExportWorkspacePrefix } from '../../../audit'
 
 const RESOURCE_PAGE_SIZE = 20
+
+/** Rows a verification scan evaluates per job when the tenant is located by a filter. */
+const VERIFICATION_SCAN_PAGE_SIZE = 1_000
 const IDENTITY_PAGE_SIZE = 10
 const TENANT_CLOSURE_QUIESCENCE_SECONDS = 16 * 60
 const TENANT_CURSOR_IV_BYTES = 12
@@ -1278,7 +1281,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         operation.workspaceId,
         this.decodeDynamoPosition(job, cursor.position),
         true,
-        1,
+        // A filtered scan applies its limit before the filter, so one evaluated row per job would
+        // walk a shared table one job per unrelated row; a partition query needs only one match.
+        findPartitionSelector(target) ? 1 : VERIFICATION_SCAN_PAGE_SIZE,
       )
       if (page.items.length > 0) {
         return {
@@ -1464,12 +1469,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     keysOnly: boolean,
     limit = RESOURCE_PAGE_SIZE,
   ): Promise<DynamoPage> {
-    const directSelector = target.selectors.length === 1 &&
-      target.selectors[0]?.path.length === 1 &&
-      target.selectors[0]?.path[0] === target.partitionKey &&
-      target.selectors[0]?.mode === 'equals'
-      ? target.selectors[0]
-      : undefined
+    const directSelector = findPartitionSelector(target)
     const projection = keysOnly
       ? createKeyProjection(target)
       : undefined
@@ -1727,6 +1727,23 @@ function delimitedPrefixTarget(
     ...(sortKey ? { sortKey } : {}),
     selectors: [workspaceSelector(partitionKey, 'prefix', '', '#')],
   }
+}
+
+/**
+ * Returns the selector that locates the tenant by the whole partition key, so the target can be
+ * read with a query instead of a filtered scan.
+ *
+ * @param target - Tenant table target.
+ * @returns The partition selector, or `undefined` when the target needs a filtered scan.
+ */
+function findPartitionSelector(target: TenantDynamoTarget): TenantSelector | undefined {
+  const [selector] = target.selectors
+  return target.selectors.length === 1 &&
+    selector?.path.length === 1 &&
+    selector.path[0] === target.partitionKey &&
+    selector.mode === 'equals'
+    ? selector
+    : undefined
 }
 
 /** Creates a scan target whose tenant locator may differ from its primary key. */

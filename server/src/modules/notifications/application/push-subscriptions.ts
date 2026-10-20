@@ -4,7 +4,7 @@ import {
   readPushSubscriptionRemoval,
   type ValidatedPushSubscription,
 } from '../domain/push-subscription'
-import { NotificationError } from '../notifications'
+import { NotificationError } from '../domain/notification-error'
 
 /** Push subscription storage the use cases require. */
 export type PushSubscriptionStore = {
@@ -13,8 +13,11 @@ export type PushSubscriptionStore = {
    * member so one device never receives two people's notifications.
    */
   register(workspaceId: string, memberKey: string, subscription: ValidatedPushSubscription, now: Date): Promise<void>
-  /** Removes a member's subscription for an endpoint; removing a missing one succeeds. */
-  remove(workspaceId: string, memberKey: string, endpoint: string): Promise<void>
+  /**
+   * Removes a member's subscription for an endpoint; removing a missing one succeeds. A removal
+   * that started before the endpoint's last change leaves that newer state alone.
+   */
+  remove(workspaceId: string, memberKey: string, endpoint: string, now: Date): Promise<void>
 }
 
 /** Authenticated principal a device is registered for. */
@@ -60,14 +63,16 @@ export async function registerPushDevice(
  * @param store - Subscription storage.
  * @param principal - Authenticated principal.
  * @param body - Untrusted request body.
+ * @param now - Current time.
  */
 export async function removePushDevice(
   store: PushSubscriptionStore,
   principal: PushSubscriptionPrincipal,
   body: unknown,
+  now: Date,
 ): Promise<void> {
   requirePerson(principal)
-  await store.remove(principal.directoryId, principal.userKey, readPushSubscriptionRemoval(body))
+  await store.remove(principal.directoryId, principal.userKey, readPushSubscriptionRemoval(body), now)
 }
 
 /**

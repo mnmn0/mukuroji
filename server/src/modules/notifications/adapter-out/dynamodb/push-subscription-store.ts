@@ -8,7 +8,7 @@ import {
   createPushSubscriptionId,
   type ValidatedPushSubscription,
 } from '../../domain/push-subscription'
-import { NotificationError } from '../../notifications'
+import { NotificationError } from '../../domain/notification-error'
 import type { PushSubscriptionStore } from '../../application/push-subscriptions'
 
 /** Days a subscription is kept without being registered again by its browser. */
@@ -40,14 +40,16 @@ type PushSubscriptionDocumentClient = {
   }>
 }
 
-/** Member that currently owns a push endpoint. */
+/** Owner record of a push endpoint: its current or last member and when it last changed. */
 type EndpointOwner = {
-  /** Owning Workspace. */
+  /** Owning, or last owning, Workspace. */
   workspaceId: string
-  /** Owning member. */
+  /** Owning, or last owning, member. */
   memberKey: string
-  /** Server time in epoch milliseconds when the owner last registered, if recorded. */
-  registeredAt?: number
+  /** Server time in epoch milliseconds of the last registration or removal. */
+  changedAt: number
+  /** Whether the last member removed the endpoint, leaving the record as a tombstone. */
+  removed: boolean
 }
 
 /**
@@ -58,7 +60,8 @@ type EndpointOwner = {
  * @returns Partition key.
  */
 function memberPartition(workspaceId: string, memberKey: string): string {
-  return `member#${workspaceId}#${memberKey}`
+  // Each component is encoded, so `#` inside an ID can never shift the boundary between them.
+  return `member#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}`
 }
 
 /**
@@ -107,12 +110,13 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
     const expiresAt = Math.floor(now.getTime() / 1_000) + subscriptionRetentionDays * 86_400
     for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
       const owner = await this.#readOwner(subscription.subscriptionId)
-      const ownedByMember = owner?.workspaceId === workspaceId && owner.memberKey === memberKey
-      // Another member registered this endpoint after this request started, so this request is
-      // stale and must not take the device back, even when it lost the race and is retrying.
-      if (owner && !ownedByMember && owner.registeredAt !== undefined && owner.registeredAt > now.getTime()) {
-        throw new NotificationError(409, 'PushSubscriptionConflict', 'A newer registration owns this push subscription.')
+      // The endpoint was registered or removed after this request started, by any member, so the
+      // request is stale and must not undo that change, including when it lost the race and retries.
+      if (owner && owner.changedAt > now.getTime()) {
+        throw new NotificationError(409, 'PushSubscriptionConflict', 'A newer change owns this push subscription.')
       }
+      const liveOwner = owner && !owner.removed ? owner : undefined
+      const ownedByMember = liveOwner?.workspaceId === workspaceId && liveOwner.memberKey === memberKey
       // Only a stored subscription is refreshed. An owner can outlive an expired member row, and
       // that device counts again as new; the transaction re-checks the row still exists.
       const refresh = ownedByMember && await this.#hasSubscription(partition, subscription.subscriptionId)
@@ -127,7 +131,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
         sk: 'owner',
         workspaceId,
         memberKey,
-        registeredAt: now.getTime(),
+        changedAt: now.getTime(),
         expiresAt: expiresAt + ownerRetentionMarginDays * 86_400,
       }
       try {
@@ -137,13 +141,9 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
               Put: {
                 TableName: this.#tableName,
                 Item: ownerItem,
-                // Fence the owner read above so a concurrent takeover is retried, not overwritten.
-                ...(owner
-                  ? {
-                      ConditionExpression: 'workspaceId = :ownerWorkspace AND memberKey = :ownerMember',
-                      ExpressionAttributeValues: { ':ownerWorkspace': owner.workspaceId, ':ownerMember': owner.memberKey },
-                    }
-                  : { ConditionExpression: 'attribute_not_exists(pk)' }),
+                // Fence the exact owner record read above, so every change is applied in order and a
+                // concurrent registration or removal is retried, never overwritten.
+                ...ownerFence(owner),
               },
             },
             {
@@ -181,12 +181,12 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
                   },
                 }]
               : []),
-            ...(owner && !ownedByMember
+            ...(liveOwner && !ownedByMember
               ? [{
                   Delete: {
                     TableName: this.#tableName,
                     Key: {
-                      pk: memberPartition(owner.workspaceId, owner.memberKey),
+                      pk: memberPartition(liveOwner.workspaceId, liveOwner.memberKey),
                       sk: `subscription#${subscription.subscriptionId}`,
                     },
                   },
@@ -205,39 +205,42 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
   /**
    * Removes a member's subscription for an endpoint.
    *
+   * While the member owns the endpoint, the owner record becomes a tombstone carrying the removal
+   * time instead of disappearing, so a registration that started earlier, from any tab or retry,
+   * is recognised as stale and cannot recreate the registration afterwards. A removal that started
+   * before the endpoint's last change is itself stale and leaves that newer state alone.
+   *
    * @param workspaceId - Workspace of the member.
    * @param memberKey - Member removing the device.
-   * @param endpoint - Push service URL.
+   * @param endpoint - Endpoint to remove.
+   * @param now - Current time.
    */
-  async remove(workspaceId: string, memberKey: string, endpoint: string): Promise<void> {
+  async remove(workspaceId: string, memberKey: string, endpoint: string, now: Date): Promise<void> {
     const subscriptionId = createPushSubscriptionId(endpoint)
     const ownerKey = { pk: endpointPartition(subscriptionId), sk: 'owner' }
     for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
       const owner = await this.#readOwner(subscriptionId)
-      const ownedByMember = owner?.workspaceId === workspaceId && owner.memberKey === memberKey
-      // The member row and, while this member owns the endpoint, the owner row are deleted in one
-      // transaction fenced on the owner read, so a concurrent refresh can never leave either alone.
+      if (owner && owner.changedAt > now.getTime()) return
+      const ownedByMember = owner !== undefined && !owner.removed &&
+        owner.workspaceId === workspaceId && owner.memberKey === memberKey
+      // The member row and the owner record change in one transaction fenced on the owner read,
+      // so a concurrent registration can never leave either alone.
       const ownerOperation = ownedByMember
         ? {
-            Delete: {
+            Put: {
               TableName: this.#tableName,
-              Key: ownerKey,
-              ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
-              ExpressionAttributeValues: { ':workspace': workspaceId, ':member': memberKey },
+              Item: {
+                ...ownerKey,
+                workspaceId,
+                memberKey,
+                changedAt: now.getTime(),
+                removed: true,
+                expiresAt: Math.floor(now.getTime() / 1_000) + ownerRetentionMarginDays * 86_400,
+              },
+              ...ownerFence(owner),
             },
           }
-        : {
-            ConditionCheck: {
-              TableName: this.#tableName,
-              Key: ownerKey,
-              ...(owner
-                ? {
-                    ConditionExpression: 'workspaceId = :workspace AND memberKey = :member',
-                    ExpressionAttributeValues: { ':workspace': owner.workspaceId, ':member': owner.memberKey },
-                  }
-                : { ConditionExpression: 'attribute_not_exists(pk)' }),
-            },
-          }
+        : { ConditionCheck: { TableName: this.#tableName, Key: ownerKey, ...ownerFence(owner) } }
       try {
         await this.#client.send(new TransactWriteCommand({
           TransactItems: [
@@ -275,10 +278,10 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
   }
 
   /**
-   * Strongly reads the current owner of an endpoint.
+   * Strongly reads the owner record of an endpoint.
    *
    * @param subscriptionId - Endpoint-derived subscription ID.
-   * @returns The owner, or `undefined` when the endpoint is unowned.
+   * @returns The owner record, which may be a tombstone, or `undefined` when none exists.
    */
   async #readOwner(subscriptionId: string): Promise<EndpointOwner | undefined> {
     const { Item } = await this.#client.send(new GetCommand({
@@ -287,11 +290,11 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       ConsistentRead: true,
     }))
     if (!Item) return undefined
-    const { workspaceId, memberKey, registeredAt } = Item
-    if (typeof workspaceId !== 'string' || typeof memberKey !== 'string') {
+    const { workspaceId, memberKey, changedAt, removed } = Item
+    if (typeof workspaceId !== 'string' || typeof memberKey !== 'string' || typeof changedAt !== 'number') {
       throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
     }
-    return { workspaceId, memberKey, ...(typeof registeredAt === 'number' ? { registeredAt } : {}) }
+    return { workspaceId, memberKey, changedAt, removed: removed === true }
   }
 
   /**
@@ -341,6 +344,24 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
 
 /** Cancellation reasons that mean another registration changed the guarded rows first. */
 const raceCancellationCodes: readonly string[] = ['ConditionalCheckFailed', 'TransactionConflict']
+
+/**
+ * Builds the condition that the owner record is still exactly the one read, so owner changes
+ * apply in order.
+ *
+ * @param owner - Owner record read before the write, if any.
+ * @returns Condition expression and values for the owner record.
+ */
+function ownerFence(owner: EndpointOwner | undefined): {
+  /** Condition on the owner record. */
+  ConditionExpression: string
+  /** Values the condition refers to. */
+  ExpressionAttributeValues?: Record<string, unknown>
+} {
+  return owner
+    ? { ConditionExpression: 'changedAt = :ownerChangedAt', ExpressionAttributeValues: { ':ownerChangedAt': owner.changedAt } }
+    : { ConditionExpression: 'attribute_not_exists(pk)' }
+}
 
 /**
  * Returns whether a transaction lost a race with a concurrent registration.

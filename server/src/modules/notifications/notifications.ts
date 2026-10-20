@@ -11,6 +11,9 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
+import { NotificationError } from './domain/notification-error'
+
+export { NotificationError }
 
 /** Notification timeline で選択できる保存状態です。 */
 export type NotificationState = 'unread' | 'read' | 'archived' | 'snoozed'
@@ -250,20 +253,6 @@ export type NotificationClient = {
   getPreferences(input: NotificationRecipientInput): Promise<NotificationPreferences>
   /** Recipient の preference を version 条件付きで置き換えます。 */
   savePreferences(input: SaveNotificationPreferencesInput): Promise<NotificationPreferences>
-}
-
-/** Notification API/store の安定した error です。 */
-export class NotificationError extends Error {
-  /** HTTP status code です。 */
-  readonly status: number
-  /** Client が分岐に使う error code です。 */
-  readonly code: string
-
-  constructor(status: number, code: string, message: string) {
-    super(message)
-    this.status = status
-    this.code = code
-  }
 }
 
 /** NotificationsTable 内で preference を識別する sort key です。 */

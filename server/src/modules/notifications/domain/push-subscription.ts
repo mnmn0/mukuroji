@@ -1,6 +1,6 @@
 import { createECDH, createHash } from 'node:crypto'
 import type { PushConfiguration, PushSubscriptionInput } from '@mukuroji/contracts'
-import { NotificationError } from '../notifications'
+import { NotificationError } from './notification-error'
 
 /** Longest push endpoint accepted; real push service URLs are far shorter. */
 const maxEndpointLength = 2_048
