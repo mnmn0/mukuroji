@@ -578,8 +578,9 @@ function WorkspaceRouteShell({
         )}
         </section>
         {quickAccessFeedbackMessage ? (
+          // Stacks above the app's offline notice, which publishes its height in this variable.
           <div
-            className="fixed bottom-5 right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-lg"
+            className="fixed bottom-[calc(1.25rem+var(--app-bottom-notice-offset,0px))] right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-lg"
             role={workspace.quickAccessFeedback?.kind === 'error' ? 'alert' : 'status'}
           >
             <span className="min-w-0 flex-1">{quickAccessFeedbackMessage}</span>

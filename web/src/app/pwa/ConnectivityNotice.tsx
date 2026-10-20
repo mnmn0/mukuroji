@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
 import {
   createTranslator,
   getInitialLocale,
@@ -8,6 +8,7 @@ import {
 import { announce } from '../../shared/lib/liveAnnouncements'
 import {
   appConnectivity,
+  publishBottomNoticeOffset,
   resolveConnectivityAnnouncement,
   type ConnectivityStore,
 } from '../../shared/lib/pwa/connectivity'
@@ -35,7 +36,8 @@ export type ConnectivityNoticeProps = {
  *
  * The visible notice uses the same bottom-right slot as the update notice while offline, clear
  * of the headers and the Workspace sidebar's bottom navigation, and swallows taps instead of
- * passing them to the content beneath. It steps aside while the update notice uses that slot. Announcements go through the app's
+ * passing them to the content beneath. It steps aside while the update notice uses that slot, and
+ * publishes its height so other bottom-right notices stack above it. Announcements go through the app's
  * persistent live regions, so they are read even though the notice mounts at the same moment.
  *
  * @param props - Connectivity source and update notice state.
@@ -60,10 +62,30 @@ export function ConnectivityNotice({
     announce(change === 'online' ? onlineMessage : offlineMessage, 'polite', Date.now(), 'connectivity')
   }, [offlineMessage, online, onlineMessage])
 
-  if (online || (isUpdateNoticeShown ?? updateReady)) return null
+  const visible = !online && !(isUpdateNoticeShown ?? updateReady)
+  const noticeRef = useRef<HTMLParagraphElement>(null)
+
+  useLayoutEffect(() => {
+    const notice = noticeRef.current
+    if (!visible || !notice) return undefined
+    const rootStyle = document.documentElement.style
+    publishBottomNoticeOffset(rootStyle, notice.getBoundingClientRect().height)
+    // The message wraps differently as the viewport or language changes.
+    const observer = typeof ResizeObserver === 'undefined'
+      ? undefined
+      : new ResizeObserver(() => publishBottomNoticeOffset(rootStyle, notice.getBoundingClientRect().height))
+    observer?.observe(notice)
+    return () => {
+      observer?.disconnect()
+      publishBottomNoticeOffset(rootStyle, undefined)
+    }
+  }, [visible])
+
+  if (!visible) return null
 
   return (
     <p
+      ref={noticeRef}
       className="workbench-panel fixed inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] z-50 m-0 px-4 py-2 text-sm leading-6 shadow-lg sm:left-auto sm:max-w-md"
       data-testid="connectivity-notice"
     >

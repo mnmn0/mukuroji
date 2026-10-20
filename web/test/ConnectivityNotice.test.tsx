@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ConnectivityNotice } from '../src/app/pwa/ConnectivityNotice'
 import {
+  bottomNoticeOffsetProperty,
   createConnectivityStore,
+  publishBottomNoticeOffset,
   resolveConnectivityAnnouncement,
   type ConnectivityStore,
 } from '../src/shared/lib/pwa/connectivity'
@@ -85,5 +87,24 @@ describe('ConnectivityNotice', () => {
     expect(markup).toContain('オフラインです。')
     // The bar itself is not a live region; announcements use the persistent regions.
     expect(markup).not.toContain('role=')
+  })
+})
+
+describe('publishBottomNoticeOffset', () => {
+  test('publishes the notice height plus a gap and clears it once hidden', () => {
+    const properties = new Map<string, string>()
+    const style = {
+      setProperty: (name: string, value: string | null) => { properties.set(name, value ?? '') },
+      removeProperty: (name: string) => {
+        const previous = properties.get(name) ?? ''
+        properties.delete(name)
+        return previous
+      },
+    }
+
+    publishBottomNoticeOffset(style, 40.2)
+    expect(properties.get(bottomNoticeOffsetProperty)).toBe('49px')
+    publishBottomNoticeOffset(style, undefined)
+    expect(properties.has(bottomNoticeOffsetProperty)).toBe(false)
   })
 })

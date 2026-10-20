@@ -101,5 +101,31 @@ export function resolveConnectivityAnnouncement(
   return online ? 'online' : 'offline'
 }
 
+/** CSS custom property holding the space the offline notice takes at the bottom edge. */
+export const bottomNoticeOffsetProperty = '--app-bottom-notice-offset'
+
+/** Gap kept between the offline notice and a notice stacked above it, in pixels. */
+const bottomNoticeGap = 8
+
+/** Style declaration fields used to publish the bottom notice offset. */
+type BottomNoticeOffsetStyle = Pick<CSSStyleDeclaration, 'setProperty' | 'removeProperty'>
+
+/**
+ * Publishes how much of the bottom edge the offline notice occupies.
+ *
+ * Other fixed bottom-right notices, such as the Workspace quick-access feedback, add this offset
+ * so they stack above the offline notice instead of covering it.
+ *
+ * @param style - Style declaration of the document root.
+ * @param height - Height of the visible notice in pixels; `undefined` once it is hidden.
+ */
+export function publishBottomNoticeOffset(style: BottomNoticeOffsetStyle, height: number | undefined): void {
+  if (height === undefined) {
+    style.removeProperty(bottomNoticeOffsetProperty)
+    return
+  }
+  style.setProperty(bottomNoticeOffsetProperty, `${Math.ceil(height) + bottomNoticeGap}px`)
+}
+
 /** Connectivity of the running page. */
 export const appConnectivity = createConnectivityStore()
