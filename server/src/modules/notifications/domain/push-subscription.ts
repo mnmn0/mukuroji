@@ -96,7 +96,9 @@ export function readPushSubscriptionInput(value: unknown): ValidatedPushSubscrip
   const p256dh = readBase64UrlKey(keys.p256dh, p256dhByteLength)
   const auth = readBase64UrlKey(keys.auth, authByteLength)
   // A key off the curve would be stored but fail every later encryption.
-  if (!isP256Point(Buffer.from(p256dh, 'base64url'))) throw invalidSubscription()
+  const point = Buffer.from(p256dh, 'base64url')
+  // Only the uncompressed form (0x04) is accepted; ECDH also accepts the hybrid forms.
+  if (point[0] !== 0x04 || !isP256Point(point)) throw invalidSubscription()
   return { endpoint, keys: { p256dh, auth }, subscriptionId: createPushSubscriptionId(endpoint) }
 }
 

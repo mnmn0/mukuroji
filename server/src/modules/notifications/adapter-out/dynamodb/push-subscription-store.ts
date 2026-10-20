@@ -117,6 +117,9 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       // request is stale and must not undo that change, including when it lost the race and retries.
       // Equal times count as newer too: two requests in the same millisecond cannot be ordered.
       if (owner && owner.changedAt >= now.getTime()) {
+        // A newer registration by this member already holds the endpoint, so this request has
+        // nothing left to do. A newer removal or another member's claim still wins.
+        if (!owner.removed && owner.workspaceId === workspaceId && owner.memberKey === memberKey) return
         throw new NotificationError(409, 'PushSubscriptionConflict', 'A newer change owns this push subscription.')
       }
       const liveOwner = owner && !owner.removed ? owner : undefined

@@ -767,6 +767,7 @@ describe('AwsTenantOperationResourceOwner', () => {
                   title: { S: 'Visible title' },
                   apiToken: { S: 'reusable-secret' },
                   tokenHash: { S: 'capability-digest' },
+                  auth: { S: 'push-auth-secret' },
                 }],
               })),
               headers: {},
@@ -841,6 +842,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(exportBodies[0]).toContain('[REDACTED]')
       expect(exportBodies[0]).not.toContain('reusable-secret')
       expect(exportBodies[0]).not.toContain('capability-digest')
+      expect(exportBodies[0]).not.toContain('push-auth-secret')
       expect(dynamoRequests[0]).toMatchObject({
         TableName: 'focus',
         ExpressionAttributeValues: {

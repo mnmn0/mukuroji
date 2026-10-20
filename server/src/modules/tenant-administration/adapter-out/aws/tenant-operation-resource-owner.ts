@@ -1864,7 +1864,9 @@ function redactExportValue(value: unknown, fieldName = ''): unknown {
 /** Returns true for fields that may carry reusable credentials or protected plaintext. */
 function isSensitiveField(value: string): boolean {
   const normalized = value.replaceAll(/[^a-z0-9]/giu, '')
-  return /(?:authorization|ciphertext|clientsecret|cookie|credential|password|privatekey|refreshtoken|secret|token)$/iu
+  // A Web Push `auth` secret lets anyone holding the endpoint encrypt messages to the device.
+  return normalized.toLowerCase() === 'auth'
+    || /(?:authorization|ciphertext|clientsecret|cookie|credential|password|privatekey|refreshtoken|secret|token)$/iu
     .test(normalized)
     || /(?:apikey|authorization|cookie|credential|password|privatekey|secret|signingkey|token)(?:digest|hash)$/iu
       .test(normalized)

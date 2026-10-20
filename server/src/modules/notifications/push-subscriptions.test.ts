@@ -69,6 +69,9 @@ describe('push subscription validation', () => {
     const offCurve = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 1)]).toString('base64url')
     for (const body of [
       { endpoint, keys: { p256dh: compressed, auth } },
+      // The hybrid encoding (0x06/0x07) of a valid point, which Web Push does not use.
+      { endpoint, keys: { p256dh: Buffer.concat([Buffer.from([0x06]), Buffer.from(p256dh, 'base64url').subarray(1)]).toString('base64url'), auth } },
+      { endpoint, keys: { p256dh: Buffer.concat([Buffer.from([0x07]), Buffer.from(p256dh, 'base64url').subarray(1)]).toString('base64url'), auth } },
       { endpoint, keys: { p256dh: offCurve, auth } },
       { endpoint, keys: { p256dh, auth: Buffer.alloc(15).toString('base64url') } },
       { endpoint, keys: { p256dh: `${p256dh}=`, auth } },
@@ -291,10 +294,23 @@ describe('DynamoDbPushSubscriptionStore', () => {
 })
 
 describe('DynamoDbPushSubscriptionStore ordering', () => {
-  test('treats any change after the request started as newer, including the same member and removals', async () => {
+  test('accepts a stale registration without writing when the same member registered the endpoint later', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') {
+        return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() + 1, revision: 'r0' } }
+      }
+      return {}
+    })
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+      .resolves.toBeUndefined()
+    expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+  })
+
+  test('treats a later removal or another member\'s later registration as newer', async () => {
     for (const later of [
-      { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() + 1, revision: 'r0' },
       { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() + 1, revision: 'r0', removed: true },
+      { workspaceId: 'ws-1', memberKey: 'bob', changedAt: now.getTime() + 1, revision: 'r0' },
+      { workspaceId: 'ws-2', memberKey: 'ada', changedAt: now.getTime() + 1, revision: 'r0' },
     ]) {
       const { client, sent } = createClient(async (command) => {
         if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: later }
