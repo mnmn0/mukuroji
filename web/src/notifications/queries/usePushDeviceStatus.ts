@@ -69,7 +69,7 @@ export function trackPushRegistration<Result>(registration: Promise<Result>): Pr
  */
 export async function settlePushRegistrations(): Promise<void> {
   while (pendingRegistrations.size > 0) {
-    await Promise.allSettled([...pendingRegistrations])
+    await Promise.allSettled(pendingRegistrations)
   }
 }
 
