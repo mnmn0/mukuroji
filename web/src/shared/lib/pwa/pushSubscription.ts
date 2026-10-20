@@ -182,12 +182,11 @@ export function readPushEnvironment(): PushEnvironment {
   ) {
     // Storage stays readable, so a sign-out can still remove an endpoint registered while push
     // was available.
-    const registeredEndpoint = typeof window === 'undefined' ? undefined : createRegisteredEndpointMemory(window.localStorage)
     return {
       supported: false,
       notification: undefined,
       getPushManager: async () => undefined,
-      ...(registeredEndpoint ? { registeredEndpoint } : {}),
+      ...withRegisteredEndpointMemory(),
     }
   }
   return {
@@ -196,8 +195,33 @@ export function readPushEnvironment(): PushEnvironment {
     getPushManager: async () => (await readServiceWorkerRegistration(navigator.serviceWorker))?.pushManager,
     getDisplayedNotifications: async () =>
       (await readServiceWorkerRegistration(navigator.serviceWorker))?.getNotifications() ?? [],
-    registeredEndpoint: createRegisteredEndpointMemory(window.localStorage),
+    ...withRegisteredEndpointMemory(),
   }
+}
+
+/**
+ * Creates the endpoint memory, or none when the page cannot reach local storage, as when site
+ * data is blocked and reading `window.localStorage` throws.
+ *
+ * @returns The memory, or `undefined` when storage cannot be reached.
+ */
+function readRegisteredEndpointMemory(): RegisteredEndpointMemory | undefined {
+  if (typeof window === 'undefined') return undefined
+  try {
+    return createRegisteredEndpointMemory(window.localStorage)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Returns the environment's endpoint memory property, omitted when storage cannot be reached.
+ *
+ * @returns An object to spread into the environment.
+ */
+function withRegisteredEndpointMemory(): Pick<PushEnvironment, 'registeredEndpoint'> {
+  const registeredEndpoint = readRegisteredEndpointMemory()
+  return registeredEndpoint ? { registeredEndpoint } : {}
 }
 
 /** How long to wait for the app's first service worker registration before giving up. */

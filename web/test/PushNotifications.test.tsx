@@ -32,6 +32,7 @@ import {
   decodeBase64Url,
   readServiceWorkerRegistration,
   matchesApplicationServerKey,
+  readPushEnvironment,
   readPushSubscriptionInput,
   type BrowserPushManager,
   type BrowserPushSubscription,
@@ -585,6 +586,20 @@ describe('push configuration and cleanup fallbacks', () => {
       registeredEndpoint: memory,
     }, refusing)).toBe('failed')
     expect(memory.read()).toEqual({ endpoint })
+  })
+
+  test('reads the environment without endpoint memory when local storage cannot be reached', () => {
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: Object.defineProperty({}, 'localStorage', { get: () => { throw new Error('SecurityError') } }),
+    })
+    try {
+      const environment = readPushEnvironment()
+      expect(environment.supported).toBe(false)
+      expect(environment.registeredEndpoint).toBeUndefined()
+    } finally {
+      Reflect.deleteProperty(globalThis, 'window')
+    }
   })
 
   test('removes the remembered endpoint on sign-out even when push is no longer available', async () => {
