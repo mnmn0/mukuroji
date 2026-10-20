@@ -98,6 +98,22 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   }
 })
 
+test('接続が切れると画面下部にオフラインの案内を出し、復帰すると消して読み上げる', async ({ page, context }) => {
+  await page.goto('/support')
+  await expect(page.getByTestId('connectivity-notice')).toHaveCount(0)
+
+  await context.setOffline(true)
+  await expect(page.getByTestId('connectivity-notice')).toContainText('オフラインです。')
+  await expect(page.getByTestId('live-announcer-polite')).toContainText('オフラインです。')
+  // Other bottom-right notices stack above the offline notice using its published height.
+  await expect.poll(() => page.evaluate(() => document.documentElement.style.getPropertyValue('--app-bottom-notice-offset'))).toMatch(/^\d+px$/)
+
+  await context.setOffline(false)
+  await expect(page.getByTestId('connectivity-notice')).toHaveCount(0)
+  await expect(page.getByTestId('live-announcer-polite')).toContainText('オンラインに戻りました。')
+  expect(await page.evaluate(() => document.documentElement.style.getPropertyValue('--app-bottom-notice-offset'))).toBe('')
+})
+
 test('オフライン時のページ遷移は静的なオフラインページを表示し、オンライン復帰で再取得できる', async ({ page, context }) => {
   await page.goto('/support')
   await waitForServiceWorkerControl(page)
