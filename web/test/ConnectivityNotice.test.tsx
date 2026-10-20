@@ -91,7 +91,7 @@ describe('ConnectivityNotice', () => {
 })
 
 describe('publishBottomNoticeOffset', () => {
-  test('publishes the notice height plus a gap and clears it once hidden', () => {
+  test('publishes the notice distance from the viewport bottom plus a gap and clears it once hidden', () => {
     const properties = new Map<string, string>()
     const style = {
       setProperty: (name: string, value: string | null) => { properties.set(name, value ?? '') },

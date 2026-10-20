@@ -69,14 +69,16 @@ export function ConnectivityNotice({
     const notice = noticeRef.current
     if (!visible || !notice) return undefined
     const rootStyle = document.documentElement.style
-    publishBottomNoticeOffset(rootStyle, notice.getBoundingClientRect().height)
+    /** Measures the notice's top edge from the viewport bottom, safe-area inset included. */
+    const publish = () => publishBottomNoticeOffset(rootStyle, window.innerHeight - notice.getBoundingClientRect().top)
+    publish()
     // The message wraps differently as the viewport or language changes.
-    const observer = typeof ResizeObserver === 'undefined'
-      ? undefined
-      : new ResizeObserver(() => publishBottomNoticeOffset(rootStyle, notice.getBoundingClientRect().height))
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(publish)
     observer?.observe(notice)
+    window.addEventListener('resize', publish)
     return () => {
       observer?.disconnect()
+      window.removeEventListener('resize', publish)
       publishBottomNoticeOffset(rootStyle, undefined)
     }
   }, [visible])

@@ -101,7 +101,7 @@ export function resolveConnectivityAnnouncement(
   return online ? 'online' : 'offline'
 }
 
-/** CSS custom property holding the space the offline notice takes at the bottom edge. */
+/** CSS custom property holding how far from the viewport bottom other notices must start. */
 export const bottomNoticeOffsetProperty = '--app-bottom-notice-offset'
 
 /** Gap kept between the offline notice and a notice stacked above it, in pixels. */
@@ -113,18 +113,19 @@ type BottomNoticeOffsetStyle = Pick<CSSStyleDeclaration, 'setProperty' | 'remove
 /**
  * Publishes how much of the bottom edge the offline notice occupies.
  *
- * Other fixed bottom-right notices, such as the Workspace quick-access feedback, add this offset
- * so they stack above the offline notice instead of covering it.
+ * The distance is measured from the viewport bottom to the notice's top edge, so it includes the
+ * safe-area inset the notice sits above. Other fixed bottom-right notices, such as the Workspace
+ * quick-access feedback, start at least this far up so they stack above the offline notice.
  *
  * @param style - Style declaration of the document root.
- * @param height - Height of the visible notice in pixels; `undefined` once it is hidden.
+ * @param distance - Distance from the viewport bottom to the notice's top in pixels; `undefined` once it is hidden.
  */
-export function publishBottomNoticeOffset(style: BottomNoticeOffsetStyle, height: number | undefined): void {
-  if (height === undefined) {
+export function publishBottomNoticeOffset(style: BottomNoticeOffsetStyle, distance: number | undefined): void {
+  if (distance === undefined) {
     style.removeProperty(bottomNoticeOffsetProperty)
     return
   }
-  style.setProperty(bottomNoticeOffsetProperty, `${Math.ceil(height) + bottomNoticeGap}px`)
+  style.setProperty(bottomNoticeOffsetProperty, `${Math.ceil(distance) + bottomNoticeGap}px`)
 }
 
 /** Connectivity of the running page. */

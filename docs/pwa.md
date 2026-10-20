@@ -97,7 +97,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   接続が切れている間は画面右下（更新通知と同じ位置。phone では画面下部）に「オフラインです。表示中の内容は最新でない可能性があり、接続が戻るまで変更は保存できません。」を表示します
   （`web/src/app/pwa/ConnectivityNotice.tsx`）。header と Workspace の sidebar 下部の操作を覆わない位置に置き、通知の上の tap は下の要素へ渡しません。
   更新通知が表示されている間は重ならないよう表示を控えます（切断の読み上げは行います）。
-  案内の高さは `--app-bottom-notice-offset` として公開し、Workspace のクイックアクセスの通知など右下の通知はその上に積み重ねて案内を覆いません。
+  画面下端から案内の上端までの距離（safe-area の余白を含む）を `--app-bottom-notice-offset` として公開し、Workspace のクイックアクセスの通知など右下の通知はその上に積み重ねて案内を覆いません。
   切断と復帰は app 共通の live region（`announce`）で読み上げます。読み込み時点でオフラインの場合も読み上げ、復帰は切断を読み上げた後だけ読み上げます。
   復帰後の再取得は SWR の `revalidateOnReconnect`（既定で有効）に任せます。offline 中の閲覧 cache と変更の保留は後続範囲です。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
