@@ -675,6 +675,32 @@ describe('push configuration and cleanup fallbacks', () => {
     expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
   })
 
+  test('waits for another tab\'s registration before disabling, and holds the lock across enabling', async () => {
+    const ada = createToken('ada')
+    const bob = createToken('bob')
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'ada' })
+    const lock = createFakeLock()
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const environment = { ...shared.environment, registeredEndpoint: memory, registrationLock: lock }
+    let finishRegistration: () => void = () => undefined
+    const api: PushDeviceApi = {
+      ...createApi().api,
+      register: () => new Promise<void>((resolve) => { finishRegistration = resolve }),
+    }
+    const enabling = enablePushDevice(bob, vapidPublicKey, environment, api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const disabling = disablePushDevice(ada, environment, createApi().api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(shared.log).toEqual([])
+    finishRegistration()
+    expect(await enabling).toBe('enabled')
+    // Bob's claim settled before Ada's decision, so Ada keeps Bob's subscription.
+    expect(await disabling).toBe('disabled')
+    expect(shared.log).toEqual([])
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+  })
+
   test('keeps the endpoint after sign-out when the subscription could not be cancelled', async () => {
     const memory = createMemory()
     memory.write({ endpoint })

@@ -106,12 +106,43 @@ export function isRegisteredByAnotherAccount(
 }
 
 /**
+ * Runs a change to the shared subscription while holding the cross-tab registration lock, where
+ * the browser has Web Locks, so another tab's sign-out or disable waits for its outcome.
+ *
+ * @param environment - Browser capabilities.
+ * @param task - Change to run.
+ * @returns The task's result.
+ */
+export function holdRegistrationLock<Result>(environment: PushEnvironment, task: () => Promise<Result>): Promise<Result> {
+  return environment.registrationLock ? environment.registrationLock.hold(task) : task()
+}
+
+/**
+ * Runs a decision about the shared subscription once no other tab is changing it, or without the
+ * lock after a bounded wait.
+ *
+ * @param environment - Browser capabilities.
+ * @param task - Decision to run.
+ * @param timeoutMilliseconds - Longest wait for the lock.
+ * @returns The task's result.
+ */
+export function afterPushRegistrations<Result>(
+  environment: PushEnvironment,
+  task: () => Promise<Result>,
+  timeoutMilliseconds: number,
+): Promise<Result> {
+  return environment.registrationLock
+    ? environment.registrationLock.afterRegistrations(task, timeoutMilliseconds)
+    : task()
+}
+
+/**
  * Registers this browser's subscription for the account and records the account as its
  * registrant. The record is marked pending until the server confirms, so another tab's
  * sign-out does not trust it yet, and the previous record is restored when the request fails.
  * A random claim token fences both: a request whose response arrives after a newer claim from
- * another tab leaves that claim alone. Where the browser has Web Locks, the registration holds a
- * cross-tab lock until its claim settles, so another tab's sign-out can wait for the outcome.
+ * another tab leaves that claim alone. Callers run it under `holdRegistrationLock` together with
+ * any change to the browser subscription before it.
  *
  * @param accessToken - Access token of the signed-in member.
  * @param input - Endpoint and keys to register.
@@ -119,28 +150,6 @@ export function isRegisteredByAnotherAccount(
  * @param api - Server calls.
  */
 export async function registerPushDevice(
-  accessToken: string,
-  input: PushSubscriptionInput,
-  environment: PushEnvironment,
-  api: PushDeviceApi,
-): Promise<void> {
-  const lock = environment.registrationLock
-  if (lock) {
-    await lock.hold(() => claimAndRegister(accessToken, input, environment, api))
-    return
-  }
-  await claimAndRegister(accessToken, input, environment, api)
-}
-
-/**
- * Claims the shared subscription for the account and registers it; see `registerPushDevice`.
- *
- * @param accessToken - Access token of the signed-in member.
- * @param input - Endpoint and keys to register.
- * @param environment - Browser capabilities.
- * @param api - Server calls.
- */
-async function claimAndRegister(
   accessToken: string,
   input: PushSubscriptionInput,
   environment: PushEnvironment,
@@ -239,7 +248,7 @@ export async function loadPushDevice(
   if (isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)) return { status: 'off', vapidPublicKey }
   if (refresh) {
     try {
-      await registerPushDevice(accessToken, input, environment, api)
+      await holdRegistrationLock(environment, () => registerPushDevice(accessToken, input, environment, api))
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }

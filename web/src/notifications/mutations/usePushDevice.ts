@@ -9,8 +9,10 @@ import {
   type PushEnvironment,
 } from '../../shared/lib/pwa/pushSubscription'
 import {
+  afterPushRegistrations,
   defaultPushDeviceApi,
   guardPushDeviceApi,
+  holdRegistrationLock,
   isRegisteredByAnotherAccount,
   loadPushDevice,
   readRefreshFailureStatus,
@@ -56,53 +58,75 @@ export async function enablePushDevice(
   }
   if (permission === 'denied') return 'denied'
   if (permission !== 'granted') return 'dismissed'
-  let created = false
   try {
-    const pushManager = await environment.getPushManager()
-    if (!pushManager) return 'failed'
-    let subscription = await pushManager.getSubscription()
-    // A subscription for an earlier key, or one whose keys the browser no longer exposes, can
-    // never be registered; remove it on the server and in the browser, then create a new one.
-    // The replacement waits a bounded time for the removal, so the old row no longer counts
-    // against the device limit, but a stalled removal never blocks it.
-    let staleEndpoint: string | undefined
-    if (
-      subscription &&
-      (!matchesApplicationServerKey(subscription, vapidPublicKey) || !readPushSubscriptionInput(subscription))
-    ) {
-      staleEndpoint = subscription.endpoint
-      await subscription.unsubscribe()
-      subscription = null
-    }
-    if (!subscription) {
-      subscription = await pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: decodeBase64Url(vapidPublicKey),
-      })
-      created = true
-    }
-    // The stale row is removed only when the replacement got a new endpoint: with the same
-    // endpoint the registration below replaces that row, and a late removal could delete it.
-    if (staleEndpoint !== undefined && staleEndpoint !== subscription.endpoint) {
-      await waitAtMost(api.remove(accessToken, { endpoint: staleEndpoint }), staleRemovalWaitMilliseconds)
-    }
-    const input = readPushSubscriptionInput(subscription)
-    try {
-      if (!input) throw new Error('The browser did not provide subscription keys.')
-      await registerPushDevice(accessToken, input, environment, api)
-    } catch (error) {
-      // A network failure says nothing about an existing registration, so only a refusal drops it.
-      if (created || isRegistrationRefusal(error)) {
-        // Only a cancelled subscription is forgotten; one still live keeps its endpoint so a
-        // later sign-out can remove it on the server.
-        if (await subscription.unsubscribe().catch(() => false)) environment.registeredEndpoint?.write(undefined)
-      }
-      throw error
-    }
-    return 'enabled'
+    // The lock covers replacing the browser subscription as well as registering it, so another
+    // tab's sign-out never cancels a subscription this tab has created but not yet claimed.
+    return await holdRegistrationLock(environment, () => replaceAndRegister(accessToken, vapidPublicKey, environment, api))
   } catch {
     return 'failed'
   }
+}
+
+/**
+ * Replaces an unusable browser subscription when needed and registers the current one; see
+ * `enablePushDevice`.
+ *
+ * @param accessToken - Access token for the API.
+ * @param vapidPublicKey - Current VAPID public key.
+ * @param environment - Browser capabilities.
+ * @param api - Server calls.
+ * @returns The outcome to announce.
+ * @throws When the browser or the server fails.
+ */
+async function replaceAndRegister(
+  accessToken: string,
+  vapidPublicKey: string,
+  environment: PushEnvironment,
+  api: PushDeviceApi,
+): Promise<PushDeviceResult> {
+  let created = false
+  const pushManager = await environment.getPushManager()
+  if (!pushManager) return 'failed'
+  let subscription = await pushManager.getSubscription()
+  // A subscription for an earlier key, or one whose keys the browser no longer exposes, can
+  // never be registered; remove it on the server and in the browser, then create a new one.
+  // The replacement waits a bounded time for the removal, so the old row no longer counts
+  // against the device limit, but a stalled removal never blocks it.
+  let staleEndpoint: string | undefined
+  if (
+    subscription &&
+    (!matchesApplicationServerKey(subscription, vapidPublicKey) || !readPushSubscriptionInput(subscription))
+  ) {
+    staleEndpoint = subscription.endpoint
+    await subscription.unsubscribe()
+    subscription = null
+  }
+  if (!subscription) {
+    subscription = await pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: decodeBase64Url(vapidPublicKey),
+    })
+    created = true
+  }
+  // The stale row is removed only when the replacement got a new endpoint: with the same
+  // endpoint the registration below replaces that row, and a late removal could delete it.
+  if (staleEndpoint !== undefined && staleEndpoint !== subscription.endpoint) {
+    await waitAtMost(api.remove(accessToken, { endpoint: staleEndpoint }), staleRemovalWaitMilliseconds)
+  }
+  const input = readPushSubscriptionInput(subscription)
+  try {
+    if (!input) throw new Error('The browser did not provide subscription keys.')
+    await registerPushDevice(accessToken, input, environment, api)
+  } catch (error) {
+    // A network failure says nothing about an existing registration, so only a refusal drops it.
+    if (created || isRegistrationRefusal(error)) {
+      // Only a cancelled subscription is forgotten; one still live keeps its endpoint so a
+      // later sign-out can remove it on the server.
+      if (await subscription.unsubscribe().catch(() => false)) environment.registeredEndpoint?.write(undefined)
+    }
+    throw error
+  }
+  return 'enabled'
 }
 
 /**
@@ -139,13 +163,16 @@ export async function disablePushDevice(
     // The browser unsubscribe stops notifications on this device, so it never waits on the
     // best-effort server removal, which may stall.
     void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
-    // Another account registered the shared subscription since this page loaded; removing this
-    // account's registration is enough, and the subscription stays with that account.
-    if (isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)) return 'disabled'
-    // `false` means nothing was cancelled, so the subscription may still be live.
-    if (!await subscription.unsubscribe()) return 'failed'
-    environment.registeredEndpoint?.write(undefined)
-    return 'disabled'
+    // The decision waits, bounded, for another tab's registration to settle its claim.
+    return await afterPushRegistrations(environment, async () => {
+      // Another account registered the shared subscription since this page loaded; removing this
+      // account's registration is enough, and the subscription stays with that account.
+      if (isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)) return 'disabled'
+      // `false` means nothing was cancelled, so the subscription may still be live.
+      if (!await subscription.unsubscribe()) return 'failed'
+      environment.registeredEndpoint?.write(undefined)
+      return 'disabled'
+    }, claimSettleWaitMilliseconds)
   } catch {
     return 'failed'
   }
@@ -262,9 +289,8 @@ export async function disconnectPushDeviceOnSignOut(
         // still remove it; without a readable subscription, the server removal must have landed.
         if (!registeredElsewhere && (cancelled || (!subscription && await rememberedRemoval))) memory?.write(undefined)
       }
-      const lock = environment.registrationLock
       await Promise.allSettled([
-        lock ? lock.afterRegistrations(release, claimSettleWaitMilliseconds) : release(),
+        afterPushRegistrations(environment, release, claimSettleWaitMilliseconds),
         lateRemoval,
       ])
     })(),
