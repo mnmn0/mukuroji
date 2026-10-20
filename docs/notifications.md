@@ -98,7 +98,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
   共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
-- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えません。新しいデバイスの登録は member ごとの登録 version
+- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えず、再登録では新しいデバイスとして上限を確認します。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
   購読は 180 日で TTL 失効し、所有者の行はその 30 日後に失効します。DynamoDB は期限切れの行を個別に遅れて削除するため、
   所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
@@ -115,7 +115,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。
   期限切れによるサインアウトでは解除しません。
 - 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
-  server からも削除してから解除し、作り直します。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
+  server からの削除を送り（完了は待ちません）、解除して作り直します。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
   設定の取得結果がどちらの形にも当てはまらない場合や VAPID 公開鍵が padding なし base64url の 65 byte 非圧縮 P-256 形式でない場合は「無効」とせず、再読み込みできる読み込み失敗にします。通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
   最大 10 秒待ってから対応状況を判定します。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
   失効した endpoint は配信 worker が push service の応答から削除します。

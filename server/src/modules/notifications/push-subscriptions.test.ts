@@ -162,8 +162,10 @@ describe('DynamoDbPushSubscriptionStore', () => {
   })
 
   test('refreshes the member’s own subscription without counting it against the limit', async () => {
+    const nowSeconds = Math.floor(now.getTime() / 1_000)
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000, revision: 'r0' } }
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000, revision: 'r0' } }
+      if (command instanceof GetCommand) return { Item: { expiresAt: nowSeconds + 60 } }
       return {}
     })
     await new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now)
@@ -171,8 +173,23 @@ describe('DynamoDbPushSubscriptionStore', () => {
     const transaction = sent.find((command) => command instanceof TransactWriteCommand)
     const items = transaction instanceof TransactWriteCommand ? transaction.input.TransactItems ?? [] : []
     expect(items).toHaveLength(2)
-    // The refresh re-checks in the transaction that the member row still exists.
-    expect(items[1]?.Put?.ConditionExpression).toBe('attribute_exists(sk)')
+    // The refresh re-checks in the transaction that the member row still exists and has not expired.
+    expect(items[1]?.Put).toMatchObject({
+      ConditionExpression: 'attribute_exists(sk) AND expiresAt > :now',
+      ExpressionAttributeValues: { ':now': nowSeconds },
+    })
+  })
+
+  test('counts a member row past its retention as a new device, even before DynamoDB deletes it', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000, revision: 'r0' } }
+      if (command instanceof GetCommand) return { Item: { expiresAt: Math.floor(now.getTime() / 1_000) } }
+      if (command instanceof QueryCommand) return { Count: MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER }
+      return {}
+    })
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+      .rejects.toMatchObject({ code: 'PushSubscriptionLimitExceeded' })
+    expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
   })
 
   test('limits the devices one member registers', async () => {

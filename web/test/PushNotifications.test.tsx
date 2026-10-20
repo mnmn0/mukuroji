@@ -193,6 +193,11 @@ describe('push device controller', () => {
     expect(log).toEqual(['request', 'unsubscribe old', 'subscribe 65'])
     // The old endpoint is removed on the server too, so it stops counting and receiving.
     expect(calls).toEqual([`remove t ${endpoint}`, `register t ${endpoint}`])
+    // A stalled removal of the old endpoint never holds up the replacement.
+    const stalled = createEnvironment({ existingKey: otherKey })
+    const hanging: PushDeviceApi = { ...createApi().api, remove: () => new Promise<void>(() => undefined) }
+    expect(await enablePushDevice('t', vapidPublicKey, stalled.environment, hanging)).toBe('enabled')
+    expect(stalled.log).toEqual(['request', 'unsubscribe old', 'subscribe 65'])
   })
 
   test('recreates an existing subscription whose keys the browser no longer exposes', async () => {

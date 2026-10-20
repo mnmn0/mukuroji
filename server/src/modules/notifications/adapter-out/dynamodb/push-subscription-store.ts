@@ -124,9 +124,10 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       }
       const liveOwner = owner && !owner.removed ? owner : undefined
       const ownedByMember = liveOwner?.workspaceId === workspaceId && liveOwner.memberKey === memberKey
-      // Only a stored subscription is refreshed. An owner can outlive an expired member row, and
-      // that device counts again as new; the transaction re-checks the row still exists.
-      const refresh = ownedByMember && await this.#hasSubscription(partition, subscription.subscriptionId)
+      // Only a stored, unexpired subscription is refreshed. An owner can outlive an expired member
+      // row, and that device counts again as new, as does a row DynamoDB has yet to delete; the
+      // transaction re-checks the row still exists and has not expired.
+      const refresh = ownedByMember && await this.#hasSubscription(partition, subscription.subscriptionId, now)
       // A new device is counted against the limit and fenced by the member's registration
       // version, so two devices registering at once cannot both pass the same count.
       const version = refresh ? undefined : await this.#readMemberVersion(partition)
@@ -169,7 +170,12 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
                   updatedAt: now.toISOString(),
                   expiresAt,
                 },
-                ...(refresh ? { ConditionExpression: 'attribute_exists(sk)' } : {}),
+                ...(refresh
+                  ? {
+                      ConditionExpression: 'attribute_exists(sk) AND expiresAt > :now',
+                      ExpressionAttributeValues: { ':now': Math.floor(now.getTime() / 1_000) },
+                    }
+                  : {}),
               },
             },
             ...(version !== undefined
@@ -271,19 +277,21 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
   }
 
   /**
-   * Strongly checks whether a member still stores a subscription.
+   * Strongly checks whether a member still stores an unexpired subscription.
    *
    * @param partition - Member partition.
    * @param subscriptionId - Endpoint-derived subscription ID.
-   * @returns `true` when the subscription row exists.
+   * @param now - Server time of the request.
+   * @returns `true` when the subscription row exists and is within its retention.
    */
-  async #hasSubscription(partition: string, subscriptionId: string): Promise<boolean> {
+  async #hasSubscription(partition: string, subscriptionId: string, now: Date): Promise<boolean> {
     const { Item } = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
       Key: { pk: partition, sk: `subscription#${subscriptionId}` },
       ConsistentRead: true,
     }))
-    return Item !== undefined
+    const expiresAt: unknown = Item?.expiresAt
+    return typeof expiresAt === 'number' && expiresAt > Math.floor(now.getTime() / 1_000)
   }
 
   /**

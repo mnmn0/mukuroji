@@ -60,11 +60,12 @@ export async function enablePushDevice(
     let subscription = await pushManager.getSubscription()
     // A subscription for an earlier key, or one whose keys the browser no longer exposes, can
     // never be registered; remove it on the server and in the browser, then create a new one.
+    // The server removal is best-effort and never holds up the replacement, which may stall.
     if (
       subscription &&
       (!matchesApplicationServerKey(subscription, vapidPublicKey) || !readPushSubscriptionInput(subscription))
     ) {
-      await api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+      void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
       await subscription.unsubscribe()
       subscription = null
     }
