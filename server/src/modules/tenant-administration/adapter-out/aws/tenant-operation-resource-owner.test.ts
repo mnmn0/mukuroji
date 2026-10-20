@@ -365,7 +365,9 @@ describe('AwsTenantOperationResourceOwner', () => {
     })
 
     try {
-      expect(await owner.execute(createDataJob(21), createOperation())).toMatchObject({ status: 'continuing' })
+      const result = await owner.execute(createDataJob(21), createOperation())
+      // The row another Workspace took over is kept and not counted as deleted.
+      expect(result).toMatchObject({ status: 'continuing', nextJob: { cursor: { processedCount: 1 } } })
       const deletes = operations.filter((operation) => operation.target === 'DynamoDB_20120810.DeleteItem')
       // Endpoint owner rows are keyed globally, so each delete is fenced on the Workspace ID and
       // a row another Workspace took over is kept instead of failing the page.

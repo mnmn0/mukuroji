@@ -105,20 +105,20 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
   tombstone でなくその member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
 - tenant の export・削除・検証の対象に含めます（member 行・所有者行（tombstone を含む）・登録 version はすべて `workspaceId` を持ちます）。
-  Workspace ID の filter 付き scan のため、export・削除・検証の各 job は最大 1,000 行を評価します（scan の limit は filter の前に適用されるため、少ない行数ずつでは共有 table の行数に比例して job が続きます）。削除は 25 件ずつ行います。
+  Workspace ID の filter 付き scan のため、export・削除・検証の各 job は最大 1,000 行を評価します（scan の limit は filter の前に適用されるため、少ない行数ずつでは共有 table の行数に比例して job が続きます）。削除は 25 件ずつ行い、別 Workspace に引き継がれて残した行は削除件数（完了の evidence）に数えません。
   所有者行の key は endpoint だけで決まり、scan の後に別 Workspace が同じ endpoint を引き継ぐことがあるため、削除はまだ閉鎖する Workspace の行である場合だけ条件付きで行い、引き継がれた行は残します。
 - `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合は所有者の行を削除時刻付きの tombstone（`removed: true`）に置き換えます。
   別の tab や再試行で削除より前に始まった登録は tombstone より古いため、削除の後に購読を作り直せません。
   端末は最後に登録した endpoint を覚えておき、サインアウト時に browser の push store を読めない場合もその endpoint で server から削除します。停止では server の削除を待たずに browser の購読を解除し、解除できなかった場合（`unsubscribe()` が `false`）は失敗として表示し、覚えた endpoint を残します。request の開始より後に変更があった削除は古い request として、その新しい状態を変えません。
   明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、表示中の app の通知を閉じ、browser の購読をすぐに解除し、
   破棄前の token でこの削除をすぐに送り（完了しない登録があっても削除が始まるようにするため）、送信中の登録（Workspace を開いた時の再登録や有効化）があった場合はその完了後に、最初の削除の完了を待たずにもう一度送ります（削除の後に server へ届いた古い登録が購読を残さないため）。
-  browser の購読は origin で 1 つを全 tab が共有するため、端末は最後に登録した account（access token の `sub`）も覚えておき、別の tab で別の account が後から登録していた場合は自分の登録だけを server から削除し、browser の購読と記憶はその account に残します。登録する tab は request を送る前に記憶を自分の account に書き換えるため、応答待ちの間に別の tab でサインアウトしても購読は解除されません（server が拒否した場合は購読と一緒に記憶も消します）。
+  browser の購読は origin で 1 つを全 tab が共有するため、端末は最後に登録した account（access token の `sub`）も覚えておき、別の tab で別の account が後から登録していた場合は自分の登録だけを server から削除し、browser の購読と記憶はその account に残します。登録する tab は request を送る前に記憶を自分の account の「確認待ち」に書き換え、server が受け付けてから確定します（失敗した場合は前の記憶に戻します）。確認待ちの記憶は所有の根拠にしないため、その間に別の tab でサインアウトすると購読は解除されます（前の member の通知が残らないことを優先します）。別の account が確定した購読は、この account では「未登録」と表示し、Workspace を開いた時の再登録もせず、停止でも自分の登録だけを server から削除します。サインアウト時に push の API が使えなくなっていても、覚えた endpoint は server から削除します。
   その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。
   期限切れによるサインアウトでは解除しません。
 - 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
-  server からの削除を送り（完了は待ちません）、解除して作り直します。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
+  server からの削除を最大 3 秒待ってから（古い行がデバイス数の上限に数えられないため。止まった削除で作り直しを止めないよう待ち時間は限ります）、解除して作り直します。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
   push の request が期限切れや session policy 違反で失敗した場合は、通知設定と同じく Workspace の session 境界に渡して再認証へ移ります。設定の取得結果がどちらの形にも当てはまらない場合や VAPID 公開鍵が padding なし base64url の 65 byte 非圧縮 P-256 形式でない場合は「無効」とせず、再読み込みできる読み込み失敗にします。通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
-  最大 10 秒待ってから対応状況を判定します。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
+  最大 10 秒待ち、それでも登録がない場合は「非対応」とせず再読み込みできる読み込み失敗にします。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
   失効した endpoint は配信 worker が push service の応答から削除します。
 
 Service worker は `push` を受けると payload（`PushNotificationPayload`: `title`、`body`、`path`、`tag`）を通知として表示します。

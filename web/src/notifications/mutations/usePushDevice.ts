@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { clearAuthSession, readAccessTokenSubject } from '../../auth/session'
+import { clearAuthSession } from '../../auth/session'
 import {
   decodeBase64Url,
   matchesApplicationServerKey,
@@ -11,10 +11,11 @@ import {
 import {
   defaultPushDeviceApi,
   guardPushDeviceApi,
+  isRegisteredByAnotherAccount,
   loadPushDevice,
   readRefreshFailureStatus,
+  registerPushDevice,
   settlePushRegistrations,
-  trackPushRegistration,
   usePushDeviceStatusQuery,
   type PushDeviceApi,
   type PushDeviceStatus,
@@ -62,12 +63,13 @@ export async function enablePushDevice(
     let subscription = await pushManager.getSubscription()
     // A subscription for an earlier key, or one whose keys the browser no longer exposes, can
     // never be registered; remove it on the server and in the browser, then create a new one.
-    // The server removal is best-effort and never holds up the replacement, which may stall.
+    // The replacement waits a bounded time for the removal, so the old row no longer counts
+    // against the device limit, but a stalled removal never blocks it.
     if (
       subscription &&
       (!matchesApplicationServerKey(subscription, vapidPublicKey) || !readPushSubscriptionInput(subscription))
     ) {
-      void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+      await waitAtMost(api.remove(accessToken, { endpoint: subscription.endpoint }), staleRemovalWaitMilliseconds)
       await subscription.unsubscribe()
       subscription = null
     }
@@ -81,10 +83,7 @@ export async function enablePushDevice(
     const input = readPushSubscriptionInput(subscription)
     try {
       if (!input) throw new Error('The browser did not provide subscription keys.')
-      // Claim the shared subscription before the request, so another tab's sign-out that runs
-      // while it is in flight leaves the subscription to this account.
-      environment.registeredEndpoint?.write({ endpoint: input.endpoint, registrant: readAccessTokenSubject(accessToken) })
-      await trackPushRegistration(api.register(accessToken, input))
+      await registerPushDevice(accessToken, input, environment, api)
     } catch (error) {
       // A network failure says nothing about an existing registration, so only a refusal drops it.
       if (created || isRegistrationRefusal(error)) {
@@ -123,12 +122,38 @@ export async function disablePushDevice(
     // The browser unsubscribe stops notifications on this device, so it never waits on the
     // best-effort server removal, which may stall.
     void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+    // Another account registered the shared subscription since this page loaded; removing this
+    // account's registration is enough, and the subscription stays with that account.
+    if (isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)) return 'disabled'
     // `false` means nothing was cancelled, so the subscription may still be live.
     if (!await subscription.unsubscribe()) return 'failed'
     environment.registeredEndpoint?.write(undefined)
     return 'disabled'
   } catch {
     return 'failed'
+  }
+}
+
+/** Longest time enabling waits for the removal of a stale subscription before replacing it. */
+export const staleRemovalWaitMilliseconds = 3_000
+
+/**
+ * Waits for a best-effort request, but no longer than the given time. Never rejects.
+ *
+ * @param request - Request to wait for.
+ * @param milliseconds - Longest wait.
+ */
+async function waitAtMost(request: Promise<unknown>, milliseconds: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      request.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, milliseconds)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
@@ -160,12 +185,17 @@ export async function disconnectPushDeviceOnSignOut(
   environment: PushEnvironment = readPushEnvironment(),
   api: PushDeviceApi = defaultPushDeviceApi,
 ): Promise<void> {
-  if (!environment.supported) return
   const remembered = environment.registeredEndpoint?.read()
-  const registrant = accessToken ? readAccessTokenSubject(accessToken) : undefined
-  const registeredElsewhere =
-    remembered?.registrant !== undefined && registrant !== undefined && remembered.registrant !== registrant
+  const registeredElsewhere = isRegisteredByAnotherAccount(environment, remembered?.endpoint, accessToken)
   if (!registeredElsewhere) environment.registeredEndpoint?.write(undefined)
+  if (!environment.supported) {
+    // Push is unavailable now, but an endpoint registered while it was available still has to
+    // be removed on the server.
+    if (accessToken && remembered) {
+      await api.remove(accessToken, { endpoint: remembered.endpoint }).catch(() => undefined)
+    }
+    return
+  }
   await Promise.allSettled([
     closeDisplayedNotifications(environment),
     (async () => {

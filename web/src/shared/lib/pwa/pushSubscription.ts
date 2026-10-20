@@ -79,6 +79,8 @@ export type RegisteredEndpoint = {
   endpoint: string
   /** Subject of the account that registered it, when the token exposed one. */
   registrant?: string
+  /** Whether the registration is still waiting for the server, so it does not prove ownership yet. */
+  pending?: boolean
 }
 
 /** Device-local memory of the endpoint last registered on the server. */
@@ -147,7 +149,12 @@ function parseRegisteredEndpoint(value: string | null): RegisteredEndpoint | und
     return undefined
   }
   const registrant = 'registrant' in data && typeof data.registrant === 'string' ? data.registrant : undefined
-  return registrant === undefined ? { endpoint: data.endpoint } : { endpoint: data.endpoint, registrant }
+  const pending = 'pending' in data && data.pending === true
+  return {
+    endpoint: data.endpoint,
+    ...(registrant === undefined ? {} : { registrant }),
+    ...(pending ? { pending } : {}),
+  }
 }
 
 /** Notification the app is currently showing. */
@@ -169,7 +176,15 @@ export function readPushEnvironment(): PushEnvironment {
     !('PushManager' in window) ||
     typeof Notification === 'undefined'
   ) {
-    return { supported: false, notification: undefined, getPushManager: async () => undefined }
+    // Storage stays readable, so a sign-out can still remove an endpoint registered while push
+    // was available.
+    const registeredEndpoint = typeof window === 'undefined' ? undefined : createRegisteredEndpointMemory(window.localStorage)
+    return {
+      supported: false,
+      notification: undefined,
+      getPushManager: async () => undefined,
+      ...(registeredEndpoint ? { registeredEndpoint } : {}),
+    }
   }
   return {
     supported: true,

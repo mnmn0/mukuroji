@@ -82,6 +82,59 @@ export function trackPushRegistration<Result>(registration: Promise<Result>): Pr
 }
 
 /**
+ * Returns whether another signed-in account holds a confirmed registration of this browser's
+ * shared subscription, made in another tab. A claim still waiting for the server proves nothing.
+ *
+ * @param environment - Browser capabilities.
+ * @param endpoint - Endpoint of the browser subscription.
+ * @param accessToken - Access token of this tab's account, if known.
+ * @returns Whether the subscription belongs to another account.
+ */
+export function isRegisteredByAnotherAccount(
+  environment: PushEnvironment,
+  endpoint: string | undefined,
+  accessToken: string | undefined,
+): boolean {
+  const remembered = environment.registeredEndpoint?.read()
+  const registrant = accessToken ? readAccessTokenSubject(accessToken) : undefined
+  return remembered !== undefined &&
+    !remembered.pending &&
+    remembered.endpoint === endpoint &&
+    remembered.registrant !== undefined &&
+    registrant !== undefined &&
+    remembered.registrant !== registrant
+}
+
+/**
+ * Registers this browser's subscription for the account and records the account as its
+ * registrant. The record is marked pending until the server confirms, so another tab's
+ * sign-out does not trust it yet, and the previous record is restored when the request fails.
+ *
+ * @param accessToken - Access token of the signed-in member.
+ * @param input - Endpoint and keys to register.
+ * @param environment - Browser capabilities.
+ * @param api - Server calls.
+ */
+export async function registerPushDevice(
+  accessToken: string,
+  input: PushSubscriptionInput,
+  environment: PushEnvironment,
+  api: PushDeviceApi,
+): Promise<void> {
+  const memory = environment.registeredEndpoint
+  const previous = memory?.read()
+  const registrant = readAccessTokenSubject(accessToken)
+  memory?.write({ endpoint: input.endpoint, ...(registrant ? { registrant } : {}), pending: true })
+  try {
+    await trackPushRegistration(api.register(accessToken, input))
+  } catch (error: unknown) {
+    memory?.write(previous)
+    throw error
+  }
+  memory?.write({ endpoint: input.endpoint, ...(registrant ? { registrant } : {}) })
+}
+
+/**
  * Waits until every tracked registration has settled. A removal sent afterwards cannot be
  * overtaken by an older registration, including the retries the server makes for it.
  *
@@ -129,7 +182,9 @@ export async function loadPushDevice(
     // A failed service worker lookup is not a missing worker; let the person retry.
     return { status: 'load-error', vapidPublicKey }
   }
-  if (!pushManager) return { status: 'unsupported' }
+  // The worker can still be activating after the bounded wait on a slow first visit, so a
+  // missing registration is retryable rather than unsupported.
+  if (!pushManager) return { status: 'load-error', vapidPublicKey }
   if (environment.notification?.permission === 'denied') return { status: 'blocked', vapidPublicKey }
   let subscription: Awaited<ReturnType<typeof pushManager.getSubscription>>
   try {
@@ -147,11 +202,12 @@ export async function loadPushDevice(
   ) {
     return { status: 'off', vapidPublicKey }
   }
+  // Another account in another tab registered the shared subscription; it is not this account's
+  // to show as on or to take over without the member enabling it.
+  if (isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)) return { status: 'off', vapidPublicKey }
   if (refresh) {
     try {
-      // Claim the shared subscription before the request; see `enablePushDevice`.
-      environment.registeredEndpoint?.write({ endpoint: input.endpoint, registrant: readAccessTokenSubject(accessToken) })
-      await trackPushRegistration(api.register(accessToken, input))
+      await registerPushDevice(accessToken, input, environment, api)
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }

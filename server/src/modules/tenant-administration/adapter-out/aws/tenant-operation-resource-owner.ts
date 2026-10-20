@@ -883,20 +883,20 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items, operation.workspaceId)
+      const deleted = await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       if (page.lastEvaluatedKey) {
         return {
           status: 'continuing',
           nextJob: createContinuation(job, {
             targetIndex: 1,
             position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }),
-            processedCount: cursor.processedCount + page.items.length,
+            processedCount: cursor.processedCount + deleted,
           }),
         }
       }
       return await this.completeWithEvidence(job, {
-        processedCount: cursor.processedCount + page.items.length,
-        sessionsDeleted: page.items.length,
+        processedCount: cursor.processedCount + deleted,
+        sessionsDeleted: deleted,
       }, operation.revision)
     }
     return { status: 'failed', failureCode: 'ACCESS_REVOCATION_CURSOR_INVALID' }
@@ -1086,7 +1086,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         true,
         target.scanPageSize,
       )
-      await this.deleteDynamoItems(target, page.items, operation.workspaceId)
+      const deleted = await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
@@ -1096,7 +1096,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           ...(page.lastEvaluatedKey
             ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
-          processedCount: cursor.processedCount + page.items.length,
+          processedCount: cursor.processedCount + deleted,
         }),
       }
     }
@@ -1199,7 +1199,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items, operation.workspaceId)
+      const deleted = await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
@@ -1209,7 +1209,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           ...(page.lastEvaluatedKey
             ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
-          processedCount: cursor.processedCount + page.items.length,
+          processedCount: cursor.processedCount + deleted,
         }),
       }
     }
@@ -1555,18 +1555,21 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
    * @param target - Table the page was read from.
    * @param items - Scanned rows to delete.
    * @param workspaceId - Workspace whose data is being deleted.
+   * @returns Number of rows deleted, leaving out rows kept because another Workspace owns them,
+   * so completion evidence never counts them as deleted.
    */
   private async deleteDynamoItems(
     target: TenantDynamoTarget,
     items: readonly Record<string, unknown>[],
     workspaceId: string,
-  ): Promise<void> {
+  ): Promise<number> {
+    let deleted = 0
     // A wide scan page can match more rows than one batch holds, so deletes go in batches.
     for (let start = 0; start < items.length; start += DELETE_BATCH_SIZE) {
       const batch = items.slice(start, start + DELETE_BATCH_SIZE)
       const ownerAttribute = target.ownerAttribute
       if (ownerAttribute) {
-        await Promise.all(batch.map(async (item) => {
+        const results = await Promise.all(batch.map(async (item) => {
           try {
             await this.documentClient.send(new DeleteCommand({
               TableName: target.tableName,
@@ -1575,10 +1578,13 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
               ExpressionAttributeNames: { '#owner': ownerAttribute },
               ExpressionAttributeValues: { ':workspaceId': workspaceId },
             }))
+            return 1
           } catch (error: unknown) {
             if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+            return 0
           }
         }))
+        deleted += results.reduce<number>((total, result) => total + result, 0)
         continue
       }
       const response = await this.documentClient.send(new BatchWriteCommand({
@@ -1593,7 +1599,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           'Tenant deletion page was throttled and must be retried.',
         )
       }
+      deleted += batch.length
     }
+    return deleted
   }
 
   /** Writes or reuses one immutable, content-addressed evidence row. */

@@ -492,7 +492,9 @@ describe('push configuration and cleanup fallbacks', () => {
       register: async () => { claimedDuringRequest = memory.read() },
     }
     expect(await enablePushDevice(bob, vapidPublicKey, { ...environment, registeredEndpoint: memory }, api)).toBe('enabled')
-    expect(claimedDuringRequest).toEqual({ endpoint, registrant: 'bob' })
+    // The claim stays pending until the server confirms it, so another tab's sign-out does not trust it yet.
+    expect(claimedDuringRequest).toEqual({ endpoint, registrant: 'bob', pending: true })
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
     // A refused registration gives the claim up with the subscription.
     const refusing: PushDeviceApi = {
       ...createApi().api,
@@ -500,6 +502,58 @@ describe('push configuration and cleanup fallbacks', () => {
     }
     expect(await enablePushDevice(bob, vapidPublicKey, { ...environment, registeredEndpoint: memory }, refusing)).toBe('failed')
     expect(memory.read()).toBeUndefined()
+  })
+
+  test('does not trust another account\'s pending claim, and restores the record when its registration fails', async () => {
+    const ada = createToken('ada')
+    const bob = createToken('bob')
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'ada' })
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    // Bob's registration fails transiently; Ada's confirmed record comes back.
+    const offline: PushDeviceApi = { ...createApi().api, register: async () => { throw new Error('offline') } }
+    expect(await enablePushDevice(bob, vapidPublicKey, { ...shared.environment, registeredEndpoint: memory }, offline)).toBe('failed')
+    expect(memory.read()).toEqual({ endpoint, registrant: 'ada' })
+    // A claim still waiting for the server does not stop Ada's sign-out from cancelling the subscription.
+    memory.write({ endpoint, registrant: 'bob', pending: true })
+    await disconnectPushDeviceOnSignOut(ada, { ...shared.environment, registeredEndpoint: memory }, createApi().api)
+    expect(shared.log).toEqual(['unsubscribe current'])
+  })
+
+  test('shows another account\'s subscription as off, never refreshes it, and leaves it on disable', async () => {
+    const ada = createToken('ada')
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'bob' })
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const { api, calls } = createApi()
+    const environment = { ...shared.environment, registeredEndpoint: memory }
+    expect((await loadPushDevice(ada, environment, api)).status).toBe('off')
+    expect(calls).toEqual([])
+    // A page that still shows on removes only Ada's registration and keeps Bob's subscription.
+    expect(await disablePushDevice(ada, environment, api)).toBe('disabled')
+    expect(calls).toEqual([`remove ${ada} ${endpoint}`])
+    expect(shared.log).toEqual([])
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+  })
+
+  test('removes the remembered endpoint on sign-out even when push is no longer available', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint })
+    const { api, calls } = createApi()
+    await disconnectPushDeviceOnSignOut('t', {
+      supported: false,
+      notification: undefined,
+      getPushManager: async () => undefined,
+      registeredEndpoint: memory,
+    }, api)
+    expect(calls).toEqual([`remove t ${endpoint}`])
+    expect(memory.read()).toBeUndefined()
+  })
+
+  test('treats a service worker that is not ready yet as retryable', async () => {
+    const { environment } = createEnvironment({ permission: 'granted' })
+    expect(await loadPushDevice('t', { ...environment, getPushManager: async () => undefined }, createApi().api))
+      .toEqual({ status: 'load-error', vapidPublicKey })
   })
 
   test('reports push request failures to the session guard and keeps the rejection', async () => {
