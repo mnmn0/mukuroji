@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { clearAuthSession } from '../../auth/session'
+import { clearAuthSession, readAccessTokenSubject } from '../../auth/session'
 import {
   decodeBase64Url,
   matchesApplicationServerKey,
@@ -87,8 +87,9 @@ export async function enablePushDevice(
     } catch (error) {
       // A network failure says nothing about an existing registration, so only a refusal drops it.
       if (created || isRegistrationRefusal(error)) {
-        await subscription.unsubscribe().catch(() => false)
-        environment.registeredEndpoint?.write(undefined)
+        // Only a cancelled subscription is forgotten; one still live keeps its endpoint so a
+        // later sign-out can remove it on the server.
+        if (await subscription.unsubscribe().catch(() => false)) environment.registeredEndpoint?.write(undefined)
       }
       throw error
     }
@@ -118,7 +119,17 @@ export async function disablePushDevice(
 ): Promise<PushDeviceResult> {
   try {
     const subscription = await (await environment.getPushManager())?.getSubscription()
-    if (!subscription) return 'disabled'
+    if (!subscription) {
+      // The subscription vanished since the status was read; the endpoint this account
+      // registered is still removed on the server, so it stops counting against the limit.
+      const remembered = environment.registeredEndpoint?.read()
+      const registrant = readAccessTokenSubject(accessToken)
+      if (remembered && (remembered.registrant === undefined || remembered.registrant === registrant)) {
+        void api.remove(accessToken, { endpoint: remembered.endpoint }).catch(() => undefined)
+        environment.registeredEndpoint?.write(undefined)
+      }
+      return 'disabled'
+    }
     // The browser unsubscribe stops notifications on this device, so it never waits on the
     // best-effort server removal, which may stall.
     void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
@@ -188,36 +199,41 @@ export async function disconnectPushDeviceOnSignOut(
   const remembered = environment.registeredEndpoint?.read()
   const registeredElsewhere = isRegisteredByAnotherAccount(environment, remembered?.endpoint, accessToken)
   if (!registeredElsewhere) environment.registeredEndpoint?.write(undefined)
+  /**
+   * Removes an endpoint on the server at once, and again once registrations still in flight have
+   * settled; the follow-up never waits on the first removal, which may stall.
+   *
+   * @param endpoint - Endpoint to remove.
+   */
+  const removeOnServer = async (endpoint: string) => {
+    if (!accessToken) return
+    await Promise.allSettled([
+      api.remove(accessToken, { endpoint }),
+      settlePushRegistrations().then((waited) => (waited ? api.remove(accessToken, { endpoint }) : undefined)),
+    ])
+  }
+  // The remembered endpoint is removed before the browser store is read, which can take up to
+  // the service worker wait, so the removal starts within the sign-out's bounded wait. It is
+  // removed even when push APIs are no longer available.
+  const rememberedRemoval = remembered ? removeOnServer(remembered.endpoint) : undefined
   if (!environment.supported) {
-    // Push is unavailable now, but an endpoint registered while it was available still has to
-    // be removed on the server.
-    if (accessToken && remembered) {
-      await api.remove(accessToken, { endpoint: remembered.endpoint }).catch(() => undefined)
-    }
+    await rememberedRemoval
     return
   }
   await Promise.allSettled([
+    rememberedRemoval,
     closeDisplayedNotifications(environment),
     (async () => {
       let subscription: BrowserPushSubscription | null | undefined
       try {
         subscription = await (await environment.getPushManager())?.getSubscription()
       } catch {
-        // The push store could not be read; the remembered endpoint still lets the server forget it.
+        // The push store could not be read; the remembered endpoint already lets the server forget it.
       }
-      const endpoint = subscription?.endpoint ?? remembered?.endpoint
       const ownedByAnotherAccount = registeredElsewhere && subscription?.endpoint === remembered?.endpoint
       await Promise.allSettled([
         ownedByAnotherAccount ? undefined : subscription?.unsubscribe(),
-        (async () => {
-          if (!accessToken || !endpoint) return
-          const removal = api.remove(accessToken, { endpoint })
-          // The follow-up never waits on the first removal, which may stall.
-          const followUp = settlePushRegistrations().then((waited) => (
-            waited ? api.remove(accessToken, { endpoint }) : undefined
-          ))
-          await Promise.allSettled([removal, followUp])
-        })(),
+        subscription && subscription.endpoint !== remembered?.endpoint ? removeOnServer(subscription.endpoint) : undefined,
       ])
     })(),
   ])

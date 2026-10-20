@@ -493,7 +493,7 @@ describe('push configuration and cleanup fallbacks', () => {
     }
     expect(await enablePushDevice(bob, vapidPublicKey, { ...environment, registeredEndpoint: memory }, api)).toBe('enabled')
     // The claim stays pending until the server confirms it, so another tab's sign-out does not trust it yet.
-    expect(claimedDuringRequest).toEqual({ endpoint, registrant: 'bob', pending: true })
+    expect(claimedDuringRequest).toEqual({ endpoint, registrant: 'bob', pending: true, claim: expect.any(String) })
     expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
     // A refused registration gives the claim up with the subscription.
     const refusing: PushDeviceApi = {
@@ -534,6 +534,57 @@ describe('push configuration and cleanup fallbacks', () => {
     expect(calls).toEqual([`remove ${ada} ${endpoint}`])
     expect(shared.log).toEqual([])
     expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+  })
+
+  test('lets only the latest claim confirm or undo the record', async () => {
+    const memory = createMemory()
+    const { environment } = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    // Another tab claims the subscription while this account's registration is in flight.
+    const api: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { memory.write({ endpoint, registrant: 'bob', pending: true, claim: 'newer' }) },
+    }
+    expect(await enablePushDevice(createToken('ada'), vapidPublicKey, { ...environment, registeredEndpoint: memory }, api)).toBe('enabled')
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob', pending: true, claim: 'newer' })
+  })
+
+  test('starts the remembered removal before the browser store answers, and removes a vanished device on disable', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint })
+    const { api, calls } = createApi()
+    void disconnectPushDeviceOnSignOut('t', {
+      ...createEnvironment({ permission: 'granted' }).environment,
+      getPushManager: () => new Promise(() => undefined),
+      registeredEndpoint: memory,
+    }, api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls).toEqual([`remove t ${endpoint}`])
+
+    const ada = createToken('ada')
+    const vanished = createMemory()
+    vanished.write({ endpoint, registrant: 'ada' })
+    const removal = createApi()
+    expect(await disablePushDevice(ada, { ...createEnvironment({ permission: 'granted' }).environment, registeredEndpoint: vanished }, removal.api))
+      .toBe('disabled')
+    expect(removal.calls).toEqual([`remove ${ada} ${endpoint}`])
+    expect(vanished.read()).toBeUndefined()
+  })
+
+  test('keeps the endpoint when a failed registration could not cancel the subscription', async () => {
+    const memory = createMemory()
+    const subscription = { ...createSubscription(vapidPublicKey, []), unsubscribe: async () => false }
+    const refusing: PushDeviceApi = {
+      ...createApi().api,
+      register: async () => { throw new NotificationsApiError(409, 'limit', 'PushSubscriptionLimitExceeded') },
+    }
+    memory.write({ endpoint })
+    expect(await enablePushDevice('t', vapidPublicKey, {
+      supported: true,
+      notification: { permission: 'granted', requestPermission: async () => 'granted' },
+      getPushManager: async () => ({ getSubscription: async () => subscription, subscribe: async () => subscription }),
+      registeredEndpoint: memory,
+    }, refusing)).toBe('failed')
+    expect(memory.read()).toEqual({ endpoint })
   })
 
   test('removes the remembered endpoint on sign-out even when push is no longer available', async () => {

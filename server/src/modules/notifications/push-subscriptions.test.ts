@@ -139,7 +139,7 @@ const now = new Date('2026-10-19T00:00:00.000Z')
 describe('DynamoDbPushSubscriptionStore', () => {
   test('takes an endpoint over from another member so one device never gets two people’s pushes', async () => {
     const { client, sent } = createClient(async (command) => {
-      if (command instanceof GetCommand) return { Item: { workspaceId: 'ws-1', memberKey: 'bob', changedAt: now.getTime() - 60_000, revision: 'r0' } }
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'bob', changedAt: now.getTime() - 60_000, revision: 'r0' } }
       if (command instanceof QueryCommand) return { Count: 1 }
       return {}
     })
@@ -183,7 +183,7 @@ describe('DynamoDbPushSubscriptionStore', () => {
   test('counts a member row past its retention as a new device, even before DynamoDB deletes it', async () => {
     const { client, sent } = createClient(async (command) => {
       if (command instanceof GetCommand && command.input.Key?.sk === 'owner') return { Item: { workspaceId: 'ws-1', memberKey: 'ada', changedAt: now.getTime() - 60_000, revision: 'r0' } }
-      if (command instanceof GetCommand) return { Item: { expiresAt: Math.floor(now.getTime() / 1_000) } }
+      if (command instanceof GetCommand && command.input.Key?.sk !== 'devices') return { Item: { expiresAt: Math.floor(now.getTime() / 1_000) } }
       if (command instanceof QueryCommand) return { Count: MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER }
       return {}
     })
@@ -313,6 +313,18 @@ describe('DynamoDbPushSubscriptionStore', () => {
       FilterExpression: 'expiresAt > :now',
       ExpressionAttributeValues: { ':now': Math.floor(now.getTime() / 1_000) },
     })
+  })
+})
+
+describe('DynamoDbPushSubscriptionStore member version', () => {
+  test('rejects an existing device-version row without a version instead of overwriting it', async () => {
+    const { client, sent } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'devices') return { Item: { pk: 'member#ws-1#ada', sk: 'devices' } }
+      return {}
+    })
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+      .rejects.toMatchObject({ code: 'PushSubscriptionUnavailable' })
+    expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
   })
 })
 

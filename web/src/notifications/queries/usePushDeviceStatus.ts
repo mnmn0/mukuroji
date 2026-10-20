@@ -109,6 +109,8 @@ export function isRegisteredByAnotherAccount(
  * Registers this browser's subscription for the account and records the account as its
  * registrant. The record is marked pending until the server confirms, so another tab's
  * sign-out does not trust it yet, and the previous record is restored when the request fails.
+ * A random claim token fences both: a request whose response arrives after a newer claim from
+ * another tab leaves that claim alone.
  *
  * @param accessToken - Access token of the signed-in member.
  * @param input - Endpoint and keys to register.
@@ -124,14 +126,21 @@ export async function registerPushDevice(
   const memory = environment.registeredEndpoint
   const previous = memory?.read()
   const registrant = readAccessTokenSubject(accessToken)
-  memory?.write({ endpoint: input.endpoint, ...(registrant ? { registrant } : {}), pending: true })
+  const claim = crypto.randomUUID()
+  memory?.write({ endpoint: input.endpoint, ...(registrant ? { registrant } : {}), pending: true, claim })
+  /**
+   * Returns whether this request's claim is still the current record.
+   *
+   * @returns Whether no newer claim replaced it.
+   */
+  const ownsClaim = () => memory?.read()?.claim === claim
   try {
     await trackPushRegistration(api.register(accessToken, input))
   } catch (error: unknown) {
-    memory?.write(previous)
+    if (ownsClaim()) memory?.write(previous)
     throw error
   }
-  memory?.write({ endpoint: input.endpoint, ...(registrant ? { registrant } : {}) })
+  if (ownsClaim()) memory?.write({ endpoint: input.endpoint, ...(registrant ? { registrant } : {}) })
 }
 
 /**

@@ -99,7 +99,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
   共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
-- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えず、再登録では新しいデバイスとして上限を確認します。新しいデバイスの登録は member ごとの登録 version
+- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えず、再登録では新しいデバイスとして上限を確認します。member ごとの登録 version の行が version を持たない壊れた状態なら上書きせず `503 PushSubscriptionUnavailable` にします。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
   購読は 180 日で TTL 失効し、所有者の行はその 30 日後に失効します。DynamoDB は期限切れの行を個別に遅れて削除するため、
   所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
@@ -112,7 +112,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   端末は最後に登録した endpoint を覚えておき、サインアウト時に browser の push store を読めない場合もその endpoint で server から削除します。停止では server の削除を待たずに browser の購読を解除し、解除できなかった場合（`unsubscribe()` が `false`）は失敗として表示し、覚えた endpoint を残します。request の開始より後に変更があった削除は古い request として、その新しい状態を変えません。
   明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、表示中の app の通知を閉じ、browser の購読をすぐに解除し、
   破棄前の token でこの削除をすぐに送り（完了しない登録があっても削除が始まるようにするため）、送信中の登録（Workspace を開いた時の再登録や有効化）があった場合はその完了後に、最初の削除の完了を待たずにもう一度送ります（削除の後に server へ届いた古い登録が購読を残さないため）。
-  browser の購読は origin で 1 つを全 tab が共有するため、端末は最後に登録した account（access token の `sub`）も覚えておき、別の tab で別の account が後から登録していた場合は自分の登録だけを server から削除し、browser の購読と記憶はその account に残します。登録する tab は request を送る前に記憶を自分の account の「確認待ち」に書き換え、server が受け付けてから確定します（失敗した場合は前の記憶に戻します）。確認待ちの記憶は所有の根拠にしないため、その間に別の tab でサインアウトすると購読は解除されます（前の member の通知が残らないことを優先します）。別の account が確定した購読は、この account では「未登録」と表示し、Workspace を開いた時の再登録もせず、停止でも自分の登録だけを server から削除します。サインアウト時に push の API が使えなくなっていても、覚えた endpoint は server から削除します。
+  browser の購読は origin で 1 つを全 tab が共有するため、端末は最後に登録した account（access token の `sub`）も覚えておき、別の tab で別の account が後から登録していた場合は自分の登録だけを server から削除し、browser の購読と記憶はその account に残します。登録する tab は request を送る前に記憶を自分の account の「確認待ち」に書き換え、server が受け付けてから確定します（失敗した場合は前の記憶に戻します）。確定と巻き戻しは request ごとの乱数の claim が記憶に残っている場合だけ行い、後から別の tab が書いた記憶を上書きしません。確認待ちの記憶は所有の根拠にしないため、その間に別の tab でサインアウトすると購読は解除されます（前の member の通知が残らないことを優先します）。別の account が確定した購読は、この account では「未登録」と表示し、Workspace を開いた時の再登録もせず、停止でも自分の登録だけを server から削除します。サインアウト時は覚えた endpoint の削除を browser の push store を読む前に始め（service worker の待ちでサインアウトの待ち時間を使い切らないため）、push の API が使えなくなっていても削除します。停止の時点で browser の購読が消えていた場合も、自分が登録した endpoint を server から削除します。登録の失敗後に購読を解除できなかった場合は endpoint の記憶を残します。
   その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。
   期限切れによるサインアウトでは解除しません。
 - 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、

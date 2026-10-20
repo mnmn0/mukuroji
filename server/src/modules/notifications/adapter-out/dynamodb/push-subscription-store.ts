@@ -366,8 +366,9 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       Key: { pk: partition, sk: memberVersionSortKey },
       ConsistentRead: true,
     }))
-    const version = Item?.version
-    if (version === undefined) return 0
+    if (Item === undefined) return 0
+    // An existing row without a valid version cannot fence anything, so it fails closed.
+    const version: unknown = Item.version
     if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
       throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
     }

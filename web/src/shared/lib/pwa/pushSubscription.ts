@@ -81,6 +81,8 @@ export type RegisteredEndpoint = {
   registrant?: string
   /** Whether the registration is still waiting for the server, so it does not prove ownership yet. */
   pending?: boolean
+  /** Random token of the pending registration, so only that request may confirm or undo it. */
+  claim?: string
 }
 
 /** Device-local memory of the endpoint last registered on the server. */
@@ -150,10 +152,12 @@ function parseRegisteredEndpoint(value: string | null): RegisteredEndpoint | und
   }
   const registrant = 'registrant' in data && typeof data.registrant === 'string' ? data.registrant : undefined
   const pending = 'pending' in data && data.pending === true
+  const claim = 'claim' in data && typeof data.claim === 'string' ? data.claim : undefined
   return {
     endpoint: data.endpoint,
     ...(registrant === undefined ? {} : { registrant }),
     ...(pending ? { pending } : {}),
+    ...(claim === undefined ? {} : { claim }),
   }
 }
 
