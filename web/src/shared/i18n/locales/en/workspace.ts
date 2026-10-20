@@ -461,6 +461,7 @@ export const workspaceMessages = {
   'workspace.settings.notifications.pushDevice.enable': 'Receive on this device',
   'workspace.settings.notifications.pushDevice.disable': 'Stop on this device',
   'workspace.settings.notifications.pushDevice.pending': 'Working',
+  'workspace.settings.notifications.pushDevice.recheck': 'Check permission again',
   'workspace.settings.notifications.pushDevice.result.enabled': 'This device is registered.',
   'workspace.settings.notifications.pushDevice.result.disabled': 'This device is no longer registered.',
   'workspace.settings.notifications.pushDevice.result.dismissed': 'Notifications were not allowed, so nothing was registered.',

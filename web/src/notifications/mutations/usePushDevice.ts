@@ -222,7 +222,7 @@ export type PushDeviceController = {
   enable: () => void
   /** Turns push off for this device. */
   disable: () => void
-  /** Reads the status again after a load error. */
+  /** Reads the status again after a load error or a permission change outside the app. */
   retry: () => void
 }
 
@@ -261,8 +261,12 @@ export function usePushDevice(accessToken: string, options: PushDeviceOptions = 
     setPending(true)
     setResult(undefined)
     void action().then(async (outcome) => {
-      const next = await loadPushDevice(accessToken, environment, api, false)
-      await mutate(next, { revalidate: false })
+      // A failed action proves nothing new, so the last confirmed status stays; reading it again
+      // would infer `on` from a browser subscription the server never confirmed.
+      if (outcome !== 'failed') {
+        const next = await loadPushDevice(accessToken, environment, api, false)
+        await mutate(next, { revalidate: false })
+      }
       pendingRef.current = false
       setResult(outcome)
       setPending(false)
@@ -271,8 +275,8 @@ export function usePushDevice(accessToken: string, options: PushDeviceOptions = 
 
   const snapshot = query.data
   const vapidPublicKey = snapshot?.vapidPublicKey
-  // A retry after a load error shows loading until the new read settles.
-  const reloading = query.isValidating && snapshot?.status === 'load-error'
+  // A retry after a load error or a permission recheck shows loading until the new read settles.
+  const reloading = query.isValidating && (snapshot?.status === 'load-error' || snapshot?.status === 'blocked')
   return {
     status: reloading || !snapshot ? 'loading' : snapshot.status,
     pending,

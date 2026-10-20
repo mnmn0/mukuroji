@@ -357,6 +357,9 @@ describe('push device settings card', () => {
     const blocked = renderToStaticMarkup(<PushDeviceSettings controller={{ ...controller, status: 'blocked' }} locale="ja" />)
     expect(blocked).not.toContain('data-testid="push-device-toggle"')
     expect(blocked).toContain('通知がブロックされています')
+    // Permission changes outside the app, so a blocked device offers a recheck.
+    expect(blocked).toContain('data-testid="push-device-recheck"')
+    expect(blocked).toContain('通知の許可を再確認')
     const loadError = renderToStaticMarkup(<PushDeviceSettings controller={{ ...controller, status: 'load-error' }} locale="en" />)
     expect(loadError).toContain('Could not load the push notification status.')
   })

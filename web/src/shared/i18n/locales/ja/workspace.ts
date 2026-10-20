@@ -461,6 +461,7 @@ export const workspaceMessages = {
   'workspace.settings.notifications.pushDevice.enable': 'このデバイスで受け取る',
   'workspace.settings.notifications.pushDevice.disable': 'このデバイスでの受信を停止',
   'workspace.settings.notifications.pushDevice.pending': '処理中',
+  'workspace.settings.notifications.pushDevice.recheck': '通知の許可を再確認',
   'workspace.settings.notifications.pushDevice.result.enabled': 'このデバイスを登録しました。',
   'workspace.settings.notifications.pushDevice.result.disabled': 'このデバイスの登録を解除しました。',
   'workspace.settings.notifications.pushDevice.result.dismissed': '通知の許可が選ばれなかったため、登録していません。',

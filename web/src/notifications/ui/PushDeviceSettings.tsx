@@ -76,6 +76,16 @@ export function PushDeviceSettings({ controller, locale }: PushDeviceSettingsPro
           >
             {t('workspace.settings.notifications.retry')}
           </button>
+        ) : status === 'blocked' ? (
+          // Permission is changed outside the app, so the person can check again after changing it.
+          <button
+            className="workbench-button-secondary min-h-10 px-4"
+            data-testid="push-device-recheck"
+            onClick={controller.retry}
+            type="button"
+          >
+            {t('workspace.settings.notifications.pushDevice.recheck')}
+          </button>
         ) : null}
       </div>
 

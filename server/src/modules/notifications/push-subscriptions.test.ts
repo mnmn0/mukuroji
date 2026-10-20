@@ -206,6 +206,29 @@ describe('DynamoDbPushSubscriptionStore', () => {
     expect(transactions).toBe(3)
   })
 
+  test('never lets a stale request take the device back from a newer registration', async () => {
+    let transactions = 0
+    let ownerReads = 0
+    const { client } = createClient(async (command) => {
+      if (command instanceof GetCommand && command.input.Key?.sk === 'owner') {
+        ownerReads += 1
+        // Bob registered the same endpoint after this request started, and won the race.
+        return ownerReads === 1
+          ? {}
+          : { Item: { workspaceId: 'ws-1', memberKey: 'bob', registeredAt: now.getTime() + 1_000 } }
+      }
+      if (command instanceof TransactWriteCommand) {
+        transactions += 1
+        throw awsError('TransactionCanceledException', ['ConditionalCheckFailed', 'None', 'None'])
+      }
+      if (command instanceof QueryCommand) return { Count: 0 }
+      return {}
+    })
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
+      .rejects.toMatchObject({ status: 409, code: 'PushSubscriptionConflict' })
+    expect(transactions).toBe(1)
+  })
+
   test('keeps throttling and other non-race cancellations as infrastructure failures', async () => {
     let transactions = 0
     const { client } = createClient(async (command) => {

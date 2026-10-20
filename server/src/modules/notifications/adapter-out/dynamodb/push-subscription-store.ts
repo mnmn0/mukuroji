@@ -46,6 +46,8 @@ type EndpointOwner = {
   workspaceId: string
   /** Owning member. */
   memberKey: string
+  /** Server time in epoch milliseconds when the owner last registered, if recorded. */
+  registeredAt?: number
 }
 
 /**
@@ -106,6 +108,11 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
     for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
       const owner = await this.#readOwner(subscription.subscriptionId)
       const ownedByMember = owner?.workspaceId === workspaceId && owner.memberKey === memberKey
+      // Another member registered this endpoint after this request started, so this request is
+      // stale and must not take the device back, even when it lost the race and is retrying.
+      if (owner && !ownedByMember && owner.registeredAt !== undefined && owner.registeredAt > now.getTime()) {
+        throw new NotificationError(409, 'PushSubscriptionConflict', 'A newer registration owns this push subscription.')
+      }
       // Only a stored subscription is refreshed. An owner can outlive an expired member row, and
       // that device counts again as new; the transaction re-checks the row still exists.
       const refresh = ownedByMember && await this.#hasSubscription(partition, subscription.subscriptionId)
@@ -120,6 +127,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
         sk: 'owner',
         workspaceId,
         memberKey,
+        registeredAt: now.getTime(),
         expiresAt: expiresAt + ownerRetentionMarginDays * 86_400,
       }
       try {
@@ -279,11 +287,11 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       ConsistentRead: true,
     }))
     if (!Item) return undefined
-    const { workspaceId, memberKey } = Item
+    const { workspaceId, memberKey, registeredAt } = Item
     if (typeof workspaceId !== 'string' || typeof memberKey !== 'string') {
       throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
     }
-    return { workspaceId, memberKey }
+    return { workspaceId, memberKey, ...(typeof registeredAt === 'number' ? { registeredAt } : {}) }
   }
 
   /**

@@ -96,7 +96,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
 - 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
-  共有端末で別の人の通知が届き続けることはありません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+  共有端末で別の人の通知が届き続けることはありません。所有者の行には server の登録時刻を記録し、request の開始より後に別の member が登録していた場合は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻しません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
 - 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
@@ -112,7 +112,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   期限切れによるサインアウトでは解除しません。
 - 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
   server からも削除してから解除し、作り直します。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
-  push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
+  通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
   最大 10 秒待ってから対応状況を判定します。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
   失効した endpoint は配信 worker が push service の応答から削除します。
 
