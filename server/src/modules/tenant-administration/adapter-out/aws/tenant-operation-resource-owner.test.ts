@@ -300,6 +300,8 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(requests.at(-1)).toMatchObject({
         TableName: 'push-subscriptions',
         FilterExpression: '(#tenant0 = :tenant0)',
+        // Every Workspace's devices share the table, so a job evaluates a wide window.
+        Limit: 1_000,
         ExpressionAttributeValues: {
           ':tenant0': { S: 'workspace/one' },
         },

@@ -11,22 +11,24 @@ const pushApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/
  * Loads whether this deployment accepts Web Push subscriptions.
  *
  * @param accessToken - Access token for the API.
- * @returns The push configuration; a response without a usable key reads as disabled.
+ * @returns The push configuration.
+ * @throws {NotificationsApiError} When the response matches neither configuration shape, so the
+ * caller shows a retryable load error instead of reading a broken response as disabled.
  */
 export async function getPushConfiguration(accessToken: string): Promise<PushConfiguration> {
   const data = await requestPush(`${pushApiBaseUrl}/push/config`, accessToken)
-  if (
-    typeof data === 'object' &&
-    data !== null &&
-    'enabled' in data &&
-    data.enabled === true &&
-    'vapidPublicKey' in data &&
-    typeof data.vapidPublicKey === 'string' &&
-    data.vapidPublicKey.length > 0
-  ) {
-    return { enabled: true, vapidPublicKey: data.vapidPublicKey }
+  if (typeof data === 'object' && data !== null && 'enabled' in data) {
+    if (data.enabled === false) return { enabled: false }
+    if (
+      data.enabled === true &&
+      'vapidPublicKey' in data &&
+      typeof data.vapidPublicKey === 'string' &&
+      data.vapidPublicKey.length > 0
+    ) {
+      return { enabled: true, vapidPublicKey: data.vapidPublicKey }
+    }
   }
-  return { enabled: false }
+  throw new NotificationsApiError(502, 'The push configuration response is invalid.', 'InvalidPushConfiguration')
 }
 
 /**

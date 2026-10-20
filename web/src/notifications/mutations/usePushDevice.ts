@@ -5,6 +5,7 @@ import {
   matchesApplicationServerKey,
   readPushEnvironment,
   readPushSubscriptionInput,
+  type BrowserPushSubscription,
   type PushEnvironment,
 } from '../../shared/lib/pwa/pushSubscription'
 import {
@@ -78,6 +79,7 @@ export async function enablePushDevice(
     try {
       if (!input) throw new Error('The browser did not provide subscription keys.')
       await trackPushRegistration(api.register(accessToken, input))
+      environment.registeredEndpoint?.write(input.endpoint)
     } catch (error) {
       // A network failure says nothing about an existing registration, so only a refusal drops it.
       if (created || isRegistrationRefusal(error)) await subscription.unsubscribe().catch(() => false)
@@ -109,7 +111,10 @@ export async function disablePushDevice(
   try {
     const subscription = await (await environment.getPushManager())?.getSubscription()
     if (!subscription) return 'disabled'
-    await api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+    // The browser unsubscribe stops notifications on this device, so it never waits on the
+    // best-effort server removal, which may stall.
+    void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+    environment.registeredEndpoint?.write(undefined)
     await subscription.unsubscribe()
     return 'disabled'
   } catch {
@@ -127,7 +132,8 @@ export const signOutPushCleanupWaitMilliseconds = 3_000
  * Notifications already on screen are closed, and the browser subscription is cancelled
  * straight away, so the steps that stop notifications on this device never wait on the network.
  * The server removal is sent only after every registration still in flight has settled, so an
- * older refresh cannot recreate the registration after it was removed.
+ * older refresh cannot recreate the registration after it was removed. When the browser's push
+ * store cannot be read, the endpoint this device last registered is removed on the server instead.
  *
  * @param accessToken - Access token of the session being signed out, if still known.
  * @param environment - Browser capabilities; defaults to the running page.
@@ -139,17 +145,24 @@ export async function disconnectPushDeviceOnSignOut(
   api: PushDeviceApi = defaultPushDeviceApi,
 ): Promise<void> {
   if (!environment.supported) return
+  const rememberedEndpoint = environment.registeredEndpoint?.read()
+  environment.registeredEndpoint?.write(undefined)
   await Promise.allSettled([
     closeDisplayedNotifications(environment),
     (async () => {
-      const subscription = await (await environment.getPushManager())?.getSubscription()
-      if (!subscription) return
+      let subscription: BrowserPushSubscription | null | undefined
+      try {
+        subscription = await (await environment.getPushManager())?.getSubscription()
+      } catch {
+        // The push store could not be read; the remembered endpoint still lets the server forget it.
+      }
+      const endpoint = subscription?.endpoint ?? rememberedEndpoint
       await Promise.allSettled([
-        subscription.unsubscribe(),
+        subscription?.unsubscribe(),
         (async () => {
-          if (!accessToken) return
+          if (!accessToken || !endpoint) return
           await settlePushRegistrations()
-          await api.remove(accessToken, { endpoint: subscription.endpoint })
+          await api.remove(accessToken, { endpoint })
         })(),
       ])
     })(),

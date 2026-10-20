@@ -14,6 +14,7 @@ import {
   type PushDeviceApi,
 } from '../src/notifications/queries/usePushDeviceStatus'
 import { NotificationsApiError } from '../src/notifications/api/errors'
+import { getPushConfiguration } from '../src/notifications/api/push'
 import { PushDeviceSettings } from '../src/notifications/ui/PushDeviceSettings'
 import {
   defaultNotificationPath,
@@ -25,6 +26,7 @@ import {
 } from '../src/service-worker/model/pushNotification'
 import { isSafeApplicationPath } from '../src/shared/routing/applicationPath'
 import {
+  createRegisteredEndpointMemory,
   decodeBase64Url,
   readServiceWorkerRegistration,
   matchesApplicationServerKey,
@@ -334,6 +336,59 @@ describe('sign-out with push cleanup', () => {
 
   test('stops waiting for a hung cleanup and still signs out', async () => {
     expect(await signOut(() => new Promise<void>(() => undefined), 10)).toEqual(['session cleared', 'session cleared'])
+  })
+})
+
+describe('push configuration and cleanup fallbacks', () => {
+  test('reads only the two configuration shapes and rejects anything else as retryable', async () => {
+    const previousFetch = globalThis.fetch
+    /**
+     * Answers the configuration request with a fixed body.
+     *
+     * @param body - Response body text.
+     */
+    const respondWith = (body: string) => {
+      globalThis.fetch = Object.assign(async () => new Response(body, { status: 200 }), { preconnect: () => undefined })
+    }
+    try {
+      respondWith(JSON.stringify({ enabled: false }))
+      expect(await getPushConfiguration('t')).toEqual({ enabled: false })
+      respondWith(JSON.stringify({ enabled: true, vapidPublicKey }))
+      expect(await getPushConfiguration('t')).toEqual({ enabled: true, vapidPublicKey })
+      for (const broken of ['', '<html>', '{}', JSON.stringify({ enabled: 'yes' }), JSON.stringify({ enabled: true })]) {
+        respondWith(broken)
+        await expect(getPushConfiguration('t'), broken).rejects.toMatchObject({ code: 'InvalidPushConfiguration' })
+      }
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  test('disabling unsubscribes without waiting for a stalled server removal', async () => {
+    const { environment, log } = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const stalled: PushDeviceApi = { ...createApi().api, remove: () => new Promise<void>(() => undefined) }
+    expect(await disablePushDevice('t', environment, stalled)).toBe('disabled')
+    expect(log).toEqual(['unsubscribe current'])
+  })
+
+  test('removes the remembered endpoint on sign-out when the push store cannot be read', async () => {
+    const values = new Map<string, string>()
+    const memory = createRegisteredEndpointMemory({
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value) },
+      removeItem: (key) => { values.delete(key) },
+    })
+    memory.write(endpoint)
+    const { environment } = createEnvironment({ permission: 'granted' })
+    const { api, calls } = createApi()
+    await disconnectPushDeviceOnSignOut('t', {
+      ...environment,
+      getPushManager: async () => { throw new Error('storage') },
+      registeredEndpoint: memory,
+    }, api)
+    expect(calls).toEqual([`remove t ${endpoint}`])
+    // The memory is cleared with the sign-out, so the next member never removes it again.
+    expect(memory.read()).toBeUndefined()
   })
 })
 

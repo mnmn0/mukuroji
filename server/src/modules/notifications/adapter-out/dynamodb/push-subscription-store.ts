@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   GetCommand,
   QueryCommand,
@@ -48,6 +49,8 @@ type EndpointOwner = {
   memberKey: string
   /** Server time in epoch milliseconds of the last registration or removal. */
   changedAt: number
+  /** Random token of the last write; owner writes compare it, so two writes never look alike. */
+  revision: string
   /** Whether the last member removed the endpoint, leaving the record as a tombstone. */
   removed: boolean
 }
@@ -112,7 +115,8 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       const owner = await this.#readOwner(subscription.subscriptionId)
       // The endpoint was registered or removed after this request started, by any member, so the
       // request is stale and must not undo that change, including when it lost the race and retries.
-      if (owner && owner.changedAt > now.getTime()) {
+      // Equal times count as newer too: two requests in the same millisecond cannot be ordered.
+      if (owner && owner.changedAt >= now.getTime()) {
         throw new NotificationError(409, 'PushSubscriptionConflict', 'A newer change owns this push subscription.')
       }
       const liveOwner = owner && !owner.removed ? owner : undefined
@@ -132,6 +136,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
         workspaceId,
         memberKey,
         changedAt: now.getTime(),
+        revision: randomUUID(),
         expiresAt: expiresAt + ownerRetentionMarginDays * 86_400,
       }
       try {
@@ -220,7 +225,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
     const ownerKey = { pk: endpointPartition(subscriptionId), sk: 'owner' }
     for (let attempt = 0; attempt < maxOwnershipAttempts; attempt += 1) {
       const owner = await this.#readOwner(subscriptionId)
-      if (owner && owner.changedAt > now.getTime()) return
+      if (owner && owner.changedAt >= now.getTime()) return
       const ownedByMember = owner !== undefined && !owner.removed &&
         owner.workspaceId === workspaceId && owner.memberKey === memberKey
       // The member row and the owner record change in one transaction fenced on the owner read,
@@ -234,6 +239,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
                 workspaceId,
                 memberKey,
                 changedAt: now.getTime(),
+                revision: randomUUID(),
                 removed: true,
                 expiresAt: Math.floor(now.getTime() / 1_000) + ownerRetentionMarginDays * 86_400,
               },
@@ -290,11 +296,18 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       ConsistentRead: true,
     }))
     if (!Item) return undefined
-    const { workspaceId, memberKey, changedAt, removed } = Item
-    if (typeof workspaceId !== 'string' || typeof memberKey !== 'string' || typeof changedAt !== 'number') {
+    const { workspaceId, memberKey, changedAt, revision, removed } = Item
+    // Only the supported shapes are trusted; anything else fails closed instead of reading as a live owner.
+    if (
+      typeof workspaceId !== 'string' ||
+      typeof memberKey !== 'string' ||
+      typeof changedAt !== 'number' ||
+      typeof revision !== 'string' ||
+      (removed !== undefined && typeof removed !== 'boolean')
+    ) {
       throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
     }
-    return { workspaceId, memberKey, changedAt, removed: removed === true }
+    return { workspaceId, memberKey, changedAt, revision, removed: removed === true }
   }
 
   /**
@@ -346,8 +359,8 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
 const raceCancellationCodes: readonly string[] = ['ConditionalCheckFailed', 'TransactionConflict']
 
 /**
- * Builds the condition that the owner record is still exactly the one read, so owner changes
- * apply in order.
+ * Builds the condition that the owner record is still exactly the one read, compared by its
+ * random revision so two writes can never be mistaken for each other, so owner changes apply in order.
  *
  * @param owner - Owner record read before the write, if any.
  * @returns Condition expression and values for the owner record.
@@ -359,7 +372,7 @@ function ownerFence(owner: EndpointOwner | undefined): {
   ExpressionAttributeValues?: Record<string, unknown>
 } {
   return owner
-    ? { ConditionExpression: 'changedAt = :ownerChangedAt', ExpressionAttributeValues: { ':ownerChangedAt': owner.changedAt } }
+    ? { ConditionExpression: 'revision = :ownerRevision', ExpressionAttributeValues: { ':ownerRevision': owner.revision } }
     : { ConditionExpression: 'attribute_not_exists(pk)' }
 }
 

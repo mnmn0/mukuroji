@@ -69,6 +69,54 @@ export type PushEnvironment = {
    * @returns Notifications that can be closed.
    */
   getDisplayedNotifications?: () => Promise<readonly DisplayedNotification[]>
+  /** Endpoint this device last registered; omitted where nothing can be remembered. */
+  registeredEndpoint?: RegisteredEndpointMemory
+}
+
+/** Device-local memory of the endpoint last registered on the server. */
+export type RegisteredEndpointMemory = {
+  /**
+   * Reads the remembered endpoint.
+   *
+   * @returns The endpoint, or `undefined` when none is remembered or storage is unavailable.
+   */
+  read: () => string | undefined
+  /**
+   * Remembers an endpoint, or forgets it.
+   *
+   * @param endpoint - Endpoint to remember; `undefined` forgets it.
+   */
+  write: (endpoint: string | undefined) => void
+}
+
+/** Storage key of the endpoint this device last registered. */
+const registeredEndpointStorageKey = 'mukuroji.push.registeredEndpoint'
+
+/**
+ * Remembers the registered endpoint in local storage, so sign-out can still remove it on the
+ * server when the browser's push store cannot be read. Storage failures are ignored.
+ *
+ * @param storage - Local storage of the page.
+ * @returns The endpoint memory.
+ */
+export function createRegisteredEndpointMemory(storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>): RegisteredEndpointMemory {
+  return {
+    read: () => {
+      try {
+        return storage.getItem(registeredEndpointStorageKey) ?? undefined
+      } catch {
+        return undefined
+      }
+    },
+    write: (endpoint) => {
+      try {
+        if (endpoint === undefined) storage.removeItem(registeredEndpointStorageKey)
+        else storage.setItem(registeredEndpointStorageKey, endpoint)
+      } catch {
+        // Remembering is best-effort; the browser subscription stays the primary source.
+      }
+    },
+  }
 }
 
 /** Notification the app is currently showing. */
@@ -98,6 +146,7 @@ export function readPushEnvironment(): PushEnvironment {
     getPushManager: async () => (await readServiceWorkerRegistration(navigator.serviceWorker))?.pushManager,
     getDisplayedNotifications: async () =>
       (await readServiceWorkerRegistration(navigator.serviceWorker))?.getNotifications() ?? [],
+    registeredEndpoint: createRegisteredEndpointMemory(window.localStorage),
   }
 }
 

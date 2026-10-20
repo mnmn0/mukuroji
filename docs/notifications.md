@@ -96,7 +96,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
 - 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`。各 ID は URL エンコードし、`#` を含む ID でも区切りがずれません）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
-  共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）を記録し、所有者の行への書き込みはすべて読んだ `changedAt` を条件にするため、変更は必ず順番に適用されます。request の開始より後に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+  共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
 - 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
@@ -104,17 +104,18 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
   tombstone でなくその member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
 - tenant の export・削除・検証の対象に含めます（member 行・所有者行（tombstone を含む）・登録 version はすべて `workspaceId` を持ちます）。
-  検証は Workspace ID の filter 付き scan のため、1 回の job で最大 1,000 行を評価します（scan の limit は filter の前に適用されるため、1 行ずつでは共有 table の行数だけ job が続きます）。
+  Workspace ID の filter 付き scan のため、export・削除・検証の各 job は最大 1,000 行を評価します（scan の limit は filter の前に適用されるため、少ない行数ずつでは共有 table の行数に比例して job が続きます）。削除は 25 件ずつ行います。
   所有者行の key は endpoint だけで決まり、scan の後に別 Workspace が同じ endpoint を引き継ぐことがあるため、削除はまだ閉鎖する Workspace の行である場合だけ条件付きで行い、引き継がれた行は残します。
 - `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合は所有者の行を削除時刻付きの tombstone（`removed: true`）に置き換えます。
-  別の tab や再試行で削除より前に始まった登録は tombstone より古いため、削除の後に購読を作り直せません。request の開始より後に変更があった削除は古い request として、その新しい状態を変えません。
+  別の tab や再試行で削除より前に始まった登録は tombstone より古いため、削除の後に購読を作り直せません。
+  端末は最後に登録した endpoint を覚えておき、サインアウト時に browser の push store を読めない場合もその endpoint で server から削除します。停止では server の削除を待たずに browser の購読を解除します。request の開始より後に変更があった削除は古い request として、その新しい状態を変えません。
   明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、表示中の app の通知を閉じ、browser の購読をすぐに解除し、
   送信中の登録（Workspace を開いた時の再登録や有効化）が完了してから破棄前の token でこの削除を送ります（古い登録が削除の後に購読を作り直さないため）。
   その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。
   期限切れによるサインアウトでは解除しません。
 - 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
   server からも削除してから解除し、作り直します。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
-  通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
+  設定の取得結果がどちらの形にも当てはまらない場合は「無効」とせず、再読み込みできる読み込み失敗にします。通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
   最大 10 秒待ってから対応状況を判定します。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
   失効した endpoint は配信 worker が push service の応答から削除します。
 

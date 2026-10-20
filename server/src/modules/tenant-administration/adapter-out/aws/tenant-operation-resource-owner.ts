@@ -52,6 +52,12 @@ const RESOURCE_PAGE_SIZE = 20
 
 /** Rows a verification scan evaluates per job when the tenant is located by a filter. */
 const VERIFICATION_SCAN_PAGE_SIZE = 1_000
+
+/** Rows an export or deletion scan of a table shared by every Workspace evaluates per job. */
+const SHARED_TABLE_SCAN_PAGE_SIZE = 1_000
+
+/** Most delete requests DynamoDB accepts in one batch. */
+const DELETE_BATCH_SIZE = 25
 const IDENTITY_PAGE_SIZE = 10
 const TENANT_CLOSURE_QUIESCENCE_SECONDS = 16 * 60
 const TENANT_CURSOR_IV_BYTES = 12
@@ -168,6 +174,11 @@ type TenantDynamoTarget = {
    * keys are global, where another Workspace can take a row over after it was scanned.
    */
   readonly ownerAttribute?: string
+  /**
+   * Rows a filtered scan evaluates per export or deletion job. Set for shared tables where the
+   * tenant is a small fraction of the rows, so a job does not stop after a handful of unrelated rows.
+   */
+  readonly scanPageSize?: number
 }
 
 /** Opaque DynamoDB pagination state carried between queue jobs. */
@@ -429,6 +440,8 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           workspaceSelector('workspaceId', 'equals'),
         ]),
         ownerAttribute: 'workspaceId',
+        // Every Workspace's devices share this table, so each job evaluates a large window.
+        scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
       },
     ]
   }
@@ -671,6 +684,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         operation.workspaceId,
         this.decodeDynamoPosition(job, cursor.position),
         false,
+        target.scanPageSize,
       )
       const body = serializeExportPage(
         target.id,
@@ -1070,6 +1084,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         operation.workspaceId,
         this.decodeDynamoPosition(job, cursor.position),
         true,
+        target.scanPageSize,
       )
       await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
@@ -1546,38 +1561,38 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     items: readonly Record<string, unknown>[],
     workspaceId: string,
   ): Promise<void> {
-    if (items.length === 0) return
-    const ownerAttribute = target.ownerAttribute
-    if (ownerAttribute) {
-      await Promise.all(items.map(async (item) => {
-        try {
-          await this.documentClient.send(new DeleteCommand({
-            TableName: target.tableName,
-            Key: createItemKey(target, item),
-            ConditionExpression: '#owner = :workspaceId',
-            ExpressionAttributeNames: { '#owner': ownerAttribute },
-            ExpressionAttributeValues: { ':workspaceId': workspaceId },
-          }))
-        } catch (error: unknown) {
-          if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
-        }
+    // A wide scan page can match more rows than one batch holds, so deletes go in batches.
+    for (let start = 0; start < items.length; start += DELETE_BATCH_SIZE) {
+      const batch = items.slice(start, start + DELETE_BATCH_SIZE)
+      const ownerAttribute = target.ownerAttribute
+      if (ownerAttribute) {
+        await Promise.all(batch.map(async (item) => {
+          try {
+            await this.documentClient.send(new DeleteCommand({
+              TableName: target.tableName,
+              Key: createItemKey(target, item),
+              ConditionExpression: '#owner = :workspaceId',
+              ExpressionAttributeNames: { '#owner': ownerAttribute },
+              ExpressionAttributeValues: { ':workspaceId': workspaceId },
+            }))
+          } catch (error: unknown) {
+            if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+          }
+        }))
+        continue
+      }
+      const response = await this.documentClient.send(new BatchWriteCommand({
+        RequestItems: {
+          [target.tableName]: batch.map((item) => ({ DeleteRequest: { Key: createItemKey(target, item) } })),
+        },
       }))
-      return
-    }
-    const requests = items.map((item) => ({
-      DeleteRequest: {
-        Key: createItemKey(target, item),
-      },
-    }))
-    const response = await this.documentClient.send(new BatchWriteCommand({
-      RequestItems: { [target.tableName]: requests },
-    }))
-    if ((response.UnprocessedItems?.[target.tableName]?.length ?? 0) > 0) {
-      throw new TenantAdministrationError(
-        503,
-        'TenantOperationDeleteThrottled',
-        'Tenant deletion page was throttled and must be retried.',
-      )
+      if ((response.UnprocessedItems?.[target.tableName]?.length ?? 0) > 0) {
+        throw new TenantAdministrationError(
+          503,
+          'TenantOperationDeleteThrottled',
+          'Tenant deletion page was throttled and must be retried.',
+        )
+      }
     }
   }
 

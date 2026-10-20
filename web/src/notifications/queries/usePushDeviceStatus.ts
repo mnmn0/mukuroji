@@ -128,6 +128,7 @@ export async function loadPushDevice(
   if (refresh) {
     try {
       await trackPushRegistration(api.register(accessToken, input))
+      environment.registeredEndpoint?.write(input.endpoint)
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }
