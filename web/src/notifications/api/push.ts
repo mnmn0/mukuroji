@@ -12,8 +12,9 @@ const pushApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/
  *
  * @param accessToken - Access token for the API.
  * @returns The push configuration.
- * @throws {NotificationsApiError} When the response matches neither configuration shape, so the
- * caller shows a retryable load error instead of reading a broken response as disabled.
+ * @throws {NotificationsApiError} When the response matches neither configuration shape or the
+ * key is malformed, so the caller shows a retryable load error instead of reading a broken
+ * response as disabled.
  */
 export async function getPushConfiguration(accessToken: string): Promise<PushConfiguration> {
   const data = await requestPush(`${pushApiBaseUrl}/push/config`, accessToken)
@@ -23,12 +24,33 @@ export async function getPushConfiguration(accessToken: string): Promise<PushCon
       data.enabled === true &&
       'vapidPublicKey' in data &&
       typeof data.vapidPublicKey === 'string' &&
-      data.vapidPublicKey.length > 0
+      isUncompressedP256Key(data.vapidPublicKey)
     ) {
       return { enabled: true, vapidPublicKey: data.vapidPublicKey }
     }
   }
   throw new NotificationsApiError(502, 'The push configuration response is invalid.', 'InvalidPushConfiguration')
+}
+
+/** Byte length of an uncompressed P-256 public key. */
+const uncompressedP256KeyLength = 65
+
+/**
+ * Returns whether a value is an unpadded base64url uncompressed P-256 public key, so a broken
+ * key is reported as a load error instead of failing later while matching the subscription.
+ *
+ * @param value - Key from the configuration response.
+ * @returns Whether the key has the shape browsers accept as an application server key.
+ */
+function isUncompressedP256Key(value: string): boolean {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return false
+  try {
+    const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '='))
+    return binary.length === uncompressedP256KeyLength && binary.charCodeAt(0) === 0x04
+  } catch {
+    // A length that no base64 encoding produces.
+    return false
+  }
 }
 
 /**

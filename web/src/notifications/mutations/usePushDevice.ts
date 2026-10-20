@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { clearAuthSession } from '../../auth/session'
+import { clearAuthSession, readAccessTokenSubject } from '../../auth/session'
 import {
   decodeBase64Url,
   matchesApplicationServerKey,
@@ -79,7 +79,7 @@ export async function enablePushDevice(
     try {
       if (!input) throw new Error('The browser did not provide subscription keys.')
       await trackPushRegistration(api.register(accessToken, input))
-      environment.registeredEndpoint?.write(input.endpoint)
+      environment.registeredEndpoint?.write({ endpoint: input.endpoint, registrant: readAccessTokenSubject(accessToken) })
     } catch (error) {
       // A network failure says nothing about an existing registration, so only a refusal drops it.
       if (created || isRegistrationRefusal(error)) await subscription.unsubscribe().catch(() => false)
@@ -101,7 +101,8 @@ export async function enablePushDevice(
  * @param accessToken - Access token for the API.
  * @param environment - Browser capabilities.
  * @param api - Server calls.
- * @returns `disabled`, or `failed` when the browser subscription could not be cancelled.
+ * @returns `disabled`, or `failed` when the browser subscription could not be cancelled. The
+ * remembered endpoint is kept on failure, so a later sign-out can still remove it on the server.
  */
 export async function disablePushDevice(
   accessToken: string,
@@ -114,8 +115,9 @@ export async function disablePushDevice(
     // The browser unsubscribe stops notifications on this device, so it never waits on the
     // best-effort server removal, which may stall.
     void api.remove(accessToken, { endpoint: subscription.endpoint }).catch(() => undefined)
+    // `false` means nothing was cancelled, so the subscription may still be live.
+    if (!await subscription.unsubscribe()) return 'failed'
     environment.registeredEndpoint?.write(undefined)
-    await subscription.unsubscribe()
     return 'disabled'
   } catch {
     return 'failed'
@@ -131,9 +133,15 @@ export const signOutPushCleanupWaitMilliseconds = 3_000
  *
  * Notifications already on screen are closed, and the browser subscription is cancelled
  * straight away, so the steps that stop notifications on this device never wait on the network.
- * The server removal is sent only after every registration still in flight has settled, so an
- * older refresh cannot recreate the registration after it was removed. When the browser's push
- * store cannot be read, the endpoint this device last registered is removed on the server instead.
+ * The server removal also starts at once, so it is sent even when a registration never settles;
+ * when registrations were still in flight it is sent again once they have settled, so an older
+ * refresh that reached the server after the first removal cannot keep the registration. When the
+ * browser's push store cannot be read, the endpoint this device last registered is removed on the
+ * server instead.
+ *
+ * Every tab shares the browser's one subscription. When another signed-in account registered it
+ * after this one, in another tab, it belongs to that account now: this sign-out removes only its
+ * own registration on the server and leaves the subscription and the memory to that account.
  *
  * @param accessToken - Access token of the session being signed out, if still known.
  * @param environment - Browser capabilities; defaults to the running page.
@@ -145,8 +153,11 @@ export async function disconnectPushDeviceOnSignOut(
   api: PushDeviceApi = defaultPushDeviceApi,
 ): Promise<void> {
   if (!environment.supported) return
-  const rememberedEndpoint = environment.registeredEndpoint?.read()
-  environment.registeredEndpoint?.write(undefined)
+  const remembered = environment.registeredEndpoint?.read()
+  const registrant = accessToken ? readAccessTokenSubject(accessToken) : undefined
+  const registeredElsewhere =
+    remembered?.registrant !== undefined && registrant !== undefined && remembered.registrant !== registrant
+  if (!registeredElsewhere) environment.registeredEndpoint?.write(undefined)
   await Promise.allSettled([
     closeDisplayedNotifications(environment),
     (async () => {
@@ -156,13 +167,19 @@ export async function disconnectPushDeviceOnSignOut(
       } catch {
         // The push store could not be read; the remembered endpoint still lets the server forget it.
       }
-      const endpoint = subscription?.endpoint ?? rememberedEndpoint
+      const endpoint = subscription?.endpoint ?? remembered?.endpoint
+      const ownedByAnotherAccount = registeredElsewhere && subscription?.endpoint === remembered?.endpoint
       await Promise.allSettled([
-        subscription?.unsubscribe(),
+        ownedByAnotherAccount ? undefined : subscription?.unsubscribe(),
         (async () => {
           if (!accessToken || !endpoint) return
-          await settlePushRegistrations()
-          await api.remove(accessToken, { endpoint })
+          const removal = api.remove(accessToken, { endpoint })
+          if (await settlePushRegistrations()) {
+            await removal.catch(() => undefined)
+            await api.remove(accessToken, { endpoint })
+          } else {
+            await removal
+          }
         })(),
       ])
     })(),

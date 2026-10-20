@@ -1,6 +1,7 @@
 import useSWR from 'swr'
 import type { PushConfiguration, PushSubscriptionInput, PushSubscriptionRemovalInput } from '@mukuroji/contracts'
 import { NotificationsApiError } from '../api/errors'
+import { readAccessTokenSubject } from '../../auth/session'
 import {
   getPushConfiguration,
   registerPushSubscription,
@@ -65,12 +66,14 @@ export function trackPushRegistration<Result>(registration: Promise<Result>): Pr
  * Waits until every tracked registration has settled. A removal sent afterwards cannot be
  * overtaken by an older registration, including the retries the server makes for it.
  *
- * @returns A promise that settles once no registration is in flight.
+ * @returns Whether any registration was in flight.
  */
-export async function settlePushRegistrations(): Promise<void> {
+export async function settlePushRegistrations(): Promise<boolean> {
+  const waited = pendingRegistrations.size > 0
   while (pendingRegistrations.size > 0) {
     await Promise.allSettled(pendingRegistrations)
   }
+  return waited
 }
 
 /**
@@ -128,7 +131,7 @@ export async function loadPushDevice(
   if (refresh) {
     try {
       await trackPushRegistration(api.register(accessToken, input))
-      environment.registeredEndpoint?.write(input.endpoint)
+      environment.registeredEndpoint?.write({ endpoint: input.endpoint, registrant: readAccessTokenSubject(accessToken) })
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }

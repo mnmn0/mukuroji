@@ -13,6 +13,7 @@ import {
   trackPushRegistration,
   type PushDeviceApi,
 } from '../src/notifications/queries/usePushDeviceStatus'
+import { readAccessTokenSubject } from '../src/auth/session'
 import { NotificationsApiError } from '../src/notifications/api/errors'
 import { getPushConfiguration } from '../src/notifications/api/push'
 import { PushDeviceSettings } from '../src/notifications/ui/PushDeviceSettings'
@@ -110,6 +111,30 @@ function createApi(options: { enabled?: boolean, registerFails?: boolean } = {})
     },
   }
   return { api, calls }
+}
+
+/**
+ * Creates endpoint memory backed by a map.
+ *
+ * @returns The memory.
+ */
+function createMemory() {
+  const values = new Map<string, string>()
+  return createRegisteredEndpointMemory({
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value) },
+    removeItem: (key) => { values.delete(key) },
+  })
+}
+
+/**
+ * Creates an unsigned JWT-shaped access token for a subject.
+ *
+ * @param subject - Token subject.
+ * @returns The token.
+ */
+function createToken(subject: string): string {
+  return `h.${Buffer.from(JSON.stringify({ sub: subject })).toString('base64url')}.s`
 }
 
 describe('push subscription helpers', () => {
@@ -260,6 +285,21 @@ describe('push device controller', () => {
     expect(log).toEqual(['unsubscribe current'])
   })
 
+  test('reports a disable as failed and keeps the remembered endpoint when nothing was cancelled', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint })
+    const { api } = createApi()
+    const subscription = { ...createSubscription(vapidPublicKey, []), unsubscribe: async () => false }
+    const result = await disablePushDevice('t', {
+      supported: true,
+      notification: { permission: 'granted', requestPermission: async () => 'granted' },
+      getPushManager: async () => ({ getSubscription: async () => subscription, subscribe: async () => subscription }),
+      registeredEndpoint: memory,
+    }, api)
+    expect(result).toBe('failed')
+    expect(memory.read()).toEqual({ endpoint })
+  })
+
   test('removes the device on sign-out and refreshes only opted-in devices', async () => {
     const signedOut = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
     const removal = createApi()
@@ -291,10 +331,12 @@ describe('push device controller', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(racing.log).toEqual(['unsubscribe current'])
     expect(closed).toEqual(['closed'])
-    expect(racingApi.calls).toEqual([])
+    // The removal starts at once, so it is sent even if the registration never settles, and is
+    // sent again once the registration has settled.
+    expect(racingApi.calls).toEqual([`remove t ${endpoint}`])
     finishRefresh()
     await signingOut
-    expect(racingApi.calls).toEqual([`remove t ${endpoint}`])
+    expect(racingApi.calls).toEqual([`remove t ${endpoint}`, `remove t ${endpoint}`])
 
     const notOptedIn = createApi()
     await refreshPushDevice('t', createEnvironment({ permission: 'granted' }).environment, notOptedIn.api)
@@ -355,7 +397,16 @@ describe('push configuration and cleanup fallbacks', () => {
       expect(await getPushConfiguration('t')).toEqual({ enabled: false })
       respondWith(JSON.stringify({ enabled: true, vapidPublicKey }))
       expect(await getPushConfiguration('t')).toEqual({ enabled: true, vapidPublicKey })
-      for (const broken of ['', '<html>', '{}', JSON.stringify({ enabled: 'yes' }), JSON.stringify({ enabled: true })]) {
+      for (const broken of [
+        '',
+        '<html>',
+        '{}',
+        JSON.stringify({ enabled: 'yes' }),
+        JSON.stringify({ enabled: true }),
+        JSON.stringify({ enabled: true, vapidPublicKey: 'x' }),
+        JSON.stringify({ enabled: true, vapidPublicKey: `${vapidPublicKey}=` }),
+        JSON.stringify({ enabled: true, vapidPublicKey: Buffer.concat([Buffer.from([0x02]), Buffer.alloc(32, 7)]).toString('base64url') }),
+      ]) {
         respondWith(broken)
         await expect(getPushConfiguration('t'), broken).rejects.toMatchObject({ code: 'InvalidPushConfiguration' })
       }
@@ -372,13 +423,8 @@ describe('push configuration and cleanup fallbacks', () => {
   })
 
   test('removes the remembered endpoint on sign-out when the push store cannot be read', async () => {
-    const values = new Map<string, string>()
-    const memory = createRegisteredEndpointMemory({
-      getItem: (key) => values.get(key) ?? null,
-      setItem: (key, value) => { values.set(key, value) },
-      removeItem: (key) => { values.delete(key) },
-    })
-    memory.write(endpoint)
+    const memory = createMemory()
+    memory.write({ endpoint })
     const { environment } = createEnvironment({ permission: 'granted' })
     const { api, calls } = createApi()
     await disconnectPushDeviceOnSignOut('t', {
@@ -388,6 +434,39 @@ describe('push configuration and cleanup fallbacks', () => {
     }, api)
     expect(calls).toEqual([`remove t ${endpoint}`])
     // The memory is cleared with the sign-out, so the next member never removes it again.
+    expect(memory.read()).toBeUndefined()
+  })
+
+  test('leaves the subscription to another account that registered it later in another tab', async () => {
+    const ada = createToken('ada')
+    const bob = createToken('bob')
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'bob' })
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const { api, calls } = createApi()
+    await disconnectPushDeviceOnSignOut(ada, { ...shared.environment, registeredEndpoint: memory }, api)
+    // Ada's own registration is removed on the server, but Bob keeps the browser subscription.
+    expect(calls).toEqual([`remove ${ada} ${endpoint}`])
+    expect(shared.log).toEqual([])
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+    // The account that registered it last unsubscribes as usual.
+    await disconnectPushDeviceOnSignOut(bob, { ...shared.environment, registeredEndpoint: memory }, api)
+    expect(shared.log).toEqual(['unsubscribe current'])
+    expect(memory.read()).toBeUndefined()
+  })
+
+  test('reads the registrant from the token and the memory, ignoring malformed values', () => {
+    expect(readAccessTokenSubject(createToken('ada'))).toBe('ada')
+    expect(readAccessTokenSubject('t')).toBeUndefined()
+    expect(readAccessTokenSubject('a.b.c')).toBeUndefined()
+    const values = new Map<string, string>([['mukuroji.push.registeredEndpoint', endpoint]])
+    const memory = createRegisteredEndpointMemory({
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value) },
+      removeItem: (key) => { values.delete(key) },
+    })
+    expect(memory.read()).toBeUndefined()
+    values.set('mukuroji.push.registeredEndpoint', JSON.stringify({ endpoint: 1 }))
     expect(memory.read()).toBeUndefined()
   })
 })

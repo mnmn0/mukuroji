@@ -290,6 +290,12 @@ describe('DynamoDbPushSubscriptionStore', () => {
     await expect(new DynamoDbPushSubscriptionStore(client, 'push').register('ws-1', 'ada', subscription, now))
       .rejects.toMatchObject({ code: 'PushSubscriptionLimitExceeded' })
     expect(sent.some((command) => command instanceof TransactWriteCommand)).toBe(false)
+    // Rows past their retention are not counted while DynamoDB has yet to delete them.
+    const count = sent.find((command) => command instanceof QueryCommand)
+    expect(count instanceof QueryCommand ? count.input : undefined).toMatchObject({
+      FilterExpression: 'expiresAt > :now',
+      ExpressionAttributeValues: { ':now': Math.floor(now.getTime() / 1_000) },
+    })
   })
 })
 

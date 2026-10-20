@@ -130,7 +130,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
       // A new device is counted against the limit and fenced by the member's registration
       // version, so two devices registering at once cannot both pass the same count.
       const version = refresh ? undefined : await this.#readMemberVersion(partition)
-      if (version !== undefined && await this.#countSubscriptions(partition) >= MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER) {
+      if (version !== undefined && await this.#countSubscriptions(partition, now) >= MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER) {
         throw new NotificationError(409, 'PushSubscriptionLimitExceeded', 'Too many devices receive push notifications.')
       }
       const ownerItem = {
@@ -316,17 +316,26 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
   /**
    * Counts a member's stored subscriptions.
    *
+   * Rows past their `expiresAt` are left out: DynamoDB deletes expired items only eventually, and
+   * a subscription past its retention must not keep a member from registering a new device.
+   *
    * @param partition - Member partition.
-   * @returns Number of subscriptions.
+   * @param now - Server time of the request.
+   * @returns Number of unexpired subscriptions.
    */
-  async #countSubscriptions(partition: string): Promise<number> {
+  async #countSubscriptions(partition: string, now: Date): Promise<number> {
     let total = 0
     let startKey: Record<string, unknown> | undefined
     do {
       const { Count, LastEvaluatedKey } = await this.#client.send(new QueryCommand({
         TableName: this.#tableName,
         KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
-        ExpressionAttributeValues: { ':pk': partition, ':prefix': 'subscription#' },
+        FilterExpression: 'expiresAt > :now',
+        ExpressionAttributeValues: {
+          ':pk': partition,
+          ':prefix': 'subscription#',
+          ':now': Math.floor(now.getTime() / 1_000),
+        },
         Select: 'COUNT',
         ConsistentRead: true,
         ...(startKey ? { ExclusiveStartKey: startKey } : {}),

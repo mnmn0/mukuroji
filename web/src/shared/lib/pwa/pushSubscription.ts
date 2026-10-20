@@ -73,20 +73,28 @@ export type PushEnvironment = {
   registeredEndpoint?: RegisteredEndpointMemory
 }
 
+/** Endpoint this device last registered, with the account that registered it. */
+export type RegisteredEndpoint = {
+  /** Registered endpoint. */
+  endpoint: string
+  /** Subject of the account that registered it, when the token exposed one. */
+  registrant?: string
+}
+
 /** Device-local memory of the endpoint last registered on the server. */
 export type RegisteredEndpointMemory = {
   /**
-   * Reads the remembered endpoint.
+   * Reads the remembered registration.
    *
-   * @returns The endpoint, or `undefined` when none is remembered or storage is unavailable.
+   * @returns The registration, or `undefined` when none is remembered or storage is unavailable.
    */
-  read: () => string | undefined
+  read: () => RegisteredEndpoint | undefined
   /**
-   * Remembers an endpoint, or forgets it.
+   * Remembers a registration, or forgets it.
    *
-   * @param endpoint - Endpoint to remember; `undefined` forgets it.
+   * @param registration - Registration to remember; `undefined` forgets it.
    */
-  write: (endpoint: string | undefined) => void
+  write: (registration: RegisteredEndpoint | undefined) => void
 }
 
 /** Storage key of the endpoint this device last registered. */
@@ -94,7 +102,9 @@ const registeredEndpointStorageKey = 'mukuroji.push.registeredEndpoint'
 
 /**
  * Remembers the registered endpoint in local storage, so sign-out can still remove it on the
- * server when the browser's push store cannot be read. Storage failures are ignored.
+ * server when the browser's push store cannot be read. Local storage is shared by every tab, so
+ * the registrant tells a sign-out whether another signed-in account registered the browser's
+ * subscription after it. Storage failures are ignored.
  *
  * @param storage - Local storage of the page.
  * @returns The endpoint memory.
@@ -103,20 +113,41 @@ export function createRegisteredEndpointMemory(storage: Pick<Storage, 'getItem' 
   return {
     read: () => {
       try {
-        return storage.getItem(registeredEndpointStorageKey) ?? undefined
+        return parseRegisteredEndpoint(storage.getItem(registeredEndpointStorageKey))
       } catch {
         return undefined
       }
     },
-    write: (endpoint) => {
+    write: (registration) => {
       try {
-        if (endpoint === undefined) storage.removeItem(registeredEndpointStorageKey)
-        else storage.setItem(registeredEndpointStorageKey, endpoint)
+        if (registration === undefined) storage.removeItem(registeredEndpointStorageKey)
+        else storage.setItem(registeredEndpointStorageKey, JSON.stringify(registration))
       } catch {
         // Remembering is best-effort; the browser subscription stays the primary source.
       }
     },
   }
+}
+
+/**
+ * Reads a stored registration, ignoring values of any other shape.
+ *
+ * @param value - Stored text.
+ * @returns The registration, or `undefined`.
+ */
+function parseRegisteredEndpoint(value: string | null): RegisteredEndpoint | undefined {
+  if (!value) return undefined
+  let data: unknown
+  try {
+    data = JSON.parse(value)
+  } catch {
+    return undefined
+  }
+  if (typeof data !== 'object' || data === null || !('endpoint' in data) || typeof data.endpoint !== 'string') {
+    return undefined
+  }
+  const registrant = 'registrant' in data && typeof data.registrant === 'string' ? data.registrant : undefined
+  return registrant === undefined ? { endpoint: data.endpoint } : { endpoint: data.endpoint, registrant }
 }
 
 /** Notification the app is currently showing. */
