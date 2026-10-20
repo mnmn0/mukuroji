@@ -33,7 +33,8 @@ import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession, hasStoredAuthSession, type AuthSession } from '../../auth/session'
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
-import { signOutWithPushCleanup, usePushDeviceRefresh } from '../../notifications/mutations/usePushDevice'
+import { signOutWithPushCleanup } from '../../notifications/mutations/usePushDevice'
+import { usePushDeviceRefresh } from '../../notifications/queries/usePushDeviceStatus'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
 import {
   clearAppBadgeAndNotifyTabs,
@@ -454,8 +455,9 @@ export function WorkspaceRouteProvider() {
 
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {
-    signOutWithPushCleanup(session?.accessToken)
-    navigate('/', { replace: true })
+    void signOutWithPushCleanup(session?.accessToken).then(() => {
+      navigate('/', { replace: true })
+    })
   }, [navigate, session?.accessToken])
 
   /** Applies the navigation and storage policy of a resolved enterprise session action. */

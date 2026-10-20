@@ -4,11 +4,14 @@ import {
   disablePushDevice,
   disconnectPushDeviceOnSignOut,
   enablePushDevice,
+  signOutWithPushCleanup,
+  type PushDeviceController,
+} from '../src/notifications/mutations/usePushDevice'
+import {
   loadPushDevice,
   refreshPushDevice,
   type PushDeviceApi,
-  type PushDeviceController,
-} from '../src/notifications/mutations/usePushDevice'
+} from '../src/notifications/queries/usePushDeviceStatus'
 import { NotificationsApiError } from '../src/notifications/api/errors'
 import { PushDeviceSettings } from '../src/notifications/ui/PushDeviceSettings'
 import {
@@ -193,6 +196,12 @@ describe('push device controller', () => {
       .toBe('load-error')
   })
 
+  test('reports a failed service worker lookup as a retryable load error, not as unsupported', async () => {
+    const { environment } = createEnvironment({ permission: 'granted' })
+    const failing: PushEnvironment = { ...environment, getPushManager: async () => { throw new Error('storage') } }
+    expect((await loadPushDevice('t', failing, createApi().api)).status).toBe('load-error')
+  })
+
   test('waits for the first service worker registration, but not forever', async () => {
     const registration = { pushManager: {} }
     const later = {
@@ -236,6 +245,16 @@ describe('push device controller', () => {
     expect(removal.calls).toEqual([`remove t ${endpoint}`])
     expect(signedOut.log).toEqual(['unsubscribe current'])
 
+    // The browser subscription is cancelled even when the server removal hangs.
+    const hanging = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const pending = disconnectPushDeviceOnSignOut('t', hanging.environment, {
+      ...createApi().api,
+      remove: () => new Promise<void>(() => undefined),
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hanging.log).toEqual(['unsubscribe current'])
+    void pending
+
     const notOptedIn = createApi()
     await refreshPushDevice('t', createEnvironment({ permission: 'granted' }).environment, notOptedIn.api)
     await refreshPushDevice('t', createEnvironment({ existingKey: vapidPublicKey }).environment, notOptedIn.api)
@@ -243,6 +262,39 @@ describe('push device controller', () => {
     const optedIn = createApi()
     await refreshPushDevice('t', createEnvironment({ permission: 'granted', existingKey: vapidPublicKey }).environment, optedIn.api)
     expect(optedIn.calls).toEqual([`register t ${endpoint}`])
+  })
+})
+
+describe('sign-out with push cleanup', () => {
+  /**
+   * Runs a sign-out against in-memory session storage.
+   *
+   * @param cleanup - Push cleanup to wait for.
+   * @param waitMilliseconds - Longest wait for the cleanup.
+   * @returns The order of cleanup and session clearing.
+   */
+  async function signOut(cleanup: () => Promise<void>, waitMilliseconds: number): Promise<string[]> {
+    const order: string[] = []
+    const storage = { removeItem: () => { order.push('session cleared') } }
+    const previousWindow = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', { localStorage: storage, sessionStorage: storage })
+    try {
+      await signOutWithPushCleanup('t', async () => {
+        await cleanup()
+        order.push('push cleaned')
+      }, waitMilliseconds)
+    } finally {
+      Reflect.set(globalThis, 'window', previousWindow)
+    }
+    return order
+  }
+
+  test('clears the session only after the push cleanup, so the page cannot go away first', async () => {
+    expect(await signOut(async () => undefined, 1_000)).toEqual(['push cleaned', 'session cleared', 'session cleared'])
+  })
+
+  test('stops waiting for a hung cleanup and still signs out', async () => {
+    expect(await signOut(() => new Promise<void>(() => undefined), 10)).toEqual(['session cleared', 'session cleared'])
   })
 })
 

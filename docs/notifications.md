@@ -92,8 +92,8 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   （CloudFormation parameter `WebPushVapidPublicKey`）が空または不正な場合は `enabled: false` で、登録は `409 PushNotificationsDisabled` です。
 - `PUT /api/push-subscriptions` は browser の `PushSubscription.toJSON()` と同じ `{ endpoint, keys: { p256dh, auth } }` だけを受け付けます。
   member や Workspace は request に含めず、認証済み member に保存します。service account など人以外は `403` です。
-- endpoint は HTTPS かつ既知の push service（FCM、Mozilla、Apple、Windows）の host だけを許可し、認証情報・port・正規化で変わる URL を拒否します。
-  配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵、`auth` は 16 byte で、どちらも padding なし base64url です。
+- endpoint は HTTPS かつ既知の push service（FCM、Mozilla、Apple、Windows）の host だけを許可し、認証情報・port・fragment（`#`。push service へ送られないため、同じ endpoint が別の ID を得てしまいます）・正規化で変わる URL を拒否します。
+  配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
 - 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
   共有端末で別の人の通知が届き続けることはありません。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
@@ -104,12 +104,14 @@ in-app を無効にした状態で投影された notification は Inbox unread 
   所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
   その member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
 - tenant の export・削除・検証の対象に含めます（member 行・所有者行・登録 version はすべて `workspaceId` を持ちます）。
+  所有者行の key は endpoint だけで決まり、scan の後に別 Workspace が同じ endpoint を引き継ぐことがあるため、削除はまだ閉鎖する Workspace の行である場合だけ条件付きで行い、引き継がれた行は残します。
 - `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合だけ endpoint の所有者も解放します。
-  明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、破棄前の token でこの削除を送ってから browser の購読を解除します。
+  明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、破棄前の token でのこの削除と browser の購読解除を並行して行い、
+  その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。
   期限切れによるサインアウトでは解除しません。
 - 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
   server からも削除してから解除し、作り直します。server が登録を拒否した場合はその場で作った購読を解除します。
-  push の購読状態を読めない場合は「未登録」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
+  push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
   最大 10 秒待ってから対応状況を判定します。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
   失効した endpoint は配信 worker が push service の応答から削除します。
 

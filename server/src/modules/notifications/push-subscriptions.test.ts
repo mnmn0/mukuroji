@@ -56,6 +56,8 @@ describe('push subscription validation', () => {
       'https://fcm.googleapis.com:8443/x',
       'https://internal.example/fcm',
       `https://fcm.googleapis.com/${'x'.repeat(2_100)}`,
+      // A fragment is dropped from HTTP requests, so it must not mint a second ID for one endpoint.
+      `${endpoint}#second-member`,
     ]) {
       expect(() => readPushSubscriptionInput({ endpoint: bad, keys: { p256dh, auth } }), bad).toThrow(NotificationError)
     }
@@ -63,8 +65,11 @@ describe('push subscription validation', () => {
 
   test('rejects malformed keys and unknown fields', () => {
     const compressed = Buffer.concat([Buffer.from([0x02]), Buffer.alloc(64, 1)]).toString('base64url')
+    // 65 bytes starting with 0x04 that are not a point on the curve.
+    const offCurve = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 1)]).toString('base64url')
     for (const body of [
       { endpoint, keys: { p256dh: compressed, auth } },
+      { endpoint, keys: { p256dh: offCurve, auth } },
       { endpoint, keys: { p256dh, auth: Buffer.alloc(15).toString('base64url') } },
       { endpoint, keys: { p256dh: `${p256dh}=`, auth } },
       { endpoint, keys: { p256dh, auth, extra: 'x' } },

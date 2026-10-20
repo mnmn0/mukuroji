@@ -72,6 +72,8 @@ export function readPushEndpoint(value: unknown): string {
     url.username !== '' ||
     url.password !== '' ||
     url.port !== '' ||
+    // Fragments never reach the push service, so they would let one endpoint take several IDs.
+    url.hash !== '' ||
     url.href !== value ||
     !isPushServiceHost(url.hostname)
   ) {
@@ -93,8 +95,8 @@ export function readPushSubscriptionInput(value: unknown): ValidatedPushSubscrip
   if (!isRecord(keys) || !hasOnlyKeys(keys, ['p256dh', 'auth'])) throw invalidSubscription()
   const p256dh = readBase64UrlKey(keys.p256dh, p256dhByteLength)
   const auth = readBase64UrlKey(keys.auth, authByteLength)
-  // An uncompressed P-256 point always starts with 0x04.
-  if (Buffer.from(p256dh, 'base64url')[0] !== 0x04) throw invalidSubscription()
+  // A key off the curve would be stored but fail every later encryption.
+  if (!isP256Point(Buffer.from(p256dh, 'base64url'))) throw invalidSubscription()
   return { endpoint, keys: { p256dh, auth }, subscriptionId: createPushSubscriptionId(endpoint) }
 }
 

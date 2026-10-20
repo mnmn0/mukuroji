@@ -1358,8 +1358,9 @@ export function DocumentPage() {
         loadMoreDocuments: handleLoadMoreDocuments,
         loadMoreVersions: handleLoadMoreVersions,
         logout: () => {
-          signOutWithPushCleanup(accessToken)
-          navigate('/', { replace: true })
+          void signOutWithPushCleanup(accessToken).then(() => {
+            navigate('/', { replace: true })
+          })
         },
         moveDocument: handleMoveDocument,
         navigate,

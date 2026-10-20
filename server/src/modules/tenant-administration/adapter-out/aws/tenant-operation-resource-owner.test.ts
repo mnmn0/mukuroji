@@ -311,6 +311,79 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
+  test('deletes push rows only while they still belong to the closing Workspace', async () => {
+    const operations: Array<{ target: string | undefined, body: unknown }> = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const target = readHttpHeader(request, 'x-amz-target')
+          const body = readJsonRequestBody(request)
+          operations.push({ target, body })
+          if (target === 'DynamoDB_20120810.Scan') {
+            return {
+              response: {
+                body: new TextEncoder().encode(JSON.stringify({
+                  Items: [
+                    { pk: { S: 'endpoint#device-1' }, sk: { S: 'owner' } },
+                    { pk: { S: 'member#workspace/one#ada' }, sk: { S: 'subscription#device-1' } },
+                  ],
+                })),
+                headers: {},
+                statusCode: 200,
+              },
+            }
+          }
+          // Another Workspace took the endpoint over after the scan.
+          const takenOver = isRecord(body) && isRecord(body.Key) && isRecord(body.Key.sk) && body.Key.sk.S === 'owner'
+          return {
+            response: {
+              body: new TextEncoder().encode(takenOver
+                ? JSON.stringify({ __type: 'com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException', message: 'taken over' })
+                : '{}'),
+              headers: {},
+              statusCode: takenOver ? 400 : 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const cognitoClient = new CognitoIdentityProviderClient({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'data',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+
+    try {
+      expect(await owner.execute(createDataJob(21), createOperation())).toMatchObject({ status: 'continuing' })
+      const deletes = operations.filter((operation) => operation.target === 'DynamoDB_20120810.DeleteItem')
+      // Endpoint owner rows are keyed globally, so each delete is fenced on the Workspace ID and
+      // a row another Workspace took over is kept instead of failing the page.
+      expect(operations.some((operation) => operation.target === 'DynamoDB_20120810.BatchWriteItem')).toBe(false)
+      expect(deletes).toHaveLength(2)
+      for (const { body } of deletes) {
+        expect(body).toMatchObject({
+          TableName: 'push-subscriptions',
+          ConditionExpression: '#owner = :workspaceId',
+          ExpressionAttributeNames: { '#owner': 'workspaceId' },
+          ExpressionAttributeValues: { ':workspaceId': { S: 'workspace/one' } },
+        })
+      }
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
   test('selects credential-auth locator partitions by nested target Workspace', async () => {
     const requests: unknown[] = []
     const lowLevelClient = new DynamoDBClient({

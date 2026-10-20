@@ -160,6 +160,11 @@ type TenantDynamoTarget = {
   readonly sortKey?: string
   /** All supported tenant locators for rows in the table. */
   readonly selectors: readonly TenantSelector[]
+  /**
+   * Attribute that must still hold the Workspace ID when a row is deleted. Set for tables whose
+   * keys are global, where another Workspace can take a row over after it was scanned.
+   */
+  readonly ownerAttribute?: string
 }
 
 /** Opaque DynamoDB pagination state carried between queue jobs. */
@@ -415,9 +420,13 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   private trailingTargets(): TenantDynamoTarget[] {
     return [
       // Member subscriptions, endpoint owners, and registration versions all carry the Workspace ID.
-      attributeTarget('push-subscriptions', this.config.pushSubscriptionsTableName, 'pk', 'sk', [
-        workspaceSelector('workspaceId', 'equals'),
-      ]),
+      // Endpoint owner rows are keyed by endpoint alone, so deletion is fenced on that ID.
+      {
+        ...attributeTarget('push-subscriptions', this.config.pushSubscriptionsTableName, 'pk', 'sk', [
+          workspaceSelector('workspaceId', 'equals'),
+        ]),
+        ownerAttribute: 'workspaceId',
+      },
     ]
   }
 
@@ -857,7 +866,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items)
+      await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       if (page.lastEvaluatedKey) {
         return {
           status: 'continuing',
@@ -1059,7 +1068,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items)
+      await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
@@ -1172,7 +1181,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items)
+      await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
@@ -1522,12 +1531,39 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     }
   }
 
-  /** Deletes one bounded DynamoDB page and rejects unprocessed writes for retry. */
+  /**
+   * Deletes one bounded DynamoDB page and rejects unprocessed writes for retry.
+   *
+   * Rows of a target with an owner attribute are deleted one by one, each conditioned on still
+   * belonging to the Workspace; a row another Workspace took over since the scan is kept.
+   *
+   * @param target - Table the page was read from.
+   * @param items - Scanned rows to delete.
+   * @param workspaceId - Workspace whose data is being deleted.
+   */
   private async deleteDynamoItems(
     target: TenantDynamoTarget,
     items: readonly Record<string, unknown>[],
+    workspaceId: string,
   ): Promise<void> {
     if (items.length === 0) return
+    const ownerAttribute = target.ownerAttribute
+    if (ownerAttribute) {
+      await Promise.all(items.map(async (item) => {
+        try {
+          await this.documentClient.send(new DeleteCommand({
+            TableName: target.tableName,
+            Key: createItemKey(target, item),
+            ConditionExpression: '#owner = :workspaceId',
+            ExpressionAttributeNames: { '#owner': ownerAttribute },
+            ExpressionAttributeValues: { ':workspaceId': workspaceId },
+          }))
+        } catch (error: unknown) {
+          if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+        }
+      }))
+      return
+    }
     const requests = items.map((item) => ({
       DeleteRequest: {
         Key: createItemKey(target, item),

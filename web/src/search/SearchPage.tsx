@@ -606,8 +606,9 @@ export function SearchPage() {
               <button
                 className="workbench-button-secondary min-h-10 px-4"
                 onClick={() => {
-                  signOutWithPushCleanup(accessToken)
-                  navigate('/', { replace: true })
+                  void signOutWithPushCleanup(accessToken).then(() => {
+                    navigate('/', { replace: true })
+                  })
                 }}
                 type="button"
               >
