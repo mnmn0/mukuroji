@@ -727,6 +727,65 @@ describe('push configuration and cleanup fallbacks', () => {
     expect(calls).toEqual([`remove t ${endpoint}`, `remove t ${endpoint}`])
   })
 
+  test('rechecks ownership inside the lock before refreshing, so a settled claim from another tab is kept', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'ada' })
+    const lock = createFakeLock()
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const environment = { ...shared.environment, registeredEndpoint: memory, registrationLock: lock }
+    let finishRegistration: () => void = () => undefined
+    const bobApi: PushDeviceApi = {
+      ...createApi().api,
+      register: () => new Promise<void>((resolve) => { finishRegistration = resolve }),
+    }
+    const enabling = enablePushDevice(createToken('bob'), vapidPublicKey, environment, bobApi)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Ada's page refreshes while Bob's claim is still pending, then waits for the lock.
+    const adaApi = createApi()
+    const refreshing = loadPushDevice(createToken('ada'), environment, adaApi.api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    finishRegistration()
+    expect(await enabling).toBe('enabled')
+    expect((await refreshing).status).toBe('off')
+    expect(adaApi.calls).toEqual([])
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+  })
+
+  test('keeps the endpoint when the follow-up removal fails, and leaves another account\'s notifications', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint })
+    let removals = 0
+    let finishRefresh: () => void = () => undefined
+    void trackPushRegistration(new Promise<void>((resolve) => { finishRefresh = resolve }))
+    const signingOut = disconnectPushDeviceOnSignOut('t', {
+      supported: true,
+      notification: { permission: 'granted', requestPermission: async () => 'granted' },
+      getPushManager: async () => { throw new Error('storage') },
+      registeredEndpoint: memory,
+    }, {
+      ...createApi().api,
+      remove: async () => {
+        removals += 1
+        if (removals > 1) throw new Error('offline')
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    finishRefresh()
+    await signingOut
+    expect(removals).toBe(2)
+    expect(memory.read()).toEqual({ endpoint })
+
+    const shared = createMemory()
+    shared.write({ endpoint, registrant: 'bob' })
+    const closed: string[] = []
+    await disconnectPushDeviceOnSignOut(createToken('ada'), {
+      ...createEnvironment({ permission: 'granted', existingKey: vapidPublicKey }).environment,
+      getDisplayedNotifications: async () => [{ close: () => { closed.push('closed') } }],
+      registeredEndpoint: shared,
+    }, createApi().api)
+    expect(closed).toEqual([])
+  })
+
   test('keeps the endpoint after sign-out when the subscription could not be cancelled', async () => {
     const memory = createMemory()
     memory.write({ endpoint })

@@ -248,15 +248,21 @@ export async function disconnectPushDeviceOnSignOut(
    * settled; the follow-up never waits on the first removal, which may stall.
    *
    * @param endpoint - Endpoint to remove.
-   * @returns Whether a removal reached the server.
+   * @returns Whether the last needed removal reached the server: the follow-up when a
+   * registration was in flight, since it may have landed after the first one.
    */
   const removeOnServer = async (endpoint: string): Promise<boolean> => {
     if (!accessToken) return false
-    const results = await Promise.allSettled([
+    const [first, followUp] = await Promise.allSettled([
       api.remove(accessToken, { endpoint }),
-      settlePushRegistrations().then((waited) => (waited ? api.remove(accessToken, { endpoint }) : undefined)),
+      settlePushRegistrations().then(async (waited) => {
+        if (!waited) return false
+        await api.remove(accessToken, { endpoint })
+        return true
+      }),
     ])
-    return results[0].status === 'fulfilled'
+    if (followUp.status === 'rejected') return false
+    return followUp.value || first.status === 'fulfilled'
   }
   // The remembered endpoint is removed before the browser store is read, which can take up to
   // the service worker wait, so the removal starts within the sign-out's bounded wait. It is
@@ -268,9 +274,12 @@ export async function disconnectPushDeviceOnSignOut(
     }
     return
   }
+  // The registration's notifications on screen are shared by every tab; those of another
+  // account that registered the subscription later stay.
+  const shownToAnotherAccount = isRegisteredByAnotherAccount(environment, remembered?.endpoint, accessToken)
   await Promise.allSettled([
     rememberedRemoval,
-    closeDisplayedNotifications(environment),
+    shownToAnotherAccount ? undefined : closeDisplayedNotifications(environment),
     (async () => {
       let subscription: BrowserPushSubscription | null | undefined
       try {

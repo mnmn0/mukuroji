@@ -248,7 +248,22 @@ export async function loadPushDevice(
   if (isRegisteredByAnotherAccount(environment, subscription.endpoint, accessToken)) return { status: 'off', vapidPublicKey }
   if (refresh) {
     try {
-      await holdRegistrationLock(environment, () => registerPushDevice(accessToken, input, environment, api))
+      const registered = await holdRegistrationLock(environment, async () => {
+        // Another tab may have replaced or claimed the subscription while this one waited.
+        const current = await pushManager.getSubscription()
+        const currentInput = current ? readPushSubscriptionInput(current) : undefined
+        if (
+          !current ||
+          !currentInput ||
+          !matchesApplicationServerKey(current, vapidPublicKey) ||
+          isRegisteredByAnotherAccount(environment, current.endpoint, accessToken)
+        ) {
+          return false
+        }
+        await registerPushDevice(accessToken, currentInput, environment, api)
+        return true
+      })
+      if (!registered) return { status: 'off', vapidPublicKey }
     } catch (error: unknown) {
       return { status: readRefreshFailureStatus(error), vapidPublicKey }
     }
