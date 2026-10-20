@@ -71,6 +71,55 @@ export type PushEnvironment = {
   getDisplayedNotifications?: () => Promise<readonly DisplayedNotification[]>
   /** Endpoint this device last registered; omitted where nothing can be remembered. */
   registeredEndpoint?: RegisteredEndpointMemory
+  /** Cross-tab lock ordering registrations against sign-outs; omitted where the browser has none. */
+  registrationLock?: RegistrationLock
+}
+
+/** Cross-tab lock that orders registrations of the shared subscription against sign-outs. */
+export type RegistrationLock = {
+  /**
+   * Runs a registration while holding the lock, so other tabs see its claim settle first.
+   *
+   * @param task - Registration to run.
+   * @returns The task's result.
+   */
+  hold: <Result>(task: () => Promise<Result>) => Promise<Result>
+  /**
+   * Runs a task once no tab holds the lock, or without it once the wait runs out.
+   *
+   * @param task - Task to run.
+   * @param timeoutMilliseconds - Longest wait for the lock.
+   * @returns The task's result.
+   */
+  afterRegistrations: <Result>(task: () => Promise<Result>, timeoutMilliseconds: number) => Promise<Result>
+}
+
+/** Name of the Web Lock held while this origin registers its push subscription. */
+const registrationLockName = 'mukuroji.push.registration'
+
+/**
+ * Creates the registration lock from the browser's Web Locks API.
+ *
+ * @param locks - Lock manager of the page.
+ * @returns The registration lock.
+ */
+export function createRegistrationLock(locks: Pick<LockManager, 'request'>): RegistrationLock {
+  return {
+    hold: (task) => locks.request(registrationLockName, task),
+    afterRegistrations: async (task, timeoutMilliseconds) => {
+      let acquired = false
+      try {
+        return await locks.request(registrationLockName, { signal: AbortSignal.timeout(timeoutMilliseconds) }, () => {
+          acquired = true
+          return task()
+        })
+      } catch (error: unknown) {
+        // Only a lock that never came is retried without it; the task's own failure stays.
+        if (acquired) throw error
+        return await task()
+      }
+    },
+  }
 }
 
 /** Endpoint this device last registered, with the account that registered it. */
@@ -196,6 +245,7 @@ export function readPushEnvironment(): PushEnvironment {
     getDisplayedNotifications: async () =>
       (await readServiceWorkerRegistration(navigator.serviceWorker))?.getNotifications() ?? [],
     ...withRegisteredEndpointMemory(),
+    ...('locks' in navigator && navigator.locks ? { registrationLock: createRegistrationLock(navigator.locks) } : {}),
   }
 }
 

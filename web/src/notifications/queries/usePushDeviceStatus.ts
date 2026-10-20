@@ -110,7 +110,8 @@ export function isRegisteredByAnotherAccount(
  * registrant. The record is marked pending until the server confirms, so another tab's
  * sign-out does not trust it yet, and the previous record is restored when the request fails.
  * A random claim token fences both: a request whose response arrives after a newer claim from
- * another tab leaves that claim alone.
+ * another tab leaves that claim alone. Where the browser has Web Locks, the registration holds a
+ * cross-tab lock until its claim settles, so another tab's sign-out can wait for the outcome.
  *
  * @param accessToken - Access token of the signed-in member.
  * @param input - Endpoint and keys to register.
@@ -118,6 +119,28 @@ export function isRegisteredByAnotherAccount(
  * @param api - Server calls.
  */
 export async function registerPushDevice(
+  accessToken: string,
+  input: PushSubscriptionInput,
+  environment: PushEnvironment,
+  api: PushDeviceApi,
+): Promise<void> {
+  const lock = environment.registrationLock
+  if (lock) {
+    await lock.hold(() => claimAndRegister(accessToken, input, environment, api))
+    return
+  }
+  await claimAndRegister(accessToken, input, environment, api)
+}
+
+/**
+ * Claims the shared subscription for the account and registers it; see `registerPushDevice`.
+ *
+ * @param accessToken - Access token of the signed-in member.
+ * @param input - Endpoint and keys to register.
+ * @param environment - Browser capabilities.
+ * @param api - Server calls.
+ */
+async function claimAndRegister(
   accessToken: string,
   input: PushSubscriptionInput,
   environment: PushEnvironment,

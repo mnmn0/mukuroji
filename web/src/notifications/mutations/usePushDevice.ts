@@ -65,11 +65,12 @@ export async function enablePushDevice(
     // never be registered; remove it on the server and in the browser, then create a new one.
     // The replacement waits a bounded time for the removal, so the old row no longer counts
     // against the device limit, but a stalled removal never blocks it.
+    let staleEndpoint: string | undefined
     if (
       subscription &&
       (!matchesApplicationServerKey(subscription, vapidPublicKey) || !readPushSubscriptionInput(subscription))
     ) {
-      await waitAtMost(api.remove(accessToken, { endpoint: subscription.endpoint }), staleRemovalWaitMilliseconds)
+      staleEndpoint = subscription.endpoint
       await subscription.unsubscribe()
       subscription = null
     }
@@ -79,6 +80,11 @@ export async function enablePushDevice(
         applicationServerKey: decodeBase64Url(vapidPublicKey),
       })
       created = true
+    }
+    // The stale row is removed only when the replacement got a new endpoint: with the same
+    // endpoint the registration below replaces that row, and a late removal could delete it.
+    if (staleEndpoint !== undefined && staleEndpoint !== subscription.endpoint) {
+      await waitAtMost(api.remove(accessToken, { endpoint: staleEndpoint }), staleRemovalWaitMilliseconds)
     }
     const input = readPushSubscriptionInput(subscription)
     try {
@@ -168,6 +174,12 @@ async function waitAtMost(request: Promise<unknown>, milliseconds: number): Prom
   }
 }
 
+/**
+ * Longest time a sign-out waits for another tab's registration to settle its claim before it
+ * decides, without it, whether to cancel the shared subscription.
+ */
+export const claimSettleWaitMilliseconds = 1_500
+
 /** Longest time a sign-out waits for push cleanup before clearing the session. */
 export const signOutPushCleanupWaitMilliseconds = 3_000
 
@@ -196,28 +208,31 @@ export async function disconnectPushDeviceOnSignOut(
   environment: PushEnvironment = readPushEnvironment(),
   api: PushDeviceApi = defaultPushDeviceApi,
 ): Promise<void> {
-  const remembered = environment.registeredEndpoint?.read()
-  const registeredElsewhere = isRegisteredByAnotherAccount(environment, remembered?.endpoint, accessToken)
-  if (!registeredElsewhere) environment.registeredEndpoint?.write(undefined)
+  const memory = environment.registeredEndpoint
+  const remembered = memory?.read()
   /**
    * Removes an endpoint on the server at once, and again once registrations still in flight have
    * settled; the follow-up never waits on the first removal, which may stall.
    *
    * @param endpoint - Endpoint to remove.
+   * @returns Whether a removal reached the server.
    */
-  const removeOnServer = async (endpoint: string) => {
-    if (!accessToken) return
-    await Promise.allSettled([
+  const removeOnServer = async (endpoint: string): Promise<boolean> => {
+    if (!accessToken) return false
+    const results = await Promise.allSettled([
       api.remove(accessToken, { endpoint }),
       settlePushRegistrations().then((waited) => (waited ? api.remove(accessToken, { endpoint }) : undefined)),
     ])
+    return results[0].status === 'fulfilled'
   }
   // The remembered endpoint is removed before the browser store is read, which can take up to
   // the service worker wait, so the removal starts within the sign-out's bounded wait. It is
   // removed even when push APIs are no longer available.
-  const rememberedRemoval = remembered ? removeOnServer(remembered.endpoint) : undefined
+  const rememberedRemoval = remembered ? removeOnServer(remembered.endpoint) : Promise.resolve(false)
   if (!environment.supported) {
-    await rememberedRemoval
+    if (await rememberedRemoval && !isRegisteredByAnotherAccount(environment, remembered?.endpoint, accessToken)) {
+      memory?.write(undefined)
+    }
     return
   }
   await Promise.allSettled([
@@ -230,10 +245,27 @@ export async function disconnectPushDeviceOnSignOut(
       } catch {
         // The push store could not be read; the remembered endpoint already lets the server forget it.
       }
-      const ownedByAnotherAccount = registeredElsewhere && subscription?.endpoint === remembered?.endpoint
+      const lateRemoval = subscription && subscription.endpoint !== remembered?.endpoint
+        ? removeOnServer(subscription.endpoint)
+        : undefined
+      /**
+       * Cancels the shared subscription unless another account confirmed it, and forgets the
+       * endpoint only once nothing can still deliver to it.
+       */
+      const release = async () => {
+        // Read again: a registration in another tab may have settled its claim meanwhile.
+        const current = memory?.read()
+        const registeredElsewhere = isRegisteredByAnotherAccount(environment, current?.endpoint, accessToken)
+        if (registeredElsewhere && subscription?.endpoint === current?.endpoint) return
+        const cancelled = subscription ? await subscription.unsubscribe().catch(() => false) : false
+        // A subscription that could not be cancelled keeps its endpoint, so a later sign-out can
+        // still remove it; without a readable subscription, the server removal must have landed.
+        if (!registeredElsewhere && (cancelled || (!subscription && await rememberedRemoval))) memory?.write(undefined)
+      }
+      const lock = environment.registrationLock
       await Promise.allSettled([
-        ownedByAnotherAccount ? undefined : subscription?.unsubscribe(),
-        subscription && subscription.endpoint !== remembered?.endpoint ? removeOnServer(subscription.endpoint) : undefined,
+        lock ? lock.afterRegistrations(release, claimSettleWaitMilliseconds) : release(),
+        lateRemoval,
       ])
     })(),
   ])

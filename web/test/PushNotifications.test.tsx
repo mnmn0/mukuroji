@@ -37,6 +37,7 @@ import {
   type BrowserPushManager,
   type BrowserPushSubscription,
   type PushEnvironment,
+  type RegistrationLock,
 } from '../src/shared/lib/pwa/pushSubscription'
 
 const vapidPublicKey = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(64, 7)]).toString('base64url')
@@ -139,6 +140,26 @@ function createToken(subject: string): string {
   return `h.${Buffer.from(JSON.stringify({ sub: subject })).toString('base64url')}.s`
 }
 
+/**
+ * Creates an in-memory registration lock that queues holders and lets waiters give up.
+ *
+ * @returns The lock.
+ */
+function createFakeLock(): RegistrationLock {
+  let tail: Promise<unknown> = Promise.resolve()
+  return {
+    hold: (task) => {
+      const run = tail.then(task)
+      tail = run.catch(() => undefined)
+      return run
+    },
+    afterRegistrations: async (task, timeoutMilliseconds) => {
+      await Promise.race([tail, new Promise((resolve) => setTimeout(resolve, timeoutMilliseconds))])
+      return task()
+    },
+  }
+}
+
 describe('push subscription helpers', () => {
   test('decodes base64url keys and matches the bound key', () => {
     expect(Buffer.from(decodeBase64Url(vapidPublicKey)).toString('base64url')).toBe(vapidPublicKey)
@@ -193,13 +214,38 @@ describe('push device controller', () => {
     const { api, calls } = createApi()
     expect(await enablePushDevice('t', vapidPublicKey, environment, api)).toBe('enabled')
     expect(log).toEqual(['request', 'unsubscribe old', 'subscribe 65'])
-    // The old endpoint is removed on the server too, so it stops counting and receiving.
-    expect(calls).toEqual([`remove t ${endpoint}`, `register t ${endpoint}`])
-    // A stalled removal of the old endpoint never holds up the replacement.
-    const stalled = createEnvironment({ existingKey: otherKey })
+    // The replacement kept the endpoint, so registering it replaces the old row; a removal
+    // could arrive after the registration and delete it.
+    expect(calls).toEqual([`register t ${endpoint}`])
+  })
+
+  test('removes a replaced endpoint before registering the new one, without waiting on a stalled removal', async () => {
+    const replacement = 'https://fcm.googleapis.com/fcm/send/replacement'
+    /**
+     * Creates an environment whose old subscription is replaced with a new endpoint.
+     *
+     * @returns The environment and the browser calls it received.
+     */
+    const replacing = () => {
+      const { environment, log } = createEnvironment({ existingKey: otherKey })
+      const pushManager: BrowserPushManager = {
+        getSubscription: async () => createSubscription(otherKey, log),
+        subscribe: async () => {
+          log.push('subscribe')
+          return { ...createSubscription(vapidPublicKey, log), endpoint: replacement, toJSON: () => ({ endpoint: replacement, keys: { p256dh: 'p', auth: 'a' } }) }
+        },
+      }
+      return { environment: { ...environment, getPushManager: async () => pushManager }, log }
+    }
+    const { environment, log } = replacing()
+    const { api, calls } = createApi()
+    expect(await enablePushDevice('t', vapidPublicKey, environment, api)).toBe('enabled')
+    expect(log).toEqual(['request', 'unsubscribe old', 'subscribe'])
+    // The old endpoint is removed on the server too, so it stops counting against the limit.
+    expect(calls).toEqual([`remove t ${endpoint}`, `register t ${replacement}`])
+    const stalled = replacing()
     const hanging: PushDeviceApi = { ...createApi().api, remove: () => new Promise<void>(() => undefined) }
     expect(await enablePushDevice('t', vapidPublicKey, stalled.environment, hanging)).toBe('enabled')
-    expect(stalled.log).toEqual(['request', 'unsubscribe old', 'subscribe 65'])
   })
 
   test('recreates an existing subscription whose keys the browser no longer exposes', async () => {
@@ -218,7 +264,7 @@ describe('push device controller', () => {
     const { api, calls } = createApi()
     expect(await enablePushDevice('t', vapidPublicKey, { ...environment, getPushManager: async () => pushManager }, api)).toBe('enabled')
     expect(log).toEqual(['unsubscribe current', 'subscribe'])
-    expect(calls).toEqual([`remove t ${endpoint}`, `register t ${endpoint}`])
+    expect(calls).toEqual([`register t ${endpoint}`])
   })
 
   test('reports an unreadable push store as a retryable load error', async () => {
@@ -600,6 +646,46 @@ describe('push configuration and cleanup fallbacks', () => {
     } finally {
       Reflect.deleteProperty(globalThis, 'window')
     }
+  })
+
+  test('waits for another tab\'s registration to settle before cancelling the shared subscription', async () => {
+    const ada = createToken('ada')
+    const bob = createToken('bob')
+    const memory = createMemory()
+    memory.write({ endpoint, registrant: 'ada' })
+    const lock = createFakeLock()
+    const shared = createEnvironment({ permission: 'granted', existingKey: vapidPublicKey })
+    const environment = { ...shared.environment, registeredEndpoint: memory, registrationLock: lock }
+    let finishRegistration: () => void = () => undefined
+    const api: PushDeviceApi = {
+      ...createApi().api,
+      register: () => new Promise<void>((resolve) => { finishRegistration = resolve }),
+    }
+    const enabling = enablePushDevice(bob, vapidPublicKey, environment, api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Bob's registration has reached the server and is waiting for its response when Ada signs out.
+    const signingOut = disconnectPushDeviceOnSignOut(ada, environment, createApi().api)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(shared.log).toEqual([])
+    finishRegistration()
+    expect(await enabling).toBe('enabled')
+    await signingOut
+    // Bob's claim settled first, so Ada's sign-out leaves Bob's subscription alone.
+    expect(shared.log).toEqual([])
+    expect(memory.read()).toEqual({ endpoint, registrant: 'bob' })
+  })
+
+  test('keeps the endpoint after sign-out when the subscription could not be cancelled', async () => {
+    const memory = createMemory()
+    memory.write({ endpoint })
+    const subscription = { ...createSubscription(vapidPublicKey, []), unsubscribe: async () => false }
+    await disconnectPushDeviceOnSignOut('t', {
+      supported: true,
+      notification: { permission: 'granted', requestPermission: async () => 'granted' },
+      getPushManager: async () => ({ getSubscription: async () => subscription, subscribe: async () => subscription }),
+      registeredEndpoint: memory,
+    }, { ...createApi().api, remove: async () => { throw new Error('offline') } })
+    expect(memory.read()).toEqual({ endpoint })
   })
 
   test('removes the remembered endpoint on sign-out even when push is no longer available', async () => {
