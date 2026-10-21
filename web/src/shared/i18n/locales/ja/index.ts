@@ -18,6 +18,8 @@ import { capacityPlanningMessages } from './capacity-planning'
 import { triageMessages } from './triage'
 import { aiAssistanceMessages } from './ai-assistance'
 import { customersMessages } from './customers'
+import { codingAgentMessages } from './coding-agent'
+import { codingAgentGuideMessages } from './coding-agent-guide'
 import { collectionsMessages } from './collections'
 
 /**
@@ -45,6 +47,8 @@ export const jaMessages = {
   ...triageMessages,
   ...aiAssistanceMessages,
   ...customersMessages,
+  ...codingAgentMessages,
+  ...codingAgentGuideMessages,
   ...collectionsMessages,
 } as const
 

@@ -83,6 +83,7 @@ import {
   resolveTaskScheduleStartDate,
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
+import { TaskHandoffPanel } from './TaskHandoffPanel'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -1477,6 +1478,9 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
+        {issue && !isRetainedDetail ? (
+          <TaskHandoffPanel configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+        ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}
         {renderedDetailSectionOrder.map((section) => (
