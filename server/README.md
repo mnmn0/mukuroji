@@ -229,6 +229,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/teams/{teamId}/issues/{issueId}/collaboration`, `/comments`, `/watch`, `/presence`
 - `/api/projects/{projectId}/issues`, `/members`, `/users`, `/watch`
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
+- `GET /api/push/config`, `PUT /api/push-subscriptions`, `DELETE /api/push-subscriptions`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
 - `GET /api/enterprise/security` と `/api/enterprise/security/*` の管理 mutation

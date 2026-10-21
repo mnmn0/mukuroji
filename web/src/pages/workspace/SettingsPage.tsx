@@ -124,6 +124,7 @@ export function SettingsPage() {
             <NotificationSettingsPanelContainer
               accessToken={workspace.accessToken}
               locale={workspace.locale}
+              guardRequest={workspace.guardEnterpriseSession}
               onSessionError={workspace.reportNotificationPreferencesError}
             />
           ) : undefined}

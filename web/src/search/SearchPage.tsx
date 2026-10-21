@@ -26,6 +26,7 @@ import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
   MobileSidebarButton,
   useWorkspaceSidebarController,
@@ -605,8 +606,9 @@ export function SearchPage() {
               <button
                 className="workbench-button-secondary min-h-10 px-4"
                 onClick={() => {
-                  clearAuthSession()
-                  navigate('/', { replace: true })
+                  void signOutWithPushCleanup(accessToken).then(() => {
+                    navigate('/', { replace: true })
+                  })
                 }}
                 type="button"
               >

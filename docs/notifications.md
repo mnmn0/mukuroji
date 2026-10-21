@@ -44,6 +44,9 @@ PATCH /api/notifications/{notificationId}
 POST /api/notifications/mark-all-read
 GET  /api/notification-preferences
 PUT  /api/notification-preferences
+GET  /api/push/config
+PUT  /api/push-subscriptions
+DELETE /api/push-subscriptions
 ```
 
 PATCH action は `mark-read`、`mark-unread`、`archive`、`restore`、`snooze` です。`snooze` は future ISO 8601 timestamp を要求します。
@@ -78,7 +81,49 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - frequency: instant、hourly、daily、weekly
 - quiet hours: enabled、start、end、IANA time zone
 
-in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport と subscription は installable PWA の実装範囲で接続します。
+in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+
+## Web Push の購読
+
+設定画面の **このデバイスのプッシュ通知** で、ブラウザまたはインストールしたアプリを購読として登録します。
+配信チャネルの **プッシュ** は member 単位の受信設定、購読はデバイス単位の宛先です。
+
+- `GET /api/push/config` は `{ enabled, vapidPublicKey? }` を返します。runtime 設定 `WEB_PUSH_VAPID_PUBLIC_KEY`
+  （CloudFormation parameter `WebPushVapidPublicKey`）が空または不正な場合は `enabled: false` で、登録は `409 PushNotificationsDisabled` です。
+  Floci では `.env` などで `WEB_PUSH_VAPID_PUBLIC_KEY` を設定すると `bun run floci:deploy-backend` が Lambda に渡します（`PUSH_SUBSCRIPTIONS_TABLE_NAME` の既定は `mukuroji-push-subscriptions-local`）。
+- `PUT /api/push-subscriptions` は `{ endpoint, keys: { p256dh, auth } }` だけを受け付けます。client は `PushSubscription.toJSON()` からこの 3 つを取り出して送り、`expirationTime` など他の field を含む body は `400` です。
+  member や Workspace は request に含めず、認証済み member に保存します。service account など人以外は `403` です。
+- endpoint は HTTPS かつ既知の push service（FCM、Mozilla、Apple、Windows）の host だけを許可し、認証情報・port・fragment（`#`。push service へ送られないため、同じ endpoint が別の ID を得てしまいます）・正規化で変わる URL を拒否します。
+  配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
+- 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`。各 ID は URL エンコードし、`#` を含む ID でも区切りがずれません）と endpoint の所有者
+  （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
+  共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+  再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
+- 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えず（`expiresAt` がない・数値でない壊れた行は数えます）、再登録では新しいデバイスとして上限を確認します。member ごとの登録 version の行が version を持たない壊れた状態なら上書きせず `503 PushSubscriptionUnavailable` にします。新しいデバイスの登録は member ごとの登録 version
+  （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
+  購読は 180 日で TTL 失効し、所有者の行はその 30 日後に失効します。DynamoDB は期限切れの行を個別に遅れて削除するため、
+  所有者が先に消えて別の member が前の登録を残したまま同じ endpoint を登録することを防ぎます。配信 worker は送信前に所有者の行が
+  tombstone でなくその member を指していることを確認してから送信します（後続の配信 worker の要件）。購読済みのデバイスでは Workspace を開くたび（と設定画面の表示時）に登録し直して期限と所有者を更新します。
+- tenant の export・削除・検証の対象に含めます（member 行・所有者行（tombstone を含む）・登録 version はすべて `workspaceId` を持ちます）。
+  Workspace ID の filter 付き scan のため、export・削除・検証の各 job は最大 1,000 行を評価します（scan の limit は filter の前に適用されるため、少ない行数ずつでは共有 table の行数に比例して job が続きます）。削除は 25 件ずつ行い、別 Workspace に引き継がれて残した行は削除件数（完了の evidence）に数えません。
+  所有者行の key は endpoint だけで決まり、scan の後に別 Workspace が同じ endpoint を引き継ぐことがあるため、削除はまだ閉鎖する Workspace の行である場合だけ条件付きで行い、引き継がれた行は残します。
+- `DELETE /api/push-subscriptions` は `{ endpoint }` の購読を削除し、まだ自分が所有している場合は所有者の行を削除時刻付きの tombstone（`removed: true`）に置き換えます。
+  別の tab や再試行で削除より前に始まった登録は tombstone より古いため、削除の後に購読を作り直せません。
+  端末は最後に登録した endpoint を覚えておき、サインアウト時に browser の push store を読めない場合もその endpoint で server から削除します。停止では server の削除を待たずに browser の購読を解除し、解除できなかった場合（`unsubscribe()` が `false`）は失敗として表示し、覚えた endpoint を残します。request の開始より後に変更があった削除は古い request として、その新しい状態を変えません。
+  明示的なサインアウトはすべて同じ処理（`signOutWithPushCleanup`）を通り、表示中の app の通知を閉じ（別の account が確定した購読の通知は残します）、browser の購読をすぐに解除し、
+  破棄前の token でこの削除をすぐに送り（完了しない登録があっても削除が始まるようにするため）、送信中の登録（Workspace を開いた時の再登録や有効化）があった場合はその完了後に、最初の削除の完了を待たずにもう一度送ります（削除の後に server へ届いた古い登録が購読を残さないため）。
+  browser の購読は origin で 1 つを全 tab が共有するため、端末は最後に登録した account（access token の `sub`）も覚えておき、別の tab で別の account が後から登録していた場合は自分の登録だけを server から削除し、browser の購読と記憶はその account に残します。登録する tab は request を送る前に記憶を自分の account の「確認待ち」に書き換え、server が受け付けてから確定します（失敗した場合は前の記憶に戻します）。確定と巻き戻しは request ごとの乱数の claim が記憶に残っている場合だけ行い、後から別の tab が書いた記憶を上書きしません。Web Locks がある browser では有効化（古い購読の作り直しを含む）と再登録は応答まで tab 間の lock を持ち、別の tab のサインアウトと停止は最大 1.5 秒その確定を待ってから判断します。待っても確定しない（offline などで応答がない）確認待ちの記憶は所有の根拠にしないため、購読は解除されます（前の member の通知が残らないことを優先します）。サインアウトで購読を解除できなかった場合は、endpoint の記憶を残します。別の account が確定した購読は、この account では「未登録」と表示し、Workspace を開いた時の再登録もせず、停止でも自分の登録だけを server から削除します。別の account の購読を自分に登録し直そうとして拒否された場合も、その購読は解除しません。停止の削除は、送信中だった自分の再登録が完了した後にもう一度送ります。サインアウト時は覚えた endpoint の削除を browser の push store を読む前に始め（service worker の待ちでサインアウトの待ち時間を使い切らないため）、push の API が使えなくなっていても削除します。停止の時点で browser の購読が消えていた場合も、自分が登録した endpoint を server から削除します。登録の失敗後に購読を解除できなかった場合は endpoint の記憶を残します。
+  その完了（最大 3 秒）を待ってから session を消して画面を移動します。tab を閉じる前に購読が残ることを防ぎつつ、遅い network でサインアウトを止めません。
+  期限切れによるサインアウトでは解除しません。
+- 有効化では、通知の許可を click の中で尋ねてから購読します。以前の VAPID key で作られた購読や、browser が鍵を返さない購読は、
+  解除して作り直し、新しい endpoint が古いものと異なる場合は登録の前に古い行の削除を最大 3 秒待ちます（古い行がデバイス数の上限に数えられないため。止まった削除で作り直しを止めないよう待ち時間は限ります）。同じ endpoint が返った場合は登録がその行を置き換えるため削除しません（遅れて届いた削除が新しい登録を消さないため）。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
+  push の request が期限切れや session policy 違反で失敗した場合は、通知設定と同じく Workspace の session 境界に渡して再認証へ移ります。設定の取得結果がどちらの形にも当てはまらない場合や VAPID 公開鍵が padding なし base64url の 65 byte 非圧縮 P-256 形式でない場合は「無効」とせず、再読み込みできる読み込み失敗にします。通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
+  最大 10 秒待ち、それでも登録がない場合は「非対応」とせず再読み込みできる読み込み失敗にします。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
+  失効した endpoint は配信 worker が push service の応答から削除します。
+
+Service worker は `push` を受けると payload（`PushNotificationPayload`: `title`、`body`、`path`、`tag`）を通知として表示します。
+payload がない・壊れている場合も browser の要件どおり汎用の通知を表示します。`path` は app の deep link と同じ同一 origin path 判定を通ったものだけを使い、
+それ以外はインボックスを開きます。通知の click では、focus 中の app window を優先して再利用し、遷移できない場合（`navigate` が失敗または `null` を返した場合）は新しい window を開きます。
 
 ## Slack 配信
 

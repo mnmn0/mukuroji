@@ -1,8 +1,9 @@
 # Installable PWA
 
 mukuroji の Web は manifest と service worker を持ち、mobile / desktop へ install できます。
-この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push、file / camera capture、
-offline read cache、encrypted mutation queue は Issue #38 の後続範囲です。
+この文書は現在の範囲、cache の安全境界、hosting 要件を定めます。push の配信、file / camera capture、
+offline read cache、encrypted mutation queue は Issue #38 の後続範囲です。push の購読登録と service worker での表示は
+[Notifications](./notifications.md#web-push-の購読) を参照してください。
 
 ## 現在の範囲
 
@@ -44,7 +45,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   許可済みまたはブロック済みの端末では再度尋ねません。以前にブロックした端末では、再読み込み後も現在の許可状態から
   「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
   platform では、不要な通知の許可を求めないよう button を表示しません。
-  この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
+  同じ通知の許可は、通知設定の「このデバイスのプッシュ通知」をオンにしたときの push 購読にも使い、push 通知はそのデバイスを登録した場合だけ届くことを文言でも案内します。
 - share target: `POST /share`（`multipart/form-data`）で `title` / `text` / `url` を受け取ります。
   **段階的に公開します**: 既存の install では更新された worker が利用者の承認まで待機するため、manifest が先に更新されると
   旧 worker が `POST /share` を素通しして共有内容が失われます。この release では worker の受け口だけを入れ、manifest には

@@ -44,6 +44,7 @@ import type {
 import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-identity/enterprise-session-activity'
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
+import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
 import type { CollectionsPersistence } from '../../modules/collections'
@@ -172,6 +173,8 @@ export interface WorkItemDependencies {
   fileProofing: FileProofingClient
   /** Provides notification persistence. */
   notifications: NotificationClient
+  /** Provides Web Push device subscription persistence. */
+  pushSubscriptions: PushSubscriptionStore
   /** Provides Focus policy and recipient snooze persistence. */
   focusState: FocusStateClient
   /** Provides Workspace search persistence. */

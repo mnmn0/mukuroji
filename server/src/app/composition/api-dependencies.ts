@@ -101,6 +101,7 @@ import {
   InMemoryFocusStateClient,
   createFocusStateClient,
 } from '../../modules/focus'
+import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -547,6 +548,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     collaboration: new DynamoDbCollaborationClient(),
     fileProofing: createDefaultFileProofingClient(),
     notifications: new DynamoDbNotificationsClient(),
+    pushSubscriptions: new DynamoDbPushSubscriptionStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
+    ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),

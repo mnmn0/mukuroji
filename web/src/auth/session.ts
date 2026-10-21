@@ -127,3 +127,22 @@ function readSession(storage: Storage) {
     return null
   }
 }
+
+/**
+ * Reads the subject (`sub`) of a JWT access token without verifying it, to tell signed-in
+ * accounts apart on this device. It is never used to authorize anything.
+ *
+ * @param accessToken - Access token.
+ * @returns The subject, or `undefined` when the token is not a JWT with a string subject.
+ */
+export function readAccessTokenSubject(accessToken: string): string | undefined {
+  const payload = accessToken.split('.')[1]
+  if (!payload) return undefined
+  try {
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const data: unknown = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')))
+    return typeof data === 'object' && data !== null && 'sub' in data && typeof data.sub === 'string' ? data.sub : undefined
+  } catch {
+    return undefined
+  }
+}

@@ -12,6 +12,7 @@ import {
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
   MobileSidebarButton,
   useWorkspaceSidebarController,
@@ -323,8 +324,9 @@ export function RequestIntakePage() {
               </div>
               <div className="grid h-10 w-10 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-sm font-semibold text-[var(--workbench-primary-text)]">{userInitial}</div>
               <button className="workbench-button-secondary min-h-10 px-4" onClick={() => {
-                clearAuthSession()
-                navigate('/', { replace: true })
+                void signOutWithPushCleanup(accessToken).then(() => {
+                  navigate('/', { replace: true })
+                })
               }} type="button">{t('dashboard.logout')}</button>
             </div>
           </div>

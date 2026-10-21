@@ -49,6 +49,15 @@ import { TenantAdministrationError } from '../../domain/tenant-administration'
 import { createAuditExportWorkspacePrefix } from '../../../audit'
 
 const RESOURCE_PAGE_SIZE = 20
+
+/** Rows a verification scan evaluates per job when the tenant is located by a filter. */
+const VERIFICATION_SCAN_PAGE_SIZE = 1_000
+
+/** Rows an export or deletion scan of a table shared by every Workspace evaluates per job. */
+const SHARED_TABLE_SCAN_PAGE_SIZE = 1_000
+
+/** Most delete requests DynamoDB accepts in one batch. */
+const DELETE_BATCH_SIZE = 25
 const IDENTITY_PAGE_SIZE = 10
 const TENANT_CLOSURE_QUIESCENCE_SECONDS = 16 * 60
 const TENANT_CURSOR_IV_BYTES = 12
@@ -110,6 +119,8 @@ export type TenantOperationResourceOwnerConfig = {
   notificationsTableName: string
   /** Focus queue state table. */
   focusTableName: string
+  /** Web Push subscriptions and endpoint owners. */
+  pushSubscriptionsTableName: string
   /** Realtime session table. */
   realtimeSessionsTableName: string
   /** File proofing metadata table. */
@@ -158,6 +169,16 @@ type TenantDynamoTarget = {
   readonly sortKey?: string
   /** All supported tenant locators for rows in the table. */
   readonly selectors: readonly TenantSelector[]
+  /**
+   * Attribute that must still hold the Workspace ID when a row is deleted. Set for tables whose
+   * keys are global, where another Workspace can take a row over after it was scanned.
+   */
+  readonly ownerAttribute?: string
+  /**
+   * Rows a filtered scan evaluates per export or deletion job. Set for shared tables where the
+   * tenant is a small fraction of the rows, so a job does not stop after a handful of unrelated rows.
+   */
+  readonly scanPageSize?: number
 }
 
 /** Opaque DynamoDB pagination state carried between queue jobs. */
@@ -405,6 +426,26 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     ]
   }
 
+  /**
+   * Returns tenant tables added after durable cursors existed. They run after the file
+   * namespaces, so a job queued before they were added keeps its numeric cursor meaning: every
+   * earlier table and namespace keeps its index, and the new tables follow the last namespace.
+   */
+  private trailingTargets(): TenantDynamoTarget[] {
+    return [
+      // Member subscriptions, endpoint owners, and registration versions all carry the Workspace ID.
+      // Endpoint owner rows are keyed by endpoint alone, so deletion is fenced on that ID.
+      {
+        ...attributeTarget('push-subscriptions', this.config.pushSubscriptionsTableName, 'pk', 'sk', [
+          workspaceSelector('workspaceId', 'equals'),
+        ]),
+        ownerAttribute: 'workspaceId',
+        // Every Workspace's devices share this table, so each job evaluates a large window.
+        scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
+      },
+    ]
+  }
+
   /** Returns tables deleted before tenant secrets and control-plane evidence. */
   private dataDeletionTargets(): TenantDynamoTarget[] {
     const excluded = new Set([
@@ -622,13 +663,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult | number> {
     const targets = this.exportTargets()
     const fileNamespaces = this.fileNamespaces(operation.workspaceId)
+    const trailing = this.trailingTargets()
     const cursor = job.cursor ?? {
       targetIndex: 0,
       phase: 'snapshot',
       processedCount: 0,
     }
-    if (cursor.targetIndex < targets.length) {
-      const target = targets[cursor.targetIndex]
+    const trailingTarget = trailing[cursor.targetIndex - targets.length - fileNamespaces.length]
+    if (cursor.targetIndex < targets.length || trailingTarget) {
+      const target = targets[cursor.targetIndex] ?? trailingTarget
       if (!target) {
         throw new TenantAdministrationError(
           503,
@@ -641,6 +684,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         operation.workspaceId,
         this.decodeDynamoPosition(job, cursor.position),
         false,
+        target.scanPageSize,
       )
       const body = serializeExportPage(
         target.id,
@@ -676,10 +720,10 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       }
     }
     const namespaceIndex = cursor.targetIndex - targets.length
-    if (namespaceIndex > fileNamespaces.length) {
+    if (namespaceIndex > fileNamespaces.length + trailing.length) {
       return { status: 'failed', failureCode: 'EXPORT_FILE_CURSOR_INVALID' }
     }
-    if (namespaceIndex === fileNamespaces.length) return cursor.processedCount
+    if (namespaceIndex === fileNamespaces.length + trailing.length) return cursor.processedCount
     const namespace = fileNamespaces[namespaceIndex]
     if (!namespace) {
       return { status: 'failed', failureCode: 'EXPORT_FILE_NAMESPACE_INVALID' }
@@ -839,20 +883,20 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items)
+      const deleted = await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       if (page.lastEvaluatedKey) {
         return {
           status: 'continuing',
           nextJob: createContinuation(job, {
             targetIndex: 1,
             position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }),
-            processedCount: cursor.processedCount + page.items.length,
+            processedCount: cursor.processedCount + deleted,
           }),
         }
       }
       return await this.completeWithEvidence(job, {
-        processedCount: cursor.processedCount + page.items.length,
-        sessionsDeleted: page.items.length,
+        processedCount: cursor.processedCount + deleted,
+        sessionsDeleted: deleted,
       }, operation.revision)
     }
     return { status: 'failed', failureCode: 'ACCESS_REVOCATION_CURSOR_INVALID' }
@@ -1029,17 +1073,20 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult> {
     const targets = this.dataDeletionTargets()
     const fileNamespaces = this.fileNamespaces(operation.workspaceId)
+    const trailing = this.trailingTargets()
     const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
-    if (cursor.targetIndex < targets.length) {
-      const target = targets[cursor.targetIndex]
+    const trailingTarget = trailing[cursor.targetIndex - targets.length - fileNamespaces.length]
+    if (cursor.targetIndex < targets.length || trailingTarget) {
+      const target = targets[cursor.targetIndex] ?? trailingTarget
       if (!target) return { status: 'failed', failureCode: 'DATA_TARGET_INVALID' }
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
         this.decodeDynamoPosition(job, cursor.position),
         true,
+        target.scanPageSize,
       )
-      await this.deleteDynamoItems(target, page.items)
+      const deleted = await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
@@ -1049,7 +1096,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           ...(page.lastEvaluatedKey
             ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
-          processedCount: cursor.processedCount + page.items.length,
+          processedCount: cursor.processedCount + deleted,
         }),
       }
     }
@@ -1126,7 +1173,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         }),
       }
     }
-    if (namespaceIndex === fileNamespaces.length) {
+    if (namespaceIndex === fileNamespaces.length + trailing.length) {
       return await this.completeWithEvidence(job, {
         deletedResources: cursor.processedCount,
         fileNamespaces: fileNamespaces.map((namespace) => namespace.id),
@@ -1152,7 +1199,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.decodeDynamoPosition(job, cursor.position),
         true,
       )
-      await this.deleteDynamoItems(target, page.items)
+      const deleted = await this.deleteDynamoItems(target, page.items, operation.workspaceId)
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
@@ -1162,7 +1209,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           ...(page.lastEvaluatedKey
             ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
-          processedCount: cursor.processedCount + page.items.length,
+          processedCount: cursor.processedCount + deleted,
         }),
       }
     }
@@ -1231,9 +1278,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult> {
     const dataTargets = this.dataDeletionTargets()
     const secretTargets = this.secretDeletionTargets()
+    // Trailing tables follow the secret tables. Every earlier index keeps its meaning; only the
+    // final namespace check, which carries no continuation position, moves after them.
     const targets = [
       ...dataTargets,
       ...secretTargets,
+      ...this.trailingTargets(),
     ]
     const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
     if (cursor.targetIndex < targets.length) {
@@ -1246,12 +1296,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         operation.workspaceId,
         this.decodeDynamoPosition(job, cursor.position),
         true,
-        1,
+        // A filtered scan applies its limit before the filter, so one evaluated row per job would
+        // walk a shared table one job per unrelated row; a partition query needs only one match.
+        findPartitionSelector(target) ? 1 : VERIFICATION_SCAN_PAGE_SIZE,
       )
       if (page.items.length > 0) {
         return {
           status: 'repair',
-          step: cursor.targetIndex < dataTargets.length
+          step: cursor.targetIndex < dataTargets.length ||
+              cursor.targetIndex >= dataTargets.length + secretTargets.length
             ? 'delete-data'
             : 'delete-secrets',
         }
@@ -1431,12 +1484,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     keysOnly: boolean,
     limit = RESOURCE_PAGE_SIZE,
   ): Promise<DynamoPage> {
-    const directSelector = target.selectors.length === 1 &&
-      target.selectors[0]?.path.length === 1 &&
-      target.selectors[0]?.path[0] === target.partitionKey &&
-      target.selectors[0]?.mode === 'equals'
-      ? target.selectors[0]
-      : undefined
+    const directSelector = findPartitionSelector(target)
     const projection = keysOnly
       ? createKeyProjection(target)
       : undefined
@@ -1498,27 +1546,62 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     }
   }
 
-  /** Deletes one bounded DynamoDB page and rejects unprocessed writes for retry. */
+  /**
+   * Deletes one bounded DynamoDB page and rejects unprocessed writes for retry.
+   *
+   * Rows of a target with an owner attribute are deleted one by one, each conditioned on still
+   * belonging to the Workspace; a row another Workspace took over since the scan is kept.
+   *
+   * @param target - Table the page was read from.
+   * @param items - Scanned rows to delete.
+   * @param workspaceId - Workspace whose data is being deleted.
+   * @returns Number of rows deleted, leaving out rows kept because another Workspace owns them,
+   * so completion evidence never counts them as deleted.
+   */
   private async deleteDynamoItems(
     target: TenantDynamoTarget,
     items: readonly Record<string, unknown>[],
-  ): Promise<void> {
-    if (items.length === 0) return
-    const requests = items.map((item) => ({
-      DeleteRequest: {
-        Key: createItemKey(target, item),
-      },
-    }))
-    const response = await this.documentClient.send(new BatchWriteCommand({
-      RequestItems: { [target.tableName]: requests },
-    }))
-    if ((response.UnprocessedItems?.[target.tableName]?.length ?? 0) > 0) {
-      throw new TenantAdministrationError(
-        503,
-        'TenantOperationDeleteThrottled',
-        'Tenant deletion page was throttled and must be retried.',
-      )
+    workspaceId: string,
+  ): Promise<number> {
+    let deleted = 0
+    // A wide scan page can match more rows than one batch holds, so deletes go in batches.
+    for (let start = 0; start < items.length; start += DELETE_BATCH_SIZE) {
+      const batch = items.slice(start, start + DELETE_BATCH_SIZE)
+      const ownerAttribute = target.ownerAttribute
+      if (ownerAttribute) {
+        const results = await Promise.all(batch.map(async (item) => {
+          try {
+            await this.documentClient.send(new DeleteCommand({
+              TableName: target.tableName,
+              Key: createItemKey(target, item),
+              ConditionExpression: '#owner = :workspaceId',
+              ExpressionAttributeNames: { '#owner': ownerAttribute },
+              ExpressionAttributeValues: { ':workspaceId': workspaceId },
+            }))
+            return 1
+          } catch (error: unknown) {
+            if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+            return 0
+          }
+        }))
+        deleted += results.reduce<number>((total, result) => total + result, 0)
+        continue
+      }
+      const response = await this.documentClient.send(new BatchWriteCommand({
+        RequestItems: {
+          [target.tableName]: batch.map((item) => ({ DeleteRequest: { Key: createItemKey(target, item) } })),
+        },
+      }))
+      if ((response.UnprocessedItems?.[target.tableName]?.length ?? 0) > 0) {
+        throw new TenantAdministrationError(
+          503,
+          'TenantOperationDeleteThrottled',
+          'Tenant deletion page was throttled and must be retried.',
+        )
+      }
+      deleted += batch.length
     }
+    return deleted
   }
 
   /** Writes or reuses one immutable, content-addressed evidence row. */
@@ -1669,6 +1752,23 @@ function delimitedPrefixTarget(
   }
 }
 
+/**
+ * Returns the selector that locates the tenant by the whole partition key, so the target can be
+ * read with a query instead of a filtered scan.
+ *
+ * @param target - Tenant table target.
+ * @returns The partition selector, or `undefined` when the target needs a filtered scan.
+ */
+function findPartitionSelector(target: TenantDynamoTarget): TenantSelector | undefined {
+  const [selector] = target.selectors
+  return target.selectors.length === 1 &&
+    selector?.path.length === 1 &&
+    selector.path[0] === target.partitionKey &&
+    selector.mode === 'equals'
+    ? selector
+    : undefined
+}
+
 /** Creates a scan target whose tenant locator may differ from its primary key. */
 function attributeTarget(
   id: string,
@@ -1772,7 +1872,9 @@ function redactExportValue(value: unknown, fieldName = ''): unknown {
 /** Returns true for fields that may carry reusable credentials or protected plaintext. */
 function isSensitiveField(value: string): boolean {
   const normalized = value.replaceAll(/[^a-z0-9]/giu, '')
-  return /(?:authorization|ciphertext|clientsecret|cookie|credential|password|privatekey|refreshtoken|secret|token)$/iu
+  // A Web Push `auth` secret lets anyone holding the endpoint encrypt messages to the device.
+  return normalized.toLowerCase() === 'auth'
+    || /(?:authorization|ciphertext|clientsecret|cookie|credential|password|privatekey|refreshtoken|secret|token)$/iu
     .test(normalized)
     || /(?:apikey|authorization|cookie|credential|password|privatekey|secret|signingkey|token)(?:digest|hash)$/iu
       .test(normalized)

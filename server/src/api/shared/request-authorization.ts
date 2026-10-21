@@ -552,6 +552,17 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/ai-assistance/preferences/me',
     permission: 'workspace.read',
   },
+  // Push availability and the caller's own device registration change no shared Workspace data.
+  {
+    method: 'GET',
+    pathPattern: '/api/push/config',
+    permission: 'workspace.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/push-subscriptions',
+    permission: 'workspace.read',
+  },
   {
     method: 'POST',
     pathPattern: '/api/ai-assistance/generations*',

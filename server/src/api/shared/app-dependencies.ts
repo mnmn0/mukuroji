@@ -85,6 +85,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get notifications() {
     return requireAppDependencies().workItems.notifications
   },
+  get pushSubscriptions() {
+    return requireAppDependencies().workItems.pushSubscriptions
+  },
   get focusState() {
     return requireAppDependencies().workItems.focusState
   },
