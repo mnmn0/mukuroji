@@ -88,6 +88,10 @@ export const automationMessages = {
   'automation.webhook.createDescription':
     'Issue an endpoint and signing secret for events sent by an external service.',
   'automation.webhook.create': 'Create endpoint',
+  'automation.webhook.purpose': 'Delivers to',
+  'automation.webhook.purposeAutomation': 'Automation rules',
+  'automation.webhook.purposeTriage': 'Triage: {team}',
+  'automation.webhook.purposeTriageUnsupported': 'Triage: {team} (unsupported Team ID)',
   'automation.webhook.empty': 'No webhook endpoints yet.',
   'automation.webhook.endpointUrl': 'Endpoint URL',
   'automation.webhook.endpointId': 'Endpoint ID: {id}',

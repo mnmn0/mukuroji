@@ -2,7 +2,7 @@ import { BrandMark } from '../../shared/ui/BrandMark'
 import { createTranslator } from '../../shared/i18n/i18n'
 
 const panelCardClass =
-  'rounded-lg border border-[var(--workbench-border)] bg-white shadow-[0_1px_2px_rgba(23,32,29,0.04)]'
+  'rounded-lg border border-[var(--workbench-border)] bg-surface shadow-[0_1px_2px_rgba(23,32,29,0.04)]'
 
 /**
  * ログイン画面に表示する作業台プレビューの props です。
@@ -26,7 +26,7 @@ export function DashboardPreview({ t }: DashboardPreviewProps) {
 
   return (
     <div
-      className="grid min-h-[520px] w-[min(100%,820px)] grid-cols-[168px_minmax(0,1fr)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white shadow-[0_16px_34px_rgba(23,32,29,0.08)] max-[720px]:min-h-0 max-[720px]:grid-cols-1"
+      className="grid min-h-[520px] w-[min(100%,820px)] grid-cols-[168px_minmax(0,1fr)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface shadow-[0_16px_34px_rgba(23,32,29,0.08)] max-[720px]:min-h-0 max-[720px]:grid-cols-1"
       aria-label={t('preview.aria')}
     >
       <aside className="border-r border-white/10 bg-[var(--workbench-sidebar)] px-4 py-6 max-[720px]:hidden">

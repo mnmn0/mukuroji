@@ -392,15 +392,36 @@ export const workspaceMessages = {
   'workspace.settings.title': 'Settings',
   'workspace.settings.description':
     'Manage this browser’s display language and text size, and review the signed-in account.',
+  'workspace.settings.install.title': 'Install as an app',
+  'workspace.settings.install.description': 'Install mukuroji to open it in its own window. Where the device supports app badges, its icon also shows the unread Inbox count.',
+  'workspace.settings.install.action': 'Install',
+  'workspace.settings.install.pending': 'Waiting for the browser…',
+  'workspace.settings.install.accepted': 'Installing mukuroji. It opens in its own window once the browser finishes.',
+  'workspace.settings.install.dismissed': 'Installation was cancelled. You can install later from the browser menu.',
+  'workspace.settings.install.failed': 'The browser could not open its install dialog. Install mukuroji from the browser menu instead.',
+  'workspace.settings.install.installed': 'mukuroji is installed as an app.',
+  'workspace.settings.install.badge.description': 'Some devices, such as iPhone and iPad, show the unread Inbox count on the app icon only after notifications are allowed. The same permission is also used when you turn on Push notifications on this device in the notification settings.',
+  'workspace.settings.install.badge.action': 'Allow icon badge',
+  'workspace.settings.install.badge.pending': 'Waiting for your choice…',
+  'workspace.settings.install.badge.granted': 'Notifications are allowed. The app icon can now show the unread Inbox count. Push notifications reach this device only after you turn them on in the notification settings.',
+  'workspace.settings.install.badge.denied': 'Notifications are blocked, so the app icon cannot show the unread count. You can change this in the device settings.',
+  'workspace.settings.install.badge.dismissed': 'No choice was made. You can allow the icon badge from here later.',
+  'workspace.settings.install.badge.unsupported': 'This device could not ask for notification permission, so the app icon may not show the unread count.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':
-    'Adjust text size and display language for this browser.',
+    'Adjust text size, theme, and display language for this browser.',
   'workspace.settings.fontSizeTitle': 'Font size',
   'workspace.settings.fontSizeDescription':
     'Applies to task lists, the sidebar, settings, and the rest of the app.',
   'workspace.settings.fontSize.compact': 'Compact',
   'workspace.settings.fontSize.standard': 'Standard',
   'workspace.settings.fontSize.comfortable': 'Comfortable',
+  'workspace.settings.themeTitle': 'Theme',
+  'workspace.settings.themeDescription':
+    "Changes the colors of the whole app. System follows your operating system's light or dark setting.",
+  'workspace.settings.theme.light': 'Light',
+  'workspace.settings.theme.dark': 'Dark',
+  'workspace.settings.theme.system': 'System',
   'workspace.settings.profileTitle': 'Signed-in account',
   'workspace.settings.profileDescription':
     'The account used by the current session.',
@@ -424,7 +445,7 @@ export const workspaceMessages = {
   'workspace.settings.notifications.channel.slackDescription':
     'Send these notifications to your Slack destination. Administrator setup is required.',
   'workspace.settings.notifications.channel.pushDescription':
-    'Save the setting that will be used after PWA push subscriptions are connected.',
+    'Delivered to devices registered under Push notifications on this device once push delivery starts.',
   'workspace.settings.notifications.frequencyTitle': 'Delivery frequency',
   'workspace.settings.notifications.frequencyDescription':
     'Choose instant delivery or a digest interval.',
@@ -446,6 +467,27 @@ export const workspaceMessages = {
   'workspace.settings.notifications.saveHint': 'Changes apply after you save them.',
   'workspace.settings.notifications.saving': 'Saving',
   'workspace.settings.notifications.save': 'Save changes',
+  'workspace.settings.notifications.pushDevice.title': 'Push notifications on this device',
+  'workspace.settings.notifications.pushDevice.description':
+    'Register this browser or installed app. Also turn on the Push channel. Notifications reach this device once push delivery starts.',
+  'workspace.settings.notifications.pushDevice.loading': 'Checking this device.',
+  'workspace.settings.notifications.pushDevice.unsupported':
+    'This browser does not support push notifications. Open the app in a supported browser or from your Home Screen.',
+  'workspace.settings.notifications.pushDevice.disabled': 'Push notifications are not enabled for this deployment.',
+  'workspace.settings.notifications.pushDevice.blocked':
+    'Notifications are blocked. Allow notifications for this site in your browser or device settings.',
+  'workspace.settings.notifications.pushDevice.loadError': 'Could not load the push notification status.',
+  'workspace.settings.notifications.pushDevice.off': 'This device does not receive push notifications.',
+  'workspace.settings.notifications.pushDevice.on': 'This device receives push notifications.',
+  'workspace.settings.notifications.pushDevice.enable': 'Receive on this device',
+  'workspace.settings.notifications.pushDevice.disable': 'Stop on this device',
+  'workspace.settings.notifications.pushDevice.pending': 'Working',
+  'workspace.settings.notifications.pushDevice.recheck': 'Check permission again',
+  'workspace.settings.notifications.pushDevice.result.enabled': 'This device is registered.',
+  'workspace.settings.notifications.pushDevice.result.disabled': 'This device is no longer registered.',
+  'workspace.settings.notifications.pushDevice.result.dismissed': 'Notifications were not allowed, so nothing was registered.',
+  'workspace.settings.notifications.pushDevice.result.denied': 'Notifications were denied, so nothing was registered.',
+  'workspace.settings.notifications.pushDevice.result.failed': 'Could not change this device. Try again.',
   'workspace.settings.permissionTitle': 'Permission sets',
   'workspace.settings.permissionDescription':
     'Manage edit, approval, and view permissions by team.',
@@ -680,6 +722,7 @@ export const workspaceMessages = {
   'sidebar.nav.inbox': 'Inbox',
   'sidebar.nav.requests': 'Requests',
   'sidebar.nav.customers': 'Customers',
+  'sidebar.nav.collections': 'Collections',
   'sidebar.nav.documents': 'Documents',
   'sidebar.nav.dashboard': 'Dashboard',
   'sidebar.nav.planning': 'Planning',

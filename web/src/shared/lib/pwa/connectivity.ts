@@ -1,0 +1,132 @@
+/** Browser capabilities the connectivity store reads. */
+export type ConnectivityEnvironment = {
+  /** Returns whether the browser reports a network connection. */
+  readonly isOnline: () => boolean
+  /** Receives `online` and `offline` events; absent outside the browser. */
+  readonly target: EventTarget | undefined
+}
+
+/** Network connectivity state shared by the app shell. */
+export type ConnectivityStore = {
+  /** Registers a listener for connectivity changes and returns its unsubscribe function. */
+  readonly subscribe: (listener: () => void) => () => void
+  /** Returns whether the browser currently reports a network connection. */
+  readonly getSnapshot: () => boolean
+}
+
+/**
+ * Reads connectivity from the running page.
+ *
+ * Browsers report `navigator.onLine === false` only when there is certainly no network, so a
+ * page without `navigator` is treated as online.
+ *
+ * @returns The page environment.
+ */
+function readPageEnvironment(): ConnectivityEnvironment {
+  return {
+    isOnline: () => typeof navigator === 'undefined' || navigator.onLine !== false,
+    target: typeof window === 'undefined' ? undefined : window,
+  }
+}
+
+/**
+ * Creates a store that follows the browser's `online` and `offline` events.
+ *
+ * Event listeners are attached while at least one subscriber exists.
+ *
+ * @param environment - Connectivity source; defaults to the running page.
+ * @returns The connectivity store.
+ */
+export function createConnectivityStore(
+  environment: ConnectivityEnvironment = readPageEnvironment(),
+): ConnectivityStore {
+  const listeners = new Set<() => void>()
+  let online = environment.isOnline()
+
+  /** Re-reads the connection and notifies subscribers when it changed. */
+  function handleChange(): void {
+    const next = environment.isOnline()
+    if (next === online) return
+    online = next
+    for (const listener of listeners) listener()
+  }
+
+  return {
+    /**
+     * Registers a listener for connectivity changes, attaching the browser events for the first one.
+     *
+     * @param listener - Called after the connectivity changes.
+     * @returns A function that removes the listener and detaches the events after the last one.
+     */
+    subscribe(listener) {
+      if (listeners.size === 0) {
+        environment.target?.addEventListener('online', handleChange)
+        environment.target?.addEventListener('offline', handleChange)
+        // A change while nobody was subscribed has no event left to deliver.
+        online = environment.isOnline()
+      }
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+        if (listeners.size === 0) {
+          environment.target?.removeEventListener('online', handleChange)
+          environment.target?.removeEventListener('offline', handleChange)
+        }
+      }
+    },
+    /**
+     * Reads the connectivity last observed.
+     *
+     * @returns Whether the page is online.
+     */
+    getSnapshot: () => online,
+  }
+}
+
+/**
+ * Decides which connectivity change to announce.
+ *
+ * Losing the connection is announced at page load too; coming back is announced only after a
+ * loss was announced.
+ *
+ * @param announcedOnline - Connectivity last announced; `true` before anything was announced.
+ * @param online - Current connectivity.
+ * @returns The change to announce, or `undefined` when nothing changed.
+ */
+export function resolveConnectivityAnnouncement(
+  announcedOnline: boolean,
+  online: boolean,
+): 'offline' | 'online' | undefined {
+  if (announcedOnline === online) return undefined
+  return online ? 'online' : 'offline'
+}
+
+/** CSS custom property holding how far from the viewport bottom other notices must start. */
+export const bottomNoticeOffsetProperty = '--app-bottom-notice-offset'
+
+/** Gap kept between the offline notice and a notice stacked above it, in pixels. */
+const bottomNoticeGap = 8
+
+/** Style declaration fields used to publish the bottom notice offset. */
+type BottomNoticeOffsetStyle = Pick<CSSStyleDeclaration, 'setProperty' | 'removeProperty'>
+
+/**
+ * Publishes how much of the bottom edge the offline notice occupies.
+ *
+ * The distance is measured from the viewport bottom to the notice's top edge, so it includes the
+ * safe-area inset the notice sits above. Other fixed bottom-right notices, such as the Workspace
+ * quick-access feedback, start at least this far up so they stack above the offline notice.
+ *
+ * @param style - Style declaration of the document root.
+ * @param distance - Distance from the viewport bottom to the notice's top in pixels; `undefined` once it is hidden.
+ */
+export function publishBottomNoticeOffset(style: BottomNoticeOffsetStyle, distance: number | undefined): void {
+  if (distance === undefined) {
+    style.removeProperty(bottomNoticeOffsetProperty)
+    return
+  }
+  style.setProperty(bottomNoticeOffsetProperty, `${Math.ceil(distance) + bottomNoticeGap}px`)
+}
+
+/** Connectivity of the running page. */
+export const appConnectivity = createConnectivityStore()

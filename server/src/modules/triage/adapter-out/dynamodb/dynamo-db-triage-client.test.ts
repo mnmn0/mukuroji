@@ -2401,6 +2401,74 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('admits a webhook entry routed by its endpoint with replies closed', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      const receipt = await harness.client.createWebhookEntry(
+        'workspace-1',
+        'support',
+        { id: 'webhook-1', name: 'Status page' },
+        {
+          eventId: 'evt-1',
+          title: 'Checkout errors',
+          body: 'Customers see 500 on checkout.',
+          requesterDisplayName: 'Status page',
+          requesterEmail: 'alerts@example.com',
+        },
+        { key: 'delivery-1', fingerprint: createTriageInputFingerprint({ eventId: 'evt-1' }) },
+        { receivedAt: '2026-08-01T00:00:00.000Z' },
+      )
+
+      expect(receipt.replayed).toBe(false)
+      const transactItems = harness.commands[2]?.input.TransactItems
+      const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
+      expect(stored).toMatchObject({
+        source: { kind: 'webhook', sourceId: 'webhook-1:evt-1', connectorId: 'webhook-1' },
+        requester: { displayName: 'Status page', email: 'alerts@example.com', guest: true },
+        permission: { canReply: false },
+        teamId: 'support',
+        state: 'pending',
+        // The entry starts from the time the delivery was first accepted.
+        receivedAt: '2026-08-01T00:00:00.000Z',
+      })
+      expect(JSON.stringify(transactItems)).toContain('webhook-ingest')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('stores a webhook entry admitted after its retention ended only in redacted form', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      await harness.client.createWebhookEntry(
+        'workspace-1',
+        'support',
+        { id: 'webhook-1', name: 'Status page' },
+        {
+          eventId: 'evt-old',
+          title: 'Old checkout errors',
+          body: 'Secret customer details.',
+          requesterDisplayName: 'Alice Requester',
+        },
+        { key: 'delivery-old', fingerprint: createTriageInputFingerprint({ eventId: 'evt-old' }) },
+        { receivedAt: '2020-01-01T00:00:00.000Z' },
+      )
+      const transactItems = JSON.stringify(harness.commands[2]?.input.TransactItems)
+      expect(transactItems).not.toContain('Secret customer details.')
+      expect(transactItems).not.toContain('Old checkout errors')
+      expect(transactItems).not.toContain('Alice Requester')
+      expect(transactItems).toContain('"redactedAt":"2026-08-09T00:00:00.000Z"')
+      const items = harness.commands[2]?.input.TransactItems
+      const receipt = Array.isArray(items)
+        ? items.find((item) => item?.Put?.Item?.entryType === 'triage-operation-receipt')
+        : undefined
+      // The replay receipt expires 90 days after admission, not after the old received time.
+      expect(receipt?.Put?.Item?.expiresAt).toBe(Math.floor(Date.parse('2026-11-07T00:00:00.000Z') / 1_000))
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('replays an existing manual source after a response is lost', async () => {
     const fingerprint = createTriageInputFingerprint({
       workspaceId: 'workspace-1',

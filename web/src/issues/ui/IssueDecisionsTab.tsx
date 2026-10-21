@@ -257,18 +257,18 @@ export function IssueDecisionsTab({
         ) : null}
       </div>
       {deepLinkExhausted ? (
-        <p className="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+        <p className="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-fg-amber-800" role="status">
           {t('collaboration.deepLink.exhausted')}
         </p>
       ) : null}
 
       {controller.hasLoadError ? (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-red-200 bg-red-50 px-3 py-2.5" role="alert">
-          <p className="text-sm font-semibold text-red-700">
+          <p className="text-sm font-semibold text-fg-red-700">
             {t('collaboration.decisions.error')}
           </p>
           <button
-            className="min-h-[44px] text-xs font-bold text-red-700 underline underline-offset-2"
+            className="min-h-[44px] text-xs font-bold text-fg-red-700 underline underline-offset-2"
             onClick={() => void controller.refresh()}
             type="button"
           >
@@ -278,7 +278,7 @@ export function IssueDecisionsTab({
       ) : null}
       {controller.hasMutationError ? (
         <p
-          className="mt-4 border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700"
+          className="mt-4 border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-fg-red-700"
           role="alert"
         >
           {t(
@@ -342,7 +342,7 @@ export function IssueDecisionsTab({
               </p>
               {item.supersededByItemId ? (
                 <a
-                  className="mt-2 inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+                  className="mt-2 inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
                   href={`#${createContextItemAnchorId(panelInstanceId, item.supersededByItemId)}`}
                 >
                   {t('collaboration.decisions.openReplacement')}
@@ -351,7 +351,7 @@ export function IssueDecisionsTab({
               <div className="mt-2 flex flex-wrap items-center gap-x-3">
                 {item.source && onOpenSource ? (
                   <a
-                    className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+                    className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
                     href={createContextSourcePermalink(item, item.source)}
                     onClick={(event) => {
                       event.preventDefault()
@@ -455,7 +455,7 @@ export function IssueDecisionsTab({
 
       {controller.hasMore ? (
         <button
-          className="mt-4 min-h-[44px] text-sm font-semibold text-[var(--workbench-primary)] underline underline-offset-2 disabled:opacity-60"
+          className="mt-4 min-h-[44px] text-sm font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2 disabled:opacity-60"
           disabled={controller.isLoadingMore}
           onClick={() => void controller.loadMore()}
           type="button"
@@ -525,11 +525,11 @@ function ContextRevisionHistory({
           className="flex flex-wrap items-center justify-between gap-3 border-y border-red-200 bg-red-50 py-2"
           role="alert"
         >
-          <p className="text-xs font-semibold text-red-700">
+          <p className="text-xs font-semibold text-fg-red-700">
             {t('collaboration.decisions.history.error')}
           </p>
           <button
-            className="min-h-[44px] text-xs font-bold text-red-700 underline underline-offset-2"
+            className="min-h-[44px] text-xs font-bold text-fg-red-700 underline underline-offset-2"
             onClick={() => void onRetry()}
             type="button"
           >
@@ -590,7 +590,7 @@ function ContextRevisionHistory({
       )}
       {!history.hasLoadError && !history.isLoading && history.hasMore ? (
         <button
-          className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2 disabled:opacity-60"
+          className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2 disabled:opacity-60"
           disabled={history.isLoadingMore}
           onClick={() => void onLoadMore()}
           type="button"
@@ -631,7 +631,7 @@ function ContextRevisionSource({ source, t }: ContextRevisionSourceProps) {
       !capturedEvidence)
 
   return (
-    <div className="mt-2 border-l-[3px] border-[#99d7cf] pl-3">
+    <div className="mt-2 border-l-[3px] border-tone-99d7cf pl-3">
       <div className="flex flex-wrap items-center gap-2 text-[0.68rem] font-semibold text-[var(--workbench-muted)]">
         <span>{t(`collaboration.sources.kind.${source.kind}`)}</span>
         <span>{t(`collaboration.sources.availability.${source.availability}`)}</span>
@@ -766,7 +766,7 @@ function ContextEditorForm({
       </div>
       {!editorIsAuthorized ? (
         <p
-          className="border border-[var(--workbench-border-strong)] bg-white px-3 py-2.5 text-xs font-semibold leading-5 text-[var(--workbench-muted)]"
+          className="border border-[var(--workbench-border-strong)] bg-surface px-3 py-2.5 text-xs font-semibold leading-5 text-[var(--workbench-muted)]"
           role="status"
         >
           {t('collaboration.decisions.editor.permissionLost')}
@@ -914,7 +914,7 @@ function ContextEditorForm({
           </label>
           {!sourceQuoteIsValid ? (
             <p
-              className="text-xs font-semibold text-red-700"
+              className="text-xs font-semibold text-fg-red-700"
               id={quoteErrorId}
               role="alert"
             >

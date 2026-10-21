@@ -62,7 +62,7 @@ function TaskHandoffSnapshot({ brief, revision, t }: TaskHandoffSnapshotProps) {
 
   return (
     <details className="min-w-0 border-y border-[var(--workbench-border)]" data-testid="task-handoff-panel">
-      <summary className="min-h-[44px] cursor-pointer py-3 text-sm font-semibold text-[var(--workbench-primary)]">
+      <summary className="min-h-[44px] cursor-pointer py-3 text-sm font-semibold text-[var(--workbench-primary-text)]">
         {t('agents.handoff.title')}
       </summary>
       <div className="grid min-w-0 gap-3 pb-4">
@@ -99,8 +99,8 @@ function TaskHandoffSnapshot({ brief, revision, t }: TaskHandoffSnapshotProps) {
           </button>
         </div>
         <p className="text-xs leading-5 text-[var(--workbench-muted)]" id={feedbackId}>{t('agents.handoff.note')}</p>
-        {copyState === 'copied' ? <p className="text-xs font-medium text-[var(--workbench-primary)]" role="status">{t('agents.handoff.copied')}</p> : null}
-        {copyState === 'failed' ? <p className="text-xs leading-5 text-red-700" role="alert">{t('agents.handoff.copyFailed')}</p> : null}
+        {copyState === 'copied' ? <p className="text-xs font-medium text-[var(--workbench-primary-text)]" role="status">{t('agents.handoff.copied')}</p> : null}
+        {copyState === 'failed' ? <p className="text-xs leading-5 text-fg-red-700" role="alert">{t('agents.handoff.copyFailed')}</p> : null}
       </div>
     </details>
   )

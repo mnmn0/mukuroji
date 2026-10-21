@@ -243,7 +243,7 @@ export function EditorDialog(props: {
                 value={webhookScopes}
                 onChange={onWebhookScopesChange}
               />
-              <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium leading-5 text-blue-900">
+              <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium leading-5 text-fg-blue-900">
                 {labels.helpText.webhookDelivery}
               </p>
             </>

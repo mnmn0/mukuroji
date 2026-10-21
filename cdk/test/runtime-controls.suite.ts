@@ -18,6 +18,7 @@ const runtimeControlEnvironmentKeys = [
 const controlledFunctionScopes = new Map([
   ['AnalyticsScheduleFunctionBB9E6044', 'analytics-schedule'],
   ['ApiFunctionCE271BD4', 'api'],
+  ['AuditExportWorkerFunction2F3C3D05', 'audit-export'],
   ['CollaborationProjectionFunction1AAC5764', 'audit-projection'],
   ['AutomationEventFunction5E8CB543', 'automation-event'],
   ['AutomationScheduleFunction29B41328', 'automation-schedule'],
@@ -500,13 +501,13 @@ test('grants every controlled data-plane role only the exact configuration ARN',
     }],
     Version: '2012-10-17',
   });
-  expect(readPolicy.Roles).toHaveLength(23);
+  expect(readPolicy.Roles).toHaveLength(24);
   expect(readPolicy.Roles).toEqual(
     expect.arrayContaining(controlledRoleReferences),
   );
 });
 
-test('binds exact runtime-control settings through API config and twenty-two direct environments', () => {
+test('binds exact runtime-control settings through API config and twenty-three direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),

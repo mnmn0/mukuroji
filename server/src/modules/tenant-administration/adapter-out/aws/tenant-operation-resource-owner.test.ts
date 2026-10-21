@@ -32,6 +32,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     tenantExportBucketName: 'tenant-export',
     fileBucketName: 'tenant-files',
     workItemImportBucketName: 'work-item-imports',
+    auditExportBucketName: 'audit-exports',
     cognitoUserPoolId: 'user-pool-1',
     workItemsTableName: 'work-items',
     workItemEventsTableName: 'work-item-events',
@@ -54,6 +55,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     workspaceSearchTableName: 'workspace-search',
     notificationsTableName: 'notifications',
     focusTableName: 'focus',
+    pushSubscriptionsTableName: 'push-subscriptions',
     realtimeSessionsTableName: 'realtime-sessions',
     fileProofingTableName: 'file-proofing',
   }
@@ -291,6 +293,94 @@ describe('AwsTenantOperationResourceOwner', () => {
           ':tenant0': { S: 'WORKSPACE#workspace/one#' },
         },
       })
+
+      // Tables added after cursors existed run after every file namespace, so queued jobs keep
+      // their indexes; with 17 data tables and 4 file namespaces the push table is index 21.
+      await owner.execute(createDataJob(21), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'push-subscriptions',
+        FilterExpression: '(#tenant0 = :tenant0)',
+        // Every Workspace's devices share the table, so a job evaluates a wide window.
+        Limit: 1_000,
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'workspace/one' },
+        },
+      })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('deletes push rows only while they still belong to the closing Workspace', async () => {
+    const operations: Array<{ target: string | undefined, body: unknown }> = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const target = readHttpHeader(request, 'x-amz-target')
+          const body = readJsonRequestBody(request)
+          operations.push({ target, body })
+          if (target === 'DynamoDB_20120810.Scan') {
+            return {
+              response: {
+                body: new TextEncoder().encode(JSON.stringify({
+                  Items: [
+                    { pk: { S: 'endpoint#device-1' }, sk: { S: 'owner' } },
+                    { pk: { S: 'member#workspace/one#ada' }, sk: { S: 'subscription#device-1' } },
+                  ],
+                })),
+                headers: {},
+                statusCode: 200,
+              },
+            }
+          }
+          // Another Workspace took the endpoint over after the scan.
+          const takenOver = isRecord(body) && isRecord(body.Key) && isRecord(body.Key.sk) && body.Key.sk.S === 'owner'
+          return {
+            response: {
+              body: new TextEncoder().encode(takenOver
+                ? JSON.stringify({ __type: 'com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException', message: 'taken over' })
+                : '{}'),
+              headers: {},
+              statusCode: takenOver ? 400 : 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const cognitoClient = new CognitoIdentityProviderClient({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'data',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+
+    try {
+      const result = await owner.execute(createDataJob(21), createOperation())
+      // The row another Workspace took over is kept and not counted as deleted.
+      expect(result).toMatchObject({ status: 'continuing', nextJob: { cursor: { processedCount: 1 } } })
+      const deletes = operations.filter((operation) => operation.target === 'DynamoDB_20120810.DeleteItem')
+      // Endpoint owner rows are keyed globally, so each delete is fenced on the Workspace ID and
+      // a row another Workspace took over is kept instead of failing the page.
+      expect(operations.some((operation) => operation.target === 'DynamoDB_20120810.BatchWriteItem')).toBe(false)
+      expect(deletes).toHaveLength(2)
+      for (const { body } of deletes) {
+        expect(body).toMatchObject({
+          TableName: 'push-subscriptions',
+          ConditionExpression: '#owner = :workspaceId',
+          ExpressionAttributeNames: { '#owner': 'workspaceId' },
+          ExpressionAttributeValues: { ':workspaceId': { S: 'workspace/one' } },
+        })
+      }
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -428,12 +518,17 @@ describe('AwsTenantOperationResourceOwner', () => {
       })
 
       const position = first.nextJob.cursor.position
-      const replacement = position.endsWith('A') ? 'B' : 'A'
+      const originalBytes = Buffer.from(position, 'base64url')
+      const tamperedBytes = Buffer.from(originalBytes)
+      const lastByte = tamperedBytes.at(-1)
+      if (lastByte === undefined) throw new Error('Expected a nonempty encrypted cursor.')
+      tamperedBytes[tamperedBytes.length - 1] = lastByte ^ 1
+      expect(tamperedBytes.equals(originalBytes)).toBe(false)
       const tamperedJob: TenantOperationExecutionJob = {
         ...first.nextJob,
         cursor: {
           ...first.nextJob.cursor,
-          position: `${position.slice(0, -1)}${replacement}`,
+          position: tamperedBytes.toString('base64url'),
         },
       }
       await expect(owner.execute(tamperedJob, operation)).rejects.toMatchObject({
@@ -447,6 +542,65 @@ describe('AwsTenantOperationResourceOwner', () => {
       }, crossOperation)).rejects.toMatchObject({
         code: 'TenantOperationCursorInvalid',
       })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('verifies filtered scan targets a bounded page per job instead of one evaluated row', async () => {
+    const requests: Array<{ target: string | undefined, body: unknown }> = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push({ target: readHttpHeader(request, 'x-amz-target'), body: readJsonRequestBody(request) })
+          return {
+            response: { body: new TextEncoder().encode('{"Items":[]}'), headers: {}, statusCode: 200 },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const cognitoClient = new CognitoIdentityProviderClient({ credentials: testCredentials, region: 'ap-northeast-1' })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'verification',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(),
+      currentStep: 'verify',
+      completedSteps: ['export', 'revoke-access', 'anonymize-members', 'delete-data', 'delete-secrets'],
+      revision: 6,
+    }
+    let job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: operation.workspaceId,
+      operationId: operation.operationId,
+      step: 'verify',
+    }
+
+    try {
+      for (let step = 0; step < 60; step += 1) {
+        if (requests.some(({ body }) => isRecord(body) && body.TableName === 'push-subscriptions')) break
+        const result = await owner.execute(job, operation)
+        if (result.status !== 'continuing') break
+        job = result.nextJob
+      }
+      const pushScan = requests.find(({ body }) => isRecord(body) && body.TableName === 'push-subscriptions')
+      expect(pushScan?.target).toBe('DynamoDB_20120810.Scan')
+      expect(pushScan?.body).toMatchObject({ Limit: 1_000 })
+      // A target read by its partition key still stops at the first residual row.
+      const partitionQuery = requests.find(({ target }) => target === 'DynamoDB_20120810.Query')
+      expect(partitionQuery?.body).toMatchObject({ Limit: 1 })
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -615,6 +769,7 @@ describe('AwsTenantOperationResourceOwner', () => {
                   title: { S: 'Visible title' },
                   apiToken: { S: 'reusable-secret' },
                   tokenHash: { S: 'capability-digest' },
+                  auth: { S: 'push-auth-secret' },
                 }],
               })),
               headers: {},
@@ -689,6 +844,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(exportBodies[0]).toContain('[REDACTED]')
       expect(exportBodies[0]).not.toContain('reusable-secret')
       expect(exportBodies[0]).not.toContain('capability-digest')
+      expect(exportBodies[0]).not.toContain('push-auth-secret')
       expect(dynamoRequests[0]).toMatchObject({
         TableName: 'focus',
         ExpressionAttributeValues: {
@@ -1028,7 +1184,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 20 },
+      cursor: { targetIndex: 20, processedCount: 20 },
     }
 
     try {
@@ -1242,7 +1398,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 20 },
+      cursor: { targetIndex: 20, processedCount: 20 },
     }
 
     try {

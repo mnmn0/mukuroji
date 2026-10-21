@@ -30,6 +30,7 @@ import {
   createSearchWorkItemTypeKey,
   type DueDateWorkItemSchedule,
   type TriageEntry,
+  type WorkItemContributorAssignment,
 } from '@mukuroji/contracts'
 
 afterEach(() => {
@@ -1312,6 +1313,122 @@ test('DynamoDB Work Item creation commits a deterministic Triage acceptance cont
   )).toHaveLength(1)
 })
 
+/**
+ * Creates a DynamoDB Work Item client whose first create persists and whose later creates
+ * fail the deterministic-ID condition, so retries exercise the idempotent replay path.
+ *
+ * @returns The client under test.
+ */
+function createIdempotentReplayClient() {
+  let persistedItem: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: persistedItem ? [persistedItem] : [] }
+      }
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: persistedItem }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const nextItem = readTransactionPutItem(command.input, 'WorkItemsTable')
+        if (!persistedItem) {
+          if (!nextItem) throw new Error('Work Item transaction Put was not captured.')
+          persistedItem = nextItem
+          return {}
+        }
+        const transactItems = command.input.TransactItems
+        const error = new Error('The caller-selected Work Item already exists.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: Array.isArray(transactItems)
+            ? transactItems.map((_, index) => ({
+                Code: index === 0 ? 'ConditionalCheckFailed' : 'None',
+              }))
+            : [],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  return new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+}
+
+/**
+ * Builds an idempotent create body with the given contributor list.
+ *
+ * @param contributorAssignments - Server-normalized contributors for this attempt.
+ * @returns A create request bound to one caller-selected resource ID.
+ */
+function createIdempotentContributorCreateBody(
+  contributorAssignments: WorkItemContributorAssignment[],
+) {
+  return {
+    title: 'Idempotent contributors',
+    assigneeUserId: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    schedule: createDueDateSchedule('2026-08-14'),
+    priority: 'high',
+    idempotencyResourceId: 'caller-selected-contributors',
+    contributorAssignments,
+  }
+}
+
+test('DynamoDB idempotent Work Item create replays when only assignment IDs and order differ', async () => {
+  const client = createIdempotentReplayClient()
+  const created = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createIdempotentContributorCreateBody([
+      { assignmentId: 'a'.repeat(32), memberUserId: 'sato@example.com', status: 'planned' },
+      { assignmentId: 'b'.repeat(32), memberUserId: 'suzuki@example.com', status: 'planned' },
+    ]),
+    'demo@example.com',
+  )
+
+  const replay = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createIdempotentContributorCreateBody([
+      { assignmentId: 'c'.repeat(32), memberUserId: 'suzuki@example.com', status: 'planned' },
+      { assignmentId: 'd'.repeat(32), memberUserId: 'sato@example.com', status: 'planned' },
+    ]),
+    'demo@example.com',
+  )
+
+  expect(replay).toEqual(created)
+})
+
+test('DynamoDB idempotent Work Item create conflicts when the contributor list differs', async () => {
+  const client = createIdempotentReplayClient()
+  await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createIdempotentContributorCreateBody([
+      { assignmentId: 'a'.repeat(32), memberUserId: 'sato@example.com', status: 'planned' },
+    ]),
+    'demo@example.com',
+  )
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createIdempotentContributorCreateBody([
+      { assignmentId: 'a'.repeat(32), memberUserId: 'suzuki@example.com', status: 'planned' },
+    ]),
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
+})
+
 test('DynamoDB Work Item persists and re-reads explicit schedule replacements', async () => {
   let persistedItem: Record<string, unknown> | undefined
   const documentClient = {
@@ -2221,6 +2338,84 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
           UpdateExpression: expect.stringContaining('ADD #revision :increment'),
         }),
       },
+    ])
+  })
+})
+
+test('DynamoDB Work Item client keeps the snapshot membership version when the actor adds themselves', async () => {
+  await withTestEnvironment({
+    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+  }, async () => {
+    let transactItems: TransactWriteCommandInput['TransactItems']
+    const documentClient = {
+      async send(command: { input: TransactWriteCommandInput; constructor: { name: string } }) {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactItems = command.input.TransactItems
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+    /**
+     * Builds the expected active-member ConditionCheck for a contributor.
+     * @param memberKey Workspace member key.
+     * @param version Member version the check pins.
+     * @returns The expected transaction item.
+     */
+    const memberCheck = (memberKey: string, version: number) => ({
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: `MEMBER#${memberKey}` },
+        ConditionExpression: '#status = :active AND #version = :version',
+        ExpressionAttributeNames: { '#status': 'status', '#version': 'version' },
+        ExpressionAttributeValues: { ':active': 'active', ':version': version },
+      },
+    })
+
+    await client.createTeamIssue(
+      'workspace-1',
+      'core-team',
+      {
+        title: 'Self-assigned contributor',
+        assigneeUserId: 'sato@example.com',
+        workflowSchemaVersion: 1,
+        workflowStatusId: 'todo',
+        statusCategory: 'unstarted',
+        customFieldValues: {},
+        schedule: createDueDateSchedule('2026-07-20'),
+        priority: 'medium',
+        // The contributor check read the actor's row after a change bumped it to version 8.
+        authorizationConditionChecks: [memberCheck('demo@example.com', 8), memberCheck('suzuki@example.com', 3)],
+        authorizationSnapshot: {
+          workspaceId: 'workspace-1',
+          memberKey: 'demo@example.com',
+          workspaceMemberVersion: 7,
+          planningRevision: 0,
+        },
+      },
+      'demo@example.com',
+    )
+
+    const memberChecks = (transactItems ?? []).flatMap((item) =>
+      item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+        ? [{
+            recordKey: item.ConditionCheck.Key?.recordKey,
+            versions: Object.values(item.ConditionCheck.ExpressionAttributeValues ?? {})
+              .filter((value) => typeof value === 'number'),
+          }]
+        : [])
+    // One check per row, and the actor's row keeps the version observed at authorization.
+    expect(memberChecks).toEqual([
+      { recordKey: 'MEMBER#suzuki@example.com', versions: [3] },
+      { recordKey: 'MEMBER#demo@example.com', versions: [7] },
     ])
   })
 })

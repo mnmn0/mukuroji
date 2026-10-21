@@ -23,7 +23,7 @@ export function TaskSchedulePreviewMetadata({
 
   return (
     <div className="mt-4 grid gap-3" data-testid="task-schedule-preview-metadata">
-      <ul className="grid gap-1 text-xs font-semibold text-[#475467]">
+      <ul className="grid gap-1 text-xs font-semibold text-fg-475467">
         {preview.impacts.map((impact) => (
           <li key={`${impact.teamId}:${impact.workItemId}:${impact.kind}:delta`}>
             {impact.teamId} / {impact.workItemId}: {' '}
@@ -54,7 +54,7 @@ export function TaskSchedulePreviewMetadata({
             '{count}',
             String(preview.affectedProjects.length),
           )}
-          className="flex flex-wrap gap-1 font-mono text-[11px] text-[#475467]"
+          className="flex flex-wrap gap-1 font-mono text-[11px] text-fg-475467"
         >
           {preview.affectedProjects.map((project) => (
             <li className="workbench-badge" key={`${project.teamId}:${project.projectId}`}>
@@ -69,7 +69,7 @@ export function TaskSchedulePreviewMetadata({
             '{count}',
             String(preview.affectedMilestoneIds.length),
           )}
-          className="flex flex-wrap gap-1 font-mono text-[11px] text-[#475467]"
+          className="flex flex-wrap gap-1 font-mono text-[11px] text-fg-475467"
         >
           {preview.affectedMilestoneIds.map((milestoneId) => (
             <li className="workbench-badge" key={milestoneId}>{milestoneId}</li>
@@ -77,7 +77,7 @@ export function TaskSchedulePreviewMetadata({
         </ul>
       ) : null}
       {preview.conflicts.length > 0 ? (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-red-800" role="alert">
+        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-fg-red-800" role="alert">
           <p className="text-xs font-bold uppercase tracking-wide">
             {t('tasks.schedule.conflicts')}
           </p>

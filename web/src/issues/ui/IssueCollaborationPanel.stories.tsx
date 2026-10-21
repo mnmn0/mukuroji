@@ -36,7 +36,7 @@ const meta = {
   },
   decorators: [
     (Story) => (
-      <div className="workbench-shell w-[440px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white shadow-sm">
+      <div className="workbench-shell w-[440px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface shadow-sm">
         <Story />
       </div>
     ),

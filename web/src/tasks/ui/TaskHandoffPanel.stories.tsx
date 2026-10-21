@@ -23,7 +23,7 @@ const meta = {
     t: createTranslator('ja'),
   },
   decorators: [
-    (Story) => <div className="mx-auto w-full max-w-xl bg-white px-5 py-4"><Story /></div>,
+    (Story) => <div className="mx-auto w-full max-w-xl bg-surface px-5 py-4"><Story /></div>,
   ],
 } satisfies Meta<typeof TaskHandoffPanel>
 

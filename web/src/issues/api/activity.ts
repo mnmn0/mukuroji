@@ -5,6 +5,7 @@ import {
   readJson,
   trimTrailingSlash,
 } from './http'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 /**
  * チーム所有 Issue の活動種別です。
@@ -167,16 +168,6 @@ function isTeamIssueActivityEvent(
     (value.summary === undefined || typeof value.summary === 'string') &&
     (value.metadata === undefined || isRecord(value.metadata))
   )
-}
-
-/**
- * Narrows an unknown JSON value to a non-array object.
- *
- * @param value - Untrusted decoded JSON.
- * @returns Whether the value is a JSON object candidate.
- */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function requestJson<TResponse>(

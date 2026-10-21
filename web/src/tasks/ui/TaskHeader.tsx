@@ -122,7 +122,7 @@ export function TaskHeader({
               <span className="text-xs text-[var(--workbench-muted)]">
                 {t('tasks.count').replace('{count}', String(tasks.length))}
               </span>
-              <span className="text-xs font-medium text-blue-700">
+              <span className="text-xs font-medium text-fg-blue-700">
                 {t('tasks.metric.inProgress')}: {taskSummary.inProgressCount}
               </span>
             </div>
@@ -171,7 +171,7 @@ export function TaskHeader({
           </span>
           <div
             aria-label={t('tasks.userAvatar')}
-            className="grid h-9 w-9 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)] max-[860px]:hidden"
+            className="grid h-9 w-9 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-sm font-semibold text-[var(--workbench-primary-text)] max-[860px]:hidden"
           >
             {userInitial}
           </div>
@@ -235,7 +235,7 @@ function ProjectSummary({ summary, t }: ProjectSummaryProps) {
       className="flex shrink-0 items-center gap-4 text-xs text-[var(--workbench-muted)] max-[1200px]:hidden"
     >
       <span>{t('tasks.metric.done')} <strong className="font-semibold text-[var(--workbench-text)]">{summary.doneCount} / {summary.totalCount}</strong></span>
-      <span>{t('tasks.metric.completionRate')} <strong className="font-semibold text-emerald-700">{summary.completionRate}%</strong></span>
+      <span>{t('tasks.metric.completionRate')} <strong className="font-semibold text-fg-emerald-700">{summary.completionRate}%</strong></span>
     </section>
   )
 }
@@ -273,10 +273,10 @@ function IconButton({
       aria-busy={isBusy || undefined}
       aria-label={label}
       aria-pressed={isPressed}
-      className={`grid h-9 w-9 place-items-center transition focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`grid h-9 w-9 place-items-center transition focus:outline-none focus:ring-4 focus:ring-tone-2563eb/10 disabled:cursor-not-allowed disabled:opacity-50 ${
         isPressed
-          ? 'bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700'
-          : 'text-[#505967] hover:bg-[#f3f4f6] hover:text-[#1c1d1f]'
+          ? 'bg-amber-50 text-fg-amber-600 hover:bg-amber-100 hover:text-fg-amber-700'
+          : 'text-fg-505967 hover:bg-tone-f3f4f6 hover:text-fg-1c1d1f'
       } ${
         rounded ? 'rounded-full' : 'rounded-md'
       }`}
@@ -292,7 +292,7 @@ function IconButton({
 /** Renders the compact project breadcrumb glyph. */
 function ProjectGlyph() {
   return (
-    <span className="grid h-5 w-5 place-items-center rounded border border-[#d3d8df] bg-[#f3f4f6] text-app-micro font-semibold text-[#505967]">
+    <span className="grid h-5 w-5 place-items-center rounded border border-tone-d3d8df bg-tone-f3f4f6 text-app-micro font-semibold text-fg-505967">
       P
     </span>
   )
@@ -312,7 +312,7 @@ function TabIcon({ tab }: { /** Task view represented by the glyph. */ tab: Task
   return (
     <span
       aria-hidden="true"
-      className="grid h-5 w-5 place-items-center rounded border border-[#d3d8df] bg-white text-[0.65rem] font-semibold text-[#505967]"
+      className="grid h-5 w-5 place-items-center rounded border border-tone-d3d8df bg-surface text-[0.65rem] font-semibold text-fg-505967"
     >
       {icons[tab]}
     </span>

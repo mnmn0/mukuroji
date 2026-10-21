@@ -14,7 +14,7 @@ const meta = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div className="workbench-shell w-[440px] max-w-[calc(100vw-32px)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <div className="workbench-shell w-[440px] max-w-[calc(100vw-32px)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <Story />
       </div>
     ),

@@ -234,7 +234,7 @@ export function DocumentShareDialog({
       <section
         aria-labelledby="document-share-title"
         aria-modal="true"
-        className="flex max-h-[min(820px,calc(100svh-48px))] w-full max-w-[680px] flex-col overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-white shadow-[0_28px_90px_rgba(23,32,29,0.3)]"
+        className="flex max-h-[min(820px,calc(100svh-48px))] w-full max-w-[680px] flex-col overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-surface shadow-[0_28px_90px_rgba(23,32,29,0.3)]"
         onKeyDown={handleKeyDown}
         onMouseDown={(event) => event.stopPropagation()}
         ref={dialogRef}
@@ -255,7 +255,7 @@ export function DocumentShareDialog({
           </div>
           <button
             aria-label={t('documents.share.close')}
-            className="grid h-9 w-9 flex-none place-items-center rounded-md text-xl text-[var(--workbench-muted)] hover:bg-white"
+            className="grid h-9 w-9 flex-none place-items-center rounded-md text-xl text-[var(--workbench-muted)] hover:bg-surface"
             onClick={onClose}
             type="button"
           >
@@ -266,7 +266,7 @@ export function DocumentShareDialog({
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-6">
           {errorMessage ? (
             <p
-              className="m-0 mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
+              className="m-0 mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-800"
               role="alert"
             >
               {errorMessage}
@@ -302,7 +302,7 @@ export function DocumentShareDialog({
                     aria-pressed={document.permission.mode === mode}
                     className={`min-h-10 rounded-md px-3 text-sm font-semibold ${
                       document.permission.mode === mode
-                        ? 'bg-white text-[var(--workbench-text)] shadow-sm'
+                        ? 'bg-surface text-[var(--workbench-text)] shadow-sm'
                         : 'text-[var(--workbench-muted)]'
                     }`}
                     disabled={isSavingPermission}
@@ -435,7 +435,7 @@ export function DocumentShareDialog({
               <div className="mt-3 grid gap-2">
                 {publicShares.map((share) => (
                   <article
-                    className="rounded-lg border border-[var(--workbench-border)] bg-white p-3"
+                    className="rounded-lg border border-[var(--workbench-border)] bg-surface p-3"
                     key={share.id}
                   >
                     <div className="flex items-center gap-2">
@@ -531,7 +531,7 @@ function ShareList({
           className="flex items-center gap-3 px-3 py-3"
           key={share.grant.memberKey}
         >
-          <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-[#e5f7f4] text-xs font-bold text-[var(--workbench-primary)]">
+          <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]">
             {share.grant.memberKey.charAt(0).toUpperCase()}
           </span>
           <div className="min-w-0 flex-1">

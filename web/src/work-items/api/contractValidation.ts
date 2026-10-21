@@ -1,5 +1,7 @@
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
+  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
@@ -7,6 +9,7 @@ import {
   type CustomFieldDefinition,
   type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
+  type WorkItemContributorAssignment,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
   type WorkItemScheduleChangePreview,
@@ -469,6 +472,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.teamId === 'string' &&
     typeof value.title === 'string' &&
     typeof value.assigneeUserId === 'string' &&
+    (value.contributorAssignments === undefined || isContributorAssignmentList(value.contributorAssignments)) &&
     typeof value.creatorMemberKey === 'string' &&
     typeof value.workflowStatusId === 'string' &&
     isOptionalString(value.workItemTypeId) &&
@@ -503,6 +507,66 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isOptionalString(value.archivedAt) &&
     isOptionalString(value.archivedBy) &&
     isApprovalSummary(value.approvalSummary, value.createdAt)
+}
+
+/** Server-generated contributor assignment IDs: 32 lowercase hexadecimal digits. */
+const CONTRIBUTOR_ASSIGNMENT_ID_PATTERN = /^[0-9a-f]{32}$/u
+
+/** Work Item configuration ID grammar used for job roles. */
+const CONTRIBUTOR_JOB_ROLE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
+
+/**
+ * Checks that a contributor member ID is in the normalized form the server stores.
+ *
+ * @param value - Candidate member ID.
+ * @returns Whether it is non-empty, trimmed, lower-case, at most 256 characters, and printable.
+ */
+function isCanonicalContributorMemberId(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || value.length > 256 || value !== value.trim().toLowerCase()) return false
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    if (codePoint < 0x20 || codePoint === 0x7f) return false
+  }
+  return true
+}
+
+/**
+ * Returns whether a value is a list of contributor assignments.
+ *
+ * @param value - Candidate `contributorAssignments` value.
+ * @returns Whether every entry names a member or job role with a valid status and effort.
+ */
+function isContributorAssignmentList(value: unknown): value is WorkItemContributorAssignment[] {
+  // Same limits as the canonical contract: a bounded list with unique assignment IDs.
+  return Array.isArray(value) &&
+    value.length <= WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT &&
+    new Set(value.map((entry) => isRecord(entry) ? entry.assignmentId : undefined)).size === value.length &&
+    hasUniqueContributorMembers(value) &&
+    value.every((entry) =>
+    isRecord(entry) &&
+    typeof entry.assignmentId === 'string' && CONTRIBUTOR_ASSIGNMENT_ID_PATTERN.test(entry.assignmentId) &&
+    (entry.memberUserId === undefined || isCanonicalContributorMemberId(entry.memberUserId)) &&
+    (entry.jobRoleId === undefined || (typeof entry.jobRoleId === 'string' && CONTRIBUTOR_JOB_ROLE_ID_PATTERN.test(entry.jobRoleId))) &&
+    (entry.memberUserId !== undefined || entry.jobRoleId !== undefined) &&
+    (entry.plannedEffortMinutes === undefined ||
+      (Number.isSafeInteger(entry.plannedEffortMinutes) &&
+        typeof entry.plannedEffortMinutes === 'number' &&
+        entry.plannedEffortMinutes >= 0 &&
+        entry.plannedEffortMinutes <= WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES)) &&
+    (entry.status === 'planned' || entry.status === 'in-progress' || entry.status === 'done'))
+}
+
+/**
+ * Checks that no member appears in two contributor assignments, as the server stores them.
+ *
+ * @param entries - Candidate assignments.
+ * @returns Whether every named member appears once, compared case-insensitively.
+ */
+function hasUniqueContributorMembers(entries: readonly unknown[]): boolean {
+  const members = entries
+    .map((entry) => isRecord(entry) && typeof entry.memberUserId === 'string' ? entry.memberUserId.trim().toLowerCase() : undefined)
+    .filter((member): member is string => member !== undefined)
+  return new Set(members).size === members.length
 }
 
 /** Returns whether a value is one compact committed Work Item schedule. */

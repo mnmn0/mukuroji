@@ -11,6 +11,7 @@ import {
   type MutationRequestContext,
 } from '../../shared/api/mutationHeaders'
 import { ProjectDirectoryApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const projectsApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_PROJECTS_API_BASE_URL ??
@@ -211,12 +212,3 @@ function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
 }
 
-/**
- * Narrows an unknown value to a non-array record.
- *
- * @param value - Unknown candidate value.
- * @returns Whether the value is a non-null object record.
- */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}

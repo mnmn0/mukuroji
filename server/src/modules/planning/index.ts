@@ -1,4 +1,5 @@
 /** Planning module public application and domain surface. */
+export type { PlanningUpdateActivity } from './planning-update-activity'
 export {
   PLANNING_STORAGE_SCHEMA_VERSION,
   createPlanningWorkItemDependencySummary,

@@ -39,7 +39,7 @@ export function HomeWorkspaceView({ focusQueue, isFocusUnavailable = false, onOp
           <p className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.collaboration.handoffTitle')}</p>
           <p className="mt-1 text-xs leading-5 text-[var(--workbench-muted)]">{t('workspace.collaboration.handoffDescription')}</p>
         </div>
-        <Link className="inline-flex min-h-[44px] shrink-0 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-white px-3 text-xs font-semibold text-[var(--workbench-primary)] no-underline hover:bg-teal-50" to={`${workspaceNavPaths.help}#coding-agent`}>
+        <Link className="inline-flex min-h-[44px] shrink-0 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-surface px-3 text-xs font-semibold text-[var(--workbench-primary-text)] no-underline hover:bg-teal-50" to={`${workspaceNavPaths.help}#coding-agent`}>
           {t('workspace.collaboration.connect')}<ChevronIcon className="size-4 -rotate-90 fill-none stroke-current stroke-2" />
         </Link>
       </div>

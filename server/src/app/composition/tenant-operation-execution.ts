@@ -245,6 +245,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     tenantExportBucketName: requireEnvironment('TENANT_EXPORT_BUCKET_NAME'),
     fileBucketName: requireEnvironment('FILE_BUCKET_NAME'),
     workItemImportBucketName: requireEnvironment('WORK_ITEM_IMPORT_BUCKET_NAME'),
+    auditExportBucketName: requireEnvironment('AUDIT_EXPORT_BUCKET_NAME'),
     cognitoUserPoolId: requireEnvironment('COGNITO_USER_POOL_ID'),
     workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),
     workItemEventsTableName: requireEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE'),
@@ -269,6 +270,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     workspaceSearchTableName: requireEnvironment('WORKSPACE_SEARCH_TABLE_NAME'),
     notificationsTableName: requireEnvironment('NOTIFICATIONS_TABLE_NAME'),
     focusTableName: requireEnvironment('FOCUS_TABLE_NAME'),
+    pushSubscriptionsTableName: requireEnvironment('PUSH_SUBSCRIPTIONS_TABLE_NAME'),
     realtimeSessionsTableName: requireEnvironment('REALTIME_SESSIONS_TABLE_NAME'),
     fileProofingTableName: requireEnvironment('FILE_PROOFING_TABLE_NAME'),
   }

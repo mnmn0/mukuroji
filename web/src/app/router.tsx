@@ -9,8 +9,10 @@ import { DashboardPage } from '../pages/workspace/DashboardPage'
 import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPage'
 import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../pages/workspace/HelpPage'
+import { SharePage } from '../pages/workspace/SharePage'
 import { HomePage } from '../pages/workspace/HomePage'
 import { FocusPage } from '../pages/workspace/FocusPage'
+import { UpdateFeedPage } from '../pages/workspace/UpdateFeedPage'
 import { InboxPage } from '../pages/workspace/InboxPage'
 import { MyTasksPage } from '../pages/workspace/MyTasksPage'
 import { PlanningPage } from '../pages/workspace/PlanningPage'
@@ -26,6 +28,7 @@ import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
+import { CollectionsPage } from '../pages/workspace/CollectionsPage'
 import { CustomerPage } from '../pages/workspace/CustomerPage'
 import { EnterpriseSsoCallbackPage } from '../pages/auth/EnterpriseSsoCallbackPage'
 import { DocumentPage } from '../documents/DocumentPage'
@@ -75,6 +78,7 @@ export const appRoutes: RouteObject[] = [
                 path: '/focus',
                 element: <FocusPage />,
               },
+              { path: '/updates', element: <UpdateFeedPage /> },
               {
                 path: '/my-tasks',
                 element: <MyTasksPage />,
@@ -86,6 +90,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/help',
                 element: <HelpPage />,
+              },
+              {
+                path: '/share',
+                element: <SharePage />,
               },
               {
                 path: '/settings',
@@ -126,6 +134,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/customers/:customerId',
                 element: <CustomerPage />,
+              },
+              {
+                path: '/collections',
+                element: <CollectionsPage />,
               },
               {
                 path: '/search',

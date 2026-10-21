@@ -54,6 +54,7 @@ import type {
 import { DeveloperPlatformError } from './errors'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
+import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
 export const PUBLIC_API_RATE_LIMIT = 120
@@ -3532,10 +3533,10 @@ async function readOAuthTokenInput(c: Context) {
 }
 
 function requireRecord(value: unknown, message: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new PublicApiServiceError(400, 'invalid_request', message)
   }
-  return value as Record<string, unknown>
+  return value
 }
 
 function stableStringify(value: unknown): string {

@@ -44,8 +44,11 @@ import type {
 import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-identity/enterprise-session-activity'
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
+import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CollectionsPersistence } from '../../modules/collections'
+import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence, UpdateFeedDigestPersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
@@ -76,6 +79,7 @@ import type {
 import type {
   RuntimeControlProvider,
 } from '../../infrastructure/runtime/runtime-control'
+import type { AuditExportService } from '../../modules/audit/audit-export'
 
 /** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
 type AutomationCompositionTransactionItem =
@@ -123,6 +127,8 @@ export interface WorkspaceDependencies {
   projectDirectory: ProjectDirectoryClient
   /** Provides append-only audit persistence. */
   auditEvents: AuditEventsClient
+  /** Runs asynchronous audit exports when the export bucket and queue are deployed. */
+  auditExports?: AuditExportService
   /** Provides Workspace membership persistence. */
   workspaceAccess: WorkspaceAccessClient
   /** Provides capability-scoped Enterprise Identity application ports. */
@@ -167,6 +173,8 @@ export interface WorkItemDependencies {
   fileProofing: FileProofingClient
   /** Provides notification persistence. */
   notifications: NotificationClient
+  /** Provides Web Push device subscription persistence. */
+  pushSubscriptions: PushSubscriptionStore
   /** Provides Focus policy and recipient snooze persistence. */
   focusState: FocusStateClient
   /** Provides Workspace search persistence. */
@@ -179,6 +187,16 @@ export interface WorkItemDependencies {
   workItemConfigurations: WorkItemConfigurationClient
   /** Provides Planning persistence. */
   planning: PlanningClient
+  /** Provides durable per-member, per-version feed read state. */
+  updateFeedReadState: UpdateFeedReadStatePersistence
+  /** Provides bounded member-owned saved feed definitions. */
+  savedUpdateFeeds: SavedUpdateFeedsPersistence
+  /** Provides Workspace Collections that reference canonical Work Items. */
+  collections: CollectionsPersistence
+  /** Provides manual digest preferences and content-free generation receipts. */
+  updateFeedDigest: UpdateFeedDigestPersistence
+  /** Provides delivery opt-in metadata independently of manual previews. */
+  inboxDigestSettings: UpdateFeedDigestPersistence
   /** Provides Request Intake persistence. */
   requestIntake: RequestIntakeClient
   /** Provides the Team Triage queue and replay-safe mutation surface. */

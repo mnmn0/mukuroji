@@ -70,7 +70,7 @@ export function OptionChecklist<TValue extends string>(props: {
       <div className="grid gap-2">
         {options.map((option) => (
           <label
-            className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-3 py-2"
+            className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface px-3 py-2"
             key={option.value}
           >
             <span className="min-w-0">
@@ -92,7 +92,7 @@ export function OptionChecklist<TValue extends string>(props: {
         ))}
       </div>
       {errorMessage ? (
-        <p className="text-xs font-semibold text-red-700" role="alert">
+        <p className="text-xs font-semibold text-fg-red-700" role="alert">
           {errorMessage}
         </p>
       ) : null}

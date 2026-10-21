@@ -248,14 +248,14 @@ export function ProjectPermissionsPanel({
   return (
     <div className="grid gap-5" data-testid="permissions-view">
       <div className="grid grid-cols-[minmax(0,1fr)_300px] gap-4 max-[1080px]:grid-cols-1">
-        <section className="rounded-md border border-[#d3d8df] bg-white p-4">
+        <section className="rounded-md border border-tone-d3d8df bg-surface p-4">
           <div className="grid gap-4">
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
-                <p className="text-sm font-semibold text-[#505967]">
+                <p className="text-sm font-semibold text-fg-505967">
                   {t('workspace.permissions.projectLabel')}
                 </p>
-                <p className="mt-1 text-xl font-semibold leading-tight text-[#1c1d1f]">
+                <p className="mt-1 text-xl font-semibold leading-tight text-fg-1c1d1f">
                   {projectName}
                 </p>
               </div>
@@ -268,10 +268,10 @@ export function ProjectPermissionsPanel({
 
             {isManagementEnabled ? (
               <form className="grid grid-cols-2 gap-3 max-[780px]:grid-cols-1" onSubmit={handleSubmit}>
-                <label className="grid gap-1.5 text-sm font-semibold text-[#505967]" htmlFor="permissions-user-search">
+                <label className="grid gap-1.5 text-sm font-semibold text-fg-505967" htmlFor="permissions-user-search">
                   {t('workspace.permissions.userSearch')}
                   <input
-                    className="h-10 rounded-md border border-[#d3d8df] px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
+                    className="h-10 rounded-md border border-tone-d3d8df px-3 text-sm font-medium text-fg-1c1d1f outline-none transition focus:border-tone-2563eb focus:ring-4 focus:ring-tone-2563eb/10"
                     data-testid="permissions-user-search"
                     id="permissions-user-search"
                     placeholder={t('workspace.permissions.userSearchPlaceholder')}
@@ -280,10 +280,10 @@ export function ProjectPermissionsPanel({
                     onChange={(event) => onUserQueryChange?.(event.target.value)}
                   />
                 </label>
-                <label className="grid gap-1.5 text-sm font-semibold text-[#505967]" htmlFor="permissions-user-select">
+                <label className="grid gap-1.5 text-sm font-semibold text-fg-505967" htmlFor="permissions-user-select">
                   {t('workspace.permissions.memberEmail')}
                   <select
-                    className="h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10"
+                    className="h-10 rounded-md border border-tone-d3d8df bg-surface px-3 text-sm font-medium text-fg-1c1d1f outline-none transition focus:border-tone-2563eb focus:ring-4 focus:ring-tone-2563eb/10"
                     data-testid="permissions-user-select"
                     disabled={assignmentCandidates.length === 0}
                     id="permissions-user-select"
@@ -306,7 +306,7 @@ export function ProjectPermissionsPanel({
                   onChange={(role) => setFormState((current) => ({ ...current, role }))}
                 />
                 <button
-                  className="self-end min-h-10 rounded-md bg-[#1c1d1f] px-5 text-sm font-semibold text-white transition hover:bg-[#343941] disabled:cursor-not-allowed disabled:bg-[#b5bdc9]"
+                  className="self-end min-h-10 rounded-md bg-tone-1c1d1f px-5 text-sm font-semibold text-white transition hover:bg-tone-343941 disabled:cursor-not-allowed disabled:bg-tone-b5bdc9"
                   data-testid="permissions-submit"
                   disabled={!selectedUserId || isLastManagerAssignmentBlocked || savingMemberKey === selectedUserId}
                   type="submit"
@@ -315,13 +315,13 @@ export function ProjectPermissionsPanel({
                     ? t('workspace.permissions.saving')
                     : t('workspace.permissions.save')}
                 </button>
-                <div className="col-span-full flex flex-wrap items-center gap-3 text-sm font-medium text-[#5f6874]">
+                <div className="col-span-full flex flex-wrap items-center gap-3 text-sm font-medium text-fg-5f6874">
                   {isUsersLoading ? <span>{t('workspace.permissions.usersLoading')}</span> : null}
-                  {usersErrorMessage ? <span className="font-semibold text-red-700">{usersErrorMessage}</span> : null}
+                  {usersErrorMessage ? <span className="font-semibold text-fg-red-700">{usersErrorMessage}</span> : null}
                   {!isUsersLoading && assignmentCandidates.length === 0 ? <span>{t('workspace.permissions.usersEmpty')}</span> : null}
                   {usersNextToken && onLoadMoreUsers ? (
                     <button
-                      className="min-h-9 rounded-md border border-[#d3d8df] bg-white px-3 text-xs font-semibold text-[#1c1d1f] transition hover:border-[var(--workbench-primary)] hover:text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:text-[#b5bdc9]"
+                      className="min-h-9 rounded-md border border-tone-d3d8df bg-surface px-3 text-xs font-semibold text-fg-1c1d1f transition hover:border-[var(--workbench-primary)] hover:text-[var(--workbench-primary-text)] disabled:cursor-not-allowed disabled:text-fg-b5bdc9"
                       data-testid="permissions-load-more-users"
                       disabled={isLoadingMoreUsers}
                       type="button"
@@ -335,29 +335,29 @@ export function ProjectPermissionsPanel({
                 </div>
               </form>
             ) : (
-              <p className="rounded-md border border-[#d3d8df] bg-[#fbfcfd] px-4 py-3 text-sm font-medium leading-6 text-[#505967]">
+              <p className="rounded-md border border-tone-d3d8df bg-tone-fbfcfd px-4 py-3 text-sm font-medium leading-6 text-fg-505967">
                 {t('workspace.permissions.managerOnly')}
               </p>
             )}
             {errorMessage || localErrorMessage ? (
-              <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+              <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
                 {localErrorMessage ?? errorMessage}
               </p>
             ) : null}
           </div>
         </section>
 
-        <section className="rounded-md border border-[#d3d8df] bg-white p-4">
-          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#5f6874]">
+        <section className="rounded-md border border-tone-d3d8df bg-surface p-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-fg-5f6874">
             {t('workspace.permissions.policyTitle')}
           </p>
           <div className="mt-3 grid gap-2.5">
             {projectMemberRoleOptions.map((role) => (
-              <div className="rounded-md border border-[#e4e7ec] bg-[#fbfcfd] p-3" key={role}>
-                <p className="text-sm font-semibold text-[#1c1d1f]">
+              <div className="rounded-md border border-tone-e4e7ec bg-tone-fbfcfd p-3" key={role}>
+                <p className="text-sm font-semibold text-fg-1c1d1f">
                   {t(`workspace.permissions.role.${role}`)}
                 </p>
-                <p className="mt-1 text-sm font-medium leading-6 text-[#505967]">
+                <p className="mt-1 text-sm font-medium leading-6 text-fg-505967">
                   {t(`workspace.permissions.${role}Policy`)}
                 </p>
               </div>
@@ -366,17 +366,17 @@ export function ProjectPermissionsPanel({
         </section>
       </div>
 
-      <section className="overflow-hidden rounded-md border border-[#d3d8df] bg-white">
+      <section className="overflow-hidden rounded-md border border-tone-d3d8df bg-surface">
         <SectionHeader
           title={t('workspace.permissions.directoryTitle')}
           meta={projectName}
         />
         {isLoading ? (
-          <p className="px-4 py-7 text-sm font-medium text-[#5f6874]">
+          <p className="px-4 py-7 text-sm font-medium text-fg-5f6874">
             {t('workspace.permissions.loading')}
           </p>
         ) : (
-          <div className="grid divide-y divide-[#e4e7ec]">
+          <div className="grid divide-y divide-tone-e4e7ec">
             {members.map((member) => {
               const isLastManager = member.role === 'manager' && member.id === lastManagerId
 
@@ -387,8 +387,8 @@ export function ProjectPermissionsPanel({
                   key={member.id}
                 >
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-[#1c1d1f]">{member.name ?? member.email}</p>
-                    <p className="mt-1 truncate text-sm font-medium text-[#5f6874]">
+                    <p className="truncate text-sm font-semibold text-fg-1c1d1f">{member.name ?? member.email}</p>
+                    <p className="mt-1 truncate text-sm font-medium text-fg-5f6874">
                       {member.email}
                       {member.status ? ` / ${member.status}` : ''}
                     </p>
@@ -407,7 +407,7 @@ export function ProjectPermissionsPanel({
                     }
                   />
                   <button
-                    className="min-h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-semibold text-[#1c1d1f] transition hover:border-red-300 hover:text-red-700 disabled:cursor-not-allowed disabled:text-[#b5bdc9]"
+                    className="min-h-10 rounded-md border border-tone-d3d8df bg-surface px-3 text-sm font-semibold text-fg-1c1d1f transition hover:border-red-300 hover:text-fg-red-700 disabled:cursor-not-allowed disabled:text-fg-b5bdc9"
                     data-testid={`permission-remove-${createProjectMemberTestId(member.id)}`}
                     disabled={!isManagementEnabled || !onRemoveMember || isLastManager || savingMemberKey === member.id}
                     type="button"
@@ -421,7 +421,7 @@ export function ProjectPermissionsPanel({
               )
             })}
             {members.length === 0 ? (
-              <p className="px-4 py-7 text-sm font-medium text-[#5f6874]">
+              <p className="px-4 py-7 text-sm font-medium text-fg-5f6874">
                 {t('workspace.permissions.empty')}
               </p>
             ) : null}
@@ -442,10 +442,10 @@ function RoleSelect({
   onChange,
 }: RoleSelectProps) {
   return (
-    <label className="grid gap-1.5 text-sm font-semibold text-[#505967]" htmlFor={id}>
+    <label className="grid gap-1.5 text-sm font-semibold text-fg-505967" htmlFor={id}>
       {label}
       <select
-        className="h-10 rounded-md border border-[#d3d8df] bg-white px-3 text-sm font-medium text-[#1c1d1f] outline-none transition focus:border-[#2563eb] focus:ring-4 focus:ring-[#2563eb]/10 disabled:cursor-not-allowed disabled:bg-[#f3f4f6] disabled:text-[#8f99a8]"
+        className="h-10 rounded-md border border-tone-d3d8df bg-surface px-3 text-sm font-medium text-fg-1c1d1f outline-none transition focus:border-tone-2563eb focus:ring-4 focus:ring-tone-2563eb/10 disabled:cursor-not-allowed disabled:bg-tone-f3f4f6 disabled:text-fg-8f99a8"
         data-testid={testId}
         disabled={disabled}
         id={id}
@@ -476,9 +476,9 @@ function SectionHeader({
   meta: string
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#e4e7ec] bg-[#fbfcfd] px-4 py-3">
-      <h2 className="text-sm font-semibold text-[#1c1d1f]">{title}</h2>
-      <span className="rounded-full border border-[#d3d8df] bg-white px-2.5 py-1 text-xs font-semibold text-[#505967]">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-tone-e4e7ec bg-tone-fbfcfd px-4 py-3">
+      <h2 className="text-sm font-semibold text-fg-1c1d1f">{title}</h2>
+      <span className="rounded-full border border-tone-d3d8df bg-surface px-2.5 py-1 text-xs font-semibold text-fg-505967">
         {meta}
       </span>
     </div>

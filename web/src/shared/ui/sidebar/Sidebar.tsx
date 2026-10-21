@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
 import { BrandMark } from '../BrandMark'
-import { HandoffIcon } from '../icons'
+import { HandoffIcon, FormIcon } from '../icons'
 
 /**
  * サイドバー内の SVG アイコンに渡す共通 props です。
@@ -76,10 +76,12 @@ export type SidebarTeam = {
 export type SidebarNavId =
   | 'home'
   | 'focus'
+  | 'updates'
   | 'my-tasks'
   | 'inbox'
   | 'requests'
   | 'customers'
+  | 'collections'
   | 'documents'
   | 'dashboard'
   | 'planning'
@@ -528,9 +530,15 @@ type SidebarArchiveTarget = {
   projectId?: string
 }
 
+/** Adapts the shared document outline to the sidebar's size classes. */
+function UpdateFeedSidebarIcon({ className }: SidebarIconProps) {
+  return <FormIcon className={`${className ?? ''} fill-none stroke-current stroke-[1.8]`} />
+}
+
 const primaryNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'focus', icon: FocusIcon },
+  { id: 'updates', icon: UpdateFeedSidebarIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
 ]
@@ -538,6 +546,7 @@ const primaryNavItems: MainNavItem[] = [
 const secondaryNavItems: MainNavItem[] = [
   { id: 'requests', icon: PanelIcon },
   { id: 'customers', icon: BuildingIcon },
+  { id: 'collections', icon: CollectionFolderIcon },
   { id: 'documents', icon: DocumentIcon },
   { id: 'dashboard', icon: DashboardIcon },
   { id: 'planning', icon: PlanningIcon },
@@ -624,10 +633,12 @@ const defaultLabels: SidebarLabels = {
   nav: {
     home: 'ホーム',
     focus: 'フォーカス',
+    updates: 'アップデート',
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
     requests: 'リクエスト',
     customers: '顧客',
+    collections: 'コレクション',
     documents: 'ドキュメント',
     dashboard: 'ダッシュボード',
     planning: 'プランニング',
@@ -666,10 +677,10 @@ type PartialSidebarCreateLabels = Partial<Omit<SidebarCreateLabels, 'toneLabels'
 }
 
 const projectToneClasses: Record<SidebarProjectTone, string> = {
-  blue: 'border-teal-300/70 text-teal-200 bg-teal-500/10',
-  purple: 'border-slate-300/70 text-slate-200 bg-white/10',
-  green: 'border-emerald-400/70 text-emerald-300 bg-emerald-500/10',
-  yellow: 'border-amber-300/70 text-amber-200 bg-amber-400/15',
+  blue: 'border-teal-300/70 text-fg-teal-200 bg-teal-500/10',
+  purple: 'border-slate-300/70 text-fg-slate-200 bg-white/10',
+  green: 'border-emerald-400/70 text-fg-emerald-300 bg-emerald-500/10',
+  yellow: 'border-amber-300/70 text-fg-amber-200 bg-amber-400/15',
 }
 
 const projectToneSwatchClasses: Record<SidebarProjectTone, string> = {
@@ -957,7 +968,7 @@ export function Sidebar({
             </span>
           </div>
           <button
-            className="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-200 transition hover:bg-white/10 hover:text-white"
+            className="grid h-9 w-9 flex-none place-items-center rounded-lg text-fg-slate-200 transition hover:bg-white/10 hover:text-white"
             type="button"
             aria-label={isCollapsed ? resolvedLabels.expand : resolvedLabels.collapse}
             aria-expanded={!isCollapsed}
@@ -974,7 +985,7 @@ export function Sidebar({
         {onOpenSearch ? (
           <button
             aria-keyshortcuts="Control+K Meta+K"
-            className={`mb-4 flex h-10 flex-none items-center rounded-lg border border-white/12 bg-white/[0.06] text-sm font-semibold text-slate-100 transition hover:border-white/20 hover:bg-white/10 focus-visible:bg-white/10 ${
+            className={`mb-4 flex h-10 flex-none items-center rounded-lg border border-white/12 bg-surface/[0.06] text-sm font-semibold text-fg-slate-100 transition hover:border-white/20 hover:bg-white/10 focus-visible:bg-white/10 ${
               isCollapsed ? 'w-full justify-center px-0' : 'w-full justify-between gap-3 px-3'
             }`}
             data-testid="sidebar-search-trigger"
@@ -987,7 +998,7 @@ export function Sidebar({
               <span className={isCollapsed ? 'sr-only' : 'truncate'}>{resolvedLabels.search}</span>
             </span>
             {isCollapsed ? null : (
-              <kbd className="shrink-0 whitespace-nowrap rounded border border-white/15 bg-black/10 px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-slate-300">
+              <kbd className="shrink-0 whitespace-nowrap rounded border border-white/15 bg-black/10 px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-fg-slate-300">
                 {resolvedLabels.searchShortcut}
               </kbd>
             )}
@@ -1020,7 +1031,7 @@ export function Sidebar({
                   aria-expanded={isQuickAccessManagerOpen}
                   aria-haspopup="dialog"
                   aria-label={resolvedLabels.manageQuickAccess}
-                  className="grid h-8 w-8 place-items-center rounded-lg text-slate-200 transition hover:bg-white/10 hover:text-white"
+                  className="grid h-8 w-8 place-items-center rounded-lg text-fg-slate-200 transition hover:bg-white/10 hover:text-white"
                   onClick={() => setIsQuickAccessManagerOpen(true)}
                   title={resolvedLabels.manageQuickAccess}
                   type="button"
@@ -1043,13 +1054,13 @@ export function Sidebar({
                 />
               ))}
               {quickAccessProjects.length === 0 && !isCollapsed ? (
-                <p className="px-2 py-1.5 text-app-caption leading-5 text-slate-400">
+                <p className="px-2 py-1.5 text-app-caption leading-5 text-fg-slate-400">
                   {resolvedLabels.quickAccessEmpty}
                 </p>
               ) : null}
               {quickAccessProjects.length > 5 && !isCollapsed && onShowAllQuickAccess ? (
                 <button
-                  className="min-h-8 w-full rounded-lg px-2 text-left text-app-meta font-semibold text-teal-200 transition hover:bg-white/10 hover:text-teal-100"
+                  className="min-h-8 w-full rounded-lg px-2 text-left text-app-meta font-semibold text-fg-teal-200 transition hover:bg-white/10 hover:text-fg-teal-100"
                   onClick={onShowAllQuickAccess}
                   type="button"
                 >
@@ -1092,7 +1103,7 @@ export function Sidebar({
                 {isTeamSwitcherOpen ? (
                   <div
                     aria-label={resolvedLabels.switchTeam}
-                    className="mt-1 rounded-lg border border-white/10 bg-[#21302c] p-2 shadow-xl"
+                    className="mt-1 rounded-lg border border-white/10 bg-tone-21302c p-2 shadow-xl"
                     onKeyDown={(event) => {
                       if (event.key === 'Escape') {
                         event.preventDefault()
@@ -1110,10 +1121,10 @@ export function Sidebar({
                     <label className={isCollapsed ? 'sr-only' : 'block'}>
                       <span className="sr-only">{resolvedLabels.searchTeams}</span>
                       <span className="relative block">
-                        <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                        <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-fg-slate-400" />
                         <input
                           autoFocus
-                          className="h-9 w-full rounded-lg border border-white/10 bg-black/15 pl-8 pr-2 text-sm text-white outline-none placeholder:text-slate-400 focus:border-teal-400"
+                          className="h-9 w-full rounded-lg border border-white/10 bg-black/15 pl-8 pr-2 text-sm text-white outline-none placeholder:text-fg-slate-400 focus:border-teal-400"
                           onChange={(event) => setTeamSearchQuery(event.currentTarget.value)}
                           placeholder={resolvedLabels.searchTeams}
                           value={teamSearchQuery}
@@ -1124,7 +1135,7 @@ export function Sidebar({
                       {filteredTeams.map((team) => (
                         <button
                           aria-current={team.id === currentTeam.id ? 'true' : undefined}
-                          className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition hover:bg-white/10 ${team.id === currentTeam.id ? 'bg-teal-500/20 text-white' : 'text-slate-200'}`}
+                          className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition hover:bg-white/10 ${team.id === currentTeam.id ? 'bg-teal-500/20 text-white' : 'text-fg-slate-200'}`}
                           key={team.id}
                           onClick={() => {
                             updateActiveTeamView(team.id, 'overview')
@@ -1142,7 +1153,7 @@ export function Sidebar({
                         </button>
                       ))}
                       {filteredTeams.length === 0 && !isCollapsed ? (
-                        <p className="px-2 py-3 text-app-caption text-slate-400">
+                        <p className="px-2 py-3 text-app-caption text-fg-slate-400">
                           {resolvedLabels.noTeamsFound}
                         </p>
                       ) : null}
@@ -1159,14 +1170,14 @@ export function Sidebar({
                 />
               </div>
             ) : !isCollapsed ? (
-              <p className="px-2 py-2 text-app-caption text-slate-400">
+              <p className="px-2 py-2 text-app-caption text-fg-slate-400">
                 {resolvedLabels.create.noTeams}
               </p>
             ) : null}
           </section>
 
           {archiveErrorMessage && !isCollapsed ? (
-            <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-app-caption font-bold leading-5 text-red-100" role="alert">
+            <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-app-caption font-bold leading-5 text-fg-red-100" role="alert">
               {archiveErrorMessage}
             </p>
           ) : null}
@@ -1186,7 +1197,7 @@ export function Sidebar({
             ref={moreButtonRef}
             aria-expanded={isMoreOpen}
             aria-haspopup="true"
-            className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 hover:text-white ${isCollapsed ? 'justify-center px-0' : 'px-2'} ${secondaryItems.some((item) => item.id === activeNavId) || isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
+            className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-fg-slate-100 transition hover:bg-white/10 hover:text-white ${isCollapsed ? 'justify-center px-0' : 'px-2'} ${secondaryItems.some((item) => item.id === activeNavId) || isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
             onClick={() => {
               setIsTeamSwitcherOpen(false)
               if (isCollapsed && !isMoreOpen) {
@@ -1203,12 +1214,12 @@ export function Sidebar({
           </button>
           {isMoreOpen ? (
             <div
-              className="mt-1 space-y-1 rounded-lg border border-white/10 bg-[#21302c] p-1.5 shadow-xl"
+              className="mt-1 space-y-1 rounded-lg border border-white/10 bg-tone-21302c p-1.5 shadow-xl"
             >
               {onShowAllProjects ? (
                 <button
                   aria-current={isAllProjectsActive ? 'page' : undefined}
-                  className={`flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 ${isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
+                  className={`flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-app-body font-medium text-fg-slate-100 transition hover:bg-white/10 ${isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
                   onClick={() => {
                     setIsMoreOpen(false)
                     onShowAllProjects()
@@ -1239,7 +1250,7 @@ export function Sidebar({
                   ref={createButtonRef}
                   aria-controls={isCreateModalOpen ? createDialogId : undefined}
                   aria-haspopup="dialog"
-                  className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
+                  className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-fg-slate-100 transition hover:bg-white/10 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
                   onClick={() => {
                     setIsMoreOpen(false)
                     openCreateModal()
@@ -1253,7 +1264,7 @@ export function Sidebar({
               ) : null}
               {currentTeam && onArchiveTeam ? (
                 <button
-                  className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-300 transition hover:bg-red-500/15 hover:text-red-100 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
+                  className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-fg-slate-300 transition hover:bg-red-500/15 hover:text-fg-red-100 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
                   onClick={() => {
                     setIsMoreOpen(false)
                     requestArchiveTeam(currentTeam.id)
@@ -1391,7 +1402,7 @@ function SidebarQuickAccessManagerModal({
         aria-busy={isBusy}
         aria-labelledby={titleId}
         aria-modal="true"
-        className="w-full max-w-lg rounded-lg border border-[var(--workbench-border)] bg-white p-5 text-[var(--workbench-text)] shadow-xl"
+        className="w-full max-w-lg rounded-lg border border-[var(--workbench-border)] bg-surface p-5 text-[var(--workbench-text)] shadow-xl"
         onKeyDown={(event) => {
           if (event.key === 'Escape' && !isBusy) {
             event.preventDefault()
@@ -1412,7 +1423,7 @@ function SidebarQuickAccessManagerModal({
           </div>
           <button
             aria-label={labels.closeQuickAccessDialog}
-            className="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
+            className="grid h-9 w-9 flex-none place-items-center rounded-lg text-fg-slate-500 transition hover:bg-slate-100 hover:text-fg-slate-800 disabled:opacity-50"
             data-autofocus
             disabled={isBusy}
             onClick={onRequestClose}
@@ -1423,7 +1434,7 @@ function SidebarQuickAccessManagerModal({
         </header>
 
         {projects.length === 0 ? (
-          <p className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+          <p className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-fg-slate-500">
             {labels.quickAccessEmpty}
           </p>
         ) : (
@@ -1434,19 +1445,19 @@ function SidebarQuickAccessManagerModal({
               const isMoveDownDisabled = isBusy || index === projects.length - 1 || !onMove
               return (
                 <li
-                  className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm"
+                  className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-200 bg-surface px-3 py-2 shadow-sm"
                   key={`${project.teamId}\u0000${project.projectId}`}
                 >
                   <ProjectGlyph tone={tone} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-semibold">{project.name}</span>
-                    <span className="block truncate text-xs text-slate-500">{project.teamName}</span>
+                    <span className="block truncate text-xs text-fg-slate-500">{project.teamName}</span>
                   </span>
                   <span className="flex flex-none items-center gap-1">
                     <button
                       aria-label={`${labels.moveQuickAccessUp}: ${project.name}`}
                       aria-disabled={isMoveUpDisabled}
-                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
+                      className="grid h-8 w-8 place-items-center rounded-lg text-fg-slate-500 transition hover:bg-slate-100 hover:text-fg-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
                       onClick={() => {
                         if (!isMoveUpDisabled) void onMove?.(project, 'up')
                       }}
@@ -1457,7 +1468,7 @@ function SidebarQuickAccessManagerModal({
                     <button
                       aria-label={`${labels.moveQuickAccessDown}: ${project.name}`}
                       aria-disabled={isMoveDownDisabled}
-                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
+                      className="grid h-8 w-8 place-items-center rounded-lg text-fg-slate-500 transition hover:bg-slate-100 hover:text-fg-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
                       onClick={() => {
                         if (!isMoveDownDisabled) void onMove?.(project, 'down')
                       }}
@@ -1467,7 +1478,7 @@ function SidebarQuickAccessManagerModal({
                     </button>
                     <button
                       aria-label={`${labels.removeQuickAccess}: ${project.name}`}
-                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-red-50 hover:text-red-700 disabled:opacity-30"
+                      className="grid h-8 w-8 place-items-center rounded-lg text-fg-slate-500 transition hover:bg-red-50 hover:text-fg-red-700 disabled:opacity-30"
                       disabled={isBusy || !onRemove}
                       onClick={() => void onRemove?.(
                         project.projectId,
@@ -1628,7 +1639,7 @@ function SidebarArchiveConfirmationModal({
               : labels.confirmProjectDescription(target.name)}
           </p>
           {errorMessage ? (
-            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
               {errorMessage}
             </p>
           ) : null}
@@ -1855,7 +1866,7 @@ function SidebarRegistrationModal({
               {labels.title}
             </h2>
             <button
-              className="grid h-9 w-9 flex-none place-items-center rounded-lg text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="grid h-9 w-9 flex-none place-items-center rounded-lg text-[var(--workbench-muted)] transition hover:bg-surface hover:text-[var(--workbench-text)] disabled:cursor-not-allowed disabled:opacity-50"
               type="button"
               aria-label={labels.close}
               title={labels.close}
@@ -1911,7 +1922,7 @@ function SidebarRegistrationModal({
                 />
               </label>
               {teamErrorMessage ? (
-                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold leading-5 text-red-700" role="alert">
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold leading-5 text-fg-red-700" role="alert">
                   {teamErrorMessage}
                 </p>
               ) : null}
@@ -1935,7 +1946,7 @@ function SidebarRegistrationModal({
               <label className="grid gap-2 text-[13px] font-semibold text-[var(--workbench-text)]">
                 {labels.team}
                 <select
-                  className="workbench-input h-11 px-3 text-[14px] disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                  className="workbench-input h-11 px-3 text-[14px] disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-fg-slate-500"
                   name="teamId"
                   defaultValue={projectDefaultTeamId}
                   disabled={teams.length === 0}
@@ -1963,10 +1974,10 @@ function SidebarRegistrationModal({
                 <div className="grid grid-cols-4 gap-2">
                   {projectToneOptions.map((tone) => (
                     <label
-                      className={`grid h-10 cursor-pointer place-items-center rounded-lg border transition focus-within:border-[var(--workbench-primary)] focus-within:ring-3 focus-within:ring-[#99d7cf]/35 ${
+                      className={`grid h-10 cursor-pointer place-items-center rounded-lg border transition focus-within:border-[var(--workbench-primary)] focus-within:ring-3 focus-within:ring-tone-99d7cf/35 ${
                         selectedTone === tone
-                          ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] ring-3 ring-[#99d7cf]/35'
-                          : 'border-[var(--workbench-border-strong)] bg-white hover:bg-[var(--workbench-surface-muted)]'
+                          ? 'border-[var(--workbench-primary)] bg-tone-e5f7f4 ring-3 ring-tone-99d7cf/35'
+                          : 'border-[var(--workbench-border-strong)] bg-surface hover:bg-[var(--workbench-surface-muted)]'
                       }`}
                       key={tone}
                       title={labels.toneLabels[tone]}
@@ -1989,12 +2000,12 @@ function SidebarRegistrationModal({
                 </div>
               </fieldset>
               {teams.length === 0 ? (
-                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] font-bold leading-5 text-amber-800">
+                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] font-bold leading-5 text-fg-amber-800">
                   {labels.noTeams}
                 </p>
               ) : null}
               {projectErrorMessage ? (
-                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold leading-5 text-red-700" role="alert">
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold leading-5 text-fg-red-700" role="alert">
                   {projectErrorMessage}
                 </p>
               ) : null}
@@ -2032,8 +2043,8 @@ function CreateModeTab({
     <button
       className={`flex h-10 items-center justify-center gap-2 rounded-md px-3 text-[13px] font-semibold transition disabled:cursor-not-allowed ${
         active
-          ? 'bg-white text-[var(--workbench-text)] shadow-[0_3px_10px_rgba(23,32,29,0.1)]'
-          : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+          ? 'bg-surface text-[var(--workbench-text)] shadow-[0_3px_10px_rgba(23,32,29,0.1)]'
+          : 'text-[var(--workbench-muted)] hover:bg-surface/70 hover:text-[var(--workbench-text)]'
       }`}
       type="button"
       aria-pressed={active}
@@ -2146,7 +2157,7 @@ function NavButton({
   return (
     <button
       className={`group relative flex min-h-10 max-[980px]:min-h-[44px] w-full items-center gap-3 rounded-md text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
-        active ? 'bg-white/10 text-white' : 'text-slate-200'
+        active ? 'bg-white/10 text-white' : 'text-fg-slate-200'
       }`}
       type="button"
       aria-label={collapsed ? accessibleLabel : undefined}
@@ -2157,7 +2168,7 @@ function NavButton({
       {active ? (
         <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-teal-300" aria-hidden="true" />
       ) : null}
-      <Icon className="h-5 w-5 flex-none text-slate-100 transition group-hover:text-white" />
+      <Icon className="h-5 w-5 flex-none text-fg-slate-100 transition group-hover:text-white" />
       <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{label}</span>
       {badge ? (
         <span
@@ -2259,7 +2270,7 @@ function QuickAccessProjectButton({
     <button
       aria-current={active ? 'page' : undefined}
       aria-label={collapsed ? accessibleLabel : undefined}
-      className={`relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${active ? 'bg-white/10 text-white' : 'text-slate-200'}`}
+      className={`relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${active ? 'bg-white/10 text-white' : 'text-fg-slate-200'}`}
       onClick={() => onSelect(project.projectId, project.teamId)}
       title={collapsed ? accessibleLabel : project.teamName}
       type="button"
@@ -2277,7 +2288,7 @@ function QuickAccessProjectButton({
 function TeamAvatar({ name }: { /** Team name used to derive the initial. */ name: string }) {
   const initial = name.trim().charAt(0).toUpperCase() || 'T'
   return (
-    <span aria-hidden="true" className="grid h-6 w-6 flex-none place-items-center rounded-md bg-teal-400/15 text-[11px] font-bold text-teal-100 ring-1 ring-inset ring-teal-300/30">
+    <span aria-hidden="true" className="grid h-6 w-6 flex-none place-items-center rounded-md bg-teal-400/15 text-[11px] font-bold text-fg-teal-100 ring-1 ring-inset ring-teal-300/30">
       {initial}
     </span>
   )
@@ -2321,7 +2332,7 @@ function SubNavButton({
     <button
       aria-label={collapsed ? label : undefined}
       className={`relative flex h-8 w-full items-center gap-3 rounded-lg text-left text-app-meta font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
-        active ? 'bg-white/10 text-white' : 'text-slate-200'
+        active ? 'bg-white/10 text-white' : 'text-fg-slate-200'
       }`}
       type="button"
       aria-current={active ? 'page' : undefined}
@@ -2331,7 +2342,7 @@ function SubNavButton({
       {active ? (
         <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-teal-300" aria-hidden="true" />
       ) : null}
-      <Icon className="h-[18px] w-[18px] flex-none fill-none stroke-current stroke-2 text-slate-100" />
+      <Icon className="h-[18px] w-[18px] flex-none fill-none stroke-current stroke-2 text-fg-slate-100" />
       <span className={collapsed ? 'sr-only' : 'min-w-0 truncate'}>{label}</span>
     </button>
   )
@@ -2552,6 +2563,15 @@ function BuildingIcon({ className }: SidebarIconProps) {
       <path d="M4 21V5l8-2 8 2v16" />
       <path d="M2 21h20" />
       <path d="M8 8h1M15 8h1M8 12h1M15 12h1M8 16h1M15 16h1" />
+    </SvgBase>
+  )
+}
+
+/** Renders the folder icon used for Collection destinations. */
+function CollectionFolderIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
     </SvgBase>
   )
 }

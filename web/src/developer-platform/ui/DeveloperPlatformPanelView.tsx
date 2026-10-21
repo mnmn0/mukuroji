@@ -311,7 +311,7 @@ export function DeveloperPlatformPanel({
         <h2 className="text-xl font-semibold text-[var(--workbench-text)]">
           {labels.title}
         </h2>
-        <p className="text-sm font-semibold text-red-700">
+        <p className="text-sm font-semibold text-fg-red-700">
           {loadErrorMessage ?? labels.loadError}
         </p>
         {onRetry ? (
@@ -604,8 +604,8 @@ export function DeveloperPlatformPanel({
               }
               className={`min-h-10 rounded-md px-3 text-left text-sm font-semibold transition ${
                 activeSection === section
-                  ? 'bg-white text-[var(--workbench-primary)] shadow-sm'
-                  : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+                  ? 'bg-surface text-[var(--workbench-primary-text)] shadow-sm'
+                  : 'text-[var(--workbench-muted)] hover:bg-surface/70 hover:text-[var(--workbench-text)]'
               }`}
               key={section}
               onClick={() => {
@@ -622,7 +622,7 @@ export function DeveloperPlatformPanel({
         <div className="min-w-0 overflow-hidden p-5 max-[600px]:p-3">
           {operationError ? (
             <div
-              className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
+              className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-800"
               role="alert"
             >
               {operationError}

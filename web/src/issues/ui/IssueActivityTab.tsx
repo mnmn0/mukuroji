@@ -150,7 +150,7 @@ export function IssueActivityTab({
       data-testid="issue-activity-tab"
     >
       {deepLinkExhausted ? (
-        <p className="mb-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+        <p className="mb-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-fg-amber-800" role="status">
           {t('collaboration.deepLink.exhausted')}
         </p>
       ) : null}
@@ -165,11 +165,11 @@ export function IssueActivityTab({
 
       {controller.hasActivityLoadError ? (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-red-200 bg-red-50 px-3 py-2.5" role="alert">
-          <p className="text-sm font-semibold text-red-700">
+          <p className="text-sm font-semibold text-fg-red-700">
             {t('collaboration.activity.error')}
           </p>
           <button
-            className="min-h-[44px] text-xs font-bold text-red-700 underline underline-offset-2"
+            className="min-h-[44px] text-xs font-bold text-fg-red-700 underline underline-offset-2"
             onClick={() => void controller.refresh()}
             type="button"
           >
@@ -234,7 +234,7 @@ export function IssueActivityTab({
 
       {controller.hasMoreActivity ? (
         <button
-          className="mt-4 min-h-[44px] text-sm font-semibold text-[var(--workbench-primary)] underline decoration-[#99d7cf] underline-offset-2 disabled:opacity-60"
+          className="mt-4 min-h-[44px] text-sm font-semibold text-[var(--workbench-primary-text)] underline decoration-fg-99d7cf underline-offset-2 disabled:opacity-60"
           disabled={controller.isLoadingMoreActivity}
           onClick={() => void controller.loadMoreActivity()}
           type="button"
@@ -309,7 +309,7 @@ function ActivityEventRow({
             '{event}',
             formatActivityLabel(event, members, t),
           )}
-          className="min-h-[44px] whitespace-nowrap px-1 text-xs font-semibold text-[var(--workbench-primary)]"
+          className="min-h-[44px] whitespace-nowrap px-1 text-xs font-semibold text-[var(--workbench-primary-text)]"
           onClick={() => onPromote(event)}
           type="button"
         >

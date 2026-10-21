@@ -223,7 +223,7 @@ export function TaskViewToolbar({
                 <button
                   aria-expanded={isSwitcherOpen}
                   aria-haspopup="menu"
-                  className="inline-flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)] shadow-sm transition hover:border-[#99d7cf] hover:bg-[#f6fbfa] sm:w-auto sm:max-w-[min(320px,70vw)]"
+                  className="inline-flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-surface px-3 text-sm font-semibold text-[var(--workbench-text)] shadow-sm transition hover:border-tone-99d7cf hover:bg-tone-f6fbfa sm:w-auto sm:max-w-[min(320px,70vw)]"
                   onClick={() => setIsSwitcherOpen((isOpen) => !isOpen)}
                   type="button"
                 >
@@ -317,15 +317,15 @@ export function TaskViewToolbar({
             title={t('taskViews.copyLink')}
             type="button"
           >
-            {copied ? <CheckIcon className="h-4 w-4 text-[var(--workbench-primary)]" />
+            {copied ? <CheckIcon className="h-4 w-4 text-[var(--workbench-primary-text)]" />
               : <CopyIcon className="h-4 w-4" />}
           </button>
           <button
             aria-expanded={isSettingsOpen}
             className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-semibold transition ${
               isSettingsOpen
-                ? 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-                : 'border-[var(--workbench-border-strong)] bg-white text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
+                ? 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+                : 'border-[var(--workbench-border-strong)] bg-surface text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
             }`}
             onClick={() => setIsSettingsOpen((isOpen) => !isOpen)}
             type="button"
@@ -422,17 +422,17 @@ export function TaskViewToolbar({
       </div>
 
       {copied ? (
-        <p className="border-t border-[var(--workbench-border)] px-3 py-2 text-xs font-semibold text-[var(--workbench-primary)]" role="status">
+        <p className="border-t border-[var(--workbench-border)] px-3 py-2 text-xs font-semibold text-[var(--workbench-primary-text)]" role="status">
           {t('taskViews.copied')}
         </p>
       ) : null}
       {errorMessage ? (
-        <p className="border-t border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700" role="alert">
+        <p className="border-t border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-fg-red-700" role="alert">
           {errorMessage}
         </p>
       ) : null}
       {migrationWarnings.length > 0 ? (
-        <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800" role="status">
+        <div className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-fg-amber-800" role="status">
           <p>{t('taskViews.migration')}</p>
           <ul className="mt-1 list-disc pl-4 font-medium">
             {migrationWarnings.map((warning) => <li key={warning}>{warning}</li>)}
@@ -544,7 +544,7 @@ function Popover({ align, button, children, isOpen, onClose }: PopoverProps) {
       {button}
       {isOpen ? (
         <div
-          className={`absolute top-[calc(100%+6px)] z-40 rounded-md border border-[var(--workbench-border-strong)] bg-white shadow-xl ${
+          className={`absolute top-[calc(100%+6px)] z-40 rounded-md border border-[var(--workbench-border-strong)] bg-surface shadow-xl ${
             align === 'right' ? 'right-0' : 'left-0'
           }`}
         >
@@ -575,7 +575,7 @@ function ViewOptionButton({ active, badge, label, meta, onClick }: ViewOptionBut
     <button
       aria-checked={active}
       className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left transition ${
-        active ? 'bg-[#e5f7f4]' : 'hover:bg-[var(--workbench-surface-muted)]'
+        active ? 'bg-tone-e5f7f4' : 'hover:bg-[var(--workbench-surface-muted)]'
       }`}
       onClick={onClick}
       role="menuitemradio"
@@ -590,7 +590,7 @@ function ViewOptionButton({ active, badge, label, meta, onClick }: ViewOptionBut
         <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{label}</span>
         <span className="mt-0.5 block text-[11px] font-medium text-[var(--workbench-muted)]">{meta}</span>
       </span>
-      <span className="flex-none text-[var(--workbench-primary)]">{badge}</span>
+      <span className="flex-none text-[var(--workbench-primary-text)]">{badge}</span>
     </button>
   )
 }
@@ -631,9 +631,9 @@ export function TaskViewPreferenceButton({
       aria-checked={active}
       className={`flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
         danger
-          ? 'text-red-700 hover:bg-red-50'
+          ? 'text-fg-red-700 hover:bg-red-50'
           : isActive
-            ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+            ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
             : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
       }`}
       disabled={disabled}
@@ -711,7 +711,7 @@ export function TaskViewSettingsPanel({
     }
   }, [sortFocusRequestId])
   return (
-    <div className="grid gap-4 border-t border-[var(--workbench-border)] bg-[#fbfdfd] px-3 py-3 sm:grid-cols-[minmax(150px,0.7fr)_minmax(150px,0.7fr)_minmax(220px,1.2fr)]" data-testid="task-view-settings">
+    <div className="grid gap-4 border-t border-[var(--workbench-border)] bg-tone-fbfdfd px-3 py-3 sm:grid-cols-[minmax(150px,0.7fr)_minmax(150px,0.7fr)_minmax(220px,1.2fr)]" data-testid="task-view-settings">
       {supportsLayoutPresentation ? (
         <fieldset className="grid content-start gap-1.5">
           <legend className="text-xs font-semibold text-[var(--workbench-muted)]">
@@ -798,7 +798,7 @@ export function TaskViewSettingsPanel({
       ) : null}
       {supportsLayoutPresentation ? <fieldset className="grid content-start gap-1.5">
         <legend className="text-xs font-semibold text-[var(--workbench-muted)]">{t('taskViews.density')}</legend>
-        <div className="inline-flex w-fit rounded-md border border-[var(--workbench-border-strong)] bg-white p-0.5">
+        <div className="inline-flex w-fit rounded-md border border-[var(--workbench-border-strong)] bg-surface p-0.5">
           {taskViewDensities.map((density) => (
             <button
               aria-pressed={settings.density === density}
@@ -826,7 +826,7 @@ export function TaskViewSettingsPanel({
             const position = String(index + 1)
             return (
               <div
-                className="grid gap-2 rounded-md border border-[var(--workbench-border)] bg-white p-2 sm:grid-cols-[minmax(150px,1fr)_minmax(120px,0.55fr)_auto]"
+                className="grid gap-2 rounded-md border border-[var(--workbench-border)] bg-surface p-2 sm:grid-cols-[minmax(150px,1fr)_minmax(120px,0.55fr)_auto]"
                 data-testid="task-view-sort-rule"
                 key={index}
               >
@@ -875,7 +875,7 @@ export function TaskViewSettingsPanel({
                 </label>
                 <button
                   aria-label={t('taskViews.sort.remove').replace('{index}', position)}
-                  className="self-end rounded-md px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-50"
+                  className="self-end rounded-md px-3 py-2 text-xs font-semibold text-fg-red-700 transition hover:bg-red-50"
                   onClick={() => {
                     const nextSortRules = sortRules.filter(
                       (_, ruleIndex) => ruleIndex !== index,
@@ -902,7 +902,7 @@ export function TaskViewSettingsPanel({
           })}
           {nextSortOption ? (
             <button
-              className="w-fit rounded-md border border-dashed border-[var(--workbench-border-strong)] bg-white px-3 py-2 text-xs font-semibold text-[var(--workbench-primary)] transition hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
+              className="w-fit rounded-md border border-dashed border-[var(--workbench-border-strong)] bg-surface px-3 py-2 text-xs font-semibold text-[var(--workbench-primary-text)] transition hover:border-tone-99d7cf hover:bg-tone-e5f7f4"
               onClick={() => {
                 pendingSortFocusRef.current = `field:${sortRules.length}`
                 setSortFocusRequestId((currentId) => currentId + 1)
@@ -931,8 +931,8 @@ export function TaskViewSettingsPanel({
                 disabled={required}
                 className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition ${
                   selected
-                    ? 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-                    : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'
+                    ? 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+                    : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'
                 }`}
                 key={option.id}
                 onClick={() => {
@@ -960,7 +960,7 @@ export function TaskViewSettingsPanel({
               return (
                 <div
                   aria-label={t('taskViews.column.settings').replace('{column}', label)}
-                  className="grid gap-2 rounded-md border border-[var(--workbench-border)] bg-white p-2 sm:grid-cols-[minmax(130px,1fr)_auto_minmax(104px,0.6fr)_minmax(112px,0.7fr)] sm:items-end"
+                  className="grid gap-2 rounded-md border border-[var(--workbench-border)] bg-surface p-2 sm:grid-cols-[minmax(130px,1fr)_auto_minmax(104px,0.6fr)_minmax(112px,0.7fr)] sm:items-end"
                   data-testid="task-view-column-setting"
                   key={column.field}
                   role="group"
@@ -1226,7 +1226,7 @@ function SaveViewSheet({
       <div
         aria-labelledby="task-view-save-title"
         aria-modal="true"
-        className="h-full w-[min(440px,100vw)] overflow-auto border-l border-[var(--workbench-border-strong)] bg-white p-5 shadow-2xl max-[520px]:border-l-0"
+        className="h-full w-[min(440px,100vw)] overflow-auto border-l border-[var(--workbench-border-strong)] bg-surface p-5 shadow-2xl max-[520px]:border-l-0"
         ref={dialogRef}
         role="dialog"
         tabIndex={-1}
@@ -1261,7 +1261,7 @@ function SaveViewSheet({
           }}
         >
           {errorMessage ? (
-            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700" role="alert">
+            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-fg-red-700" role="alert">
               {errorMessage}
             </p>
           ) : null}

@@ -29,6 +29,7 @@ import {
   type BulkOperation,
   type CreateAutomationRuleInput,
   type CreateAutomationInboundWebhookEndpointInput,
+  type AutomationInboundWebhookTriageRouting,
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
   type RecurringWork,
@@ -38,6 +39,7 @@ import {
   type UpdateRecurringWorkInput,
 } from '@mukuroji/contracts'
 import type {
+  AutomationAcceptedTriageWebhookDelivery,
   AutomationExecutionClaimToken,
   AutomationExecutionDefinitionGuard,
   AutomationExecutionQuery,
@@ -139,6 +141,33 @@ export {
   AUTOMATION_SCHEDULE_SHARD_COUNT,
   createAutomationScheduleShard,
 } from '../../application/schedule-shard'
+/** Entry type of the endpoint row of an Automation-purpose endpoint. */
+const INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE = 'inbound-webhook'
+
+/**
+ * Entry type of the endpoint row of a Triage-purpose endpoint.
+ *
+ * Servers from before endpoint purposes get, list, and fence only `inbound-webhook` endpoint
+ * rows and ignore `purpose`. A separate type keeps a Triage endpoint out of their management
+ * list and Automation rule targets after a rollback.
+ */
+const INBOUND_WEBHOOK_TRIAGE_ENDPOINT_ENTRY_TYPE = 'inbound-webhook-triage'
+/** Entry type of the public lookup row of an Automation-purpose endpoint. */
+const INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE = 'inbound-webhook-lookup'
+
+/**
+ * Entry type of the public lookup row of a Triage-purpose endpoint.
+ *
+ * Servers from before endpoint purposes resolve only the Automation lookup type and ignore
+ * `purpose`. A separate type makes them treat a Triage endpoint as unknown after a rollback,
+ * instead of recording its payload as an Automation event.
+ */
+const INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE = 'inbound-webhook-triage-lookup'
+/** Entry type of the marker that keeps an accepted Triage delivery resolvable after revocation. */
+const INBOUND_WEBHOOK_TRIAGE_DELIVERY_ENTRY_TYPE = 'inbound-webhook-triage-delivery'
+/** Number of items the create reservation writes before any reference fence. */
+const INBOUND_WEBHOOK_CREATE_RESERVATION_ITEM_COUNT = 3
+
 /** Inbound webhook plaintext secret を同じ key で回収できる時間です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_SECRET_RECOVERY_MS = 24 * 60 * 60_000
 /** Revoke 後の late secret write を再削除する間隔です。 */
@@ -888,13 +917,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
 
   /** Workspace の inbound webhook endpoints を secret metadata なしで返します。 */
   async listInboundWebhookEndpoints(workspaceId: string) {
-    const values = await this.listCurrent<Record<string, unknown>>(
+    const items = await this.listCurrentItems(
       workspaceId,
       'INBOUND_WEBHOOK#',
-      'inbound-webhook',
+      isInboundWebhookEndpointEntryType,
     )
-    return values
-      .map(readInboundWebhookEndpointRecord)
+    return items
+      .map(readInboundWebhookEndpointItem)
       .map(toAutomationInboundWebhookEndpoint)
   }
 
@@ -916,9 +945,10 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       },
       ConsistentRead: true,
     }))
+    const lookupEntryType: unknown = lookup.Item?.entryType
     if (
-      lookup.Item?.entryType !== 'inbound-webhook-lookup' ||
-      lookup.Item.opaqueEndpointId !== normalizedOpaqueId ||
+      (lookupEntryType !== INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE && lookupEntryType !== INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE) ||
+      lookup.Item?.opaqueEndpointId !== normalizedOpaqueId ||
       typeof lookup.Item.workspaceId !== 'string' ||
       typeof lookup.Item.endpointId !== 'string'
     ) {
@@ -928,16 +958,32 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       lookup.Item.workspaceId,
       lookup.Item.endpointId,
     )
-    return endpoint?.opaqueEndpointId === normalizedOpaqueId ? endpoint : undefined
+    // The lookup kind must match the endpoint purpose, so neither can be swapped for the other.
+    return endpoint?.opaqueEndpointId === normalizedOpaqueId &&
+      inboundWebhookLookupEntryType(endpoint.purpose) === lookupEntryType
+      ? endpoint
+      : undefined
   }
 
-  /** Create operation と provisioning endpoint を atomic に予約します。 */
+  /**
+   * Create operation と provisioning endpoint を atomic に予約します。
+   * @param workspaceId Workspace that owns the endpoint.
+   * @param actorId Actor requesting the endpoint, scoped into the idempotency identity.
+   * @param input Endpoint creation input.
+   * @param idempotencyKey Client idempotency key for the create operation.
+   * @param endpointBaseUrl Public base URL used to build the endpoint URL.
+   * @param validateNewEndpoint Optional validator run only for a new reservation; the
+   *   ConditionCheck items it returns commit with the reservation as reference fences.
+   * @returns The reserved provisioning endpoint and operation, or the stored replay for a
+   *   repeated request.
+   */
   async reserveCreateInboundWebhookEndpoint(
     workspaceId: string,
     actorId: string,
     input: CreateAutomationInboundWebhookEndpointInput,
     idempotencyKey: string,
     endpointBaseUrl: string,
+    validateNewEndpoint?: () => Promise<readonly DynamoDbAutomationTransactionItem[] | void>,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
@@ -958,6 +1004,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (existing) {
       return await this.readInboundWebhookProvisioningReplay(existing, identity.requestFingerprint)
     }
+    // The validator's condition checks commit with the reservation, so a reference it
+    // validated, such as the Triage routing Team, cannot be archived before the endpoint exists.
+    const referenceFences = [...(await validateNewEndpoint?.() ?? [])]
+    if (!referenceFences.every(isDynamoDbConditionCheckTransactionItem)) {
+      throw invalidInput('Inbound webhook endpoint reference fence is invalid.')
+    }
 
     const endpointId = `webhook-${randomUUID()}`
     const opaqueEndpointId = randomBytes(32).toString('base64url')
@@ -974,6 +1026,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       workspaceId: normalizedWorkspaceId,
       opaqueEndpointId,
       name: normalized.name,
+      ...createInboundWebhookPurposeFields(normalized),
       status: 'provisioning',
       version: 1,
       secretGeneration,
@@ -1022,7 +1075,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               Item: {
                 scopeKey: inboundWebhookLookupScopeKey(opaqueEndpointId),
                 recordKey: 'ENDPOINT',
-                entryType: 'inbound-webhook-lookup',
+                entryType: inboundWebhookLookupEntryType(endpoint.purpose),
                 opaqueEndpointId,
                 workspaceId: normalizedWorkspaceId,
                 endpointId,
@@ -1038,6 +1091,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
           },
+          ...referenceFences,
         ],
       }))
       return { endpoint, operation }
@@ -1047,8 +1101,63 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         normalizedWorkspaceId,
         identity.operationId,
       )
-      if (!replay) throw idempotencyConflict()
-      return await this.readInboundWebhookProvisioningReplay(replay, identity.requestFingerprint)
+      if (replay) {
+        return await this.readInboundWebhookProvisioningReplay(replay, identity.requestFingerprint)
+      }
+      if (hasConditionalCheckFailureFrom(error, INBOUND_WEBHOOK_CREATE_RESERVATION_ITEM_COUNT)) {
+        throw inboundWebhookReferenceUnavailable()
+      }
+      throw idempotencyConflict()
+    }
+  }
+
+  /**
+   * Resolves a Triage delivery whose receipt already committed, whatever the endpoint's status.
+   *
+   * The marker is written in the same transaction as the delivery receipt and survives
+   * revocation, so only a delivery accepted while the endpoint was active resolves here.
+   *
+   * @param opaqueEndpointId - Public endpoint identifier from the request path.
+   * @param idempotencyKey - Sender idempotency key of the delivery.
+   * @returns The accepted delivery, or undefined when no receipt was committed for it.
+   */
+  async resolveAcceptedTriageWebhookDelivery(
+    opaqueEndpointId: string,
+    idempotencyKey: string,
+  ): Promise<AutomationAcceptedTriageWebhookDelivery | undefined> {
+    await this.ensureTable()
+    const normalizedOpaqueId = requireInboundWebhookOpaqueId(opaqueEndpointId)
+    const idempotencyKeyHash = hashCanonicalText(
+      requireBoundedText(idempotencyKey, 'Inbound webhook idempotency key', 256),
+    )
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        scopeKey: inboundWebhookLookupScopeKey(normalizedOpaqueId),
+        recordKey: inboundWebhookTriageDeliveryKey(idempotencyKeyHash),
+      },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (item?.entryType !== INBOUND_WEBHOOK_TRIAGE_DELIVERY_ENTRY_TYPE) return undefined
+    if (
+      typeof item.workspaceId !== 'string' ||
+      typeof item.endpointId !== 'string' ||
+      typeof item.bodyFingerprint !== 'string' ||
+      typeof item.eventId !== 'string' ||
+      typeof item.createdAt !== 'string'
+    ) {
+      throw storedInvalid('inbound webhook Triage delivery')
+    }
+    const endpoint = await this.getInboundWebhookEndpointRecord(item.workspaceId, item.endpointId)
+    if (endpoint?.opaqueEndpointId !== normalizedOpaqueId || endpoint.purpose !== 'triage') {
+      return undefined
+    }
+    return {
+      endpoint,
+      eventId: item.eventId,
+      bodyFingerprint: item.bodyFingerprint,
+      acceptedAt: item.createdAt,
     }
   }
 
@@ -1465,7 +1574,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         signatureFingerprint,
         input.signatureTimestamp,
       )
-      return { eventId: existing.eventId, replayed: true }
+      return {
+        eventId: existing.eventId,
+        replayed: true,
+        ...(existing.acceptedAt ? { acceptedAt: existing.acceptedAt } : {}),
+      }
     }
 
     const now = new Date().toISOString()
@@ -1505,10 +1618,27 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
           },
+          // Revocation deletes the opaque lookup, so a Triage receipt is also indexed under the
+          // opaque ID; a retry can then finish the accepted delivery's entry after revocation.
+          ...(endpoint.purpose === 'triage'
+            ? [{
+              Put: {
+                TableName: this.tableName,
+                Item: createInboundWebhookTriageDeliveryStorageItem(
+                  endpoint,
+                  idempotencyKeyHash,
+                  bodyFingerprint,
+                  eventId,
+                  now,
+                ),
+                ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+              },
+            }]
+            : []),
           input.auditMutation,
         ],
       }))
-      return { eventId, replayed: false }
+      return { eventId, replayed: false, acceptedAt: now }
     } catch (error) {
       if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
       const replay = await this.getInboundWebhookDeliveryReceipt(endpoint.workspaceId, deliveryKey)
@@ -1520,7 +1650,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
           signatureFingerprint,
           input.signatureTimestamp,
         )
-        return { eventId: replay.eventId, replayed: true }
+        return {
+          eventId: replay.eventId,
+          replayed: true,
+          ...(replay.acceptedAt ? { acceptedAt: replay.acceptedAt } : {}),
+        }
       }
       const signature = await this.getInboundWebhookSignatureReceipt(
         endpoint.workspaceId,
@@ -2316,13 +2450,23 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return result.Item?.entryType === 'bulk-operation' ? readBulkOperation(result.Item) : undefined
   }
 
+  /**
+   * Reads an endpoint row of either purpose.
+   *
+   * @param workspaceId - Workspace that owns the endpoint.
+   * @param endpointId - Endpoint identifier.
+   * @returns The endpoint, or undefined when no endpoint row exists.
+   */
   private async getInboundWebhookEndpointRecord(workspaceId: string, endpointId: string) {
-    const value = await this.getCurrent<Record<string, unknown>>(
-      workspaceId,
-      inboundWebhookEndpointKey(endpointId),
-      'inbound-webhook',
-    )
-    return value ? readInboundWebhookEndpointRecord(value) : undefined
+    await this.ensureTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { scopeKey: automationScopeKey(workspaceId), recordKey: inboundWebhookEndpointKey(endpointId) },
+      ConsistentRead: true,
+    }))
+    return response.Item && isInboundWebhookEndpointEntryType(response.Item.entryType)
+      ? readInboundWebhookEndpointItem(response.Item)
+      : undefined
   }
 
   private async requireInboundWebhookEndpointRecord(workspaceId: string, endpointId: string) {
@@ -2415,6 +2559,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     }
   }
 
+  /**
+   * Reads a stored inbound webhook delivery receipt with a consistent read.
+   *
+   * @param workspaceId - Workspace that owns the receipt.
+   * @param recordKey - Storage record key of the delivery receipt.
+   * @returns The receipt fields, or undefined when no delivery receipt is stored.
+   */
   private async getInboundWebhookDeliveryReceipt(workspaceId: string, recordKey: string) {
     await this.ensureTable()
     const response = await this.documentClient.send(new GetCommand({
@@ -2432,6 +2583,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return {
       bodyFingerprint: response.Item.bodyFingerprint,
       eventId: response.Item.eventId,
+      ...(typeof response.Item.createdAt === 'string' ? { acceptedAt: response.Item.createdAt } : {}),
     }
   }
 
@@ -2604,8 +2756,25 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
 
   /** Prefix に一致する current rows を返します。 */
   private async listCurrent<T>(workspaceId: string, prefix: string, entryType: string) {
+    const items = await this.listCurrentItems(workspaceId, prefix, (value) => value === entryType)
+    return items.map((item) => stripStorage<T>(item))
+  }
+
+  /**
+   * Returns the stored rows under a record key prefix whose entry type matches.
+   *
+   * @param workspaceId - Workspace whose rows are listed.
+   * @param prefix - Record key prefix.
+   * @param matchesEntryType - Accepts the entry types to keep.
+   * @returns The matching rows, with their storage attributes.
+   */
+  private async listCurrentItems(
+    workspaceId: string,
+    prefix: string,
+    matchesEntryType: (entryType: unknown) => boolean,
+  ) {
     await this.ensureTable()
-    const items: T[] = []
+    const items: Record<string, unknown>[] = []
     const seenCursors = new Set<string>()
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
@@ -2617,9 +2786,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         ExpressionAttributeValues: { ':scopeKey': automationScopeKey(workspaceId), ':prefix': prefix },
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      items.push(...(response.Items ?? [])
-        .filter((item) => item.entryType === entryType)
-        .map((item) => stripStorage<T>(item)))
+      items.push(...(response.Items ?? []).filter((item) => matchesEntryType(item.entryType)))
       exclusiveStartKey = response.LastEvaluatedKey
       if (exclusiveStartKey) {
         const cursorFingerprint = canonicalString(exclusiveStartKey)
@@ -2730,13 +2897,19 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return value
   }
 
+  /**
+   * Ensures a webhook trigger references an active Automation inbound webhook endpoint.
+   *
+   * @param workspaceId - Workspace that owns the endpoint.
+   * @param trigger - Automation trigger to check; non-webhook triggers are ignored.
+   */
   private async assertActiveInboundWebhookTrigger(
     workspaceId: string,
     trigger: AutomationTrigger,
   ) {
     if (trigger.type !== 'webhook') return
     const endpoint = await this.getInboundWebhookEndpointRecord(workspaceId, trigger.webhookId)
-    if (endpoint?.status !== 'active') {
+    if (endpoint?.status !== 'active' || endpoint.purpose !== 'automation') {
       throw new AutomationError(
         'conflict',
         'AutomationInboundWebhookTriggerUnavailable',
@@ -3122,6 +3295,46 @@ function inboundWebhookLookupScopeKey(opaqueEndpointId: string) {
   return `INBOUND_WEBHOOK_LOOKUP#${requireInboundWebhookOpaqueId(opaqueEndpointId)}`
 }
 
+/**
+ * Builds the sort key of a Triage delivery marker under an endpoint's opaque lookup partition.
+ *
+ * @param idempotencyKeyHash - SHA-256 of the sender idempotency key.
+ * @returns The marker sort key.
+ */
+function inboundWebhookTriageDeliveryKey(idempotencyKeyHash: string) {
+  return `DELIVERY#${requireSha256Fingerprint(idempotencyKeyHash, 'Inbound webhook idempotency fingerprint')}`
+}
+
+/**
+ * Builds the Triage delivery marker committed with a Triage-purpose delivery receipt.
+ *
+ * @param endpoint - Active endpoint that accepted the delivery.
+ * @param idempotencyKeyHash - SHA-256 of the sender idempotency key.
+ * @param bodyFingerprint - SHA-256 of the accepted raw body.
+ * @param eventId - Audit outbox event identifier of the delivery.
+ * @param now - ISO time the delivery was accepted.
+ * @returns The storage item, expiring with the delivery receipt.
+ */
+function createInboundWebhookTriageDeliveryStorageItem(
+  endpoint: AutomationInboundWebhookEndpointRecord,
+  idempotencyKeyHash: string,
+  bodyFingerprint: string,
+  eventId: string,
+  now: string,
+) {
+  return {
+    scopeKey: inboundWebhookLookupScopeKey(endpoint.opaqueEndpointId),
+    recordKey: inboundWebhookTriageDeliveryKey(idempotencyKeyHash),
+    entryType: INBOUND_WEBHOOK_TRIAGE_DELIVERY_ENTRY_TYPE,
+    workspaceId: endpoint.workspaceId,
+    endpointId: endpoint.id,
+    bodyFingerprint,
+    eventId,
+    createdAt: now,
+    expiresAt: Math.floor(Date.parse(now) / 1_000) + AUTOMATION_INBOUND_WEBHOOK_DELIVERY_RETENTION_SECONDS,
+  }
+}
+
 function inboundWebhookOperationKey(operationId: string) {
   return `INBOUND_WEBHOOK_OPERATION#${encodeKey(operationId)}`
 }
@@ -3205,11 +3418,17 @@ function createInboundWebhookEndpointUrl(endpointBaseUrl: string, opaqueEndpoint
   return endpointUrl.toString()
 }
 
+/**
+ * Builds the DynamoDB item that stores an inbound webhook endpoint.
+ *
+ * @param endpoint - Endpoint record to persist.
+ * @returns The storage item with scope, record key, and purpose-specific entry type.
+ */
 function createInboundWebhookEndpointStorageItem(endpoint: AutomationInboundWebhookEndpointRecord) {
   return {
     scopeKey: automationScopeKey(endpoint.workspaceId),
     recordKey: inboundWebhookEndpointKey(endpoint.id),
-    entryType: 'inbound-webhook',
+    entryType: inboundWebhookEndpointEntryType(endpoint.purpose),
     ...endpoint,
   }
 }
@@ -3276,6 +3495,13 @@ function createInboundWebhookSignatureReceiptStorageItem(
   }
 }
 
+/**
+ * Builds a condition check that the endpoint is still active with the same version, revision, and secret.
+ *
+ * @param tableName - Automation table name.
+ * @param endpoint - Endpoint record whose current state must still hold.
+ * @returns The condition check input.
+ */
 function createInboundWebhookActiveConditionCheck(
   tableName: string,
   endpoint: AutomationInboundWebhookEndpointRecord,
@@ -3300,7 +3526,7 @@ function createInboundWebhookActiveConditionCheck(
     },
     ExpressionAttributeValues: {
       ':active': 'active',
-      ':entryType': 'inbound-webhook',
+      ':entryType': inboundWebhookEndpointEntryType(endpoint.purpose),
       ':id': endpoint.id,
       ':opaqueEndpointId': endpoint.opaqueEndpointId,
       ':revision': endpoint.revision,
@@ -3311,6 +3537,13 @@ function createInboundWebhookActiveConditionCheck(
   }
 }
 
+/**
+ * Builds a transaction condition check that a rule's webhook endpoint is still active.
+ *
+ * @param tableName - Automation table name.
+ * @param endpoint - Endpoint record referenced by the rule trigger.
+ * @returns The transaction item wrapping the condition check.
+ */
 function createInboundWebhookRuleActiveConditionCheck(
   tableName: string,
   endpoint: AutomationInboundWebhookEndpointRecord,
@@ -3331,7 +3564,8 @@ function createInboundWebhookRuleActiveConditionCheck(
       },
       ExpressionAttributeValues: {
         ':active': 'active',
-        ':entryType': 'inbound-webhook',
+        // Rules target only Automation endpoints, so the fence also rejects a Triage endpoint row.
+        ':entryType': INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE,
         ':id': endpoint.id,
       },
     },
@@ -3497,8 +3731,18 @@ function readTemplateApplication(item: Record<string, unknown>) {
   return value
 }
 
+/**
+ * Parses and validates a stored inbound webhook endpoint item.
+ *
+ * @param item - Raw DynamoDB item.
+ * @returns The validated endpoint record.
+ */
 function readInboundWebhookEndpointRecord(item: Record<string, unknown>) {
-  const value = stripStorage<AutomationInboundWebhookEndpointRecord>(item)
+  // Endpoints created before purposes existed deliver to Automation.
+  const value = stripStorage<AutomationInboundWebhookEndpointRecord>({ purpose: 'automation', ...item })
+  const purposeIsValid = value.purpose === 'automation'
+    ? value.triageRouting === undefined
+    : value.purpose === 'triage' && isNonEmptyText(value.triageRouting?.teamId)
   const statusIsValid = value.status === 'provisioning' || value.status === 'active' ||
     value.status === 'paused' || value.status === 'revoked'
   const provisioningIsValid = value.status === 'provisioning'
@@ -3522,11 +3766,26 @@ function readInboundWebhookEndpointRecord(item: Record<string, unknown>) {
     !isIsoTimestamp(value.updatedAt) ||
     (value.rotatedAt !== undefined && !isIsoTimestamp(value.rotatedAt)) ||
     (value.revokedAt !== undefined && !isIsoTimestamp(value.revokedAt)) ||
-    !provisioningIsValid
+    !provisioningIsValid ||
+    !purposeIsValid
   ) {
     throw storedInvalid('inbound webhook endpoint')
   }
   return value
+}
+
+/**
+ * Decodes a stored endpoint row and checks that its entry type matches its purpose.
+ *
+ * @param item - Stored endpoint row, including its storage attributes.
+ * @returns The endpoint record.
+ */
+function readInboundWebhookEndpointItem(item: Record<string, unknown>) {
+  const endpoint = readInboundWebhookEndpointRecord(item)
+  if (item.entryType !== inboundWebhookEndpointEntryType(endpoint.purpose)) {
+    throw storedInvalid('inbound webhook endpoint')
+  }
+  return endpoint
 }
 
 function readInboundWebhookProvisioningOperation(item: Record<string, unknown>) {
@@ -3683,6 +3942,19 @@ function inboundWebhookLifecycleConflict() {
   )
 }
 
+/**
+ * Reports that a reference validated for a new endpoint changed before the endpoint committed.
+ *
+ * @returns The conflict error.
+ */
+function inboundWebhookReferenceUnavailable() {
+  return new AutomationError(
+    'conflict',
+    'AutomationInboundWebhookReferenceUnavailable',
+    'A reference of the inbound webhook endpoint changed before it was created.',
+  )
+}
+
 function inboundWebhookIdempotencyConflict() {
   return new AutomationError(
     'conflict',
@@ -3811,6 +4083,41 @@ function isDynamoDbAuditPutTransactionItem(
     Object.keys(put.Item).length > 0
 }
 
+/**
+ * Checks whether an unknown value is a DynamoDB ConditionCheck transaction item.
+ *
+ * @param value - Candidate transaction item.
+ * @returns Whether the value holds only a ConditionCheck with a table, key, and condition.
+ */
+function isDynamoDbConditionCheckTransactionItem(
+  value: unknown,
+): value is DynamoDbAutomationTransactionItem {
+  if (!isRecord(value)) return false
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== 'ConditionCheck') return false
+  const check = value.ConditionCheck
+  return isRecord(check) &&
+    typeof check.TableName === 'string' &&
+    check.TableName.trim().length > 0 &&
+    isRecord(check.Key) &&
+    typeof check.ConditionExpression === 'string' &&
+    check.ConditionExpression.trim().length > 0
+}
+
+/**
+ * Checks whether a cancelled transaction failed a condition at or after an item index.
+ *
+ * @param error - Error thrown by the transaction.
+ * @param startIndex - First transaction item index to inspect.
+ * @returns Whether any inspected item reported `ConditionalCheckFailed`.
+ */
+function hasConditionalCheckFailureFrom(error: unknown, startIndex: number) {
+  if (!isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  return error.CancellationReasons.slice(startIndex).some((reason) =>
+    isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
+  )
+}
+
 function isNamedError(error: unknown, name: string) {
   return isRecord(error) && (error.name === name || error.code === name)
 }
@@ -3854,4 +4161,48 @@ function hasAutomationKeySchema(
       key.AttributeName === attributeName && key.KeyType === keyType
     )
   )
+}
+
+/**
+ * Builds the purpose fields of a new endpoint, keeping Team routing only for Triage.
+ *
+ * @param input - Validated create input.
+ * @returns The endpoint's purpose and, for Triage, its fixed Team routing.
+ */
+function createInboundWebhookPurposeFields(
+  input: CreateAutomationInboundWebhookEndpointInput,
+): { purpose: 'automation' } | { purpose: 'triage'; triageRouting: AutomationInboundWebhookTriageRouting } {
+  return input.purpose === 'triage'
+    ? { purpose: 'triage', triageRouting: input.triageRouting }
+    : { purpose: 'automation' }
+}
+
+/**
+ * Chooses the lookup row entry type for an endpoint purpose.
+ *
+ * @param purpose - Endpoint purpose.
+ * @returns The lookup entry type that servers resolve for that purpose.
+ */
+function inboundWebhookLookupEntryType(purpose: 'automation' | 'triage'): string {
+  return purpose === 'triage' ? INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE : INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE
+}
+
+/**
+ * Chooses the endpoint row entry type for an endpoint purpose.
+ *
+ * @param purpose - Endpoint purpose.
+ * @returns The endpoint row entry type that stores that purpose.
+ */
+function inboundWebhookEndpointEntryType(purpose: 'automation' | 'triage'): string {
+  return purpose === 'triage' ? INBOUND_WEBHOOK_TRIAGE_ENDPOINT_ENTRY_TYPE : INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE
+}
+
+/**
+ * Tells whether a stored entry type is an endpoint row of either purpose.
+ *
+ * @param entryType - Stored entry type.
+ * @returns True for an Automation or Triage endpoint row.
+ */
+function isInboundWebhookEndpointEntryType(entryType: unknown): boolean {
+  return entryType === INBOUND_WEBHOOK_ENDPOINT_ENTRY_TYPE || entryType === INBOUND_WEBHOOK_TRIAGE_ENDPOINT_ENTRY_TYPE
 }

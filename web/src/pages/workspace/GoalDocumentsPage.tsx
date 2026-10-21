@@ -41,7 +41,7 @@ export function GoalDocumentsPage() {
 
   return (
     <>
-      <header className="flex min-h-16 items-center justify-between gap-4 border-b border-[var(--workbench-border)] bg-white px-5">
+      <header className="flex min-h-16 items-center justify-between gap-4 border-b border-[var(--workbench-border)] bg-surface px-5">
         <div className="flex min-w-0 items-center gap-3">
           <MobileSidebarButton
             label={t('sidebar.mobileOpen')}

@@ -21,6 +21,7 @@ import {
 } from '../../work-items/model/workItemFilters'
 import { createWorkItemTypeWorkflowStatusKey } from '../../work-items/model/workItemDisplay'
 import type { TaskViewPresentationSettings } from './taskViewPresentation'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const defaultTaskViewColumns = [
   'title',
@@ -1047,7 +1048,3 @@ function normalizeJsonValue(value: unknown): unknown {
   )
 }
 
-/** Narrows an unknown value to a non-array object record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}

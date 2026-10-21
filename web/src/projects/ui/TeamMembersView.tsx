@@ -122,7 +122,7 @@ export function TeamMembersView({
             <label className="grid gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
               {t('workspace.members.searchLabel')}
               <input
-                className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case tracking-normal text-[var(--workbench-text)] outline-none transition placeholder:text-slate-400 focus:border-[#6fbfb4] focus:ring-4 focus:ring-[#dff5f1]"
+                className="min-h-11 rounded-lg border border-slate-200 bg-surface px-3 text-sm font-semibold normal-case tracking-normal text-[var(--workbench-text)] outline-none transition placeholder:text-fg-slate-400 focus:border-tone-6fbfb4 focus:ring-4 focus:ring-tone-dff5f1"
                 data-testid="team-members-search"
                 placeholder={t('workspace.members.searchPlaceholder')}
                 type="search"
@@ -133,7 +133,7 @@ export function TeamMembersView({
             <label className="grid gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
               {t('workspace.members.roleFilter')}
               <select
-                className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case tracking-normal text-[var(--workbench-text)] outline-none transition focus:border-[#6fbfb4] focus:ring-4 focus:ring-[#dff5f1]"
+                className="min-h-11 rounded-lg border border-slate-200 bg-surface px-3 text-sm font-semibold normal-case tracking-normal text-[var(--workbench-text)] outline-none transition focus:border-tone-6fbfb4 focus:ring-4 focus:ring-tone-dff5f1"
                 data-testid="team-members-role-filter"
                 value={roleFilter}
                 onChange={(event) => {
@@ -164,7 +164,7 @@ export function TeamMembersView({
             >
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-semibold text-[#0d1833]">{member.name}</p>
+                  <p className="text-sm font-semibold text-fg-0d1833">{member.name}</p>
                   <span className="workbench-badge">
                     {member.role
                       ? t(`workspace.permissions.role.${member.role}`)
@@ -177,7 +177,7 @@ export function TeamMembersView({
                 <div className="mt-3 flex flex-wrap gap-2">
                   {member.projectAccess.map((project) => (
                     <button
-                      className="rounded-full border border-[#99d7cf] bg-[#e5f7f4] px-3 py-1 text-xs font-semibold text-[var(--workbench-primary)] transition hover:bg-[#d6f0ec]"
+                      className="rounded-full border border-tone-99d7cf bg-tone-e5f7f4 px-3 py-1 text-xs font-semibold text-[var(--workbench-primary-text)] transition hover:bg-tone-d6f0ec"
                       data-testid={`team-member-project-${createWorkspaceTaskTestToken(member.id)}-${createWorkspaceTaskTestToken(project.projectId)}`}
                       key={project.projectId}
                       type="button"
@@ -199,10 +199,10 @@ export function TeamMembersView({
               </div>
               <div className="grid gap-2">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[#69758a]">
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em] text-fg-69758a">
                     {t('workspace.members.metric.open')}
                   </p>
-                  <p className="text-sm font-semibold text-[#0d1833]">
+                  <p className="text-sm font-semibold text-fg-0d1833">
                     {member.openPercent}%
                   </p>
                 </div>
@@ -216,7 +216,7 @@ export function TeamMembersView({
                     : t('workspace.members.noAssignedTasks')}
                 </p>
               </div>
-              <div className="grid gap-2 text-sm font-bold leading-6 text-[#526381]">
+              <div className="grid gap-2 text-sm font-bold leading-6 text-fg-526381">
                 <p>
                   {t('workspace.members.taskCount').replace(
                     '{count}',
@@ -251,7 +251,7 @@ export function TeamMembersView({
             </div>
           ))}
           {filteredMembers.length === 0 ? (
-            <p className="px-5 py-8 text-sm font-bold text-[#526381]">
+            <p className="px-5 py-8 text-sm font-bold text-fg-526381">
               {t('workspace.members.empty')}
             </p>
           ) : null}

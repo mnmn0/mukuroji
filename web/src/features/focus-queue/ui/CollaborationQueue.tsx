@@ -28,10 +28,10 @@ export type CollaborationQueueProps = {
 }
 
 const stageStyles: Record<CollaborationStage, string> = {
-  attention: 'bg-amber-50 text-amber-900',
-  active: 'bg-sky-50 text-sky-800',
-  ready: 'bg-teal-50 text-teal-800',
-  waiting: 'bg-slate-100 text-slate-700',
+  attention: 'bg-amber-50 text-fg-amber-900',
+  active: 'bg-sky-50 text-fg-sky-900',
+  ready: 'bg-teal-50 text-fg-teal-800',
+  waiting: 'bg-slate-100 text-fg-slate-700',
 }
 
 /**
@@ -52,7 +52,7 @@ export function CollaborationQueue({ response, unavailable = false, onOpenTask, 
     response?.sections.find((group) => group.section === 'next' && group.items.length > 0) ? 'next' : 'now'
 
   return (
-    <section aria-labelledby={titleId} className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+    <section aria-labelledby={titleId} className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
       <header className="flex flex-wrap items-center justify-between gap-4 px-5 py-5">
         <div>
           <h2 className="text-base font-semibold text-[var(--workbench-text)]" id={titleId}>{t('workspace.collaboration.title')}</h2>
@@ -70,7 +70,7 @@ export function CollaborationQueue({ response, unavailable = false, onOpenTask, 
         </label>
         <label className="min-w-0 max-[600px]:w-full">
           <span className="sr-only">{t('workspace.collaboration.team')}</span>
-          <select className="min-h-[44px] w-full max-w-full rounded-md border border-[var(--workbench-border)] bg-white px-3 text-sm" onChange={(event) => setTeamId(event.target.value)} value={teamId}>
+          <select className="min-h-[44px] w-full max-w-full rounded-md border border-[var(--workbench-border)] bg-surface px-3 text-sm" onChange={(event) => setTeamId(event.target.value)} value={teamId}>
             <option value="">{t('workspace.collaboration.allTeams')}</option>
             {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
           </select>
@@ -79,7 +79,7 @@ export function CollaborationQueue({ response, unavailable = false, onOpenTask, 
 
       <div aria-label={t('workspace.collaboration.filter')} className="flex flex-wrap gap-1 border-b border-[var(--workbench-border)] px-3 py-2" role="group">
         {(['all', ...collaborationStages] satisfies Array<CollaborationStage | 'all'>).map((value) => (
-          <button aria-pressed={stage === value} className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3 text-sm font-medium ${stage === value ? 'bg-teal-50 text-teal-800' : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'}`} key={value} onClick={() => setStage(value)} type="button">
+          <button aria-pressed={stage === value} className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3 text-sm font-medium ${stage === value ? 'bg-teal-50 text-fg-teal-800' : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'}`} key={value} onClick={() => setStage(value)} type="button">
             {t(`workspace.collaboration.stage.${value}`)}
             <span className="text-xs tabular-nums">{unavailable ? '—' : value === 'all' ? scoped.length : scoped.filter((entry) => entry.stage === value).length}</span>
           </button>
@@ -111,7 +111,7 @@ export function CollaborationQueue({ response, unavailable = false, onOpenTask, 
                   <p className="mt-1 break-words text-xs leading-6 text-[var(--workbench-muted)]">{resolveWorkItemAssignee(task)} · {resolveWorkItemWorkflowStatusLabel(task, resolveWorkspaceTaskConfiguration(task, configurations))}{task.dueDate ? ` · ${t('workspace.collaboration.due')} ${task.dueDate}` : ''}</p>
                   {reasons.length ? <p className="mt-1 break-words text-xs leading-5 text-[var(--workbench-muted)]">{[...new Set(reasons)].join(' · ')}</p> : null}
                 </div>
-                <Link className="inline-flex min-h-[44px] shrink-0 items-center gap-1 rounded-md px-3 text-sm font-medium text-[var(--workbench-primary)] no-underline hover:bg-teal-50" to={createFocusPath(task.teamId, task.id, itemStage === 'attention' ? attentionSignal?.source.eventId : undefined)}>
+                <Link className="inline-flex min-h-[44px] shrink-0 items-center gap-1 rounded-md px-3 text-sm font-medium text-[var(--workbench-primary-text)] no-underline hover:bg-teal-50" to={createFocusPath(task.teamId, task.id, itemStage === 'attention' ? attentionSignal?.source.eventId : undefined)}>
                   {t(itemStage === 'attention' ? 'workspace.collaboration.review' : 'workspace.collaboration.details')}<ChevronIcon className="size-4 -rotate-90 fill-none stroke-current stroke-2" />
                 </Link>
               </li>
@@ -119,7 +119,7 @@ export function CollaborationQueue({ response, unavailable = false, onOpenTask, 
           </ul>}
         </>
       )}
-      <footer className="flex flex-wrap gap-x-6 gap-y-1 border-t border-[var(--workbench-border)] px-5 py-2 text-xs font-medium text-[var(--workbench-primary)]">
+      <footer className="flex flex-wrap gap-x-6 gap-y-1 border-t border-[var(--workbench-border)] px-5 py-2 text-xs font-medium text-[var(--workbench-primary-text)]">
         <Link className="inline-flex min-h-[44px] items-center underline-offset-4 hover:underline" data-testid="workspace-home-my-tasks" to={workspaceNavPaths['my-tasks']}>{t('workspace.home.openMyTasks')}</Link>
         <Link className="inline-flex min-h-[44px] items-center underline-offset-4 hover:underline" data-testid="workspace-home-focus-waiting" to={`${workspaceNavPaths.focus}?section=waiting`}>{t('workspace.home.openFocusWaiting')}</Link>
       </footer>

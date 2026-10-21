@@ -123,7 +123,7 @@ function AssigneeLifecycleHarness({ panelProps }: AssigneeLifecycleHarnessProps)
 
   return (
     <>
-      <div className="flex gap-2 bg-white p-3">
+      <div className="flex gap-2 bg-surface p-3">
         <button
           data-testid="assignee-load-viewer"
           onClick={() => setOptions(assigneeOptions)}

@@ -151,6 +151,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   canManageWorkspaceConfiguration: true,
   canMutateTeamConfiguration: true,
   fontSizePreference: 'standard',
+  themePreference: 'light',
   guardEnterpriseSession: (request) => request,
   hasQuickAccessLoadError: false,
   inboxCount: 3,
@@ -165,6 +166,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   onCreateTeam: () => Promise.resolve(),
   onDismissProjectQuickAccessFeedback: () => undefined,
   onFontSizePreferenceChange: () => undefined,
+  onThemePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
@@ -580,7 +582,9 @@ export const SettingsRoute: Story = {
       locale="ja"
       onFontSizePreferenceChange={() => undefined}
       onLocaleChange={() => undefined}
+      onThemePreferenceChange={() => undefined}
       t={t}
+      themePreference="light"
       userLabel="demo@example.com"
     />
   ),

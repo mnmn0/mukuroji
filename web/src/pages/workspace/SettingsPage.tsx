@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
@@ -6,6 +6,9 @@ import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platfor
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
+import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
+import { AppInstallCard } from '../../shared/ui/AppInstallCard'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
 import { WorkspaceAccessPanelContainer } from '../../workspace/ui/WorkspaceAccessPanel'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -22,6 +25,9 @@ export function SettingsPage() {
   const workspace = useWorkspaceRouteContext()
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const appInstall = useAppInstallPrompt()
+  const badgePermission = useAppBadgePermission()
+  const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed' | 'failed'>()
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
       ? 'connectors'
@@ -31,6 +37,41 @@ export function SettingsPage() {
     <WorkspaceRouteContent>
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
         <WorkspaceSettingsView
+          appInstallSection={(
+            <AppInstallCard
+              badgePermission={{
+                offered: badgePermission.offered,
+                pending: badgePermission.pending,
+                blocked: badgePermission.blocked,
+                ...(badgePermission.result ? { result: badgePermission.result } : {}),
+                description: t('workspace.settings.install.badge.description'),
+                actionLabel: t('workspace.settings.install.badge.action'),
+                pendingLabel: t('workspace.settings.install.badge.pending'),
+                grantedMessage: t('workspace.settings.install.badge.granted'),
+                deniedMessage: t('workspace.settings.install.badge.denied'),
+                dismissedMessage: t('workspace.settings.install.badge.dismissed'),
+                unsupportedMessage: t('workspace.settings.install.badge.unsupported'),
+                onRequest: badgePermission.request,
+              }}
+              acceptedMessage={t('workspace.settings.install.accepted')}
+              description={t('workspace.settings.install.description')}
+              dismissedMessage={t('workspace.settings.install.dismissed')}
+              failedMessage={t('workspace.settings.install.failed')}
+              installedMessage={t('workspace.settings.install.installed')}
+              installLabel={t('workspace.settings.install.action')}
+              outcome={installOutcome}
+              pendingLabel={t('workspace.settings.install.pending')}
+              status={appInstall.status}
+              title={t('workspace.settings.install.title')}
+              onInstall={() => {
+                // The previous result stays announced, even after a new install offer, until the next attempt.
+                setInstallOutcome(undefined)
+                void appInstall.install().then((outcome) => {
+                  if (outcome !== 'unavailable') setInstallOutcome(outcome)
+                })
+              }}
+            />
+          )}
           configurationSections={workspace.accessToken ? (
             <>
               {aiAssistanceUiEnabled ? (
@@ -77,15 +118,18 @@ export function SettingsPage() {
             </>
           ) : undefined}
           fontSizePreference={workspace.fontSizePreference}
+          themePreference={workspace.themePreference}
           locale={workspace.locale}
           notificationSettingsSection={workspace.accessToken ? (
             <NotificationSettingsPanelContainer
               accessToken={workspace.accessToken}
               locale={workspace.locale}
+              guardRequest={workspace.guardEnterpriseSession}
               onSessionError={workspace.reportNotificationPreferencesError}
             />
           ) : undefined}
           onFontSizePreferenceChange={workspace.onFontSizePreferenceChange}
+          onThemePreferenceChange={workspace.onThemePreferenceChange}
           onLocaleChange={workspace.onLocaleChange}
           t={t}
           userLabel={workspace.userLabel}

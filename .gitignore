@@ -28,7 +28,9 @@ bun-debug.log*
 .playwright-mcp/
 .floci/generated/
 playwright-report/
+playwright-report-pwa/
 test-results/
 
 # Generated screenshots
 web-vite-react.png
+playwright-visual-report/

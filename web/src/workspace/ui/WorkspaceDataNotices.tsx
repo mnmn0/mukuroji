@@ -26,7 +26,7 @@ export function WorkspaceTaskLoadNotice({
 
   return (
     <p
-      className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+      className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
       data-testid="workspace-task-partial-error"
       role="alert"
     >
@@ -67,7 +67,7 @@ export function WorkspaceConfigurationLoadNotice({
 
   return (
     <div
-      className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
       data-testid={testId}
       role="alert"
     >
@@ -115,7 +115,7 @@ export function WorkspaceFocusLoadNotice({
 
   return (
     <div
-      className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
       data-testid="workspace-focus-load-error"
       role="alert"
     >

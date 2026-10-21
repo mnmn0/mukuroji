@@ -65,6 +65,13 @@ if ! aws_local dynamodb describe-table --table-name mukuroji-developer-platform-
     --global-secondary-indexes '[{"IndexName":"LookupKeyIndex","KeySchema":[{"AttributeName":"lookupKey","KeyType":"HASH"},{"AttributeName":"lookupSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"KEYS_ONLY"}}]' >/dev/null
 fi
 ensure_ttl mukuroji-developer-platform-local
+if ! aws_local dynamodb describe-table --table-name mukuroji-push-subscriptions-local >/dev/null 2>&1; then
+  aws_local dynamodb create-table --table-name mukuroji-push-subscriptions-local \
+    --billing-mode PAY_PER_REQUEST \
+    --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+    --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE >/dev/null
+fi
+ensure_ttl mukuroji-push-subscriptions-local
 for bucket in mukuroji-files-local mukuroji-work-item-import-local; do
   if ! aws_local s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
     aws_local s3api create-bucket --bucket "$bucket" >/dev/null

@@ -5,6 +5,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
+import { buildInboundWebhookCreateInput } from '../model/webhookCreateInput'
 import { reduceAutomationWebhookSecret } from '../model/webhookSecretState'
 
 const webhookStatusLabelKeys: Record<AutomationInboundWebhookEndpoint['status'], MessageKey> = {
@@ -24,6 +25,8 @@ export type AutomationInboundWebhooksPanelProps = {
   busyOperation?: string
   /** Mutation controls を表示しない参照専用状態です。 */
   readOnly: boolean
+  /** Teams a Triage-purpose endpoint can route to; omit to offer Automation only. */
+  teams?: readonly { id: string; name: string }[]
   /** Endpoint 作成 callback です。 */
   onCreate?: (
     input: CreateAutomationInboundWebhookEndpointInput,
@@ -51,9 +54,11 @@ export function AutomationInboundWebhooksPanel({
   onRevoke,
   onRotate,
   readOnly,
+  teams = [],
 }: AutomationInboundWebhooksPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [name, setName] = useState('')
+  const [triageTeamId, setTriageTeamId] = useState('')
   const [oneTimeSecret, dispatchSecret] = useReducer(
     reduceAutomationWebhookSecret,
     undefined,
@@ -68,17 +73,23 @@ export function AutomationInboundWebhooksPanel({
     dispatchSecret({ readOnly, type: 'access-change' })
   }, [readOnly])
 
+  /**
+   * Creates an inbound webhook endpoint from the form and reveals its one-time secret.
+   *
+   * @param event - Form submit event.
+   */
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const normalizedName = name.trim()
     if (!normalizedName || !onCreate) return
     try {
-      const response = await onCreate({ name: normalizedName })
+      const response = await onCreate(buildInboundWebhookCreateInput(normalizedName, triageTeamId, teams))
       dispatchSecret({ readOnly: readOnlyRef.current, response, type: 'reveal' })
     } catch {
       return
     }
     setName('')
+    setTriageTeamId('')
   }
 
   async function handleRotate(endpoint: AutomationInboundWebhookEndpoint) {
@@ -136,6 +147,30 @@ export function AutomationInboundWebhooksPanel({
                 onChange={(event) => setName(event.target.value)}
               />
             </label>
+            {teams.length > 0 ? (
+              <label className="grid min-w-[200px] gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('automation.webhook.purpose')}
+                <select
+                  className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                  data-testid="automation-webhook-purpose"
+                  value={triageTeamId}
+                  onChange={(event) => setTriageTeamId(event.target.value)}
+                >
+                  <option value="">{t('automation.webhook.purposeAutomation')}</option>
+                  {teams.map((team) => {
+                    // Triage stores Team IDs in its record keys and accepts only this grammar;
+                    // such Teams are shown but cannot be chosen, with the reason in the label.
+                    const supported = isTriageTeamIdentifier(team.id)
+                    return (
+                      <option disabled={!supported} key={team.id} value={team.id}>
+                        {t(supported ? 'automation.webhook.purposeTriage' : 'automation.webhook.purposeTriageUnsupported')
+                          .replace('{team}', team.name)}
+                      </option>
+                    )
+                  })}
+                </select>
+              </label>
+            ) : null}
             <button
               className="workbench-button-primary min-h-10 px-5 disabled:cursor-not-allowed disabled:opacity-55"
               data-testid="automation-webhook-create"
@@ -171,7 +206,7 @@ export function AutomationInboundWebhooksPanel({
             const canRotate = endpoint.status === 'active' || endpoint.status === 'paused'
             return (
               <article
-                className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4"
+                className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-surface p-4"
                 data-testid={`automation-webhook-${endpoint.id}`}
                 key={endpoint.id}
               >
@@ -189,6 +224,14 @@ export function AutomationInboundWebhooksPanel({
                       <span className="workbench-badge">
                         {t('automation.version').replace('{version}', String(endpoint.version))}
                       </span>
+                      {endpoint.purpose === 'triage' ? (
+                        <span className="workbench-badge" data-testid={`automation-webhook-purpose-${endpoint.id}`}>
+                          {t('automation.webhook.purposeTriage').replace(
+                            '{team}',
+                            teams.find((team) => team.id === endpoint.triageRouting?.teamId)?.name ?? endpoint.triageRouting?.teamId ?? '',
+                          )}
+                        </span>
+                      ) : null}
                     </div>
                     <p className="mt-2 break-all text-xs font-medium text-[var(--workbench-muted)]">
                       {t('automation.webhook.endpointId').replace('{id}', endpoint.id)}
@@ -231,7 +274,7 @@ export function AutomationInboundWebhooksPanel({
                       ) : null}
                       {endpoint.status !== 'revoked' && onRevoke ? (
                         <button
-                          className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+                          className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                           data-testid={`automation-webhook-revoke-${endpoint.id}`}
                           disabled={isMutationBusy}
                           type="button"
@@ -245,7 +288,7 @@ export function AutomationInboundWebhooksPanel({
                 </div>
                 {endpoint.status === 'provisioning' ? (
                   <section
-                    className="rounded-lg border border-amber-400 bg-amber-50 px-3 py-3 text-amber-950"
+                    className="rounded-lg border border-amber-400 bg-amber-50 px-3 py-3 text-fg-amber-950"
                     data-testid={`automation-webhook-provisioning-warning-${endpoint.id}`}
                     role="status"
                   >
@@ -310,10 +353,10 @@ export function AutomationWebhookSecretNotice({
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-amber-950">
+          <h3 className="text-sm font-semibold text-fg-amber-950">
             {t('automation.webhook.secretTitle')} · {endpointName}
           </h3>
-          <p className="mt-1 text-xs font-medium leading-5 text-amber-900">
+          <p className="mt-1 text-xs font-medium leading-5 text-fg-amber-900">
             {t('automation.webhook.secretDescription')}
           </p>
         </div>
@@ -326,8 +369,8 @@ export function AutomationWebhookSecretNotice({
           {t('automation.webhook.secretDismiss')}
         </button>
       </div>
-      <div className="mt-3 grid gap-1 rounded-lg border border-amber-300 bg-white px-3 py-3">
-        <span className="text-xs font-semibold text-amber-900">
+      <div className="mt-3 grid gap-1 rounded-lg border border-amber-300 bg-surface px-3 py-3">
+        <span className="text-xs font-semibold text-fg-amber-900">
           {t('automation.webhook.secretLabel')}
         </span>
         <code className="break-all text-sm font-semibold text-[var(--workbench-text)]">
@@ -336,4 +379,12 @@ export function AutomationWebhookSecretNotice({
       </div>
     </section>
   )
+}/**
+ * Checks that a Team ID can own Triage entries, matching the server's Triage identifier grammar.
+ *
+ * @param teamId - Team ID.
+ * @returns Whether a Triage webhook can route to the Team.
+ */
+function isTriageTeamIdentifier(teamId: string): boolean {
+  return teamId.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(teamId)
 }

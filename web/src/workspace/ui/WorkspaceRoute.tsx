@@ -83,6 +83,12 @@ const focusRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.focus.title',
   descriptionKey: 'workspace.focus.description',
 }
+const updatesRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'updates',
+  eyebrowKey: 'workspace.home.eyebrow',
+  titleKey: 'updates.title',
+  descriptionKey: 'updates.description',
+}
 const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'my-tasks',
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -100,6 +106,11 @@ const helpRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'workspace.help.eyebrow',
   titleKey: 'workspace.help.title',
   descriptionKey: 'workspace.help.description',
+}
+const shareRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'triage.eyebrow',
+  titleKey: 'triage.share.title',
+  descriptionKey: 'triage.share.description',
 }
 const settingsRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'settings',
@@ -148,6 +159,12 @@ const customerRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'customers.eyebrow',
   titleKey: 'customers.title',
   descriptionKey: 'customers.description',
+}
+const collectionsRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'collections',
+  eyebrowKey: 'collections.eyebrow',
+  titleKey: 'collections.title',
+  descriptionKey: 'collections.description',
 }
 const searchRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
@@ -500,7 +517,7 @@ function WorkspaceRouteShell({
                       {workspace.userLabel}
                     </p>
                   </div>
-                  <div className="grid h-10 w-10 place-items-center max-[600px]:hidden rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
+                  <div className="grid h-10 w-10 place-items-center max-[600px]:hidden rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-sm font-semibold text-[var(--workbench-primary-text)]">
                     {workspace.userInitial}
                   </div>
                   <button
@@ -517,7 +534,7 @@ function WorkspaceRouteShell({
 
         {workspace.hasQuickAccessLoadError && !isCommonSessionRedirecting ? (
           <div
-            className="mx-[clamp(20px,3vw,34px)] mt-4 flex flex-none flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900"
+            className="mx-[clamp(20px,3vw,34px)] mt-4 flex flex-none flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-900"
             data-testid="quick-access-load-error"
             role="alert"
           >
@@ -535,7 +552,7 @@ function WorkspaceRouteShell({
         {commonErrorMessage ? (
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-7">
             <div
-              className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+              className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
               data-testid="workspace-common-error"
               role="alert"
             >
@@ -561,15 +578,16 @@ function WorkspaceRouteShell({
         )}
         </section>
         {quickAccessFeedbackMessage ? (
+          // Stacks above the app's offline notice, which publishes its distance from the viewport bottom.
           <div
-            className="fixed bottom-5 right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-lg"
+            className="fixed bottom-[max(1.25rem,var(--app-bottom-notice-offset,0px))] right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-lg"
             role={workspace.quickAccessFeedback?.kind === 'error' ? 'alert' : 'status'}
           >
             <span className="min-w-0 flex-1">{quickAccessFeedbackMessage}</span>
             {workspace.quickAccessFeedback?.undoItems ? (
               <button
                 autoFocus={workspace.quickAccessFeedback.focusUndo}
-                className="min-h-8 flex-none rounded-lg px-2 text-[var(--workbench-primary)] transition hover:bg-teal-50 disabled:opacity-50"
+                className="min-h-8 flex-none rounded-lg px-2 text-[var(--workbench-primary-text)] transition hover:bg-teal-50 disabled:opacity-50"
                 disabled={workspace.isQuickAccessLoading || workspace.isQuickAccessSaving}
                 onClick={() => void workspace.onUndoProjectQuickAccess()}
                 type="button"
@@ -579,7 +597,7 @@ function WorkspaceRouteShell({
             ) : null}
             <button
               aria-label={t('projects.quickAccess.feedback.dismiss')}
-              className="grid h-8 w-8 flex-none place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+              className="grid h-8 w-8 flex-none place-items-center rounded-lg text-fg-slate-500 transition hover:bg-slate-100 hover:text-fg-slate-800"
               onClick={workspace.onDismissProjectQuickAccessFeedback}
               type="button"
             >
@@ -668,6 +686,7 @@ function resolveWorkspaceRouteMetadata(
   if (matchPath('/focus', pathname)) {
     return focusRouteMetadata
   }
+  if (matchPath('/updates', pathname)) return updatesRouteMetadata
 
   if (matchPath('/my-tasks', pathname)) {
     return myTasksRouteMetadata
@@ -679,6 +698,10 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/help', pathname)) {
     return helpRouteMetadata
+  }
+
+  if (matchPath('/share', pathname)) {
+    return shareRouteMetadata
   }
 
   if (matchPath('/settings', pathname)) {
@@ -694,6 +717,10 @@ function resolveWorkspaceRouteMetadata(
     matchPath('/customers/*', pathname)
   ) {
     return customerRouteMetadata
+  }
+
+  if (matchPath('/collections', pathname)) {
+    return collectionsRouteMetadata
   }
 
   if (matchPath('/search', pathname)) {

@@ -26,6 +26,7 @@ import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
   MobileSidebarButton,
   useWorkspaceSidebarController,
@@ -78,6 +79,7 @@ import {
 import { SearchCountReport } from './ui/SearchCountReport'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
 import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
+import { readRecord } from '../shared/api/jsonValidation'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -415,7 +417,7 @@ export function SearchPage() {
     if (isAiOperationPendingRef.current) return
     commitRouteState(updateSearchRouteState(routeState, {
       filters: {
-        ...asRecord(routeState.filters),
+        ...readRecord(routeState.filters),
         ...patch,
       } as WorkspaceSearchFilters,
     }))
@@ -425,7 +427,7 @@ export function SearchPage() {
     if (isAiOperationPendingRef.current) return
     commitRouteState(updateSearchRouteState(routeState, {
       layout: {
-        ...asRecord(routeState.layout),
+        ...readRecord(routeState.layout),
         ...patch,
       } as SearchViewLayout,
     }))
@@ -598,14 +600,15 @@ export function SearchPage() {
               <div className="hidden text-right min-[721px]:block">
                 <p className="max-w-[220px] truncate text-sm font-semibold text-[var(--workbench-text)]">{userLabel}</p>
               </div>
-              <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
+              <div className="grid h-10 w-10 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-sm font-semibold text-[var(--workbench-primary-text)]">
                 {userInitial}
               </div>
               <button
                 className="workbench-button-secondary min-h-10 px-4"
                 onClick={() => {
-                  clearAuthSession()
-                  navigate('/', { replace: true })
+                  void signOutWithPushCleanup(accessToken).then(() => {
+                    navigate('/', { replace: true })
+                  })
                 }}
                 type="button"
               >
@@ -685,7 +688,7 @@ export function SearchPage() {
                   t={t}
                 />
                 {migrationWarnings.map((warning) => (
-                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800" key={warning} role="status">
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800" key={warning} role="status">
                     {t('search.saved.migration')} {warning}
                   </p>
                 ))}
@@ -700,7 +703,7 @@ export function SearchPage() {
                   ) : null}
                 </div>
                 {visibleSearchErrorMessage ? (
-                  <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
                     {currentUserErrorAction?.kind === 'stay'
                       ? visibleSearchErrorMessage
                       : `${t('search.error')} ${visibleSearchErrorMessage}`}
@@ -832,7 +835,7 @@ function SearchToolbar({
     <section className="workbench-toolbar grid gap-4 p-4" data-testid="search-toolbar">
       {aiAssistanceEnabled ? <div
         aria-label={t('ai.search.mode')}
-        className="flex w-fit max-w-full gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-white p-1"
+        className="flex w-fit max-w-full gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-surface p-1"
         role="group"
       >
         <button
@@ -966,7 +969,7 @@ function SearchToolbar({
                     : event.target.value === 'dueDate'
                       ? 'dueDate'
                       : 'updatedAt'
-                  const currentDate = asRecord(asRecord(routeState.filters).date)
+                  const currentDate = readRecord(readRecord(routeState.filters).date)
                   setDateFieldOverride({ routeSignature, value: nextDateField })
                   if (currentDate.from || currentDate.to) {
                     onFiltersChange({ date: { ...currentDate, field: nextDateField } })
@@ -1009,7 +1012,7 @@ function SearchToolbar({
       </details>
 
       <div className="grid grid-cols-[auto_minmax(170px,auto)_minmax(130px,1fr)] items-end gap-3 max-[720px]:grid-cols-1">
-        <div className="flex flex-wrap gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-white p-1" role="group" aria-label={t('search.layout.label')}>
+        <div className="flex flex-wrap gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-surface p-1" role="group" aria-label={t('search.layout.label')}>
           {searchLayoutModes.map((mode) => (
             <button
               aria-pressed={getSearchLayoutMode(routeState.layout) === mode}
@@ -1124,7 +1127,7 @@ function SavedViewsPanel({
           {canWrite ? (
             <button
               aria-expanded={isFormOpen}
-              className="grid h-8 w-8 place-items-center rounded-lg text-lg text-[var(--workbench-primary)] transition hover:bg-[#e5f7f4]"
+              className="grid h-8 w-8 place-items-center rounded-lg text-lg text-[var(--workbench-primary-text)] transition hover:bg-tone-e5f7f4"
               onClick={() => onFormOpenChange(!isFormOpen)}
               type="button"
             >
@@ -1135,14 +1138,14 @@ function SavedViewsPanel({
         </header>
         <div className="grid gap-1 p-2" data-testid="saved-view-list">
           {sortedViews.map((view) => (
-            <div className={`rounded-lg border p-2 ${selectedViewId === view.id ? 'border-[#99d7cf] bg-[#e5f7f4]' : 'border-transparent'}`} key={view.id}>
+            <div className={`rounded-lg border p-2 ${selectedViewId === view.id ? 'border-tone-99d7cf bg-tone-e5f7f4' : 'border-transparent'}`} key={view.id}>
               <button className="w-full px-1 py-1 text-left" onClick={() => onSelect(view)} type="button">
                 <span className="flex items-center justify-between gap-2">
                   <span className="truncate text-sm font-semibold text-[var(--workbench-text)]">{view.name}</span>
                   {view.pinned || view.favorite ? (
                     <span
                       aria-label={view.pinned ? t('search.saved.pinned') : t('search.saved.favorites')}
-                      className="text-xs text-[var(--workbench-primary)]"
+                      className="text-xs text-[var(--workbench-primary-text)]"
                       role="img"
                     >
                       {view.pinned ? '●' : '★'}
@@ -1154,7 +1157,7 @@ function SavedViewsPanel({
                 </span>
               </button>
               {selectedViewId === view.id && (canWrite || view.canEdit) ? (
-                <div className="mt-2 flex flex-wrap gap-1 border-t border-[#99d7cf]/50 pt-2">
+                <div className="mt-2 flex flex-wrap gap-1 border-t border-tone-99d7cf/50 pt-2">
                   {canWrite ? (
                     <>
                       <SmallAction label={t('search.saved.favorite')} onClick={() => void onPatch(view, { favorite: !view.favorite })} pressed={view.favorite} />
@@ -1215,10 +1218,10 @@ function SavedViewsPanel({
           >
             {t('search.saved.save')}
           </button>
-          {errorMessage ? <p className="text-xs font-semibold text-red-700" role="alert">{errorMessage}</p> : null}
+          {errorMessage ? <p className="text-xs font-semibold text-fg-red-700" role="alert">{errorMessage}</p> : null}
         </section>
       ) : errorMessage ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700" role="alert">{errorMessage}</p>
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-fg-red-700" role="alert">{errorMessage}</p>
       ) : null}
       </fieldset>
     </aside>
@@ -1251,7 +1254,7 @@ function CustomFieldFilterBuilder({
   }
 
   return (
-    <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-white p-3">
+    <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-3">
       <legend className="px-1 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
         {t('search.filters.customField')}
       </legend>
@@ -1299,7 +1302,7 @@ function CustomFieldFilterBuilder({
             </label>
             <button
               aria-label={`${t('search.filters.remove')}: ${filter.fieldId}`}
-              className="grid h-9 w-9 place-items-center rounded-lg text-red-700 transition hover:bg-red-50 max-[760px]:w-full"
+              className="grid h-9 w-9 place-items-center rounded-lg text-fg-red-700 transition hover:bg-red-50 max-[760px]:w-full"
               onClick={() => onChange(filters.filter((_, filterIndex) => filterIndex !== index))}
               type="button"
             >
@@ -1324,7 +1327,7 @@ function CustomFieldFilterBuilder({
         <label className="grid gap-1 text-[11px] font-semibold text-[var(--workbench-muted)]">
           {t('search.filters.value')}
           <input
-            className="workbench-input min-h-9 px-3 disabled:bg-white/60"
+            className="workbench-input min-h-9 px-3 disabled:bg-surface/60"
             disabled={draftOperator === 'is-empty' || draftOperator === 'is-not-empty'}
             onChange={(event) => setDraftValue(event.target.value)}
             value={draftValue}
@@ -1395,7 +1398,7 @@ function DateInput({
       <input
         className="workbench-input min-h-10 px-3 normal-case tracking-normal"
         onChange={(event) => {
-          const currentDate = asRecord(asRecord(routeState.filters).date)
+          const currentDate = readRecord(readRecord(routeState.filters).date)
           const boundKey = filterKey === 'dateFrom' ? 'from' : 'to'
           const nextDate = {
             ...currentDate,
@@ -1427,8 +1430,8 @@ function ToggleChip({
       aria-pressed={active}
       className={`min-h-8 rounded-lg border px-3 text-xs font-semibold transition ${
         active
-          ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-          : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'
+          ? 'border-[var(--workbench-primary)] bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+          : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'
       }`}
       onClick={onToggle}
       type="button"
@@ -1452,7 +1455,7 @@ function SmallAction({
   return (
     <button
       aria-pressed={pressed}
-      className={`rounded-md px-2 py-1 text-[10px] font-semibold transition ${danger ? 'text-red-700 hover:bg-red-50' : 'text-[var(--workbench-muted)] hover:bg-white'}`}
+      className={`rounded-md px-2 py-1 text-[10px] font-semibold transition ${danger ? 'text-fg-red-700 hover:bg-red-50' : 'text-[var(--workbench-muted)] hover:bg-surface'}`}
       onClick={onClick}
       type="button"
     >
@@ -1527,10 +1530,6 @@ function toggleValue<TValue extends string>(values: readonly TValue[], value: TV
 
 function hasExplicitSearchState(searchParams: URLSearchParams) {
   return Array.from(searchParams.keys()).some((key) => key !== 'v' && key !== 'view')
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
 }
 
 function formatSavedViewMigrationWarnings(view: SavedWorkspaceView) {

@@ -69,7 +69,7 @@ export function SecurityNumberField({
   return (
     <label className="grid min-w-0 gap-2 border-t border-[var(--workbench-border)] py-4 text-sm font-semibold text-[var(--workbench-text)]">
       {label}
-      <span className="flex min-w-0 overflow-hidden rounded-md border border-[var(--workbench-border-strong)] bg-white focus-within:border-[var(--workbench-primary)] focus-within:ring-2 focus-within:ring-[var(--workbench-primary)]/20">
+      <span className="flex min-w-0 overflow-hidden rounded-md border border-[var(--workbench-border-strong)] bg-surface focus-within:border-[var(--workbench-primary)] focus-within:ring-2 focus-within:ring-[var(--workbench-primary)]/20">
         <input
           className="min-h-11 min-w-0 flex-1 border-0 bg-transparent px-3 outline-none"
           disabled={disabled}
@@ -134,7 +134,7 @@ export function EnterpriseSecurityReadOnlyNotice({
 }) {
   return (
     <div
-      className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700"
+      className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-fg-slate-700"
       role="status"
     >
       {t('security.readOnly')}
@@ -159,10 +159,10 @@ export function EnterpriseSecurityStatusBadge({
     'danger' | 'neutral' | 'success' | 'warning',
     string
   > = {
-    danger: 'border-red-200 bg-red-50 text-red-700',
-    neutral: 'border-slate-200 bg-slate-50 text-slate-600',
-    success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-    warning: 'border-amber-200 bg-amber-50 text-amber-800',
+    danger: 'border-red-200 bg-red-50 text-fg-red-700',
+    neutral: 'border-slate-200 bg-slate-50 text-fg-slate-600',
+    success: 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+    warning: 'border-amber-200 bg-amber-50 text-fg-amber-800',
   }
 
   return (
@@ -248,8 +248,8 @@ export function EnterpriseSsoPrerequisiteList({
             aria-hidden="true"
             className={`grid h-6 w-6 flex-none place-items-center rounded-full text-xs font-bold ${
               complete
-                ? 'bg-emerald-100 text-emerald-700'
-                : 'bg-amber-100 text-amber-800'
+                ? 'bg-emerald-100 text-fg-emerald-700'
+                : 'bg-amber-100 text-fg-amber-800'
             }`}
           >
             {complete ? '✓' : '!'}

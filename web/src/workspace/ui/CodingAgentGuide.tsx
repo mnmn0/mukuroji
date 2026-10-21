@@ -52,20 +52,20 @@ export function CodingAgentGuide({ t }: CodingAgentGuideProps) {
   }
 
   return (
-    <section aria-labelledby={titleId} className="min-w-0 scroll-mt-5 border-y border-[var(--workbench-border)] bg-white" id="coding-agent">
+    <section aria-labelledby={titleId} className="min-w-0 scroll-mt-5 border-y border-[var(--workbench-border)] bg-surface" id="coding-agent">
       <header className="border-b border-[var(--workbench-border)] px-5 py-5">
-        <p className="text-xs font-semibold text-[var(--workbench-primary)]">{t('agents.guide.eyebrow')}</p>
+        <p className="text-xs font-semibold text-[var(--workbench-primary-text)]">{t('agents.guide.eyebrow')}</p>
         <h2 className="mt-2 text-xl font-semibold tracking-tight text-[var(--workbench-text)]" id={titleId}>{t('agents.guide.title')}</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.guide.description')}</p>
       </header>
       <div className="grid min-w-0 gap-7 px-5 py-6 min-[1100px]:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('agents.guide.setupTitle')}</h3>
-          <ol className="mt-4 grid list-decimal gap-5 pl-5 marker:font-semibold marker:text-[var(--workbench-primary)]">
+          <ol className="mt-4 grid list-decimal gap-5 pl-5 marker:font-semibold marker:text-[var(--workbench-primary-text)]">
             <li className="pl-1">
               <h4 className="text-sm font-semibold text-[var(--workbench-text)]">{t('agents.guide.credentialsTitle')}</h4>
               <p className="mt-1 text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.guide.credentialsDescription')}</p>
-              <Link className="mt-2 inline-flex min-h-[44px] items-center text-sm font-semibold text-[var(--workbench-primary)] underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2" to="/settings">
+              <Link className="mt-2 inline-flex min-h-[44px] items-center text-sm font-semibold text-[var(--workbench-primary-text)] underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2" to="/settings">
                 {t('agents.guide.openSettings')}
               </Link>
             </li>
@@ -103,7 +103,7 @@ export function CodingAgentGuide({ t }: CodingAgentGuideProps) {
             spellCheck={false}
             value={codingAgentConfigurationTemplate}
           />
-          <p className={`mt-2 text-xs leading-5 ${copyState === 'failed' ? 'text-amber-800' : 'text-[var(--workbench-primary)]'}`} id={copyFeedbackId} role="status">
+          <p className={`mt-2 text-xs leading-5 ${copyState === 'failed' ? 'text-fg-amber-800' : 'text-[var(--workbench-primary-text)]'}`} id={copyFeedbackId} role="status">
             {copyState === 'copied' ? t('agents.guide.copied') : copyState === 'failed' ? t('agents.guide.copyFailed') : null}
           </p>
           <p className="mt-3 break-words text-xs leading-6 text-[var(--workbench-muted)]">{t('agents.guide.tokenHelp')}</p>
@@ -120,7 +120,7 @@ export function CodingAgentGuide({ t }: CodingAgentGuideProps) {
       </details>
       <div className="border-t border-[var(--workbench-border)] px-5 py-5">
         <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('agents.guide.workflowTitle')}</h3>
-        <ol className="mt-5 grid list-decimal gap-x-10 gap-y-5 pl-5 marker:font-semibold marker:text-[var(--workbench-primary)] min-[760px]:grid-cols-2">
+        <ol className="mt-5 grid list-decimal gap-x-10 gap-y-5 pl-5 marker:font-semibold marker:text-[var(--workbench-primary-text)] min-[760px]:grid-cols-2">
           {workflowSteps.map((step) => (
             <li className="min-w-0 pl-1" key={step.title}>
               <h4 className="text-sm font-semibold text-[var(--workbench-text)]">{t(step.title)}</h4>

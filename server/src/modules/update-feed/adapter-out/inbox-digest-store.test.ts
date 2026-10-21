@@ -1,0 +1,935 @@
+import { expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
+import type { SavedUpdateFeeds } from '@mukuroji/contracts'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
+import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '../../planning'
+import { InMemoryPlanningClient } from '../../planning/planning'
+import { NOTIFICATION_PREFERENCES_KEY, createNotificationRecipientKey, toNotificationItem } from '../../notifications'
+import { emptyDigestState } from '../application/digest'
+import { deliverInboxDigest, inboxDigestTerminalReason, runInboxDigestSchedule, type InboxDigestContext } from '../application/inbox-digest'
+import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
+import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
+import { DynamoDbSavedUpdateFeedsStore } from './saved-feeds-store'
+import { DynamoDbInboxDigestCheckpoints } from './inbox-digest-checkpoint'
+import { runInboxDigestWorker, type InboxDigestWorkerDependencies } from '../application/inbox-digest-worker'
+
+const recipient = { workspaceId: 'w', memberKey: 'reader' }
+const now = Date.parse('2026-10-03T12:00:00Z')
+const membershipKey = { workspaceId: 'w', recordKey: 'MEMBER#reader' }
+const membership: PlanningCallerAuthorizationConditionCheck = { ConditionCheck: { TableName: 'members', Key: membershipKey, ConditionExpression: '#version = :version', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': 2 } } }
+
+/** Creates an SDK-command-boundary transactional model with atomic condition evaluation. */
+async function fixture() {
+  const rows = new Map<string, Record<string, unknown>>()
+  const commands: unknown[] = []
+  let loseResponse = false
+  let loseClaimResponse = false
+  let clock = now
+  let lastPage = false
+  let readError: unknown
+  let preferencesReadError: unknown
+  let writeError: unknown
+  let sdkFailure: ((command: unknown) => unknown) | undefined
+  let beforeTransaction: (() => void) | undefined
+  const indexed: Record<string, unknown>[] = []
+  let currentDueIndex = false
+  /** Derives model coordinates from the known table schemas. */
+  const coordinate = (table: string, value: Record<string, unknown>) => JSON.stringify([table, table === 'notifications' ? value.recipientKey : value.workspaceId, table === 'notifications' ? value.notificationKey : value.recordKey])
+  rows.set(coordinate('members', membershipKey), { ...membershipKey, version: 2 })
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  /** Evaluates the actual generated conjunction against the isolated row. */
+  const condition = (expression: string | undefined, row: Record<string, unknown> | undefined, names: Record<string, string> = {}, values: Record<string, unknown> = {}) => {
+    return expression?.split(' AND ').every((part) => {
+      const absent = /^attribute_not_exists\((\w+)\)$/.exec(part)
+      if (absent) return row?.[absent[1]!] === undefined
+      const comparison = /^(.*?) (=|<=|>) (.*?)$/.exec(part)
+      if (!comparison) return false
+      const [, path, operator, expected] = comparison
+      let observed: unknown = row
+      for (const component of (path ?? '').split('.')) {
+        observed = typeof observed === 'object' && observed !== null && !Array.isArray(observed) ? Reflect.get(observed, names[component] ?? component) : undefined
+      }
+      const value = expected === undefined ? undefined : values[expected]
+      return operator === '=' ? observed === value : typeof observed === 'number' && typeof value === 'number' && (operator === '<=' ? observed <= value : observed > value)
+    }) ?? true
+  }
+  // Only the SDK's overloaded send signature needs this test-only cast.
+  client.send = (async (command: unknown) => {
+    const injected = sdkFailure?.(command)
+    if (injected !== undefined) throw injected
+    commands.push(command)
+    if (command instanceof GetCommand) {
+      if (readError) throw readError
+      if (preferencesReadError && command.input.TableName === 'notifications') throw preferencesReadError
+      expect(command.input.ConsistentRead).toBe(true)
+      return { Item: structuredClone(rows.get(coordinate(command.input.TableName!, command.input.Key!))) }
+    }
+    if (command instanceof QueryCommand) {
+      expect(command.input.IndexName).toBe(INBOX_DIGEST_INDEX.name)
+      expect(command.input.Limit).toBeLessThanOrEqual(100)
+      expect(command.input.ConsistentRead).toBeUndefined()
+      if (currentDueIndex) {
+        const values = command.input.ExpressionAttributeValues!
+        const due = [...rows.values()].filter((row) => row.inboxDigestShard === values[':shard'] && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= values[':due']).sort((a, b) => Number(a.inboxDigestDueAt) - Number(b.inboxDigestDueAt))
+        const cursor = command.input.ExclusiveStartKey
+        const after = cursor ? due.filter((row) => Number(row.inboxDigestDueAt) > Number(cursor.inboxDigestDueAt)) : due
+        const items = after.slice(0, command.input.Limit)
+        return { Items: items, ...(after.length > items.length ? { LastEvaluatedKey: items.at(-1) } : {}) }
+      }
+      return { Items: indexed, ...(lastPage ? {} : { LastEvaluatedKey: { workspaceId: 'next', recordKey: 'next' } }) }
+    }
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected SDK command')
+    if (writeError) throw typeof writeError === 'function' ? writeError(command.input.TransactItems?.length ?? 0) : writeError
+    beforeTransaction?.()
+    const items = command.input.TransactItems ?? []
+    const reasons = items.map((item) => {
+      const operation = item.Put ?? item.ConditionCheck ?? item.Delete
+      if (!operation?.TableName) throw new Error('Missing transaction operation')
+      const value = 'Item' in operation ? operation.Item : operation.Key
+      if (!value) throw new Error('Missing transaction coordinates')
+      return { Code: condition(operation.ConditionExpression, rows.get(coordinate(operation.TableName, value)), operation.ExpressionAttributeNames, operation.ExpressionAttributeValues) ? 'None' : 'ConditionalCheckFailed' }
+    })
+    if (reasons.some((reason) => reason.Code !== 'None')) throw Object.assign(new Error('Conditional failure'), { name: 'TransactionCanceledException', CancellationReasons: reasons })
+    // Evaluate every condition first; apply all writes without an await boundary.
+    for (const item of items) if (item.Put?.Item && item.Put.TableName) rows.set(coordinate(item.Put.TableName, item.Put.Item), structuredClone(item.Put.Item))
+    for (const item of items) if (item.Delete?.Key && item.Delete.TableName) rows.delete(coordinate(item.Delete.TableName, item.Delete.Key))
+    if (loseClaimResponse) { loseClaimResponse = false; throw Object.assign(new Error('Lost claim response'), { name: 'TimeoutError' }) }
+    if (loseResponse && items.some((item) => item.Put?.TableName === 'notifications')) throw Object.assign(new Error('Lost response'), { name: 'TimeoutError' })
+    return {}
+  }) as DynamoDBDocumentClient['send']
+  const store = new DynamoDbInboxDigestStore('planning', 'notifications', client, [membership], () => clock, 'ja')
+  await store.replace('w', 'reader', { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent', 'at-risk'] } })
+  const snapshot = await new InMemoryPlanningClient().get('w', { workItems: [] })
+  snapshot.updateTargets = [{ target: { type: 'project', teamId: 'team', projectId: 'project' }, latestVersion: 1, updateState: 'current', updatedAt: new Date(now).toISOString(), latestUpdate: { id: 'report', version: 1, health: 'at-risk', risk: 'none', summary: 'Private content', authorMemberKey: 'reader', coveredDueAt: new Date(now).toISOString(), createdAt: new Date(now).toISOString(), progressSnapshot: { percent: 20, linkedWorkItemCount: 1 }, capturedScope: { teamId: 'team', projectId: 'project' } } }]
+  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSavedFeeds: async (): Promise<SavedUpdateFeeds> => ({ revision: 1, feeds: [{ id: 'custom', name: 'Personal name', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }), readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
+  return {
+    store, rows, indexed, commands, coordinate, context,
+    /** Models a converged due index with its actual key condition and pagination. */
+    useCurrentDueIndex() { currentDueIndex = true },
+    checkpoints: new DynamoDbInboxDigestCheckpoints('planning', client),
+    /** Recreates checkpoint adapters while retaining durable SDK rows. */
+    restartCheckpoints: () => new DynamoDbInboxDigestCheckpoints('planning', client),
+    /** Shares the trusted clock across source, delivery and checkpoint boundaries. */
+    now: () => clock,
+    /** Makes the modeled query a complete one-page source. */
+    finishIndex() { lastPage = true },
+    run: () => deliverInboxDigest({ authorize: async () => context }, recipient, clock),
+    /** Injects a condition-boundary race. */
+    beforeTransaction(callback: () => void) { beforeTransaction = callback },
+    /** Loses only completion acknowledgements after both durable rows commit. */
+    loseResponse() { loseResponse = true },
+    /** Loses a committed claim response without running the completion path. */
+    loseClaimResponse() { loseClaimResponse = true },
+    /** Advances the trusted clock for lease and cadence tests. */
+    advance(milliseconds: number) { clock += milliseconds },
+    /** Injects a read-only SDK failure. */
+    failRead(error: unknown) { readError = error },
+    /** Fails only the post-claim notification preference read. */
+    failPreferencesRead(error: unknown) { preferencesReadError = error },
+    /** Injects a transaction SDK failure or a size-aware cancellation vector. */
+    failWrite(error: unknown) { writeError = error },
+    /** Injects an error at any one SDK boundary without altering stored rows. */
+    failCommand(failure: (command: unknown) => unknown) { sdkFailure = failure },
+    /** Inspects notification rows separately from metadata and preferences. */
+    notifications: () => [...rows.values()].filter((row) => row.itemType === 'notification'),
+    /** Inspects the separate delivery metadata. */
+    metadata: () => [...rows.values()].find((row) => row.entryType === 'update-feed-inbox-digest')!,
+  }
+}
+
+for (const empty of [true, false]) test(`pruned ${empty ? 'empty' : 'nonempty'} interval performs no SDK transaction or retained-history eviction`, async () => {
+  const f = await fixture()
+  if (empty) f.context.reader.authorizeTarget = async () => undefined
+  for (let day = 0; day < 21; day++) { await f.run(); f.advance(86_400_000) }
+  const before = await f.store.get('w', 'reader')
+  const notifications = structuredClone(f.notifications())
+  const transactions = f.commands.filter((command) => command instanceof TransactWriteCommand).length
+  expect(before.history).toHaveLength(20)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 21 * 86_400_000, now, 'daily')).toBe('cancelled')
+  expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
+  expect(await f.store.get('w', 'reader')).toEqual(before)
+  expect(f.notifications()).toEqual(notifications)
+})
+
+test('denial backs off only the due index without revoked guards and later reauthorizes', async () => {
+  const f = await fixture()
+  const source = f.store.withCallerAuthorization([])
+  const before = structuredClone(f.metadata())
+  f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 99 })
+  const denied = { authorize: async () => undefined, deferDenied: source.deferDenied.bind(source) }
+  expect(await deliverInboxDigest(denied, recipient, now)).toBe('denied')
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  const write = f.commands.filter((command) => command instanceof TransactWriteCommand).at(-1)
+  expect(write instanceof TransactWriteCommand && write.input.TransactItems).toHaveLength(1)
+  const transactions = f.commands.filter((command) => command instanceof TransactWriteCommand).length
+  const restarted = source.withCallerAuthorization([])
+  for (let scan = 0; scan < 3; scan++) await restarted.deferDenied(recipient)
+  expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
+  f.indexed.push(before)
+  const shard = Number(String(before.inboxDigestShard).split('#')[1])
+  expect((await source.listDue(shard)).recipients).toEqual([])
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  f.advance(3_600_000)
+  expect((await source.listDue(shard)).recipients).toEqual([{ ...recipient, frequency: 'daily' }])
+  f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 2 })
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('denial maintenance preserves concurrent consent changes and retries a lost acknowledgment safely', async () => {
+  const f = await fixture()
+  const source = f.store.withCallerAuthorization([])
+  f.beforeTransaction(() => {
+    const row = f.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+    delete row.inboxDigestDueAt
+    delete row.inboxDigestShard
+  })
+  await expect(source.deferDenied(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(f.metadata().preferences).toMatchObject({ enabled: false })
+  expect(f.metadata().inboxDigestDueAt).toBeUndefined()
+  await source.deferDenied(recipient)
+  const g = await fixture()
+  g.loseClaimResponse()
+  await expect(g.store.withCallerAuthorization([]).deferDenied(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  await g.store.withCallerAuthorization([]).deferDenied(recipient)
+  expect(g.metadata().inboxDigestDueAt).toBe(now + 3_600_000)
+  expect((await g.store.get('w', 'reader')).history).toEqual([])
+  expect(g.notifications()).toEqual([])
+})
+
+test('explicit fresh consent can supersede denial backoff without losing settings', async () => {
+  const f = await fixture()
+  await f.store.withCallerAuthorization([]).deferDenied(recipient)
+  const current = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...current, preferences: { enabled: true, frequency: 'weekly', views: ['at-risk'] } })
+  expect(f.metadata().inboxDigestDueAt).toBe(now)
+  expect(f.metadata().preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['at-risk'] })
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('worker denial backoff survives restart, frees converged due pages and later reauthorizes', async () => {
+  const f = await fixture()
+  f.useCurrentDueIndex()
+  const deniedBefore = structuredClone(f.metadata())
+  const shard = Number(String(deniedBefore.inboxDigestShard).split('#')[1])
+  const healthy = { workspaceId: 'w', memberKey: 'healthy-10' }
+  f.advance(1)
+  await f.store.replace(healthy.workspaceId, healthy.memberKey, { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent'] } })
+  const healthyRow = [...f.rows.values()].find((row) => row.memberKey === healthy.memberKey)!
+  expect(healthyRow.inboxDigestShard).toBe(deniedBefore.inboxDigestShard)
+  let denied = true
+  const authorized: string[] = []
+  const source = f.store.withCallerAuthorization([])
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async (currentShard, cursor) => {
+      const page = await source.listDue(currentShard, 1, cursor ? JSON.parse(cursor) : undefined)
+      return { recipients: page.recipients, ...(page.cursor ? { cursor: JSON.stringify(page.cursor) } : {}) }
+    },
+    delivery: {
+      deferDenied: (owner) => source.deferDenied(owner),
+      authorize: async (owner) => {
+        authorized.push(owner.memberKey)
+        if (owner.memberKey === recipient.memberKey && denied) return undefined
+        return { ...f.context, recipient: owner, reader: { ...f.context.reader, memberKey: owner.memberKey } }
+      },
+    },
+  }
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 0, failed: 0 })
+  expect(f.metadata()).toEqual({ ...deniedBefore, inboxDigestDueAt: f.now() + 3_600_000 })
+  dependencies.checkpoints = f.restartCheckpoints()
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 1, failed: 0 })
+  expect(f.notifications()).toHaveLength(1)
+  for (let scan = 0; scan < 3; scan++) {
+    dependencies.checkpoints = f.restartCheckpoints()
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 0, delivered: 0 })
+  }
+  expect(authorized).toEqual(['reader', 'healthy-10'])
+  f.advance(3_600_000)
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 0 })
+  expect(f.metadata()).toEqual({ ...deniedBefore, inboxDigestDueAt: f.now() + 3_600_000 })
+  denied = false
+  f.advance(3_600_000)
+  dependencies.checkpoints = f.restartCheckpoints()
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 1 })
+  expect(f.notifications()).toHaveLength(2)
+  expect(authorized).toEqual(['reader', 'healthy-10', 'reader', 'reader'])
+})
+
+test('worker retries a lost denial-maintenance acknowledgment after checkpoint restart without extending backoff', async () => {
+  const f = await fixture()
+  f.useCurrentDueIndex()
+  const before = structuredClone(f.metadata())
+  const shard = Number(String(before.inboxDigestShard).split('#')[1])
+  const source = f.store.withCallerAuthorization([])
+  let lose = true
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async () => ({ recipients: (await source.listDue(shard)).recipients }),
+    delivery: { authorize: async () => undefined, deferDenied: async (owner) => {
+      if (lose) { lose = false; f.loseClaimResponse() }
+      await source.deferDenied(owner)
+    } },
+  }
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 1 })
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  f.advance(60_000)
+  dependencies.checkpoints = f.restartCheckpoints()
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 0 })
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 0, failed: 0 })
+  expect(f.notifications()).toEqual([])
+})
+
+test('atomic SDK completion binds authorization, missing META, preferences and deterministic Inbox insertion', async () => {
+  const f = await fixture()
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+  const transaction = f.commands.filter((command) => command instanceof TransactWriteCommand).at(-1)
+  if (!(transaction instanceof TransactWriteCommand)) throw new Error('Missing transaction')
+  expect(transaction.input.TransactItems).toHaveLength(5)
+  expect(transaction.input.TransactItems?.[2]?.ConditionCheck).toMatchObject({ Key: { workspaceId: 'FENCE#w', recordKey: 'META' }, ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' })
+  expect(toNotificationItem(f.notifications()[0], createNotificationRecipientKey('w', 'reader'), new Date(now))).toMatchObject({ title: '更新ダイジェストを確認できます', state: 'unread' })
+  expect(JSON.stringify(f.notifications())).not.toContain('Private content')
+  expect(f.metadata().inboxDigestDueAt).toBe(Date.parse('2026-10-04T00:00:00Z'))
+  expect(await f.run()).toBe('not-due')
+})
+
+test('saved-feed revision is fenced atomically with Inbox delivery, including changes after the final read', async () => {
+  for (const change of [false, true]) {
+    const f = await fixture()
+    const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+    f.rows.set(f.coordinate('planning', definition), definition)
+    const state = await f.store.get('w', 'reader')
+    await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+    if (change) f.beforeTransaction(() => {
+      const transaction = f.commands.at(-1)
+      if (transaction instanceof TransactWriteCommand && transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 2 })
+    })
+    if (change) {
+      await expect(f.run()).rejects.toMatchObject({ status: 409 })
+      expect(f.notifications()).toHaveLength(0)
+    } else {
+      expect(await f.run()).toBe('delivered')
+      expect(f.notifications()).toHaveLength(1)
+      expect(JSON.stringify(f.notifications())).not.toContain('Personal name')
+    }
+  }
+})
+
+for (const corrupt of [true, false]) test(`saved-definition SDK boundary corruption=${corrupt} is classified through real scheduled delivery`, async () => {
+  const f = await fixture()
+  const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+  f.rows.set(f.coordinate('planning', definition), definition)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  // The SDK's overloaded transport is the only test-only assertion here.
+  client.send = (async (command: unknown) => {
+    expect(command).toBeInstanceOf(GetCommand)
+    if (!corrupt) throw new Error('Unknown SDK failure')
+    return { Item: { ...definition, feeds: [{ id: 'invalid' }] } }
+  }) as DynamoDBDocumentClient['send']
+  const definitions = new DynamoDbSavedUpdateFeedsStore('planning', client)
+  f.context.reader.readSavedFeeds = () => definitions.get('w', 'reader')
+  const result = await runInboxDigestSchedule({ enabled: true, dependencies: { authorize: async () => f.context }, listCandidates: async () => ({ recipients: [{ ...recipient, frequency: 'daily' }] }) }, now)
+  expect(result.terminal).toEqual(corrupt ? [{ recipient, frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'corrupt-state' }] : [])
+  expect(result.failed).toEqual(corrupt ? [] : [{ ...recipient, frequency: 'daily', scheduledAt: now }])
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  expect(f.notifications()).toHaveLength(0)
+})
+
+for (const change of ['edited', 'deleted']) for (const during of [false, true]) test(`${change} definitions disable stale delivery once, during generation ${during}, until explicit reselection`, async () => {
+  const f = await fixture()
+  const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+  const original = await f.context.reader.readSavedFeeds!()
+  let collection = original
+  let reads = 0
+  f.rows.set(f.coordinate('planning', definition), definition)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+  const indexedBeforeChange = structuredClone(f.metadata())
+  f.context.reader.readSavedFeeds = async () => {
+    if (++reads === (during ? 2 : 1)) {
+      collection = { revision: 2, feeds: change === 'deleted' ? [] : original.feeds.map((feed) => ({ ...feed, name: 'Edited private definition' })) }
+      f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 2 })
+    }
+    return collection
+  }
+  expect(await f.run()).toBe('disabled')
+  const paused = await f.store.get('w', 'reader')
+  expect(paused.preferences.enabled).toBe(false)
+  expect(paused.preferences.savedFeeds?.revision).toBe(1)
+  expect(paused.history).toHaveLength(during ? 1 : 0)
+  if (during) expect(paused.history[0]).toMatchObject({ status: 'failed', attempts: 1 })
+  expect(f.metadata().inboxDigestShard).toBeUndefined()
+  expect(f.metadata().inboxDigestDueAt).toBeUndefined()
+  f.indexed.push(indexedBeforeChange)
+  const shard = Number(String(indexedBeforeChange.inboxDigestShard).split('#')[1])
+  expect((await f.store.listDue(shard)).recipients).toEqual([]) // Stale GSI results are strongly rechecked.
+  const queries = reads
+  for (let repetition = 0; repetition < 4; repetition++) expect(await f.run()).toBe('disabled')
+  expect(reads).toBe(queries)
+  expect(await f.store.get('w', 'reader')).toEqual(paused)
+  expect(f.notifications()).toHaveLength(0)
+  collection = { ...original, revision: 3 }
+  f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 3 })
+  expect(await f.run()).toBe('disabled') // Restoring a definition never restores withdrawn consent.
+  await f.store.replace('w', 'reader', { ...paused, preferences: { ...paused.preferences, enabled: true, savedFeeds: { revision: 3, ids: ['custom'] } } }, undefined, 3)
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+for (const withdrawal of [false, true]) test(`stale selection handling preserves concurrent explicit consent change, withdrawal ${withdrawal}`, async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = async () => {
+    const current = await f.store.get('w', 'reader')
+    await f.store.replace('w', 'reader', { ...current, preferences: { enabled: !withdrawal, frequency: 'weekly', views: ['recent'] } })
+    return { revision: 2, feeds: [] }
+  }
+  if (withdrawal) expect(await f.run()).toBe('disabled')
+  else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect((await f.store.get('w', 'reader')).preferences).toEqual({ enabled: !withdrawal, frequency: 'weekly', views: ['recent'] })
+  expect(f.notifications()).toHaveLength(0)
+  expect(await f.run()).toBe(withdrawal ? 'disabled' : 'delivered')
+})
+
+test('missing definition reader is an availability failure, never silent consent withdrawal', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = undefined
+  await expect(f.run()).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestAuthorizationUnavailable' })
+  expect((await f.store.get('w', 'reader')).preferences.enabled).toBe(true)
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('stale-selection disable is CAS-fenced against a reselection at the write boundary', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = async () => ({ revision: 2, feeds: [] })
+  f.beforeTransaction(() => {
+    const row = f.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: true, frequency: 'weekly', views: ['recent'] }
+  })
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect((await f.store.get('w', 'reader')).preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['recent'] })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('lost transaction response and concurrent attempts preserve a single durable Inbox row', async () => {
+  const f = await fixture()
+  f.loseResponse()
+  await expect(f.run()).rejects.toMatchObject({ status: 503 })
+  expect(f.notifications()).toHaveLength(1)
+  const row = f.notifications()[0]!
+  row.inboxState = 'archived'
+  expect(await f.run()).toBe('not-due')
+  expect(f.notifications()[0]?.inboxState).toBe('archived')
+  const g = await fixture()
+  await Promise.allSettled([g.run(), g.run()])
+  expect(g.notifications()).toHaveLength(1)
+  expect((await g.store.get('w', 'reader')).history[0]?.status).toBe('completed')
+})
+
+test('membership revocation or first Planning creation rolls back both completion writes', async () => {
+  for (const boundary of ['membership', 'planning']) {
+    const f = await fixture()
+    f.beforeTransaction(() => {
+      const transaction = f.commands.at(-1)
+      if (!(transaction instanceof TransactWriteCommand) || !transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) return
+      if (boundary === 'membership') f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 3 })
+      else f.rows.set(f.coordinate('planning', { workspaceId: 'FENCE#w', recordKey: 'META' }), { workspaceId: 'FENCE#w', recordKey: 'META', entryType: 'planning-meta', schemaVersion: 1, revision: 1 })
+    })
+    await expect(f.run()).rejects.toMatchObject({ status: 409 })
+    expect(f.notifications()).toHaveLength(0)
+    expect((await f.store.get('w', 'reader')).history[0]?.status).not.toBe('completed')
+  }
+})
+
+test('lost claim response stays leased then reclaims once; disabled settings fence pending completion', async () => {
+  const f = await fixture()
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ status: 503 })
+  expect(await f.run()).toBe('not-due')
+  expect(f.notifications()).toHaveLength(0)
+  expect(f.metadata().inboxDigestDueAt).toBe(now + 60_000)
+  f.advance(60_001)
+  expect(await f.run()).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history[0]?.attempts).toBe(2)
+  const g = await fixture()
+  g.beforeTransaction(() => {
+    const command = g.commands.at(-1)
+    if (!(command instanceof TransactWriteCommand) || !command.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) return
+    const row = g.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+    delete row.inboxDigestShard
+    delete row.inboxDigestDueAt
+  })
+  await expect(g.run()).rejects.toMatchObject({ status: 409 })
+  expect(g.notifications()).toHaveLength(0)
+  expect(await g.run()).toBe('disabled')
+})
+
+test('concurrent Inbox preference creation is fenced and a retry cannot deliver after channel disable', async () => {
+  const f = await fixture()
+  f.beforeTransaction(() => {
+    const transaction = f.commands.at(-1)
+    if (!(transaction instanceof TransactWriteCommand) || !transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) return
+    const row = { recipientKey: 'w#reader', notificationKey: NOTIFICATION_PREFERENCES_KEY, itemType: 'preferences', version: 1, channels: { inApp: false, email: false, push: false, slack: false }, frequency: 'instant', quietHours: { enabled: false, start: '22:00', end: '08:00', timeZone: 'UTC' } }
+    f.rows.set(f.coordinate('notifications', row), row)
+  })
+  await expect(f.run()).rejects.toMatchObject({ status: 409 })
+  await expect(f.run()).rejects.toMatchObject({ status: 409 })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+for (const boundary of ['metadata', 'preferences', 'query', 'second-candidate', 'write']) for (const [name, status, code] of [
+  ['TimeoutError', 503, 'UpdateFeedDigestRetryable'],
+  ['AccessDeniedException', 502, 'UpdateFeedDigestStoragePermanent'],
+  ['UnclassifiedNetworkFailure', 502, 'UpdateFeedDigestStorageFailure'],
+] as const) test(`${boundary} SDK ${name} is classified without partial success`, async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  const row = f.metadata()
+  const shard = Number(String(row.inboxDigestShard).split('#')[1])
+  f.indexed.push({ workspaceId: row.workspaceId, recordKey: row.recordKey }, { workspaceId: row.workspaceId, recordKey: row.recordKey })
+  let reads = 0
+  f.failCommand((command) => {
+    const fails = boundary === 'write' ? command instanceof TransactWriteCommand : boundary === 'query' ? command instanceof QueryCommand : command instanceof GetCommand && (boundary === 'preferences' ? command.input.TableName === 'notifications' : boundary === 'second-candidate' ? ++reads === 2 : true)
+    return fails ? Object.assign(new Error('Sensitive SDK detail'), { name }) : undefined
+  })
+  let deliveries = 0
+  const operation = boundary === 'metadata' ? f.store.get('w', 'reader') : boundary === 'preferences' ? f.run() : boundary === 'write' ? f.store.replace('w', 'reader', state) : runInboxDigestSchedule({ enabled: true, listCandidates: async () => { const page = await f.store.listDue(shard); return { recipients: page.recipients, cursor: JSON.stringify(page.cursor) } }, dependencies: { authorize: async () => { deliveries++; return f.context } } }, now)
+  await expect(operation).rejects.toMatchObject({ status, code })
+  expect(f.notifications()).toHaveLength(0)
+  expect(deliveries).toBe(0)
+  if (boundary === 'second-candidate') expect(reads).toBe(2)
+})
+
+for (const malformed of ['index-key', 'owner', 'state']) test(`due candidate ${malformed} corruption is typed and returns no page`, async () => {
+  const f = await fixture()
+  const row = f.metadata()
+  const shard = Number(String(row.inboxDigestShard).split('#')[1])
+  f.indexed.push({ workspaceId: row.workspaceId, recordKey: malformed === 'index-key' ? 'wrong' : row.recordKey })
+  if (malformed === 'owner') row.memberKey = ''
+  if (malformed === 'state') row.history = 'invalid'
+  await expect(f.store.listDue(shard)).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('due query is bounded and rechecks stale index entries against strongly consistent canonical metadata', async () => {
+  const f = await fixture()
+  const row = f.metadata()
+  f.indexed.push({ workspaceId: row.workspaceId, recordKey: row.recordKey })
+  const shard = Number(String(row.inboxDigestShard).split('#')[1])
+  expect(await f.store.listDue(shard, 10)).toEqual({ recipients: [{ ...recipient, frequency: 'daily' }], cursor: { workspaceId: 'next', recordKey: 'next' } })
+  await f.run()
+  expect((await f.store.listDue(shard, 10)).recipients).toEqual([])
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { ...state.preferences, enabled: false } })
+  expect(f.metadata().inboxDigestShard).toBeUndefined()
+  expect((await f.store.listDue(shard, 10)).recipients).toEqual([])
+  await expect(f.store.listDue(shard, 101)).rejects.toMatchObject({ status: 409 })
+  expect((await f.store.get('other', 'reader')).preferences.enabled).toBe(false)
+})
+
+test('malformed due rows fail closed and metadata cannot bypass the atomic completion path', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await expect(f.store.replace('w', 'reader', { ...state, history: [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'forged', leaseUntil: 0, count: 1 }] })).rejects.toMatchObject({ status: 409 })
+  f.metadata().inboxDigestDueAt = 'malformed'
+  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const empty of [false, true]) test(`${frequency} claim completes across Monday midnight with empty=${empty}`, async () => {
+  const f = await fixture()
+  const start = Date.parse('2026-10-04T23:59:50Z')
+  f.advance(start - now)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
+  if (empty) f.context.reader.authorizeTarget = async () => undefined
+  const read = f.context.reader.readSnapshot
+  let crossed = false
+  f.context.reader.readSnapshot = async () => { if (!crossed) { crossed = true; f.advance(20_000) }; return read() }
+  expect(await f.run()).toBe(empty ? 'empty' : 'delivered')
+  const id = `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`
+  expect((await f.store.get('w', 'reader')).history[0]).toMatchObject({ id, status: 'completed', attempts: 1 })
+  expect(f.notifications()).toHaveLength(empty ? 0 : 1)
+  expect(f.metadata().inboxDigestDueAt).toBe(start + 20_000)
+  expect(await f.run()).toBe(empty ? 'empty' : 'delivered')
+  expect((await f.store.get('w', 'reader')).history).toHaveLength(2)
+  expect(f.notifications()).toHaveLength(empty ? 0 : 2)
+})
+
+test('completion preserves prior history and rejects forged or multiple transitions and expired claims', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  const claimed = await f.store.replace('w', 'reader', { ...state, history: [
+    { id: 'daily:2026-10-02', status: 'failed', attempts: 1, token: 'older', leaseUntil: 0, count: 0 },
+    { id: 'daily:2026-10-03', status: 'pending', attempts: 1, token: 'claim', leaseUntil: now + 60_000, count: 0 },
+  ] })
+  const completed = { ...claimed, history: claimed.history.map((row) => row.id === 'daily:2026-10-03' ? { ...row, status: 'completed' as const, leaseUntil: 0 } : row) }
+  const forged = structuredClone(completed)
+  forged.history[1]!.token = 'forged'
+  await expect(f.store.complete(recipient, forged, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  const changedTime = structuredClone(completed)
+  changedTime.history[1]!.startedAt = now - 1
+  await expect(f.store.complete(recipient, changedTime, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  const multiple = structuredClone(completed)
+  multiple.history[0]!.status = 'completed'
+  await expect(f.store.complete(recipient, multiple, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  const saved = await f.store.complete(recipient, completed, 0, undefined)
+  expect(saved.history[0]).toEqual(claimed.history[0])
+  const g = await fixture()
+  const pending = await g.store.replace('w', 'reader', { ...await g.store.get('w', 'reader'), history: [claimed.history[1]!] })
+  g.advance(60_001)
+  await expect(g.store.complete(recipient, { ...pending, history: completed.history.slice(1) }, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  expect(g.notifications()).toHaveLength(0)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`fresh GSI discovery retries failed ${frequency} claim after UTC rollover before the new interval`, async () => {
+  const f = await fixture()
+  const claimAt = Date.parse('2026-10-04T23:59:30Z')
+  const interval = `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`
+  const scheduledAt = Date.parse(`${interval.split(':')[1]}T00:00:00Z`)
+  f.advance(claimAt - now)
+  const initial = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...initial, preferences: { enabled: true, frequency, views: ['recent'] } })
+  const read = f.context.reader.readSnapshot
+  f.context.reader.readSnapshot = async () => { f.advance(60_001); throw new Error('Read failed after rollover') }
+  await expect(f.run()).rejects.toThrow('Read failed after rollover')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'failed', attempts: 1, startedAt: claimAt }])
+  expect(f.metadata().inboxDigestDueAt).toBe(claimAt + 120_001)
+  f.context.reader.readSnapshot = read
+  f.advance(60_000)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  const page = await f.store.listDue(shard)
+  expect(page.recipients).toEqual([{ ...recipient, frequency, scheduledAt, receiptAttempts: 1 }])
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: page.recipients }), dependencies: { authorize: async () => f.context } }, claimAt + 120_001)
+  expect(result).toMatchObject({ delivered: 1, failed: [], terminal: [] })
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'completed', attempts: 2, startedAt: claimAt }])
+  expect(f.notifications()).toHaveLength(1)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const changed of [false, true]) test(`preclaim ${frequency} exhaustion survives restart and day/Monday transitions, cadenceChanged=${changed}`, async () => {
+  const f = await fixture()
+  f.finishIndex()
+  const admittedAt = Date.parse('2026-10-03T23:57:50Z')
+  f.advance(admittedAt - now)
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency, views: ['recent'] } })
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  let calls = 0
+  let failing = true
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async () => {
+      const page = await f.store.listDue(shard)
+      const source = f.restartCheckpoints()
+      const recipients = []
+      for (const candidate of page.recipients) if (!await source.isQuarantined(candidate, f.now(), shard) && !await source.isExhausted(candidate, f.now(), shard)) recipients.push(candidate)
+      return { recipients }
+    },
+    delivery: { authorize: async () => { calls++; if (failing) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Private outage'); return f.context } },
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    dependencies.checkpoints = f.restartCheckpoints()
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 1 })
+    if (attempt < 2) f.advance(60_000)
+  }
+  expect(calls).toBe(3)
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  const evidence = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-exhaustion')
+  expect(evidence).toMatchObject({ work: { recipient, frequency, scheduledAt: admittedAt, attempts: 2 }, reason: 'retry-exhausted', workerAttempts: 3 })
+  expect(evidence?.expiresAt).toBeUndefined()
+  expect(JSON.stringify(evidence)).not.toContain('Private outage')
+  const before = structuredClone(evidence)
+  f.advance(86_400_000)
+  expect(await f.restartCheckpoints().isExhausted({ ...recipient, frequency, scheduledAt: admittedAt }, f.now(), shard)).toBe(true)
+  const currentFrequency = changed ? frequency === 'daily' ? 'weekly' : 'daily' : frequency
+  if (changed) await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency: currentFrequency, views: ['recent'] } })
+  failing = false
+  const sameWeeklyInterval = frequency === 'weekly' && !changed
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: sameWeeklyInterval ? 0 : 1, delivered: sameWeeklyInterval ? 0 : 1 })
+  expect(calls).toBe(sameWeeklyInterval ? 3 : 4)
+  expect([...f.rows.values()].find((row) => row.entryType === 'inbox-digest-exhaustion')).toEqual(before)
+  if (sameWeeklyInterval) {
+    f.advance(86_400_000)
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ delivered: 1 })
+    expect((await f.store.get('w', 'reader')).history[0]?.id).toBe('weekly:2026-10-05')
+  }
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`unchanged ${frequency} receipt progress cannot reset exhausted worker budget next day`, async () => {
+  const f = await fixture()
+  f.finishIndex()
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency, views: ['recent'] } })
+  f.context.reader.readSnapshot = async () => { throw new Error('Initial generation outage') }
+  await expect(f.run()).rejects.toThrow('Initial generation outage')
+  f.advance(60_000)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  let calls = 0
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async () => {
+      const page = await f.store.listDue(shard)
+      const recipients = []
+      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now(), shard) && !await f.checkpoints.isExhausted(candidate, f.now(), shard)) recipients.push(candidate)
+      return { recipients }
+    },
+    delivery: { authorize: async () => { calls++; throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Unavailable') } },
+  }
+  for (let attempt = 0; attempt < 3; attempt++) { await runInboxDigestWorker(dependencies, shard); f.advance(60_000) }
+  expect(calls).toBe(3)
+  expect([...f.rows.values()].find((row) => row.entryType === 'inbox-digest-exhaustion')).toMatchObject({ work: { frequency, receiptAttempts: 1, attempts: 2 }, workerAttempts: 3 })
+  dependencies.checkpoints = f.restartCheckpoints()
+  f.advance(86_400_000)
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 0 })
+  expect(calls).toBe(3)
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ attempts: 1, status: 'failed' }])
+})
+
+test('postclaim conditional conflicts consume the documented generation budget without writing Inbox rows', async () => {
+  const f = await fixture()
+  const key = { workspaceId: 'FENCE#w', recordKey: 'META' }
+  f.rows.set(f.coordinate('planning', key), { ...key, entryType: 'planning-meta', schemaVersion: 1, revision: 1 })
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+    expect((await f.store.get('w', 'reader')).history).toMatchObject([{ status: 'failed', attempts: attempt }])
+    expect(f.notifications()).toEqual([])
+  }
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
+  expect(f.notifications()).toEqual([])
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`worker quarantine recovery rediscovers unfinished ${frequency} receipt after two preclaim failures and rollover`, async () => {
+  const f = await fixture()
+  f.finishIndex()
+  const firstAt = Date.parse('2026-10-04T23:57:50Z')
+  const claimAt = firstAt + 120_000
+  const interval = `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`
+  f.advance(firstAt - now)
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency, views: ['recent'] } })
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  let authorizationAttempts = 0
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async (currentShard, _cursor, limit) => {
+      const page = await f.store.listDue(currentShard, limit)
+      const recipients = []
+      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now(), shard) && !await f.checkpoints.isExhausted(candidate, f.now(), shard)) recipients.push(candidate)
+      return { recipients }
+    },
+    delivery: { authorize: async () => {
+      if (++authorizationAttempts <= 2) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Preclaim outage')
+      return f.context
+    } },
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 1 })
+    expect((await f.store.get('w', 'reader')).history).toEqual([])
+    f.advance(60_000)
+  }
+  const read = f.context.reader.readSnapshot
+  f.context.reader.readSnapshot = async () => { f.advance(20_000); throw new Error('Post-claim rollover failure') }
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 1 })
+  expect(f.now()).toBe(Date.parse('2026-10-05T00:00:10Z'))
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, attempts: 1, status: 'failed', startedAt: claimAt }])
+  const checkpoint = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-checkpoint')
+  expect(checkpoint?.pending).toEqual([])
+  expect(await f.checkpoints.isQuarantined(recipient, f.now(), shard)).toBe(true)
+  expect(f.notifications()).toEqual([])
+  f.context.reader.readSnapshot = read
+  f.advance(86_400_000)
+  expect(await f.checkpoints.isQuarantined(recipient, f.now(), shard)).toBe(false)
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 1, failed: 0 })
+  expect((await f.store.get('w', 'reader')).history).toEqual([expect.objectContaining({ id: interval, attempts: 2, status: 'completed', startedAt: claimAt })])
+  expect(f.notifications()).toHaveLength(1)
+  expect(f.notifications()[0]).toMatchObject({ occurredAt: new Date(claimAt).toISOString(), expiresAt: Math.floor(claimAt / 1000) + 365 * 86_400 })
+})
+
+test('completion rejects a logical interval later than its real first claim', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  const claimed = await f.store.replace('w', 'reader', { ...state, history: [{ id: 'daily:2026-10-04', status: 'pending', attempts: 1, token: 'claim', startedAt: now, leaseUntil: now + 60_000, count: 0 }] })
+  await expect(f.store.complete(recipient, { ...claimed, history: claimed.history.map((row) => ({ ...row, status: 'completed', leaseUntil: 0 })) }, 0, undefined)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('read failures distinguish absent, transient SDK and corrupt persisted envelopes/preferences/receipts/due fields', async () => {
+  const f = await fixture()
+  expect(await f.store.get('missing', 'reader')).toEqual(emptyDigestState())
+  for (const name of ['ThrottlingException', 'TimeoutError', 'ProvisionedThroughputExceededException']) {
+    f.failRead(Object.assign(new Error('private SDK detail'), { name }))
+    await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
+  }
+  f.failRead(new Error('unknown private failure'))
+  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+  f.failRead(undefined)
+  const original = structuredClone(f.metadata())
+  for (const mutation of [{ schemaVersion: 2 }, { memberKey: 'other' }, { preferences: { enabled: true } }, { history: [{}] }, { history: [{ id: 'daily:2026-10-03', status: 'failed', attempts: 1, token: 'claim', leaseUntil: 0, count: 0, startedAt: -1 }] }, { inboxDigestShard: 'wrong' }, { inboxDigestDueAt: 'invalid' }]) {
+    f.rows.set(f.coordinate('planning', original), { ...original, ...mutation })
+    await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+  }
+  f.rows.set(f.coordinate('planning', original), original)
+  await expect(f.store.replace('w', 'reader', { ...emptyDigestState(), revision: -1 })).rejects.toMatchObject({ status: 400 })
+  await expect(f.store.replace('w', 'reader', emptyDigestState())).rejects.toMatchObject({ status: 409 })
+})
+
+test('late-week delivery uses first claim time for sorting and full retention, stable across retry and lost response', async () => {
+  const f = await fixture()
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency: 'weekly', views: ['recent'] } })
+  const read = f.context.reader.readSnapshot
+  let fail = true
+  f.context.reader.readSnapshot = async () => { if (fail) throw new Error('Transient content read'); return read() }
+  await expect(f.run()).rejects.toThrow('Transient content read')
+  expect((await f.store.get('w', 'reader')).history[0]?.startedAt).toBe(now)
+  f.advance(60_000)
+  fail = false
+  f.loseResponse()
+  await expect(f.run()).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
+  const notification = f.notifications()[0]!
+  expect(notification.eventId).toBe('update-feed-digest:weekly:2026-09-28')
+  expect(notification.occurredAt).toBe(new Date(now).toISOString())
+  expect(notification.createdAt).toBe(new Date(now).toISOString())
+  expect(notification.expiresAt).toBe(now / 1000 + 365 * 86400)
+  expect(String(notification.notificationKey) > '2026-10-02T23:59:00.000Z#ordinary-notification').toBe(true)
+  const key = notification.notificationKey
+  f.advance(60_000)
+  expect(await f.run()).toBe('not-due')
+  expect(f.notifications()).toHaveLength(1)
+  expect(f.notifications()[0]?.notificationKey).toBe(key)
+})
+
+for (const [name, code, terminal] of [
+  ['TimeoutError', 'UpdateFeedDigestRetryable', undefined],
+  ['AccessDeniedException', 'UpdateFeedDigestStoragePermanent', 'storage-permanent'],
+  ['NetworkingError', 'UpdateFeedDigestStorageFailure', undefined],
+] as const) test(`post-claim preference read classifies ${name} without committing a notification`, async () => {
+  const f = await fixture()
+  f.failPreferencesRead(Object.assign(new Error('private SDK detail'), { name }))
+  try { await f.run(); throw new Error('Expected rejection') }
+  catch (error) { expect(error).toMatchObject({ code }); expect(inboxDigestTerminalReason(error)).toBe(terminal); expect(String(error)).not.toContain('private SDK') }
+  expect(f.notifications()).toHaveLength(0)
+  expect((await f.store.get('w', 'reader')).history[0]).toMatchObject({ status: 'failed', attempts: 1 })
+  f.failPreferencesRead(undefined)
+  f.advance(60_000)
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('malformed notification preferences are corruption while absent consent defaults and explicit opt-out stays conflict', async () => {
+  const owner = createNotificationRecipientKey('w', 'reader')
+  const key = { recipientKey: owner, notificationKey: NOTIFICATION_PREFERENCES_KEY }
+  const valid = { ...key, itemType: 'preferences', version: 1, channels: { inApp: true, email: false, push: false, slack: false }, frequency: 'instant', quietHours: { enabled: false, start: '22:00', end: '08:00', timeZone: 'UTC' } }
+  for (const bad of [{ ...valid, recipientKey: 'other' }, { ...valid, notificationKey: 'other' }, { ...valid, itemType: 'wrong' }, { ...valid, channels: { inApp: 'true' } }]) {
+    const f = await fixture()
+    f.rows.set(f.coordinate('notifications', key), bad)
+    await expect(f.run()).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+    expect(f.notifications()).toHaveLength(0)
+  }
+  const off = await fixture()
+  off.rows.set(off.coordinate('notifications', key), { ...valid, channels: { ...valid.channels, inApp: false } })
+  await expect(off.run()).rejects.toMatchObject({ status: 409, code: 'UpdateFeedDigestConflict' })
+  expect(off.notifications()).toHaveLength(0)
+  expect(await (await fixture()).run()).toBe('delivered')
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const boundary of [false, true]) test(`lost third ${frequency} claim recovers with boundary=${boundary}`, async () => {
+  const f = await fixture()
+  const start = boundary ? Date.parse('2026-10-04T23:59:30Z') : now
+  f.advance(start - now)
+  const id = `${frequency}:${frequency === 'weekly' ? '2026-09-28' : boundary ? '2026-10-04' : '2026-10-03'}`
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] }, history: [{ id, status: 'failed', attempts: 2, token: 'previous', leaseUntil: 0, startedAt: start - 60_000, count: 0 }] })
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  expect(f.metadata().inboxDigestDueAt).toBe(start + 60_000)
+  expect((await f.store.get('w', 'reader')).history[0]).toMatchObject({ id, status: 'pending', attempts: 3 })
+  expect(await f.run()).toBe('not-due')
+  f.advance(60_001)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  expect((await f.store.listDue(shard)).recipients).toEqual([{ ...recipient, frequency }])
+  if (boundary) expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, start + 60_001, start, frequency)).toBe('delivered')
+  else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
+  expect((await f.store.get('w', 'reader')).history.find((row) => row.id === id)).toMatchObject({ status: 'failed', attempts: 3, leaseUntil: 0 })
+  expect(f.notifications()).toHaveLength(boundary ? 1 : 0)
+  if (boundary) { expect(await f.run()).toBe('not-due'); expect(f.notifications()).toHaveLength(1) }
+  else expect(f.metadata().inboxDigestDueAt).toBe(Date.parse(frequency === 'daily' ? '2026-10-04T00:00:00Z' : '2026-10-05T00:00:00Z'))
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`delayed first ${frequency} claim keeps logical interval but orders and expires from actual claim time`, async () => {
+  const f = await fixture()
+  const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
+  const retryAt = scheduledAt + 120_000
+  f.advance(scheduledAt - now)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
+  f.failWrite(Object.assign(new Error('Claim transport failure'), { name: 'TimeoutError' }))
+  await expect(deliverInboxDigest({ authorize: async () => f.context }, recipient, scheduledAt, scheduledAt, frequency)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  f.failWrite(undefined)
+  f.advance(retryAt - scheduledAt)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt, scheduledAt, frequency)).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ startedAt: retryAt, status: 'completed', id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}` }])
+  expect(f.notifications()[0]).toMatchObject({ occurredAt: new Date(retryAt).toISOString(), expiresAt: Math.floor(retryAt / 1000) + 365 * 86_400 })
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt + 1, scheduledAt, frequency)).toBe('not-due')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('a pinned retry defers a live prior claim instead of acknowledging unfinished logical work', async () => {
+  const f = await fixture()
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  f.advance(30_000)
+  await expect(deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 30_000, now, 'daily')).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  f.advance(30_001)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 60_001, now, 'daily')).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ attempts: 2, startedAt: now, status: 'completed' }])
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('transaction failures classify complete cancellation vectors and permanent SDK failures without leaking details', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  for (const name of ['ValidationException', 'AccessDeniedException', 'ResourceNotFoundException']) {
+    f.failWrite(Object.assign(new Error('private SDK detail'), { name }))
+    try { await f.store.replace('w', 'reader', state); throw new Error('Expected rejection') }
+    catch (error) {
+      expect(error).toMatchObject({ status: 502, code: 'UpdateFeedDigestStoragePermanent' })
+      expect(inboxDigestTerminalReason(error)).toBe('storage-permanent')
+      expect(String(error)).not.toContain('private SDK')
+    }
+  }
+  f.failWrite(new Error('Unknown network failure'))
+  await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+  for (const name of ['ThrottlingException', 'TimeoutError', 'TransactionInProgressException', 'InternalServerError']) {
+    f.failWrite(Object.assign(new Error('temporary'), { name }))
+    await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
+  }
+  for (const [codes, status] of [
+    [['None', 'ConditionalCheckFailed'], 409], [['None', 'TransactionConflict'], 503],
+    [['ConditionalCheckFailed', 'ThrottlingError'], 503], [['ValidationError', 'TransactionConflict'], 502],
+    [['None'], 502], [['None', 'None'], 502], [['None', undefined], 502],
+  ] as const) {
+    f.failWrite({ name: 'TransactionCanceledException', CancellationReasons: codes.map((Code) => ({ Code })) })
+    await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status })
+  }
+  expect(await f.store.get('w', 'reader')).toEqual(state)
+  expect(f.notifications()).toHaveLength(0)
+})

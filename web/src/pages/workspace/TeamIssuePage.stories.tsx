@@ -3,7 +3,7 @@ import type { WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState, type ComponentProps } from 'react'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
-import { TeamIssueScreen } from './TeamIssuePage'
+import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
 import {
   collaborationWorkspaceMemberFixtures,
   issueCollaborationControllerFixture,

@@ -250,6 +250,8 @@ const expectedDataConfiguration = {
 };
 
 const expectedWorkflowConfiguration = {
+  AUDIT_EXPORT_BUCKET_NAME: base64(ref('AuditExportBucketC2429A66')),
+  AUDIT_EXPORT_QUEUE_URL: base64(ref('AuditExportQueueD1DB7896')),
   DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET: nestedSecret(
     ref(DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID),
   ),
@@ -272,6 +274,8 @@ const expectedWorkflowConfiguration = {
   ),
   NOTIFICATIONS_STATUS_INDEX_NAME: base64('RecipientStatusIndex'),
   NOTIFICATIONS_TABLE_NAME: base64(ref('NotificationsTable76DCFC6C')),
+  PUSH_SUBSCRIPTIONS_TABLE_NAME: base64(ref('PushSubscriptionsTable14F60E9C')),
+  WEB_PUSH_VAPID_PUBLIC_KEY: base64(ref('WebPushVapidPublicKey')),
   CAPACITY_PLANNING_TABLE_NAME: base64(ref('CapacityPlanningTable0EECD517')),
   PLANNING_TABLE_NAME: base64(ref('PlanningTable2A0D4CC5')),
   REALTIME_SESSIONS_TABLE_NAME: base64(

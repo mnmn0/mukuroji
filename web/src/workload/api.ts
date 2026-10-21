@@ -7,6 +7,7 @@ import {
   type WorkloadSnapshot,
   type WorkingSchedule,
 } from '@mukuroji/contracts'
+import { isRecord } from '../shared/api/jsonValidation'
 
 /** Error returned by the workload API. */
 export class WorkloadApiError extends Error {
@@ -469,11 +470,6 @@ function readErrorMessage(value: unknown): string {
     'message' in value && typeof value.message === 'string'
     ? value.message
     : 'Workload data could not be loaded.'
-}
-
-/** Checks whether an unknown response value is a non-array record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Reads a JSON response body without assuming its runtime shape. */

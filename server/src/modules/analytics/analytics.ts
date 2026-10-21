@@ -2745,10 +2745,11 @@ function canonicalJson(value: unknown): string {
   if (value === undefined) return 'null'
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  return `{${Object.keys(value as Record<string, unknown>)
+  if (!isRecord(value)) return JSON.stringify(value)
+  return `{${Object.keys(value)
     .sort()
     .map((key) =>
-      `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
     )
     .join(',')}}`
 }

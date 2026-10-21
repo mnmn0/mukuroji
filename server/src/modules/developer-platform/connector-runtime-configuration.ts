@@ -208,7 +208,7 @@ export function parseConnectorRuntimeSecret(
 ): Readonly<Record<string, string>> {
   let parsed: unknown
   try {
-    parsed = JSON.parse(secret) as unknown
+    parsed = JSON.parse(secret)
   } catch {
     throw configurationInvalid('Connector runtime configuration must be valid JSON.')
   }

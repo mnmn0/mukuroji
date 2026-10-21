@@ -288,12 +288,12 @@ export function EnterpriseSecurityPanelContainer({
       {activeRecoveryNotice && recoveryExpiryLabel && !isAuthorizationError ? (
         <section
           aria-live="polite"
-          className="flex flex-col gap-4 rounded-xl border border-[#eab8ad] bg-[#fff5f2] p-4 text-[#713128] sm:flex-row sm:items-center"
+          className="flex flex-col gap-4 rounded-xl border border-tone-eab8ad bg-tone-fff5f2 p-4 text-fg-713128 sm:flex-row sm:items-center"
           data-testid="enterprise-recovery-active"
         >
           <span
             aria-hidden="true"
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#f9ddd6] text-lg font-black"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-tone-f9ddd6 text-lg font-black"
           >
             !
           </span>
@@ -309,7 +309,7 @@ export function EnterpriseSecurityPanelContainer({
             </p>
           </div>
           <button
-            className="min-h-10 shrink-0 cursor-pointer rounded-md border border-[#c66352] bg-white px-4 text-sm font-bold text-[#8c382b] hover:bg-[#fffaf8] disabled:cursor-not-allowed disabled:opacity-60"
+            className="min-h-10 shrink-0 cursor-pointer rounded-md border border-tone-c66352 bg-surface px-4 text-sm font-bold text-fg-8c382b hover:bg-tone-fffaf8 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={busyOperation === 'break-glass:revoke-activation'}
             type="button"
             onClick={() => void revokeActiveRecoveryAccess()}

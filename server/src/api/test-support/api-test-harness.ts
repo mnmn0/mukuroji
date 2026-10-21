@@ -12,6 +12,8 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemContributorAssignment,
+  type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type CanonicalWorkItem,
   type WorkItemSchedule,
@@ -68,6 +70,7 @@ import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
+import { isStoredContributorAssignmentList } from '../../modules/work-items/domain/contributor-assignments'
 import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
@@ -226,8 +229,31 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
   return { client }
 }
 
+/** Test overrides for an inbound webhook endpoint; Team routing comes only with the Triage purpose. */
+type InboundWebhookEndpointRecordOverrides =
+  Partial<Omit<AutomationInboundWebhookEndpointRecord, 'purpose' | 'triageRouting'>> & (
+    | {
+      /** Automation purpose, the default. */
+      purpose?: 'automation'
+      /** Automation-purpose endpoints carry no Team routing. */
+      triageRouting?: never
+    }
+    | {
+      /** Triage purpose. */
+      purpose: 'triage'
+      /** Fixed Team routing of the Triage endpoint. */
+      triageRouting: { teamId: string }
+    }
+  )
+
+/**
+ * Creates an active Automation inbound webhook endpoint record for API tests.
+ *
+ * @param overrides - Fields that replace the defaults.
+ * @returns The endpoint record.
+ */
 function createInboundWebhookEndpointRecord(
-  overrides: Partial<AutomationInboundWebhookEndpointRecord> = {},
+  overrides: InboundWebhookEndpointRecordOverrides = {},
 ): AutomationInboundWebhookEndpointRecord {
   return {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -235,6 +261,7 @@ function createInboundWebhookEndpointRecord(
     workspaceId: 'user#demo@example.com',
     opaqueEndpointId: 'A'.repeat(43),
     name: 'Build events',
+    purpose: 'automation',
     status: 'active',
     version: 1,
     secretGeneration: 1,
@@ -606,6 +633,7 @@ function createCollaborationStub(
     removeReaction: unsupported,
     getWatcherState: unsupported,
     getMemberWatcherState: unsupported,
+    async getMemberSubscribedScopes() { return [] },
     subscribe: unsupported,
     unsubscribe: unsupported,
     heartbeatPresence: unsupported,
@@ -1281,7 +1309,15 @@ function configureFakeProjectClients(
     profileError?: Error
     /** 指定した active member を Workspace guest として返します。 */
     guestWorkspaceMemberKeys?: string[]
+    /** Job roles returned by the resolved Work Item configuration. */
+    jobRoles?: WorkItemJobRoleDefinition[]
+    /** Contributors stored on the first fake Team Work Item and on detail reads. */
+    issueContributorAssignments?: WorkItemContributorAssignment[]
     inactiveWorkspaceMemberKeys?: string[]
+    /** Members that read as active but are deactivated before their commit-time fence is built. */
+    deactivatedBeforeFenceMemberKeys?: string[]
+    /** Omits the Workspace access membership fence, as an adapter without fencing support would. */
+    withoutMemberFence?: boolean
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
@@ -1374,6 +1410,12 @@ function configureFakeProjectClients(
       planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
       /** Updated Team-local Work Item identifier. */
       issueId: string
+      /** Contributor list supplied to the adapter, when the update changes it. */
+      contributorAssignments?: unknown
+      /** Caller authorization ConditionChecks supplied to the adapter. */
+      authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
+      /** Configuration guard ConditionChecks supplied to the adapter. */
+      configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -1592,6 +1634,9 @@ function configureFakeProjectClients(
         : `Work Item ${index}`,
       description: '初回体験の摩擦を下げる。',
       assigneeUserId: 'sato@example.com',
+      ...(index === 0 && options.issueContributorAssignments
+        ? { contributorAssignments: options.issueContributorAssignments }
+        : {}),
       creatorMemberKey: 'demo@example.com',
       workflowSchemaVersion: 1 as const,
       workflowStatusId: 'in-progress',
@@ -1837,6 +1882,16 @@ function configureFakeProjectClients(
       },
     },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
+      ...(options.jobRoles
+        ? {
+            async getTeamConfiguration(_workspaceId: string, teamId: string) {
+              return {
+                configuration: { ...createTestWorkItemConfiguration('team', teamId), jobRoles: options.jobRoles },
+                inheritedFrom: 'default' as const,
+              }
+            },
+          }
+        : {}),
       async listRelations() {
         return {
           relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
@@ -2109,17 +2164,20 @@ function configureFakeProjectClients(
       },
     },
     workspaceAccess: {
-      async createActiveMemberConditionCheck(workspaceId, memberKey) {
-        const member = createWorkspaceMember(memberKey)
-        if (member.status !== 'active') return undefined
-        return {
-          ConditionCheck: {
-            TableName: 'WorkspaceAccessTable',
-            Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
-            ConditionExpression: 'attribute_exists(workspaceId)',
-          },
-        }
-      },
+      ...(options.withoutMemberFence ? {} : {
+        async createActiveMemberConditionCheck(workspaceId: string, memberKey: string) {
+          const member = createWorkspaceMember(memberKey)
+          if (member.status !== 'active') return undefined
+          if (options.deactivatedBeforeFenceMemberKeys?.includes(memberKey)) return undefined
+          return {
+            ConditionCheck: {
+              TableName: 'WorkspaceAccessTable',
+              Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+              ConditionExpression: 'attribute_exists(workspaceId)',
+            },
+          }
+        },
+      }),
       async getMember(_workspaceId, memberKey) {
         return createWorkspaceMember(memberKey)
       },
@@ -2477,6 +2535,9 @@ function configureFakeProjectClients(
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
+            ...(options.issueContributorAssignments
+              ? { contributorAssignments: options.issueContributorAssignments }
+              : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
@@ -2534,6 +2595,9 @@ function configureFakeProjectClients(
             title: String(input.title),
             description: typeof input.description === 'string' ? input.description : undefined,
             assigneeUserId: String(input.assigneeUserId),
+            ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
+              ? { contributorAssignments: input.contributorAssignments }
+              : {}),
             creatorMemberKey: actorUserId,
             workflowSchemaVersion: 1,
             workflowStatusId: String(input.workflowStatusId),
@@ -2560,6 +2624,9 @@ function configureFakeProjectClients(
           authorizationSnapshot: input.authorizationSnapshot,
           planningRevisionFence: input.planningRevisionFence,
           issueId,
+          ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
+          authorizationConditionChecks: input.authorizationConditionChecks,
+          configurationConditionChecks: input.configurationConditionChecks,
         })
         calls.issueUpdates.push({
           actorUserId,
@@ -2590,6 +2657,9 @@ function configureFakeProjectClients(
               : undefined,
             title: typeof input.title === 'string' ? input.title : '初回オンボーディングの離脱要因を減らす',
             assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : 'sato@example.com',
+            ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
+              ? { contributorAssignments: input.contributorAssignments }
+              : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId: typeof input.workflowStatusId === 'string'

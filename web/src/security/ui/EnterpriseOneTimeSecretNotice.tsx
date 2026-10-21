@@ -55,10 +55,10 @@ export function EnterpriseOneTimeSecretNotice({
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-amber-950">
+          <h3 className="text-sm font-semibold text-fg-amber-950">
             {t('security.secret.title')} · {label}
           </h3>
-          <p className="mt-1 text-xs font-medium leading-5 text-amber-900">
+          <p className="mt-1 text-xs font-medium leading-5 text-fg-amber-900">
             {t(
               kind === 'scim'
                 ? 'security.secret.scimDescription'
@@ -75,7 +75,7 @@ export function EnterpriseOneTimeSecretNotice({
           {t('security.action.close')}
         </button>
       </div>
-      <div className="mt-3 flex min-w-0 flex-wrap items-center gap-3 rounded-lg border border-amber-300 bg-white px-3 py-3">
+      <div className="mt-3 flex min-w-0 flex-wrap items-center gap-3 rounded-lg border border-amber-300 bg-surface px-3 py-3">
         <code className="min-w-0 flex-1 break-all text-sm font-semibold text-[var(--workbench-text)]">
           {token}
         </code>

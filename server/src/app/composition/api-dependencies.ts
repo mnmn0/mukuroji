@@ -44,10 +44,13 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { DynamoDbCollectionsStore, InMemoryCollectionsStore } from '../../modules/collections'
+import { DynamoDbInboxDigestStore, DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore } from '../../modules/update-feed'
 import {
   recordApiAccess,
   recordApiError,
 } from '../../infrastructure/observability/api-observability'
+import { createXrayApiAccessRecorder } from '../../infrastructure/observability/xray-request-subsegment'
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
 import {
   createStaticRuntimeControlProvider,
@@ -98,6 +101,7 @@ import {
   InMemoryFocusStateClient,
   createFocusStateClient,
 } from '../../modules/focus'
+import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -164,6 +168,7 @@ import {
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../modules/capacity-planning'
+import { createConfiguredAuditExportService } from './audit-export'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -497,11 +502,17 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
   const { tenantAdministration, workspaceAccess } =
     createProductionTenantWorkspaceAccess()
+  const auditEvents = createAuditEventsClient()
+  const auditExports = createConfiguredAuditExportService({
+    readEvents: (query) => auditEvents.query(query),
+    countEvents: (query) => auditEvents.countEventsConsistently(query),
+  })
   return {
     customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
-    auditEvents: createAuditEventsClient(),
+    auditEvents,
+    ...(auditExports ? { auditExports } : {}),
     workspaceAccess,
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
@@ -537,12 +548,45 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     collaboration: new DynamoDbCollaborationClient(),
     fileProofing: createDefaultFileProofingClient(),
     notifications: new DynamoDbNotificationsClient(),
+    pushSubscriptions: new DynamoDbPushSubscriptionStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
+    ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
+    updateFeedReadState: new DynamoDbUpdateFeedReadStateStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    collections: new DynamoDbCollectionsStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      [],
+      (workspaceId, fence) => createWorkItemRevisionConditionCheck(
+        loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ?? 'mukuroji-team-issues-local',
+        workspaceId,
+        fence.teamId,
+        fence.issueId,
+        fence.revision,
+      ),
+    ),
+    updateFeedDigest: new DynamoDbUpdateFeedDigestStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    inboxDigestSettings: new DynamoDbInboxDigestStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      loadServerConfig().environment.NOTIFICATIONS_TABLE_NAME ?? 'mukuroji-notifications-local',
+      createDynamoDbDocumentClient(),
+    ),
     requestIntake: createDefaultRequestIntakeClient(
       createProductionTenantAvailability(),
       async (entry) => await triage.prepareEntryAdmission(entry),
@@ -1466,6 +1510,7 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
  */
 export function createProductionOperationalDependencies(): OperationalDependencies {
   const config = loadServerConfig()
+  const recordXrayAccess = createXrayApiAccessRecorder()
   return {
     ...(config.applicationCommitSha === undefined
       ? {}
@@ -1473,7 +1518,12 @@ export function createProductionOperationalDependencies(): OperationalDependenci
     recordRuntimeControl:
       createProductionRuntimeControlObservationRecorder(),
     readiness: createDynamoDbReadinessProbe(),
-    recordAccess: recordApiAccess,
+    recordAccess: recordXrayAccess
+      ? (observation) => {
+        recordApiAccess(observation)
+        recordXrayAccess(observation)
+      }
+      : recordApiAccess,
     recordError: recordApiError,
     runtimeControl: createProductionRuntimeControlProvider('api'),
   }
@@ -1691,6 +1741,11 @@ export function createTestAppDependencies(): AppDependencies {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
       planning: new InMemoryPlanningClient(),
+      updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
+      savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
+      collections: new InMemoryCollectionsStore(),
+      updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
+      inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
       requestIntake,
@@ -1750,6 +1805,7 @@ export function overrideAppDependencies(
         ? { projectDirectory: overrides.projectDirectory }
         : {}),
       ...(overrides.auditEvents ? { auditEvents: overrides.auditEvents } : {}),
+      ...(overrides.auditExports ? { auditExports: overrides.auditExports } : {}),
       ...(overrides.workspaceAccess
         ? { workspaceAccess: overrides.workspaceAccess }
         : {}),
@@ -1805,6 +1861,11 @@ export function overrideAppDependencies(
         ? { workItemConfigurations: overrides.workItemConfigurations }
         : {}),
       ...(overrides.planning ? { planning: overrides.planning } : {}),
+      ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
+      ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
+      ...(overrides.collections ? { collections: overrides.collections } : {}),
+      ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
+      ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),
       ...(overrides.requestIntake ? { requestIntake: overrides.requestIntake } : {}),
       ...(overrides.triage ? { triage: overrides.triage } : {}),
       ...(overrides.analytics ? { analytics: overrides.analytics } : {}),

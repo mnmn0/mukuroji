@@ -1,0 +1,346 @@
+import { afterEach, describe, expect, test } from 'bun:test'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
+import { COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH, type WorkItemCollection, type WorkItemCollectionEntry } from '@mukuroji/contracts'
+import {
+  CollectionApiError,
+  addCollectionItem,
+  getCollectionItems,
+  getCollections,
+  removeCollectionItem,
+  updateCollection,
+} from '../src/features/collections/api/collections'
+import { collectionCandidateKey, toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
+import { searchCollectionCandidates } from '../src/features/collections/queries/useCollections'
+import { insertByAddedAt } from '../src/features/collections/mutations/useCollectionActions'
+import { resolveCollectionErrorMessageKey } from '../src/features/collections/model/collectionErrors'
+import { CollectionsWorkspace, type CollectionsWorkspaceProps } from '../src/features/collections/ui/CollectionsWorkspace'
+import { createTranslator } from '../src/shared/i18n/i18n'
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
+
+const collection: WorkItemCollection = {
+  collectionId: 'c1',
+  name: 'Launch',
+  description: 'Q4 launch work',
+  createdBy: 'demo@example.com',
+  createdAt: '2026-10-16T00:00:00.000Z',
+  updatedAt: '2026-10-16T00:00:00.000Z',
+  revision: 2,
+}
+
+/**
+ * Renders the workspace with defaults.
+ *
+ * @param overrides - Props to replace.
+ * @returns Static markup.
+ */
+function render(overrides: Partial<CollectionsWorkspaceProps> = {}) {
+  const props: CollectionsWorkspaceProps = {
+    t: createTranslator('en'),
+    collections: [collection],
+    collectionsFailed: false,
+    onRetryCollections: () => undefined,
+    onRetryItems: () => undefined,
+    candidateQuery: 'page',
+    onSearchCandidates: () => undefined,
+    candidatesFailed: false,
+    onRetryCandidates: () => undefined,
+    selectedId: 'c1',
+    items: [{ teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction', statusCategory: 'started', assignedProjectId: 'refero', addedAt: '2026-10-16T00:00:00.000Z' }],
+    itemsFailed: false,
+    candidates: [
+      { teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction' },
+      { teamId: 'core-team', issueId: 'pricing', title: 'Pricing page' },
+    ],
+    canEdit: true,
+    pending: false,
+    workItemHref: (teamId, issueId) => `/teams/${teamId}/issues?issueId=${issueId}`,
+    onSelect: () => undefined,
+    onCreate: async () => true,
+    onRename: async () => true,
+    onDelete: () => undefined,
+    onAddItem: () => undefined,
+    onRemoveItem: () => undefined,
+    ...overrides,
+  }
+  return renderToStaticMarkup(<MemoryRouter><CollectionsWorkspace {...props} /></MemoryRouter>)
+}
+
+describe('CollectionsWorkspace', () => {
+  test('links each readable Work Item to its canonical detail and offers only unlisted candidates', () => {
+    const markup = render()
+    expect(markup).toContain('href="/teams/core-team/issues?issueId=onboarding"')
+    expect(markup).toContain('In progress · refero')
+    expect(markup).toContain('Only Work Items you can view are shown.')
+    expect(markup).toContain('>Pricing page (core-team / pricing)</option>')
+    expect(markup).not.toContain('>Reduce onboarding friction (core-team / onboarding)</option>')
+    expect(markup).toContain('aria-label="Remove from Collection: Reduce onboarding friction (core-team / onboarding)"')
+  })
+
+  test('asks for a search before offering candidates and reports an empty search', () => {
+    const before = render({ candidateQuery: '', candidates: undefined })
+    expect(before).toContain('Find Work Items to add')
+    expect(before).not.toContain('Add a Work Item')
+    expect(render({ candidates: undefined })).toContain('Searching Work Items')
+    const empty = render({ candidates: [{ teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction' }] })
+    expect(empty).toContain('No Work Items to add match this search.')
+    expect(empty).not.toContain('Add a Work Item')
+  })
+
+  test('accepts a candidate keyword as long as the longest canonical Work Item ID', () => {
+    const markup = render()
+    const search = /<input[^>]*type="search"[^>]*>/u.exec(markup)?.[0] ?? ''
+    expect(search).toContain(`maxLength="${COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH}"`)
+    expect(COLLECTION_WORK_ITEM_IDENTIFIER_MAX_LENGTH).toBe(256)
+  })
+
+  test('shows a permission-denied state instead of a retryable failure', () => {
+    const markup = render({ accessDenied: true, collections: undefined, collectionsFailed: true })
+    expect(markup).toContain('You do not have permission to view Collections.')
+    expect(markup).not.toContain('>Retry</button>')
+    expect(markup).not.toContain('view-only access')
+  })
+
+  test('reports a selected Collection that the list does not contain', () => {
+    const markup = render({ selectedId: 'deleted', items: undefined })
+    expect(markup).toContain('role="alert">This Collection does not exist or was deleted.')
+    expect(markup).not.toContain('Choose a Collection from the list.')
+  })
+
+  test('edits descriptions in a multi-line field so line breaks survive', () => {
+    expect(render({ selectedId: undefined })).toContain('<textarea')
+    // The read-only view keeps line breaks and wraps long words.
+    expect(render()).toMatch(/<p class="[^"]*whitespace-pre-wrap break-words[^"]*">Q4 launch work<\/p>/u)
+  })
+
+  test('tells Collections with the same name apart by creator and date', () => {
+    const markup = render()
+    expect(markup).toContain(">Launch<span class=\"mt-0.5 block truncate text-xs font-normal text-[var(--workbench-muted)]\">demo@example.com · 2026-10-16 00:00 UTC · #c1</span>")
+  })
+
+  test('hides every change control for view-only members', () => {
+    const markup = render({ canEdit: false })
+    expect(markup).toContain('You have view-only access')
+    expect(markup).not.toContain('New Collection')
+    expect(markup).not.toContain('Remove from Collection')
+    expect(markup).not.toContain('Add a Work Item')
+    expect(markup).not.toContain('Find Work Items to add')
+  })
+
+  test('reports loading failures and the latest action error', () => {
+    const markup = render({ collections: undefined, collectionsFailed: true, errorMessage: 'The Collection changed.' })
+    expect(markup).toContain('Collections could not be loaded.')
+    expect(markup).toContain('role="alert">The Collection changed.')
+    expect(markup).toContain('>Retry</button>')
+  })
+
+  test('keeps loaded data visible when a refresh or the candidate list fails', () => {
+    const markup = render({ collectionsFailed: true, itemsFailed: true, candidatesFailed: true })
+    expect(markup).toContain('The latest state could not be loaded.')
+    expect(markup).toContain('Reduce onboarding friction')
+    expect(markup).toContain('Work Items to add could not be searched.')
+    expect(markup).not.toContain('Add a Work Item')
+    expect(markup.match(/>Retry<\/button>/gu)).toHaveLength(3)
+  })
+})
+
+describe('toCollectionCandidates', () => {
+  test('reads Team and Work Item IDs from Work Item search results only', () => {
+    const base = { title: 'T', url: '/x', highlights: [] }
+    expect(toCollectionCandidates([
+      { ...base, id: 'team/チーム/a/issue/課題/1', entityType: 'work-item', teamId: 'チーム/a' },
+      { ...base, id: 'team/core/issue/x/comment/c1', entityType: 'comment', teamId: 'core' },
+      { ...base, id: 'team/core/issue/', entityType: 'work-item', teamId: 'core' },
+      { ...base, id: 'team/other/issue/x', entityType: 'work-item', teamId: 'core' },
+      { ...base, id: 'team/core/issue/x', entityType: 'work-item' },
+      { id: 'team/core/issue/y', entityType: 'work-item', teamId: 'core', title: 42 },
+      null,
+    ])).toEqual([{ teamId: 'チーム/a', issueId: '課題/1', title: 'T' }])
+  })
+})
+
+describe('Collection API', () => {
+  test('rejects malformed responses and keeps the API error code', async () => {
+    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [], canWrite: 'yes' }))
+    await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [{ name: 'Missing ID' }], canWrite: true }))
+    await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [{ ...collection, revision: 0 }], canWrite: true }))
+    await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: 'CollectionNotFound', message: 'Not found' }), { status: 404 })
+    const failure = await getCollectionItems('token', 'c1').catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(CollectionApiError)
+    expect(failure).toMatchObject({ status: 404, code: 'CollectionNotFound' })
+    // Items for another Collection are invalid, not data to ignore.
+    globalThis.fetch = async () => new Response(JSON.stringify({ collection: { ...collection, collectionId: 'other' }, items: [] }))
+    await expect(getCollectionItems('token', collection.collectionId)).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('returns the added Work Item so the item list can show it without a reload', async () => {
+    const item = { teamId: 'core-team', issueId: 'pricing', title: 'Pricing page', statusCategory: 'unstarted', addedAt: '2026-10-16T00:00:00.000Z' }
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...collection, revision: 3, item }))
+    expect(await addCollectionItem('token', 'c1', 'core-team', 'pricing')).toEqual({ ...collection, revision: 3, item })
+    // An add response without the Work Item, or with another one, is invalid.
+    for (const body of [{ ...collection, revision: 3 }, { ...collection, revision: 3, item: { ...item, issueId: 'other' } }, { ...collection, collectionId: 'other', item }]) {
+      globalThis.fetch = async () => new Response(JSON.stringify(body))
+      await expect(addCollectionItem('token', 'c1', 'core-team', 'pricing')).rejects.toMatchObject({ status: 502 })
+    }
+  })
+
+  test('rejects update and item-removal responses for another Collection', async () => {
+    const updated = { ...collection, name: 'Renamed', revision: 3 }
+    globalThis.fetch = async () => new Response(JSON.stringify(updated))
+    expect(await updateCollection('token', 'c1', { name: 'Renamed', expectedRevision: 2 })).toEqual(updated)
+    expect(await removeCollectionItem('token', 'c1', 'core-team', 'pricing')).toEqual(updated)
+    // A valid Collection with another ID must not be reported as the changed Collection or cached under its ID.
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...updated, collectionId: 'other' }))
+    await expect(updateCollection('token', 'c1', { name: 'Renamed', expectedRevision: 2 })).rejects.toMatchObject({ status: 502 })
+    await expect(removeCollectionItem('token', 'c1', 'core-team', 'pricing')).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('maps failures to actionable messages', () => {
+    expect(resolveCollectionErrorMessageKey(409, 'CollectionConflict')).toBe('collections.error.conflict')
+    expect(resolveCollectionErrorMessageKey(409, 'CollectionItemLimitReached')).toBe('collections.error.limit')
+    expect(resolveCollectionErrorMessageKey(409, 'CollectionDeleted')).toBe('collections.error.createdDeleted')
+    expect(resolveCollectionErrorMessageKey(404, 'CollectionWorkItemNotFound')).toBe('collections.error.notFound')
+    expect(resolveCollectionErrorMessageKey(403, 'CollectionAuthorizationChanged')).toBe('collections.error.denied')
+    expect(resolveCollectionErrorMessageKey(undefined, undefined)).toBe('collections.error.generic')
+  })
+})
+
+describe('searchCollectionCandidates', () => {
+  test('keeps reading while a cursor remains even when pages come back empty', async () => {
+    // The server's per-page evaluation budget can be spent on other entity types.
+    let calls = 0
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = async () => {
+      calls += 1
+      const results = calls === 30
+        ? [{ id: 'team/core/issue/found', entityType: 'work-item', teamId: 'core', title: 'Found', url: '/', highlights: [] }]
+        : []
+      return new Response(JSON.stringify({ schemaVersion: 1, results, ...(calls < 30 ? { nextCursor: String(calls) } : {}) }))
+    }
+    try {
+      const candidates = await searchCollectionCandidates('token', 'x', new Set())
+      expect(candidates.map((candidate) => candidate.issueId)).toEqual(['found'])
+      expect(calls).toBe(30)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  test('rejects a malformed candidate page instead of treating it as empty', async () => {
+    const previousFetch = globalThis.fetch
+    try {
+      for (const body of [
+        { results: [] },
+        { schemaVersion: 2, results: [] },
+        { schemaVersion: 1, results: [null] },
+        { schemaVersion: 1, results: 'none' },
+        { schemaVersion: 1, results: [{ id: 'team/core/issue/x', entityType: 'work-item', teamId: 'core' }] },
+        { schemaVersion: 1, results: [{ id: 'other/x', entityType: 'work-item', teamId: 'core', title: 'X' }] },
+      ]) {
+        globalThis.fetch = async () => new Response(JSON.stringify(body))
+        const failure = await searchCollectionCandidates('token', 'x', new Set()).catch((error: unknown) => error)
+        expect(failure).toBeInstanceOf(CollectionApiError)
+      }
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  test('rejects a repeated cursor as an invalid response instead of ending the search', async () => {
+    const previousFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      // Page 1 returns a candidate, then pages 2 and 3 cycle between the same two cursors.
+      const results = calls === 1
+        ? [{ id: 'team/core/issue/found', entityType: 'work-item', teamId: 'core', title: 'Found', url: '/', highlights: [] }]
+        : []
+      return new Response(JSON.stringify({ schemaVersion: 1, results, nextCursor: calls % 2 === 0 ? 'a' : 'b' }))
+    }
+    try {
+      const failure = await searchCollectionCandidates('token', 'x', new Set()).catch((error: unknown) => error)
+      expect(failure).toBeInstanceOf(CollectionApiError)
+      expect(failure).toMatchObject({ status: 502 })
+      expect(calls).toBe(3)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  test('reports a search that hits the page cap without candidates instead of showing no matches', async () => {
+    const previousFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      return new Response(JSON.stringify({ schemaVersion: 1, results: [], nextCursor: String(calls) }))
+    }
+    try {
+      await expect(searchCollectionCandidates('token', 'x', new Set())).rejects.toThrow('stopped before finding a candidate')
+      expect(calls).toBe(100)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
+  test('reads past every listed item to find addable candidates', async () => {
+    // 180 listed items fill the first 15 pages; addable matches start on page 16.
+    const listed = Array.from({ length: 180 }, (_, index) => `listed-${index}`)
+    const all = [...listed, 'new-1', 'new-2']
+    const requests: string[] = []
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = async (input) => {
+      const url = new URL(String(input), 'http://localhost')
+      requests.push(url.searchParams.get('cursor') ?? '0')
+      const start = Number(url.searchParams.get('cursor') ?? '0')
+      const page = all.slice(start, start + 12)
+      const next = start + 12 < all.length ? String(start + 12) : undefined
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        results: page.map((issueId) => ({ id: `team/core/issue/${issueId}`, entityType: 'work-item', teamId: 'core', title: issueId, url: '/', highlights: [] })),
+        ...(next ? { nextCursor: next } : {}),
+      }))
+    }
+    try {
+      const candidates = await searchCollectionCandidates('token', 'x', new Set(listed.map((issueId) => collectionCandidateKey('core', issueId))))
+      expect(candidates.map((candidate) => candidate.issueId)).toEqual(['new-1', 'new-2'])
+      expect(requests).toHaveLength(16)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+})
+
+describe('insertByAddedAt', () => {
+  /**
+   * Builds a Collection item fixture.
+   * @param issueId Work Item identifier.
+   * @param addedAt ISO timestamp when the reference was added.
+   * @returns The item fixture.
+   */
+  const entry = (issueId: string, addedAt: string): WorkItemCollectionEntry => ({
+    teamId: 't1', issueId, title: issueId, statusCategory: 'started', addedAt,
+  })
+  const items = [entry('new', '2026-10-18T03:00:00.000Z'), entry('old', '2026-10-18T01:00:00.000Z')]
+
+  test('puts a fresh or same-time add on top', () => {
+    expect(insertByAddedAt(items, entry('fresh', '2026-10-18T04:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['fresh', 'new', 'old'])
+    expect(insertByAddedAt(items, entry('tie', '2026-10-18T03:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['tie', 'new', 'old'])
+  })
+
+  test('keeps an older existing reference in time order', () => {
+    expect(insertByAddedAt(items, entry('middle', '2026-10-18T02:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['new', 'middle', 'old'])
+    expect(insertByAddedAt(items, entry('oldest', '2026-10-18T00:00:00.000Z')).map((item) => item.issueId))
+      .toEqual(['new', 'old', 'oldest'])
+  })
+})

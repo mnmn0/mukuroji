@@ -12,10 +12,10 @@ repository に固定せず、各実行の evidence record に残します。
 | Request correlation | `/api/*` で client header を信頼せず server が correlation/request ID を生成し、内部 route、response、CORS exposed header へ渡す | 信頼済み service 間で parent correlation を継承する認証済み protocol は未実装 |
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
-| Trace | CDK が管理する全28個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination、runtime control、restore drill の51 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な50件のtest evidenceを確認するまで unattended production とみなさないこと |
+| Trace | CDK が管理する全29個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する。API Lambda は sampled trace ごとに `mukuroji-api-request` subsegment を送り、`correlation_id`、`request_id`、`route_group` を annotation として登録する | API 以外の worker Lambda の annotation、unsampled trace の検索は未実装 |
+| Alarm | API、queue、DLQ（audit export の `AuditExportDlqAlarm` と `AuditExportQueueAgeAlarm` を含む）、async destination、runtime control、restore drill の56 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な55件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
-| Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
+| Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する。Storybook の主要画面を light/dark で screenshot 比較し、build 後の JS/CSS gzip size を `web/performance-budget.json` と照合する（[web quality gates](web-quality-gates.md)） | Chromium と mock API による回帰 proxy であり、実 screen reader と実ブラウザでの runtime performance（LCP、INP）計測は未実装。screenshot 比較と budget の CI job は maintainer による workflow 追加待ち（[付録](web-quality-gates.md#付録-ci-workflow)） |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` mode、route/effect registry、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。6表の同一時点PITR restore、同時点exportとのexact aggregate比較、exact S3 version copy、RPO/RTO測定、90日cadence、immutable evidence、承認付きcleanupを隔離workflowで自動化する | Regional replication/failover と AWS Backup plan は未実装。成功したsame-Region drillをregional DR完了扱いにしないこと |
 
@@ -227,8 +227,13 @@ fields @timestamp, event, correlationId, requestId, invocationId, traceId,
 
 X-Ray は全 Lambda で active です。API log の `traceId` は sampled trace が保存されている場合の
 exact lookup に使い、保存されていない場合は `invocationId` と UTC window から Lambda log を
-起点に調査します。Correlation/request ID 自体を X-Ray annotation として登録していないため、
-correlation ID だけで X-Ray trace を一意検索できるとは記載しません。
+起点に調査します。
+
+API Lambda は sampled trace に `mukuroji-api-request` subsegment を追加し、server が生成した
+correlation ID、request ID、route group を annotation として登録します。sampled trace は
+X-Ray console の filter expression `annotation.correlation_id = "<correlation ID>"` で検索できます。
+unsampled request には subsegment がないため、その場合は上記の log 起点の調査を使います。
+subsegment は X-Ray daemon への UDP 送信で、送信失敗は API response に影響しません。
 
 ## Severity、acknowledge、escalation
 
@@ -268,6 +273,7 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `ConnectorSyncDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Queue body の installation/job/operation ID。Credential/body は記録しない |
 | `ConnectorPollDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | EventBridge または Lambda destination envelope、installation/poll locator |
 | `ConnectorSyncQueueAgeAlarm` | Oldest message `> 900 s` / 5分 | SEV2 | Oldest message sent timestamp、installation/job ID、queue depth |
+| `AuditExportQueueAgeAlarm` | Oldest message `> 3,600 s` / 5分 | SEV2 | Oldest message sent timestamp、queue depth、Workspace/export/correlation ID。24時間の処理期限より前に backlog を検知する（step message の遅延は最大 900 s） |
 | `EnterpriseScimGroupJobDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Enterprise stream record の workspace/control revision/group-job locator |
 | `EnterpriseIdentityMaintenanceDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Enterprise `CONTROL` stream record の workspace/state generation/revision |
 | `RequestEmailIngestionDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Async envelope の request/thread locator。Email address/body/signature は記録しない |
@@ -589,10 +595,19 @@ DLQ流入とredrive計画をincident recordへ固定します。
 | `webhook-delivery` | 5 | 3分 | 15分 | `WebhookDeliveryDlqAlarm` |
 | `connector-sync` | 5 | 30分 | 2時間30分 | `ConnectorSyncDlqAlarm` |
 | `work-item-import` | 5 | 90分 | 7時間30分 | `WorkItemImportDlqAlarm` |
+| `audit-export` | 5 | 30分 | 2時間30分 | `AuditExportDlqAlarm` |
 
 Re-enable後はsystem of record、idempotency key、checkpoint、partial-batch semanticsを確認し、
 上記「DLQ alarm の共通初動」に従ってowner承認後にredriveします。停止中のmessageを一括
 deleteしたり、terminal jobを盲目的にredriveしたりしません。
+
+`audit-export` の完了前確認は、`AuditEventsTable` の Workspace partition 全体を strongly
+consistent read で数えます（base table の sort key が時刻順でない `eventId` のため、filter や期間に
+かかわらず全履歴を読む）。1 export につき走査ごとに 1 回（最大 3 回）で、1 step は 1 MB までの
+page を最大 10 回に抑えます。大きな Workspace で export が続く場合は、audit table の
+`ConsumedReadCapacityUnits` と `ReadThrottleEvents` を監視し、throttle が API の audit 読み取りや
+書き込みに波及する場合は export の要求を絞ります。読み取り量が問題になる場合の将来案として、
+`occurredAt` を sort key とする LSI（table の再作成が必要）で期間を絞った件数確認に置き換えられます。
 
 ### Public API contract trust root
 
@@ -627,6 +642,40 @@ Trust root の candidate OID は base と一致しない限り失敗します。
 5. 同じ context を専用 App の integration ID 固定で直ちに required list へ戻し、effective
    rules、protected environment、after JSON を保存してから merge 停止を解除する。失敗時は
    旧 trust root へ戻し、context を外した状態で通常変更を merge しない。
+
+Publisher checkout の regression は `bun run api:contract:test` で検証します。Test は workflow
+に記載した non-cone sparse-checkout pattern で実際の Git checkout を作り、比較 step の shell
+を実行します。Trusted source の明示的な value import は `openapi.ts` → `work-items.ts` →
+`work-item-configuration.ts` です。最後の import は現在 `typeof` だけで使われ Bun 1.3.10 では
+除去されますが、trusted checkout にはこの source import chain 全体を含めます。
+Candidate は canonical JSON wrapper と snapshot の data
+だけで評価し、candidate source は実行しません。Finalizer は network 境界だけを mock し、
+比較失敗・skip、checkout/setup 失敗、古い base、再検証失敗、publish 失敗を検証します。
+これは merge 前の workflow simulation であり、専用 App による live check の成功証拠ではありません。
+
+Snapshot が既に存在しても、`contracts/src/openapi.ts` が生成コードのままなら bootstrap は
+未完了です。Comparator は exact canonical JSON wrapper を要求するため、checkout 修復後も
+その候補を拒否します。Trust-root rotation には source/snapshot の変更を混ぜず、その後の
+別 PR で既存 snapshot の bytes を保った wrapper 移行を検証してください。移行前の trusted
+生成コードと snapshot の一致、移行後の runtime document の一致を確認します。新しい main
+を base にした wrapper PR を probe として使い、App check の成功と head SHA を確認します。
+現行 main の workflow は workflow 自身の変更を拒否するため、この修復 PR 自身を通常の
+Public API check で green にすることはできません。Required context が既に有効なら、上記の
+管理者 rotation 手順と bootstrap 完了の判断が blocker です。Check の成功を偽装したり、
+candidate workflow を privileged 実行したりして回避しないでください。
+
+Canonical wrapper の JSON import は Node ESM consumer のため `with { type: 'json' }` を
+含む exact source に固定します。Bun だけでなく Node/Playwright consumer でも検証し、
+attribute の省略を許すような source check の緩和は行いません。
+
+Rotation 前に実際の required contexts を確認してください。専用 App context がまだ required
+でない場合は、上記 step 3/5 の context 削除・復元は適用せず、既存 ruleset と protected
+environment を変更しません。その場合も「全 CI 成功」の運用条件には、最終 SHA の rotation
+PR だけに限定した Public API gate と対応 publisher workflow の失敗に対する明示的な例外が
+必要です。他の applicable CI と両 bot review は成功を要求します。Merge 停止中に rotation
+だけを merge し、new-main base の wrapper probe で App actor・candidate SHA・base SHA と
+成功を確認します。Probe が失敗した場合は通常変更を merge せず、原因調査または旧 trust root
+への rollback を個別承認のもとで行います。Required context の新規追加は別の判断です。
 
 Shared APIには`live` Aliasによるversion単位のatomic cutoverがありますが、weighted routing/
 CodeDeployによるcode canaryはありません。AppConfig の

@@ -41,11 +41,49 @@ export function getInitialLocale(): Locale {
   return resolveLocale(window.navigator.language)
 }
 
+/** Listeners notified when the saved locale preference may have changed. */
+const localePreferenceListeners = new Set<() => void>()
+
 /**
  * ユーザーが選択した locale をブラウザに保存します。
  */
 export function setLocalePreference(locale: Locale) {
   window.localStorage.setItem(storageKey, locale)
+
+  for (const listener of localePreferenceListeners) {
+    listener()
+  }
+}
+
+/**
+ * Subscribes to locale preference changes from this tab or another tab.
+ *
+ * Use with `useSyncExternalStore` and `getInitialLocale` for UI that lives outside the routes
+ * that own the locale state.
+ *
+ * @param listener - Callback invoked when the saved locale may have changed.
+ * @returns Unsubscribe function.
+ */
+export function subscribeToLocalePreference(listener: () => void): () => void {
+  /**
+   * Forwards cross-tab updates to the saved locale key, including `localStorage.clear()`,
+   * which reports a `null` key.
+   *
+   * @param event - Storage event raised by another tab.
+   */
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === storageKey || event.key === null) {
+      listener()
+    }
+  }
+
+  localePreferenceListeners.add(listener)
+  window.addEventListener('storage', handleStorage)
+
+  return () => {
+    localePreferenceListeners.delete(listener)
+    window.removeEventListener('storage', handleStorage)
+  }
 }
 
 /**
@@ -66,10 +104,12 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
   const navKeyMap: Record<SidebarNavId, MessageKey> = {
     home: 'sidebar.nav.home',
     focus: 'sidebar.nav.focus',
+    updates: 'sidebar.nav.updates',
     'my-tasks': 'sidebar.nav.myTasks',
     inbox: 'sidebar.nav.inbox',
     requests: 'sidebar.nav.requests',
     customers: 'sidebar.nav.customers',
+    collections: 'sidebar.nav.collections',
     documents: 'sidebar.nav.documents',
     dashboard: 'sidebar.nav.dashboard',
     planning: 'sidebar.nav.planning',
@@ -155,10 +195,12 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
     nav: {
       home: t(navKeyMap.home),
       focus: t(navKeyMap.focus),
+      updates: t(navKeyMap.updates),
       'my-tasks': t(navKeyMap['my-tasks']),
       inbox: t(navKeyMap.inbox),
       requests: t(navKeyMap.requests),
       customers: t(navKeyMap.customers),
+      collections: t(navKeyMap.collections),
       documents: t(navKeyMap.documents),
       dashboard: t(navKeyMap.dashboard),
       planning: t(navKeyMap.planning),

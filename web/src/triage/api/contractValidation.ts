@@ -30,6 +30,7 @@ import {
   type TriageWorkItemSourcePage,
 } from '@mukuroji/contracts'
 import { TriageApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const invalidContractMessage = 'The Team triage response did not match the expected contract.'
 
@@ -474,11 +475,6 @@ function requireRecord(value: unknown): Record<string, unknown> {
     throw invalidContractError()
   }
   return value
-}
-
-/** Checks whether a value is a non-array object. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Requires an array at a contract boundary. */

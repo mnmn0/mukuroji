@@ -6,6 +6,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -27,11 +28,19 @@ import {
   resolveEnterpriseSessionErrorsAction,
   type EnterpriseSessionErrorAction,
 } from '../../auth/enterpriseSessionErrors'
+import { buildLoginRedirectPath } from '../../auth/model/loginReturnPath'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
-import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
+import { clearAuthSession, getAuthSession, hasStoredAuthSession, type AuthSession } from '../../auth/session'
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
+import { signOutWithPushCleanup } from '../../notifications/mutations/usePushDevice'
+import { usePushDeviceRefresh } from '../../notifications/queries/usePushDeviceStatus'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
+import {
+  clearAppBadgeAndNotifyTabs,
+  keepAppBadgePublished,
+  resolveAppBadgeAction,
+} from '../../shared/lib/pwa/appBadge'
 import {
   aiAssistanceUiEnabled,
   isAiAssistanceTaskEnabled as isSavedAiAssistanceTaskEnabled,
@@ -78,6 +87,11 @@ import {
   type FontSizePreference,
 } from '../../shared/lib/preferences/fontSize'
 import {
+  getInitialThemePreference,
+  setThemePreference,
+  type ThemePreference,
+} from '../../shared/lib/preferences/theme'
+import {
   createProjectIssuesPath,
   createTeamIssuesPath,
   createTeamViewPath,
@@ -102,6 +116,8 @@ export type WorkspaceRouteContextValue = {
   workspaceId?: string
   /** The selected application font-size preference. */
   fontSizePreference: FontSizePreference
+  /** The selected application color theme. */
+  themePreference: ThemePreference
   /** The best available display label for the current user. */
   userLabel: string
   /** Stable identifiers that route models may use to recognize the current user. */
@@ -164,6 +180,8 @@ export type WorkspaceRouteContextValue = {
   onRetryProjectQuickAccess: () => Promise<void>
   /** Persists and applies a new font-size preference. */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
+  /** Persists and applies a new color theme. */
+  onThemePreferenceChange: (preference: ThemePreference) => void
   /** Persists and applies a new workspace locale. */
   onLocaleChange: (locale: Locale) => void
   /** Clears the authentication session and returns to the public entry route. */
@@ -233,6 +251,8 @@ export function WorkspaceRouteProvider() {
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const [fontSizePreference, setFontSizePreferenceState] =
     useState<FontSizePreference>(() => getInitialFontSizePreference())
+  const [themePreference, setThemePreferenceState] =
+    useState<ThemePreference>(() => getInitialThemePreference())
   const [authenticatedApiErrorReports, setAuthenticatedApiErrorReports] =
     useState<AuthenticatedApiErrorReports>({
       guardedSessionErrors: [],
@@ -269,12 +289,34 @@ export function WorkspaceRouteProvider() {
     enabled: Boolean(user && !currentUserError),
   })
   const {
-    data: inboxCount = 0,
+    data: loadedInboxCount,
     error: notificationUnreadCountError,
+    mutate: refreshInboxCount,
   } = useNotificationUnreadCount(
     accessToken,
     Boolean(user && !currentUserError),
   )
+  const inboxCount = loadedInboxCount ?? 0
+  // Mirror the unread Inbox count on the installed app icon. Keep the existing badge while
+  // the count is loading or failed, and clear it only for a loaded zero or a signed-out session.
+  const badgeAction = resolveAppBadgeAction(Boolean(accessToken), loadedInboxCount)
+  const badgeCount = badgeAction.kind === 'show' ? badgeAction.count : undefined
+  const badgeCleared = badgeAction.kind === 'clear'
+  useEffect(() => {
+    // The badge is shared by every tab: a loaded zero clears it and tells the others. A sign-out
+    // already did both in clearAuthSession, and a signed-out page leaves the badge alone.
+    if (badgeCleared) void clearAppBadgeAndNotifyTabs()
+  }, [badgeCleared])
+  useEffect(() => {
+    if (badgeCount === undefined || !accessToken) return undefined
+    // Publishes only while this tab's session is still stored, since a remembered session
+    // may be shared and signed out in another tab, and republishes after other tabs clear.
+    return keepAppBadgePublished({
+      count: badgeCount,
+      isSessionStored: () => hasStoredAuthSession(accessToken),
+      refreshCount: () => refreshInboxCount(),
+    })
+  }, [accessToken, badgeCount, refreshInboxCount])
   const userLabel =
     user?.attributes.email ??
     user?.attributes.name ??
@@ -409,11 +451,14 @@ export function WorkspaceRouteProvider() {
     ) ||
     Boolean(user && isProjectDirectoryLoading)
 
+  usePushDeviceRefresh(user ? session?.accessToken : undefined)
+
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {
-    clearAuthSession()
-    navigate('/', { replace: true })
-  }, [navigate])
+    void signOutWithPushCleanup(session?.accessToken).then(() => {
+      navigate('/', { replace: true })
+    })
+  }, [navigate, session?.accessToken])
 
   /** Applies the navigation and storage policy of a resolved enterprise session action. */
   const handleSessionErrorAction = useCallback((action: EnterpriseSessionErrorAction) => {
@@ -461,6 +506,12 @@ export function WorkspaceRouteProvider() {
   const handleFontSizePreferenceChange = useCallback((preference: FontSizePreference) => {
     setFontSizePreferenceState(preference)
     setFontSizePreference(preference)
+  }, [])
+
+  /** Saves a color theme and updates provider state for the active route. */
+  const handleThemePreferenceChange = useCallback((preference: ThemePreference) => {
+    setThemePreferenceState(preference)
+    setThemePreference(preference)
   }, [])
 
   /** Saves a locale preference and updates provider state for the active route. */
@@ -760,6 +811,7 @@ export function WorkspaceRouteProvider() {
     canMutateTeamConfiguration,
     commonErrorKey,
     fontSizePreference,
+    themePreference,
     guardEnterpriseSession,
     inboxCount,
     hasQuickAccessLoadError,
@@ -782,6 +834,7 @@ export function WorkspaceRouteProvider() {
       : undefined,
     onDismissProjectQuickAccessFeedback: handleDismissProjectQuickAccessFeedback,
     onFontSizePreferenceChange: handleFontSizePreferenceChange,
+    onThemePreferenceChange: handleThemePreferenceChange,
     onLocaleChange: handleLocaleChange,
     onLogout: handleLogout,
     onOpenNotification: handleOpenNotification,
@@ -820,6 +873,7 @@ export function WorkspaceRouteProvider() {
     canMutateTeamConfiguration,
     commonErrorKey,
     fontSizePreference,
+    themePreference,
     guardEnterpriseSession,
     handleArchiveProject,
     handleArchiveTeam,
@@ -827,6 +881,7 @@ export function WorkspaceRouteProvider() {
     handleCreateTeam,
     handleDismissProjectQuickAccessFeedback,
     handleFontSizePreferenceChange,
+    handleThemePreferenceChange,
     handleIsProjectQuickAccess,
     handleLocaleChange,
     handleLogout,
@@ -862,7 +917,13 @@ export function WorkspaceRouteProvider() {
   ])
 
   if (!session) {
-    return <Navigate replace to="/" />
+    // Keep the requested page so deep links and installed-app shortcuts resume after sign-in.
+    return (
+      <Navigate
+        replace
+        to={buildLoginRedirectPath(`${location.pathname}${location.search}${location.hash}`)}
+      />
+    )
   }
 
   return <Outlet context={contextValue} />

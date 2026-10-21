@@ -305,6 +305,7 @@ function bindApiRuntimeConfiguration(
     focusTable,
     planningTable,
     projectDirectoryTable,
+    pushSubscriptionsTable,
     realtimeSessionsTable,
     requestIntakeTable,
     teamIssueEventsTable,
@@ -314,6 +315,7 @@ function bindApiRuntimeConfiguration(
     workspaceSearchTable,
   } = input.dataStores;
   const {
+    auditExportBucket,
     fileBucket,
     fileProofingTable,
     workItemImportBucket,
@@ -336,12 +338,14 @@ function bindApiRuntimeConfiguration(
     fileUploadUrlTtlSeconds,
     requestRateLimitPerHour,
     requestTokenHashSecret,
+    webPushVapidPublicKey,
     systemAdminGroups,
     apiAllowedOrigins,
     workspaceAuditPseudonymKey,
     workspaceDirectoryId,
   } = input.parameters;
   const {
+    auditExportQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -488,6 +492,8 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      PUSH_SUBSCRIPTIONS_TABLE_NAME: pushSubscriptionsTable.tableName,
+      WEB_PUSH_VAPID_PUBLIC_KEY: webPushVapidPublicKey.valueAsString,
       FOCUS_TABLE_NAME: focusTable.tableName,
       CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
@@ -503,6 +509,8 @@ function bindApiRuntimeConfiguration(
         workItemConfigurationTable.tableName,
       WORK_ITEM_IMPORT_BUCKET_NAME: workItemImportBucket.bucketName,
       WORK_ITEM_IMPORT_QUEUE_URL: workItemImportQueue.queueUrl,
+      AUDIT_EXPORT_BUCKET_NAME: auditExportBucket.bucketName,
+      AUDIT_EXPORT_QUEUE_URL: auditExportQueue.queueUrl,
     },
     {
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
@@ -572,6 +580,7 @@ export function buildApiRuntime(
     enterpriseIdentityTable,
     tenantAdministrationTable,
     notificationsTable,
+    pushSubscriptionsTable,
     focusTable,
     planningTable,
     projectDirectoryTable,
@@ -584,6 +593,7 @@ export function buildApiRuntime(
     workspaceSearchTable,
   } = input.dataStores;
   const {
+    auditExportBucket,
     fileBucket,
     fileProofingTable,
     workItemImportBucket,
@@ -600,6 +610,7 @@ export function buildApiRuntime(
     cognitoUserPoolArn,
   } = input.parameters;
   const {
+    auditExportQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -702,6 +713,7 @@ export function buildApiRuntime(
   customersTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
+  pushSubscriptionsTable.grants.readWriteData(apiFunction);
   apiFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',
@@ -853,6 +865,7 @@ export function buildApiRuntime(
         new iam.PolicyStatement({
           actions: ['sqs:SendMessage'],
           resources: [
+            auditExportQueue.queueArn,
             webhookDeliveryQueue.queueArn,
             workItemImportQueue.queueArn,
           ],
@@ -1053,6 +1066,20 @@ export function buildApiRuntime(
         's3:PutObject',
       ],
       resources: [workItemImportBucket.arnForObjects('work-item-imports/*')],
+    }),
+  );
+  apiFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:PutObject'],
+      resources: [auditExportBucket.arnForObjects('audit-exports/*')],
+    }),
+  );
+  // A missing job must read as NoSuchKey, and the check S3 makes for a missing object carries
+  // no `s3:prefix`, so this grant has no prefix condition; the bucket holds only audit exports.
+  apiFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['s3:ListBucket'],
+      resources: [auditExportBucket.bucketArn],
     }),
   );
   apiFunction.addToRolePolicy(
