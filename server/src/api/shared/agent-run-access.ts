@@ -121,18 +121,25 @@ export async function resolveAgentRunFence(
       if (!holder || holder.state !== 'active') throw createAgentRunIntegrityError()
       throw createAgentRunConflictError(describeHoldingRun(holder, now))
     }
-    if (!claim) {
-      // An agent whose run a person released must stop even when it no longer sends the run ID. The
-      // newest-run record is read consistently, and the transaction checks it again.
-      const latest = await store.getLatestRun(principal.directoryId, teamId, workItemId)
+    if (claim) {
+      // The caller holds the claim without naming its run, so the claimed run is fenced like a named one.
+      const held = await store.getRun(principal.directoryId, teamId, claim.runId)
       if (
-        latest !== undefined &&
-        latest.instanceIdHash === fence.instanceIdHash &&
-        latest.assigneeUserId === principal.userKey &&
-        (latest.outcome === 'released' || latest.outcome === 'superseded')
+        !held || held.state !== 'active' || held.workItemId !== workItemId ||
+        held.instanceIdHash !== claim.instanceIdHash || held.assigneeUserId !== claim.assigneeUserId
       ) {
-        throw createAgentRunNotActiveError()
+        throw createAgentRunIntegrityError()
       }
+      return { run: held }
+    }
+    // An agent whose run a person released must stop even when it no longer sends the run ID. The
+    // revocation is read consistently, and the transaction checks it again.
+    if (await store.isInstanceRevoked(principal.directoryId, teamId, {
+      workItemId,
+      assigneeUserId: principal.userKey,
+      instanceIdHash: fence.instanceIdHash ?? '',
+    })) {
+      throw createAgentRunNotActiveError()
     }
     return {}
   }

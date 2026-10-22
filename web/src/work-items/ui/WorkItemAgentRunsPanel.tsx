@@ -11,6 +11,8 @@ import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from './a
 export type WorkItemAgentRunsPanelProps = {
   /** Runs, newest first. */
   runs: readonly AgentRunView[]
+  /** Whether older runs exist beyond the listed ones. */
+  hasMore?: boolean
   /** Locale-aware text. */
   labels: WorkItemAgentRunsLabels
   /** Whether the first page is loading. */
@@ -72,6 +74,7 @@ export function WorkItemAgentRunsPanelContainer({
     <WorkItemAgentRunsPanel
       errorMessage={!data && error ? labels.loadError : undefined}
       formatDateTime={formatDateTime}
+      hasMore={data?.hasMore ?? false}
       isLoading={isLoading}
       labels={labels}
       onRelease={async (run) => {
@@ -99,6 +102,7 @@ export function WorkItemAgentRunsPanelContainer({
 export function WorkItemAgentRunsPanel({
   errorMessage,
   formatDateTime,
+  hasMore = false,
   isLoading,
   labels,
   onRelease,
@@ -204,6 +208,10 @@ export function WorkItemAgentRunsPanel({
             ))}
           </ol>
         </div>
+      ) : null}
+
+      {hasMore ? (
+        <p className="text-xs font-medium text-[var(--workbench-muted)]">{labels.historyTruncated}</p>
       ) : null}
     </section>
   )

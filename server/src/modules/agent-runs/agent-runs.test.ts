@@ -264,6 +264,10 @@ describe('DynamoDB Agent Run store', () => {
         { ConditionCheck: { Key: { recordKey: 'agent-run-claim#task-1' }, ConditionExpression: '#runId = :runId AND #instanceIdHash = :instanceIdHash' } },
       ],
     })
+    const assignment = { ConditionCheck: { TableName: 'WorkItems', Key: { issueId: 'task-1' }, ConditionExpression: 'revision = :expectedRevision' } }
+    const fenced = createClient([{}])
+    await new DynamoDbAgentRunStore(fenced.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z'), [assignment])
+    expect(fenced.commands[0]?.input).toMatchObject({ TransactItems: [{}, {}, assignment] })
     const finished = createClient([runConditionFailed, { Item: { ...item, state: 'finished', outcome: 'completed', finishedAt: now.toISOString(), finishedBy: 'agent' } }])
     await expect(new DynamoDbAgentRunStore(finished.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
       .rejects.toMatchObject({ reason: 'agent_run_not_active' })
@@ -298,28 +302,34 @@ describe('DynamoDB Agent Run store', () => {
       .rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
-  test('records the newest run and checks it when an instance omits the run ID', () => {
+  test('revokes a released instance until the same member and instance start again', () => {
     const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
     const run = createRun()
-    const latestPut = store.createStartItems(run)[2]
-    expect(latestPut?.Put).toMatchObject({
-      Item: { recordKey: 'agent-run-latest#task-1', entityType: 'agent-run-latest', runId: run.runId, instanceIdHash: run.instanceIdHash },
+    const startItems = store.createStartItems(run)
+    expect(startItems[2]?.Delete?.Key?.recordKey).toMatch(/^agent-run-revoked#task-1#[0-9a-f]{64}$/u)
+    const released = store.createCloseItems(finishAgentRun(run, 'released', 'member-2', now))
+    expect(released[2]?.Put?.Item).toMatchObject({
+      entityType: 'agent-run-revocation',
+      workItemId: 'task-1',
+      assigneeUserId: run.assigneeUserId,
+      instanceIdHash: run.instanceIdHash,
+      runId: run.runId,
     })
-    expect(latestPut?.Put).not.toHaveProperty('ConditionExpression')
-    const latestUpdate = store.createCloseItems(finishAgentRun(run, 'released', 'member-2', now))[2]
-    expect(latestUpdate?.Update).toMatchObject({
-      Key: { recordKey: 'agent-run-latest#task-1' },
-      ConditionExpression: '#runId = :runId',
-      ExpressionAttributeValues: { ':outcome': 'released', ':runId': run.runId },
-    })
-    const [, latestCheck] = store.createMutationFenceConditionChecks({
+    expect(released[2]?.Put?.Item?.recordKey).toBe(startItems[2]?.Delete?.Key?.recordKey)
+    // An agent's own finish does not revoke its instance.
+    expect(store.createCloseItems(finishAgentRun(run, 'completed', 'agent', now))).toHaveLength(2)
+    const [, revocationCheck] = store.createMutationFenceConditionChecks({
       directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: run.assigneeUserId, instanceIdHash: run.instanceIdHash, now,
     })
-    expect(latestCheck?.ConditionCheck).toMatchObject({
-      Key: { recordKey: 'agent-run-latest#task-1' },
-      ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR ' +
-        '#assigneeUserId <> :assigneeUserId OR NOT (#outcome IN (:released, :superseded))',
+    expect(revocationCheck?.ConditionCheck).toMatchObject({
+      Key: { recordKey: startItems[2]?.Delete?.Key?.recordKey },
+      ConditionExpression: 'attribute_not_exists(#recordKey)',
     })
+    // Another member using the same instance ID has a different revocation key.
+    const [, otherMemberCheck] = store.createMutationFenceConditionChecks({
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: 'member-9', instanceIdHash: run.instanceIdHash, now,
+    })
+    expect(otherMemberCheck?.ConditionCheck?.Key?.recordKey).not.toBe(startItems[2]?.Delete?.Key?.recordKey)
   })
 
   test('saves settings with revision CAS and reports a lost update as a conflict', async () => {

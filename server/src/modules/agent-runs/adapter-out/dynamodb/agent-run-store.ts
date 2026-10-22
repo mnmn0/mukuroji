@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   GetCommand,
   QueryCommand,
@@ -18,8 +19,8 @@ import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
   type StoredAgentRun,
+  type AgentRunRevocation,
   type StoredAgentRunClaim,
-  type StoredAgentRunLatest,
 } from '../../domain/agent-run'
 import {
   AgentRunError,
@@ -80,13 +81,14 @@ export interface AgentRunStore {
    */
   getClaim(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunClaim | undefined>
   /**
-   * Reads the strongly consistent record of a Work Item's newest run.
+   * Strongly reads whether a person released, or another instance took over, a run of this member
+   * and instance on the Work Item since the instance last started one there.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
-   * @param workItemId - Work Item ID.
-   * @returns The newest run's identity and outcome, or undefined when the Work Item never had a run.
+   * @param revocation - Work Item, member, and instance hash.
+   * @returns True when the instance must start a new run before acting on the Work Item.
    */
-  getLatestRun(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunLatest | undefined>
+  isInstanceRevoked(directoryId: string, teamId: string, revocation: AgentRunRevocation): Promise<boolean>
   /**
    * Strongly reads Team Agent settings.
    * @param directoryId - Workspace ID.
@@ -141,17 +143,18 @@ export interface AgentRunStore {
    */
   listFinishedRuns(directoryId: string, teamId: string, cursor: string | undefined, limit: number): Promise<AgentRunPage>
   /**
-   * Builds the writes that create a run, claim its Work Item, and record it as the newest run.
+   * Builds the writes that create a run, claim its Work Item, and clear an earlier revocation of the
+   * same member and instance on it.
    * @param run - New active run.
-   * @returns Run and claim puts that fail when either already exists, then the newest-run put.
+   * @returns Run and claim puts that fail when either already exists, then the revocation delete.
    */
   createStartItems(run: StoredAgentRun): AgentRunTransactItem[]
   /**
    * Builds the checks that fence a Work Item mutation with the caller's claim and run. The lease is
    * extended after the mutation commits, so an older mutation never overwrites a newer heartbeat.
    * @param input - Scope, current run, instance hash, and time.
-   * @returns Run and claim condition checks, or, without a run, claim and newest-run checks that
-   * reject an instance whose newest run a person released or another instance took over.
+   * @returns Run and claim condition checks, or, without a run, claim and revocation checks that
+   * reject an instance whose run a person released or another instance took over.
    */
   createMutationFenceConditionChecks(input: AgentRunFenceInput): AgentRunTransactItem[]
   /**
@@ -163,10 +166,11 @@ export interface AgentRunStore {
    */
   createClaimAbsentCheck(directoryId: string, teamId: string, workItemId: string): AgentRunTransactItem
   /**
-   * Builds the writes that finish an active run, remove its claim, and record its outcome.
+   * Builds the writes that finish an active run, remove its claim, and, for a release or take over,
+   * revoke the run's instance on the Work Item.
    * @param run - Finished form of the run.
    * @param expectedInstanceIdHash - Instance that must still own the run, when an agent closes it.
-   * @returns Run update, claim delete, and newest-run update, conditioned on the run still being active.
+   * @returns Run update and claim delete conditioned on the run still being active, then any revocation put.
    */
   createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
   /**
@@ -181,9 +185,10 @@ export interface AgentRunStore {
    * @param run - Active run.
    * @param instanceIdHash - Instance that must own the run.
    * @param now - Heartbeat time.
+   * @param conditionChecks - Checks on other tables that must still hold, such as the Work Item's assignment.
    * @returns The run with the extended lease.
    */
-  heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun>
+  heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date, conditionChecks?: readonly AgentRunTransactItem[]): Promise<StoredAgentRun>
   /**
    * Extends a lease after a mutation that could only check the run; a finished run is left as is.
    * @param run - Run that fenced the mutation.
@@ -242,13 +247,15 @@ function claimRecordKey(workItemId: string): string {
 }
 
 /**
- * Builds the sort key of a Work Item's newest-run record.
+ * Builds the sort key of an instance revocation. The member and instance are hashed together so
+ * neither can contain the key separator.
  *
- * @param workItemId - Work Item ID.
+ * @param revocation - Work Item, member, and instance hash.
  * @returns Sort key.
  */
-function latestRecordKey(workItemId: string): string {
-  return `agent-run-latest#${workItemId}`
+function revocationRecordKey(revocation: AgentRunRevocation): string {
+  const subject = createHash('sha256').update(`${revocation.assigneeUserId}\u0000${revocation.instanceIdHash}`).digest('hex')
+  return `agent-run-revoked#${revocation.workItemId}#${subject}`
 }
 
 /** Sort key of the Team Agent settings row. */
@@ -384,7 +391,7 @@ function parseRun(
   }
 }
 
-/** Every outcome a stored run or newest-run record can carry. */
+/** Every outcome a stored run can carry. */
 const storedOutcomes: readonly AgentRunOutcome[] = ['completed', 'paused', 'failed', 'released', 'superseded']
 
 /**
@@ -533,26 +540,24 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  async getLatestRun(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunLatest | undefined> {
+  async isInstanceRevoked(directoryId: string, teamId: string, revocation: AgentRunRevocation): Promise<boolean> {
     const response = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
-      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: latestRecordKey(workItemId) },
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: revocationRecordKey(revocation) },
       ConsistentRead: true,
     }))
     const item = response.Item
-    if (item === undefined) return undefined
-    if (item.entityType !== 'agent-run-latest' || item.workItemId !== workItemId || item.workspaceId !== directoryId) {
+    if (item === undefined) return false
+    if (
+      item.entityType !== 'agent-run-revocation' ||
+      item.workItemId !== revocation.workItemId ||
+      item.workspaceId !== directoryId ||
+      item.assigneeUserId !== revocation.assigneeUserId ||
+      item.instanceIdHash !== revocation.instanceIdHash
+    ) {
       throw createAgentRunIntegrityError()
     }
-    const outcome = item.outcome === undefined ? undefined : storedOutcomes.find((candidate) => candidate === item.outcome)
-    if (item.outcome !== undefined && !outcome) throw createAgentRunIntegrityError()
-    return {
-      workItemId,
-      runId: storedString(item, 'runId'),
-      instanceIdHash: storedString(item, 'instanceIdHash'),
-      assigneeUserId: storedString(item, 'assigneeUserId'),
-      ...(outcome === undefined ? {} : { outcome }),
-    }
+    return true
   }
 
   /** @inheritdoc */
@@ -721,19 +726,10 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
         },
       },
       {
-        // The claim put above already admits one start per Work Item, so this replaces the previous record.
-        Put: {
+        // Starting again is how a released instance resumes work on this Work Item.
+        Delete: {
           TableName: this.#tableName,
-          Item: {
-            directoryTeamId: partition,
-            recordKey: latestRecordKey(run.workItemId),
-            entityType: 'agent-run-latest',
-            workspaceId: run.directoryId,
-            workItemId: run.workItemId,
-            runId: run.runId,
-            instanceIdHash: run.instanceIdHash,
-            assigneeUserId: run.assigneeUserId,
-          },
+          Key: { directoryTeamId: partition, recordKey: revocationRecordKey(run) },
         },
       },
     ]
@@ -741,7 +737,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
 
   /** @inheritdoc */
   createMutationFenceConditionChecks(input: AgentRunFenceInput): AgentRunTransactItem[] {
-    if (!input.run) return [this.#claimCheck(input), this.#latestNotRevokedCheck(input)]
+    if (!input.run) return [this.#claimCheck(input), this.#notRevokedCheck(input)]
     return [
       {
         ConditionCheck: {
@@ -813,16 +809,24 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           ExpressionAttributeValues: { ':runId': run.runId },
         },
       },
-      {
-        Update: {
-          TableName: this.#tableName,
-          Key: { directoryTeamId: partition, recordKey: latestRecordKey(run.workItemId) },
-          UpdateExpression: 'SET #outcome = :outcome',
-          ConditionExpression: '#runId = :runId',
-          ExpressionAttributeNames: { '#runId': 'runId', '#outcome': 'outcome' },
-          ExpressionAttributeValues: { ':runId': run.runId, ':outcome': run.outcome },
-        },
-      },
+      ...(run.outcome === 'released' || run.outcome === 'superseded'
+        ? [{
+            Put: {
+              TableName: this.#tableName,
+              Item: {
+                directoryTeamId: partition,
+                recordKey: revocationRecordKey(run),
+                entityType: 'agent-run-revocation',
+                workspaceId: run.directoryId,
+                workItemId: run.workItemId,
+                assigneeUserId: run.assigneeUserId,
+                instanceIdHash: run.instanceIdHash,
+                runId: run.runId,
+                revokedAt: run.finishedAt,
+              },
+            },
+          }]
+        : []),
     ]
   }
 
@@ -838,7 +842,12 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  async heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun> {
+  async heartbeat(
+    run: StoredAgentRun,
+    instanceIdHash: string,
+    now: Date,
+    conditionChecks: readonly AgentRunTransactItem[] = [],
+  ): Promise<StoredAgentRun> {
     const leaseExpiresAt = calculateLeaseExpiry(now, run.leaseMinutes)
     const threshold = new Date(now.getTime() - AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000).toISOString()
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
@@ -880,6 +889,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
               ExpressionAttributeValues: { ':runId': run.runId, ':instanceIdHash': instanceIdHash },
             },
           },
+          ...conditionChecks,
         ],
       }))
     } catch (error) {
@@ -963,31 +973,26 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /**
-   * Builds the check that rejects an instance whose newest run on the Work Item a person released
-   * or another instance took over. It reads committed state, unlike the run index.
+   * Builds the check that rejects an instance whose run on the Work Item a person released or
+   * another instance took over. It reads committed state, unlike the run index.
    *
    * @param input - Fence input.
-   * @returns ConditionCheck on the newest-run record.
+   * @returns ConditionCheck that no revocation exists for the caller's member and instance.
    */
-  #latestNotRevokedCheck(input: AgentRunFenceInput): AgentRunTransactItem {
+  #notRevokedCheck(input: AgentRunFenceInput): AgentRunTransactItem {
     return {
       ConditionCheck: {
         TableName: this.#tableName,
-        Key: { directoryTeamId: createAgentRunPartition(input.directoryId, input.teamId), recordKey: latestRecordKey(input.workItemId) },
-        ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR ' +
-          '#assigneeUserId <> :assigneeUserId OR NOT (#outcome IN (:released, :superseded))',
-        ExpressionAttributeNames: {
-          '#recordKey': 'recordKey',
-          '#instanceIdHash': 'instanceIdHash',
-          '#assigneeUserId': 'assigneeUserId',
-          '#outcome': 'outcome',
+        Key: {
+          directoryTeamId: createAgentRunPartition(input.directoryId, input.teamId),
+          recordKey: revocationRecordKey({
+            workItemId: input.workItemId,
+            assigneeUserId: input.assigneeUserId,
+            instanceIdHash: input.instanceIdHash,
+          }),
         },
-        ExpressionAttributeValues: {
-          ':instanceIdHash': input.instanceIdHash,
-          ':assigneeUserId': input.assigneeUserId,
-          ':released': 'released',
-          ':superseded': 'superseded',
-        },
+        ConditionExpression: 'attribute_not_exists(#recordKey)',
+        ExpressionAttributeNames: { '#recordKey': 'recordKey' },
       },
     }
   }

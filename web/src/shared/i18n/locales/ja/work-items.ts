@@ -637,6 +637,7 @@ export const workItemsMessages = {
   'workItems.agentRuns.retry': '実行記録を再読み込み',
   'workItems.agentRuns.empty': 'まだエージェントは担当していません。',
   'workItems.agentRuns.history': '過去の実行',
+  'workItems.agentRuns.historyTruncated': '新しい実行のみを表示しています。それより前の実行は表示されていません。',
   'workItems.agentRuns.startedAt': '開始',
   'workItems.agentRuns.lastActivity': '最終操作',
   'workItems.agentRuns.leaseExpiresAt': '期限',

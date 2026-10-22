@@ -8,8 +8,8 @@ import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
   type StoredAgentRun,
+  type AgentRunRevocation,
   type StoredAgentRunClaim,
-  type StoredAgentRunLatest,
 } from '../../domain/agent-run'
 import {
   AgentRunError,
@@ -31,8 +31,8 @@ type InMemoryAgentRunState = {
   runs: Map<string, StoredAgentRun>
   /** Claims by `<directoryId>|<teamId>|<workItemId>`. */
   claims: Map<string, StoredAgentRunClaim>
-  /** Newest-run records by `<directoryId>|<teamId>|<workItemId>`. */
-  latest: Map<string, StoredAgentRunLatest>
+  /** Revoked instances by `<directoryId>|<teamId>|<workItemId>|<assigneeUserId>|<instanceIdHash>`. */
+  revocations: Set<string>
   /** Settings by `<directoryId>|<teamId>`. */
   settings: Map<string, AgentSettings>
 }
@@ -81,13 +81,25 @@ function key(directoryId: string, teamId: string, id: string): string {
 }
 
 /**
+ * Builds a revocation set key.
+ *
+ * @param directoryId - Workspace ID.
+ * @param teamId - Team ID.
+ * @param revocation - Work Item, member, and instance hash.
+ * @returns Set key.
+ */
+function revocationKey(directoryId: string, teamId: string, revocation: AgentRunRevocation): string {
+  return `${directoryId}|${teamId}|${revocation.workItemId}|${revocation.assigneeUserId}|${revocation.instanceIdHash}`
+}
+
+/**
  * Agent Run store for tests and local composition without DynamoDB. It produces the same
  * transaction items as the DynamoDB store and evaluates their conditions in memory, so code that
  * commits Agent Run items with another writer can call {@link InMemoryAgentRunStore.applyTransactItems}.
  */
 export class InMemoryAgentRunStore implements AgentRunStore {
   /** Current state. */
-  readonly state: InMemoryAgentRunState = { runs: new Map(), claims: new Map(), latest: new Map(), settings: new Map() }
+  readonly state: InMemoryAgentRunState = { runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map() }
   /** Builder that produces DynamoDB-shaped items. */
   readonly #builder = new DynamoDbAgentRunStore({
     send: async () => {
@@ -103,13 +115,9 @@ export class InMemoryAgentRunStore implements AgentRunStore {
    */
   seed(run: StoredAgentRun): void {
     this.state.runs.set(key(run.directoryId, run.teamId, run.runId), structuredClone(run))
-    this.state.latest.set(key(run.directoryId, run.teamId, run.workItemId), {
-      workItemId: run.workItemId,
-      runId: run.runId,
-      instanceIdHash: run.instanceIdHash,
-      assigneeUserId: run.assigneeUserId,
-      ...(run.outcome ? { outcome: run.outcome } : {}),
-    })
+    if (run.outcome === 'released' || run.outcome === 'superseded') {
+      this.state.revocations.add(revocationKey(run.directoryId, run.teamId, run))
+    }
     if (run.state === 'active') {
       this.state.claims.set(key(run.directoryId, run.teamId, run.workItemId), {
         workItemId: run.workItemId,
@@ -133,9 +141,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  async getLatestRun(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunLatest | undefined> {
-    const latest = this.state.latest.get(key(directoryId, teamId, workItemId))
-    return latest ? { ...latest } : undefined
+  async isInstanceRevoked(directoryId: string, teamId: string, revocation: AgentRunRevocation): Promise<boolean> {
+    return this.state.revocations.has(revocationKey(directoryId, teamId, revocation))
   }
 
   /** @inheritdoc */
@@ -194,8 +201,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
 
   /** @inheritdoc */
   createStartItems(run: StoredAgentRun): AgentRunTransactItem[] {
-    const [runPut, claimPut, latestPut] = this.#builder.createStartItems(run)
-    if (!runPut || !claimPut || !latestPut) throw new Error('The start builder returned an unexpected item count.')
+    const [runPut, claimPut, revocationDelete] = this.#builder.createStartItems(run)
+    if (!runPut || !claimPut || !revocationDelete) throw new Error('The start builder returned an unexpected item count.')
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const claimKey = key(run.directoryId, run.teamId, run.workItemId)
     return [
@@ -214,16 +221,9 @@ export class InMemoryAgentRunStore implements AgentRunStore {
           })
         },
       }),
-      this.#register(latestPut, {
+      this.#register(revocationDelete, {
         check: () => true,
-        apply: (state) => {
-          state.latest.set(claimKey, {
-            workItemId: run.workItemId,
-            runId: run.runId,
-            instanceIdHash: run.instanceIdHash,
-            assigneeUserId: run.assigneeUserId,
-          })
-        },
+        apply: (state) => { state.revocations.delete(revocationKey(run.directoryId, run.teamId, run)) },
       }),
     ]
   }
@@ -245,8 +245,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
 
   /** @inheritdoc */
   createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
-    const [runUpdate, claimDelete, latestUpdate] = this.#builder.createCloseItems(run, expectedInstanceIdHash)
-    if (!runUpdate || !claimDelete || !latestUpdate) throw new Error('The close builder returned an unexpected item count.')
+    const [runUpdate, claimDelete, revocationPut] = this.#builder.createCloseItems(run, expectedInstanceIdHash)
+    if (!runUpdate || !claimDelete) throw new Error('The close builder returned an unexpected item count.')
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const claimKey = key(run.directoryId, run.teamId, run.workItemId)
     return [
@@ -273,13 +273,12 @@ export class InMemoryAgentRunStore implements AgentRunStore {
         check: (state) => state.claims.get(claimKey)?.runId === run.runId,
         apply: (state) => { state.claims.delete(claimKey) },
       }),
-      this.#register(latestUpdate, {
-        check: (state) => state.latest.get(claimKey)?.runId === run.runId,
-        apply: (state) => {
-          const latest = state.latest.get(claimKey)
-          if (latest && run.outcome) state.latest.set(claimKey, { ...latest, outcome: run.outcome })
-        },
-      }),
+      ...(revocationPut
+        ? [this.#register(revocationPut, {
+            check: () => true,
+            apply: (state) => { state.revocations.add(revocationKey(run.directoryId, run.teamId, run)) },
+          })]
+        : []),
     ]
   }
 
@@ -313,7 +312,14 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  async heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun> {
+  async heartbeat(
+    run: StoredAgentRun,
+    instanceIdHash: string,
+    now: Date,
+    conditionChecks: readonly AgentRunTransactItem[] = [],
+  ): Promise<StoredAgentRun> {
+    // Checks on other tables are evaluated by their own writers; this store accepts them unchanged.
+    void conditionChecks
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const current = this.state.runs.get(runKey)
     if (!current || current.state !== 'active' || current.instanceIdHash !== instanceIdHash) throw createAgentRunNotActiveError()
@@ -360,8 +366,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
     const claimKey = key(input.directoryId, input.teamId, input.workItemId)
     const run = input.run
     if (!run) {
-      const [claimCheck, latestCheck] = items
-      if (!claimCheck || !latestCheck) throw new Error('The fence builder returned an unexpected item count.')
+      const [claimCheck, revocationCheck] = items
+      if (!claimCheck || !revocationCheck) throw new Error('The fence builder returned an unexpected item count.')
       this.#register(claimCheck, {
         check: (state) => {
           const claim = state.claims.get(claimKey)
@@ -369,12 +375,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
         },
         apply: () => undefined,
       })
-      this.#register(latestCheck, {
-        check: (state) => {
-          const latest = state.latest.get(claimKey)
-          return !latest || latest.instanceIdHash !== input.instanceIdHash || latest.assigneeUserId !== input.assigneeUserId ||
-            (latest.outcome !== 'released' && latest.outcome !== 'superseded')
-        },
+      this.#register(revocationCheck, {
+        check: (state) => !state.revocations.has(revocationKey(input.directoryId, input.teamId, input)),
         apply: () => undefined,
       })
       return items

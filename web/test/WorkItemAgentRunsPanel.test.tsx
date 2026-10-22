@@ -71,6 +71,11 @@ describe('WorkItemAgentRunsPanel', () => {
     expect(html).toContain('Earlier runs')
     expect(html).toContain('Paused')
     expect(html).toContain('Released')
+    expect(html).not.toContain(labels.historyTruncated)
+    const truncated = renderToStaticMarkup(
+      <WorkItemAgentRunsPanel formatDateTime={(value) => value} hasMore labels={labels} runs={agentRunFixtures} />,
+    )
+    expect(truncated).toContain(labels.historyTruncated)
   })
 
   test('hides the release action when the viewer may not release and explains a stalled run', () => {

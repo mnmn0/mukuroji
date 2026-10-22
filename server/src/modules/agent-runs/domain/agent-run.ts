@@ -78,20 +78,17 @@ export type StoredAgentRunClaim = {
 }
 
 /**
- * Strongly consistent record of a Work Item's newest run. Fences read it instead of the run index,
- * which can lag, so an instance stops right after a person releases its run.
+ * Agent instance that may no longer act on a Work Item without starting a new run, because a person
+ * released its run or another instance took it over. Only the same member and instance starting
+ * again on the Work Item clears it.
  */
-export type StoredAgentRunLatest = {
+export type AgentRunRevocation = {
   /** Work Item ID. */
   workItemId: string
-  /** Newest run of the Work Item. */
-  runId: string
-  /** Instance hash of the newest run. */
-  instanceIdHash: string
-  /** Member responsible for the newest run. */
+  /** Member the revoked instance acts for. */
   assigneeUserId: string
-  /** Outcome once the newest run finished; absent while it is active. */
-  outcome?: AgentRunOutcome
+  /** Hash of the revoked instance ID. */
+  instanceIdHash: string
 }
 
 /** Validated input for a run start, with the instance ID already hashed. */

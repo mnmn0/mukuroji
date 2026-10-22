@@ -88,7 +88,41 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     return { ...input, ...(scope.assignedProjectId ? { assignedProjectId: scope.assignedProjectId } : {}) }
   }
 
-  /** Reads every active run of the configured assignee, optionally only this instance's runs. */
+  /**
+   * Checks whether a run's task is inside the optional process-wide Project restriction.
+   *
+   * @param run - Run to check.
+   * @returns True when no Project is configured or the run's task belongs to it.
+   */
+  async function runInScope(run: AgentRunRecord): Promise<boolean> {
+    if (scope.assignedProjectId === undefined) return true
+    try {
+      inScope(await api.get(run.workItemId))
+      return true
+    } catch (error) {
+      if (error instanceof AgentTaskError && ['not_found', 'forbidden', 'out_of_scope'].includes(error.code)) return false
+      throw error
+    }
+  }
+
+  /**
+   * Drops runs whose task is outside the configured Project, reading at most ten tasks at a time.
+   *
+   * @param runs - Active runs of the assignee.
+   * @returns Runs inside the configured Project.
+   */
+  async function scopedRuns(runs: AgentRunRecord[]): Promise<AgentRunRecord[]> {
+    if (scope.assignedProjectId === undefined) return runs
+    const kept: AgentRunRecord[] = []
+    for (let index = 0; index < runs.length; index += 10) {
+      const batch = runs.slice(index, index + 10)
+      const inside = await Promise.all(batch.map(runInScope))
+      kept.push(...batch.filter((_, position) => inside[position]))
+    }
+    return kept
+  }
+
+  /** Reads every active run of the configured assignee in the configured Project, optionally only this instance's runs. */
   async function activeRuns(onlyThisInstance: boolean): Promise<AgentRunRecord[]> {
     const runs: AgentRunRecord[] = []
     const cursors = new Set<string>()
@@ -99,7 +133,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         ...(onlyThisInstance ? { instanceId: scope.instanceId } : {}),
       }, cursor)
       runs.push(...result.items.filter((run) => run.state === 'active'))
-      if (!result.hasMore) return runs
+      if (!result.hasMore) return scopedRuns(runs)
       if (!result.nextCursor || cursors.has(result.nextCursor)) {
         throw new AgentTaskError('invalid_response', 'The API returned a missing or repeated run cursor.')
       }
@@ -171,6 +205,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     if (own) return own
     const run = await api.getRun(runId)
     if (run.state !== 'active') return undefined
+    if (!(await runInScope(run))) {
+      throw new AgentTaskError('out_of_scope', 'This run belongs to a task outside the configured Project.')
+    }
     if ([...startedRuns.values()].includes(runId)) return run
     throw new AgentTaskError('not_own_run', 'This run belongs to another agent instance. Do not operate on it; ask the user.')
   }

@@ -346,6 +346,42 @@ describe('public Agent Run service', () => {
     await update('laptop-1', 'released-3')
   })
 
+  test('keeps a released instance stopped after another instance runs the Work Item', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const released = createHeldRun('task-1', 'laptop-1')
+    store.seed(released)
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(released, 'released', 'sato@example.com', new Date())))
+    const other = createHeldRun('task-1', 'laptop-2')
+    store.applyTransactItems(store.createStartItems(other))
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(other, 'completed', 'agent', new Date())))
+    const workItems = createCanonicalPublicWorkItemService()
+    await expect(runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: 'late-released' }, undefined, { instanceIdHash: hashAgentInstanceId('laptop-1') },
+    ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('fences a held claim through its run and fails closed when that run is inconsistent', async () => {
+    const { store, observed } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    const workItems = createCanonicalPublicWorkItemService()
+    /**
+     * Renames the fixture task as the claim holder without naming its run.
+     *
+     * @param key - Idempotency key.
+     * @returns The updated Work Item.
+     */
+    const update = (key: string) => runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: key }, undefined, { instanceIdHash: held.instanceIdHash },
+    ))
+    await update('held-1')
+    expect(JSON.stringify(observed.at(-1))).toContain(`agent-run#${held.runId}`)
+    store.state.runs.set(`${workspaceId}|core-team|${held.runId}`, finishAgentRun(held, 'completed', 'agent', new Date()))
+    await expect(update('held-2')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
   test('rejects an instance-only update when a person releases the run during the request', async () => {
     let releaseBeforeCommit: (() => void) | undefined
     const { store } = configureUnstartedAssignedWorkItem({
@@ -404,6 +440,28 @@ describe('public Agent Run service', () => {
       if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
       else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
     }
+  })
+
+  test('stops heartbeats after a reassignment but still lets the former assignee finish', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', assigneeUserId: 'sato@example.com' })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    setTestAppDependencies({
+      transactions: {
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId, held.instanceIdHash)))
+      .rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+    expect(await runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'paused', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-reassigned' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-reassigned', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).toMatchObject({ state: 'finished', outcome: 'paused' })
+    expect(store.state.claims.size).toBe(0)
   })
 
   test('refuses heartbeats and finishes on another member run', async () => {

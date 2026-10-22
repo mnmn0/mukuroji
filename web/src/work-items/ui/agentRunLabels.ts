@@ -18,6 +18,8 @@ export type WorkItemAgentRunsLabels = {
   empty: string
   /** Heading of the finished-run history. */
   history: string
+  /** Note shown when older runs exist beyond the listed ones. */
+  historyTruncated: string
   /** Label of the start time. */
   startedAt: string
   /** Label of the latest activity time. */
@@ -56,6 +58,7 @@ export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRuns
     retry: t('workItems.agentRuns.retry'),
     empty: t('workItems.agentRuns.empty'),
     history: t('workItems.agentRuns.history'),
+    historyTruncated: t('workItems.agentRuns.historyTruncated'),
     startedAt: t('workItems.agentRuns.startedAt'),
     lastActivity: t('workItems.agentRuns.lastActivity'),
     leaseExpiresAt: t('workItems.agentRuns.leaseExpiresAt'),

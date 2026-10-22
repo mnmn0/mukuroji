@@ -17,6 +17,7 @@ import {
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
 import type { PublicAgentRunService } from '../../modules/developer-platform/public-api'
 import { ProjectDataError } from '../../modules/directory'
+import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
@@ -33,6 +34,7 @@ import {
 } from '../shared/project-access'
 import {
   createWorkItemIdempotencyTransaction,
+  getTeamIssuesTableName,
   loadAuthorizedTeamIssue,
 } from '../shared/work-item-access'
 import { createMutationAuditContext } from '../../modules/audit/audit'
@@ -91,23 +93,30 @@ async function requireRun(principal: WorkspacePrincipal, teamId: string, runId: 
  * @param teamId - Team ID.
  * @param runId - Run ID.
  * @param instanceIdHash - Hash of the instance ID the caller sent.
- * @returns The run.
+ * @returns The run and the revision of its Work Item that was read.
  */
 async function requireOwnRun(
   principal: WorkspacePrincipal,
   teamId: string,
   runId: string,
   instanceIdHash: string,
-): Promise<StoredAgentRun> {
+): Promise<{
+  /** Caller's run. */
+  run: StoredAgentRun
+  /** Current assignee of the run's Work Item. */
+  workItemAssigneeUserId: string
+  /** Revision of the run's Work Item that was read. */
+  workItemRevision: number
+}> {
   const run = await requireRun(principal, teamId, runId)
   if (run.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
-  await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
+  const { detail } = await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
   if (run.instanceIdHash !== instanceIdHash) {
     // Another instance of the same user must not keep alive or close a run it did not start.
     if (run.state !== 'active') throw createAgentRunNotActiveError()
     throw createAgentRunConflictError(describeHoldingRun(run, new Date()))
   }
-  return run
+  return { run, workItemAssigneeUserId: detail.issue.assigneeUserId, workItemRevision: detail.issue.revision }
 }
 
 /**
@@ -325,10 +334,14 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     /** Extends the caller's own lease. */
     async heartbeat(credential, teamId, runId, instanceIdHash) {
       const principal = await resolveWriter(credential, teamId)
-      const run = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+      const { run, workItemAssigneeUserId, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
       if (run.state !== 'active') throw createAgentRunNotActiveError()
+      // A member who is no longer responsible for the Work Item cannot keep its claim alive; finishing stays allowed.
+      if (workItemAssigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
       const now = new Date()
-      return toAgentRun(await workItemDependencies.agentRuns.heartbeat(run, instanceIdHash, now), now)
+      return toAgentRun(await workItemDependencies.agentRuns.heartbeat(run, instanceIdHash, now, [
+        createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, run.workItemId, workItemRevision),
+      ]), now)
     },
 
     /** Rechecks ownership before a finish receipt replays. */
@@ -340,7 +353,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     /** Closes the caller's own run and removes its claim. */
     async finish(credential, teamId, runId, { outcome, instanceIdHash }, context, idempotency) {
       const principal = await resolveWriter(credential, teamId)
-      const run = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+      const { run } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
       const now = new Date()
       if (run.state !== 'active') {
         if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)

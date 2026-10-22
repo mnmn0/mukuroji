@@ -47,7 +47,14 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       if (!found) throw new AgentTaskError('not_found', 'Not found')
       return structuredClone(found)
     },
-    async list(filters) { return { items: [...records.values()].filter((item) => !filters.assigneeUserId || item.assigneeUserId === filters.assigneeUserId), hasMore: false } },
+    async list(filters) {
+      return {
+        items: [...records.values()].filter((item) =>
+          (!filters.assigneeUserId || item.assigneeUserId === filters.assigneeUserId) &&
+          (!filters.assignedProjectId || item.assignedProjectId === filters.assignedProjectId)),
+        hasMore: false,
+      }
+    },
     async create(input) {
       const created = task('created', input)
       records.set(created.id, created)
@@ -301,6 +308,19 @@ describe('agent task lifecycle', () => {
     await scoped.transition('one', 1, 'coding', 'start', 'claim')
     await scoped.comments('one')
     await scoped.report('one', 'Progress', 'note')
+  })
+
+  test('keeps runs of tasks outside the configured Project out of selection, heartbeats, and finishing', async () => {
+    const { service, api } = fixture([
+      task('inside', { assignedProjectId: 'project' }),
+      task('outside', { assignedProjectId: 'other-project' }),
+    ])
+    const claimed = await service.transition('outside', 1, 'coding', 'start', 'claim-outside')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    const scoped = createAgentTasks(api, { ...baseScope, assignedProjectId: 'project' })
+    expect(await scoped.next({})).toMatchObject({ action: 'start', task: { id: 'inside' }, ownRuns: [], otherRuns: [] })
+    await expect(scoped.heartbeat(runId)).rejects.toMatchObject({ code: 'out_of_scope' })
+    await expect(scoped.finishRun(runId, 'paused', 'finish-outside')).rejects.toMatchObject({ code: 'out_of_scope' })
   })
 
   test('rejects blockers, inaccessible blockers, wrong assignment, invalid transitions, and Project escapes', async () => {

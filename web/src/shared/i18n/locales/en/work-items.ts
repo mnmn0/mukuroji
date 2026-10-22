@@ -637,6 +637,7 @@ export const workItemsMessages = {
   'workItems.agentRuns.retry': 'Reload agent runs',
   'workItems.agentRuns.empty': 'No agent has claimed this task yet.',
   'workItems.agentRuns.history': 'Earlier runs',
+  'workItems.agentRuns.historyTruncated': 'Only the newest runs are shown. Older runs are not listed.',
   'workItems.agentRuns.startedAt': 'Started',
   'workItems.agentRuns.lastActivity': 'Last activity',
   'workItems.agentRuns.leaseExpiresAt': 'Lease ends',

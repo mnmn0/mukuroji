@@ -55,6 +55,15 @@ export const ReadOnly: Story = {
   },
 }
 
+/** Older runs exist beyond the newest page. */
+export const TruncatedHistory: Story = {
+  args: { hasMore: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(labels.historyTruncated)).toBeVisible()
+  },
+}
+
 /** No agent has claimed the task. */
 export const Empty: Story = {
   args: { runs: [] },
