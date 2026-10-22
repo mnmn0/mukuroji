@@ -178,17 +178,19 @@ export interface AgentWorkItemApi {
   /**
    * Extends a run lease.
    * @param runId - Run identifier.
+   * @param instanceId - Instance identifier that started the run.
    * @returns The run with its extended lease.
    */
-  heartbeat(runId: string): Promise<AgentRunRecord>
+  heartbeat(runId: string, instanceId: string): Promise<AgentRunRecord>
   /**
    * Closes a run.
    * @param runId - Run identifier.
    * @param outcome - Finish reason.
+   * @param instanceId - Instance identifier that started the run.
    * @param key - Idempotency key reused only for this exact logical operation.
    * @returns The finished run.
    */
-  finishRun(runId: string, outcome: AgentRunFinishOutcome, key: string): Promise<AgentRunRecord>
+  finishRun(runId: string, outcome: AgentRunFinishOutcome, instanceId: string, key: string): Promise<AgentRunRecord>
   /**
    * Reads the Team Agent settings.
    * @returns Current settings or the defaults.

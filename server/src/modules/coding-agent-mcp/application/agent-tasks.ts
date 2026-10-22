@@ -118,6 +118,17 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   }> {
     const [own, all] = await Promise.all([activeRuns(true), activeRuns(false)])
     const ownIds = new Set(own.map((run) => run.runId))
+    // The run index can lag behind a start this process just made; read those runs directly.
+    for (const [taskId, runId] of startedRuns) {
+      if (ownIds.has(runId)) continue
+      const run = await api.getRun(runId)
+      if (run.state !== 'active') {
+        startedRuns.delete(taskId)
+        continue
+      }
+      own.push(run)
+      ownIds.add(runId)
+    }
     return {
       own,
       others: all.filter((run) => !ownIds.has(run.runId)).map((run) => ({
@@ -292,6 +303,12 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         .find((task) => task !== undefined)
       if (resumed) return { action: 'in_progress', task: resumed, blockedCount: 0, skipped: [], ...runSummary }
       const skipped: { taskId: string; reason: SkippedTaskReason }[] = []
+      /**
+       * Records a skipped task while the report stays within its size limit.
+       *
+       * @param taskId - Skipped task.
+       * @param reason - Why the task was skipped.
+       */
       const skip = (taskId: string, reason: SkippedTaskReason) => {
         if (skipped.length < maximumSkippedReports) skipped.push({ taskId, reason })
       }
@@ -340,12 +357,12 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       if (!(await ownRun(runId))) {
         throw new AgentTaskError('agent_run_not_active', 'This run is finished. Do not continue its work without the user.')
       }
-      return api.heartbeat(runId)
+      return api.heartbeat(runId, scope.instanceId)
     },
     /** Closes this instance's own run; a finished run is forwarded so an identical retry can replay. */
     async finishRun(runId: string, outcome: AgentRunFinishOutcome, key: string) {
       await ownRun(runId)
-      const finished = await api.finishRun(runId, outcome, key)
+      const finished = await api.finishRun(runId, outcome, scope.instanceId, key)
       for (const [taskId, startedRunId] of startedRuns) {
         if (startedRunId === runId) startedRuns.delete(taskId)
       }

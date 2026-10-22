@@ -91,6 +91,14 @@ export type ValidatedAgentRunFence = {
   instanceIdHash?: string
 }
 
+/** Validated finish request, with the instance ID already hashed. */
+export type ValidatedAgentRunFinish = {
+  /** Reason the agent is closing the run. */
+  outcome: AgentRunFinishOutcome
+  /** SHA-256 of the caller instance ID. */
+  instanceIdHash: string
+}
+
 const runIdPattern = /^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
 const agentNamePattern = /^[\p{L}\p{N} ._-]+$/u
 const identifierMaxLength = 256
@@ -265,19 +273,31 @@ export function readStartAgentRunRequest(value: unknown): ValidatedAgentRunStart
 }
 
 /**
+ * Validates a run heartbeat request body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Hash of the instance that asks to extend the lease.
+ */
+export function readHeartbeatAgentRunRequest(value: unknown): string {
+  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent Run heartbeat body is required.')
+  assertKnownFields(value, ['instanceId'], 'Agent Run heartbeat')
+  return hashAgentInstanceId(readAgentInstanceId(value.instanceId, '/instanceId'))
+}
+
+/**
  * Validates a run finish request body.
  *
  * @param value - Untrusted JSON body.
- * @returns The requested outcome.
+ * @returns The requested outcome and the hash of the instance that asks to finish.
  */
-export function readFinishAgentRunRequest(value: unknown): AgentRunFinishOutcome {
+export function readFinishAgentRunRequest(value: unknown): ValidatedAgentRunFinish {
   if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent Run finish body is required.')
-  assertKnownFields(value, ['outcome'], 'Agent Run finish')
+  assertKnownFields(value, ['outcome', 'instanceId'], 'Agent Run finish')
   const outcome = AGENT_RUN_FINISH_OUTCOMES.find((candidate) => candidate === value.outcome)
   if (!outcome) {
     throw new AgentRunError('validation_failed', `outcome must be one of ${AGENT_RUN_FINISH_OUTCOMES.join(', ')}.`, { pointer: '/outcome' })
   }
-  return outcome
+  return { outcome, instanceIdHash: hashAgentInstanceId(readAgentInstanceId(value.instanceId, '/instanceId')) }
 }
 
 /**

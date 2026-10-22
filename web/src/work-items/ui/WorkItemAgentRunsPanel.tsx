@@ -109,6 +109,11 @@ export function WorkItemAgentRunsPanel({
   const [releaseFailed, setReleaseFailed] = useState(false)
   const { active, history } = splitAgentRuns(runs)
 
+  /**
+   * Releases a run after the viewer confirms it.
+   *
+   * @param run - Active run to release.
+   */
   const release = async (run: AgentRunView) => {
     if (!onRelease || !window.confirm(labels.releaseConfirm)) return
     setReleasingRunId(run.runId)

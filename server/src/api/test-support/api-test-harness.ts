@@ -78,6 +78,7 @@ import {
   type TeamIssueDetailReadOptions,
   type TeamIssuesClient,
   type UpdateTeamIssueRequestBody,
+  type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
@@ -2623,7 +2624,7 @@ function configureFakeProjectClients(
           },
         }
       },
-      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId) {
+      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId, _auditContext, idempotency) {
         await options.issueUpdateHook?.({
           authorizationSnapshot: input.authorizationSnapshot,
           planningRevisionFence: input.planningRevisionFence,
@@ -2651,7 +2652,7 @@ function configureFakeProjectClients(
           input.schedule,
           createDefaultDueDateWorkItemSchedule('2026-06-18'),
         )
-        return {
+        const updated: UpdateTeamIssueResponse = {
           issue: {
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 2,
@@ -2687,6 +2688,9 @@ function configureFakeProjectClients(
             source: 'dynamodb',
           },
         }
+        // Like the DynamoDB client, the receipt is prepared from the committed Work Item.
+        await idempotency?.prepare({ status: 200, body: updated.issue })
+        return updated
       },
       async updateTeamIssueSchedules(
         directoryId,

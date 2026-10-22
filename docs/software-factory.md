@@ -102,8 +102,9 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 
 - lease の長さは Team の Agent settings `leaseMinutes`（既定 30、範囲 5〜240）で決める。
   Run の開始時に当時の値を `leaseMinutes` として固定し、設定変更は新しい Run から効く。
-- Run 配下の mutation（report、finish、`agentRunId` 付き Work Item 更新）と `heartbeat` は
-  同じ transaction で `lastHeartbeatAt` を更新する。読み取りは lease を延長しない。
+- `heartbeat` と Run 配下の mutation（report、`agentRunId` 付き Work Item 更新）は
+  `lastHeartbeatAt` を更新する。読み取りは lease を延長しない。lease は `lastHeartbeatAt < now`
+  を条件に更新し、遅れて届いた更新で期限を戻さない。
 - heartbeat は Run ごとに 10 秒に 1 回まで受け付け、超過分は `429` と `retryAfterSeconds` を返す。
 - Phase 1 の heartbeat は MCP tool 呼び出しだけで送る。Claude Code の hooks や Kiro の agent
   hooks から定期送信する方式は後続 Phase の option とし、Codex は hook 相当の有無を確認して
@@ -118,10 +119,10 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 - public API の Work Item 更新（PATCH）と comment 作成は任意の `agentRunId` と
   `agentInstanceId` を受け取る。`agentRunId` が指定された場合、server は Run が `active` で、
   credential の actor が `assigneeUserId` と一致し、Run の `workItemId` が対象と一致することを
-  強整合 read で事前検証する。この read は Run を予約しないため、lease 延長と mutation を確定する
-  同じ transaction 内でも、Run の `state=active`、対象 `workItemId`、claim row の `runId` が指定
-  された Run と一致することを条件付きで再検証する。条件を満たさない場合は lease 延長と mutation を
-  行わず、`agent_run_not_active` を返す。`workItemId` が一致しない Run も同じ error で拒否する。
+  強整合 read で事前検証する。この read は Run を予約しないため、mutation を確定する同じ
+  transaction 内でも、Run の `state=active`、対象 `workItemId`、claim row の `runId` が指定
+  された Run と一致することを ConditionCheck で再検証する。条件を満たさない場合は mutation を
+  行わず、`agent_run_not_active` を返す。lease は commit 後に延長する。`workItemId` が一致しない Run も同じ error で拒否する。
 - どちらも指定しない更新（人間の Web 操作、SDK）は、対象 Work Item に `active` Run があっても
   従来どおり成功する。既存の client と SDK は変更不要である。
 - MCP は mutation に常に `agentInstanceId` を添え、対象 Work Item と `workItemId` が一致する
@@ -272,9 +273,9 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `GET /v1/agent-runs/{runId}` | Run 1 件。 |
 | `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。閲覧できない Work Item の Run は返さない。 |
 | `GET /v1/agent-settings?teamId=` | Team の Agent settings。MCP の `get_configuration` が使う。 |
-| `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body なし。 |
+| `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body は Run 開始時と同じ `instanceId`。 |
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
-| `POST /v1/agent-runs/{runId}/finish` | `outcome` 付きの終了。 |
+| `POST /v1/agent-runs/{runId}/finish` | 終了。body は `outcome` と Run 開始時と同じ `instanceId`。 |
 | `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` | 停滞 Run の引き継ぎ。設定で許可時のみ。 |
 | `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` と `agentInstanceId` を追加。 |
 
@@ -293,7 +294,7 @@ Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem
 
 | Status | `code` | `errors[].code` | 条件 |
 | --- | --- | --- | --- |
-| `409` | `conflict` | `agent_run_conflict` | 対象 Work Item に別 instance の `active` Run がある。`detail` に保持 Run の agent 名、runtime、開始時刻、停滞かどうかを含める。 |
+| `409` | `conflict` | `agent_run_conflict` | 対象 Work Item に別 instance の `active` Run がある、または別 instance の `active` Run を heartbeat・finish しようとした。`detail` に保持 Run の agent 名、runtime、開始時刻、停滞かどうかを含める。 |
 | `409` | `conflict` | `agent_run_not_active` | 指定 Run が `finished`、別 instance のもの、または対象 Work Item と一致しない |
 | `403` | `forbidden` | `agent_run_forbidden` | credential の actor が Work Item または Run の `assigneeUserId` と異なる |
 | `409` | `conflict` | `invalid_transition` | start 対象が `backlog` / `unstarted` でない、または遷移先が `started` でない |
@@ -398,11 +399,13 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 
 - start は Public Work Item 更新と同じ経路（RBAC、workflow 遷移検証、revision CAS、
   idempotency receipt）を通し、Run と claim の put、`agent-run.started` audit event を同じ
-  transaction に加える。receipt は `{ run, workItem }` を保存する。
-- PATCH の fence は Run の lease 延長と claim の ConditionCheck を Work Item 更新と同じ
-  transaction に入れる。comment の保存処理は ConditionCheck だけを受け付けるため、comment は
-  Run と claim を ConditionCheck で検証し、commit 後に lease を延長する。延長の失敗で comment
-  を失敗にはしない。
+  transaction に加える。receipt は `201` の `{ run, workItem }` を保存し、再送も同じ応答を返す。
+- PATCH と comment の fence は、Run と claim を ConditionCheck で Work Item 更新・comment 保存と
+  同じ transaction に入れて検証し、commit 後に lease を延長する。延長は `lastHeartbeatAt < now`
+  を条件にするため、並行する mutation や heartbeat の順序が入れ替わっても lease は戻らない。
+  延長の失敗で mutation を失敗にはしない。
+- heartbeat と finish は Run 開始時の `instanceId` を必須とし、その hash を Run の条件式でも
+  照合する。同じ credential を共有する別 instance は、他 instance の Run を延長・終了できない。
 - `agentRunId` は `agentInstanceId` と一緒に送る。`agentInstanceId` だけの mutation は、別
   instance の claim がない場合だけ成功する。claim がなく、その Work Item の最新 Run が同じ instance
   のもので `released` または `superseded` で終わっている場合は `agent_run_not_active` とする。
@@ -411,7 +414,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   ないことを同じ transaction で検査し、削除と start の競合を防ぐ。
 - `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
-  `in_progress` とする。それ以外の自 Run は `ownRuns` に残し、agent に `finish_run` を促す。
+  `in_progress` とする。Run 一覧の index は結果整合のため、同じ process が開始した直後の Run は
+  `getRun` で直接読み、`ownRuns` に含める。それ以外の自 Run は `ownRuns` に残し、agent に `finish_run` を促す。
   Run のない `started` Work Item は再開対象にしない。
 - 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、`allowTakeoverAfterLeaseExpiry`
   を使う take over、data-integrity の verify script による claim / Run 不整合の検査。

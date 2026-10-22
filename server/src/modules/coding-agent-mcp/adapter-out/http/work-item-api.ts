@@ -243,9 +243,13 @@ export function createAgentWorkItemApi(
     /** Reads one run. */
     async getRun(runId) { return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}`, runSchema), runId) },
     /** Extends a run lease; heartbeats need no idempotency key. */
-    async heartbeat(runId) { return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/heartbeat`, runSchema, 'POST'), runId) },
+    async heartbeat(runId, instanceId) {
+      return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/heartbeat`, runSchema, 'POST', { instanceId }), runId)
+    },
     /** Closes a run with the original idempotency key. */
-    async finishRun(runId, outcome, key) { return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/finish`, runSchema, 'POST', { outcome }, key), runId) },
+    async finishRun(runId, outcome, instanceId, key) {
+      return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/finish`, runSchema, 'POST', { outcome, instanceId }, key), runId)
+    },
     /** Reads Team Agent settings. */
     async agentSettings() {
       const settings = await request('agent-settings', settingsSchema)

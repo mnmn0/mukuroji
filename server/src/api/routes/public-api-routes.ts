@@ -637,13 +637,13 @@ function projectPublicWorkItemReceiptBody(value: unknown): Record<string, unknow
  *
  * @param workspaceId - Workspace that owns the idempotency reservation.
  * @param token - Public API idempotency reservation token.
- * @param createReceiptBody - Optional wrapper that embeds the allowlisted Work Item in a larger response.
+ * @param createReceipt - Optional wrapper that embeds the allowlisted Work Item in a larger response with its own status.
  * @returns Transaction contribution that cannot persist internal Work Item fields.
  */
 function createPublicWorkItemIdempotencyTransaction(
   workspaceId: string,
   token: IdempotencyMutationToken | undefined,
-  createReceiptBody?: (workItem: Record<string, unknown>) => unknown,
+  createReceipt?: (workItem: Record<string, unknown>) => { status: 200 | 201; body: unknown },
 ): WorkItemIdempotencyTransaction | undefined {
   const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
   if (transaction === undefined) return undefined
@@ -651,10 +651,7 @@ function createPublicWorkItemIdempotencyTransaction(
     async prepare(response) {
       if (response.status !== 200) return transaction.prepare(response)
       const workItem = projectPublicWorkItemReceiptBody(response.body)
-      return transaction.prepare({
-        status: 200,
-        body: createReceiptBody ? createReceiptBody(workItem) : workItem,
-      })
+      return transaction.prepare(createReceipt ? createReceipt(workItem) : { status: 200, body: workItem })
     },
   }
 }
@@ -915,7 +912,7 @@ export async function updateCanonicalPublicWorkItem(
   const idempotencyTransaction = createPublicWorkItemIdempotencyTransaction(
     principal.directoryId,
     idempotency,
-    prepared?.createReceiptBody,
+    prepared?.createReceipt,
   )
   let response: Awaited<ReturnType<typeof workItemDependencies.teamIssues.updateTeamIssue>>
   try {
@@ -938,6 +935,7 @@ export async function updateCanonicalPublicWorkItem(
   } catch (error) {
     throw prepared ? await prepared.classifyFailure(error) : error
   }
+  await prepared?.afterCommit?.()
   await projectWorkItemSearchDocumentBestEffort(
     principal.directoryId,
     response.issue,

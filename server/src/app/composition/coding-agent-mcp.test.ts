@@ -64,9 +64,13 @@ function startFakeApi() {
     if (runMatch) {
       const entry = runs.find((candidate) => candidate.run.runId === runMatch[1])
       if (!entry) return Response.json({}, { status: 404 })
-      if (runMatch[2] === 'finish') {
-        if (entry.run.state !== 'active') return problem(409, 'agent_run_not_active')
+      if (runMatch[2] !== undefined) {
         const body: unknown = await request.json()
+        if (entry.run.state !== 'active') return problem(409, 'agent_run_not_active')
+        if (!body || typeof body !== 'object' || !('instanceId' in body) || body.instanceId !== entry.instanceId) {
+          return problem(409, 'agent_run_conflict')
+        }
+        if (runMatch[2] === 'heartbeat') return Response.json(entry.run)
         seenKeys.push(request.headers.get('Idempotency-Key') ?? '')
         entry.run = { ...entry.run, state: 'finished', outcome: body && typeof body === 'object' && 'outcome' in body ? body.outcome : 'completed', finishedAt: task.updatedAt, finishedBy: 'agent' }
       }

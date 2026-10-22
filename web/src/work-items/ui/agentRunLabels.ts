@@ -1,5 +1,5 @@
 import type { AgentRunRuntime } from '@mukuroji/contracts'
-import type { Locale } from '../../shared/i18n/i18n'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { AgentRunDisplayState } from '../model/agentRunDisplay'
 
 /** Locale-aware text of the Agent Run panel. */
@@ -47,61 +47,33 @@ export type WorkItemAgentRunsLabels = {
  * @returns Panel text.
  */
 export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRunsLabels {
-  const runtimes = { 'claude-code': 'Claude Code', codex: 'Codex', kiro: 'Kiro', other: locale === 'ja' ? 'その他' : 'Other' }
-  if (locale === 'ja') {
-    return {
-      title: 'エージェント実行',
-      description: 'コーディングエージェントによるこのタスクの担当記録です。同時に担当できるエージェントは 1 つだけです。',
-      loading: '実行記録を読み込んでいます。',
-      loadError: '実行記録を読み込めませんでした。',
-      retry: '再読み込み',
-      empty: 'まだエージェントは担当していません。',
-      history: '過去の実行',
-      startedAt: '開始',
-      lastActivity: '最終操作',
-      leaseExpiresAt: '期限',
-      finishedAt: '終了',
-      release: '解放',
-      releaseConfirm: 'この実行を解放しますか。エージェントは以後このタスクを更新できなくなります。',
-      releaseError: '実行を解放できませんでした。権限と最新の状態を確認してください。',
-      stalledHint: '期限内に操作がありません。エージェントの状況を確認し、必要なら解放してください。',
-      runtimes,
-      states: {
-        running: '処理中',
-        stalled: '停滞',
-        completed: '完了',
-        paused: '中断',
-        failed: '失敗',
-        released: '解放済み',
-        superseded: '引き継ぎ済み',
-      },
-    }
-  }
+  const t = createTranslator(locale)
   return {
-    title: 'Agent runs',
-    description: 'Coding agents that claimed this task. Only one agent can hold it at a time.',
-    loading: 'Loading agent runs.',
-    loadError: 'Agent runs could not be loaded.',
-    retry: 'Retry',
-    empty: 'No agent has claimed this task yet.',
-    history: 'Earlier runs',
-    startedAt: 'Started',
-    lastActivity: 'Last activity',
-    leaseExpiresAt: 'Lease ends',
-    finishedAt: 'Finished',
-    release: 'Release',
-    releaseConfirm: 'Release this run? The agent can no longer update this task.',
-    releaseError: 'The run could not be released. Check your permissions and the latest state.',
-    stalledHint: 'No activity within the lease. Check on the agent and release the run if needed.',
-    runtimes,
+    title: t('workItems.agentRuns.title'),
+    description: t('workItems.agentRuns.description'),
+    loading: t('workItems.agentRuns.loading'),
+    loadError: t('workItems.agentRuns.loadError'),
+    retry: t('workItems.agentRuns.retry'),
+    empty: t('workItems.agentRuns.empty'),
+    history: t('workItems.agentRuns.history'),
+    startedAt: t('workItems.agentRuns.startedAt'),
+    lastActivity: t('workItems.agentRuns.lastActivity'),
+    leaseExpiresAt: t('workItems.agentRuns.leaseExpiresAt'),
+    finishedAt: t('workItems.agentRuns.finishedAt'),
+    release: t('workItems.agentRuns.release'),
+    releaseConfirm: t('workItems.agentRuns.releaseConfirm'),
+    releaseError: t('workItems.agentRuns.releaseError'),
+    stalledHint: t('workItems.agentRuns.stalledHint'),
+    // Product names stay untranslated.
+    runtimes: { 'claude-code': 'Claude Code', codex: 'Codex', kiro: 'Kiro', other: t('workItems.agentRuns.runtime.other') },
     states: {
-      running: 'Running',
-      stalled: 'Stalled',
-      completed: 'Completed',
-      paused: 'Paused',
-      failed: 'Failed',
-      released: 'Released',
-      superseded: 'Taken over',
+      running: t('workItems.agentRuns.state.running'),
+      stalled: t('workItems.agentRuns.state.stalled'),
+      completed: t('workItems.agentRuns.state.completed'),
+      paused: t('workItems.agentRuns.state.paused'),
+      failed: t('workItems.agentRuns.state.failed'),
+      released: t('workItems.agentRuns.state.released'),
+      superseded: t('workItems.agentRuns.state.superseded'),
     },
   }
 }

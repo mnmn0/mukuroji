@@ -138,13 +138,8 @@ export interface AgentRunStore {
    */
   createStartItems(run: StoredAgentRun): AgentRunTransactItem[]
   /**
-   * Builds the writes that fence a Work Item mutation and, for a held run, extend its lease.
-   * @param input - Scope, current run, instance hash, and time.
-   * @returns Lease update and claim checks to commit with the mutation.
-   */
-  createMutationFenceItems(input: AgentRunFenceInput): AgentRunTransactItem[]
-  /**
-   * Builds condition-only checks for writers that accept only ConditionCheck items.
+   * Builds the checks that fence a Work Item mutation with the caller's claim and run. The lease is
+   * extended after the mutation commits, so an older mutation never overwrites a newer heartbeat.
    * @param input - Scope, current run, instance hash, and time.
    * @returns Run and claim condition checks.
    */
@@ -160,9 +155,10 @@ export interface AgentRunStore {
   /**
    * Builds the writes that finish an active run and remove its claim.
    * @param run - Finished form of the run.
+   * @param expectedInstanceIdHash - Instance that must still own the run, when an agent closes it.
    * @returns Run update and claim delete conditioned on the run still being active.
    */
-  createCloseItems(run: StoredAgentRun): AgentRunTransactItem[]
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
   /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
@@ -172,10 +168,11 @@ export interface AgentRunStore {
   /**
    * Extends a lease in response to an explicit heartbeat, at most once per interval.
    * @param run - Active run.
+   * @param instanceIdHash - Instance that must own the run.
    * @param now - Heartbeat time.
    * @returns The run with the extended lease.
    */
-  heartbeat(run: StoredAgentRun, now: Date): Promise<StoredAgentRun>
+  heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun>
   /**
    * Extends a lease after a mutation that could only check the run; a finished run is left as is.
    * @param run - Run that fenced the mutation.
@@ -679,39 +676,6 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createMutationFenceItems(input: AgentRunFenceInput): AgentRunTransactItem[] {
-    if (!input.run) return [this.#claimCheck(input)]
-    const leaseExpiresAt = calculateLeaseExpiry(input.now, input.run.leaseMinutes)
-    return [
-      {
-        Update: {
-          TableName: this.#tableName,
-          Key: { directoryTeamId: createAgentRunPartition(input.directoryId, input.teamId), recordKey: runRecordKey(input.run.runId) },
-          UpdateExpression: 'SET #lastHeartbeatAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
-          ConditionExpression: '#state = :active AND #workItemId = :workItemId AND #instanceIdHash = :instanceIdHash',
-          ExpressionAttributeNames: {
-            '#lastHeartbeatAt': 'lastHeartbeatAt',
-            '#leaseExpiresAt': 'leaseExpiresAt',
-            '#activeRunSortKey': 'activeRunSortKey',
-            '#state': 'state',
-            '#workItemId': 'workItemId',
-            '#instanceIdHash': 'instanceIdHash',
-          },
-          ExpressionAttributeValues: {
-            ':now': input.now.toISOString(),
-            ':leaseExpiresAt': leaseExpiresAt,
-            ':activeRunSortKey': `${leaseExpiresAt}#${input.run.runId}`,
-            ':active': 'active',
-            ':workItemId': input.workItemId,
-            ':instanceIdHash': input.instanceIdHash,
-          },
-        },
-      },
-      this.#claimCheck(input),
-    ]
-  }
-
-  /** @inheritdoc */
   createMutationFenceConditionChecks(input: AgentRunFenceInput): AgentRunTransactItem[] {
     if (!input.run) return [this.#claimCheck(input)]
     return [
@@ -741,7 +705,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun): AgentRunTransactItem[] {
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
     if (run.state !== 'finished' || !run.outcome || !run.finishedAt || !run.finishedBy) {
       throw new TypeError('createCloseItems requires the finished form of a run.')
     }
@@ -753,9 +717,12 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
           UpdateExpression: 'SET #state = :finished, #outcome = :outcome, #finishedAt = :finishedAt, #finishedBy = :finishedBy ' +
             'REMOVE #activeRunPartition, #activeRunSortKey, #lastHeartbeatRequestAt',
-          ConditionExpression: '#state = :active',
+          ConditionExpression: expectedInstanceIdHash === undefined
+            ? '#state = :active'
+            : '#state = :active AND #instanceIdHash = :instanceIdHash',
           ExpressionAttributeNames: {
             '#state': 'state',
+            ...(expectedInstanceIdHash === undefined ? {} : { '#instanceIdHash': 'instanceIdHash' }),
             '#outcome': 'outcome',
             '#finishedAt': 'finishedAt',
             '#finishedBy': 'finishedBy',
@@ -769,6 +736,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             ':finishedAt': run.finishedAt,
             ':finishedBy': run.finishedBy,
             ':active': 'active',
+            ...(expectedInstanceIdHash === undefined ? {} : { ':instanceIdHash': expectedInstanceIdHash }),
           },
         },
       },
@@ -796,7 +764,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  async heartbeat(run: StoredAgentRun, now: Date): Promise<StoredAgentRun> {
+  async heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun> {
     const leaseExpiresAt = calculateLeaseExpiry(now, run.leaseMinutes)
     const threshold = new Date(now.getTime() - AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000).toISOString()
     try {
@@ -804,13 +772,15 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
         TableName: this.#tableName,
         Key: { directoryTeamId: createAgentRunPartition(run.directoryId, run.teamId), recordKey: runRecordKey(run.runId) },
         UpdateExpression: 'SET #lastHeartbeatAt = :now, #lastHeartbeatRequestAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
-        ConditionExpression: '#state = :active AND (attribute_not_exists(#lastHeartbeatRequestAt) OR #lastHeartbeatRequestAt <= :threshold)',
+        ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #lastHeartbeatAt < :now AND ' +
+          '(attribute_not_exists(#lastHeartbeatRequestAt) OR #lastHeartbeatRequestAt <= :threshold)',
         ExpressionAttributeNames: {
           '#lastHeartbeatAt': 'lastHeartbeatAt',
           '#lastHeartbeatRequestAt': 'lastHeartbeatRequestAt',
           '#leaseExpiresAt': 'leaseExpiresAt',
           '#activeRunSortKey': 'activeRunSortKey',
           '#state': 'state',
+          '#instanceIdHash': 'instanceIdHash',
         },
         ExpressionAttributeValues: {
           ':now': now.toISOString(),
@@ -818,13 +788,19 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           ':activeRunSortKey': `${leaseExpiresAt}#${run.runId}`,
           ':active': 'active',
           ':threshold': threshold,
+          ':instanceIdHash': instanceIdHash,
         },
       }))
     } catch (error) {
       if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
       const current = await this.getRun(run.directoryId, run.teamId, run.runId)
-      if (!current || current.state !== 'active') throw createAgentRunNotActiveError()
-      const last = current.lastHeartbeatRequestAt === undefined ? now.getTime() : Date.parse(current.lastHeartbeatRequestAt)
+      if (!current || current.state !== 'active' || current.instanceIdHash !== instanceIdHash) throw createAgentRunNotActiveError()
+      const nextAllowedAt = current.lastHeartbeatRequestAt === undefined
+        ? 0
+        : Date.parse(current.lastHeartbeatRequestAt) + AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000
+      // Outside the rate window, only a newer lease renewal (a fenced mutation) can have failed the condition.
+      if (nextAllowedAt <= now.getTime()) return current
+      const last = nextAllowedAt - AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000
       const retryAfterSeconds = Math.max(1, Math.ceil((last + AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000 - now.getTime()) / 1_000))
       throw new AgentRunError('rate_limited', `Send at most one heartbeat every ${AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS} seconds per run.`, { retryAfterSeconds })
     }

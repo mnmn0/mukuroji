@@ -116,11 +116,15 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       if (!run) throw new AgentTaskError('not_found', 'Not found')
       return publicRun(run)
     },
-    async heartbeat(runId) { return api.getRun(runId) },
-    async finishRun(runId, outcome) {
+    async heartbeat(runId, instanceId) {
+      if (runs.get(runId)?.instanceId !== instanceId) throw new AgentTaskError('agent_run_conflict', 'Another instance')
+      return api.getRun(runId)
+    },
+    async finishRun(runId, outcome, instanceId) {
       const run = runs.get(runId)
       if (!run) throw new AgentTaskError('not_found', 'Not found')
       if (run.state !== 'active') throw new AgentTaskError('agent_run_not_active', 'Finished')
+      if (run.instanceId !== instanceId) throw new AgentTaskError('agent_run_conflict', 'Another instance')
       runs.set(runId, { ...run, state: 'finished', outcome, finishedBy: 'agent', finishedAt: '2026-09-01T01:00:00.000Z' })
       return api.getRun(runId)
     },
@@ -198,6 +202,7 @@ describe('agent task lifecycle', () => {
     const claimed = await lagging.transition('one', 1, 'coding', 'start', 'claim')
     const runId = 'run' in claimed ? claimed.run.runId : ''
     expect(await lagging.heartbeat(runId)).toMatchObject({ runId })
+    expect(await lagging.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId }] })
     await lagging.report('one', 'Progress', 'note')
     expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
     indexed = true
@@ -206,6 +211,8 @@ describe('agent task lifecycle', () => {
     // The remembered run ID still reaches the server, which reports the release.
     expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
     await expect(lagging.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    indexed = false
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
   })
 
   test('closes its own run once and forwards a retry of a finished run to the server', async () => {

@@ -19,6 +19,7 @@ import type { PublicAgentRunService } from '../../modules/developer-platform/pub
 import { ProjectDataError } from '../../modules/directory'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
+  AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
   createAgentRunAuditPut,
   isAgentRunFenceConflict,
 } from '../shared/agent-run-access'
@@ -84,17 +85,28 @@ async function requireRun(principal: WorkspacePrincipal, teamId: string, runId: 
 }
 
 /**
- * Loads the caller's own run after rechecking access to its Work Item.
+ * Loads the caller's own run after rechecking access to its Work Item and the instance that started it.
  *
  * @param principal - Authorized writer.
  * @param teamId - Team ID.
  * @param runId - Run ID.
+ * @param instanceIdHash - Hash of the instance ID the caller sent.
  * @returns The run.
  */
-async function requireOwnRun(principal: WorkspacePrincipal, teamId: string, runId: string): Promise<StoredAgentRun> {
+async function requireOwnRun(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  runId: string,
+  instanceIdHash: string,
+): Promise<StoredAgentRun> {
   const run = await requireRun(principal, teamId, runId)
   if (run.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
   await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
+  if (run.instanceIdHash !== instanceIdHash) {
+    // Another instance of the same user must not keep alive or close a run it did not start.
+    if (run.state !== 'active') throw createAgentRunNotActiveError()
+    throw createAgentRunConflictError(describeHoldingRun(run, new Date()))
+  }
   return run
 }
 
@@ -187,10 +199,12 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
               })
               started = run
               startedAt = now
-              const auditPut = createAgentRunAuditPut(auditContext, run, 'started', 'Agent Run started.')
+              const auditPut = createAgentRunAuditPut(
+                auditContext, run, 'started', 'Agent Run started.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+              )
               return {
                 transactItems: [...store.createStartItems(run), ...(auditPut ? [auditPut] : [])],
-                createReceiptBody: (workItem) => ({ run: toAgentRun(run, now), workItem }),
+                createReceipt: (workItem) => ({ status: 201, body: { run: toAgentRun(run, now), workItem } }),
                 async classifyFailure(error) {
                   if (!isAgentRunFenceConflict(error)) return error
                   const latest = await store.getClaim(principal.directoryId, teamId, workItemId)
@@ -265,24 +279,24 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     },
 
     /** Extends the caller's own lease. */
-    async heartbeat(credential, teamId, runId) {
+    async heartbeat(credential, teamId, runId, instanceIdHash) {
       const principal = await resolveWriter(credential, teamId)
-      const run = await requireOwnRun(principal, teamId, runId)
+      const run = await requireOwnRun(principal, teamId, runId, instanceIdHash)
       if (run.state !== 'active') throw createAgentRunNotActiveError()
       const now = new Date()
-      return toAgentRun(await workItemDependencies.agentRuns.heartbeat(run, now), now)
+      return toAgentRun(await workItemDependencies.agentRuns.heartbeat(run, instanceIdHash, now), now)
     },
 
     /** Rechecks ownership before a finish receipt replays. */
-    async authorizeFinish(credential, teamId, runId) {
+    async authorizeFinish(credential, teamId, runId, instanceIdHash) {
       const principal = await resolveWriter(credential, teamId)
-      await requireOwnRun(principal, teamId, runId)
+      await requireOwnRun(principal, teamId, runId, instanceIdHash)
     },
 
     /** Closes the caller's own run and removes its claim. */
-    async finish(credential, teamId, runId, outcome, context, idempotency) {
+    async finish(credential, teamId, runId, { outcome, instanceIdHash }, context, idempotency) {
       const principal = await resolveWriter(credential, teamId)
-      const run = await requireOwnRun(principal, teamId, runId)
+      const run = await requireOwnRun(principal, teamId, runId, instanceIdHash)
       const now = new Date()
       if (run.state !== 'active') {
         if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)
@@ -297,6 +311,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         request: {
           method: 'POST',
           path: `/api/v1/agent-runs/${encodeURIComponent(runId)}/finish`,
+          // The instance ID is a bearer-like secret of the agent; only the outcome is audited.
           body: { outcome },
         },
         source: {
@@ -311,7 +326,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
         ?.prepare({ status: 200, body: response })
       const store = workItemDependencies.agentRuns
-      const closeItems = store.createCloseItems(finished)
+      const closeItems = store.createCloseItems(finished, instanceIdHash)
       await store.commit([
         ...closeItems,
         ...(auditPut ? [auditPut] : []),

@@ -18,6 +18,7 @@ export {
   readAgentRunId,
   readAgentRunMutationFence,
   readFinishAgentRunRequest,
+  readHeartbeatAgentRunRequest,
   readStartAgentRunRequest,
   readUpdateAgentSettingsRequest,
   splitAgentRunMutationFence,
@@ -25,6 +26,7 @@ export {
   type StoredAgentRun,
   type StoredAgentRunClaim,
   type ValidatedAgentRunFence,
+  type ValidatedAgentRunFinish,
   type ValidatedAgentRunStart,
 } from './domain/agent-run'
 export {

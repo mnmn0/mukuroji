@@ -11,8 +11,12 @@ import {
   type StoredAgentRun,
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
-import { createMutationAuditContext } from '../modules/audit/audit'
-import { createAgentRunDeletionFences } from './shared/agent-run-access'
+import { createAuditEventId, createMutationAuditContext } from '../modules/audit/audit'
+import {
+  AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+  createAgentRunAuditPut,
+  createAgentRunDeletionFences,
+} from './shared/agent-run-access'
 import { resolveDeveloperCredentialPrincipal } from './shared/developer-platform-access'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
 import type { CollaborationClient } from '../modules/collaboration/collaboration'
@@ -108,6 +112,15 @@ function configureUnstartedAssignedWorkItem(overrides: {
 describe('public Agent Run service', () => {
   test('starts a run atomically with the started transition and fences other instances', async () => {
     const { store, observed } = configureUnstartedAssignedWorkItem()
+    const receipts: unknown[] = []
+    setTestAppDependencies({
+      transactions: {
+        async prepareIdempotencyCompletionTransactWrite(input) {
+          receipts.push(input.response)
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
     const service = createCanonicalPublicAgentRunService()
     const started = await runWithTestAppDependencies(() => service.start(
       credential, 'core-team', 'task-1',
@@ -123,6 +136,9 @@ describe('public Agent Run service', () => {
     expect(started.workItem).toMatchObject({ id: 'task-1' })
     expect(observed[0]?.length).toBeGreaterThanOrEqual(2)
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(started.run.runId)
+    // A replay must return the 201 start response, not the bare Work Item.
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]).toMatchObject({ status: 201, body: { run: started.run, workItem: { id: 'task-1', revision: 2 } } })
 
     const other = await runWithTestAppDependencies(() => service.start(
       credential, 'core-team', 'task-1',
@@ -136,6 +152,12 @@ describe('public Agent Run service', () => {
 
   test('rejects starts by another member, from a started status, or into a non-started status', async () => {
     const service = createCanonicalPublicAgentRunService()
+    /**
+     * Starts a run on the fixture task.
+     *
+     * @param workflowStatusId - Target workflow status.
+     * @returns The start response.
+     */
     const start = (workflowStatusId = 'in-progress') => runWithTestAppDependencies(() => service.start(
       credential, 'core-team', 'task-1',
       readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId, runtime: 'claude-code', agentName: 'Claude Code', instanceId: 'laptop-1' }),
@@ -158,6 +180,12 @@ describe('public Agent Run service', () => {
     const held = createHeldRun('task-1')
     store.seed(held)
     const workItems = createCanonicalPublicWorkItemService()
+    /**
+     * Renames the fixture task with an Agent Run fence.
+     *
+     * @param fence - Fence the agent sends.
+     * @returns The updated Work Item.
+     */
     const update = (fence: { agentRunId?: string, instanceIdHash: string }) => runWithTestAppDependencies(() => workItems.update(
       credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
       { requestId: 'update', idempotencyKey: `update-${fence.instanceIdHash.slice(0, 6)}` }, undefined, fence,
@@ -225,8 +253,10 @@ describe('public Agent Run service', () => {
       },
     })
     const service = createCanonicalPublicAgentRunService()
-    await runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId))
-    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId)))
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId, hashAgentInstanceId('laptop-1'))))
+      .rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    await runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId, held.instanceIdHash))
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId, held.instanceIdHash)))
       .rejects.toMatchObject({ category: 'rate_limited' })
 
     const own = await runWithTestAppDependencies(() => service.list(
@@ -234,21 +264,33 @@ describe('public Agent Run service', () => {
     ))
     expect(own.items.map((run) => run.runId)).toEqual([held.runId])
 
+    await expect(runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: hashAgentInstanceId('laptop-1') },
+      { requestId: 'finish', idempotencyKey: 'finish-0' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-0', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    expect(receipts).toEqual([])
     const finished = await runWithTestAppDependencies(() => service.finish(
-      credential, 'core-team', held.runId, 'completed', { requestId: 'finish', idempotencyKey: 'finish-1' },
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-1' },
       { credentialId: 'agent-key', idempotencyKey: 'finish-1', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))
     expect(finished).toMatchObject({ state: 'finished', outcome: 'completed', finishedBy: 'agent' })
     expect(receipts).toEqual([{ status: 200, body: finished }])
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
     expect(await runWithTestAppDependencies(() => service.finish(
-      credential, 'core-team', held.runId, 'completed', { requestId: 'finish', idempotencyKey: 'finish-2' },
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-2' },
       { credentialId: 'agent-key', idempotencyKey: 'finish-2', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))).toMatchObject({ outcome: 'completed' })
     await expect(runWithTestAppDependencies(() => service.finish(
-      credential, 'core-team', held.runId, 'failed', { requestId: 'finish', idempotencyKey: 'finish-3' },
+      credential, 'core-team', held.runId, { outcome: 'failed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-3' },
       { credentialId: 'agent-key', idempotencyKey: 'finish-3', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    // Once the run is closed, another instance learns only that it is no longer active.
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId, hashAgentInstanceId('laptop-1'))))
+      .rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
   test('stops an agent whose run a person released, even when it omits the run ID', async () => {
@@ -256,6 +298,13 @@ describe('public Agent Run service', () => {
     const released = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'released', 'sato@example.com', new Date())
     store.state.runs.set(`${workspaceId}|core-team|${released.runId}`, released)
     const workItems = createCanonicalPublicWorkItemService()
+    /**
+     * Renames the fixture task as an agent instance that omits the run ID.
+     *
+     * @param instanceId - Raw instance ID.
+     * @param key - Idempotency key.
+     * @returns The updated Work Item.
+     */
     const update = (instanceId: string, key: string) => runWithTestAppDependencies(() => workItems.update(
       credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
       { requestId: 'update', idempotencyKey: key }, undefined, { instanceIdHash: hashAgentInstanceId(instanceId) },
@@ -287,12 +336,34 @@ describe('public Agent Run service', () => {
     expect(await store.getRun(workspaceId, 'core-team', held.runId)).toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com' })
   })
 
+  test('keeps Agent Run audit events apart from the Work Item event in the same transaction', () => {
+    const previous = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditEvents'
+    try {
+      const context = createMutationAuditContext({
+        workspaceId, actor: { id: 'demo@example.com', kind: 'user' }, idempotencyKey: 'start-1',
+        request: { method: 'POST', path: '/api/v1/work-items/task-1/agent-runs', body: {} },
+        source: { kind: 'api', requestId: 'start', method: 'POST', route: '/api/v1/work-items/task-1/agent-runs' },
+      })
+      const run = createHeldRun('task-1')
+      const workItemEventId = createAuditEventId(context, 'work-item.updated', { type: 'work-item', id: 'team/core-team/issue/task-1' })
+      const shared = createAgentRunAuditPut(context, run, 'started', 'Agent Run started.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM)
+      const standalone = createAgentRunAuditPut(context, run, 'finished', 'Agent Run finished.')
+      expect(shared?.Put?.Item?.eventId).toBeString()
+      expect(shared?.Put?.Item?.eventId).not.toBe(workItemEventId)
+      expect(standalone?.Put?.Item?.eventId).toBe(workItemEventId)
+    } finally {
+      if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+      else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
+    }
+  })
+
   test('refuses heartbeats and finishes on another member run', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const foreign = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
     store.seed(foreign)
     const service = createCanonicalPublicAgentRunService()
-    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', foreign.runId)))
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', foreign.runId, foreign.instanceIdHash)))
       .rejects.toMatchObject({ reason: 'agent_run_forbidden' })
   })
 })
@@ -335,6 +406,17 @@ describe('Web Agent Run routes', () => {
     expect(await history.json()).toMatchObject({ items: [{ runId: previous.runId, canRelease: true }] })
     const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${previous.runId}/release`, { method: 'POST', headers })
     expect(released.status).toBe(200)
+  })
+
+  test('does not offer a release to an assignee who can only view the Team', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(history.status).toBe(200)
+    expect(await history.json()).toMatchObject({ items: [{ runId: held.runId, canRelease: false }] })
+    const denied = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
+    expect(denied.status).toBe(403)
   })
 
   test('reads defaults and saves Agent settings for Team managers with revision CAS', async () => {

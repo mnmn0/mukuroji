@@ -72,7 +72,19 @@ export async function releaseAgentRun(
  */
 function readAgentRunView(value: unknown): AgentRunView | undefined {
   if (!isRecord(value)) return undefined
+  /**
+   * Reads a non-empty string field.
+   *
+   * @param name - Field name.
+   * @returns The value, or undefined when it is missing or invalid.
+   */
   const text = (name: string) => typeof value[name] === 'string' && value[name] !== '' ? value[name] : undefined
+  /**
+   * Reads an ISO 8601 timestamp field.
+   *
+   * @param name - Field name.
+   * @returns The value, or undefined when it is missing or invalid.
+   */
   const time = (name: string) => {
     const candidate = text(name)
     return candidate !== undefined && Number.isFinite(Date.parse(candidate)) ? candidate : undefined

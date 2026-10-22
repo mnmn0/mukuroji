@@ -2673,6 +2673,11 @@ const agentRunFixture: AgentRun = {
  * @returns Agent Run service.
  */
 function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): PublicAgentRunService {
+  /**
+   * Fails a service call the test did not expect.
+   *
+   * @returns Never; always throws.
+   */
   const unexpected = async (): Promise<never> => {
     throw new Error('Unexpected Agent Run service call.')
   }
@@ -2715,6 +2720,13 @@ describe('public Agent Run routes', () => {
     }) })
     const credential = await createApiKey(platform, ['work-items:write'])
     const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    /**
+     * Sends a run start request.
+     *
+     * @param key - Idempotency key.
+     * @param body - Request body.
+     * @returns Response.
+     */
     const send = (key: string, body: unknown = startBody) => router.request('/v1/work-items/work-item-1/agent-runs?teamId=team-1', {
       method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body),
     })
@@ -2735,18 +2747,45 @@ describe('public Agent Run routes', () => {
     expect(await invalid.json()).toMatchObject({ code: 'validation_failed', errors: [{ pointer: '/runtime' }] })
   })
 
-  test('returns Retry-After when heartbeats are too frequent and 503 when runs are not configured', async () => {
+  test('binds heartbeats and finishes to the instance, returns Retry-After, and 503 when runs are not configured', async () => {
+    const finishes: unknown[] = []
     const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
-      async heartbeat() {
+      async heartbeat(_credential, _teamId, _runId, instanceIdHash) {
+        expect(instanceIdHash).toBe(hashAgentInstanceId('laptop-1'))
         throw new AgentRunError('rate_limited', 'Too frequent.', { retryAfterSeconds: 7 })
       },
+      async finish(_credential, _teamId, _runId, request) {
+        finishes.push(request)
+        return { ...agentRunFixture, state: 'finished', outcome: request.outcome, finishedBy: 'agent', finishedAt: NOW.toISOString() }
+      },
+      async authorizeFinish() {},
     }) })
     const credential = await createApiKey(platform, ['work-items:read', 'work-items:write'])
-    const headers = { Authorization: `Bearer ${credential.secret}` }
-    const limited = await router.request(`/v1/agent-runs/${agentRunFixture.runId}/heartbeat?teamId=team-1`, { method: 'POST', headers })
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    const body = JSON.stringify({ instanceId: 'laptop-1' })
+    const limited = await router.request(`/v1/agent-runs/${agentRunFixture.runId}/heartbeat?teamId=team-1`, { method: 'POST', headers, body })
     expect(limited.status).toBe(429)
     expect(limited.headers.get('Retry-After')).toBe('7')
-    expect((await router.request('/v1/agent-runs/not-a-run/heartbeat?teamId=team-1', { method: 'POST', headers })).status).toBe(400)
+    expect((await router.request('/v1/agent-runs/not-a-run/heartbeat?teamId=team-1', { method: 'POST', headers, body })).status).toBe(400)
+    const anonymous = await router.request(`/v1/agent-runs/${agentRunFixture.runId}/heartbeat?teamId=team-1`, {
+      method: 'POST', headers, body: '{}',
+    })
+    expect(anonymous.status).toBe(400)
+    expect(await anonymous.json()).toMatchObject({ errors: [{ pointer: '/instanceId' }] })
+
+    /**
+     * Sends a run finish request.
+     *
+     * @param instanceBody - Request body.
+     * @param key - Idempotency key.
+     * @returns Response.
+     */
+    const finish = (instanceBody: unknown, key: string) => router.request(`/v1/agent-runs/${agentRunFixture.runId}/finish?teamId=team-1`, {
+      method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(instanceBody),
+    })
+    expect((await finish({ outcome: 'completed', instanceId: 'laptop-1' }, 'finish-1')).status).toBe(200)
+    expect(finishes).toEqual([{ outcome: 'completed', instanceIdHash: hashAgentInstanceId('laptop-1') }])
+    expect((await finish({ outcome: 'completed' }, 'finish-2')).status).toBe(400)
 
     const unconfigured = createTestRouter({ platform })
     expect((await unconfigured.router.request('/v1/agent-settings?teamId=team-1', { headers })).status).toBe(503)

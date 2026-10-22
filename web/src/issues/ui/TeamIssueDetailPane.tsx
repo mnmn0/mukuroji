@@ -907,36 +907,25 @@ function IssueDetailContent({
         ) : null
       case 'workflow':
         return (
-          <>
-            <fieldset
-              className="contents"
-              disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
-            >
-              <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-                {t('tasks.column.status')}
-                <select
-                  className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                  defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
-                  form={editorFormId}
-                  key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
-                  name="workflowStatusId"
-                >
-                  {workflowStatuses.map((status) => (
-                    <option key={status.id} value={status.id}>{status.name}</option>
-                  ))}
-                </select>
-              </label>
-            </fieldset>
-            {accessToken ? (
-              <WorkItemAgentRunsPanelContainer
-                accessToken={accessToken}
-                key={issue.teamId + ':' + issue.id + ':agent-runs'}
-                locale={locale}
-                teamId={issue.teamId}
-                workItemId={issue.id}
-              />
-            ) : null}
-          </>
+          <fieldset
+            className="contents"
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+          >
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('tasks.column.status')}
+              <select
+                className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
+                form={editorFormId}
+                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
+                name="workflowStatusId"
+              >
+                {workflowStatuses.map((status) => (
+                  <option key={status.id} value={status.id}>{status.name}</option>
+                ))}
+              </select>
+            </label>
+          </fieldset>
         )
       case 'schedule':
         return (
@@ -1081,6 +1070,16 @@ function IssueDetailContent({
           {!hasCustomFieldSection && hasCustomFields
             ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
             : null}
+          {/* Agent claims are operational state, so Work Item types that hide the workflow section still show them. */}
+          {accessToken ? (
+            <WorkItemAgentRunsPanelContainer
+              accessToken={accessToken}
+              key={issue.teamId + ':' + issue.id + ':agent-runs'}
+              locale={locale}
+              teamId={issue.teamId}
+              workItemId={issue.id}
+            />
+          ) : null}
         </div>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"

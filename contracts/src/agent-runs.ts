@@ -125,10 +125,18 @@ export type StartAgentRunResponse = {
   workItem: PublicWorkItem
 }
 
+/** Request body that extends the lease of an agent's own run. */
+export type HeartbeatAgentRunRequest = {
+  /** Instance identifier sent when the run started; other instances cannot extend the lease. */
+  instanceId: string
+}
+
 /** Request body that closes an agent's own run. */
 export type FinishAgentRunRequest = {
   /** Reason the agent is closing the run. */
   outcome: AgentRunFinishOutcome
+  /** Instance identifier sent when the run started; other instances cannot close the run. */
+  instanceId: string
 }
 
 /** Optional Agent Run fence attached to Work Item mutations made by an agent. */

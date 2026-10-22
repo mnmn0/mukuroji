@@ -23,6 +23,8 @@ import { workItemDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { createRequestMutationContext, readBearerAccessToken, readJson } from '../shared/http'
 import {
+  canWorkspaceBusinessWrite,
+  requireAssignedProjectPermission,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -68,6 +70,31 @@ function toAgentRunErrorResponse(c: Context, error: unknown): Response {
 async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
   try {
     await requireTeamPermission(principal, teamId, 'manager')
+    return true
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
+  }
+}
+
+/**
+ * Checks the write access the release route requires before it applies {@link mayRelease}, so the
+ * history never offers a release that the release route would reject.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param assignedProjectId - Project the run's Work Item is assigned to.
+ * @returns True when the viewer may write the Work Item.
+ */
+async function canWriteForRelease(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  assignedProjectId: string | undefined,
+): Promise<boolean> {
+  if (!canWorkspaceBusinessWrite(principal)) return false
+  try {
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    requireAssignedProjectPermission(principal, context, assignedProjectId, 'member')
     return true
   } catch (error) {
     if (error instanceof ProjectDataError && error.status === 403) return false
@@ -138,12 +165,15 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
         undefined,
         readHistoryLimit(c.req.query('limit')),
       )
-      const manager = await isTeamManager(principal, teamId)
+      const [manager, writable] = await Promise.all([
+        isTeamManager(principal, teamId),
+        canWriteForRelease(principal, teamId, detail.issue.assignedProjectId),
+      ])
       const now = new Date()
       const response: WorkItemAgentRunsResponse = {
         items: page.runs.map((run) => toAgentRunView(
           run,
-          mayRelease(run, principal, manager, detail.issue.assigneeUserId),
+          writable && mayRelease(run, principal, manager, detail.issue.assigneeUserId),
           now,
         )),
         hasMore: page.nextCursor !== undefined,

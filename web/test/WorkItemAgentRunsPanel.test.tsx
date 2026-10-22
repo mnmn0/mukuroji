@@ -5,6 +5,11 @@ import { agentRunFixtures, stalledAgentRunFixture } from '../src/work-items/agen
 import { readAgentRunDisplayState, splitAgentRuns } from '../src/work-items/model/agentRunDisplay'
 import { WorkItemAgentRunsPanel } from '../src/work-items/ui/WorkItemAgentRunsPanel'
 import { createWorkItemAgentRunsLabels } from '../src/work-items/ui/agentRunLabels'
+import { DEFAULT_WORK_ITEM_TYPE, type WorkItemDetailSectionId } from '@mukuroji/contracts'
+import { createTranslator } from '../src/shared/i18n/i18n'
+import { referoTaskFixtures } from '../src/tasks/fixtures'
+import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 const labels = createWorkItemAgentRunsLabels('en')
 const originalFetch = globalThis.fetch
@@ -14,6 +19,47 @@ afterEach(() => {
 })
 
 describe('WorkItemAgentRunsPanel', () => {
+  test('uses the shared locale dictionaries for both locales', () => {
+    const ja = createWorkItemAgentRunsLabels('ja')
+    expect(ja.title).toBe(createTranslator('ja')('workItems.agentRuns.title'))
+    expect(labels.title).toBe(createTranslator('en')('workItems.agentRuns.title'))
+    expect(ja.states.stalled).not.toBe(labels.states.stalled)
+    expect(ja.runtimes['claude-code']).toBe('Claude Code')
+  })
+
+  test('appears on the task page detail even when the Work Item type hides the workflow section', () => {
+    const task = referoTaskFixtures[0]
+    const detailSections: WorkItemDetailSectionId[] = ['overview', 'description']
+    const configuration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [{ ...DEFAULT_WORK_ITEM_TYPE, detailSections }],
+    }
+    /**
+     * Renders the task page detail for the fixture task.
+     *
+     * @param accessToken - Session token, when signed in.
+     * @returns Markup.
+     */
+    const render = (accessToken?: string) => renderToStaticMarkup(
+      <TaskDetailPane
+        accessToken={accessToken}
+        assigneeOptions={[]}
+        configuration={configuration}
+        detail={{ issue: task, activity: [] }}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="en"
+        projects={[]}
+        relationCandidates={[]}
+        t={createTranslator('en')}
+        task={task}
+        workspaceMembers={[]}
+      />,
+    )
+    expect(render('session-token')).toContain('data-testid="work-item-agent-runs-panel"')
+    expect(render()).not.toContain('data-testid="work-item-agent-runs-panel"')
+  })
+
   test('shows the active run with its release action and the finished history', () => {
     const html = renderToStaticMarkup(
       <WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} onRelease={async () => undefined} runs={agentRunFixtures} />,
@@ -41,6 +87,12 @@ describe('WorkItemAgentRunsPanel', () => {
   })
 
   test('shows empty, loading, and error states', () => {
+    /**
+     * Renders the panel without runs.
+     *
+     * @param props - Props that override the defaults.
+     * @returns Markup.
+     */
     const render = (props: Partial<Parameters<typeof WorkItemAgentRunsPanel>[0]>) => renderToStaticMarkup(
       <WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} runs={[]} {...props} />,
     )
@@ -48,7 +100,7 @@ describe('WorkItemAgentRunsPanel', () => {
     expect(render({ isLoading: true })).toContain(labels.loading)
     const failed = render({ errorMessage: labels.loadError, onRetry: () => undefined })
     expect(failed).toContain('role="alert"')
-    expect(failed).toContain('>Retry<')
+    expect(failed).toContain('>Reload agent runs<')
   })
 
   test('derives display states and separates the active run', () => {

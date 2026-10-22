@@ -1478,6 +1478,12 @@
       "FinishAgentRunRequest": {
         "additionalProperties": false,
         "properties": {
+          "instanceId": {
+            "description": "Instance identifier sent when the run started. Another instance of the same user cannot extend or close the run.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
           "outcome": {
             "enum": [
               "completed",
@@ -1488,7 +1494,23 @@
           }
         },
         "required": [
-          "outcome"
+          "outcome",
+          "instanceId"
+        ],
+        "type": "object"
+      },
+      "HeartbeatAgentRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "instanceId": {
+            "description": "Instance identifier sent when the run started. Another instance of the same user cannot extend or close the run.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "instanceId"
         ],
         "type": "object"
       },
@@ -7216,6 +7238,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HeartbeatAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {

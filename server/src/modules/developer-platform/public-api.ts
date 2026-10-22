@@ -5,7 +5,6 @@ import {
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type AgentRun,
-  type AgentRunFinishOutcome,
   type AgentSettings,
   type ApiProblem,
   type ApiProblemCode,
@@ -49,9 +48,11 @@ import {
   readAgentRunId,
   readAgentRunMutationFence,
   readFinishAgentRunRequest,
+  readHeartbeatAgentRunRequest,
   readStartAgentRunRequest,
   splitAgentRunMutationFence,
   type ValidatedAgentRunFence,
+  type ValidatedAgentRunFinish,
   type ValidatedAgentRunStart,
 } from '../agent-runs'
 import type {
@@ -428,23 +429,25 @@ export interface PublicAgentRunService {
    * @param credential - Authenticated developer credential.
    * @param teamId - Team ID.
    * @param runId - Run ID.
+   * @param instanceIdHash - Hash of the instance ID that started the run.
    * @returns The run with its extended lease.
    */
-  heartbeat(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string): Promise<AgentRun>
+  heartbeat(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string, instanceIdHash: string): Promise<AgentRun>
   /**
    * Revalidates finish permissions before replaying a finish receipt.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team ID.
    * @param runId - Run ID.
+   * @param instanceIdHash - Hash of the instance ID that started the run.
    * @returns A promise that resolves when the caller still owns the run.
    */
-  authorizeFinish(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string): Promise<void>
+  authorizeFinish(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string, instanceIdHash: string): Promise<void>
   /**
    * Closes the caller's own active run.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team ID.
    * @param runId - Run ID.
-   * @param outcome - Finish reason.
+   * @param request - Finish reason and the hash of the instance ID that started the run.
    * @param context - Request and idempotency identifiers.
    * @param idempotency - Idempotency reservation token.
    * @returns The finished run.
@@ -453,7 +456,7 @@ export interface PublicAgentRunService {
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
     runId: string,
-    outcome: AgentRunFinishOutcome,
+    request: ValidatedAgentRunFinish,
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ): Promise<AgentRun>
@@ -1046,8 +1049,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const agentRuns = requireAgentRunService(dependencies)
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const runId = readAgentRunId(c.req.param('runId'), '/runId')
+    const instanceIdHash = readHeartbeatAgentRunRequest(await readJson(c))
     try {
-      return c.json(await agentRuns.heartbeat(credential, teamId, runId))
+      return c.json(await agentRuns.heartbeat(credential, teamId, runId, instanceIdHash))
     } catch (error) {
       if (error instanceof AgentRunError && error.retryAfterSeconds !== undefined) {
         c.header('Retry-After', String(error.retryAfterSeconds))
@@ -1060,14 +1064,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
     const agentRuns = requireAgentRunService(dependencies)
     const rawBody = await readJson(c)
-    const outcome = readFinishAgentRunRequest(rawBody)
+    const finishRequest = readFinishAgentRunRequest(rawBody)
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const runId = readAgentRunId(c.req.param('runId'), '/runId')
     return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
       status: 200,
-      body: await agentRuns.finish(credential, teamId, runId, outcome, context, idempotency),
+      body: await agentRuns.finish(credential, teamId, runId, finishRequest, context, idempotency),
     }), {
-      authorizeReplay: () => agentRuns.authorizeFinish(credential, teamId, runId),
+      authorizeReplay: () => agentRuns.authorizeFinish(credential, teamId, runId, finishRequest.instanceIdHash),
     })
   })
 

@@ -49,11 +49,18 @@ export type PreparedPublicWorkItemUpdateExtension = {
   /** Writes committed atomically with the Work Item update. */
   transactItems: AgentRunTransactItem[]
   /**
-   * Builds the replay receipt body from the public Work Item receipt.
+   * Builds the replay receipt from the public Work Item receipt.
    * @param workItem - Allowlisted public Work Item receipt.
-   * @returns Exact response body to replay.
+   * @returns Exact status and body to replay.
    */
-  createReceiptBody?(workItem: Record<string, unknown>): unknown
+  createReceipt?(workItem: Record<string, unknown>): {
+    /** Replayed HTTP status. */
+    status: 200 | 201
+    /** Replayed body. */
+    body: unknown
+  }
+  /** Runs after the update committed; must not fail the committed update. */
+  afterCommit?(): Promise<void>
   /**
    * Translates a failed update into the precise error to report.
    * @param error - Error raised by the update.
@@ -167,6 +174,23 @@ export async function classifyAgentRunFenceFailure(
 }
 
 /**
+ * Extends a run lease after a fenced mutation committed, never failing that mutation.
+ *
+ * @param run - Run that fenced the mutation, if the caller held one.
+ * @param now - Time the mutation committed.
+ */
+async function extendLeaseBestEffort(run: StoredAgentRun | undefined, now: Date): Promise<void> {
+  if (!run) return
+  try {
+    await workItemDependencies.agentRuns.extendLeaseAfterMutation(run, now)
+  } catch (error) {
+    console.error('Failed to extend an Agent Run lease after a fenced mutation.', {
+      errorType: error instanceof Error ? error.name : 'unknown',
+    })
+  }
+}
+
+/**
  * Creates the extension that fences a public Work Item update with the caller's run.
  *
  * @param teamId - Team that owns the Work Item.
@@ -181,9 +205,12 @@ export function createAgentRunMutationFenceExtension(
 ): PublicWorkItemUpdateExtension {
   return {
     async prepare({ principal, now }) {
+      const store = workItemDependencies.agentRuns
       const { run } = await resolveAgentRunFence(principal, teamId, workItemId, fence, now)
       return {
-        transactItems: workItemDependencies.agentRuns.createMutationFenceItems({
+        // Lease state is only checked here; extending it after the commit with a newer-time
+        // condition keeps a slow update from overwriting a later heartbeat.
+        transactItems: store.createMutationFenceConditionChecks({
           directoryId: principal.directoryId,
           teamId,
           workItemId,
@@ -193,10 +220,17 @@ export function createAgentRunMutationFenceExtension(
         }),
         classifyFailure: (error) =>
           classifyAgentRunFenceFailure(principal, teamId, workItemId, fence, error, now),
+        afterCommit: () => extendLeaseBestEffort(run, new Date()),
       }
     },
   }
 }
+
+/**
+ * Audit sequence slot of an Agent Run event committed with a Work Item update or deletion.
+ * Audit event IDs derive from the idempotency key and the slot, and the Work Item event uses slot 0.
+ */
+export const AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM = 1
 
 /**
  * Builds an immutable audit event for an Agent Run lifecycle change.
@@ -205,6 +239,7 @@ export function createAgentRunMutationFenceExtension(
  * @param run - Run after the change.
  * @param action - Lifecycle action.
  * @param summary - Human-readable summary.
+ * @param sequence - Audit sequence slot; pass {@link AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM} when another event shares the transaction.
  * @returns Audit put, or undefined when auditing is not configured.
  */
 export function createAgentRunAuditPut(
@@ -212,6 +247,7 @@ export function createAgentRunAuditPut(
   run: StoredAgentRun,
   action: 'started' | 'finished' | 'released',
   summary: string,
+  sequence?: number,
 ): AgentRunTransactItem | undefined {
   return createMutationAuditEventPut(getConfiguredAuditTableName(), auditContext, {
     directoryId: run.directoryId,
@@ -219,6 +255,7 @@ export function createAgentRunAuditPut(
     entityType: 'agent-run',
     entityId: `team/${run.teamId}/agent-run/${run.runId}`,
     action,
+    ...(sequence === undefined ? {} : { sequence }),
     summary,
     changes: [],
     metadata: {
@@ -281,16 +318,7 @@ export async function prepareAgentRunCommentFence(
   }).flatMap((item) => item.ConditionCheck ? [{ ConditionCheck: item.ConditionCheck }] : [])
   return {
     conditionChecks,
-    async afterCommit() {
-      if (!run) return
-      try {
-        await store.extendLeaseAfterMutation(run, now)
-      } catch (error) {
-        console.error('Failed to extend an Agent Run lease after a comment.', {
-          errorType: error instanceof Error ? error.name : 'unknown',
-        })
-      }
-    },
+    afterCommit: () => extendLeaseBestEffort(run, new Date()),
     async classifyFailure(error) {
       if (!(error instanceof CollaborationError) || error.code !== 'CollaborationAuthorizationChanged') return error
       try {
@@ -336,9 +364,10 @@ export async function createAgentRunDeletionFences(
     released,
     'released',
     'Agent Run was released because its Work Item was deleted.',
+    AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
   )
   return [
     ...store.createCloseItems(released),
     ...(auditPut ? [auditPut] : []),
-  ].map((transactWriteItem) => ({ kind: 'agent-runs' as const, transactWriteItem }))
+  ].map((transactWriteItem): NamedWorkItemDeletionFence => ({ kind: 'agent-runs', transactWriteItem }))
 }

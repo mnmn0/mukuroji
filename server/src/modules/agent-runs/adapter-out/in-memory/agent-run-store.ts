@@ -201,15 +201,9 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createMutationFenceItems(input: AgentRunFenceInput): AgentRunTransactItem[] {
-    const items = this.#builder.createMutationFenceItems(input)
-    return this.#registerFence(items, input, true)
-  }
-
-  /** @inheritdoc */
   createMutationFenceConditionChecks(input: AgentRunFenceInput): AgentRunTransactItem[] {
     const items = this.#builder.createMutationFenceConditionChecks(input)
-    return this.#registerFence(items, input, false)
+    return this.#registerFence(items, input)
   }
 
   /** @inheritdoc */
@@ -222,14 +216,18 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun): AgentRunTransactItem[] {
-    const [runUpdate, claimDelete] = this.#builder.createCloseItems(run)
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
+    const [runUpdate, claimDelete] = this.#builder.createCloseItems(run, expectedInstanceIdHash)
     if (!runUpdate || !claimDelete) throw new Error('The close builder returned an unexpected item count.')
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const claimKey = key(run.directoryId, run.teamId, run.workItemId)
     return [
       this.#register(runUpdate, {
-        check: (state) => state.runs.get(runKey)?.state === 'active',
+        check: (state) => {
+          const current = state.runs.get(runKey)
+          return current?.state === 'active' &&
+            (expectedInstanceIdHash === undefined || current.instanceIdHash === expectedInstanceIdHash)
+        },
         apply: (state) => {
           const current = state.runs.get(runKey)
           if (!current) return
@@ -280,10 +278,10 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  async heartbeat(run: StoredAgentRun, now: Date): Promise<StoredAgentRun> {
+  async heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun> {
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const current = this.state.runs.get(runKey)
-    if (!current || current.state !== 'active') throw createAgentRunNotActiveError()
+    if (!current || current.state !== 'active' || current.instanceIdHash !== instanceIdHash) throw createAgentRunNotActiveError()
     if (current.lastHeartbeatRequestAt !== undefined) {
       const nextAllowed = Date.parse(current.lastHeartbeatRequestAt) + AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000
       if (nextAllowed > now.getTime()) {
@@ -292,6 +290,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
         })
       }
     }
+    if (Date.parse(current.lastHeartbeatAt) >= now.getTime()) return structuredClone(current)
     const updated: StoredAgentRun = {
       ...current,
       lastHeartbeatAt: now.toISOString(),
@@ -318,10 +317,9 @@ export class InMemoryAgentRunStore implements AgentRunStore {
    * Registers fence effects for items built by the DynamoDB builder.
    * @param items - Built items.
    * @param input - Fence input.
-   * @param extendsLease - Whether the run item extends the lease.
    * @returns The same items.
    */
-  #registerFence(items: AgentRunTransactItem[], input: AgentRunFenceInput, extendsLease: boolean): AgentRunTransactItem[] {
+  #registerFence(items: AgentRunTransactItem[], input: AgentRunFenceInput): AgentRunTransactItem[] {
     const claimKey = key(input.directoryId, input.teamId, input.workItemId)
     const run = input.run
     if (!run) {
@@ -344,15 +342,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
         const current = state.runs.get(runKey)
         return current?.state === 'active' && current.workItemId === input.workItemId && current.instanceIdHash === input.instanceIdHash
       },
-      apply: (state) => {
-        const current = state.runs.get(runKey)
-        if (!extendsLease || !current) return
-        state.runs.set(runKey, {
-          ...current,
-          lastHeartbeatAt: input.now.toISOString(),
-          leaseExpiresAt: calculateLeaseExpiry(input.now, current.leaseMinutes),
-        })
-      },
+      apply: () => undefined,
     })
     this.#register(claimCheck, {
       check: (state) => {

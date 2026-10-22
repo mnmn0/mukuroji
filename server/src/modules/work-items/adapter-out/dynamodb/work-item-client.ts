@@ -1066,7 +1066,7 @@ export type WorkItemScheduleCascadeResponse = {
 export type WorkItemIdempotencyTransaction = {
   /** Exact HTTP response を encrypted receipt transaction item に変換します。 */
   prepare(
-    response: { /** HTTP status です。 */ status: 200 | 204; /** Replay body です。 */ body: unknown },
+    response: { /** HTTP status です。 */ status: 200 | 201 | 204; /** Replay body です。 */ body: unknown },
   ): Promise<IdempotencyCompletionTransactWrite | undefined>
 }
 

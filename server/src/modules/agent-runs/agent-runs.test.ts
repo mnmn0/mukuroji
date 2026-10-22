@@ -17,6 +17,7 @@ import {
   isAgentRunStalled,
   readAgentRunMutationFence,
   readFinishAgentRunRequest,
+  readHeartbeatAgentRunRequest,
   readStartAgentRunRequest,
   readUpdateAgentSettingsRequest,
   splitAgentRunMutationFence,
@@ -136,8 +137,13 @@ describe('Agent Run domain', () => {
   })
 
   test('accepts only agent finish outcomes and bounded settings', () => {
-    expect(readFinishAgentRunRequest({ outcome: 'paused' })).toBe('paused')
-    expect(() => readFinishAgentRunRequest({ outcome: 'released' })).toThrow(AgentRunError)
+    expect(readFinishAgentRunRequest({ outcome: 'paused', instanceId: 'laptop-1' }))
+      .toEqual({ outcome: 'paused', instanceIdHash: hashAgentInstanceId('laptop-1') })
+    expect(() => readFinishAgentRunRequest({ outcome: 'released', instanceId: 'laptop-1' })).toThrow(AgentRunError)
+    expect(() => readFinishAgentRunRequest({ outcome: 'paused' })).toThrow(AgentRunError)
+    expect(readHeartbeatAgentRunRequest({ instanceId: 'laptop-1' })).toBe(hashAgentInstanceId('laptop-1'))
+    expect(() => readHeartbeatAgentRunRequest({})).toThrow(AgentRunError)
+    expect(() => readHeartbeatAgentRunRequest(undefined)).toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false }))
       .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false })
     for (const leaseMinutes of [4, 241, 30.5]) {
@@ -170,22 +176,22 @@ describe('DynamoDB Agent Run store', () => {
     })
   })
 
-  test('fences a held run by extending its lease and checking the claim', () => {
+  test('fences a held run by checking the run and the claim without writing the lease', () => {
     const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
     const run = createRun()
     const later = new Date('2026-10-22T00:10:00.000Z')
-    const [lease, claim] = store.createMutationFenceItems({
+    const [held, claim] = store.createMutationFenceConditionChecks({
       directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash: run.instanceIdHash, run, now: later,
     })
-    expect(lease?.Update).toMatchObject({
+    expect(held?.ConditionCheck).toMatchObject({
       ConditionExpression: '#state = :active AND #workItemId = :workItemId AND #instanceIdHash = :instanceIdHash',
-      ExpressionAttributeValues: { ':leaseExpiresAt': '2026-10-22T00:40:00.000Z', ':workItemId': 'task-1' },
+      ExpressionAttributeValues: { ':workItemId': 'task-1' },
     })
     expect(claim?.ConditionCheck).toMatchObject({
       ConditionExpression: '#runId = :runId AND #instanceIdHash = :instanceIdHash',
       ExpressionAttributeValues: { ':runId': run.runId },
     })
-    const [unclaimed] = store.createMutationFenceItems({
+    const [unclaimed] = store.createMutationFenceConditionChecks({
       directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash: run.instanceIdHash, now: later,
     })
     expect(unclaimed?.ConditionCheck?.ConditionExpression).toBe('attribute_not_exists(#recordKey) OR #instanceIdHash = :instanceIdHash')
@@ -198,6 +204,11 @@ describe('DynamoDB Agent Run store', () => {
     expect(update?.Update?.ConditionExpression).toBe('#state = :active')
     expect(update?.Update?.UpdateExpression).toContain('REMOVE #activeRunPartition, #activeRunSortKey')
     expect(remove?.Delete).toMatchObject({ ConditionExpression: '#runId = :runId', Key: { recordKey: 'agent-run-claim#task-1' } })
+    const [agentUpdate] = store.createCloseItems(finished, finished.instanceIdHash)
+    expect(agentUpdate?.Update).toMatchObject({
+      ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash',
+      ExpressionAttributeValues: { ':instanceIdHash': finished.instanceIdHash },
+    })
     expect(() => store.createCloseItems(createRun())).toThrow(TypeError)
   })
 
@@ -230,20 +241,36 @@ describe('DynamoDB Agent Run store', () => {
   test('rate-limits explicit heartbeats and reports a finished run as not active', async () => {
     const run = createRun({ lastHeartbeatRequestAt: '2026-10-22T00:00:05.000Z' })
     const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)[0]?.Put?.Item
+    /**
+     * Simulates a failed DynamoDB condition.
+     *
+     * @returns Never; always throws.
+     */
     const conditionalFailure = () => {
       throw Object.assign(new Error('failed'), { name: 'ConditionalCheckFailedException' })
     }
     const limited = createClient([conditionalFailure, { Item: item }])
-    await expect(new DynamoDbAgentRunStore(limited.client, 'AgentRuns').heartbeat(run, new Date('2026-10-22T00:00:08.000Z')))
+    await expect(new DynamoDbAgentRunStore(limited.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:00:08.000Z')))
       .rejects.toMatchObject({ category: 'rate_limited', retryAfterSeconds: 7 })
     const finishedItem = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
       .createStartItems(run)[0]?.Put?.Item
     const finished = createClient([conditionalFailure, { Item: { ...finishedItem, state: 'finished', outcome: 'completed', finishedAt: now.toISOString(), finishedBy: 'agent' } }])
-    await expect(new DynamoDbAgentRunStore(finished.client, 'AgentRuns').heartbeat(run, new Date('2026-10-22T00:01:00.000Z')))
+    await expect(new DynamoDbAgentRunStore(finished.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
+      .rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    const renewed = createClient([conditionalFailure, { Item: { ...item, lastHeartbeatAt: '2026-10-22T00:02:00.000Z' } }])
+    expect(await new DynamoDbAgentRunStore(renewed.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
+      .toMatchObject({ lastHeartbeatAt: '2026-10-22T00:02:00.000Z' })
+    const other = createClient([conditionalFailure, { Item: item }])
+    await expect(new DynamoDbAgentRunStore(other.client, 'AgentRuns').heartbeat(run, hashAgentInstanceId('laptop-2'), new Date('2026-10-22T00:01:00.000Z')))
       .rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
   test('saves settings with revision CAS and reports a lost update as a conflict', async () => {
+    /**
+     * Simulates a cancelled transaction.
+     *
+     * @returns Never; always throws.
+     */
     const cancelled = () => {
       throw Object.assign(new Error('cancelled'), {
         name: 'TransactionCanceledException',
@@ -262,6 +289,12 @@ describe('DynamoDB Agent Run store', () => {
 
 describe('Agent Run commits', () => {
   test('reports a cancelled run write as not active and any other cancellation as retryable', async () => {
+    /**
+     * Creates a client response that cancels a transaction with the given reasons.
+     *
+     * @param codes - Cancellation reason codes, one per item.
+     * @returns Response that always throws.
+     */
     const cancelled = (codes: string[]) => () => {
       throw Object.assign(new Error('cancelled'), {
         name: 'TransactionCanceledException',
@@ -294,7 +327,14 @@ describe('in-memory Agent Run store', () => {
     const store = new InMemoryAgentRunStore()
     const run = createRun()
     store.seed(run)
-    const fence = (instanceIdHash: string, held?: StoredAgentRun) => store.createMutationFenceItems({
+    /**
+     * Builds a mutation fence for the fixture task.
+     *
+     * @param instanceIdHash - Hash of the caller instance ID.
+     * @param held - Run the caller holds, if any.
+     * @returns Fence items.
+     */
+    const fence = (instanceIdHash: string, held?: StoredAgentRun) => store.createMutationFenceConditionChecks({
       directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash, ...(held ? { run: held } : {}), now,
     })
     expect(() => store.applyTransactItems(fence(hashAgentInstanceId('laptop-2')))).toThrow('Transaction cancelled.')

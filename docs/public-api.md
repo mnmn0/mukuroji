@@ -84,10 +84,13 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 - `GET /api/v1/work-items/{workItemId}/agent-runs` と `GET /api/v1/agent-runs` は通常の signed
   pagination を使います。`GET /api/v1/agent-runs` は `state`（既定 `active`）、`instanceId`、
   `assigneeUserId` で絞り込めます。
-- `POST /api/v1/agent-runs/{runId}/heartbeat` は lease を延長します。Run ごとに10秒に1回までで、
-  超過時は `429` と `Retry-After` を返します。
+- `POST /api/v1/agent-runs/{runId}/heartbeat` は lease を延長します。body の `instanceId` に
+  Run 開始時と同じ値を送ります。Run ごとに10秒に1回までで、超過時は `429` と `Retry-After` を
+  返します。
 - `POST /api/v1/agent-runs/{runId}/finish` は `Idempotency-Key` を要求し、`outcome` に
-  `completed`、`paused`、`failed` を受け付けます。
+  `completed`、`paused`、`failed` を、`instanceId` に Run 開始時と同じ値を受け付けます。
+- 同じメンバーの別 instance は、他 instance の Run を heartbeat・finish できません。`active` な
+  Run には `agent_run_conflict`、終了済みの Run には `agent_run_not_active` を返します。
 - `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
   `agentInstanceId` を受け付けます。どちらも送らない既存 client の挙動は変わりません。
 - Run 固有の拒否理由は problem の `errors[].code`（`agent_run_conflict`、`agent_run_not_active`、
