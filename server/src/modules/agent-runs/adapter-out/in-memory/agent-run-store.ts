@@ -107,6 +107,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       workItemId: run.workItemId,
       runId: run.runId,
       instanceIdHash: run.instanceIdHash,
+      assigneeUserId: run.assigneeUserId,
       ...(run.outcome ? { outcome: run.outcome } : {}),
     })
     if (run.state === 'active') {
@@ -216,7 +217,12 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       this.#register(latestPut, {
         check: () => true,
         apply: (state) => {
-          state.latest.set(claimKey, { workItemId: run.workItemId, runId: run.runId, instanceIdHash: run.instanceIdHash })
+          state.latest.set(claimKey, {
+            workItemId: run.workItemId,
+            runId: run.runId,
+            instanceIdHash: run.instanceIdHash,
+            assigneeUserId: run.assigneeUserId,
+          })
         },
       }),
     ]
@@ -359,14 +365,14 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       this.#register(claimCheck, {
         check: (state) => {
           const claim = state.claims.get(claimKey)
-          return !claim || claim.instanceIdHash === input.instanceIdHash
+          return !claim || (claim.instanceIdHash === input.instanceIdHash && claim.assigneeUserId === input.assigneeUserId)
         },
         apply: () => undefined,
       })
       this.#register(latestCheck, {
         check: (state) => {
           const latest = state.latest.get(claimKey)
-          return !latest || latest.instanceIdHash !== input.instanceIdHash ||
+          return !latest || latest.instanceIdHash !== input.instanceIdHash || latest.assigneeUserId !== input.assigneeUserId ||
             (latest.outcome !== 'released' && latest.outcome !== 'superseded')
         },
         apply: () => undefined,

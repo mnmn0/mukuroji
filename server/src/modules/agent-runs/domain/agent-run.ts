@@ -88,6 +88,8 @@ export type StoredAgentRunLatest = {
   runId: string
   /** Instance hash of the newest run. */
   instanceIdHash: string
+  /** Member responsible for the newest run. */
+  assigneeUserId: string
   /** Outcome once the newest run finished; absent while it is active. */
   outcome?: AgentRunOutcome
 }

@@ -125,6 +125,58 @@ async function createHolderConflict(principal: WorkspacePrincipal, teamId: strin
   return createAgentRunConflictError(describeHoldingRun(holder, now))
 }
 
+/** Concurrent reads per run listing page. */
+const listReadConcurrency = 10
+
+/**
+ * Maps values with at most a fixed number of concurrent calls, keeping the input order.
+ *
+ * @param values - Values to map.
+ * @param concurrency - Largest number of calls in flight.
+ * @param map - Asynchronous mapping.
+ * @returns Mapped values in input order.
+ */
+async function mapInOrderWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  map: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = []
+  for (let index = 0; index < values.length; index += concurrency) {
+    results.push(...await Promise.all(values.slice(index, index + concurrency).map(map)))
+  }
+  return results
+}
+
+/**
+ * Reads the Project a Work Item is assigned to from the committed Work Item, so a move to another
+ * Project or a deletion takes effect immediately.
+ *
+ * @param principal - Authorized reader.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @returns The assigned Project, undefined when unassigned, or null when the Work Item was deleted.
+ */
+async function readAssignedProjectId(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+): Promise<string | undefined | null> {
+  try {
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      workItemId,
+      { consistentIssueRead: true, includeEvents: false },
+    )
+    return detail.issue.assignedProjectId
+  } catch (error) {
+    // A deleted Work Item's runs are no longer visible to anyone.
+    if (error instanceof ProjectDataError && error.status === 404) return null
+    throw error
+  }
+}
+
 /**
  * Creates the Public API Agent Run service backed by canonical Work Items and the Agent Run store.
  *
@@ -242,29 +294,19 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ? await store.listActiveRuns(principal.directoryId, teamId, continuation, limit)
         : await store.listFinishedRuns(principal.directoryId, teamId, continuation, limit)
       const now = new Date()
-      const items: AgentRun[] = []
-      for (const run of page.runs) {
-        if (filters.instanceIdHash !== undefined && run.instanceIdHash !== filters.instanceIdHash) continue
-        if (filters.assigneeUserId !== undefined && run.assigneeUserId !== filters.assigneeUserId) continue
-        let assignedProjectId: string | undefined
-        try {
-          const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
-            principal.directoryId,
-            teamId,
-            run.workItemId,
-            // Authorization reads the committed Work Item, so a move to another Project or a deletion
-            // hides its runs immediately.
-            { consistentIssueRead: true, includeEvents: false },
-          )
-          assignedProjectId = detail.issue.assignedProjectId
-        } catch (error) {
-          // A deleted Work Item's runs are no longer visible to anyone.
-          if (error instanceof ProjectDataError && error.status === 404) continue
-          throw error
-        }
-        if (!canAccessAssignedProject(principal, permission, assignedProjectId, 'viewer')) continue
-        items.push(toAgentRun(run, now))
-      }
+      const candidates = page.runs.filter((run) =>
+        (filters.instanceIdHash === undefined || run.instanceIdHash === filters.instanceIdHash) &&
+        (filters.assigneeUserId === undefined || run.assigneeUserId === filters.assigneeUserId))
+      const visible = await mapInOrderWithConcurrency(candidates, listReadConcurrency, async (indexed) => {
+        // The indexes can still show a run's state from before it closed, so the run is read again.
+        const [run, assignedProjectId] = await Promise.all([
+          store.getRun(principal.directoryId, teamId, indexed.runId),
+          readAssignedProjectId(principal, teamId, indexed.workItemId),
+        ])
+        if (!run || run.state !== filters.state || assignedProjectId === null) return undefined
+        return canAccessAssignedProject(principal, permission, assignedProjectId, 'viewer') ? run : undefined
+      })
+      const items: AgentRun[] = visible.flatMap((run) => run ? [toAgentRun(run, now)] : [])
       return {
         items,
         hasMore: page.nextCursor !== undefined,

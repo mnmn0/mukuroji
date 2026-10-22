@@ -205,6 +205,17 @@ describe('public Agent Run service', () => {
     expect(after > before).toBe(true)
   })
 
+  test('does not let another member reuse the holder instance ID to pass the fence', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const foreign = { ...createHeldRun('task-1', 'laptop-1'), assigneeUserId: 'sato@example.com' }
+    store.seed(foreign)
+    const workItems = createCanonicalPublicWorkItemService()
+    await expect(runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: 'shared-instance' }, undefined, { instanceIdHash: hashAgentInstanceId('laptop-1') },
+    ))).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+  })
+
   test('fences a public comment with condition checks and keeps unfenced comments unchanged', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const held = createHeldRun('task-1')
@@ -295,6 +306,18 @@ describe('public Agent Run service', () => {
     // Once the run is closed, another instance learns only that it is no longer active.
     await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId, hashAgentInstanceId('laptop-1'))))
       .rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('hides a run the active index still lists after it closed', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'released', 'sato@example.com', new Date())))
+    // The index projection lags and still returns the pre-release image.
+    store.listActiveRuns = async () => ({ runs: [held] })
+    const service = createCanonicalPublicAgentRunService()
+    const page = await runWithTestAppDependencies(() => service.list(credential, 'core-team', { state: 'active' }, undefined, 50))
+    expect(page.items).toEqual([])
   })
 
   test('stops an agent whose run a person released, even when it omits the run ID', async () => {

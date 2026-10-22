@@ -181,7 +181,7 @@ describe('DynamoDB Agent Run store', () => {
     const run = createRun()
     const later = new Date('2026-10-22T00:10:00.000Z')
     const [held, claim] = store.createMutationFenceConditionChecks({
-      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash: run.instanceIdHash, run, now: later,
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: run.assigneeUserId, instanceIdHash: run.instanceIdHash, run, now: later,
     })
     expect(held?.ConditionCheck).toMatchObject({
       ConditionExpression: '#state = :active AND #workItemId = :workItemId AND #instanceIdHash = :instanceIdHash',
@@ -192,9 +192,10 @@ describe('DynamoDB Agent Run store', () => {
       ExpressionAttributeValues: { ':runId': run.runId },
     })
     const [unclaimed] = store.createMutationFenceConditionChecks({
-      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash: run.instanceIdHash, now: later,
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: run.assigneeUserId, instanceIdHash: run.instanceIdHash, now: later,
     })
-    expect(unclaimed?.ConditionCheck?.ConditionExpression).toBe('attribute_not_exists(#recordKey) OR #instanceIdHash = :instanceIdHash')
+    expect(unclaimed?.ConditionCheck?.ConditionExpression)
+      .toBe('attribute_not_exists(#recordKey) OR (#instanceIdHash = :instanceIdHash AND #assigneeUserId = :assigneeUserId)')
   })
 
   test('closes a run only while it is active and only removes its own claim', () => {
@@ -312,11 +313,12 @@ describe('DynamoDB Agent Run store', () => {
       ExpressionAttributeValues: { ':outcome': 'released', ':runId': run.runId },
     })
     const [, latestCheck] = store.createMutationFenceConditionChecks({
-      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash: run.instanceIdHash, now,
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: run.assigneeUserId, instanceIdHash: run.instanceIdHash, now,
     })
     expect(latestCheck?.ConditionCheck).toMatchObject({
       Key: { recordKey: 'agent-run-latest#task-1' },
-      ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR NOT (#outcome IN (:released, :superseded))',
+      ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR ' +
+        '#assigneeUserId <> :assigneeUserId OR NOT (#outcome IN (:released, :superseded))',
     })
   })
 
@@ -390,14 +392,22 @@ describe('in-memory Agent Run store', () => {
      * @returns Fence items.
      */
     const fence = (instanceIdHash: string, held?: StoredAgentRun) => store.createMutationFenceConditionChecks({
-      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash, ...(held ? { run: held } : {}), now,
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: run.assigneeUserId, instanceIdHash, ...(held ? { run: held } : {}), now,
     })
     expect(() => store.applyTransactItems(fence(hashAgentInstanceId('laptop-2')))).toThrow('Transaction cancelled.')
     store.applyTransactItems(fence(run.instanceIdHash, run))
     store.applyTransactItems(fence(run.instanceIdHash))
+    // The same instance ID configured by another member does not share the holder's claim.
+    expect(() => store.applyTransactItems(store.createMutationFenceConditionChecks({
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: 'member-9', instanceIdHash: run.instanceIdHash, now,
+    }))).toThrow('Transaction cancelled.')
     // After a person releases the run, the same instance is fenced out while other instances are not.
     store.applyTransactItems(store.createCloseItems(finishAgentRun(run, 'released', 'member-2', now)))
     expect(() => store.applyTransactItems(fence(run.instanceIdHash))).toThrow('Transaction cancelled.')
     store.applyTransactItems(fence(hashAgentInstanceId('laptop-2')))
+    // Another member that happens to use the released instance ID is not fenced out by that release.
+    store.applyTransactItems(store.createMutationFenceConditionChecks({
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', assigneeUserId: 'member-9', instanceIdHash: run.instanceIdHash, now,
+    }))
   })
 })

@@ -202,6 +202,8 @@ export type AgentRunFenceInput = {
   workItemId: string
   /** Hash of the caller's instance ID. */
   instanceIdHash: string
+  /** Member the caller's credential acts for; an instance ID only counts together with its member. */
+  assigneeUserId: string
   /** Active run the caller holds for the Work Item, when it sent one. */
   run?: StoredAgentRun
   /** Mutation time. */
@@ -548,6 +550,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       workItemId,
       runId: storedString(item, 'runId'),
       instanceIdHash: storedString(item, 'instanceIdHash'),
+      assigneeUserId: storedString(item, 'assigneeUserId'),
       ...(outcome === undefined ? {} : { outcome }),
     }
   }
@@ -729,6 +732,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             workItemId: run.workItemId,
             runId: run.runId,
             instanceIdHash: run.instanceIdHash,
+            assigneeUserId: run.assigneeUserId,
           },
         },
       },
@@ -951,9 +955,9 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           ConditionCheck: {
             TableName: this.#tableName,
             Key: key,
-            ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash = :instanceIdHash',
-            ExpressionAttributeNames: { '#recordKey': 'recordKey', '#instanceIdHash': 'instanceIdHash' },
-            ExpressionAttributeValues: { ':instanceIdHash': input.instanceIdHash },
+            ConditionExpression: 'attribute_not_exists(#recordKey) OR (#instanceIdHash = :instanceIdHash AND #assigneeUserId = :assigneeUserId)',
+            ExpressionAttributeNames: { '#recordKey': 'recordKey', '#instanceIdHash': 'instanceIdHash', '#assigneeUserId': 'assigneeUserId' },
+            ExpressionAttributeValues: { ':instanceIdHash': input.instanceIdHash, ':assigneeUserId': input.assigneeUserId },
           },
         }
   }
@@ -970,9 +974,20 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       ConditionCheck: {
         TableName: this.#tableName,
         Key: { directoryTeamId: createAgentRunPartition(input.directoryId, input.teamId), recordKey: latestRecordKey(input.workItemId) },
-        ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR NOT (#outcome IN (:released, :superseded))',
-        ExpressionAttributeNames: { '#recordKey': 'recordKey', '#instanceIdHash': 'instanceIdHash', '#outcome': 'outcome' },
-        ExpressionAttributeValues: { ':instanceIdHash': input.instanceIdHash, ':released': 'released', ':superseded': 'superseded' },
+        ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR ' +
+          '#assigneeUserId <> :assigneeUserId OR NOT (#outcome IN (:released, :superseded))',
+        ExpressionAttributeNames: {
+          '#recordKey': 'recordKey',
+          '#instanceIdHash': 'instanceIdHash',
+          '#assigneeUserId': 'assigneeUserId',
+          '#outcome': 'outcome',
+        },
+        ExpressionAttributeValues: {
+          ':instanceIdHash': input.instanceIdHash,
+          ':assigneeUserId': input.assigneeUserId,
+          ':released': 'released',
+          ':superseded': 'superseded',
+        },
       },
     }
   }

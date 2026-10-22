@@ -115,7 +115,8 @@ export async function resolveAgentRunFence(
   const store = workItemDependencies.agentRuns
   const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
   if (fence.agentRunId === undefined) {
-    if (claim && claim.instanceIdHash !== fence.instanceIdHash) {
+    // An instance ID identifies an agent only together with the member it acts for.
+    if (claim && (claim.instanceIdHash !== fence.instanceIdHash || claim.assigneeUserId !== principal.userKey)) {
       const holder = await store.getRun(principal.directoryId, teamId, claim.runId)
       if (!holder || holder.state !== 'active') throw createAgentRunIntegrityError()
       throw createAgentRunConflictError(describeHoldingRun(holder, now))
@@ -127,6 +128,7 @@ export async function resolveAgentRunFence(
       if (
         latest !== undefined &&
         latest.instanceIdHash === fence.instanceIdHash &&
+        latest.assigneeUserId === principal.userKey &&
         (latest.outcome === 'released' || latest.outcome === 'superseded')
       ) {
         throw createAgentRunNotActiveError()
@@ -217,6 +219,7 @@ export function createAgentRunMutationFenceExtension(
           teamId,
           workItemId,
           instanceIdHash: fence.instanceIdHash ?? '',
+          assigneeUserId: principal.userKey,
           ...(run ? { run } : {}),
           now,
         }),
@@ -315,6 +318,7 @@ export async function prepareAgentRunCommentFence(
     teamId,
     workItemId,
     instanceIdHash: fence.instanceIdHash ?? '',
+    assigneeUserId: principal.userKey,
     ...(run ? { run } : {}),
     now,
   }).flatMap((item) => item.ConditionCheck ? [{ ConditionCheck: item.ConditionCheck }] : [])
