@@ -5,6 +5,7 @@ import {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
+  createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
   readStartAgentRunRequest,
@@ -248,6 +249,10 @@ describe('public Agent Run service', () => {
       .map((check) => String(check.ConditionCheck.Key?.recordKey ?? ''))
     expect(fencedKeys).toContain(`agent-run#${held.runId}`)
     expect(fencedKeys).toContain('agent-run-claim#task-1')
+    // The comment commits only while the run owner is still the assignee.
+    expect(writes[0]?.authorizationConditionChecks?.some((check) =>
+      check.ConditionCheck.Key?.issueId === 'task-1' &&
+      check.ConditionCheck.ExpressionAttributeValues?.[':assigneeUserId'] === 'demo@example.com')).toBe(true)
     expect((writes[1]?.authorizationConditionChecks ?? [])
       .some((check) => String(check.ConditionCheck.Key?.recordKey ?? '').startsWith('agent-run'))).toBe(false)
   })
@@ -468,6 +473,54 @@ describe('public Agent Run service', () => {
       { requestId: 'finish', idempotencyKey: 'finish-reassigned' },
       { credentialId: 'agent-key', idempotencyKey: 'finish-reassigned', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))).toMatchObject({ state: 'finished', outcome: 'paused' })
+    expect(store.state.claims.size).toBe(0)
+  })
+
+  test('refuses run-fenced updates and comments from the former assignee after a reassignment', async () => {
+    const { store, observed } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', assigneeUserId: 'sato@example.com' })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    const writes: unknown[] = []
+    setTestAppDependencies({ collaboration: createCollaborationStub({
+      async createComment(input) {
+        writes.push(input)
+        throw new Error('The comment must not be written.')
+      },
+    }) })
+    const workItems = createCanonicalPublicWorkItemService()
+    for (const fence of [{ agentRunId: held.runId, instanceIdHash: held.instanceIdHash }, { instanceIdHash: held.instanceIdHash }]) {
+      await expect(runWithTestAppDependencies(() => workItems.update(
+        credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+        { requestId: 'update', idempotencyKey: `reassigned-${fence.agentRunId ?? 'instance'}` }, undefined, fence,
+      ))).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+      await expect(runWithTestAppDependencies(() => workItems.addComment(
+        credential, 'core-team', 'task-1', 'progress', { requestId: 'comment', idempotencyKey: `reassigned-comment-${fence.agentRunId ?? 'instance'}` },
+        undefined, undefined, fence,
+      ))).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+    }
+    expect(observed).toHaveLength(0)
+    expect(writes).toHaveLength(0)
+    expect(store.state.runs.get(`${workspaceId}|core-team|${held.runId}`)?.leaseExpiresAt).toBe(held.leaseExpiresAt)
+  })
+
+  test('rejects a start when Agent settings change before it commits', async () => {
+    let saveBeforeCommit = true
+    const { store } = configureUnstartedAssignedWorkItem({
+      beforeCommit: () => {
+        if (!saveBeforeCommit) return
+        saveBeforeCommit = false
+        store.state.settings.set(`${workspaceId}|core-team`, {
+          ...createDefaultAgentSettings('core-team'), revision: 1, leaseMinutes: 5, updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+        })
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    await expect(runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
+      { requestId: 'start', idempotencyKey: 'start-settings-race' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-settings-race', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toThrow('Agent settings changed during the request. Retry the start.')
     expect(store.state.claims.size).toBe(0)
   })
 

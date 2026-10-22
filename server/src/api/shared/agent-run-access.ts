@@ -24,11 +24,13 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  createWorkItemAssigneeConditionCheck,
   type NamedWorkItemDeletionFence,
   type TeamIssueResponseItem,
 } from '../../modules/work-items'
 import { workItemDependencies } from './app-dependencies'
 import type { WorkspacePrincipal } from './project-access'
+import { getTeamIssuesTableName } from './work-item-access'
 
 /** Context passed to an extension after the Work Item update was authorized and validated. */
 export type PublicWorkItemUpdateExtensionContext = {
@@ -215,9 +217,12 @@ export function createAgentRunMutationFenceExtension(
   fence: ValidatedAgentRunFence,
 ): PublicWorkItemUpdateExtension {
   return {
-    async prepare({ principal, now }) {
+    async prepare({ principal, issue, now }) {
       const store = workItemDependencies.agentRuns
       const { run } = await resolveAgentRunFence(principal, teamId, workItemId, fence, now)
+      // A run outlives a reassignment only until its lease expires; the former assignee's agent
+      // must not renew it. The update's revision check covers a reassignment after this read.
+      if (run && issue.assigneeUserId !== run.assigneeUserId) throw createAgentRunForbiddenError()
       return {
         // Lease state is only checked here; extending it after the commit with a newer-time
         // condition keeps a slow update from overwriting a later heartbeat.
@@ -308,6 +313,7 @@ export type PreparedAgentRunCommentFence = {
  * @param teamId - Team that owns the Work Item.
  * @param workItemId - Commented Work Item.
  * @param fence - Validated fence from the request.
+ * @param workItemAssigneeUserId - Current assignee of the Work Item, as read before the comment.
  * @param now - Mutation time.
  * @returns Condition checks and hooks.
  */
@@ -316,11 +322,18 @@ export async function prepareAgentRunCommentFence(
   teamId: string,
   workItemId: string,
   fence: ValidatedAgentRunFence,
+  workItemAssigneeUserId: string,
   now: Date,
 ): Promise<PreparedAgentRunCommentFence> {
   const store = workItemDependencies.agentRuns
   const { run } = await resolveAgentRunFence(principal, teamId, workItemId, fence, now)
-  const conditionChecks = store.createMutationFenceConditionChecks({
+  // A run outlives a reassignment only until its lease expires; the former assignee's agent
+  // must not renew it, so the comment also checks that the assignment has not changed.
+  if (run && workItemAssigneeUserId !== run.assigneeUserId) throw createAgentRunForbiddenError()
+  const assignmentChecks = run
+    ? [createWorkItemAssigneeConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, run.assigneeUserId)]
+    : []
+  const conditionChecks = [...store.createMutationFenceConditionChecks({
     directoryId: principal.directoryId,
     teamId,
     workItemId,
@@ -328,7 +341,7 @@ export async function prepareAgentRunCommentFence(
     assigneeUserId: principal.userKey,
     ...(run ? { run } : {}),
     now,
-  }).flatMap((item) => item.ConditionCheck ? [{ ConditionCheck: item.ConditionCheck }] : [])
+  }), ...assignmentChecks].flatMap((item) => item.ConditionCheck ? [{ ConditionCheck: item.ConditionCheck }] : [])
   return {
     conditionChecks,
     afterCommit: () => extendLeaseBestEffort(run, new Date()),

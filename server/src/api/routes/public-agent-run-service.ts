@@ -264,12 +264,21 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                 auditContext, run, 'started', 'Agent Run started.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
               )
               return {
-                transactItems: [...store.createStartItems(run), ...(auditPut ? [auditPut] : [])],
+                transactItems: [
+                  ...store.createStartItems(run),
+                  // The lease length is fixed for the run, so settings saved meanwhile must not be missed.
+                  store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+                  ...(auditPut ? [auditPut] : []),
+                ],
                 createReceipt: (workItem) => ({ status: 201, body: { run: toAgentRun(run, now), workItem } }),
                 async classifyFailure(error) {
                   if (!isAgentRunFenceConflict(error)) return error
                   const latest = await store.getClaim(principal.directoryId, teamId, workItemId)
                   if (latest) return createHolderConflict(principal, teamId, latest.runId, new Date())
+                  const latestSettings = await store.getSettings(principal.directoryId, teamId)
+                  if (latestSettings.revision !== settings.revision) {
+                    return new AgentRunError('conflict', 'Agent settings changed during the request. Retry the start.')
+                  }
                   return new AgentRunError('conflict', 'The Agent Run claim changed during the request. Reload the task and retry.')
                 },
               }

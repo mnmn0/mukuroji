@@ -1024,7 +1024,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal, context, teamId, detail.issue.assignedProjectId,
       )
       const preparedFence = agentRunFence
-        ? await prepareAgentRunCommentFence(principal, teamId, workItemId, agentRunFence, new Date())
+        ? await prepareAgentRunCommentFence(principal, teamId, workItemId, agentRunFence, detail.issue.assigneeUserId, new Date())
         : undefined
       const comment = await workItemDependencies.collaboration.createComment({
         workspaceId: principal.directoryId,

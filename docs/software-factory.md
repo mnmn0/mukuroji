@@ -101,7 +101,9 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 ### Lease
 
 - lease の長さは Team の Agent settings `leaseMinutes`（既定 30、範囲 5〜240）で決める。
-  Run の開始時に当時の値を `leaseMinutes` として固定し、設定変更は新しい Run から効く。
+  Run の開始時に当時の値を `leaseMinutes` として固定し、設定変更は新しい Run から効く。start は
+  読んだ設定の revision（未保存なら設定 row がないこと）を同じ transaction で検査し、開始中に
+  保存された設定を取りこぼした Run を確定しない。
 - `heartbeat` と Run 配下の mutation（report、`agentRunId` 付き Work Item 更新）は
   `lastHeartbeatAt` を更新する。読み取りは lease を延長しない。lease は `lastHeartbeatAt < now`
   を条件に更新し、遅れて届いた更新で期限を戻さない。
@@ -411,7 +413,9 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 - PATCH と comment の fence は、Run と claim を ConditionCheck で Work Item 更新・comment 保存と
   同じ transaction に入れて検証し、commit 後に lease を延長する。延長は `lastHeartbeatAt < now`
   を条件にするため、並行する mutation や heartbeat の順序が入れ替わっても lease は戻らない。
-  延長の失敗で mutation を失敗にはしない。
+  延長の失敗で mutation を失敗にはしない。Run で fence する mutation は、Work Item の現在の担当者が
+  Run の開始者である場合だけ受け付ける（`agent_run_forbidden`）。PATCH は revision CAS で、comment は
+  担当者の ConditionCheck で、読んだ後の担当変更と競合した mutation を確定しない。
 - heartbeat と finish は Run 開始時の `instanceId` を必須とし、その hash を Run の条件式でも
   照合する。同じ credential を共有する別 instance は、他 instance の Run を延長・終了できない。
 - `agentRunId` は `agentInstanceId` と一緒に送る。`agentInstanceId` だけの mutation は、別
@@ -431,7 +435,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   revision を同じ transaction で検査し、担当変更と競合した解放を確定しない。
 - Run 一覧の可視性は Work Item を強整合で読んで判定する。index は閉じた直後の Run を `active` と
   返すことがあるため、一覧は各 Run を強整合で読み直し、要求した状態のものだけを返す（読み取りは
-  同時 10 件まで）。Web の Run パネルは開いている間
+  同時 10 件まで）。Work Item の Run 履歴も同じく各 Run を強整合で読み直す。Web の Run パネルは
+  解放の応答を表示に反映してから背景で再取得し、開いている間
   30 秒ごと、および `active` Run の lease が切れる直後に再取得し、停滞を表示する。新しい 20 件より前の
   Run がある場合は、表示が新しい Run に限られることを示す。
 - `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は、Project 外のタスクの Run を `ownRuns` / `otherRuns` に

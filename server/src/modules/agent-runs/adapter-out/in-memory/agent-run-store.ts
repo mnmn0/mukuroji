@@ -244,6 +244,14 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
+  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem {
+    return this.#register(this.#builder.createSettingsRevisionCheck(directoryId, teamId, revision), {
+      check: (state) => (state.settings.get(`${directoryId}|${teamId}`)?.revision ?? 0) === revision,
+      apply: () => undefined,
+    })
+  }
+
+  /** @inheritdoc */
   createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
     const [runUpdate, claimDelete, revocationPut] = this.#builder.createCloseItems(run, expectedInstanceIdHash)
     if (!runUpdate || !claimDelete) throw new Error('The close builder returned an unexpected item count.')

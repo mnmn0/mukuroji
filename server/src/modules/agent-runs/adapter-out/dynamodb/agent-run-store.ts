@@ -41,6 +41,9 @@ export const AGENT_RUN_ACTIVE_INDEX_NAME = 'ActiveRunIndex'
 /** Largest page a list query returns. */
 const maximumPageSize = 100
 
+/** Strong reads in flight at once when a history page re-reads its runs from the base table. */
+const historyRereadConcurrency = 10
+
 /** Minimal DynamoDB command boundary used by the Agent Run store. */
 export type AgentRunDocumentClient = {
   /** Sends one read, query, update, or transaction. */
@@ -165,6 +168,14 @@ export interface AgentRunStore {
    * @returns ConditionCheck that the claim row does not exist.
    */
   createClaimAbsentCheck(directoryId: string, teamId: string, workItemId: string): AgentRunTransactItem
+  /**
+   * Builds a check that the Team's Agent settings are still at the revision a start read.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param revision - Revision the start read; `0` means the defaults were never saved.
+   * @returns ConditionCheck on the settings row.
+   */
+  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem
   /**
    * Builds the writes that finish an active run, remove its claim, and, for a release or take over,
    * revoke the run's instance on the Work Item.
@@ -659,8 +670,17 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       Limit: readLimit(limit),
       ExclusiveStartKey: decodeCursor(cursor, 'workItemRunKey', key),
     }))
-    const runs = (response.Items ?? []).map((item) => parseRun(item, { directoryId, teamId }))
-    if (runs.some((run) => run.workItemId !== workItemId)) throw createAgentRunIntegrityError()
+    const indexed = (response.Items ?? []).map((item) => parseRun(item, { directoryId, teamId }))
+    if (indexed.some((run) => run.workItemId !== workItemId)) throw createAgentRunIntegrityError()
+    // The index is eventually consistent, so a run that just finished can still look active there.
+    const runs: StoredAgentRun[] = []
+    for (let start = 0; start < indexed.length; start += historyRereadConcurrency) {
+      runs.push(...await Promise.all(indexed.slice(start, start + historyRereadConcurrency).map(async (run) => {
+        const current = await this.getRun(directoryId, teamId, run.runId)
+        if (!current || current.workItemId !== workItemId) throw createAgentRunIntegrityError()
+        return current
+      })))
+    }
     return this.#page(runs, response.LastEvaluatedKey)
   }
 
@@ -761,6 +781,24 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
         ConditionExpression: 'attribute_not_exists(#recordKey)',
         ExpressionAttributeNames: { '#recordKey': 'recordKey' },
       },
+    }
+  }
+
+  /** @inheritdoc */
+  createSettingsRevisionCheck(directoryId: string, teamId: string, revision: number): AgentRunTransactItem {
+    const conditionCheck = {
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+    }
+    return {
+      ConditionCheck: revision === 0
+        ? { ...conditionCheck, ConditionExpression: 'attribute_not_exists(#recordKey)', ExpressionAttributeNames: { '#recordKey': 'recordKey' } }
+        : {
+            ...conditionCheck,
+            ConditionExpression: '#revision = :revision',
+            ExpressionAttributeNames: { '#revision': 'revision' },
+            ExpressionAttributeValues: { ':revision': revision },
+          },
     }
   }
 

@@ -239,6 +239,17 @@ describe('DynamoDB Agent Run store', () => {
     await expect(store.listWorkItemRuns('workspace-1', 'core', 'task-2', page.nextCursor, 20)).rejects.toBeInstanceOf(AgentRunError)
   })
 
+  test('re-reads Work Item history from the base table so a just-closed run is not shown as active', async () => {
+    const run = createRun()
+    const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)[0]?.Put?.Item
+    if (!item) throw new Error('The start items need a run put.')
+    const closed = { ...item, state: 'finished', outcome: 'released', finishedAt: now.toISOString(), finishedBy: 'sato@example.com' }
+    const { client, commands } = createClient([{ Items: [item] }, { Item: closed }])
+    const page = await new DynamoDbAgentRunStore(client, 'AgentRuns').listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 20)
+    expect(page.runs).toMatchObject([{ runId: run.runId, state: 'finished', outcome: 'released' }])
+    expect(commands[1]?.input).toMatchObject({ ConsistentRead: true, Key: { recordKey: `agent-run#${run.runId}` } })
+  })
+
   test('rate-limits explicit heartbeats and reports a finished run as not active', async () => {
     const run = createRun({ lastHeartbeatRequestAt: '2026-10-22T00:00:05.000Z' })
     const [runPut, claimPut] = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)
