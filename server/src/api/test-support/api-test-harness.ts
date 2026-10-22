@@ -1380,6 +1380,8 @@ function configureFakeProjectClients(
     detailReadHook?: (issueId: string) => Promise<void>
     /** Detail fake が返す現在の設定済み workflow status ID です。 */
     detailWorkflowStatusId?: string
+    /** Status category the detail fake returns instead of the one derived from the status ID. */
+    detailStatusCategory?: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled'
     /** Detail fake が read ごとに返す workflow status ID です。 */
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
@@ -1416,6 +1418,8 @@ function configureFakeProjectClients(
       authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
       /** Configuration guard ConditionChecks supplied to the adapter. */
       configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
+      /** Agent Run writes committed with the update. */
+      agentRunTransactItems?: UpdateTeamIssueRequestBody['agentRunTransactItems']
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -2541,10 +2545,10 @@ function configureFakeProjectClients(
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
-            statusCategory:
-              workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
+            statusCategory: options.detailStatusCategory ??
+              (workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
                 ? 'completed'
-                : 'started',
+                : 'started'),
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
@@ -2627,6 +2631,7 @@ function configureFakeProjectClients(
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
+          ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
         })
         calls.issueUpdates.push({
           actorUserId,

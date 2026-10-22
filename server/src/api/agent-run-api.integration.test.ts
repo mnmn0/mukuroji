@@ -1,0 +1,310 @@
+import { afterEach, describe, expect, test } from 'bun:test'
+import { createApiTestHarness } from './test-support/api-test-harness'
+import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemService } from './api-router'
+import {
+  InMemoryAgentRunStore,
+  InMemoryTransactionCanceledError,
+  createActiveAgentRun,
+  hashAgentInstanceId,
+  readStartAgentRunRequest,
+  type StoredAgentRun,
+} from '../modules/agent-runs'
+import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
+import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
+import type { CollaborationClient } from '../modules/collaboration/collaboration'
+
+const {
+  app,
+  configureFakeProjectClients,
+  createCollaborationStub,
+  resetTestApp,
+  runWithTestAppDependencies,
+  setTestAppDependencies,
+} = createApiTestHarness()
+
+afterEach(() => {
+  resetTestApp()
+})
+
+const workspaceId = 'user#demo@example.com'
+const credential: AuthenticatedDeveloperCredential = {
+  kind: 'api-key',
+  workspaceId,
+  credentialId: 'agent-key',
+  subjectUserId: 'demo@example.com',
+  scopes: ['work-items:read', 'work-items:write'],
+}
+
+/**
+ * Creates an active run held by another instance of the same member.
+ *
+ * @param workItemId - Claimed Work Item.
+ * @param instanceId - Raw instance ID of the holder.
+ * @returns Stored run.
+ */
+function createHeldRun(workItemId: string, instanceId = 'other-laptop'): StoredAgentRun {
+  return createActiveAgentRun({
+    directoryId: workspaceId,
+    teamId: 'core-team',
+    workItemId,
+    assigneeUserId: 'demo@example.com',
+    start: readStartAgentRunRequest({
+      expectedRevision: 1,
+      workflowStatusId: 'in-progress',
+      runtime: 'codex',
+      agentName: 'Codex',
+      instanceId,
+    }),
+    credentialId: 'agent-key',
+    startRevision: 2,
+    leaseMinutes: 30,
+    now: new Date(),
+  })
+}
+
+/**
+ * Configures fakes for an unstarted Work Item assigned to the credential owner and an in-memory
+ * store that commits Agent Run items when the Work Item update commits.
+ *
+ * @param overrides - Detail fake options.
+ * @returns The store and the Agent Run items observed by updates.
+ */
+function configureUnstartedAssignedWorkItem(overrides: {
+  /** Assignee returned by the detail fake. */
+  assigneeUserId?: string
+  /** Status category returned by the detail fake. */
+  statusCategory?: 'unstarted' | 'started'
+  /** Team role of the caller. */
+  role?: 'member' | 'manager' | 'viewer'
+} = {}) {
+  const store = new InMemoryAgentRunStore()
+  const observed: unknown[][] = []
+  configureFakeProjectClients(true, {
+    directoryId: workspaceId,
+    role: overrides.role ?? 'member',
+    workspaceRole: 'member',
+    detailAssigneeUserId: overrides.assigneeUserId ?? 'demo@example.com',
+    detailWorkflowStatusId: overrides.statusCategory === 'started' ? 'in-progress' : 'todo',
+    detailStatusCategory: overrides.statusCategory ?? 'unstarted',
+    issueUpdateHook(input) {
+      const items = input.agentRunTransactItems ?? []
+      observed.push(items)
+      try {
+        store.applyTransactItems(items)
+      } catch (error) {
+        if (error instanceof InMemoryTransactionCanceledError) throw createAgentRunFenceConflictError()
+        throw error
+      }
+    },
+  })
+  setTestAppDependencies({ agentRuns: store })
+  return { store, observed }
+}
+
+describe('public Agent Run service', () => {
+  test('starts a run atomically with the started transition and fences other instances', async () => {
+    const { store, observed } = configureUnstartedAssignedWorkItem()
+    const service = createCanonicalPublicAgentRunService()
+    const started = await runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'claude-code', agentName: 'Claude Code', instanceId: 'laptop-1' }),
+      { requestId: 'start-1', idempotencyKey: 'start-key-1' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-key-1', requestFingerprint: 'fp', reservationId: 'reservation-1' },
+    ))
+    expect(started.run).toMatchObject({
+      teamId: 'core-team', workItemId: 'task-1', assigneeUserId: 'demo@example.com', runtime: 'claude-code',
+      state: 'active', startRevision: 2, leaseMinutes: 30, stalled: false, reportCount: 0,
+    })
+    expect(started.run.runId).toMatch(/^run_/u)
+    expect(started.workItem).toMatchObject({ id: 'task-1' })
+    expect(observed[0]?.length).toBeGreaterThanOrEqual(2)
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(started.run.runId)
+
+    const other = await runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' }),
+      { requestId: 'start-2', idempotencyKey: 'start-key-2' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-key-2', requestFingerprint: 'fp2', reservationId: 'reservation-2' },
+    )).catch((error: unknown) => error)
+    expect(other).toMatchObject({ category: 'conflict', reason: 'agent_run_conflict' })
+    expect(other instanceof Error ? other.message : '').toContain('Claude Code (claude-code)')
+  })
+
+  test('rejects starts by another member, from a started status, or into a non-started status', async () => {
+    const service = createCanonicalPublicAgentRunService()
+    const start = (workflowStatusId = 'in-progress') => runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId, runtime: 'claude-code', agentName: 'Claude Code', instanceId: 'laptop-1' }),
+      { requestId: 'start', idempotencyKey: 'start-key' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-key', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    configureUnstartedAssignedWorkItem({ assigneeUserId: 'sato@example.com' })
+    await expect(start()).rejects.toMatchObject({ category: 'forbidden', reason: 'agent_run_forbidden' })
+    resetTestApp()
+    configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    await expect(start()).rejects.toMatchObject({ reason: 'invalid_transition' })
+    resetTestApp()
+    const { store } = configureUnstartedAssignedWorkItem()
+    await expect(start('todo')).rejects.toMatchObject({ reason: 'invalid_transition' })
+    expect(store.state.runs.size).toBe(0)
+  })
+
+  test('fences a public update: another instance conflicts and the holder extends its lease', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const workItems = createCanonicalPublicWorkItemService()
+    const update = (fence: { agentRunId?: string, instanceIdHash: string }) => runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: `update-${fence.instanceIdHash.slice(0, 6)}` }, undefined, fence,
+    ))
+    await expect(update({ instanceIdHash: hashAgentInstanceId('laptop-1') }))
+      .rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    await expect(update({ agentRunId: held.runId, instanceIdHash: hashAgentInstanceId('laptop-1') }))
+      .rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    const before = (await store.getRun(workspaceId, 'core-team', held.runId))?.lastHeartbeatAt ?? ''
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await update({ agentRunId: held.runId, instanceIdHash: held.instanceIdHash })
+    const after = (await store.getRun(workspaceId, 'core-team', held.runId))?.lastHeartbeatAt ?? ''
+    expect(after > before).toBe(true)
+  })
+
+  test('fences a public comment with condition checks and keeps unfenced comments unchanged', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const writes: Parameters<CollaborationClient['createComment']>[0][] = []
+    setTestAppDependencies({ collaboration: createCollaborationStub({
+      async createComment(input) {
+        writes.push(input)
+        return {
+          id: `comment-${writes.length}`, rootCommentId: `comment-${writes.length}`, authorMemberKey: input.actorMemberKey,
+          bodyMarkdown: input.bodyMarkdown, version: 1, mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+          createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z',
+        }
+      },
+    }) })
+    const workItems = createCanonicalPublicWorkItemService()
+    await expect(runWithTestAppDependencies(() => workItems.addComment(
+      credential, 'core-team', 'task-1', 'progress', { requestId: 'comment', idempotencyKey: 'comment-1' },
+      undefined, undefined, { instanceIdHash: hashAgentInstanceId('laptop-1') },
+    ))).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    expect(writes).toHaveLength(0)
+    await runWithTestAppDependencies(() => workItems.addComment(
+      credential, 'core-team', 'task-1', 'progress', { requestId: 'comment', idempotencyKey: 'comment-2' },
+      undefined, undefined, { agentRunId: held.runId, instanceIdHash: held.instanceIdHash },
+    ))
+    await runWithTestAppDependencies(() => workItems.addComment(
+      credential, 'core-team', 'task-1', 'human note', { requestId: 'comment', idempotencyKey: 'comment-3' },
+    ))
+    const fencedKeys = (writes[0]?.authorizationConditionChecks ?? [])
+      .map((check) => String(check.ConditionCheck.Key?.recordKey ?? ''))
+    expect(fencedKeys).toContain(`agent-run#${held.runId}`)
+    expect(fencedKeys).toContain('agent-run-claim#task-1')
+    expect((writes[1]?.authorizationConditionChecks ?? [])
+      .some((check) => String(check.ConditionCheck.Key?.recordKey ?? '').startsWith('agent-run'))).toBe(false)
+  })
+
+  test('heartbeats, finishes, and lists only the caller instance when asked', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    const otherHeld = createHeldRun('task-2', 'third-laptop')
+    store.seed(held)
+    store.seed(otherHeld)
+    const receipts: unknown[] = []
+    setTestAppDependencies({
+      transactions: {
+        async prepareIdempotencyCompletionTransactWrite(input) {
+          receipts.push(input.response)
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    await runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId))
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', held.runId)))
+      .rejects.toMatchObject({ category: 'rate_limited' })
+
+    const own = await runWithTestAppDependencies(() => service.list(
+      credential, 'core-team', { state: 'active', instanceIdHash: held.instanceIdHash }, undefined, 50,
+    ))
+    expect(own.items.map((run) => run.runId)).toEqual([held.runId])
+
+    const finished = await runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, 'completed', { requestId: 'finish', idempotencyKey: 'finish-1' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-1', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    expect(finished).toMatchObject({ state: 'finished', outcome: 'completed', finishedBy: 'agent' })
+    expect(receipts).toEqual([{ status: 200, body: finished }])
+    expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
+    expect(await runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, 'completed', { requestId: 'finish', idempotencyKey: 'finish-2' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-2', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).toMatchObject({ outcome: 'completed' })
+    await expect(runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, 'failed', { requestId: 'finish', idempotencyKey: 'finish-3' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-3', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('refuses heartbeats and finishes on another member run', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const foreign = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
+    store.seed(foreign)
+    const service = createCanonicalPublicAgentRunService()
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', foreign.runId)))
+      .rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+  })
+})
+
+describe('Web Agent Run routes', () => {
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  test('lists a Work Item history with release permissions and releases an active run', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(history.status).toBe(200)
+    expect(await history.json()).toMatchObject({ items: [{ runId: held.runId, canRelease: true, state: 'active' }] })
+
+    const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
+    expect(released.status).toBe(200)
+    expect(await released.json()).toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com', canRelease: false })
+    expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
+    const again = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
+    expect(again.status).toBe(200)
+  })
+
+  test('lets only the assignee or a Team manager release a run', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const foreign = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
+    store.seed(foreign)
+    const denied = await app.request(`http://localhost/api/teams/core-team/agent-runs/${foreign.runId}/release`, { method: 'POST', headers })
+    expect(denied.status).toBe(403)
+    expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(true)
+  })
+
+  test('reads defaults and saves Agent settings for Team managers with revision CAS', async () => {
+    configureUnstartedAssignedWorkItem({ role: 'manager' })
+    const read = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
+    expect(await read.json()).toMatchObject({ revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    const saved = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ revision: 1, leaseMinutes: 60 })
+    const stale = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(stale.status).toBe(409)
+  })
+
+  test('rejects Agent settings changes from Team members', async () => {
+    configureUnstartedAssignedWorkItem({ role: 'member' })
+    const response = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(response.status).toBe(403)
+  })
+})

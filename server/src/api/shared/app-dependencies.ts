@@ -88,6 +88,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get pushSubscriptions() {
     return requireAppDependencies().workItems.pushSubscriptions
   },
+  get agentRuns() {
+    return requireAppDependencies().workItems.agentRuns
+  },
   get focusState() {
     return requireAppDependencies().workItems.focusState
   },
@@ -188,6 +191,9 @@ export const developerPlatformDependencies: DeveloperPlatformDependencies = {
   },
   get publicWorkItems() {
     return requireAppDependencies().developerPlatform.publicWorkItems
+  },
+  get publicAgentRuns() {
+    return requireAppDependencies().developerPlatform.publicAgentRuns
   },
   get workItemImportExecutions() {
     return requireAppDependencies().developerPlatform.workItemImportExecutions

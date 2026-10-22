@@ -72,6 +72,13 @@ if ! aws_local dynamodb describe-table --table-name mukuroji-push-subscriptions-
     --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE >/dev/null
 fi
 ensure_ttl mukuroji-push-subscriptions-local
+if ! aws_local dynamodb describe-table --table-name mukuroji-agent-runs-local >/dev/null 2>&1; then
+  aws_local dynamodb create-table --table-name mukuroji-agent-runs-local \
+    --billing-mode PAY_PER_REQUEST \
+    --attribute-definitions AttributeName=directoryTeamId,AttributeType=S AttributeName=recordKey,AttributeType=S AttributeName=workItemRunKey,AttributeType=S AttributeName=workItemRunSortKey,AttributeType=S AttributeName=activeRunPartition,AttributeType=S AttributeName=activeRunSortKey,AttributeType=S \
+    --key-schema AttributeName=directoryTeamId,KeyType=HASH AttributeName=recordKey,KeyType=RANGE \
+    --global-secondary-indexes '[{"IndexName":"WorkItemRunIndex","KeySchema":[{"AttributeName":"workItemRunKey","KeyType":"HASH"},{"AttributeName":"workItemRunSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}},{"IndexName":"ActiveRunIndex","KeySchema":[{"AttributeName":"activeRunPartition","KeyType":"HASH"},{"AttributeName":"activeRunSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]' >/dev/null
+fi
 for bucket in mukuroji-files-local mukuroji-work-item-import-local; do
   if ! aws_local s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
     aws_local s3api create-bucket --bucket "$bucket" >/dev/null

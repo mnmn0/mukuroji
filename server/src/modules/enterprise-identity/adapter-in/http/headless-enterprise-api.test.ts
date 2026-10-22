@@ -538,6 +538,15 @@ test('wires external and Document deletion fences through the canonical Public W
   expect(deleteTransactions[0]?.deletionFences).toEqual([
     { kind: 'external-links', transactWriteItem: externalFence },
     { kind: 'document-backlinks', transactWriteItem: documentFence },
+    {
+      kind: 'agent-runs',
+      transactWriteItem: {
+        ConditionCheck: expect.objectContaining({
+          Key: { directoryTeamId: 'user#demo@example.com#team#core-team', recordKey: 'agent-run-claim#wiring-delete' },
+          ConditionExpression: 'attribute_not_exists(#recordKey)',
+        }),
+      },
+    },
   ])
   expect(deleteTransactions[0]?.authorizationConditionChecks).toEqual([])
   expect(deleteTransactions[0]?.authorizationSnapshot).toMatchObject({

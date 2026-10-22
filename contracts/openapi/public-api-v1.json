@@ -326,6 +326,175 @@
       }
     },
     "schemas": {
+      "AgentRun": {
+        "additionalProperties": false,
+        "description": "One claim of a Work Item by one agent instance. A stalled run stays active; `stalled` is derived when the run is read.",
+        "properties": {
+          "agentName": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "assigneeUserId": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "finishedBy": {
+            "description": "`agent` when the agent closed the run, otherwise the member who released it.",
+            "type": "string"
+          },
+          "lastHeartbeatAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "leaseExpiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "leaseMinutes": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "outcome": {
+            "enum": [
+              "completed",
+              "paused",
+              "failed",
+              "released",
+              "superseded"
+            ],
+            "type": "string"
+          },
+          "reportCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "runId": {
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
+          "runtime": {
+            "enum": [
+              "claude-code",
+              "codex",
+              "kiro",
+              "other"
+            ],
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "stalled": {
+            "type": "boolean"
+          },
+          "startRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "startedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "finished"
+            ],
+            "type": "string"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "teamId",
+          "workItemId",
+          "assigneeUserId",
+          "runtime",
+          "agentName",
+          "state",
+          "startRevision",
+          "leaseMinutes",
+          "startedAt",
+          "lastHeartbeatAt",
+          "leaseExpiresAt",
+          "stalled",
+          "reportCount"
+        ],
+        "type": "object"
+      },
+      "AgentRunPage": {
+        "additionalProperties": false,
+        "properties": {
+          "hasMore": {
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRun"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "hasMore"
+        ],
+        "type": "object"
+      },
+      "AgentSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "allowTakeoverAfterLeaseExpiry": {
+            "type": "boolean"
+          },
+          "leaseMinutes": {
+            "maximum": 240,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "revision": {
+            "description": "`0` means the Team still uses the defaults.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "updatedBy": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "revision",
+          "leaseMinutes",
+          "allowTakeoverAfterLeaseExpiry"
+        ],
+        "type": "object"
+      },
       "ApiKeyOneTimeSecretOutput": {
         "additionalProperties": false,
         "properties": {
@@ -867,6 +1036,17 @@
       "CreatePublicWorkItemCommentRequest": {
         "additionalProperties": false,
         "properties": {
+          "agentInstanceId": {
+            "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "agentRunId": {
+            "description": "Active Agent Run of the caller for this Work Item. Requires agentInstanceId.",
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
           "body": {
             "maxLength": 4096,
             "minLength": 1,
@@ -1292,6 +1472,23 @@
           "syncStatus",
           "createdAt",
           "updatedAt"
+        ],
+        "type": "object"
+      },
+      "FinishAgentRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "enum": [
+              "completed",
+              "paused",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
         ],
         "type": "object"
       },
@@ -2097,6 +2294,63 @@
         },
         "type": "object"
       },
+      "StartAgentRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agentName": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "instanceId": {
+            "description": "Opaque, stable identifier of the agent instance. Mukuroji stores and compares only its hash.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "runtime": {
+            "enum": [
+              "claude-code",
+              "codex",
+              "kiro",
+              "other"
+            ],
+            "type": "string"
+          },
+          "workflowStatusId": {
+            "description": "Started-category status the Work Item moves to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "workflowStatusId",
+          "runtime",
+          "agentName",
+          "instanceId"
+        ],
+        "type": "object"
+      },
+      "StartAgentRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/AgentRun"
+          },
+          "workItem": {
+            "$ref": "#/components/schemas/WorkItem"
+          }
+        },
+        "required": [
+          "run",
+          "workItem"
+        ],
+        "type": "object"
+      },
       "UpdateExternalWorkItemLinkInput": {
         "additionalProperties": false,
         "properties": {
@@ -2119,6 +2373,17 @@
         "additionalProperties": false,
         "minProperties": 2,
         "properties": {
+          "agentInstanceId": {
+            "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "agentRunId": {
+            "description": "Active Agent Run of the caller for this Work Item. Requires agentInstanceId.",
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
           "assignedProjectId": {
             "type": [
               "string",
@@ -6587,6 +6852,522 @@
         ]
       }
     },
+    "/api/v1/agent-runs": {
+      "get": {
+        "operationId": "listPublicAgentRuns",
+        "parameters": [
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to list.",
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "default": "active",
+              "enum": [
+                "active",
+                "finished"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restricts the list to runs started by this instance. The server compares only its hash.",
+            "in": "query",
+            "name": "instanceId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restricts the list to runs of this assignee.",
+            "in": "query",
+            "name": "assigneeUserId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 page に返す最大件数です。",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunPage"
+                }
+              }
+            },
+            "description": "Agent Run page; a page can be empty and still continue",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List a Team's Agent Runs visible to the credential owner",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/agent-runs/{runId}": {
+      "get": {
+        "operationId": "getPublicAgentRun",
+        "parameters": [
+          {
+            "description": "Agent Run ID returned by Mukuroji.",
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "pattern": "^run_[0-9a-f-]{36}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRun"
+                }
+              }
+            },
+            "description": "Agent Run",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read one Agent Run",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/agent-runs/{runId}/finish": {
+      "post": {
+        "operationId": "finishPublicAgentRun",
+        "parameters": [
+          {
+            "description": "Agent Run ID returned by Mukuroji.",
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "pattern": "^run_[0-9a-f-]{36}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRun"
+                }
+              }
+            },
+            "description": "Finished run",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Close the caller's own active run and release its claim",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/agent-runs/{runId}/heartbeat": {
+      "post": {
+        "operationId": "heartbeatPublicAgentRun",
+        "parameters": [
+          {
+            "description": "Agent Run ID returned by Mukuroji.",
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "pattern": "^run_[0-9a-f-]{36}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRun"
+                }
+              }
+            },
+            "description": "Run with its extended lease",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Extend the lease of the caller's own active run, at most once every 10 seconds",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/agent-settings": {
+      "get": {
+        "operationId": "getPublicAgentSettings",
+        "parameters": [
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSettings"
+                }
+              }
+            },
+            "description": "Agent settings",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the Team Agent settings that govern runs",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
     "/api/v1/oauth/token": {
       "post": {
         "description": "client_credentials grant の client ID と client secret を交換します。",
@@ -7317,6 +8098,228 @@
         "summary": "Work Item を optimistic concurrency 付きで更新する",
         "tags": [
           "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/agent-runs": {
+      "get": {
+        "operationId": "listPublicWorkItemAgentRuns",
+        "parameters": [
+          {
+            "description": "Work Item ID",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 page に返す最大件数です。",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunPage"
+                }
+              }
+            },
+            "description": "Agent Run history page",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List the Agent Runs of a Work Item, newest first",
+        "tags": [
+          "Agent Runs"
+        ]
+      },
+      "post": {
+        "operationId": "startPublicAgentRun",
+        "parameters": [
+          {
+            "description": "Work Item ID",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartAgentRunResponse"
+                }
+              }
+            },
+            "description": "Started run and Work Item",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Claim an assigned Work Item and move it to a started status in one transaction",
+        "tags": [
+          "Agent Runs"
         ]
       }
     },
@@ -8077,6 +9080,10 @@
     {
       "description": "CSV/JSON transfer job",
       "name": "Import and Export"
+    },
+    {
+      "description": "Coding agent claims, leases, and Team Agent settings",
+      "name": "Agent Runs"
     }
   ]
 }

@@ -35,7 +35,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       collaboration: new DynamoDbCollaborationClient(),
       updateFeedReadState: new DynamoDbUpdateFeedReadStateStore(planningTable, client),
       savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(planningTable, client),
-      teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(),
+      teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), agentRuns: unavailable(),
       focusState: unavailable(), workspaceSearch: unavailable(), documents: unavailable(), workspaceSearchProjectionEnabled: false,
       workItemConfigurations: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
       requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(), collections: unavailable(),
@@ -48,7 +48,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
     developerPlatform: {
       apiKeys: unavailable(), oauthCredentials: unavailable(), webhookSubscriptions: unavailable(), webhookDeliveries: unavailable(),
       connectors: unavailable(), externalLinks: unavailable(), imports: unavailable(), idempotency: unavailable(), rateLimits: unavailable(),
-      transactions: unavailable(), publicWorkItems: unavailable(), workItemImportExecutions: unavailable(), workItemImportSources: unavailable(),
+      transactions: unavailable(), publicWorkItems: unavailable(), publicAgentRuns: unavailable(), workItemImportExecutions: unavailable(), workItemImportSources: unavailable(),
       workItemImportQueue: unavailable(), queueWebhookDelivery: unsupported,
     },
   }
