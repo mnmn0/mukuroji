@@ -323,6 +323,26 @@ describe('agent task lifecycle', () => {
     await expect(scoped.finishRun(runId, 'paused', 'finish-outside')).rejects.toMatchObject({ code: 'out_of_scope' })
   })
 
+  test('keeps a run it just started out of ownRuns once its task leaves the configured Project', async () => {
+    let moved = false
+    const { api } = fixture([task('inside', { assignedProjectId: 'project' })])
+    const lagging = createAgentTasks({
+      ...api,
+      async get(id) {
+        const current = await api.get(id)
+        return moved ? { ...current, assignedProjectId: 'other-project' } : current
+      },
+      async listActiveRuns() {
+        return { items: [], hasMore: false }
+      },
+    }, { ...baseScope, assignedProjectId: 'project' })
+    const claimed = await lagging.transition('inside', 1, 'coding', 'start', 'claim-inside')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [{ runId }] })
+    moved = true
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
+  })
+
   test('rejects blockers, inaccessible blockers, wrong assignment, invalid transitions, and Project escapes', async () => {
     const { service, api } = fixture([task('blocked', { relationIds: ['blockedBy:missing'] }), task('other', { assigneeUserId: 'someone-else' })])
     await expect(service.transition('blocked', 1, 'coding', 'start', 'a')).rejects.toMatchObject({ code: 'blocked' })

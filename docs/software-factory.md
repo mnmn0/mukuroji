@@ -429,6 +429,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   1 つの transaction で行う。claim を失った `active` Run は integrity error として延長しない。
   heartbeat は Work Item の現在の担当者だけが送れ、読んだ Work Item の revision を同じ transaction で
   検査する。担当が変わった後の前任者は lease を延長できないが、`finish_run` で閉じることはできる。
+  finish も認可に使った Work Item の revision を同じ transaction で検査し、Project 移動などと競合した
+  終了を確定しない。
 - Work Item の削除と一括 archive は `active` Run を `released` にし、claim を削除する。Run が
   ない場合も claim がないことを同じ transaction で検査し、削除・archive と start の競合を防ぐ。
 - Web の解放が Work Item の現在の担当者であることだけを根拠にする場合、読んだ Work Item の
@@ -440,7 +442,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   30 秒ごと、および `active` Run の lease が切れる直後に再取得し、停滞を表示する。新しい 20 件より前の
   Run がある場合は、表示が新しい Run に限られることを示す。
 - `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は、Project 外のタスクの Run を `ownRuns` / `otherRuns` に
-  含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。
+  含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。プロセスが開始したばかりで
+  一覧 index にまだない Run も同じ範囲で絞り込む。
 - `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
   `in_progress` とする。Run 一覧の index は結果整合のため、同じ process が開始した直後の Run は

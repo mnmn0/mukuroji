@@ -179,7 +179,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     for (const [taskId, runId] of startedRuns) {
       if (ownIds.has(runId)) continue
       const run = await rememberedActiveRun(taskId)
-      if (!run) continue
+      if (!run || !await runInScope(run)) continue
       own.push(run)
       ownIds.add(runId)
     }

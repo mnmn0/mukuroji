@@ -290,12 +290,22 @@ describe('public Agent Run service', () => {
       { credentialId: 'agent-key', idempotencyKey: 'finish-0', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))).rejects.toMatchObject({ reason: 'agent_run_conflict' })
     expect(receipts).toEqual([])
+    const committed: unknown[][] = []
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      committed.push([...items])
+      return commit(items, fenceItemCount)
+    }
     const finished = await runWithTestAppDependencies(() => service.finish(
       credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
       { requestId: 'finish', idempotencyKey: 'finish-1' },
       { credentialId: 'agent-key', idempotencyKey: 'finish-1', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))
     expect(finished).toMatchObject({ state: 'finished', outcome: 'completed', finishedBy: 'agent' })
+    // The close commits only against the Work Item revision the finish was authorized on.
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: expect.objectContaining({ issueId: 'task-1' }), ConditionExpression: 'revision = :expectedRevision',
+    }) })
     expect(receipts).toEqual([{ status: 200, body: finished }])
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
     expect(await runWithTestAppDependencies(() => service.finish(

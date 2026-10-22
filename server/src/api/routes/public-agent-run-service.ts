@@ -362,7 +362,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     /** Closes the caller's own run and removes its claim. */
     async finish(credential, teamId, runId, { outcome, instanceIdHash }, context, idempotency) {
       const principal = await resolveWriter(credential, teamId)
-      const { run } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+      const { run, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
       const now = new Date()
       if (run.state !== 'active') {
         if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)
@@ -395,6 +395,9 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const closeItems = store.createCloseItems(finished, instanceIdHash)
       await store.commit([
         ...closeItems,
+        // The finish was authorized against this Work Item state; a concurrent move out of the
+        // credential's scope must win.
+        createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, run.workItemId, workItemRevision),
         ...(auditPut ? [auditPut] : []),
         ...(receipt ? [receipt.transactWriteItem] : []),
       ], closeItems.length)
