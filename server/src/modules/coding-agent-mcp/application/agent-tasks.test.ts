@@ -186,6 +186,28 @@ describe('agent task lifecycle', () => {
     expect(await other.next({})).toMatchObject({ ownRuns: [] })
   })
 
+  test('recognizes a run it just started while the run index still lags, and stops after a release', async () => {
+    let indexed = false
+    const { api, release, fences } = fixture()
+    const lagging = createAgentTasks({
+      ...api,
+      async listActiveRuns(filters, cursor) {
+        return indexed ? api.listActiveRuns(filters, cursor) : { items: [], hasMore: false }
+      },
+    }, baseScope)
+    const claimed = await lagging.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await lagging.heartbeat(runId)).toMatchObject({ runId })
+    await lagging.report('one', 'Progress', 'note')
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
+    indexed = true
+    release(runId)
+    await lagging.report('one', 'After release', 'note-2')
+    // The remembered run ID still reaches the server, which reports the release.
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
+    await expect(lagging.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
+  })
+
   test('closes its own run once and forwards a retry of a finished run to the server', async () => {
     const { service } = fixture()
     const claimed = await service.transition('one', 1, 'coding', 'start', 'claim')

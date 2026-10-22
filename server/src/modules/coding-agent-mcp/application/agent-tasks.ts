@@ -56,6 +56,13 @@ export type AgentBlockers = {
  * @returns Task selection, lifecycle, progress, and status operations.
  */
 export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
+  /**
+   * Runs this process started, by task ID. The run list is read from an eventually consistent
+   * index, so a run started moments ago can be missing there; the server still validates every run
+   * ID this map supplies, and reports a released run as agent_run_not_active.
+   */
+  const startedRuns = new Map<string, string>()
+
   /** Verifies the optional process-wide Project restriction. */
   function inScope(task: AgentTask): AgentTask {
     if (scope.assignedProjectId !== undefined && task.assignedProjectId !== scope.assignedProjectId) {
@@ -123,7 +130,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   /** Builds the fence sent with every mutation of a task. */
   async function fenceFor(taskId: string): Promise<AgentRunMutationFence> {
     const run = (await activeRuns(true)).find((candidate) => candidate.workItemId === taskId)
-    return { agentInstanceId: scope.instanceId, ...(run ? { agentRunId: run.runId } : {}) }
+    const runId = run?.runId ?? startedRuns.get(taskId)
+    return { agentInstanceId: scope.instanceId, ...(runId ? { agentRunId: runId } : {}) }
   }
 
   /** Requires that an active run belongs to this instance before acting on it. */
@@ -131,10 +139,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     const own = (await activeRuns(true)).find((run) => run.runId === runId)
     if (own) return own
     const run = await api.getRun(runId)
-    if (run.state === 'active') {
-      throw new AgentTaskError('not_own_run', 'This run belongs to another agent instance. Do not operate on it; ask the user.')
-    }
-    return undefined
+    if (run.state !== 'active') return undefined
+    if ([...startedRuns.values()].includes(runId)) return run
+    throw new AgentTaskError('not_own_run', 'This run belongs to another agent instance. Do not operate on it; ask the user.')
   }
 
   /** Scans a complete bounded assignment queue; partial scans never masquerade as empty work. */
@@ -234,9 +241,11 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       }
     }
     if (action === 'start') {
-      return api.startRun(id, {
+      const started = await api.startRun(id, {
         expectedRevision, workflowStatusId, runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId,
       }, key)
+      startedRuns.set(id, started.run.runId)
+      return started
     }
     return api.update(id, { expectedRevision, workflowStatusId }, key, await fenceFor(id))
   }
@@ -336,7 +345,11 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     /** Closes this instance's own run; a finished run is forwarded so an identical retry can replay. */
     async finishRun(runId: string, outcome: AgentRunFinishOutcome, key: string) {
       await ownRun(runId)
-      return api.finishRun(runId, outcome, key)
+      const finished = await api.finishRun(runId, outcome, key)
+      for (const [taskId, startedRunId] of startedRuns) {
+        if (startedRunId === runId) startedRuns.delete(taskId)
+      }
+      return finished
     },
     /** Reads existing discussion without changing the task description or state. */
     async comments(id: string, cursor?: string, limit?: number) {
