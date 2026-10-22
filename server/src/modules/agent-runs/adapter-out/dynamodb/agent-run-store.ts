@@ -22,6 +22,7 @@ import {
 } from '../../domain/agent-run'
 import {
   AgentRunError,
+  createAgentRunCommitConflictError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
 } from '../../domain/agent-run-error'
@@ -789,6 +790,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       await this.#client.send(new TransactWriteCommand({ TransactItems: [...items] }))
     } catch (error) {
       if (isLeadingConditionalFailure(error, fenceItemCount)) throw createAgentRunNotActiveError()
+      if (isAwsNamedError(error, 'TransactionCanceledException')) throw createAgentRunCommitConflictError()
       throw error
     }
   }

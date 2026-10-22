@@ -283,8 +283,8 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 
 | Method / Path | 用途 |
 | --- | --- |
-| `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs` | Work Item 詳細の Run 履歴。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
-| `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Work Item の assignee または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
+| `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
+| `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
 | `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。 |
 
 `ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
@@ -404,7 +404,9 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   Run と claim を ConditionCheck で検証し、commit 後に lease を延長する。延長の失敗で comment
   を失敗にはしない。
 - `agentRunId` は `agentInstanceId` と一緒に送る。`agentInstanceId` だけの mutation は、別
-  instance の claim がない場合だけ成功する。
+  instance の claim がない場合だけ成功する。claim がなく、その Work Item の最新 Run が同じ instance
+  のもので `released` または `superseded` で終わっている場合は `agent_run_not_active` とする。
+  これにより、人が解放した後の agent は Run ID を送らなくなっても止まる。
 - Work Item の削除は `active` Run を `released` にし、claim を削除する。Run がない場合も claim が
   ないことを同じ transaction で検査し、削除と start の競合を防ぐ。
 - `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。

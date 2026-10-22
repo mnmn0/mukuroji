@@ -113,6 +113,16 @@ export async function resolveAgentRunFence(
       if (!holder || holder.state !== 'active') throw createAgentRunIntegrityError()
       throw createAgentRunConflictError(describeHoldingRun(holder, now))
     }
+    if (!claim) {
+      // An agent whose run a person released must stop even when it no longer sends the run ID.
+      const [latest] = (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs
+      if (
+        latest?.instanceIdHash === fence.instanceIdHash &&
+        (latest.outcome === 'released' || latest.outcome === 'superseded')
+      ) {
+        throw createAgentRunNotActiveError()
+      }
+    }
     return {}
   }
   const run = await store.getRun(principal.directoryId, teamId, fence.agentRunId)

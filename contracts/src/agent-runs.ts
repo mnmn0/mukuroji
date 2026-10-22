@@ -176,10 +176,10 @@ export type UpdateAgentSettingsRequest = {
   allowTakeoverAfterLeaseExpiry: boolean
 }
 
-/** Agent Run history of one Work Item for the Web application. */
+/** Newest Agent Runs of one Work Item for the Web application. */
 export type WorkItemAgentRunsResponse = {
   /** Runs, newest first. */
   items: AgentRunView[]
-  /** Opaque continuation for the next page. */
-  nextCursor?: string
+  /** Whether older runs exist beyond the returned ones. */
+  hasMore: boolean
 }

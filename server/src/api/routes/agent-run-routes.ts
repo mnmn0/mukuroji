@@ -76,19 +76,29 @@ async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Pro
 }
 
 /**
- * Projects a run for the Web application with the actions the viewer may take.
+ * Checks whether a member may release a run: a Team manager, the member who started it, or the
+ * Work Item's current assignee, who is responsible for the work after a reassignment.
  *
  * @param run - Stored run.
  * @param principal - Viewer.
  * @param manager - Whether the viewer manages the Team.
+ * @param workItemAssigneeUserId - Current assignee of the run's Work Item.
+ * @returns True when the viewer may release the run.
+ */
+function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager: boolean, workItemAssigneeUserId: string): boolean {
+  return manager || run.assigneeUserId === principal.userKey || workItemAssigneeUserId === principal.userKey
+}
+
+/**
+ * Projects a run for the Web application with the actions the viewer may take.
+ *
+ * @param run - Stored run.
+ * @param canRelease - Whether the viewer may release the run while it is active.
  * @param now - Read time.
  * @returns Run view.
  */
-function toAgentRunView(run: StoredAgentRun, principal: WorkspacePrincipal, manager: boolean, now: Date): AgentRunView {
-  return {
-    ...toAgentRun(run, now),
-    canRelease: run.state === 'active' && (manager || run.assigneeUserId === principal.userKey),
-  }
+function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date): AgentRunView {
+  return { ...toAgentRun(run, now), canRelease: run.state === 'active' && canRelease }
 }
 
 /**
@@ -119,19 +129,24 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const teamId = c.req.param('teamId')
       const workItemId = c.req.param('workItemId')
-      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      // The Web shows only the newest runs, so no store cursor, which encodes table keys, leaves the server.
       const page = await workItemDependencies.agentRuns.listWorkItemRuns(
         principal.directoryId,
         teamId,
         workItemId,
-        c.req.query('cursor') || undefined,
+        undefined,
         readHistoryLimit(c.req.query('limit')),
       )
       const manager = await isTeamManager(principal, teamId)
       const now = new Date()
       const response: WorkItemAgentRunsResponse = {
-        items: page.runs.map((run) => toAgentRunView(run, principal, manager, now)),
-        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        items: page.runs.map((run) => toAgentRunView(
+          run,
+          mayRelease(run, principal, manager, detail.issue.assigneeUserId),
+          now,
+        )),
+        hasMore: page.nextCursor !== undefined,
       }
       return c.json(response)
     } catch (error) {
@@ -150,14 +165,14 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
       const store = workItemDependencies.agentRuns
       const run = await store.getRun(principal.directoryId, teamId, runId)
       if (!run) throw new AgentRunError('not_found', 'Agent Run was not found.')
-      await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
       const manager = await isTeamManager(principal, teamId)
-      if (!manager && run.assigneeUserId !== principal.userKey) {
+      if (!mayRelease(run, principal, manager, detail.issue.assigneeUserId)) {
         throw new AgentRunError('forbidden', 'Only the Work Item assignee or a Team manager can release an Agent Run.')
       }
       const now = new Date()
       if (run.state !== 'active') {
-        if (run.outcome === 'released') return c.json(toAgentRunView(run, principal, manager, now))
+        if (run.outcome === 'released') return c.json(toAgentRunView(run, true, now))
         throw createAgentRunNotActiveError()
       }
       const released = finishAgentRun(run, 'released', principal.userKey, now)
@@ -169,7 +184,7 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
       )
       const closeItems = store.createCloseItems(released)
       await store.commit([...closeItems, ...(auditPut ? [auditPut] : [])], closeItems.length)
-      return c.json(toAgentRunView(released, principal, manager, now))
+      return c.json(toAgentRunView(released, true, now))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }

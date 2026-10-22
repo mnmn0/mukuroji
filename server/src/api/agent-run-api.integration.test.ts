@@ -5,11 +5,15 @@ import {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
+  finishAgentRun,
   hashAgentInstanceId,
   readStartAgentRunRequest,
   type StoredAgentRun,
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
+import { createMutationAuditContext } from '../modules/audit/audit'
+import { createAgentRunDeletionFences } from './shared/agent-run-access'
+import { resolveDeveloperCredentialPrincipal } from './shared/developer-platform-access'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
 import type { CollaborationClient } from '../modules/collaboration/collaboration'
 
@@ -247,6 +251,42 @@ describe('public Agent Run service', () => {
     ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
+  test('stops an agent whose run a person released, even when it omits the run ID', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const released = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'released', 'sato@example.com', new Date())
+    store.state.runs.set(`${workspaceId}|core-team|${released.runId}`, released)
+    const workItems = createCanonicalPublicWorkItemService()
+    const update = (instanceId: string, key: string) => runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: key }, undefined, { instanceIdHash: hashAgentInstanceId(instanceId) },
+    ))
+    await expect(update('laptop-1', 'released-1')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    // Another instance, and an instance whose own run completed, may still update the task.
+    await update('laptop-2', 'released-2')
+    const completed = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'completed', 'agent', new Date(Date.now() + 1_000))
+    store.state.runs.set(`${workspaceId}|core-team|${completed.runId}`, { ...completed, startedAt: new Date(Date.now() + 1_000).toISOString() })
+    await update('laptop-1', 'released-3')
+  })
+
+  test('releases an active run in the same transaction that deletes its Work Item', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const fences = await runWithTestAppDependencies(async () => {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, { permission: 'work-items.write', teamId: 'core-team', evaluateProjectScopes: true })
+      return createAgentRunDeletionFences(principal, 'core-team', 'task-1', createMutationAuditContext({
+        workspaceId, actor: { id: 'demo@example.com', kind: 'user' }, idempotencyKey: 'delete-1',
+        request: { method: 'DELETE', path: '/api/v1/work-items/task-1', body: {} },
+        source: { kind: 'api', requestId: 'delete-request', method: 'DELETE', route: '/api/v1/work-items/task-1' },
+      }), new Date())
+    })
+    expect(fences.every((fence) => fence.kind === 'agent-runs')).toBe(true)
+    expect(fences.length).toBeGreaterThanOrEqual(2)
+    store.applyTransactItems(fences.map((fence) => fence.transactWriteItem))
+    expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
+    expect(await store.getRun(workspaceId, 'core-team', held.runId)).toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com' })
+  })
+
   test('refuses heartbeats and finishes on another member run', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const foreign = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
@@ -277,12 +317,24 @@ describe('Web Agent Run routes', () => {
   })
 
   test('lets only the assignee or a Team manager release a run', async () => {
-    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', assigneeUserId: 'sato@example.com' })
     const foreign = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
     store.seed(foreign)
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(await history.json()).toMatchObject({ items: [{ runId: foreign.runId, canRelease: false }], hasMore: false })
     const denied = await app.request(`http://localhost/api/teams/core-team/agent-runs/${foreign.runId}/release`, { method: 'POST', headers })
     expect(denied.status).toBe(403)
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(true)
+  })
+
+  test('lets the current assignee release a run started before a reassignment', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', assigneeUserId: 'demo@example.com' })
+    const previous = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
+    store.seed(previous)
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(await history.json()).toMatchObject({ items: [{ runId: previous.runId, canRelease: true }] })
+    const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${previous.runId}/release`, { method: 'POST', headers })
+    expect(released.status).toBe(200)
   })
 
   test('reads defaults and saves Agent settings for Team managers with revision CAS', async () => {

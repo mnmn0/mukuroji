@@ -30,12 +30,12 @@ export async function listWorkItemAgentRuns(
     accessToken,
   )
   const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunView) : undefined
-  if (!items || items.some((item) => item === undefined) || (isRecord(data) && data.nextCursor !== undefined && typeof data.nextCursor !== 'string')) {
+  if (!isRecord(data) || !items || items.some((item) => item === undefined) || typeof data.hasMore !== 'boolean') {
     throw new WorkItemConfigurationApiError(502, 'Agent Run history returned an unexpected response.')
   }
   return {
     items: items.filter((item): item is AgentRunView => item !== undefined),
-    ...(isRecord(data) && typeof data.nextCursor === 'string' ? { nextCursor: data.nextCursor } : {}),
+    hasMore: data.hasMore,
   }
 }
 

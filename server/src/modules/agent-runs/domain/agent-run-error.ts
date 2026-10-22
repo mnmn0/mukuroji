@@ -112,3 +112,16 @@ export function createAgentRunIntegrityError(): AgentRunError {
     'Agent Run records are inconsistent. Retry later or ask an administrator to verify data integrity.',
   )
 }
+
+/**
+ * Reports that a run write was cancelled by a concurrent change outside the run itself,
+ * such as an idempotency receipt written by an identical request.
+ *
+ * @returns Retryable unavailable error; retrying with the same idempotency key is safe.
+ */
+export function createAgentRunCommitConflictError(): AgentRunError {
+  return new AgentRunError(
+    'temporarily_unavailable',
+    'The Agent Run change conflicted with a concurrent request. Retry with the same arguments and idempotency key.',
+  )
+}

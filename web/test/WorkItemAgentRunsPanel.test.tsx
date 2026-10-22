@@ -65,11 +65,13 @@ describe('Agent Run API', () => {
     const requests: string[] = []
     globalThis.fetch = async (input) => {
       requests.push(String(input))
-      return Response.json({ items: agentRunFixtures })
+      return Response.json({ items: agentRunFixtures, hasMore: false })
     }
     expect((await listWorkItemAgentRuns('token', 'core', 'task/1')).items).toHaveLength(3)
     expect(requests[0]).toBe('/api/teams/core/work-items/task%2F1/agent-runs')
-    globalThis.fetch = async () => Response.json({ items: [{ ...agentRunFixtures[0], runtime: 'unknown' }] })
+    globalThis.fetch = async () => Response.json({ items: [{ ...agentRunFixtures[0], runtime: 'unknown' }], hasMore: false })
+    await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => Response.json({ items: agentRunFixtures })
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
   })
 

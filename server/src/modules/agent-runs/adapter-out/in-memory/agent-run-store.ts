@@ -12,6 +12,7 @@ import {
 } from '../../domain/agent-run'
 import {
   AgentRunError,
+  createAgentRunCommitConflictError,
   createAgentRunNotActiveError,
 } from '../../domain/agent-run-error'
 import {
@@ -260,6 +261,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       ) {
         throw createAgentRunNotActiveError()
       }
+      if (error instanceof InMemoryTransactionCanceledError) throw createAgentRunCommitConflictError()
       throw error
     }
   }

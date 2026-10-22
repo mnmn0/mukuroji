@@ -1,5 +1,6 @@
 export {
   AgentRunError,
+  createAgentRunCommitConflictError,
   createAgentRunConflictError,
   createAgentRunForbiddenError,
   createAgentRunIntegrityError,

@@ -260,6 +260,24 @@ describe('DynamoDB Agent Run store', () => {
   })
 })
 
+describe('Agent Run commits', () => {
+  test('reports a cancelled run write as not active and any other cancellation as retryable', async () => {
+    const cancelled = (codes: string[]) => () => {
+      throw Object.assign(new Error('cancelled'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: codes.map((Code) => ({ Code })),
+      })
+    }
+    const finished = finishAgentRun(createRun(), 'completed', 'agent', now)
+    const runFailed = new DynamoDbAgentRunStore(createClient([cancelled(['ConditionalCheckFailed', 'None', 'None'])]).client, 'AgentRuns')
+    await expect(runFailed.commit([...runFailed.createCloseItems(finished), { Put: { TableName: 'Receipts', Item: {} } }], 2))
+      .rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    const receiptFailed = new DynamoDbAgentRunStore(createClient([cancelled(['None', 'None', 'ConditionalCheckFailed'])]).client, 'AgentRuns')
+    await expect(receiptFailed.commit([...receiptFailed.createCloseItems(finished), { Put: { TableName: 'Receipts', Item: {} } }], 2))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+})
+
 describe('in-memory Agent Run store', () => {
   test('admits one active run per Work Item and frees the claim on close', () => {
     const store = new InMemoryAgentRunStore()
