@@ -267,28 +267,40 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 
 | Method / Path | 用途 |
 | --- | --- |
-| `POST /v1/work-items/{workItemId}/agent-runs` | claim と `started` 遷移。body は `expectedRevision`、`workflowStatusId`、`runtime`、`agentName`、`instanceId`、`teamId`。 |
+| `POST /v1/work-items/{workItemId}/agent-runs?teamId=` | claim と `started` 遷移。body は `expectedRevision`、`workflowStatusId`、`runtime`、`agentName`、`instanceId`。Team は既存の Work Item route と同じく query で指定する。 |
 | `GET /v1/work-items/{workItemId}/agent-runs` | Work Item の Run 履歴。cursor pagination。 |
 | `GET /v1/agent-runs/{runId}` | Run 1 件。 |
-| `GET /v1/agent-runs?teamId=&state=&instanceId=` | Team の Run 一覧。`instanceId` は hash 前の値を送り、server が hash して照合する。 |
+| `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。閲覧できない Work Item の Run は返さない。 |
+| `GET /v1/agent-settings?teamId=` | Team の Agent settings。MCP の `get_configuration` が使う。 |
 | `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body なし。 |
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | `outcome` 付きの終了。 |
 | `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` | 停滞 Run の引き継ぎ。設定で許可時のみ。 |
 | `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` と `agentInstanceId` を追加。 |
 
-内部 API は `GET /api/teams/{teamId}/agent-runs` と
-`POST /api/teams/{teamId}/agent-runs/{runId}/release` を追加し、Web 画面だけが使う。
+内部 API は Web 画面だけが使い、Slice 1 では次を提供する。Team 全体の Run 一覧
+`GET /api/teams/{teamId}/agent-runs` は Factory board と同じ Slice 4 で追加する。
 
-Error は既存の `ApiProblem` に次の code を追加する。
+| Method / Path | 用途 |
+| --- | --- |
+| `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs` | Work Item 詳細の Run 履歴。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
+| `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Work Item の assignee または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
+| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。 |
 
-| Status | Code | 条件 |
-| --- | --- | --- |
-| `409` | `agent_run_conflict` | 対象 Work Item に別 instance の `active` Run がある |
-| `409` | `agent_run_not_active` | 指定 Run が `finished`、または対象 Work Item と一致しない |
-| `403` | `agent_run_forbidden` | credential の actor が Run の `assigneeUserId` と異なる |
-| `409` | `not_ready` | start 対象が Agent settings の Ready 条件を満たさない |
-| `422` | `invalid_artifact_url` | report の URL が許可形式でない |
+`ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
+Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem の `errors[].code` で返し、
+`pointer` に関係する request field を入れる。
+
+| Status | `code` | `errors[].code` | 条件 |
+| --- | --- | --- | --- |
+| `409` | `conflict` | `agent_run_conflict` | 対象 Work Item に別 instance の `active` Run がある。`detail` に保持 Run の agent 名、runtime、開始時刻、停滞かどうかを含める。 |
+| `409` | `conflict` | `agent_run_not_active` | 指定 Run が `finished`、別 instance のもの、または対象 Work Item と一致しない |
+| `403` | `forbidden` | `agent_run_forbidden` | credential の actor が Work Item または Run の `assigneeUserId` と異なる |
+| `409` | `conflict` | `invalid_transition` | start 対象が `backlog` / `unstarted` でない、または遷移先が `started` でない |
+| `409` | `conflict` | `not_ready` | start 対象が Agent settings の Ready 条件を満たさない（Slice 3） |
+| `422` | `validation_failed` | `invalid_artifact_url` | report の URL が許可形式でない（Slice 2） |
+
+Run と claim の行が食い違う場合は修復せず `503 temporarily_unavailable` とする。
 
 OpenAPI document と `api:contract:check` の baseline を同じ変更で更新する。
 
@@ -379,6 +391,29 @@ Slice 1 の MCP 結合 test は、同じ assignee の 2 つの MCP process を�
 一方の `start_task` 成功後に他方の `start_task` が `agent_run_conflict` になること、他方の
 `get_next_task` が `otherRuns` として報告し `in_progress` にしないこと、解放後に他方が開始
 できることを検証する。
+
+### Slice 1 の実装状況
+
+Slice 1 は実装済みである。設計からの具体化と、意図的に後へ回した点は次のとおり。
+
+- start は Public Work Item 更新と同じ経路（RBAC、workflow 遷移検証、revision CAS、
+  idempotency receipt）を通し、Run と claim の put、`agent-run.started` audit event を同じ
+  transaction に加える。receipt は `{ run, workItem }` を保存する。
+- PATCH の fence は Run の lease 延長と claim の ConditionCheck を Work Item 更新と同じ
+  transaction に入れる。comment の保存処理は ConditionCheck だけを受け付けるため、comment は
+  Run と claim を ConditionCheck で検証し、commit 後に lease を延長する。延長の失敗で comment
+  を失敗にはしない。
+- `agentRunId` は `agentInstanceId` と一緒に送る。`agentInstanceId` だけの mutation は、別
+  instance の claim がない場合だけ成功する。
+- Work Item の削除は `active` Run を `released` にし、claim を削除する。Run がない場合も claim が
+  ないことを同じ transaction で検査し、削除と start の競合を防ぐ。
+- `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
+- MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
+  `in_progress` とする。それ以外の自 Run は `ownRuns` に残し、agent に `finish_run` を促す。
+  Run のない `started` Work Item は再開対象にしない。
+- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、`allowTakeoverAfterLeaseExpiry`
+  を使う take over、data-integrity の verify script による claim / Run 不整合の検査。
+  不整合は読み取り時に fail-closed で検出する。
 
 ## 後続 Phase
 

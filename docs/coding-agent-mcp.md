@@ -22,9 +22,9 @@ MCPプロセスは公開APIへ接続するクライアントとして動作す�
 
 ## 接続
 
-1. この変更のコメントAPIを含むMukurojiサーバーを用意します。既存環境への反映には通常のサーバーリリースが必要です。新規テーブルやデータ移行はありません。
+1. Agent Run APIを含むMukurojiサーバーを用意します。Agent Runは新しい `AgentRunsTable` に保存するため、既存環境への反映にはCDKのデプロイが必要です。既存データの移行はありません。
 2. WorkspaceのDeveloper設定から `work-items:read` と `work-items:write` を持つAPIキーを作成します。キー所有者には対象Team/Projectへの閲覧・編集権限が必要です。OAuth access tokenも利用できますが、このMCPはtokenの自動更新を行いません。
-3. エージェントが担当する既存WorkspaceメンバーのIDとTeam IDを指定します。`ASSIGNEE_ID` は任意のエージェント名ではありません。表示用のエージェント名は `AGENT_NAME` で別途指定します。
+3. エージェントが担当する既存WorkspaceメンバーのIDとTeam IDを指定します。`ASSIGNEE_ID` は任意のエージェント名ではありません。表示用のエージェント名は `AGENT_NAME` で別途指定します。`start_task`、`heartbeat`、`finish_run` はcredentialの所有者とタスクの担当者が一致する場合だけ成功するため、`ASSIGNEE_ID` にはキー所有者自身のメンバーIDを指定します。
 4. リポジトリルートで `bun install --frozen-lockfile` を実行し、MCPクライアントに次の起動設定を登録します。
 
 `mcpServers` 形式に対応するクライアントでの例です。パス・URL・IDは実際の値に置き換えます。
@@ -40,7 +40,8 @@ tokenはクライアントの秘密情報設定または子プロセスへ引き
         "MUKUROJI_MCP_URL": "https://your-mukuroji.example.com",
         "MUKUROJI_MCP_TEAM_ID": "your-team-id",
         "MUKUROJI_MCP_ASSIGNEE_ID": "your-workspace-member-id",
-        "MUKUROJI_MCP_AGENT_NAME": "coding-agent"
+        "MUKUROJI_MCP_AGENT_NAME": "coding-agent",
+        "MUKUROJI_MCP_RUNTIME": "claude-code"
       }
     }
   }
@@ -62,6 +63,11 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `MUKUROJI_MCP_PROJECT_ID` | 任意 | 全操作を一つのProjectに限定 |
 | `MUKUROJI_MCP_AGENT_NAME` | 任意 | コメントに付ける表示名。既定 `coding-agent`、最大64文字 |
 | `MUKUROJI_MCP_READ_ONLY` | 任意 | `true` で読み取り6ツールのみ公開。既定 `false` |
+| `MUKUROJI_MCP_RUNTIME` | 任意 | Agent Runに記録するクライアント種別。`claude-code`、`codex`、`kiro`、`other`。既定 `other` |
+| `MUKUROJI_MCP_INSTANCE_ID` | 任意 | このエージェントインスタンスを区別する安定ID。最大256文字。未指定時はホスト名・OSユーザー名・runtime・担当者から導出したSHA-256だけを送ります。サーバーはさらにハッシュ化して保存し、元の値を返しません |
+
+同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
+同じマシン・同じOSユーザーで同じruntimeを複数起動する場合は、プロセスごとに異なる `INSTANCE_ID` を指定してください。
 
 配布用には `bun run mcp:build` で `server/dist/mcp.mjs` を生成できます。
 このファイルはBunで起動します。設定変更・token更新時はMCPプロセスを再起動してください。
@@ -72,30 +78,34 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | --- | --- |
 | `get_configuration` | 接続先Team・担当者、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
-| `get_task` | タスク本文・revision・現在状態と、未解決blockerの件数を取得 |
-| `get_next_task` | 設定された担当者の作業中タスクを優先表示し、未着手なら次の候補を選択 |
+| `get_task` | タスク本文・revision・現在状態、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうかを取得 |
+| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、なければAgent Runのない未着手候補を選択。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`）も返す |
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール |
 | `update_task` | タイトル・説明・優先度・custom fieldをrevision付きで更新 |
-| `start_task` | backlog/unstartedからstartedへ遷移。blockerを再確認し、同時更新をCASで排除 |
+| `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
 | `move_task` | 作業中から同じstartedカテゴリーの「レビュー中」「ブロック中」などへ移動 |
 | `report_progress` | 進捗・問題・テスト結果・PRリンクを、エージェント名付きコメントとして保存 |
 | `complete_task` | startedからcompletedへ遷移 |
 | `reopen_task` | completed/canceledからbacklog/unstartedへ戻す |
 | `cancel_task` | 未完了タスクをcanceledへ遷移 |
+| `heartbeat` | 自インスタンスのAgent Runのleaseを延長。10秒に1回まで |
+| `finish_run` | 自インスタンスのAgent Runを `completed`、`paused`、`failed` で終了。タスクのstatusは変えない |
 
 読み取りはcredentialの現在の権限範囲、更新はさらに設定された担当メンバーのタスクに限定します。
+タスクの更新・遷移・進捗報告には常にインスタンスIDを添え、自インスタンスがそのタスクのAgent Runを持つ場合はRun IDも添えます。他インスタンスがRunを持つタスクへの更新はサーバーが `agent_run_conflict` で拒否します。
 コメントにも設定されたProject・担当者の制約を公開APIへ渡し、保存時と再送時に検証します。担当変更は通常のMukuroji画面/APIで行います。複数エージェントで作業を分ける場合は担当メンバーやProjectを分けて設定できます。
 
 ## エージェントの作業手順
 
 1. `get_configuration` でstatus IDと必須fieldを確認します。`started` 等は共通カテゴリー名であり、status IDとは限りません。
 2. `get_work_status` と `get_next_task` を呼びます。候補は優先度 high→medium→low、期限の早い順（未設定は後）、作成日時、IDの順です。完了・取り消し・archive済みタスクは新規候補から除外します。
-3. `action: in_progress` は作業中という情報であり、別エージェントからの引き継ぎ許可ではありません。自分が着手済みの作業、またはユーザーから明示的に引き継いだ作業だけを再開します。
-4. `action: start` の場合、候補の `revision`、startedカテゴリーの `workflowStatusId`、新規UUIDの `idempotencyKey` を `start_task` に渡します。成功後に作業を開始します。候補取得だけでは着手済みになりません。
-5. `report_progress` に実装方針・進捗・blocker・検証結果・成果物リンクを記録します。タスクの説明は変更しません。既存コメントは `list_progress` で読みます。
+3. `action: in_progress` は、自インスタンスがAgent Runを持つstartedタスクです。そのまま再開します。`otherRuns` は同じメンバーの別インスタンスが持つタスクで、ユーザーから明示的に引き継がない限り続けません。`ownRuns` に残っていてタスクがstartedでないRunは `finish_run` で閉じます。
+4. `action: start` の場合、候補の `revision`、startedカテゴリーの `workflowStatusId`、新規UUIDの `idempotencyKey` を `start_task` に渡します。成功するとタスクとRunが返ります。成功後に作業を開始します。候補取得だけでは着手済みになりません。
+5. `report_progress` に実装方針・進捗・blocker・検証結果・成果物リンクを記録します。タスクの説明は変更しません。既存コメントは `list_progress` で読みます。更新と進捗報告はleaseを延長します。ツールを呼ばない長い作業ではlease切れの前に `heartbeat` を呼びます。
 6. レビュー待ちなどは該当するstatusを設定し、要求と必要な検証が満たされたら `complete_task` を呼びます。進捗コメントだけでは完了になりません。
+7. `complete_task` の後に `finish_run` を `outcome: completed` で呼びます。完了せずに止める場合は、レビュー待ち・blocker・ユーザーの指示なら `paused`、完了できないと判断した場合は `failed` で閉じます。
 
 例（IDとrevisionは実際の取得結果を使います）:
 
@@ -124,7 +134,11 @@ Webのタスク一覧・詳細から状態とコメントを確認できます�
 - `report_progress` は最大3900文字です。長い報告は複数コメントへ分けます。`update_task.description` は公開APIの制約に合わせ最大4096文字です。
 - コメントAPIはcanonical Collaboration保存先を読みます。新しい進捗コメントも常にcanonical保存先に入ります。
 - コメントはCollaborationの時系列索引から新しい順に読み、各索引行がコメントと一致することを検証します。不整合な索引行は `503` になり、不完全な順序を成功として返しません。
-- タスク状態を共有する機能です。エージェントの停止・切断監視、heartbeat、作業の自動実行、切断時の状態変更は行いません。不要になった作業は意図を確認して再オープン・取り消しなどで更新します。
+- Agent Runはleaseで有効期間を表します。leaseはTeamのAgent settings（既定30分、5〜240分）で決まり、Run開始時の値に固定されます。lease切れのRunはWebで「停滞」と表示されますが、自動では終了・再割り当てされず、人が解放するまでそのインスタンスのRunのままです。
+- `agent_run_conflict` は別インスタンスがタスクを保持していることを示します。`get_task` で保持者と停滞かどうかを確認し、ユーザーに相談してください。引き継ぎは行いません。
+- `agent_run_not_active` は自分のRunが終了済み、または人によって解放されたことを示します。そのタスクの作業を止めてユーザーへ報告します。
+- `agent_run_forbidden` はcredentialの所有者がタスク担当者ではないことを示します。`ASSIGNEE_ID` とキー所有者を確認してください。
+- Mukurojiはエージェントプロセスの起動・停止・切断監視、作業の自動実行、lease切れ時の状態変更を行いません。不要になった作業は意図を確認して再オープン・取り消し・Runの解放などで更新します。
 
 ## 検証
 
