@@ -1,4 +1,4 @@
-import type { WorkItemAgentRunsResponse } from '@mukuroji/contracts'
+import type { AgentRunView, WorkItemAgentRunsResponse } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import { listWorkItemAgentRuns } from '../api/agentRuns'
 
@@ -22,6 +22,21 @@ export function readAgentRunsRefreshDelay(latest: WorkItemAgentRunsResponse | un
   const untilExpiry = Date.parse(active.leaseExpiresAt) - now + 1_000
   if (!Number.isFinite(untilExpiry)) return agentRunsRefreshInterval
   return Math.min(agentRunsRefreshInterval, Math.max(minimumLeaseRefreshDelay, untilExpiry))
+}
+
+/**
+ * Replaces a run in the cached history with the server's response for it.
+ *
+ * @param current - Cached history, if any.
+ * @param run - Run as the server returned it.
+ * @returns History with the run replaced, or undefined when nothing is cached.
+ */
+export function applyAgentRunToHistory(
+  current: WorkItemAgentRunsResponse | undefined,
+  run: AgentRunView,
+): WorkItemAgentRunsResponse | undefined {
+  if (!current) return undefined
+  return { ...current, items: current.items.map((item) => item.runId === run.runId ? run : item) }
 }
 
 /**

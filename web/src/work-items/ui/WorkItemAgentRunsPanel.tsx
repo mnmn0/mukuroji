@@ -4,7 +4,7 @@ import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { Locale } from '../../shared/i18n/i18n'
 import { releaseAgentRun } from '../api/agentRuns'
 import { readAgentRunDisplayState, splitAgentRuns, type AgentRunDisplayState } from '../model/agentRunDisplay'
-import { useWorkItemAgentRuns } from '../queries/useWorkItemAgentRuns'
+import { applyAgentRunToHistory, useWorkItemAgentRuns } from '../queries/useWorkItemAgentRuns'
 import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from './agentRunLabels'
 
 /** Props of the pure Agent Run panel. */
@@ -78,12 +78,15 @@ export function WorkItemAgentRunsPanelContainer({
       isLoading={isLoading}
       labels={labels}
       onRelease={async (run) => {
-        await mutationRunner.run(
+        const released = await mutationRunner.run(
           `agent-run:release:${teamId}:${run.runId}`,
           run.runId,
           (context) => releaseAgentRun(accessToken, teamId, run.runId, context),
         )
-        await mutate()
+        // The release is committed: show it from the response, and keep a failed refresh from
+        // reporting the release as failed.
+        await mutate((current) => applyAgentRunToHistory(current, released), { revalidate: false })
+        void mutate().catch(() => undefined)
       }}
       onRetry={async () => {
         await mutate()

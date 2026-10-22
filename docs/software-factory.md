@@ -150,10 +150,12 @@ put、finish / release / take over の transaction で同じ `runId` 条件付�
 claim row が残り Run row が `finished` になった不整合は strict reader が fail-closed で `503` とし、
 [data-integrity](data-integrity.md) の verify script に検査を追加する。
 
-revocation row は Run を `released` または `superseded` で閉じる transaction で書き（Work Item 自体を
-削除する場合は書かない）、同じ member と
+revocation row は Run を `released` または `superseded` で閉じる transaction で書き、同じ member と
 instance がその Work Item で Run を開始する transaction でだけ削除する。別 instance の Run が開始・
-終了しても消えない。結果整合の `WorkItemRunIndex` は fence の判断に使わない。
+終了しても消えない。Work Item の削除で Run を解放する場合も書く。Work Item ID は削除後に同じ
+title から再作成されると再利用されるため、revocation row は解放済み instance が再作成された Work Item を
+Run なしで更新しないための tombstone を兼ね、Run row と同じく Work Item の削除後も保持する。
+結果整合の `WorkItemRunIndex` は fence の判断に使わない。
 
 Run は Work Item の archive / delete に従う。Work Item を削除または archive する transaction は
 `active` Run を `released` として閉じ、claim row を削除する。Retention は Work Item と同じとし、Run だけを

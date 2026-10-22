@@ -19,7 +19,6 @@ import {
 } from '../../domain/agent-run-error'
 import {
   DynamoDbAgentRunStore,
-  type AgentRunCloseOptions,
   type AgentRunFenceInput,
   type AgentRunPage,
   type AgentRunStore,
@@ -245,8 +244,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, options?: AgentRunCloseOptions): AgentRunTransactItem[] {
-    const [runUpdate, claimDelete, revocationPut] = this.#builder.createCloseItems(run, expectedInstanceIdHash, options)
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
+    const [runUpdate, claimDelete, revocationPut] = this.#builder.createCloseItems(run, expectedInstanceIdHash)
     if (!runUpdate || !claimDelete) throw new Error('The close builder returned an unexpected item count.')
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const claimKey = key(run.directoryId, run.teamId, run.workItemId)

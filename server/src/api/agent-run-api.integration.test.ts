@@ -418,8 +418,13 @@ describe('public Agent Run service', () => {
     store.applyTransactItems(fences.map((fence) => fence.transactWriteItem))
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
     expect(await store.getRun(workspaceId, 'core-team', held.runId)).toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com' })
-    // Nothing can act on a deleted Work Item again, so no revocation is left behind.
-    expect(store.state.revocations.size).toBe(0)
+    // Work Item IDs can be reused after deletion, so the released instance stays revoked on the ID.
+    expect(store.state.revocations.size).toBe(1)
+    const workItems = createCanonicalPublicWorkItemService()
+    await expect(runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Recreated' },
+      { requestId: 'update', idempotencyKey: 'after-delete-1' }, undefined, { instanceIdHash: held.instanceIdHash },
+    ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
   test('keeps Agent Run audit events apart from the Work Item event in the same transaction', () => {

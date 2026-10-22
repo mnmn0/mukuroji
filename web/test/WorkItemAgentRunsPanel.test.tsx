@@ -4,9 +4,9 @@ import { listWorkItemAgentRuns, releaseAgentRun } from '../src/work-items/api/ag
 import { agentRunFixtures, stalledAgentRunFixture } from '../src/work-items/agentRunFixtures'
 import { readAgentRunDisplayState, splitAgentRuns } from '../src/work-items/model/agentRunDisplay'
 import { WorkItemAgentRunsPanel } from '../src/work-items/ui/WorkItemAgentRunsPanel'
-import { readAgentRunsRefreshDelay } from '../src/work-items/queries/useWorkItemAgentRuns'
+import { applyAgentRunToHistory, readAgentRunsRefreshDelay } from '../src/work-items/queries/useWorkItemAgentRuns'
 import { createWorkItemAgentRunsLabels } from '../src/work-items/ui/agentRunLabels'
-import { DEFAULT_WORK_ITEM_TYPE, type WorkItemDetailSectionId } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE, type AgentRunView, type WorkItemDetailSectionId } from '@mukuroji/contracts'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
@@ -129,6 +129,15 @@ describe('WorkItemAgentRunsPanel', () => {
     const { active, history } = splitAgentRuns(agentRunFixtures)
     expect(active?.runId).toBe(agentRunFixtures[0]?.runId)
     expect(history).toHaveLength(2)
+  })
+
+  test('shows a committed release from its response without waiting for a refresh', () => {
+    const [active, ...rest] = agentRunFixtures
+    if (!active) throw new Error('The fixtures need an active run.')
+    const released: AgentRunView = { ...active, state: 'finished', outcome: 'released', canRelease: false }
+    const updated = applyAgentRunToHistory({ items: agentRunFixtures, hasMore: true }, released)
+    expect(updated).toEqual({ items: [released, ...rest], hasMore: true })
+    expect(applyAgentRunToHistory(undefined, released)).toBeUndefined()
   })
 })
 
