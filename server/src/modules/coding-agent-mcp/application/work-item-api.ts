@@ -1,4 +1,5 @@
 import type {
+  AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunRuntime, AgentSettings,
   CanonicalWorkItem, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
@@ -55,6 +56,34 @@ export type AgentTaskFilters = {
   workItemTypeId?: string
 }
 
+/** Agent Run as returned by the public API. */
+export type AgentRunRecord = AgentRun
+
+/** Team Agent settings as returned by the public API. */
+export type AgentSettingsRecord = AgentSettings
+
+/** Input that claims a task for this agent instance. */
+export type AgentRunStartInput = {
+  /** Task revision read before deciding to start. */
+  expectedRevision: number
+  /** Started-category status the task moves to. */
+  workflowStatusId: string
+  /** Client runtime of this process. */
+  runtime: AgentRunRuntime
+  /** Display name of this agent. */
+  agentName: string
+  /** Stable instance identifier of this process. */
+  instanceId: string
+}
+
+/** Filters for listing the Team's active runs. */
+export type AgentRunFilters = {
+  /** Restricts the list to runs of this assignee. */
+  assigneeUserId?: string
+  /** Restricts the list to runs started by this instance. */
+  instanceId?: string
+}
+
 /** Remote canonical task operations; every request authenticates with a scoped credential. */
 export interface AgentWorkItemApi {
   /**
@@ -89,9 +118,10 @@ export interface AgentWorkItemApi {
    * @param id - Task identifier within the configured Team.
    * @param input - Requested changes and the expected task revision.
    * @param key - Idempotency key reused only for this exact logical operation.
+   * @param fence - Optional Agent Run fence identifying this instance and its run.
    * @returns The updated task or its authorized idempotent receipt.
    */
-  update(id: string, input: UpdatePublicWorkItemRequest, key: string): Promise<AgentTask>
+  update(id: string, input: UpdatePublicWorkItemRequest, key: string, fence?: AgentRunMutationFence): Promise<AgentTask>
   /**
    * Reads comments and replies without exposing internal cursors.
    * @param id - Task whose discussion is requested.
@@ -108,9 +138,62 @@ export interface AgentWorkItemApi {
    * @param key - Idempotency key reused only for this exact logical operation.
    * @param assignedProjectId - Optional Project restriction enforced on persistence and replay.
    * @param assigneeUserId - Optional assignee restriction enforced on persistence and replay.
+   * @param fence - Optional Agent Run fence identifying this instance and its run.
    * @returns The created canonical comment or its authorized idempotent receipt.
    */
-  comment(id: string, body: string, key: string, assignedProjectId?: string, assigneeUserId?: string): Promise<TeamIssueCommentResponseItem>
+  comment(id: string, body: string, key: string, assignedProjectId?: string, assigneeUserId?: string, fence?: AgentRunMutationFence): Promise<TeamIssueCommentResponseItem>
+  /**
+   * Claims a task and moves it to a started status in one server transaction.
+   * @param id - Task identifier within the configured Team.
+   * @param input - Revision, target status, and instance identity.
+   * @param key - Idempotency key reused only for this exact logical operation.
+   * @returns The new run and the started task.
+   */
+  startRun(id: string, input: AgentRunStartInput, key: string): Promise<{
+    /** New run. */
+    run: AgentRunRecord
+    /** Started task. */
+    task: AgentTask
+  }>
+  /**
+   * Lists one page of the Team's active runs.
+   * @param filters - Assignee and instance restrictions.
+   * @param cursor - Continuation from a page with the same filters.
+   * @returns Active runs visible to the credential owner.
+   */
+  listActiveRuns(filters: AgentRunFilters, cursor?: string): Promise<AgentPage<AgentRunRecord>>
+  /**
+   * Lists the newest runs of one task.
+   * @param id - Task identifier within the configured Team.
+   * @param limit - Maximum number of runs.
+   * @returns Runs, newest first.
+   */
+  taskRuns(id: string, limit: number): Promise<AgentPage<AgentRunRecord>>
+  /**
+   * Reads one run.
+   * @param runId - Run identifier.
+   * @returns The run.
+   */
+  getRun(runId: string): Promise<AgentRunRecord>
+  /**
+   * Extends a run lease.
+   * @param runId - Run identifier.
+   * @returns The run with its extended lease.
+   */
+  heartbeat(runId: string): Promise<AgentRunRecord>
+  /**
+   * Closes a run.
+   * @param runId - Run identifier.
+   * @param outcome - Finish reason.
+   * @param key - Idempotency key reused only for this exact logical operation.
+   * @returns The finished run.
+   */
+  finishRun(runId: string, outcome: AgentRunFinishOutcome, key: string): Promise<AgentRunRecord>
+  /**
+   * Reads the Team Agent settings.
+   * @returns Current settings or the defaults.
+   */
+  agentSettings(): Promise<AgentSettingsRecord>
 }
 
 /** Safe, transport-independent error that may be returned to the MCP client. */
