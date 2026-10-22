@@ -306,6 +306,7 @@ function bindApiRuntimeConfiguration(
     planningTable,
     projectDirectoryTable,
     pushSubscriptionsTable,
+    agentRunsTable,
     realtimeSessionsTable,
     requestIntakeTable,
     teamIssueEventsTable,
@@ -493,6 +494,7 @@ function bindApiRuntimeConfiguration(
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
       PUSH_SUBSCRIPTIONS_TABLE_NAME: pushSubscriptionsTable.tableName,
+      AGENT_RUNS_TABLE_NAME: agentRunsTable.tableName,
       WEB_PUSH_VAPID_PUBLIC_KEY: webPushVapidPublicKey.valueAsString,
       FOCUS_TABLE_NAME: focusTable.tableName,
       CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
@@ -581,6 +583,7 @@ export function buildApiRuntime(
     tenantAdministrationTable,
     notificationsTable,
     pushSubscriptionsTable,
+    agentRunsTable,
     focusTable,
     planningTable,
     projectDirectoryTable,
@@ -714,6 +717,7 @@ export function buildApiRuntime(
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
   pushSubscriptionsTable.grants.readWriteData(apiFunction);
+  agentRunsTable.grants.readWriteData(apiFunction);
   apiFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',

@@ -1,5 +1,8 @@
 import { z } from 'zod'
-import type { AgentCatalog, AgentPage, AgentTask, AgentWorkItemApi } from '../../application/work-item-api'
+import { AGENT_RUN_PROBLEM_REASONS } from '@mukuroji/contracts'
+import type {
+  AgentCatalog, AgentPage, AgentRunRecord, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
+} from '../../application/work-item-api'
 import { AgentTaskError } from '../../application/work-item-api'
 
 const identifier = z.string().min(1).max(256).refine((value) => value !== '.' && value !== '..')
@@ -31,9 +34,33 @@ const catalogSchema: z.ZodType<AgentCatalog> = z.object({
 const commentSchema = z.object({
   id: identifier, actorUserId: identifier, body: z.string(), createdAt: z.iso.datetime(),
 })
-const idempotencyProblemSchema = z.object({
-  status: z.literal(409), code: z.literal('idempotency_conflict'), retryable: z.boolean(),
+const runSchema: z.ZodType<AgentRunRecord> = z.object({
+  schemaVersion: z.literal(1), runId: z.string().regex(/^run_[0-9a-f-]{36}$/u), teamId: identifier,
+  workItemId: identifier, assigneeUserId: identifier,
+  runtime: z.enum(['claude-code', 'codex', 'kiro', 'other']), agentName: z.string().min(1).max(64),
+  state: z.enum(['active', 'finished']),
+  outcome: z.enum(['completed', 'paused', 'failed', 'released', 'superseded']).optional(),
+  startRevision: z.number().int().positive(), leaseMinutes: z.number().int().positive(),
+  startedAt: z.iso.datetime(), lastHeartbeatAt: z.iso.datetime(), leaseExpiresAt: z.iso.datetime(),
+  stalled: z.boolean(), finishedAt: z.iso.datetime().optional(), finishedBy: z.string().min(1).optional(),
+  reportCount: z.number().int().nonnegative(),
 })
+const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
+  leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
+  updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
+})
+const problemSchema = z.object({
+  status: z.number().int(), code: z.string(), retryable: z.boolean(),
+  errors: z.array(z.object({ code: z.string() })).max(20).optional(),
+})
+/** Safe guidance for Agent Run fence reasons; remote detail text is never forwarded. */
+const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string> = {
+  agent_run_conflict: 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; do not take it over.',
+  agent_run_not_active: 'Your Agent Run is no longer active for this task (finished or released by a person). Stop working on it and report the situation to the user.',
+  agent_run_forbidden: 'Only the task assignee can start or operate an Agent Run with this credential. Check MUKUROJI_MCP_ASSIGNEE_ID and the credential owner.',
+  invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
+}
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */
 async function readBody(response: Response, maximumBytes: number): Promise<string> {
@@ -58,15 +85,21 @@ async function readBody(response: Response, maximumBytes: number): Promise<strin
   return new TextDecoder().decode(bytes)
 }
 
-/** Extracts only allowlisted retry metadata; remote messages and malformed bodies remain private. */
-async function readIdempotencyProblem(response: Response) {
-  if (response.status !== 409 || !response.headers.get('content-type')?.includes('application/problem+json')) {
+/** Extracts only allowlisted codes and retry metadata; remote messages and malformed bodies remain private. */
+async function readProblem(response: Response) {
+  if (![403, 409].includes(response.status) || !response.headers.get('content-type')?.includes('application/problem+json')) {
     await response.body?.cancel()
     return undefined
   }
   try {
-    const parsed = idempotencyProblemSchema.safeParse(JSON.parse(await readBody(response, 64 * 1024)))
-    return parsed.success ? parsed.data : undefined
+    const parsed = problemSchema.safeParse(JSON.parse(await readBody(response, 64 * 1024)))
+    if (!parsed.success || parsed.data.status !== response.status) return undefined
+    const reason = AGENT_RUN_PROBLEM_REASONS.find((candidate) => parsed.data.errors?.some((error) => error.code === candidate))
+    return {
+      idempotencyConflict: response.status === 409 && parsed.data.code === 'idempotency_conflict',
+      retryable: parsed.data.retryable,
+      ...(reason === undefined ? {} : { reason }),
+    }
   } catch {
     return undefined
   }
@@ -126,15 +159,19 @@ export function createAgentWorkItemApi(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
       if (!response.ok) {
-        const problem = await readIdempotencyProblem(response)
+        const problem = await readProblem(response)
         const retry = response.headers.get('Retry-After')
         const retrySeconds = retry && /^\d{1,6}$/.test(retry) ? Number(retry) : undefined
+        if (problem?.reason) {
+          throw new AgentTaskError(problem.reason, `Public API returned HTTP ${response.status}. ${reasonMessages[problem.reason]}`)
+        }
+        const idempotencyRetry = problem?.idempotencyConflict === true && problem.retryable
         const code = response.status === 401 ? 'unauthorized' : response.status === 403 ? 'forbidden' :
-          response.status === 404 ? 'not_found' : response.status === 409 ? (problem?.code ?? 'conflict') :
+          response.status === 404 ? 'not_found' : response.status === 409 ? (problem?.idempotencyConflict ? 'idempotency_conflict' : 'conflict') :
           response.status === 429 ? 'rate_limited' : response.status >= 500 ? 'unavailable' : 'invalid_request'
         throw new AgentTaskError(code,
-          `Public API returned HTTP ${response.status}. ${problem?.retryable ? 'The original operation is still in progress. Retry only the identical arguments and idempotencyKey.' : code === 'conflict' ? 'Reload the task; for an uncertain previous response retry the identical arguments and idempotencyKey.' : 'Check the credential, task access, and current workflow/field requirements.'}`,
-          problem?.retryable === true || response.status === 429 || response.status >= 500, retrySeconds)
+          `Public API returned HTTP ${response.status}. ${idempotencyRetry ? 'The original operation is still in progress. Retry only the identical arguments and idempotencyKey.' : code === 'conflict' ? 'Reload the task; for an uncertain previous response retry the identical arguments and idempotencyKey.' : 'Check the credential, task access, and current workflow/field requirements.'}`,
+          idempotencyRetry || response.status === 429 || response.status >= 500, retrySeconds)
       }
       if (!response.headers.get('content-type')?.includes('application/json') || !response.body) {
         await response.body?.cancel()
@@ -148,6 +185,14 @@ export function createAgentWorkItemApi(
       if (error instanceof SyntaxError) throw new AgentTaskError('invalid_response', 'The public API returned malformed JSON.')
       throw new AgentTaskError('transport', 'The API request failed or timed out. Retry mutations only with identical arguments and the same idempotencyKey.', true)
     }
+  }
+
+  /** Checks that a run belongs to the configured Team before exposing it. */
+  function scopedRun(run: AgentRunRecord, runId?: string): AgentRunRecord {
+    if (run.teamId !== config.teamId || (runId !== undefined && run.runId !== runId)) {
+      throw new AgentTaskError('invalid_response', 'The API returned a mismatched run scope.')
+    }
+    return run
   }
 
   /** Checks the response scope before exposing a task to the caller. */
@@ -174,11 +219,42 @@ export function createAgentWorkItemApi(
     },
     /** Creates a canonical task with the original idempotency key. */
     async create(input, key) { return scoped(await request('work-items', taskSchema, 'POST', { ...input, teamId: config.teamId }, key)) },
-    /** Forwards revision and idempotency without silently retrying conflicts. */
-    async update(id, input, key) { return scoped(await request(`work-items/${encodeURIComponent(id)}`, taskSchema, 'PATCH', input, key), id) },
+    /** Forwards revision, run fence, and idempotency without silently retrying conflicts. */
+    async update(id, input, key, fence) { return scoped(await request(`work-items/${encodeURIComponent(id)}`, taskSchema, 'PATCH', { ...input, ...fence }, key), id) },
     /** Reads a bounded canonical discussion page. */
     async comments(id, cursor, limit = 50, assignedProjectId) { return request(`work-items/${encodeURIComponent(id)}/comments`, pageSchema(commentSchema), 'GET', undefined, undefined, { cursor, limit, assignedProjectId }) },
-    /** Appends one idempotent progress comment. */
-    async comment(id, body, key, assignedProjectId, assigneeUserId) { return request(`work-items/${encodeURIComponent(id)}/comments`, commentSchema, 'POST', { body }, key, { assignedProjectId, assigneeUserId }) },
+    /** Appends one idempotent progress comment, fenced by the run when one is given. */
+    async comment(id, body, key, assignedProjectId, assigneeUserId, fence) { return request(`work-items/${encodeURIComponent(id)}/comments`, commentSchema, 'POST', { body, ...fence }, key, { assignedProjectId, assigneeUserId }) },
+    /** Claims a task through the run start endpoint. */
+    async startRun(id, input, key) {
+      const started = await request(`work-items/${encodeURIComponent(id)}/agent-runs`, z.object({ run: runSchema, workItem: taskSchema }), 'POST', input, key)
+      return { run: scopedRun(started.run), task: scoped(started.workItem, id) }
+    },
+    /** Lists one page of active runs. */
+    async listActiveRuns(filters, cursor) {
+      const page = await request('agent-runs', pageSchema(runSchema), 'GET', undefined, undefined, { state: 'active', ...filters, cursor, limit: 100 })
+      return { ...page, items: page.items.map((run) => scopedRun(run)) }
+    },
+    /** Lists the newest runs of one task. */
+    async taskRuns(id, limit) {
+      const page = await request(`work-items/${encodeURIComponent(id)}/agent-runs`, pageSchema(runSchema), 'GET', undefined, undefined, { limit })
+      return { ...page, items: page.items.map((run) => scopedRun(run)) }
+    },
+    /** Reads one run. */
+    async getRun(runId) { return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}`, runSchema), runId) },
+    /** Extends a run lease; heartbeats need no idempotency key. */
+    async heartbeat(runId, instanceId) {
+      return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/heartbeat`, runSchema, 'POST', { instanceId }), runId)
+    },
+    /** Closes a run with the original idempotency key. */
+    async finishRun(runId, outcome, instanceId, key) {
+      return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/finish`, runSchema, 'POST', { outcome, instanceId }, key), runId)
+    },
+    /** Reads Team Agent settings. */
+    async agentSettings() {
+      const settings = await request('agent-settings', settingsSchema)
+      if (settings.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
+      return settings
+    },
   }
 }

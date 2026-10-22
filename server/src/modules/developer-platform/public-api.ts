@@ -4,8 +4,11 @@ import {
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
+  type AgentRun,
+  type AgentSettings,
   type ApiProblem,
   type ApiProblemCode,
+  type ApiProblemViolation,
   type ApiScope,
   type CanonicalWorkItem,
   type ConnectorAuthorizationOutput,
@@ -34,9 +37,24 @@ import {
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
   type WorkItemTypeChangeResolution,
+  type StartAgentRunResponse,
   type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
+import {
+  AgentRunError,
+  hashAgentInstanceId,
+  readAgentInstanceId,
+  readAgentRunId,
+  readAgentRunMutationFence,
+  readFinishAgentRunRequest,
+  readHeartbeatAgentRunRequest,
+  readStartAgentRunRequest,
+  splitAgentRunMutationFence,
+  type ValidatedAgentRunFence,
+  type ValidatedAgentRunFinish,
+  type ValidatedAgentRunStart,
+} from '../agent-runs'
 import type {
   ApiKeyPort,
   AuthenticatedDeveloperCredential,
@@ -163,6 +181,7 @@ export interface PublicWorkItemService {
    * @param context - Request, correlation, and idempotency identifiers for this mutation.
    * @param assignedProjectId - Optional Project restriction enforced when persisting the comment.
    * @param assigneeUserId - Optional assignee restriction enforced when persisting the comment.
+   * @param agentRunFence - Optional Agent Run fence sent by a coding agent.
    * @returns The created canonical comment response item.
    */
   addComment(
@@ -173,6 +192,7 @@ export interface PublicWorkItemService {
     context: PublicMutationContext,
     assignedProjectId?: string,
     assigneeUserId?: string,
+    agentRunFence?: ValidatedAgentRunFence,
   ): Promise<TeamIssueCommentResponseItem>
   /** Credential owner の current RBAC で Work Items を bounded page 取得します。 */
   list(
@@ -239,7 +259,17 @@ export interface PublicWorkItemService {
     workItemId: string,
     input: UpdatePublicWorkItemRequest,
   ): Promise<void>
-  /** Current RBAC/configuration/CAS を通して Work Item を更新します。 */
+  /**
+   * Updates a Work Item through current RBAC, configuration validation, and revision CAS.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Updated Work Item.
+   * @param input - Validated patch without Agent Run fence fields.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @param agentRunFence - Optional Agent Run fence sent by a coding agent.
+   * @returns The updated Work Item.
+   */
   update(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
@@ -247,6 +277,7 @@ export interface PublicWorkItemService {
     input: UpdatePublicWorkItemRequest,
     context: PublicMutationContext,
     idempotency?: IdempotencyMutationToken,
+    agentRunFence?: ValidatedAgentRunFence,
   ): Promise<CanonicalWorkItem>
   /** Work Item 削除 receipt の replay 前に current delete RBAC を再評価します。 */
   authorizeDelete(
@@ -313,6 +344,139 @@ export interface PublicWorkItemService {
     /** 次 page の store-bound opaque continuation です。 */
     nextContinuation?: string
   }>
+}
+
+/** Filters for listing a Team's Agent Runs. */
+export type PublicAgentRunListFilters = {
+  /** Lifecycle state to list. */
+  state: 'active' | 'finished'
+  /** Hash of the instance ID the caller sent, restricting the list to that instance. */
+  instanceIdHash?: string
+  /** Responsible member restriction. */
+  assigneeUserId?: string
+}
+
+/** Public Agent Run API and the canonical Work Item and run persistence behind it. */
+export interface PublicAgentRunService {
+  /**
+   * Revalidates start permissions before replaying a start receipt.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Claimed Work Item.
+   * @returns A promise that resolves when the caller may still start runs on the Work Item.
+   */
+  authorizeStart(credential: AuthenticatedDeveloperCredential, teamId: string, workItemId: string): Promise<void>
+  /**
+   * Claims a Work Item and moves it to a started status in one transaction.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Claimed Work Item.
+   * @param input - Validated start input.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @returns The new run and the started Work Item.
+   */
+  start(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: ValidatedAgentRunStart,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<StartAgentRunResponse>
+  /**
+   * Lists a Work Item's runs, newest first.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item.
+   * @param continuation - Internal continuation from the signed cursor.
+   * @param limit - Page size.
+   * @returns One page of runs.
+   */
+  listWorkItemRuns(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<PublicAgentRunPage>
+  /**
+   * Lists a Team's runs the caller can see.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param filters - State, instance, and assignee filters.
+   * @param continuation - Internal continuation from the signed cursor.
+   * @param limit - Page size.
+   * @returns One page of runs; a page can be empty and still continue.
+   */
+  list(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    filters: PublicAgentRunListFilters,
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<PublicAgentRunPage>
+  /**
+   * Reads one run the caller can see.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param runId - Run ID.
+   * @returns The run.
+   */
+  get(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string): Promise<AgentRun>
+  /**
+   * Extends the lease of the caller's own active run.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param runId - Run ID.
+   * @param instanceIdHash - Hash of the instance ID that started the run.
+   * @returns The run with its extended lease.
+   */
+  heartbeat(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string, instanceIdHash: string): Promise<AgentRun>
+  /**
+   * Revalidates finish permissions before replaying a finish receipt.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param runId - Run ID.
+   * @param instanceIdHash - Hash of the instance ID that started the run.
+   * @returns A promise that resolves when the caller still owns the run.
+   */
+  authorizeFinish(credential: AuthenticatedDeveloperCredential, teamId: string, runId: string, instanceIdHash: string): Promise<void>
+  /**
+   * Closes the caller's own active run.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param runId - Run ID.
+   * @param request - Finish reason and the hash of the instance ID that started the run.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @returns The finished run.
+   */
+  finish(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    runId: string,
+    request: ValidatedAgentRunFinish,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<AgentRun>
+  /**
+   * Reads Team Agent settings.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @returns Current settings or the defaults.
+   */
+  getSettings(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<AgentSettings>
+}
+
+/** One page of runs from the Agent Run service. */
+export type PublicAgentRunPage = {
+  /** Runs in service order. */
+  items: AgentRun[]
+  /** Whether another page exists. */
+  hasMore: boolean
+  /** Internal continuation wrapped in the signed public cursor. */
+  nextContinuation?: string
 }
 
 /** Provider OAuth と sync-conflict recovery を実装する optional connector 境界です。 */
@@ -410,6 +574,8 @@ export type PublicApiDependencies = {
   ): Promise<DeveloperManagementPrincipal>
   /** Canonical Work Item/RBAC adapter です。 */
   workItems: PublicWorkItemService
+  /** Agent Run adapter; Agent Run routes report unavailable when it is not configured. */
+  agentRuns?: PublicAgentRunService
   /** Public OpenAPI 3.1 document です。 */
   openApiDocument: Record<string, unknown>
   /** Scope-bound cursor を署名する secret です。 */
@@ -503,14 +669,30 @@ export class PublicApiServiceError extends Error {
   readonly code: ApiProblemCode
   /** Client が安全に retry できる可能性です。 */
   readonly retryable: boolean
+  /** Field-level or reason-level details returned as `errors`. */
+  readonly violations?: readonly ApiProblemViolation[]
 
-  /** Stable public error を作成します。 */
-  constructor(status: number, code: ApiProblemCode, message: string, retryable = false) {
+  /**
+   * Stable public error を作成します。
+   * @param status - HTTP status.
+   * @param code - Stable problem code.
+   * @param message - Safe detail text.
+   * @param retryable - Whether the same request may be retried.
+   * @param violations - Optional details returned as `errors`.
+   */
+  constructor(
+    status: number,
+    code: ApiProblemCode,
+    message: string,
+    retryable = false,
+    violations?: readonly ApiProblemViolation[],
+  ) {
     super(message)
     this.name = 'PublicApiServiceError'
     this.status = status
     this.code = code
     this.retryable = retryable
+    this.violations = violations
   }
 }
 
@@ -681,11 +863,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const assignedProjectId = c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId')
     const assigneeUserId = c.req.query('assigneeUserId') === undefined ? undefined : readRouteId(c.req.query('assigneeUserId') ?? '', 'assigneeUserId')
     const input = requireRecord(await readJson(c), 'Comment body is required.')
-    assertAllowedFields(input, ['body'], 'Comment')
+    assertAllowedFields(input, ['body', 'agentRunId', 'agentInstanceId'], 'Comment')
     const body = readRequiredString(input.body, 'body')
-    return executeIdempotentJson(c, dependencies, credential, { body }, async (context) => ({
+    const { fence: rawFence } = splitAgentRunMutationFence(input)
+    const agentRunFence = readAgentRunMutationFence(rawFence)
+    return executeIdempotentJson(c, dependencies, credential, { body, ...rawFence }, async (context) => ({
       status: 201,
-      body: await dependencies.workItems.addComment(credential, teamId, workItemId, body, context, assignedProjectId, assigneeUserId),
+      body: await dependencies.workItems.addComment(
+        credential, teamId, workItemId, body, context, assignedProjectId, assigneeUserId, agentRunFence,
+      ),
     }), {
       authorizeReplay: () => dependencies.workItems.authorizeComment(credential, teamId, workItemId, assignedProjectId, assigneeUserId),
     })
@@ -725,14 +911,18 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.patch('/v1/work-items/:workItemId', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
-    const body = readUpdatePublicWorkItemRequest(await readJson(c))
+    const { rest, fence: rawFence } = splitAgentRunMutationFence(
+      requireRecord(await readJson(c), 'Work Item patch is required.'),
+    )
+    const body = readUpdatePublicWorkItemRequest(rest)
+    const agentRunFence = readAgentRunMutationFence(rawFence)
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     return executeIdempotentJson(
       c,
       dependencies,
       credential,
-      body,
+      { ...body, ...rawFence },
       async (
         mutationContext,
         idempotency,
@@ -745,6 +935,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           body,
           mutationContext,
           idempotency,
+          agentRunFence,
         ),
       }),
       {
@@ -783,6 +974,111 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           dependencies.workItems.authorizeDelete(credential, teamId, workItemId),
       },
     )
+  })
+
+  router.post('/v1/work-items/:workItemId/agent-runs', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const rawBody = await readJson(c)
+    const input = readStartAgentRunRequest(rawBody)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
+      status: 201,
+      body: await agentRuns.start(credential, teamId, workItemId, input, context, idempotency),
+    }), {
+      authorizeReplay: () => agentRuns.authorizeStart(credential, teamId, workItemId),
+    })
+  })
+
+  router.get('/v1/work-items/:workItemId/agent-runs', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/agent-runs`,
+      filters: { teamId },
+    }, (continuation, limit) => agentRuns.listWorkItemRuns(credential, teamId, workItemId, continuation, limit)))
+  })
+
+  router.get('/v1/agent-runs', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const stateQuery = c.req.query('state') ?? 'active'
+    if (stateQuery !== 'active' && stateQuery !== 'finished') {
+      throw new PublicApiServiceError(400, 'invalid_request', 'state must be active or finished.')
+    }
+    const instanceId = c.req.query('instanceId')
+    const assigneeUserId = c.req.query('assigneeUserId') === undefined
+      ? undefined
+      : readRouteId(c.req.query('assigneeUserId') ?? '', 'assigneeUserId')
+    const filters: PublicAgentRunListFilters = {
+      state: stateQuery,
+      ...(instanceId === undefined ? {} : { instanceIdHash: hashAgentInstanceId(readAgentInstanceId(instanceId, '/instanceId')) }),
+      ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
+    }
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: '/v1/agent-runs',
+      filters: {
+        teamId,
+        state: filters.state,
+        ...(filters.instanceIdHash ? { instanceIdHash: filters.instanceIdHash } : {}),
+        ...(filters.assigneeUserId ? { assigneeUserId: filters.assigneeUserId } : {}),
+      },
+    }, (continuation, limit) => agentRuns.list(credential, teamId, filters, continuation, limit)))
+  })
+
+  router.get('/v1/agent-runs/:runId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    return c.json(await agentRuns.get(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readAgentRunId(c.req.param('runId'), '/runId'),
+    ))
+  })
+
+  router.post('/v1/agent-runs/:runId/heartbeat', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const runId = readAgentRunId(c.req.param('runId'), '/runId')
+    const instanceIdHash = readHeartbeatAgentRunRequest(await readJson(c))
+    try {
+      return c.json(await agentRuns.heartbeat(credential, teamId, runId, instanceIdHash))
+    } catch (error) {
+      if (error instanceof AgentRunError && error.retryAfterSeconds !== undefined) {
+        c.header('Retry-After', String(error.retryAfterSeconds))
+      }
+      throw error
+    }
+  })
+
+  router.post('/v1/agent-runs/:runId/finish', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const rawBody = await readJson(c)
+    const finishRequest = readFinishAgentRunRequest(rawBody)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const runId = readAgentRunId(c.req.param('runId'), '/runId')
+    return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
+      status: 200,
+      body: await agentRuns.finish(credential, teamId, runId, finishRequest, context, idempotency),
+    }), {
+      authorizeReplay: () => agentRuns.authorizeFinish(credential, teamId, runId, finishRequest.instanceIdHash),
+    })
+  })
+
+  router.get('/v1/agent-settings', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    return c.json(await agentRuns.getSettings(credential, readRequiredQuery(c.req.query('teamId'), 'teamId')))
   })
 
   router.get('/v1/work-items/:workItemId/external-links', async (c) => {
@@ -2353,6 +2649,9 @@ function toProblemResponse(c: Context, error: unknown, dependencies: PublicApiDe
     instance: new URL(c.req.url).pathname,
     requestId: c.get('requestId'),
     retryable: normalized.retryable,
+    ...(normalized.violations && normalized.violations.length > 0
+      ? { errors: normalized.violations.map((violation) => ({ ...violation })) }
+      : {}),
   }
   return new Response(JSON.stringify(problem), {
     status: normalized.status,
@@ -2381,6 +2680,7 @@ function toProblemResponse(c: Context, error: unknown, dependencies: PublicApiDe
 
 function normalizeError(error: unknown, dependencies: PublicApiDependencies) {
   if (error instanceof PublicApiServiceError) return error
+  if (error instanceof AgentRunError) return toAgentRunProblemError(error)
   if (error instanceof UnsafeWebhookUrlError) {
     return new PublicApiServiceError(400, 'validation_failed', error.message)
   }
@@ -3682,6 +3982,47 @@ async function createSignedContinuationPage<T extends { id: string }>(
   }>,
   getTimestamp: (value: T) => string,
 ) {
+  return createOrderedSignedContinuationPage(c, dependencies, scope, loadPage, (left, right) =>
+    getTimestamp(right).localeCompare(getTimestamp(left)) ||
+    right.id.localeCompare(left.id))
+}
+
+/**
+ * Wraps a downstream continuation page in a signed, scope-bound public cursor.
+ *
+ * @param c - Request context.
+ * @param dependencies - Router dependencies holding the cursor secret and clock.
+ * @param scope - Workspace, actor, resource, and filters the cursor is bound to.
+ * @param loadPage - Loads one downstream page.
+ * @param compare - Optional ordering; the downstream order is kept when omitted.
+ * @returns Public page with an optional signed cursor.
+ */
+async function createOrderedSignedContinuationPage<T>(
+  c: Context,
+  dependencies: PublicApiDependencies,
+  scope: {
+    /** Workspace ID. */
+    workspaceId: string
+    /** Credential or user actor ID. */
+    actorId: string
+    /** Canonical route the cursor belongs to. */
+    resource: string
+    /** Filters the cursor is bound to. */
+    filters: Record<string, string | number | undefined>
+  },
+  loadPage: (
+    continuation: string | undefined,
+    limit: number,
+  ) => Promise<{
+    /** Page items. */
+    items: T[]
+    /** Whether another page exists. */
+    hasMore: boolean
+    /** Downstream continuation. */
+    nextContinuation?: string
+  }>,
+  compare?: (left: T, right: T) => number,
+) {
   const limit = readPageLimit(c.req.query('limit'))
   const fingerprint = createFilterFingerprint(scope.filters)
   const cursor = c.req.query('cursor')
@@ -3703,10 +4044,7 @@ async function createSignedContinuationPage<T extends { id: string }>(
       true,
     )
   }
-  const items = [...page.items].sort((left, right) =>
-    getTimestamp(right).localeCompare(getTimestamp(left)) ||
-    right.id.localeCompare(left.id)
-  )
+  const items = compare ? [...page.items].sort(compare) : [...page.items]
   return {
     items,
     hasMore: page.hasMore,
@@ -3842,4 +4180,38 @@ function requireStoredResponse(value: unknown) {
     )
   }
   return response as { status: 200 | 201 | 202 | 204; body: unknown }
+}
+
+/**
+ * Returns the configured Agent Run service or reports that runs are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Agent Run service.
+ */
+function requireAgentRunService(dependencies: PublicApiDependencies): PublicAgentRunService {
+  if (!dependencies.agentRuns) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent Runs are not configured.', true)
+  }
+  return dependencies.agentRuns
+}
+
+/**
+ * Converts an Agent Run failure to a stable problem, keeping the reason in `errors`.
+ *
+ * @param error - Agent Run failure.
+ * @returns Public problem error.
+ */
+function toAgentRunProblemError(error: AgentRunError): PublicApiServiceError {
+  const violations: ApiProblemViolation[] = error.reason
+    ? [{ pointer: error.pointer ?? '', code: error.reason, message: error.message }]
+    : error.pointer
+      ? [{ pointer: error.pointer, code: 'invalid', message: error.message }]
+      : []
+  return new PublicApiServiceError(
+    error.status,
+    error.category,
+    error.message,
+    error.category === 'temporarily_unavailable' || error.category === 'rate_limited',
+    violations,
+  )
 }

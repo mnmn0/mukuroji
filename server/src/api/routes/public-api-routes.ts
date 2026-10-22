@@ -13,6 +13,7 @@ import {
   type ImportJob,
   type ImportReport,
   type ImportRowError,
+  type UpdatePublicWorkItemRequest,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -55,7 +56,16 @@ import {
   projectPublicWorkItemTypeChangePreview,
 } from '../../modules/developer-platform/public-work-item-type-projection'
 import { PlanningError } from '../../modules/planning'
-import type { IdempotencyMutationToken } from '../../modules/developer-platform/application/ports'
+import type {
+  AuthenticatedDeveloperCredential,
+  IdempotencyMutationToken,
+} from '../../modules/developer-platform/application/ports'
+import {
+  createAgentRunDeletionFences,
+  createAgentRunMutationFenceExtension,
+  prepareAgentRunCommentFence,
+  type PublicWorkItemUpdateExtension,
+} from '../shared/agent-run-access'
 import {
   createDefaultSecretProtector,
 } from '../../modules/developer-platform/adapter-out/shared/developer-platform-store'
@@ -505,7 +515,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
  * @param workItem - Internal canonical Work Item containing optional server-only fields.
  * @returns Detached public response without causal, archive, intake, or approval state.
  */
-function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkItem {
+export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkItem {
   return {
     schemaVersion: workItem.schemaVersion,
     revision: workItem.revision,
@@ -627,19 +637,21 @@ function projectPublicWorkItemReceiptBody(value: unknown): Record<string, unknow
  *
  * @param workspaceId - Workspace that owns the idempotency reservation.
  * @param token - Public API idempotency reservation token.
+ * @param createReceipt - Optional wrapper that embeds the allowlisted Work Item in a larger response with its own status.
  * @returns Transaction contribution that cannot persist internal Work Item fields.
  */
 function createPublicWorkItemIdempotencyTransaction(
   workspaceId: string,
   token: IdempotencyMutationToken | undefined,
+  createReceipt?: (workItem: Record<string, unknown>) => { status: 200 | 201; body: unknown },
 ): WorkItemIdempotencyTransaction | undefined {
   const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
   if (transaction === undefined) return undefined
   return {
     async prepare(response) {
-      return transaction.prepare(response.status === 200
-        ? { status: 200, body: projectPublicWorkItemReceiptBody(response.body) }
-        : response)
+      if (response.status !== 200) return transaction.prepare(response)
+      const workItem = projectPublicWorkItemReceiptBody(response.body)
+      return transaction.prepare(createReceipt ? createReceipt(workItem) : { status: 200, body: workItem })
     },
   }
 }
@@ -769,6 +781,169 @@ function createPublicWorkItemTypeCatalog(
   }
 }
 
+/** Options for a public Work Item update shared by PATCH and Agent Run start. */
+export type CanonicalPublicWorkItemUpdateOptions = {
+  /** Request recorded in the audit context of the update. */
+  auditRequest: {
+    /** HTTP method. */
+    method: string
+    /** Request path. */
+    path: string
+    /** Query parameters. */
+    query?: Record<string, string>
+    /** Request body. */
+    body: unknown
+  }
+  /** Agent Run writes committed atomically with the update. */
+  extension?: PublicWorkItemUpdateExtension
+}
+
+/**
+ * Updates a canonical Work Item for a developer credential with current RBAC,
+ * configuration validation, revision CAS, and an atomic idempotency receipt.
+ *
+ * @param credential - Authenticated developer credential.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Updated Work Item.
+ * @param input - Validated public patch.
+ * @param mutationContext - Request and idempotency identifiers.
+ * @param idempotency - Idempotency reservation token.
+ * @param options - Audit request and optional Agent Run extension.
+ * @returns The updated canonical Work Item and the authorized principal.
+ */
+export async function updateCanonicalPublicWorkItem(
+  credential: AuthenticatedDeveloperCredential,
+  teamId: string,
+  workItemId: string,
+  input: UpdatePublicWorkItemRequest,
+  mutationContext: PublicMutationContext,
+  idempotency: IdempotencyMutationToken | undefined,
+  options: CanonicalPublicWorkItemUpdateOptions,
+): Promise<{
+  /** Updated canonical Work Item. */
+  issue: TeamIssueResponseItem
+  /** Principal authorized for the update. */
+  principal: WorkspacePrincipal
+}> {
+  rejectInternalWorkItemUpdateFields(input)
+  const authorization = await resolveStableWorkItemAuthorization(
+    credential.workspaceId,
+    async () => await resolveDeveloperCredentialPrincipal(credential, {
+      permission: 'work-items.write',
+      teamId,
+      evaluateProjectScopes: true,
+    }),
+    async (principal) => {
+      requireWorkspaceBusinessWrite(principal)
+      const permission = await requireTeamPermission(principal, teamId, 'member')
+      const body = normalizeTeamIssueInput(input, permission.team)
+      const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        workItemId,
+        { consistentIssueRead: true, includeEvents: false },
+      )
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        detail.issue.assignedProjectId,
+        'member',
+      )
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        readAssignedProjectId(body.assignedProjectId),
+        'member',
+      )
+      const dependencyAuthorizationSnapshot =
+        'schedule' in body &&
+          body.schedule !== undefined &&
+          stableDigestStringify(body.schedule) !==
+            stableDigestStringify(detail.issue.schedule)
+          ? await createDependencyFencedWorkItemAuthorizationSnapshot(
+              principal,
+              teamId,
+              workItemId,
+            )
+          : undefined
+      return { body, detail, dependencyAuthorizationSnapshot }
+    },
+  )
+  const { principal, authorizationSnapshot } = authorization
+  const { body, detail, dependencyAuthorizationSnapshot } = authorization.value
+  if (
+    dependencyAuthorizationSnapshot &&
+    dependencyAuthorizationSnapshot.planningRevision !==
+      authorizationSnapshot.planningRevision
+  ) {
+    throw createWorkItemAuthorizationChangedError()
+  }
+  const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
+  const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+    principal.directoryId,
+    teamId,
+  )
+  const configuredBody = await prepareConfiguredUpdateWorkItem(
+    principal.directoryId,
+    teamId,
+    detail.issue,
+    body,
+    resolvedConfiguration,
+  )
+  if ('assigneeUserId' in configuredBody) {
+    await requireActiveWorkspaceAssignee(
+      principal.directoryId,
+      readTeamIssueAssigneeUserId(configuredBody),
+    )
+  }
+  const auditContext = createPublicMutationAuditContext(
+    principal,
+    mutationContext,
+    options.auditRequest,
+  )
+  const now = new Date()
+  const prepared = await options.extension?.prepare({
+    principal,
+    issue: detail.issue,
+    resolvedConfiguration,
+    auditContext,
+    now,
+  })
+  const idempotencyTransaction = createPublicWorkItemIdempotencyTransaction(
+    principal.directoryId,
+    idempotency,
+    prepared?.createReceipt,
+  )
+  let response: Awaited<ReturnType<typeof workItemDependencies.teamIssues.updateTeamIssue>>
+  try {
+    response = await workItemDependencies.teamIssues.updateTeamIssue(
+      principal.directoryId,
+      teamId,
+      workItemId,
+      {
+        ...configuredBody,
+        expectedRevision,
+        authorizationSnapshot,
+        ...(prepared && prepared.transactItems.length > 0
+          ? { agentRunTransactItems: prepared.transactItems }
+          : {}),
+      },
+      principal.userKey,
+      auditContext,
+      idempotencyTransaction,
+    )
+  } catch (error) {
+    throw prepared ? await prepared.classifyFailure(error) : error
+  }
+  await prepared?.afterCommit?.()
+  await projectWorkItemSearchDocumentBestEffort(
+    principal.directoryId,
+    response.issue,
+    'Public Work Item update',
+  )
+  return { issue: response.issue, principal }
+}
+
 /**
  * Adapts request-bound canonical Work Item operations and authorization to the Public API port.
  *
@@ -832,7 +1007,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     /** Persists a progress note through the existing fenced collaboration transaction. */
-    async addComment(credential, teamId, workItemId, body, mutationContext, assignedProjectId, assigneeUserId) {
+    async addComment(credential, teamId, workItemId, body, mutationContext, assignedProjectId, assigneeUserId, agentRunFence) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write', teamId, evaluateProjectScopes: true,
       })
@@ -848,6 +1023,9 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       const authorizationConditionChecks = await createCollaborationCommentAuthorizationConditionChecks(
         principal, context, teamId, detail.issue.assignedProjectId,
       )
+      const preparedFence = agentRunFence
+        ? await prepareAgentRunCommentFence(principal, teamId, workItemId, agentRunFence, detail.issue.assigneeUserId, new Date())
+        : undefined
       const comment = await workItemDependencies.collaboration.createComment({
         workspaceId: principal.directoryId,
         teamId,
@@ -864,14 +1042,20 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         mentionMemberKeys: [],
         automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
         deepLink: createTeamIssueDeepLink(teamId, workItemId),
-        authorizationConditionChecks,
+        authorizationConditionChecks: [
+          ...authorizationConditionChecks,
+          ...(preparedFence?.conditionChecks ?? []),
+        ],
         auditContext: createPublicMutationAuditContext(principal, mutationContext, {
           method: 'POST',
           path: `/api/v1/work-items/${encodeURIComponent(workItemId)}/comments`,
           query: { teamId, ...(assignedProjectId ? { assignedProjectId } : {}), ...(assigneeUserId ? { assigneeUserId } : {}) },
           body: { body },
         }),
+      }).catch(async (error: unknown) => {
+        throw preparedFence ? await preparedFence.classifyFailure(error) : error
       })
+      await preparedFence?.afterCommit()
       await projectWorkspaceSearchDocumentBestEffort(() => createCommentSearchDocument(
         principal.directoryId, teamId, detail.issue, comment,
       ), 'Public Work Item comment creation')
@@ -1163,101 +1347,28 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       input,
       mutationContext,
       idempotency,
+      agentRunFence,
     ) {
-      rejectInternalWorkItemUpdateFields(input)
-      const authorization = await resolveStableWorkItemAuthorization(
-        credential.workspaceId,
-        async () => await resolveDeveloperCredentialPrincipal(credential, {
-          permission: 'work-items.write',
-          teamId,
-          evaluateProjectScopes: true,
-        }),
-        async (principal) => {
-          requireWorkspaceBusinessWrite(principal)
-          const permission = await requireTeamPermission(principal, teamId, 'member')
-          const body = normalizeTeamIssueInput(input, permission.team)
-          const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
-            principal.directoryId,
-            teamId,
-            workItemId,
-            { consistentIssueRead: true, includeEvents: false },
-          )
-          requireAssignedProjectPermission(
-            principal,
-            permission,
-            detail.issue.assignedProjectId,
-            'member',
-          )
-          requireAssignedProjectPermission(
-            principal,
-            permission,
-            readAssignedProjectId(body.assignedProjectId),
-            'member',
-          )
-          const dependencyAuthorizationSnapshot =
-            'schedule' in body &&
-              body.schedule !== undefined &&
-              stableDigestStringify(body.schedule) !==
-                stableDigestStringify(detail.issue.schedule)
-              ? await createDependencyFencedWorkItemAuthorizationSnapshot(
-                  principal,
-                  teamId,
-                  workItemId,
-                )
-              : undefined
-          return { body, detail, dependencyAuthorizationSnapshot }
-        },
-      )
-      const { principal, authorizationSnapshot } = authorization
-      const { body, detail, dependencyAuthorizationSnapshot } = authorization.value
-      if (
-        dependencyAuthorizationSnapshot &&
-        dependencyAuthorizationSnapshot.planningRevision !==
-          authorizationSnapshot.planningRevision
-      ) {
-        throw createWorkItemAuthorizationChangedError()
-      }
-      const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
-      const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-        principal.directoryId,
-        teamId,
-      )
-      const configuredBody = await prepareConfiguredUpdateWorkItem(
-        principal.directoryId,
-        teamId,
-        detail.issue,
-        body,
-        resolvedConfiguration,
-      )
-      if ('assigneeUserId' in configuredBody) {
-        await requireActiveWorkspaceAssignee(
-          principal.directoryId,
-          readTeamIssueAssigneeUserId(configuredBody),
-        )
-      }
-      const response = await workItemDependencies.teamIssues.updateTeamIssue(
-        principal.directoryId,
+      const { issue } = await updateCanonicalPublicWorkItem(
+        credential,
         teamId,
         workItemId,
-        { ...configuredBody, expectedRevision, authorizationSnapshot },
-        principal.userKey,
-        createPublicMutationAuditContext(principal, mutationContext, {
-          method: 'PATCH',
-          path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
-          query: { teamId },
-          body: input,
-        }),
-        createPublicWorkItemIdempotencyTransaction(
-          principal.directoryId,
-          idempotency,
-        ),
+        input,
+        mutationContext,
+        idempotency,
+        {
+          auditRequest: {
+            method: 'PATCH',
+            path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
+            query: { teamId },
+            body: input,
+          },
+          ...(agentRunFence
+            ? { extension: createAgentRunMutationFenceExtension(teamId, workItemId, agentRunFence) }
+            : {}),
+        },
       )
-      await projectWorkItemSearchDocumentBestEffort(
-        principal.directoryId,
-        response.issue,
-        'Public Work Item update',
-      )
-      return projectPublicWorkItem(response.issue)
+      return projectPublicWorkItem(issue)
     },
 
     async authorizeDelete(credential, teamId, workItemId) {
@@ -1355,18 +1466,26 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           workItemId: `team/${teamId}/issue/${workItemId}`,
         }),
       ])
+      const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
+        method: 'DELETE',
+        path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
+        query: { teamId },
+        body: { expectedRevision },
+      })
+      const agentRunFences = await createAgentRunDeletionFences(
+        principal,
+        teamId,
+        workItemId,
+        deletionAuditContext,
+        new Date(),
+      )
       const response = await workItemDependencies.teamIssues.deleteTeamIssue(
         principal.directoryId,
         teamId,
         workItemId,
         expectedRevision,
         principal.userKey,
-        createPublicMutationAuditContext(principal, mutationContext, {
-          method: 'DELETE',
-          path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
-          query: { teamId },
-          body: { expectedRevision },
-        }),
+        deletionAuditContext,
         createPublicWorkItemIdempotencyTransaction(
           principal.directoryId,
           idempotency,
@@ -1382,6 +1501,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             kind: 'document-backlinks',
             transactWriteItem: documentBacklinkFence.transactWriteItem,
           },
+          ...agentRunFences,
         ],
         undefined,
         authorizationSnapshot,
@@ -2827,6 +2947,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       },
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
+      agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {
         return getPublicApiCursorSecret()

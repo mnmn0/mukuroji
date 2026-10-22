@@ -64,6 +64,7 @@ import {
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
+import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
   WorkItemRelationsEditor,
@@ -1510,6 +1511,16 @@ export function TaskDetailPane({
               />
             </div>
           </fieldset>
+        ) : null}
+        {/* Agent claims are operational state, so Work Item types that hide the workflow section still show them. */}
+        {accessToken && issue && !isRetainedDetail ? (
+          <WorkItemAgentRunsPanelContainer
+            accessToken={accessToken}
+            key={`${issue.teamId}:${issue.id}:agent-runs`}
+            locale={locale}
+            teamId={issue.teamId}
+            workItemId={issue.id}
+          />
         ) : null}
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"

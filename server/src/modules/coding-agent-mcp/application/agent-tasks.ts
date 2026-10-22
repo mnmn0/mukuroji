@@ -1,9 +1,18 @@
 import {
   DEFAULT_WORK_ITEM_TYPE_ID,
+  type AgentRunFinishOutcome,
+  type AgentRunMutationFence,
+  type AgentRunRuntime,
   type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
-import { AgentTaskError, type AgentTask, type AgentTaskFilters, type AgentWorkItemApi } from './work-item-api'
+import {
+  AgentTaskError,
+  type AgentRunRecord,
+  type AgentTask,
+  type AgentTaskFilters,
+  type AgentWorkItemApi,
+} from './work-item-api'
 
 /** Operator-selected assignment and optional project scope for agent mutations. */
 export type AgentTaskScope = {
@@ -13,7 +22,23 @@ export type AgentTaskScope = {
   assignedProjectId?: string
   /** Human-readable agent label included in progress comments. */
   agentName: string
+  /** Client runtime recorded on runs started by this process. */
+  runtime: AgentRunRuntime
+  /** Stable identifier of this agent instance; the server stores only its hash. */
+  instanceId: string
 }
+
+/** Summary of a run held by another instance, without identifying that instance. */
+export type OtherAgentRun = Pick<AgentRunRecord, 'runId' | 'workItemId' | 'runtime' | 'agentName' | 'startedAt' | 'leaseExpiresAt' | 'stalled'>
+
+/** Why a candidate task was not selected. */
+export type SkippedTaskReason = 'blocked' | 'active_run'
+
+/** Maximum number of skipped candidates reported by task selection. */
+const maximumSkippedReports = 5
+
+/** Maximum number of active-run pages read before reporting a limit. */
+const maximumRunPages = 10
 
 /** Explicit lifecycle intent; the target status is always selected from current configuration. */
 export type AgentTransition = 'start' | 'complete' | 'reopen' | 'cancel' | 'move'
@@ -31,6 +56,13 @@ export type AgentBlockers = {
  * @returns Task selection, lifecycle, progress, and status operations.
  */
 export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
+  /**
+   * Runs this process started, by task ID. The run list is read from an eventually consistent
+   * index, so a run started moments ago can be missing there; the server still validates every run
+   * ID this map supplies, and reports a released run as agent_run_not_active.
+   */
+  const startedRuns = new Map<string, string>()
+
   /** Verifies the optional process-wide Project restriction. */
   function inScope(task: AgentTask): AgentTask {
     if (scope.assignedProjectId !== undefined && task.assignedProjectId !== scope.assignedProjectId) {
@@ -54,6 +86,130 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       throw new AgentTaskError('out_of_scope', 'The requested Project differs from the configured Project.')
     }
     return { ...input, ...(scope.assignedProjectId ? { assignedProjectId: scope.assignedProjectId } : {}) }
+  }
+
+  /**
+   * Checks whether a run's task is inside the optional process-wide Project restriction.
+   *
+   * @param run - Run to check.
+   * @returns True when no Project is configured or the run's task belongs to it.
+   */
+  async function runInScope(run: AgentRunRecord): Promise<boolean> {
+    if (scope.assignedProjectId === undefined) return true
+    try {
+      inScope(await api.get(run.workItemId))
+      return true
+    } catch (error) {
+      if (error instanceof AgentTaskError && ['not_found', 'forbidden', 'out_of_scope'].includes(error.code)) return false
+      throw error
+    }
+  }
+
+  /**
+   * Drops runs whose task is outside the configured Project, reading at most ten tasks at a time.
+   *
+   * @param runs - Active runs of the assignee.
+   * @returns Runs inside the configured Project.
+   */
+  async function scopedRuns(runs: AgentRunRecord[]): Promise<AgentRunRecord[]> {
+    if (scope.assignedProjectId === undefined) return runs
+    const kept: AgentRunRecord[] = []
+    for (let index = 0; index < runs.length; index += 10) {
+      const batch = runs.slice(index, index + 10)
+      const inside = await Promise.all(batch.map(runInScope))
+      kept.push(...batch.filter((_, position) => inside[position]))
+    }
+    return kept
+  }
+
+  /** Reads every active run of the configured assignee in the configured Project, optionally only this instance's runs. */
+  async function activeRuns(onlyThisInstance: boolean): Promise<AgentRunRecord[]> {
+    const runs: AgentRunRecord[] = []
+    const cursors = new Set<string>()
+    let cursor: string | undefined
+    for (let page = 0; page < maximumRunPages; page += 1) {
+      const result = await api.listActiveRuns({
+        assigneeUserId: scope.assigneeUserId,
+        ...(onlyThisInstance ? { instanceId: scope.instanceId } : {}),
+      }, cursor)
+      runs.push(...result.items.filter((run) => run.state === 'active'))
+      if (!result.hasMore) return scopedRuns(runs)
+      if (!result.nextCursor || cursors.has(result.nextCursor)) {
+        throw new AgentTaskError('invalid_response', 'The API returned a missing or repeated run cursor.')
+      }
+      cursor = result.nextCursor
+      cursors.add(cursor)
+    }
+    throw new AgentTaskError('queue_limit', 'More active runs exist than one selection can read. Ask the user to release finished work.')
+  }
+
+  /**
+   * Reads the run this process started for a task, forgetting it once it is finished, deleted, or
+   * no longer visible so it cannot block other work.
+   *
+   * @param taskId - Task the run claimed.
+   * @returns The active run, or undefined when there is none.
+   */
+  async function rememberedActiveRun(taskId: string): Promise<AgentRunRecord | undefined> {
+    const runId = startedRuns.get(taskId)
+    if (runId === undefined) return undefined
+    let run: AgentRunRecord
+    try {
+      run = await api.getRun(runId)
+    } catch (error) {
+      if (!(error instanceof AgentTaskError) || !['not_found', 'forbidden'].includes(error.code)) throw error
+      startedRuns.delete(taskId)
+      return undefined
+    }
+    if (run.state === 'active') return run
+    startedRuns.delete(taskId)
+    return undefined
+  }
+
+  /** Splits active runs into this instance's runs and other instances' runs. */
+  async function runsByOwner(): Promise<{
+    /** Runs this instance started. */
+    own: AgentRunRecord[]
+    /** Runs of other instances of the same assignee. */
+    others: OtherAgentRun[]
+  }> {
+    const [own, all] = await Promise.all([activeRuns(true), activeRuns(false)])
+    const ownIds = new Set(own.map((run) => run.runId))
+    // The run index can lag behind a start this process just made; read those runs directly.
+    for (const [taskId, runId] of startedRuns) {
+      if (ownIds.has(runId)) continue
+      const run = await rememberedActiveRun(taskId)
+      if (!run || !await runInScope(run)) continue
+      own.push(run)
+      ownIds.add(runId)
+    }
+    return {
+      own,
+      others: all.filter((run) => !ownIds.has(run.runId)).map((run) => ({
+        runId: run.runId, workItemId: run.workItemId, runtime: run.runtime, agentName: run.agentName,
+        startedAt: run.startedAt, leaseExpiresAt: run.leaseExpiresAt, stalled: run.stalled,
+      })),
+    }
+  }
+
+  /** Builds the fence sent with every mutation of a task. */
+  async function fenceFor(taskId: string): Promise<AgentRunMutationFence> {
+    const run = (await activeRuns(true)).find((candidate) => candidate.workItemId === taskId)
+    const runId = run?.runId ?? startedRuns.get(taskId)
+    return { agentInstanceId: scope.instanceId, ...(runId ? { agentRunId: runId } : {}) }
+  }
+
+  /** Requires that an active run belongs to this instance before acting on it. */
+  async function ownRun(runId: string): Promise<AgentRunRecord | undefined> {
+    const own = (await activeRuns(true)).find((run) => run.runId === runId)
+    if (own) return own
+    const run = await api.getRun(runId)
+    if (run.state !== 'active') return undefined
+    if (!(await runInScope(run))) {
+      throw new AgentTaskError('out_of_scope', 'This run belongs to a task outside the configured Project.')
+    }
+    if ([...startedRuns.values()].includes(runId)) return run
+    throw new AgentTaskError('not_own_run', 'This run belongs to another agent instance. Do not operate on it; ask the user.')
   }
 
   /** Scans a complete bounded assignment queue; partial scans never masquerade as empty work. */
@@ -112,7 +268,12 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   }
 
   /** Changes state using the caller's explicit revision, never a silently refreshed revision. */
-  async function transition(id: string, expectedRevision: number, workflowStatusId: string, action: AgentTransition, key: string) {
+  async function transition(id: string, expectedRevision: number, workflowStatusId: string, action: AgentTransition, key: string): Promise<AgentTask | {
+    /** Started task. */
+    task: AgentTask
+    /** Run claimed by this instance. */
+    run: AgentRunRecord
+  }> {
     const task = await owned(id)
     if (expectedRevision > task.revision) {
       throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before choosing a transition.')
@@ -135,43 +296,93 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         cancel: ['backlog', 'unstarted', 'started'], move: ['started'],
       }
       if (!sources[action].includes(task.statusCategory)) {
+        if (action === 'start' && task.statusCategory === 'started') {
+          const { others } = await runsByOwner()
+          if (others.some((run) => run.workItemId === id)) {
+            throw new AgentTaskError('agent_run_conflict', 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; do not take it over.')
+          }
+        }
         throw new AgentTaskError('invalid_transition', 'The task is not in a state that permits this operation. Reload its current status.')
       }
       if (action === 'start' && (await blockers(task)).unresolvedCount > 0) {
         throw new AgentTaskError('blocked', 'This task has unfinished or inaccessible blockers.')
       }
     }
-    return api.update(id, { expectedRevision, workflowStatusId }, key)
+    if (action === 'start') {
+      const started = await api.startRun(id, {
+        expectedRevision, workflowStatusId, runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId,
+      }, key)
+      startedRuns.set(id, started.run.runId)
+      return started
+    }
+    return api.update(id, { expectedRevision, workflowStatusId }, key, await fenceFor(id))
   }
 
   return {
-    /** Returns configured ownership and current workflow/field requirements. */
-    async configuration() { return { ...scope, catalog: await api.catalog(scope.assignedProjectId) } },
+    /** Returns configured ownership, Agent settings, and current workflow/field requirements. */
+    async configuration() {
+      const [catalog, agentSettings] = await Promise.all([api.catalog(scope.assignedProjectId), api.agentSettings()])
+      return {
+        assigneeUserId: scope.assigneeUserId,
+        ...(scope.assignedProjectId ? { assignedProjectId: scope.assignedProjectId } : {}),
+        agentName: scope.agentName,
+        runtime: scope.runtime,
+        agentSettings: {
+          leaseMinutes: agentSettings.leaseMinutes,
+          allowTakeoverAfterLeaseExpiry: agentSettings.allowTakeoverAfterLeaseExpiry,
+        },
+        catalog,
+      }
+    },
     /** Returns one page, preserving continuation even when no items are returned. */
     async list(input: AgentTaskFilters, cursor?: string, limit?: number) {
       const page = await api.list(filters(input), cursor, limit)
       return { ...page, items: page.items.map(inScope) }
     },
-    /** Returns canonical details plus read-time dependency readiness. */
+    /** Returns canonical details, dependency readiness, and the task's active run. */
     async get(id: string) {
       const task = inScope(await api.get(id))
-      return { task, blockers: await blockers(task) }
+      // A run this process just started may not be in the run index yet; read it directly first.
+      const started = await rememberedActiveRun(id)
+      if (started) return { task, blockers: await blockers(task), activeRun: { ...started, ownedByThisInstance: true } }
+      const [latest] = (await api.taskRuns(id, 1)).items
+      const activeRun = latest?.state === 'active'
+        ? { ...latest, ownedByThisInstance: (await activeRuns(true)).some((run) => run.runId === latest.runId) }
+        : null
+      return { task, blockers: await blockers(task), activeRun }
     },
-    /** Selects existing work first, then ready work by priority, deadline, creation time, and ID. */
+    /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
     async next(input: AgentTaskFilters) {
       const tasks = (await queue(input)).sort(compareTasks)
-      const started = tasks.find((task) => task.statusCategory === 'started')
-      if (started) return { action: 'in_progress', task: started, blockedCount: 0, selectionIsAdvisory: true }
+      const { own, others } = await runsByOwner()
+      const claimed = new Set([...own.map((run) => run.workItemId), ...others.map((run) => run.workItemId)])
+      const runSummary = { ownRuns: own, otherRuns: others, selectionIsAdvisory: true }
+      // A run whose task is no longer started is reported in ownRuns so the agent closes it with finish_run.
+      const resumed = own
+        .map((run) => tasks.find((task) => task.id === run.workItemId && task.statusCategory === 'started'))
+        .find((task) => task !== undefined)
+      if (resumed) return { action: 'in_progress', task: resumed, blockedCount: 0, skipped: [], ...runSummary }
+      const skipped: { taskId: string; reason: SkippedTaskReason }[] = []
+      /**
+       * Records a skipped task while the report stays within its size limit.
+       *
+       * @param taskId - Skipped task.
+       * @param reason - Why the task was skipped.
+       */
+      const skip = (taskId: string, reason: SkippedTaskReason) => {
+        if (skipped.length < maximumSkippedReports) skipped.push({ taskId, reason })
+      }
       let blockedCount = 0
       let dependencyReads = 0
       for (const task of tasks) {
         if (task.statusCategory !== 'unstarted' && task.statusCategory !== 'backlog') continue
+        if (claimed.has(task.id)) { skip(task.id, 'active_run'); continue }
         dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
         if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', 'Selection exceeded 100 dependency reads. Narrow the queue filter.')
-        if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; continue }
-        return { action: 'start', task, blockedCount, selectionIsAdvisory: true }
+        if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
+        return { action: 'start', task, blockedCount, skipped, ...runSummary }
       }
-      return { action: 'none', task: null, blockedCount, selectionIsAdvisory: true }
+      return { action: 'none', task: null, blockedCount, skipped, ...runSummary }
     },
     /** Summarizes assigned task states without claiming to monitor process liveness. */
     async status(input: AgentTaskFilters) {
@@ -189,7 +400,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       if (input.expectedRevision > task.revision) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
-      return api.update(id, input, key)
+      return api.update(id, input, key, await fenceFor(id))
     },
     /** Creates assigned work within the operator-selected Project boundary. */
     async create(input: Parameters<AgentWorkItemApi['create']>[0], key: string) {
@@ -199,7 +410,23 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     /** Adds a durable progress, blocker, or completion report to the existing discussion. */
     async report(id: string, message: string, key: string) {
       await owned(id)
-      return api.comment(id, `[${scope.agentName}]\n\n${message}`, key, scope.assignedProjectId, scope.assigneeUserId)
+      return api.comment(id, `[${scope.agentName}]\n\n${message}`, key, scope.assignedProjectId, scope.assigneeUserId, await fenceFor(id))
+    },
+    /** Extends the lease of this instance's own run. */
+    async heartbeat(runId: string) {
+      if (!(await ownRun(runId))) {
+        throw new AgentTaskError('agent_run_not_active', 'This run is finished. Do not continue its work without the user.')
+      }
+      return api.heartbeat(runId, scope.instanceId)
+    },
+    /** Closes this instance's own run; a finished run is forwarded so an identical retry can replay. */
+    async finishRun(runId: string, outcome: AgentRunFinishOutcome, key: string) {
+      await ownRun(runId)
+      const finished = await api.finishRun(runId, outcome, scope.instanceId, key)
+      for (const [taskId, startedRunId] of startedRuns) {
+        if (startedRunId === runId) startedRuns.delete(taskId)
+      }
+      return finished
     },
     /** Reads existing discussion without changing the task description or state. */
     async comments(id: string, cursor?: string, limit?: number) {

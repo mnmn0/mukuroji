@@ -32,6 +32,7 @@ import type {
 } from '../../modules/developer-platform/application/ports'
 import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
 import type {
+  PublicAgentRunService,
   PublicApiDependencies,
   PublicWorkItemService,
 } from '../../modules/developer-platform/public-api'
@@ -45,6 +46,7 @@ import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-i
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
+import type { AgentRunStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
 import type { CollectionsPersistence } from '../../modules/collections'
@@ -175,6 +177,8 @@ export interface WorkItemDependencies {
   notifications: NotificationClient
   /** Provides Web Push device subscription persistence. */
   pushSubscriptions: PushSubscriptionStore
+  /** Provides Agent Run, claim, and Team Agent settings persistence. */
+  agentRuns: AgentRunStore
   /** Provides Focus policy and recipient snooze persistence. */
   focusState: FocusStateClient
   /** Provides Workspace search persistence. */
@@ -245,6 +249,8 @@ export interface DeveloperPlatformDependencies {
   transactions: DeveloperPlatformTransactionPort
   /** Provides the canonical public Work Item use case. */
   publicWorkItems: PublicWorkItemService
+  /** Provides the public Agent Run use case. */
+  publicAgentRuns: PublicAgentRunService
   /** Provides durable Work Item import execution persistence. */
   workItemImportExecutions: WorkItemImportExecutionStore
   /** Provides durable Work Item import source persistence. */

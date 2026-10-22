@@ -129,6 +129,10 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<AgentRunsTableB0DA56A7.Arn>/index/*]',
+    ['ApiFunction/ServiceRole/DefaultPolicy/Resource'],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
@@ -404,6 +408,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<AuditExportBucketC2429A66.Arn>/audit-exports/*]',
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<AgentRunsTableB0DA56A7.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemsTableD3F1672B.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',

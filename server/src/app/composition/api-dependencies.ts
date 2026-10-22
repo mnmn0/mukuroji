@@ -10,6 +10,7 @@ import type {
 import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
+  createCanonicalPublicAgentRunService,
   createCanonicalPublicWorkItemService,
   shouldEnableWorkspaceSearchProjection,
   testEnterpriseIdentityProviderConnection,
@@ -102,6 +103,7 @@ import {
   createFocusStateClient,
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
+import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -551,6 +553,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     pushSubscriptions: new DynamoDbPushSubscriptionStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
+    ),
+    agentRuns: new DynamoDbAgentRunStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
@@ -1496,6 +1502,7 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
   return {
     ...adapters,
     publicWorkItems: createCanonicalPublicWorkItemService(),
+    publicAgentRuns: createCanonicalPublicAgentRunService(),
     workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
     workItemImportSources: createDefaultWorkItemImportSourceStore(),
     workItemImportQueue: createDefaultWorkItemImportQueue(),
@@ -1643,6 +1650,7 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
+      publicAgentRuns: createCanonicalPublicAgentRunService(),
       workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
       workItemImportSources: createLazyWorkItemImportSourceStore(),
       workItemImportQueue: createLazyWorkItemImportQueue(),
@@ -1748,6 +1756,7 @@ export function createTestAppDependencies(): AppDependencies {
       inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
+      agentRuns: new InMemoryAgentRunStore(),
       requestIntake,
     },
     automation,
@@ -1846,6 +1855,7 @@ export function overrideAppDependencies(
       ...(overrides.collaboration ? { collaboration: overrides.collaboration } : {}),
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
+      ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }
@@ -1922,6 +1932,9 @@ export function overrideAppDependencies(
       ...(overrides.transactions ? { transactions: overrides.transactions } : {}),
       ...(overrides.publicWorkItems
         ? { publicWorkItems: overrides.publicWorkItems }
+        : {}),
+      ...(overrides.publicAgentRuns
+        ? { publicAgentRuns: overrides.publicAgentRuns }
         : {}),
       ...(overrides.workItemImportExecutions
         ? { workItemImportExecutions: overrides.workItemImportExecutions }

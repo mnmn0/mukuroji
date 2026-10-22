@@ -9,6 +9,7 @@ import { registerAnalyticsRoutes } from './routes/analytics-routes'
 import { registerAuditRoutes } from './routes/audit-routes'
 import { registerTenantAdministrationRoutes } from './routes/tenant-administration-routes'
 import { registerTimeTrackingRoutes } from './routes/time-tracking-routes'
+import { registerAgentRunRoutes } from './routes/agent-run-routes'
 import { registerCapacityPlanningRoutes } from './routes/capacity-planning-routes'
 import { registerNotificationsRoutes } from './routes/notifications-routes'
 import { registerAutomationRoutes } from './routes/automation-routes'
@@ -106,6 +107,10 @@ export type {
 } from './routes/public-api-routes'
 
 export {
+  createCanonicalPublicAgentRunService,
+} from './routes/public-agent-run-service'
+
+export {
   runWithAppDependencies,
 } from './shared/app-dependencies'
 
@@ -156,6 +161,7 @@ registerAnalyticsRoutes(routeApp)
 registerAuditRoutes(routeApp)
 registerTenantAdministrationRoutes(routeApp)
 registerTimeTrackingRoutes(routeApp)
+registerAgentRunRoutes(routeApp)
 registerCapacityPlanningRoutes(routeApp)
 registerNotificationsRoutes(routeApp)
 registerAutomationRoutes(routeApp)

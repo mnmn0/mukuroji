@@ -371,6 +371,26 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/work-items/:workItemId/triage-sources',
     permission: 'teams.read',
   },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/work-items/:workItemId/agent-runs',
+    permission: 'work-items.read',
+  },
+  {
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/agent-runs/:runId/release',
+    permission: 'work-items.write',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/agent-settings',
+    permission: 'work-items.read',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/agent-settings',
+    permission: 'teams.manage',
+  },
   { method: 'GET', pathPattern: '/api/approvals*', permission: 'files.read' },
   { method: '*', pathPattern: '/api/approvals*', permission: 'files.approve' },
   {

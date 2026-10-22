@@ -987,6 +987,11 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   archivedAt?: unknown
   /** Internal bulk operation が記録する archive actor member key です。 */
   archivedBy?: unknown
+  /**
+   * Agent Run claim, fence, and lease writes committed in the same transaction as the update.
+   * A conditional failure in these items is reported as an Agent Run fence conflict.
+   */
+  agentRunTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /**
@@ -1061,12 +1066,12 @@ export type WorkItemScheduleCascadeResponse = {
 export type WorkItemIdempotencyTransaction = {
   /** Exact HTTP response を encrypted receipt transaction item に変換します。 */
   prepare(
-    response: { /** HTTP status です。 */ status: 200 | 204; /** Replay body です。 */ body: unknown },
+    response: { /** HTTP status です。 */ status: 200 | 201 | 204; /** Replay body です。 */ body: unknown },
   ): Promise<IdempotencyCompletionTransactWrite | undefined>
 }
 
 /** Canonical Work Item delete transaction に含める参照整合性 fence の種別です。 */
-type WorkItemDeletionFenceKind = 'external-links' | 'document-backlinks'
+type WorkItemDeletionFenceKind = 'external-links' | 'document-backlinks' | 'agent-runs'
 
 /** Cancellation reason を安定した domain conflict に分類する名前付き fence です。 */
 export type NamedWorkItemDeletionFence = {
@@ -2325,6 +2330,8 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const agentRunTransactItems = input.agentRunTransactItems ?? []
+    let agentRunFenceStartIndex: number | undefined
     const authorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       [
@@ -2625,6 +2632,9 @@ export class DynamoDbTeamIssuesClient {
         directoryId,
         updatedAt,
       )
+      agentRunFenceStartIndex = 2 + (auditPut ? 1 : 0) + configurationConditionChecks.length +
+        authorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0) +
+        (planningRevisionMutation ? 1 : 0)
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -2657,6 +2667,7 @@ export class DynamoDbTeamIssuesClient {
               ? [idempotencyCompletion.transactWriteItem]
               : []),
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+            ...agentRunTransactItems,
           ],
         }),
       )
@@ -2667,6 +2678,15 @@ export class DynamoDbTeamIssuesClient {
     } catch (error) {
       if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
         throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      }
+      const fenceStartIndex = agentRunFenceStartIndex
+      if (
+        fenceStartIndex !== undefined &&
+        agentRunTransactItems.some((_, index) =>
+          isTransactionConditionalFailureAt(error, fenceStartIndex + index)
+        )
+      ) {
+        throw createAgentRunFenceConflictError()
       }
 
       const cancellationReasonsMissing =
@@ -3402,18 +3422,38 @@ export function createWorkItemAuthorizationChangedError() {
   )
 }
 
+/**
+ * Creates the error reported when an Agent Run claim, fence, or lease condition fails.
+ *
+ * Callers re-read the run and claim rows to report the precise reason.
+ *
+ * @returns Stable conflict error for an Agent Run fence failure.
+ */
+export function createAgentRunFenceConflictError() {
+  return new ProjectDataError(
+    409,
+    'AgentRunFenceConflict',
+    'The Agent Run claim changed. Reload the task and its runs before retrying.',
+  )
+}
+
 function createWorkItemDeletionFenceConflictError(kind: WorkItemDeletionFenceKind) {
-  return kind === 'external-links'
-    ? new ProjectDataError(
+  switch (kind) {
+    case 'external-links':
+      return new ProjectDataError(
         409,
         'ExternalWorkItemLinkConflict',
         'Unlink all external resources before deleting this Work Item.',
       )
-    : new ProjectDataError(
+    case 'document-backlinks':
+      return new ProjectDataError(
         409,
         'WorkItemDocumentBacklinkConflict',
         'Unlink all Documents before deleting this Work Item.',
       )
+    case 'agent-runs':
+      return createAgentRunFenceConflictError()
+  }
 }
 
 function createWorkItemDeletionTransactionUnavailableError() {

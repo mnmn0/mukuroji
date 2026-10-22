@@ -3,6 +3,7 @@ import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEMA_VERSION,
+  type AgentRun,
   type ApiScope,
   type CanonicalWorkItem,
   type CustomFieldDefinition,
@@ -43,8 +44,10 @@ import {
   type DeveloperManagementPrincipal,
   type PublicApiDependencies,
   type PublicImportSourceInput,
+  type PublicAgentRunService,
   type PublicWorkItemService,
 } from './public-api'
+import { AgentRunError, createAgentRunConflictError, hashAgentInstanceId } from '../agent-runs'
 
 const NOW = new Date('2026-07-18T00:00:00.000Z')
 const managementPrincipal: DeveloperManagementPrincipal = {
@@ -211,6 +214,8 @@ function createFocusedTestPlatform(
 
 function createTestRouter(input: {
   workItems?: PublicWorkItemService
+  /** Agent Run service used by Agent Run route tests. */
+  agentRuns?: PublicAgentRunService
   connectorAuthorization?: ConnectorAuthorizationService
   managementPrincipal?: DeveloperManagementPrincipal
   /** Management authentication の request context を検証する override です。 */
@@ -234,6 +239,7 @@ function createTestRouter(input: {
       (async () => input.managementPrincipal ?? managementPrincipal),
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
     workItems: input.workItems ?? createDefaultWorkItemService(),
+    ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
     createRequestId: () => 'request-public-api-test',
@@ -684,6 +690,15 @@ describe('public API router', () => {
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('post')
     expect(paths['/api/v1/work-items/{workItemId}/work-item-type-preview']).toHaveProperty('post')
+    expect(paths['/api/v1/work-items/{workItemId}/agent-runs']).toHaveProperty('post')
+    expect(paths['/api/v1/work-items/{workItemId}/agent-runs']).toHaveProperty('get')
+    expect(paths['/api/v1/agent-runs']).toHaveProperty('get')
+    expect(paths['/api/v1/agent-runs/{runId}']).toHaveProperty('get')
+    expect(paths['/api/v1/agent-runs/{runId}/heartbeat']).toHaveProperty('post')
+    expect(paths['/api/v1/agent-runs/{runId}/finish']).toHaveProperty('post')
+    expect(paths['/api/v1/agent-settings']).toHaveProperty('get')
+    expect(components.schemas.UpdatePublicWorkItemRequest.properties).toHaveProperty('agentInstanceId')
+    expect(components.schemas.CreatePublicWorkItemCommentRequest.properties).toHaveProperty('agentRunId')
     expect(
       paths['/api/v1/work-items/{workItemId}/work-item-type-preview'].post.responses['200'].content[
         'application/json'
@@ -2629,5 +2644,201 @@ describe('public API router', () => {
     expect(await replay.json()).toEqual(resolvedBody)
     expect(resolveCalls).toBe(1)
     expect(conflictWriteChecks).toBe(2)
+  })
+})
+
+/** Public Agent Run fixture returned by fake services. */
+const agentRunFixture: AgentRun = {
+  schemaVersion: 1,
+  runId: 'run_00000000-0000-4000-8000-000000000001',
+  teamId: 'team-1',
+  workItemId: 'work-item-1',
+  assigneeUserId: 'user-1',
+  runtime: 'claude-code',
+  agentName: 'Claude Code',
+  state: 'active',
+  startRevision: 2,
+  leaseMinutes: 30,
+  startedAt: NOW.toISOString(),
+  lastHeartbeatAt: NOW.toISOString(),
+  leaseExpiresAt: NOW.toISOString(),
+  stalled: false,
+  reportCount: 0,
+}
+
+/**
+ * Creates a fake Agent Run service whose methods fail unless overridden.
+ *
+ * @param overrides - Methods used by one test.
+ * @returns Agent Run service.
+ */
+function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): PublicAgentRunService {
+  /**
+   * Fails a service call the test did not expect.
+   *
+   * @returns Never; always throws.
+   */
+  const unexpected = async (): Promise<never> => {
+    throw new Error('Unexpected Agent Run service call.')
+  }
+  return {
+    authorizeStart: unexpected,
+    start: unexpected,
+    listWorkItemRuns: unexpected,
+    list: unexpected,
+    get: unexpected,
+    heartbeat: unexpected,
+    authorizeFinish: unexpected,
+    finish: unexpected,
+    getSettings: unexpected,
+    ...overrides,
+  }
+}
+
+describe('public Agent Run routes', () => {
+  const startBody = {
+    expectedRevision: 1,
+    workflowStatusId: 'in-progress',
+    runtime: 'claude-code',
+    agentName: 'Claude Code',
+    instanceId: 'laptop-1',
+  }
+
+  test('starts idempotently, hashes the instance ID, and reports a held claim with a stable reason', async () => {
+    let starts = 0
+    let conflict = false
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      async start(_credential, teamId, workItemId, input) {
+        expect([teamId, workItemId]).toEqual(['team-1', 'work-item-1'])
+        expect(input.instanceIdHash).toBe(hashAgentInstanceId('laptop-1'))
+        expect(JSON.stringify(input)).not.toContain('laptop-1')
+        if (conflict) throw createAgentRunConflictError()
+        starts += 1
+        return { run: agentRunFixture, workItem: createWorkItem('work-item-1') }
+      },
+      async authorizeStart() {},
+    }) })
+    const credential = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    /**
+     * Sends a run start request.
+     *
+     * @param key - Idempotency key.
+     * @param body - Request body.
+     * @returns Response.
+     */
+    const send = (key: string, body: unknown = startBody) => router.request('/v1/work-items/work-item-1/agent-runs?teamId=team-1', {
+      method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body),
+    })
+    const created = await send('start-1')
+    expect(created.status).toBe(201)
+    expect(await created.json()).toMatchObject({ run: { runId: agentRunFixture.runId } })
+    expect((await send('start-1')).headers.get('Idempotency-Replayed')).toBe('true')
+    expect(starts).toBe(1)
+    conflict = true
+    const held = await send('start-2')
+    expect(held.status).toBe(409)
+    expect(await held.json()).toMatchObject({
+      code: 'conflict',
+      errors: [{ pointer: '/agentInstanceId', code: 'agent_run_conflict' }],
+    })
+    const invalid = await send('start-3', { ...startBody, runtime: 'unknown' })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ code: 'validation_failed', errors: [{ pointer: '/runtime' }] })
+  })
+
+  test('binds heartbeats and finishes to the instance, returns Retry-After, and 503 when runs are not configured', async () => {
+    const finishes: unknown[] = []
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      async heartbeat(_credential, _teamId, _runId, instanceIdHash) {
+        expect(instanceIdHash).toBe(hashAgentInstanceId('laptop-1'))
+        throw new AgentRunError('rate_limited', 'Too frequent.', { retryAfterSeconds: 7 })
+      },
+      async finish(_credential, _teamId, _runId, request) {
+        finishes.push(request)
+        return { ...agentRunFixture, state: 'finished', outcome: request.outcome, finishedBy: 'agent', finishedAt: NOW.toISOString() }
+      },
+      async authorizeFinish() {},
+    }) })
+    const credential = await createApiKey(platform, ['work-items:read', 'work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    const body = JSON.stringify({ instanceId: 'laptop-1' })
+    const limited = await router.request(`/v1/agent-runs/${agentRunFixture.runId}/heartbeat?teamId=team-1`, { method: 'POST', headers, body })
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('Retry-After')).toBe('7')
+    expect((await router.request('/v1/agent-runs/not-a-run/heartbeat?teamId=team-1', { method: 'POST', headers, body })).status).toBe(400)
+    const anonymous = await router.request(`/v1/agent-runs/${agentRunFixture.runId}/heartbeat?teamId=team-1`, {
+      method: 'POST', headers, body: '{}',
+    })
+    expect(anonymous.status).toBe(400)
+    expect(await anonymous.json()).toMatchObject({ errors: [{ pointer: '/instanceId' }] })
+
+    /**
+     * Sends a run finish request.
+     *
+     * @param instanceBody - Request body.
+     * @param key - Idempotency key.
+     * @returns Response.
+     */
+    const finish = (instanceBody: unknown, key: string) => router.request(`/v1/agent-runs/${agentRunFixture.runId}/finish?teamId=team-1`, {
+      method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(instanceBody),
+    })
+    expect((await finish({ outcome: 'completed', instanceId: 'laptop-1' }, 'finish-1')).status).toBe(200)
+    expect(finishes).toEqual([{ outcome: 'completed', instanceIdHash: hashAgentInstanceId('laptop-1') }])
+    expect((await finish({ outcome: 'completed' }, 'finish-2')).status).toBe(400)
+
+    const unconfigured = createTestRouter({ platform })
+    expect((await unconfigured.router.request('/v1/agent-settings?teamId=team-1', { headers })).status).toBe(503)
+  })
+
+  test('lists runs for one instance by hash and rejects unknown states', async () => {
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      async list(_credential, teamId, filters) {
+        expect(teamId).toBe('team-1')
+        expect(filters).toEqual({ state: 'active', instanceIdHash: hashAgentInstanceId('laptop-1') })
+        return { items: [agentRunFixture], hasMore: false }
+      },
+    }) })
+    const credential = await createApiKey(platform, ['work-items:read'])
+    const headers = { Authorization: `Bearer ${credential.secret}` }
+    const listed = await router.request('/v1/agent-runs?teamId=team-1&instanceId=laptop-1', { headers })
+    expect(await listed.json()).toEqual({ items: [agentRunFixture], hasMore: false })
+    expect((await router.request('/v1/agent-runs?teamId=team-1&state=stalled', { headers })).status).toBe(400)
+  })
+
+  test('passes Agent Run fences to updates and comments without changing the patch', async () => {
+    const fences: unknown[] = []
+    const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
+      async update(_credential, _team, _id, input, _context, _idempotency, fence) {
+        expect(input).toEqual({ expectedRevision: 1, title: 'Renamed' })
+        fences.push(fence)
+        return createWorkItem('work-item-1')
+      },
+      async addComment(credential, _team, _id, body, _context, _project, _assignee, fence) {
+        fences.push(fence)
+        return { id: 'comment-1', actorUserId: credential.subjectUserId, body, createdAt: NOW.toISOString() }
+      },
+    }) })
+    const credential = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    const patched = await router.request('/v1/work-items/work-item-1?teamId=team-1', {
+      method: 'PATCH', headers: { ...headers, 'Idempotency-Key': 'patch-1' },
+      body: JSON.stringify({ expectedRevision: 1, title: 'Renamed', agentRunId: agentRunFixture.runId, agentInstanceId: 'laptop-1' }),
+    })
+    expect(patched.status).toBe(200)
+    const commented = await router.request('/v1/work-items/work-item-1/comments?teamId=team-1', {
+      method: 'POST', headers: { ...headers, 'Idempotency-Key': 'comment-1' },
+      body: JSON.stringify({ body: 'progress', agentInstanceId: 'laptop-1' }),
+    })
+    expect(commented.status).toBe(201)
+    expect(fences).toEqual([
+      { agentRunId: agentRunFixture.runId, instanceIdHash: hashAgentInstanceId('laptop-1') },
+      { instanceIdHash: hashAgentInstanceId('laptop-1') },
+    ])
+    const orphan = await router.request('/v1/work-items/work-item-1?teamId=team-1', {
+      method: 'PATCH', headers: { ...headers, 'Idempotency-Key': 'patch-2' },
+      body: JSON.stringify({ expectedRevision: 1, title: 'Renamed', agentRunId: agentRunFixture.runId }),
+    })
+    expect(orphan.status).toBe(400)
   })
 })

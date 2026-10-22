@@ -43,6 +43,11 @@ import {
   createWorkItemAuthorizationChangedError,
 } from '../../../work-items'
 import { InMemoryPlanningClient } from '../../../planning/planning'
+import {
+  createActiveAgentRun,
+  InMemoryAgentRunStore,
+  readStartAgentRunRequest,
+} from '../../../agent-runs'
 import type {
   AutomationActionExecutionContext,
 } from '../../application/ports'
@@ -778,6 +783,65 @@ test('rejects bulk archive when a dependency is created after its incident-edge 
     }],
   })
   expect(calls.issueUpdates).toEqual([])
+})
+
+test('releases the active Agent Run of a Work Item in the same write that archives it', async () => {
+  const agentRuns = new InMemoryAgentRunStore()
+  const run = createActiveAgentRun({
+    directoryId: 'user#demo@example.com',
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+    assigneeUserId: 'demo@example.com',
+    start: readStartAgentRunRequest({
+      expectedRevision: 1,
+      workflowStatusId: 'in-progress',
+      runtime: 'codex',
+      agentName: 'Codex',
+      instanceId: 'laptop-1',
+    }),
+    credentialId: 'agent-key',
+    startRevision: 2,
+    leaseMinutes: 30,
+    now: new Date(),
+  })
+  agentRuns.seed(run)
+  configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    issueUpdateHook({ agentRunTransactItems }) {
+      agentRuns.applyTransactItems(agentRunTransactItems ?? [])
+    },
+  })
+  const planning = new InMemoryPlanningClient()
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({ agentRuns, bulkOperations: automationFake.client, planning })
+  const request = {
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  }
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  const preview: unknown = await previewResponse.json()
+  const operationToken = typeof preview === 'object' && preview !== null && 'operationToken' in preview
+    ? preview.operationToken
+    : undefined
+  expect(operationToken).toBeString()
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken }),
+  })
+
+  expect(applyResponse.status).toBe(201)
+  expect(await applyResponse.json()).toMatchObject({ status: 'succeeded' })
+  expect(agentRuns.state.claims.size).toBe(0)
+  // An archived Work Item can be restored, so the released instance stays revoked.
+  expect(agentRuns.state.revocations.size).toBe(1)
+  expect(await agentRuns.getRun('user#demo@example.com', 'core-team', run.runId))
+    .toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com' })
 })
 
 test('rejects bulk undo that would re-archive a Work Item with a dependency', async () => {

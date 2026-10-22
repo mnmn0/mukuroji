@@ -78,6 +78,7 @@ import {
   type TeamIssueDetailReadOptions,
   type TeamIssuesClient,
   type UpdateTeamIssueRequestBody,
+  type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
@@ -1380,6 +1381,8 @@ function configureFakeProjectClients(
     detailReadHook?: (issueId: string) => Promise<void>
     /** Detail fake が返す現在の設定済み workflow status ID です。 */
     detailWorkflowStatusId?: string
+    /** Status category the detail fake returns instead of the one derived from the status ID. */
+    detailStatusCategory?: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled'
     /** Detail fake が read ごとに返す workflow status ID です。 */
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
@@ -1416,6 +1419,8 @@ function configureFakeProjectClients(
       authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
       /** Configuration guard ConditionChecks supplied to the adapter. */
       configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
+      /** Agent Run writes committed with the update. */
+      agentRunTransactItems?: UpdateTeamIssueRequestBody['agentRunTransactItems']
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -2541,10 +2546,10 @@ function configureFakeProjectClients(
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
-            statusCategory:
-              workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
+            statusCategory: options.detailStatusCategory ??
+              (workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
                 ? 'completed'
-                : 'started',
+                : 'started'),
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
@@ -2619,7 +2624,7 @@ function configureFakeProjectClients(
           },
         }
       },
-      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId) {
+      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId, _auditContext, idempotency) {
         await options.issueUpdateHook?.({
           authorizationSnapshot: input.authorizationSnapshot,
           planningRevisionFence: input.planningRevisionFence,
@@ -2627,6 +2632,7 @@ function configureFakeProjectClients(
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
+          ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
         })
         calls.issueUpdates.push({
           actorUserId,
@@ -2646,7 +2652,7 @@ function configureFakeProjectClients(
           input.schedule,
           createDefaultDueDateWorkItemSchedule('2026-06-18'),
         )
-        return {
+        const updated: UpdateTeamIssueResponse = {
           issue: {
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 2,
@@ -2682,6 +2688,9 @@ function configureFakeProjectClients(
             source: 'dynamodb',
           },
         }
+        // Like the DynamoDB client, the receipt is prepared from the committed Work Item.
+        await idempotency?.prepare({ status: 200, body: updated.issue })
+        return updated
       },
       async updateTeamIssueSchedules(
         directoryId,

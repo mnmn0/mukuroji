@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createAgentTasks } from './agent-tasks'
-import { AgentTaskError, type AgentCatalog, type AgentTask, type AgentWorkItemApi } from './work-item-api'
+import type { AgentRunMutationFence } from '@mukuroji/contracts'
+import { AgentTaskError, type AgentCatalog, type AgentRunRecord, type AgentTask, type AgentWorkItemApi } from './work-item-api'
 
 /** Creates a minimal validated canonical task projection. */
 function task(id = 'one', patch: Partial<AgentTask> = {}): AgentTask {
@@ -25,11 +26,20 @@ const catalog: AgentCatalog = {
   } }],
 }
 
-/** Builds an in-memory CAS API with durable mutation receipts for lifecycle tests. */
+/** Scope shared by tests unless a test needs another instance or Project. */
+const baseScope = { assigneeUserId: 'agent-member', agentName: 'test-agent', runtime: 'claude-code', instanceId: 'instance-a' } as const
+
+/** Builds an in-memory CAS API with durable mutation receipts and run claims for lifecycle tests. */
 function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkItemApi> = {}) {
   const records = new Map(initial.map((item) => [item.id, structuredClone(item)]))
   const receipts = new Map<string, { fingerprint: string; task: AgentTask }>()
   const notes: string[] = []
+  const fences: (AgentRunMutationFence | undefined)[] = []
+  const runs = new Map<string, AgentRunRecord & { instanceId: string }>()
+  let runSequence = 0
+  const startReceipts = new Map<string, { fingerprint: string; response: { run: AgentRunRecord; task: AgentTask } }>()
+  /** Projects a stored run without the raw instance ID, as the server does. */
+  const publicRun = ({ instanceId: _instanceId, ...run }: AgentRunRecord & { instanceId: string }): AgentRunRecord => structuredClone(run)
   const api: AgentWorkItemApi = {
     async catalog() { return catalog },
     async get(id) {
@@ -37,13 +47,23 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       if (!found) throw new AgentTaskError('not_found', 'Not found')
       return structuredClone(found)
     },
-    async list(filters) { return { items: [...records.values()].filter((item) => !filters.assigneeUserId || item.assigneeUserId === filters.assigneeUserId), hasMore: false } },
+    async list(filters) {
+      return {
+        items: [...records.values()].filter((item) =>
+          (!filters.assigneeUserId || item.assigneeUserId === filters.assigneeUserId) &&
+          (!filters.assignedProjectId || item.assignedProjectId === filters.assignedProjectId)),
+        hasMore: false,
+      }
+    },
     async create(input) {
       const created = task('created', input)
       records.set(created.id, created)
       return created
     },
-    async update(id, input, key) {
+    async update(id, input, key, fence) {
+      fences.push(fence)
+      const holder = [...runs.values()].find((run) => run.workItemId === id && run.state === 'active')
+      if (holder && fence && holder.instanceId !== fence.agentInstanceId) throw new AgentTaskError('agent_run_conflict', 'Held')
       const fingerprint = JSON.stringify({ id, input })
       const receipt = receipts.get(key)
       if (receipt) {
@@ -62,13 +82,70 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return structuredClone(after)
     },
     async comments() { return { items: [], hasMore: false } },
-    async comment(_id, body) {
+    async comment(_id, body, _key, _project, _assignee, fence) {
+      fences.push(fence)
       notes.push(body)
       return { id: 'comment', actorUserId: 'agent-member', body, createdAt: '2026-09-01T00:00:00.000Z' }
     },
+    async startRun(id, input, key) {
+      const replay = startReceipts.get(key)
+      if (replay) {
+        if (replay.fingerprint !== JSON.stringify({ id, input })) throw new AgentTaskError('conflict', 'Different input')
+        return structuredClone(replay.response)
+      }
+      if ([...runs.values()].some((run) => run.workItemId === id && run.state === 'active')) {
+        throw new AgentTaskError('agent_run_conflict', 'Held')
+      }
+      const started = await api.update(id, { expectedRevision: input.expectedRevision, workflowStatusId: input.workflowStatusId }, key)
+      runSequence += 1
+      const run = {
+        schemaVersion: 1 as const, runId: `run_00000000-0000-4000-8000-${String(runSequence).padStart(12, '0')}`,
+        teamId: 'team', workItemId: id, assigneeUserId: 'agent-member', runtime: input.runtime, agentName: input.agentName,
+        state: 'active' as const, startRevision: started.revision, leaseMinutes: 30, startedAt: '2026-09-01T00:00:00.000Z',
+        lastHeartbeatAt: '2026-09-01T00:00:00.000Z', leaseExpiresAt: '2026-09-01T00:30:00.000Z', stalled: false, reportCount: 0,
+        instanceId: input.instanceId,
+      }
+      runs.set(run.runId, run)
+      const response = { run: publicRun(run), task: started }
+      startReceipts.set(key, { fingerprint: JSON.stringify({ id, input }), response })
+      return structuredClone(response)
+    },
+    async listActiveRuns(filters) {
+      return { items: [...runs.values()].filter((run) => run.state === 'active' &&
+        (!filters.instanceId || run.instanceId === filters.instanceId) &&
+        (!filters.assigneeUserId || run.assigneeUserId === filters.assigneeUserId)).map(publicRun), hasMore: false }
+    },
+    async taskRuns(id) {
+      return { items: [...runs.values()].filter((run) => run.workItemId === id).reverse().map(publicRun), hasMore: false }
+    },
+    async getRun(runId) {
+      const run = runs.get(runId)
+      if (!run) throw new AgentTaskError('not_found', 'Not found')
+      return publicRun(run)
+    },
+    async heartbeat(runId, instanceId) {
+      if (runs.get(runId)?.instanceId !== instanceId) throw new AgentTaskError('agent_run_conflict', 'Another instance')
+      return api.getRun(runId)
+    },
+    async finishRun(runId, outcome, instanceId) {
+      const run = runs.get(runId)
+      if (!run) throw new AgentTaskError('not_found', 'Not found')
+      if (run.state !== 'active') throw new AgentTaskError('agent_run_not_active', 'Finished')
+      if (run.instanceId !== instanceId) throw new AgentTaskError('agent_run_conflict', 'Another instance')
+      runs.set(runId, { ...run, state: 'finished', outcome, finishedBy: 'agent', finishedAt: '2026-09-01T01:00:00.000Z' })
+      return api.getRun(runId)
+    },
+    async agentSettings() {
+      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
+    },
     ...overrides,
   }
-  return { api, records, notes, service: createAgentTasks(api, { assigneeUserId: 'agent-member', agentName: 'test-agent' }) }
+  /** Releases a run as a person would from the Web application. */
+  const release = (runId: string) => {
+    const run = runs.get(runId)
+    if (run) runs.set(runId, { ...run, state: 'finished', outcome: 'released', finishedBy: 'member', finishedAt: '2026-09-01T01:00:00.000Z' })
+  }
+  return { api, records, notes, fences, runs, release, service: createAgentTasks(api, baseScope) }
 }
 
 describe('agent task lifecycle', () => {
@@ -86,10 +163,93 @@ describe('agent task lifecycle', () => {
     expect(pages).toBe(2)
   })
 
-  test('reports started work before selecting new work without granting another claim, and counts all statuses', async () => {
+  test('resumes only work this instance claimed and counts all statuses', async () => {
     const { service } = fixture([task('ready', { priority: 'high' }), task('active', { workflowStatusId: 'coding', statusCategory: 'started' }), task('done', { statusCategory: 'completed' })])
-    expect(await service.next({})).toMatchObject({ action: 'in_progress', task: { id: 'active' } })
+    // Started work without a run, such as work a person or an older agent started, is not resumed.
+    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'ready' }, ownRuns: [], otherRuns: [] })
     expect(await service.status({})).toMatchObject({ total: 3, counts: { started: 1, unstarted: 1, completed: 1 } })
+    const claimed = await service.transition('ready', 1, 'coding', 'start', 'claim')
+    expect(claimed).toMatchObject({ task: { id: 'ready', statusCategory: 'started' }, run: { workItemId: 'ready', state: 'active' } })
+    expect(await service.next({})).toMatchObject({ action: 'in_progress', task: { id: 'ready' }, ownRuns: [{ workItemId: 'ready' }] })
+  })
+
+  test('reports another instance\'s run without resuming it, skips its task, and fences mutations', async () => {
+    const { api, service, fences, release, runs } = fixture([task('first', { priority: 'high' }), task('second')])
+    const other = createAgentTasks(api, { ...baseScope, instanceId: 'instance-b', runtime: 'codex' })
+    await other.transition('first', 1, 'coding', 'start', 'other-claim')
+    const next = await service.next({})
+    expect(next).toMatchObject({
+      action: 'start', task: { id: 'second' }, ownRuns: [],
+      otherRuns: [{ workItemId: 'first', runtime: 'codex', stalled: false }],
+      skipped: [],
+    })
+    expect(JSON.stringify(next)).not.toContain('instance-b')
+    await expect(service.transition('first', 2, 'review', 'move', 'steal')).rejects.toMatchObject({ code: 'agent_run_conflict' })
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
+    const [held] = [...runs.values()]
+    await expect(service.finishRun(held?.runId ?? '', 'completed', 'finish')).rejects.toMatchObject({ code: 'not_own_run' })
+    await expect(service.heartbeat(held?.runId ?? '')).rejects.toMatchObject({ code: 'not_own_run' })
+    expect(await service.get('first')).toMatchObject({ activeRun: { workItemId: 'first', ownedByThisInstance: false } })
+
+    await other.report('first', 'Progress', 'note')
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-b', agentRunId: held?.runId })
+    release(held?.runId ?? '')
+    expect(await other.next({})).toMatchObject({ ownRuns: [] })
+  })
+
+  test('recognizes a run it just started while the run index still lags, and stops after a release', async () => {
+    let indexed = false
+    const { api, release, fences } = fixture()
+    const lagging = createAgentTasks({
+      ...api,
+      async listActiveRuns(filters, cursor) {
+        return indexed ? api.listActiveRuns(filters, cursor) : { items: [], hasMore: false }
+      },
+      async taskRuns(id, limit) {
+        return indexed ? api.taskRuns(id, limit) : { items: [], hasMore: false }
+      },
+    }, baseScope)
+    const claimed = await lagging.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await lagging.get('one')).toMatchObject({ activeRun: { runId, ownedByThisInstance: true } })
+    expect(await lagging.heartbeat(runId)).toMatchObject({ runId })
+    expect(await lagging.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId }] })
+    await lagging.report('one', 'Progress', 'note')
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
+    indexed = true
+    release(runId)
+    await lagging.report('one', 'After release', 'note-2')
+    // The remembered run ID still reaches the server, which reports the release.
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
+    await expect(lagging.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    indexed = false
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
+  })
+
+  test('keeps selecting work after a task it just started is deleted', async () => {
+    const { api } = fixture()
+    let deleted = false
+    const lagging = createAgentTasks({
+      ...api,
+      async listActiveRuns() { return { items: [], hasMore: false } },
+      async getRun(runId) {
+        if (deleted) throw new AgentTaskError('not_found', 'Not found')
+        return api.getRun(runId)
+      },
+    }, baseScope)
+    await lagging.transition('one', 1, 'coding', 'start', 'claim')
+    deleted = true
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
+  })
+
+  test('closes its own run once and forwards a retry of a finished run to the server', async () => {
+    const { service } = fixture()
+    const claimed = await service.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await service.heartbeat(runId)).toMatchObject({ runId })
+    expect(await service.finishRun(runId, 'paused', 'finish')).toMatchObject({ state: 'finished', outcome: 'paused' })
+    await expect(service.finishRun(runId, 'paused', 'finish-again')).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    await expect(service.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
   })
 
   test('only one concurrent claimant succeeds; identical uncertain retries replay, changed keys conflict', async () => {
@@ -99,7 +259,7 @@ describe('agent task lifecycle', () => {
       service.transition('one', 1, 'coding', 'start', 'claim-b'),
     ])
     expect(claims.filter((claim) => claim.status === 'fulfilled')).toHaveLength(1)
-    expect(await service.transition('one', 1, 'coding', 'start', 'claim-a')).toMatchObject({ revision: 2, statusCategory: 'started' })
+    expect(await service.transition('one', 1, 'coding', 'start', 'claim-a')).toMatchObject({ task: { revision: 2, statusCategory: 'started' } })
     await expect(service.transition('one', 1, 'review', 'start', 'claim-a')).rejects.toMatchObject({ code: 'conflict' })
     await expect(service.transition('one', 2, 'coding', 'start', 'new-claim')).rejects.toMatchObject({ code: 'invalid_transition' })
   })
@@ -143,11 +303,44 @@ describe('agent task lifecycle', () => {
         return { id: 'comment', actorUserId: 'member', body, createdAt: '2026-09-01T00:00:00.000Z' }
       },
     })
-    const scoped = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent-member', assignedProjectId: 'project' })
+    const scoped = createAgentTasks(api, { ...baseScope, agentName: 'test', assignedProjectId: 'project' })
     await scoped.configuration()
     await scoped.transition('one', 1, 'coding', 'start', 'claim')
     await scoped.comments('one')
     await scoped.report('one', 'Progress', 'note')
+  })
+
+  test('keeps runs of tasks outside the configured Project out of selection, heartbeats, and finishing', async () => {
+    const { service, api } = fixture([
+      task('inside', { assignedProjectId: 'project' }),
+      task('outside', { assignedProjectId: 'other-project' }),
+    ])
+    const claimed = await service.transition('outside', 1, 'coding', 'start', 'claim-outside')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    const scoped = createAgentTasks(api, { ...baseScope, assignedProjectId: 'project' })
+    expect(await scoped.next({})).toMatchObject({ action: 'start', task: { id: 'inside' }, ownRuns: [], otherRuns: [] })
+    await expect(scoped.heartbeat(runId)).rejects.toMatchObject({ code: 'out_of_scope' })
+    await expect(scoped.finishRun(runId, 'paused', 'finish-outside')).rejects.toMatchObject({ code: 'out_of_scope' })
+  })
+
+  test('keeps a run it just started out of ownRuns once its task leaves the configured Project', async () => {
+    let moved = false
+    const { api } = fixture([task('inside', { assignedProjectId: 'project' })])
+    const lagging = createAgentTasks({
+      ...api,
+      async get(id) {
+        const current = await api.get(id)
+        return moved ? { ...current, assignedProjectId: 'other-project' } : current
+      },
+      async listActiveRuns() {
+        return { items: [], hasMore: false }
+      },
+    }, { ...baseScope, assignedProjectId: 'project' })
+    const claimed = await lagging.transition('inside', 1, 'coding', 'start', 'claim-inside')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [{ runId }] })
+    moved = true
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
   })
 
   test('rejects blockers, inaccessible blockers, wrong assignment, invalid transitions, and Project escapes', async () => {
@@ -155,7 +348,7 @@ describe('agent task lifecycle', () => {
     await expect(service.transition('blocked', 1, 'coding', 'start', 'a')).rejects.toMatchObject({ code: 'blocked' })
     await expect(service.transition('other', 1, 'coding', 'start', 'a')).rejects.toMatchObject({ code: 'not_assigned' })
     await expect(service.transition('blocked', 1, 'todo', 'start', 'a')).rejects.toMatchObject({ code: 'invalid_status' })
-    const scoped = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent-member', assignedProjectId: 'restricted-project' })
+    const scoped = createAgentTasks(api, { ...baseScope, agentName: 'test', assignedProjectId: 'restricted-project' })
     await expect(scoped.get('blocked')).rejects.toMatchObject({ code: 'out_of_scope' })
     await expect(scoped.next({ assignedProjectId: 'different' })).rejects.toMatchObject({ code: 'out_of_scope' })
   })
@@ -173,7 +366,7 @@ describe('agent task lifecycle', () => {
 
   test('accepts only completed dependencies and surfaces dependency service failures', async () => {
     const { service } = fixture([task('one', { relationIds: ['blockedBy:dep'] }), task('dep', { statusCategory: 'completed' })])
-    expect(await service.transition('one', 1, 'coding', 'start', 'a')).toMatchObject({ statusCategory: 'started' })
+    expect(await service.transition('one', 1, 'coding', 'start', 'a')).toMatchObject({ task: { statusCategory: 'started' } })
     const failure = fixture([task()], { async get() { throw new AgentTaskError('unavailable', 'Down', true) } })
     await expect(failure.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
   })
@@ -184,14 +377,14 @@ describe('agent task lifecycle', () => {
         task('one', { assignedProjectId: 'project', relationIds: ['blockedBy:dep'] }),
         task('dep', { assignedProjectId, assigneeUserId: 'another-member', statusCategory: 'completed' }),
       ])
-      const service = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent-member', assignedProjectId: 'project' })
+      const service = createAgentTasks(api, { ...baseScope, agentName: 'test', assignedProjectId: 'project' })
       const blocked = assignedProjectId !== 'project'
       expect(await service.get('one')).toMatchObject({ blockers: { unresolvedCount: blocked ? 1 : 0 } })
       expect(await service.next({})).toMatchObject({ action: blocked ? 'none' : 'start', blockedCount: blocked ? 1 : 0 })
       if (blocked) {
         await expect(service.transition('one', 1, 'coding', 'start', 'claim')).rejects.toMatchObject({ code: 'blocked' })
       } else {
-        expect(await service.transition('one', 1, 'coding', 'start', 'claim')).toMatchObject({ statusCategory: 'started' })
+        expect(await service.transition('one', 1, 'coding', 'start', 'claim')).toMatchObject({ task: { statusCategory: 'started' } })
       }
     }
   })

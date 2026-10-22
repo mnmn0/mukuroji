@@ -12,6 +12,7 @@ export const codingAgentConfigurationTemplate = JSON.stringify({
         MUKUROJI_MCP_TEAM_ID: 'your-team-id',
         MUKUROJI_MCP_ASSIGNEE_ID: 'your-workspace-member-id',
         MUKUROJI_MCP_AGENT_NAME: 'coding-agent',
+        MUKUROJI_MCP_RUNTIME: 'claude-code',
       },
     },
   },

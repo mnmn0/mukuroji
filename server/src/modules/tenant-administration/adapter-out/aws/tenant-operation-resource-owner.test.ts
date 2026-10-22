@@ -56,6 +56,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     notificationsTableName: 'notifications',
     focusTableName: 'focus',
     pushSubscriptionsTableName: 'push-subscriptions',
+    agentRunsTableName: 'agent-runs',
     realtimeSessionsTableName: 'realtime-sessions',
     fileProofingTableName: 'file-proofing',
   }
@@ -301,6 +302,17 @@ describe('AwsTenantOperationResourceOwner', () => {
         TableName: 'push-subscriptions',
         FilterExpression: '(#tenant0 = :tenant0)',
         // Every Workspace's devices share the table, so a job evaluates a wide window.
+        Limit: 1_000,
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'workspace/one' },
+        },
+      })
+
+      // Agent Runs follow push subscriptions as the next trailing table.
+      await owner.execute(createDataJob(22), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'agent-runs',
+        FilterExpression: '(#tenant0 = :tenant0)',
         Limit: 1_000,
         ExpressionAttributeValues: {
           ':tenant0': { S: 'workspace/one' },
@@ -1184,7 +1196,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 20, processedCount: 20 },
+      cursor: { targetIndex: 21, processedCount: 21 },
     }
 
     try {
@@ -1398,7 +1410,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 20, processedCount: 20 },
+      cursor: { targetIndex: 21, processedCount: 21 },
     }
 
     try {

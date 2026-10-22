@@ -73,6 +73,28 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 現在のcredentialの権限に追加する制約です。queryはcursorおよび冪等request fingerprintに含まれます。
 
 一覧要素・作成応答は `{ id, actorUserId, body, createdAt }` です。
+
+### Agent Runs
+
+コーディングエージェントによる Work Item の claim は Agent Run として扱います。契約と状態遷移の正本は
+[Software factory](software-factory.md#agent-run) です。
+
+- `POST /api/v1/work-items/{workItemId}/agent-runs?teamId={teamId}` は `Idempotency-Key` を要求し、
+  Run の開始と started 遷移を一つの transaction で確定します。応答は `{ run, workItem }` です。
+- `GET /api/v1/work-items/{workItemId}/agent-runs` と `GET /api/v1/agent-runs` は通常の signed
+  pagination を使います。`GET /api/v1/agent-runs` は `state`（既定 `active`）、`instanceId`、
+  `assigneeUserId` で絞り込めます。
+- `POST /api/v1/agent-runs/{runId}/heartbeat` は lease を延長します。body の `instanceId` に
+  Run 開始時と同じ値を送ります。Run ごとに10秒に1回までで、超過時は `429` と `Retry-After` を
+  返します。
+- `POST /api/v1/agent-runs/{runId}/finish` は `Idempotency-Key` を要求し、`outcome` に
+  `completed`、`paused`、`failed` を、`instanceId` に Run 開始時と同じ値を受け付けます。
+- 同じメンバーの別 instance は、他 instance の Run を heartbeat・finish できません。`active` な
+  Run には `agent_run_conflict`、終了済みの Run には `agent_run_not_active` を返します。
+- `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
+  `agentInstanceId` を受け付けます。どちらも送らない既存 client の挙動は変わりません。
+- Run 固有の拒否理由は problem の `errors[].code`（`agent_run_conflict`、`agent_run_not_active`、
+  `agent_run_forbidden`、`invalid_transition`）で返し、`code` は既存の `conflict` / `forbidden` です。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
 ### Pagination contract

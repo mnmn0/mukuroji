@@ -121,6 +121,8 @@ export type TenantOperationResourceOwnerConfig = {
   focusTableName: string
   /** Web Push subscriptions and endpoint owners. */
   pushSubscriptionsTableName: string
+  /** Agent Run table with run, claim, and Team Agent settings rows. */
+  agentRunsTableName: string
   /** Realtime session table. */
   realtimeSessionsTableName: string
   /** File proofing metadata table. */
@@ -441,6 +443,14 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         ]),
         ownerAttribute: 'workspaceId',
         // Every Workspace's devices share this table, so each job evaluates a large window.
+        scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
+      },
+      // Runs, claims, instance revocations, and Agent settings carry the Workspace ID next to the Team partition key.
+      {
+        ...attributeTarget('agent-runs', this.config.agentRunsTableName, 'directoryTeamId', 'recordKey', [
+          workspaceSelector('workspaceId', 'equals'),
+        ]),
+        ownerAttribute: 'workspaceId',
         scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
       },
     ]

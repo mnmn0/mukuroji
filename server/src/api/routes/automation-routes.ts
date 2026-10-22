@@ -126,6 +126,7 @@ import {
   resolveFileApprovalCompletionTransition,
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
+import { createAgentRunReleaseOnRemovalItems } from '../shared/agent-run-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { createPlanningFencedWorkItemAuthorizationSnapshot } from '../shared/planning-access'
 import {
@@ -979,21 +980,33 @@ function createApiBulkOperationAdapter(
       }
       let response: UpdateTeamIssueResponse
       try {
+        const mutationContext = createBulkMutationContext(
+          { bulkAction: request.action, item: prepared.item },
+          createBulkItemMutationIdempotencyKey(
+            request,
+            itemIndex,
+            'apply',
+            principal.userKey,
+          ),
+        )
+        // An archived Work Item leaves active use, so its agent claim is released in the same write.
+        const agentRunTransactItems = request.action.type === 'archive' && request.action.archived
+          ? await createAgentRunReleaseOnRemovalItems(
+              principal,
+              prepared.item.teamId,
+              prepared.item.workItemId,
+              mutationContext,
+              new Date(),
+              'Agent Run was released because its Work Item was archived.',
+            )
+          : undefined
         response = await workItemDependencies.teamIssues.updateTeamIssue(
           principal.directoryId,
           prepared.item.teamId,
           prepared.item.workItemId,
-          prepared.body,
+          agentRunTransactItems ? { ...prepared.body, agentRunTransactItems } : prepared.body,
           principal.userKey,
-          createBulkMutationContext(
-            { bulkAction: request.action, item: prepared.item },
-            createBulkItemMutationIdempotencyKey(
-              request,
-              itemIndex,
-              'apply',
-              principal.userKey,
-            ),
-          ),
+          mutationContext,
         )
       } catch (error) {
         const recovered = canAttemptResponseLossRecovery(error)

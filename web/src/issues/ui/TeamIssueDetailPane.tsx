@@ -29,6 +29,7 @@ import { type IssueCollaborationRoute } from '../model/collaborationTabs'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import {
   isCustomFieldApplicable,
   parseCustomFieldFormData,
@@ -1069,6 +1070,16 @@ function IssueDetailContent({
           {!hasCustomFieldSection && hasCustomFields
             ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
             : null}
+          {/* Agent claims are operational state, so Work Item types that hide the workflow section still show them. */}
+          {accessToken ? (
+            <WorkItemAgentRunsPanelContainer
+              accessToken={accessToken}
+              key={issue.teamId + ':' + issue.id + ':agent-runs'}
+              locale={locale}
+              teamId={issue.teamId}
+              workItemId={issue.id}
+            />
+          ) : null}
         </div>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"

@@ -69,6 +69,8 @@ export type DataStoreResources = {
   readonly notificationsTable: dynamodb.Table;
   /** Web Push device subscriptions and exclusive endpoint ownership records. */
   readonly pushSubscriptionsTable: dynamodb.Table;
+  /** Coding agent runs, per-Work Item claims, and Team Agent settings. */
+  readonly agentRunsTable: dynamodb.Table;
   /** User and Team Focus queue preferences and snooze state. */
   readonly focusTable: dynamodb.Table;
   /** Realtime connection and one-time ticket table. */
@@ -495,6 +497,29 @@ export function buildDataStores(
     timeToLiveAttribute: 'expiresAt',
   });
 
+  const agentRunsTable = new dynamodb.Table(stack, 'AgentRunsTable', {
+    partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+  });
+
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'WorkItemRunIndex',
+    partitionKey: { name: 'workItemRunKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'workItemRunSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'ActiveRunIndex',
+    partitionKey: { name: 'activeRunPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'activeRunSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
   notificationsTable.addGlobalSecondaryIndex({
     indexName: 'RecipientStatusIndex',
     partitionKey: { name: 'recipientStatusKey', type: dynamodb.AttributeType.STRING },
@@ -576,6 +601,7 @@ export function buildDataStores(
     workspaceSearchTable,
     notificationsTable,
     pushSubscriptionsTable,
+    agentRunsTable,
     focusTable,
     realtimeSessionsTable,
     fileProofingTable,
