@@ -19,6 +19,7 @@ import {
   createDefaultAgentSettings,
   type StoredAgentRun,
   type StoredAgentRunClaim,
+  type StoredAgentRunLatest,
 } from '../../domain/agent-run'
 import {
   AgentRunError,
@@ -79,6 +80,14 @@ export interface AgentRunStore {
    */
   getClaim(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunClaim | undefined>
   /**
+   * Reads the strongly consistent record of a Work Item's newest run.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param workItemId - Work Item ID.
+   * @returns The newest run's identity and outcome, or undefined when the Work Item never had a run.
+   */
+  getLatestRun(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunLatest | undefined>
+  /**
    * Strongly reads Team Agent settings.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
@@ -132,16 +141,17 @@ export interface AgentRunStore {
    */
   listFinishedRuns(directoryId: string, teamId: string, cursor: string | undefined, limit: number): Promise<AgentRunPage>
   /**
-   * Builds the writes that create a run and claim its Work Item.
+   * Builds the writes that create a run, claim its Work Item, and record it as the newest run.
    * @param run - New active run.
-   * @returns Run and claim puts that fail when either already exists.
+   * @returns Run and claim puts that fail when either already exists, then the newest-run put.
    */
   createStartItems(run: StoredAgentRun): AgentRunTransactItem[]
   /**
    * Builds the checks that fence a Work Item mutation with the caller's claim and run. The lease is
    * extended after the mutation commits, so an older mutation never overwrites a newer heartbeat.
    * @param input - Scope, current run, instance hash, and time.
-   * @returns Run and claim condition checks.
+   * @returns Run and claim condition checks, or, without a run, claim and newest-run checks that
+   * reject an instance whose newest run a person released or another instance took over.
    */
   createMutationFenceConditionChecks(input: AgentRunFenceInput): AgentRunTransactItem[]
   /**
@@ -153,10 +163,10 @@ export interface AgentRunStore {
    */
   createClaimAbsentCheck(directoryId: string, teamId: string, workItemId: string): AgentRunTransactItem
   /**
-   * Builds the writes that finish an active run and remove its claim.
+   * Builds the writes that finish an active run, remove its claim, and record its outcome.
    * @param run - Finished form of the run.
    * @param expectedInstanceIdHash - Instance that must still own the run, when an agent closes it.
-   * @returns Run update and claim delete conditioned on the run still being active.
+   * @returns Run update, claim delete, and newest-run update, conditioned on the run still being active.
    */
   createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
   /**
@@ -166,7 +176,8 @@ export interface AgentRunStore {
    */
   commit(items: readonly AgentRunTransactItem[], fenceItemCount: number): Promise<void>
   /**
-   * Extends a lease in response to an explicit heartbeat, at most once per interval.
+   * Extends a lease in response to an explicit heartbeat, at most once per interval, while the run
+   * still holds its Work Item's claim.
    * @param run - Active run.
    * @param instanceIdHash - Instance that must own the run.
    * @param now - Heartbeat time.
@@ -226,6 +237,16 @@ function runRecordKey(runId: string): string {
  */
 function claimRecordKey(workItemId: string): string {
   return `agent-run-claim#${workItemId}`
+}
+
+/**
+ * Builds the sort key of a Work Item's newest-run record.
+ *
+ * @param workItemId - Work Item ID.
+ * @returns Sort key.
+ */
+function latestRecordKey(workItemId: string): string {
+  return `agent-run-latest#${workItemId}`
 }
 
 /** Sort key of the Team Agent settings row. */
@@ -324,8 +345,7 @@ function parseRun(
   }
   const runtime = AGENT_RUN_RUNTIMES.find((candidate) => candidate === item.runtime)
   const state = item.state === 'active' || item.state === 'finished' ? item.state : undefined
-  const outcomes: readonly AgentRunOutcome[] = ['completed', 'paused', 'failed', 'released', 'superseded']
-  const outcome = item.outcome === undefined ? undefined : outcomes.find((candidate) => candidate === item.outcome)
+  const outcome = item.outcome === undefined ? undefined : storedOutcomes.find((candidate) => candidate === item.outcome)
   if (!runtime || !state || (item.outcome !== undefined && !outcome) || (state === 'finished') !== (outcome !== undefined)) {
     throw createAgentRunIntegrityError()
   }
@@ -361,6 +381,9 @@ function parseRun(
     reportCount: storedInteger(item, 'reportCount'),
   }
 }
+
+/** Every outcome a stored run or newest-run record can carry. */
+const storedOutcomes: readonly AgentRunOutcome[] = ['completed', 'paused', 'failed', 'released', 'superseded']
 
 /**
  * Serializes a run row with its index keys.
@@ -504,6 +527,28 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       runId: storedString(item, 'runId'),
       instanceIdHash: storedString(item, 'instanceIdHash'),
       assigneeUserId: storedString(item, 'assigneeUserId'),
+    }
+  }
+
+  /** @inheritdoc */
+  async getLatestRun(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunLatest | undefined> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: latestRecordKey(workItemId) },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (item === undefined) return undefined
+    if (item.entityType !== 'agent-run-latest' || item.workItemId !== workItemId || item.workspaceId !== directoryId) {
+      throw createAgentRunIntegrityError()
+    }
+    const outcome = item.outcome === undefined ? undefined : storedOutcomes.find((candidate) => candidate === item.outcome)
+    if (item.outcome !== undefined && !outcome) throw createAgentRunIntegrityError()
+    return {
+      workItemId,
+      runId: storedString(item, 'runId'),
+      instanceIdHash: storedString(item, 'instanceIdHash'),
+      ...(outcome === undefined ? {} : { outcome }),
     }
   }
 
@@ -672,12 +717,27 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           ConditionExpression: 'attribute_not_exists(recordKey)',
         },
       },
+      {
+        // The claim put above already admits one start per Work Item, so this replaces the previous record.
+        Put: {
+          TableName: this.#tableName,
+          Item: {
+            directoryTeamId: partition,
+            recordKey: latestRecordKey(run.workItemId),
+            entityType: 'agent-run-latest',
+            workspaceId: run.directoryId,
+            workItemId: run.workItemId,
+            runId: run.runId,
+            instanceIdHash: run.instanceIdHash,
+          },
+        },
+      },
     ]
   }
 
   /** @inheritdoc */
   createMutationFenceConditionChecks(input: AgentRunFenceInput): AgentRunTransactItem[] {
-    if (!input.run) return [this.#claimCheck(input)]
+    if (!input.run) return [this.#claimCheck(input), this.#latestNotRevokedCheck(input)]
     return [
       {
         ConditionCheck: {
@@ -749,6 +809,16 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           ExpressionAttributeValues: { ':runId': run.runId },
         },
       },
+      {
+        Update: {
+          TableName: this.#tableName,
+          Key: { directoryTeamId: partition, recordKey: latestRecordKey(run.workItemId) },
+          UpdateExpression: 'SET #outcome = :outcome',
+          ConditionExpression: '#runId = :runId',
+          ExpressionAttributeNames: { '#runId': 'runId', '#outcome': 'outcome' },
+          ExpressionAttributeValues: { ':runId': run.runId, ':outcome': run.outcome },
+        },
+      },
     ]
   }
 
@@ -767,41 +837,60 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   async heartbeat(run: StoredAgentRun, instanceIdHash: string, now: Date): Promise<StoredAgentRun> {
     const leaseExpiresAt = calculateLeaseExpiry(now, run.leaseMinutes)
     const threshold = new Date(now.getTime() - AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000).toISOString()
+    const partition = createAgentRunPartition(run.directoryId, run.teamId)
     try {
-      await this.#client.send(new UpdateCommand({
-        TableName: this.#tableName,
-        Key: { directoryTeamId: createAgentRunPartition(run.directoryId, run.teamId), recordKey: runRecordKey(run.runId) },
-        UpdateExpression: 'SET #lastHeartbeatAt = :now, #lastHeartbeatRequestAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
-        ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #lastHeartbeatAt < :now AND ' +
-          '(attribute_not_exists(#lastHeartbeatRequestAt) OR #lastHeartbeatRequestAt <= :threshold)',
-        ExpressionAttributeNames: {
-          '#lastHeartbeatAt': 'lastHeartbeatAt',
-          '#lastHeartbeatRequestAt': 'lastHeartbeatRequestAt',
-          '#leaseExpiresAt': 'leaseExpiresAt',
-          '#activeRunSortKey': 'activeRunSortKey',
-          '#state': 'state',
-          '#instanceIdHash': 'instanceIdHash',
-        },
-        ExpressionAttributeValues: {
-          ':now': now.toISOString(),
-          ':leaseExpiresAt': leaseExpiresAt,
-          ':activeRunSortKey': `${leaseExpiresAt}#${run.runId}`,
-          ':active': 'active',
-          ':threshold': threshold,
-          ':instanceIdHash': instanceIdHash,
-        },
+      await this.#client.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: this.#tableName,
+              Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
+              UpdateExpression: 'SET #lastHeartbeatAt = :now, #lastHeartbeatRequestAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
+              ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #lastHeartbeatAt < :now AND ' +
+                '(attribute_not_exists(#lastHeartbeatRequestAt) OR #lastHeartbeatRequestAt <= :threshold)',
+              ExpressionAttributeNames: {
+                '#lastHeartbeatAt': 'lastHeartbeatAt',
+                '#lastHeartbeatRequestAt': 'lastHeartbeatRequestAt',
+                '#leaseExpiresAt': 'leaseExpiresAt',
+                '#activeRunSortKey': 'activeRunSortKey',
+                '#state': 'state',
+                '#instanceIdHash': 'instanceIdHash',
+              },
+              ExpressionAttributeValues: {
+                ':now': now.toISOString(),
+                ':leaseExpiresAt': leaseExpiresAt,
+                ':activeRunSortKey': `${leaseExpiresAt}#${run.runId}`,
+                ':active': 'active',
+                ':threshold': threshold,
+                ':instanceIdHash': instanceIdHash,
+              },
+            },
+          },
+          {
+            // An active run that no longer holds its claim is inconsistent and must not stay alive.
+            ConditionCheck: {
+              TableName: this.#tableName,
+              Key: { directoryTeamId: partition, recordKey: claimRecordKey(run.workItemId) },
+              ConditionExpression: '#runId = :runId AND #instanceIdHash = :instanceIdHash',
+              ExpressionAttributeNames: { '#runId': 'runId', '#instanceIdHash': 'instanceIdHash' },
+              ExpressionAttributeValues: { ':runId': run.runId, ':instanceIdHash': instanceIdHash },
+            },
+          },
+        ],
       }))
     } catch (error) {
-      if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+      if (!isAwsNamedError(error, 'TransactionCanceledException')) throw error
+      if (!isLeadingConditionalFailure(error, 2)) throw createAgentRunCommitConflictError()
       const current = await this.getRun(run.directoryId, run.teamId, run.runId)
       if (!current || current.state !== 'active' || current.instanceIdHash !== instanceIdHash) throw createAgentRunNotActiveError()
+      const claim = await this.getClaim(run.directoryId, run.teamId, run.workItemId)
+      if (claim?.runId !== run.runId || claim.instanceIdHash !== instanceIdHash) throw createAgentRunIntegrityError()
       const nextAllowedAt = current.lastHeartbeatRequestAt === undefined
         ? 0
         : Date.parse(current.lastHeartbeatRequestAt) + AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000
       // Outside the rate window, only a newer lease renewal (a fenced mutation) can have failed the condition.
       if (nextAllowedAt <= now.getTime()) return current
-      const last = nextAllowedAt - AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000
-      const retryAfterSeconds = Math.max(1, Math.ceil((last + AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS * 1_000 - now.getTime()) / 1_000))
+      const retryAfterSeconds = Math.max(1, Math.ceil((nextAllowedAt - now.getTime()) / 1_000))
       throw new AgentRunError('rate_limited', `Send at most one heartbeat every ${AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS} seconds per run.`, { retryAfterSeconds })
     }
     return {
@@ -867,6 +956,25 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             ExpressionAttributeValues: { ':instanceIdHash': input.instanceIdHash },
           },
         }
+  }
+
+  /**
+   * Builds the check that rejects an instance whose newest run on the Work Item a person released
+   * or another instance took over. It reads committed state, unlike the run index.
+   *
+   * @param input - Fence input.
+   * @returns ConditionCheck on the newest-run record.
+   */
+  #latestNotRevokedCheck(input: AgentRunFenceInput): AgentRunTransactItem {
+    return {
+      ConditionCheck: {
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(input.directoryId, input.teamId), recordKey: latestRecordKey(input.workItemId) },
+        ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR NOT (#outcome IN (:released, :superseded))',
+        ExpressionAttributeNames: { '#recordKey': 'recordKey', '#instanceIdHash': 'instanceIdHash', '#outcome': 'outcome' },
+        ExpressionAttributeValues: { ':instanceIdHash': input.instanceIdHash, ':released': 'released', ':superseded': 'superseded' },
+      },
+    }
   }
 
   /**

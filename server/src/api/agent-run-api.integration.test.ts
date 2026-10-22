@@ -85,6 +85,8 @@ function configureUnstartedAssignedWorkItem(overrides: {
   statusCategory?: 'unstarted' | 'started'
   /** Team role of the caller. */
   role?: 'member' | 'manager' | 'viewer'
+  /** Runs just before the fenced update applies its Agent Run items, to simulate a concurrent write. */
+  beforeCommit?: () => void
 } = {}) {
   const store = new InMemoryAgentRunStore()
   const observed: unknown[][] = []
@@ -98,6 +100,7 @@ function configureUnstartedAssignedWorkItem(overrides: {
     issueUpdateHook(input) {
       const items = input.agentRunTransactItems ?? []
       observed.push(items)
+      overrides.beforeCommit?.()
       try {
         store.applyTransactItems(items)
       } catch (error) {
@@ -296,8 +299,9 @@ describe('public Agent Run service', () => {
 
   test('stops an agent whose run a person released, even when it omits the run ID', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
-    const released = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'released', 'sato@example.com', new Date())
-    store.state.runs.set(`${workspaceId}|core-team|${released.runId}`, released)
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'released', 'sato@example.com', new Date())))
     const workItems = createCanonicalPublicWorkItemService()
     /**
      * Renames the fixture task as an agent instance that omits the run ID.
@@ -311,11 +315,31 @@ describe('public Agent Run service', () => {
       { requestId: 'update', idempotencyKey: key }, undefined, { instanceIdHash: hashAgentInstanceId(instanceId) },
     ))
     await expect(update('laptop-1', 'released-1')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
-    // Another instance, and an instance whose own run completed, may still update the task.
+    // Another instance, and an instance whose newer own run completed, may still update the task.
     await update('laptop-2', 'released-2')
-    const completed = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'completed', 'agent', new Date(Date.now() + 1_000))
-    store.state.runs.set(`${workspaceId}|core-team|${completed.runId}`, { ...completed, startedAt: new Date(Date.now() + 1_000).toISOString() })
+    const next = createHeldRun('task-1', 'laptop-1')
+    store.applyTransactItems(store.createStartItems(next))
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(next, 'completed', 'agent', new Date())))
     await update('laptop-1', 'released-3')
+  })
+
+  test('rejects an instance-only update when a person releases the run during the request', async () => {
+    let releaseBeforeCommit: (() => void) | undefined
+    const { store } = configureUnstartedAssignedWorkItem({
+      statusCategory: 'started',
+      beforeCommit: () => releaseBeforeCommit?.(),
+    })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    releaseBeforeCommit = () => {
+      releaseBeforeCommit = undefined
+      store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'released', 'sato@example.com', new Date())))
+    }
+    const workItems = createCanonicalPublicWorkItemService()
+    await expect(runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: 'race-1' }, undefined, { instanceIdHash: held.instanceIdHash },
+    ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
   test('releases an active run in the same transaction that deletes its Work Item', async () => {
@@ -380,8 +404,16 @@ describe('Web Agent Run routes', () => {
     expect(history.status).toBe(200)
     expect(await history.json()).toMatchObject({ items: [{ runId: held.runId, canRelease: true, state: 'active' }] })
 
+    const commits: unknown[][] = []
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      commits.push([...items])
+      await commit(items, fenceItemCount)
+    }
     const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
     expect(released.status).toBe(200)
+    // The member who started the run keeps the authority after a reassignment, so no revision check is added.
+    expect(JSON.stringify(commits[0])).not.toContain('revision = :expectedRevision')
     expect(await released.json()).toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com', canRelease: false })
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
     const again = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
@@ -403,10 +435,23 @@ describe('Web Agent Run routes', () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', assigneeUserId: 'demo@example.com' })
     const previous = { ...createHeldRun('task-1'), assigneeUserId: 'sato@example.com' }
     store.seed(previous)
+    const commits: unknown[][] = []
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      commits.push([...items])
+      await commit(items, fenceItemCount)
+    }
     const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
     expect(await history.json()).toMatchObject({ items: [{ runId: previous.runId, canRelease: true }] })
     const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${previous.runId}/release`, { method: 'POST', headers })
     expect(released.status).toBe(200)
+    // Only the current assignment grants this release, so it commits only at the revision that was read.
+    expect(commits[0]).toContainEqual({
+      ConditionCheck: expect.objectContaining({
+        Key: expect.objectContaining({ issueId: 'task-1' }),
+        ConditionExpression: 'revision = :expectedRevision',
+      }),
+    })
   })
 
   test('does not offer a release to an assignee who can only view the Team', async () => {

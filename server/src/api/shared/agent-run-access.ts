@@ -121,10 +121,12 @@ export async function resolveAgentRunFence(
       throw createAgentRunConflictError(describeHoldingRun(holder, now))
     }
     if (!claim) {
-      // An agent whose run a person released must stop even when it no longer sends the run ID.
-      const [latest] = (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs
+      // An agent whose run a person released must stop even when it no longer sends the run ID. The
+      // newest-run record is read consistently, and the transaction checks it again.
+      const latest = await store.getLatestRun(principal.directoryId, teamId, workItemId)
       if (
-        latest?.instanceIdHash === fence.instanceIdHash &&
+        latest !== undefined &&
+        latest.instanceIdHash === fence.instanceIdHash &&
         (latest.outcome === 'released' || latest.outcome === 'superseded')
       ) {
         throw createAgentRunNotActiveError()
@@ -332,6 +334,36 @@ export async function prepareAgentRunCommentFence(
 }
 
 /**
+ * Builds the writes that release a Work Item's active run when the Work Item leaves active use, or
+ * prove that no run holds it, for the same transaction as that Work Item write.
+ *
+ * @param principal - Authorized principal removing the Work Item.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item being deleted or archived.
+ * @param auditContext - Audit context of the Work Item write.
+ * @param now - Write time.
+ * @param summary - Audit summary of the release.
+ * @returns Writes committed with the Work Item write.
+ */
+export async function createAgentRunReleaseOnRemovalItems(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+  auditContext: MutationAuditContext,
+  now: Date,
+  summary: string,
+): Promise<AgentRunTransactItem[]> {
+  const store = workItemDependencies.agentRuns
+  const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
+  if (!claim) return [store.createClaimAbsentCheck(principal.directoryId, teamId, workItemId)]
+  const run = await store.getRun(principal.directoryId, teamId, claim.runId)
+  if (!run || run.state !== 'active' || run.workItemId !== workItemId) throw createAgentRunIntegrityError()
+  const released = finishAgentRun(run, 'released', principal.userKey, now)
+  const auditPut = createAgentRunAuditPut(auditContext, released, 'released', summary, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM)
+  return [...store.createCloseItems(released), ...(auditPut ? [auditPut] : [])]
+}
+
+/**
  * Builds the deletion fences that release a Work Item's active run, or prove that none exists.
  *
  * @param principal - Authorized principal deleting the Work Item.
@@ -348,26 +380,13 @@ export async function createAgentRunDeletionFences(
   auditContext: MutationAuditContext,
   now: Date,
 ): Promise<NamedWorkItemDeletionFence[]> {
-  const store = workItemDependencies.agentRuns
-  const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
-  if (!claim) {
-    return [{
-      kind: 'agent-runs',
-      transactWriteItem: store.createClaimAbsentCheck(principal.directoryId, teamId, workItemId),
-    }]
-  }
-  const run = await store.getRun(principal.directoryId, teamId, claim.runId)
-  if (!run || run.state !== 'active' || run.workItemId !== workItemId) throw createAgentRunIntegrityError()
-  const released = finishAgentRun(run, 'released', principal.userKey, now)
-  const auditPut = createAgentRunAuditPut(
+  const items = await createAgentRunReleaseOnRemovalItems(
+    principal,
+    teamId,
+    workItemId,
     auditContext,
-    released,
-    'released',
+    now,
     'Agent Run was released because its Work Item was deleted.',
-    AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
   )
-  return [
-    ...store.createCloseItems(released),
-    ...(auditPut ? [auditPut] : []),
-  ].map((transactWriteItem): NamedWorkItemDeletionFence => ({ kind: 'agent-runs', transactWriteItem }))
+  return items.map((transactWriteItem): NamedWorkItemDeletionFence => ({ kind: 'agent-runs', transactWriteItem }))
 }

@@ -252,7 +252,9 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
             principal.directoryId,
             teamId,
             run.workItemId,
-            { consistentIssueRead: false, includeEvents: false },
+            // Authorization reads the committed Work Item, so a move to another Project or a deletion
+            // hides its runs immediately.
+            { consistentIssueRead: true, includeEvents: false },
           )
           assignedProjectId = detail.issue.assignedProjectId
         } catch (error) {

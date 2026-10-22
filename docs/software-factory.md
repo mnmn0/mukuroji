@@ -141,6 +141,7 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 | --- | --- | --- | --- |
 | table | `directoryTeamId` | `agent-run#<runId>` | Run の正本 |
 | table | `directoryTeamId` | `agent-run-claim#<workItemId>` | Work Item ごとの `active` Run を 1 件に固定する claim row |
+| table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item の最新 Run の `runId`、`instanceId` hash、終了時の `outcome`。fence が強整合で読む |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
 | `ActiveRunIndex`（sparse） | `directoryTeamId` | `<leaseExpiresAt>#<runId>` | board の処理中・停滞一覧。`finished` で key を外す |
 
@@ -149,8 +150,11 @@ put、finish / release / take over の transaction で同じ `runId` 条件付�
 claim row が残り Run row が `finished` になった不整合は strict reader が fail-closed で `503` とし、
 [data-integrity](data-integrity.md) の verify script に検査を追加する。
 
-Run は Work Item の archive / delete に従う。Work Item を削除する transaction は `active` Run を
-`released` として閉じ、claim row を削除する。Retention は Work Item と同じとし、Run だけを
+latest row は start の transaction で置き換え、Run を閉じる transaction で同じ `runId` を条件に
+`outcome` を記録する。結果整合の `WorkItemRunIndex` は fence の判断に使わない。
+
+Run は Work Item の archive / delete に従う。Work Item を削除または archive する transaction は
+`active` Run を `released` として閉じ、claim row を削除する。Retention は Work Item と同じとし、Run だけを
 先に消さない。
 
 ## 構造化された進捗報告
@@ -407,15 +411,22 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 - heartbeat と finish は Run 開始時の `instanceId` を必須とし、その hash を Run の条件式でも
   照合する。同じ credential を共有する別 instance は、他 instance の Run を延長・終了できない。
 - `agentRunId` は `agentInstanceId` と一緒に送る。`agentInstanceId` だけの mutation は、別
-  instance の claim がない場合だけ成功する。claim がなく、その Work Item の最新 Run が同じ instance
-  のもので `released` または `superseded` で終わっている場合は `agent_run_not_active` とする。
-  これにより、人が解放した後の agent は Run ID を送らなくなっても止まる。
-- Work Item の削除は `active` Run を `released` にし、claim を削除する。Run がない場合も claim が
-  ないことを同じ transaction で検査し、削除と start の競合を防ぐ。
+  instance の claim がない場合だけ成功する。latest row が同じ instance の Run を `released` または
+  `superseded` と記録している場合は `agent_run_not_active` とする。latest row は強整合で読み、
+  mutation と同じ transaction でも ConditionCheck で再検証するため、人が解放した直後や解放と
+  同時に届いた mutation も止まる。
+- heartbeat は Run の lease 更新と、claim row が同じ Run と instance を指すことの ConditionCheck を
+  1 つの transaction で行う。claim を失った `active` Run は integrity error として延長しない。
+- Work Item の削除と一括 archive は `active` Run を `released` にし、claim を削除する。Run が
+  ない場合も claim がないことを同じ transaction で検査し、削除・archive と start の競合を防ぐ。
+- Web の解放が Work Item の現在の担当者であることだけを根拠にする場合、読んだ Work Item の
+  revision を同じ transaction で検査し、担当変更と競合した解放を確定しない。
+- Run 一覧の可視性は Work Item を強整合で読んで判定する。Web の Run パネルは開いている間
+  30 秒ごと、および `active` Run の lease が切れる直後に再取得し、停滞を表示する。
 - `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
   `in_progress` とする。Run 一覧の index は結果整合のため、同じ process が開始した直後の Run は
-  `getRun` で直接読み、`ownRuns` に含める。それ以外の自 Run は `ownRuns` に残し、agent に `finish_run` を促す。
+  `getRun` で直接読み、`ownRuns` と `get_task` の `activeRun` に含める。それ以外の自 Run は `ownRuns` に残し、agent に `finish_run` を促す。
   Run のない `started` Work Item は再開対象にしない。
 - 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、`allowTakeoverAfterLeaseExpiry`
   を使う take over、data-integrity の verify script による claim / Run 不整合の検査。

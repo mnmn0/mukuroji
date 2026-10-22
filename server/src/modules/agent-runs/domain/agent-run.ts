@@ -77,6 +77,21 @@ export type StoredAgentRunClaim = {
   assigneeUserId: string
 }
 
+/**
+ * Strongly consistent record of a Work Item's newest run. Fences read it instead of the run index,
+ * which can lag, so an instance stops right after a person releases its run.
+ */
+export type StoredAgentRunLatest = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Newest run of the Work Item. */
+  runId: string
+  /** Instance hash of the newest run. */
+  instanceIdHash: string
+  /** Outcome once the newest run finished; absent while it is active. */
+  outcome?: AgentRunOutcome
+}
+
 /** Validated input for a run start, with the instance ID already hashed. */
 export type ValidatedAgentRunStart = Omit<StartAgentRunRequest, 'instanceId'> & {
   /** SHA-256 of the client instance ID. */

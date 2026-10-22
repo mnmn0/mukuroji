@@ -8,7 +8,7 @@ export const codingAgentGuideMessages = {
   'agents.guide.credentialsDescription': '設定の Developer から work-items:read / work-items:write を持つ API キーを作成します。キー所有者には対象 Team / Project の閲覧・編集権限が必要です。',
   'agents.guide.openSettings': 'Developer 設定を開く',
   'agents.guide.scopeTitle': 'Team と担当メンバーを指定',
-  'agents.guide.scopeDescription': 'ASSIGNEE_ID には既存 Workspace メンバーの ID を指定します。エージェントの表示名は AGENT_NAME です。更新は設定した担当メンバーのタスクに限定されます。',
+  'agents.guide.scopeDescription': 'ASSIGNEE_ID には既存 Workspace メンバーの ID を指定します。エージェントの表示名は AGENT_NAME です。MUKUROJI_MCP_RUNTIME には、サーバーを動かすエージェントに合わせて claude-code、codex、kiro、other のいずれかを指定します。更新は設定した担当メンバーのタスクに限定されます。',
   'agents.guide.clientTitle': 'MCP クライアントへ登録',
   'agents.guide.clientDescription': 'リポジトリルートで bun install --frozen-lockfile を実行し、設定例の絶対パス・URL・ID を置き換えます。URL は /api を含まない HTTPS の origin を指定してください。コメント API を含むサーバーのリリースが必要です。',
   'agents.guide.configTitle': '接続設定のテンプレート',

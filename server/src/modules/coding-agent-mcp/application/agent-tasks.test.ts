@@ -198,9 +198,13 @@ describe('agent task lifecycle', () => {
       async listActiveRuns(filters, cursor) {
         return indexed ? api.listActiveRuns(filters, cursor) : { items: [], hasMore: false }
       },
+      async taskRuns(id, limit) {
+        return indexed ? api.taskRuns(id, limit) : { items: [], hasMore: false }
+      },
     }, baseScope)
     const claimed = await lagging.transition('one', 1, 'coding', 'start', 'claim')
     const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await lagging.get('one')).toMatchObject({ activeRun: { runId, ownedByThisInstance: true } })
     expect(await lagging.heartbeat(runId)).toMatchObject({ runId })
     expect(await lagging.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId }] })
     await lagging.report('one', 'Progress', 'note')

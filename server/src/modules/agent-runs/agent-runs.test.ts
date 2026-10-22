@@ -240,29 +240,84 @@ describe('DynamoDB Agent Run store', () => {
 
   test('rate-limits explicit heartbeats and reports a finished run as not active', async () => {
     const run = createRun({ lastHeartbeatRequestAt: '2026-10-22T00:00:05.000Z' })
-    const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)[0]?.Put?.Item
+    const [runPut, claimPut] = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)
+    const item = runPut?.Put?.Item
+    const claimItem = claimPut?.Put?.Item
     /**
-     * Simulates a failed DynamoDB condition.
+     * Simulates a heartbeat transaction whose run update failed its condition.
      *
      * @returns Never; always throws.
      */
-    const conditionalFailure = () => {
-      throw Object.assign(new Error('failed'), { name: 'ConditionalCheckFailedException' })
+    const runConditionFailed = () => {
+      throw Object.assign(new Error('cancelled'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+      })
     }
-    const limited = createClient([conditionalFailure, { Item: item }])
+    const limited = createClient([runConditionFailed, { Item: item }, { Item: claimItem }])
     await expect(new DynamoDbAgentRunStore(limited.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:00:08.000Z')))
       .rejects.toMatchObject({ category: 'rate_limited', retryAfterSeconds: 7 })
-    const finishedItem = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
-      .createStartItems(run)[0]?.Put?.Item
-    const finished = createClient([conditionalFailure, { Item: { ...finishedItem, state: 'finished', outcome: 'completed', finishedAt: now.toISOString(), finishedBy: 'agent' } }])
+    expect(limited.commands[0]?.input).toMatchObject({
+      TransactItems: [
+        { Update: { Key: { recordKey: `agent-run#${run.runId}` } } },
+        { ConditionCheck: { Key: { recordKey: 'agent-run-claim#task-1' }, ConditionExpression: '#runId = :runId AND #instanceIdHash = :instanceIdHash' } },
+      ],
+    })
+    const finished = createClient([runConditionFailed, { Item: { ...item, state: 'finished', outcome: 'completed', finishedAt: now.toISOString(), finishedBy: 'agent' } }])
     await expect(new DynamoDbAgentRunStore(finished.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
       .rejects.toMatchObject({ reason: 'agent_run_not_active' })
-    const renewed = createClient([conditionalFailure, { Item: { ...item, lastHeartbeatAt: '2026-10-22T00:02:00.000Z' } }])
+    const renewed = createClient([runConditionFailed, { Item: { ...item, lastHeartbeatAt: '2026-10-22T00:02:00.000Z' } }, { Item: claimItem }])
     expect(await new DynamoDbAgentRunStore(renewed.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
       .toMatchObject({ lastHeartbeatAt: '2026-10-22T00:02:00.000Z' })
-    const other = createClient([conditionalFailure, { Item: item }])
+    const other = createClient([runConditionFailed, { Item: item }])
     await expect(new DynamoDbAgentRunStore(other.client, 'AgentRuns').heartbeat(run, hashAgentInstanceId('laptop-2'), new Date('2026-10-22T00:01:00.000Z')))
       .rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('refuses to keep alive an active run that no longer holds its claim', async () => {
+    const run = createRun()
+    const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)[0]?.Put?.Item
+    /**
+     * Simulates a heartbeat transaction whose claim check failed.
+     *
+     * @returns Never; always throws.
+     */
+    const claimConditionFailed = () => {
+      throw Object.assign(new Error('cancelled'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+      })
+    }
+    const orphaned = createClient([claimConditionFailed, { Item: item }, {}])
+    await expect(new DynamoDbAgentRunStore(orphaned.client, 'AgentRuns').heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    const memory = new InMemoryAgentRunStore()
+    memory.state.runs.set(`workspace-1|core|${run.runId}`, run)
+    await expect(memory.heartbeat(run, run.instanceIdHash, new Date('2026-10-22T00:01:00.000Z')))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
+  test('records the newest run and checks it when an instance omits the run ID', () => {
+    const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const run = createRun()
+    const latestPut = store.createStartItems(run)[2]
+    expect(latestPut?.Put).toMatchObject({
+      Item: { recordKey: 'agent-run-latest#task-1', entityType: 'agent-run-latest', runId: run.runId, instanceIdHash: run.instanceIdHash },
+    })
+    expect(latestPut?.Put).not.toHaveProperty('ConditionExpression')
+    const latestUpdate = store.createCloseItems(finishAgentRun(run, 'released', 'member-2', now))[2]
+    expect(latestUpdate?.Update).toMatchObject({
+      Key: { recordKey: 'agent-run-latest#task-1' },
+      ConditionExpression: '#runId = :runId',
+      ExpressionAttributeValues: { ':outcome': 'released', ':runId': run.runId },
+    })
+    const [, latestCheck] = store.createMutationFenceConditionChecks({
+      directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', instanceIdHash: run.instanceIdHash, now,
+    })
+    expect(latestCheck?.ConditionCheck).toMatchObject({
+      Key: { recordKey: 'agent-run-latest#task-1' },
+      ConditionExpression: 'attribute_not_exists(#recordKey) OR #instanceIdHash <> :instanceIdHash OR NOT (#outcome IN (:released, :superseded))',
+    })
   })
 
   test('saves settings with revision CAS and reports a lost update as a conflict', async () => {
@@ -340,5 +395,9 @@ describe('in-memory Agent Run store', () => {
     expect(() => store.applyTransactItems(fence(hashAgentInstanceId('laptop-2')))).toThrow('Transaction cancelled.')
     store.applyTransactItems(fence(run.instanceIdHash, run))
     store.applyTransactItems(fence(run.instanceIdHash))
+    // After a person releases the run, the same instance is fenced out while other instances are not.
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(run, 'released', 'member-2', now)))
+    expect(() => store.applyTransactItems(fence(run.instanceIdHash))).toThrow('Transaction cancelled.')
+    store.applyTransactItems(fence(hashAgentInstanceId('laptop-2')))
   })
 })

@@ -4,6 +4,7 @@ import { listWorkItemAgentRuns, releaseAgentRun } from '../src/work-items/api/ag
 import { agentRunFixtures, stalledAgentRunFixture } from '../src/work-items/agentRunFixtures'
 import { readAgentRunDisplayState, splitAgentRuns } from '../src/work-items/model/agentRunDisplay'
 import { WorkItemAgentRunsPanel } from '../src/work-items/ui/WorkItemAgentRunsPanel'
+import { readAgentRunsRefreshDelay } from '../src/work-items/queries/useWorkItemAgentRuns'
 import { createWorkItemAgentRunsLabels } from '../src/work-items/ui/agentRunLabels'
 import { DEFAULT_WORK_ITEM_TYPE, type WorkItemDetailSectionId } from '@mukuroji/contracts'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -101,6 +102,20 @@ describe('WorkItemAgentRunsPanel', () => {
     const failed = render({ errorMessage: labels.loadError, onRetry: () => undefined })
     expect(failed).toContain('role="alert"')
     expect(failed).toContain('>Reload agent runs<')
+  })
+
+  test('refreshes at the regular interval, or right after the active lease expires', () => {
+    const now = Date.parse('2026-10-22T00:00:00.000Z')
+    const active = { ...stalledAgentRunFixture, stalled: false }
+    expect(readAgentRunsRefreshDelay(undefined, now)).toBe(30_000)
+    expect(readAgentRunsRefreshDelay({ items: [], hasMore: false }, now)).toBe(30_000)
+    expect(readAgentRunsRefreshDelay({ items: [{ ...active, leaseExpiresAt: '2026-10-22T00:00:10.000Z' }], hasMore: false }, now))
+      .toBe(11_000)
+    expect(readAgentRunsRefreshDelay({ items: [{ ...active, leaseExpiresAt: '2026-10-22T00:20:00.000Z' }], hasMore: false }, now))
+      .toBe(30_000)
+    expect(readAgentRunsRefreshDelay({ items: [{ ...active, leaseExpiresAt: '2026-10-21T23:00:00.000Z' }], hasMore: false }, now))
+      .toBe(5_000)
+    expect(readAgentRunsRefreshDelay({ items: [stalledAgentRunFixture], hasMore: false }, now)).toBe(30_000)
   })
 
   test('derives display states and separates the active run', () => {

@@ -445,7 +445,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         // Every Workspace's devices share this table, so each job evaluates a large window.
         scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
       },
-      // Runs, claims, and Agent settings carry the Workspace ID next to the Team partition key.
+      // Runs, claims, newest-run records, and Agent settings carry the Workspace ID next to the Team partition key.
       {
         ...attributeTarget('agent-runs', this.config.agentRunsTableName, 'directoryTeamId', 'recordKey', [
           workspaceSelector('workspaceId', 'equals'),

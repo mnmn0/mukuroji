@@ -8,7 +8,7 @@ export const codingAgentGuideMessages = {
   'agents.guide.credentialsDescription': 'In Settings → Developer, create an API key with work-items:read and work-items:write. Its owner needs read and edit access to the target Team and Project.',
   'agents.guide.openSettings': 'Open Developer settings',
   'agents.guide.scopeTitle': 'Choose the Team and assigned member',
-  'agents.guide.scopeDescription': 'ASSIGNEE_ID must be an existing Workspace member ID. AGENT_NAME is the display name. Changes are limited to tasks assigned to the configured member.',
+  'agents.guide.scopeDescription': 'ASSIGNEE_ID must be an existing Workspace member ID. AGENT_NAME is the display name. Set MUKUROJI_MCP_RUNTIME to claude-code, codex, kiro, or other to match the agent that runs the server. Changes are limited to tasks assigned to the configured member.',
   'agents.guide.clientTitle': 'Register in your MCP client',
   'agents.guide.clientDescription': 'Run bun install --frozen-lockfile at the repository root, then replace the absolute paths, URL, and IDs in the template. Use an HTTPS origin without /api. The server release must include the comments API.',
   'agents.guide.configTitle': 'Connection template',

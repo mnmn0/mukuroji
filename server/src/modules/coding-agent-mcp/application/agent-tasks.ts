@@ -109,6 +109,29 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     throw new AgentTaskError('queue_limit', 'More active runs exist than one selection can read. Ask the user to release finished work.')
   }
 
+  /**
+   * Reads the run this process started for a task, forgetting it once it is finished, deleted, or
+   * no longer visible so it cannot block other work.
+   *
+   * @param taskId - Task the run claimed.
+   * @returns The active run, or undefined when there is none.
+   */
+  async function rememberedActiveRun(taskId: string): Promise<AgentRunRecord | undefined> {
+    const runId = startedRuns.get(taskId)
+    if (runId === undefined) return undefined
+    let run: AgentRunRecord
+    try {
+      run = await api.getRun(runId)
+    } catch (error) {
+      if (!(error instanceof AgentTaskError) || !['not_found', 'forbidden'].includes(error.code)) throw error
+      startedRuns.delete(taskId)
+      return undefined
+    }
+    if (run.state === 'active') return run
+    startedRuns.delete(taskId)
+    return undefined
+  }
+
   /** Splits active runs into this instance's runs and other instances' runs. */
   async function runsByOwner(): Promise<{
     /** Runs this instance started. */
@@ -121,19 +144,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     // The run index can lag behind a start this process just made; read those runs directly.
     for (const [taskId, runId] of startedRuns) {
       if (ownIds.has(runId)) continue
-      let run: AgentRunRecord
-      try {
-        run = await api.getRun(runId)
-      } catch (error) {
-        // A deleted or no longer visible task must not block selection of other work.
-        if (!(error instanceof AgentTaskError) || !['not_found', 'forbidden'].includes(error.code)) throw error
-        startedRuns.delete(taskId)
-        continue
-      }
-      if (run.state !== 'active') {
-        startedRuns.delete(taskId)
-        continue
-      }
+      const run = await rememberedActiveRun(taskId)
+      if (!run) continue
       own.push(run)
       ownIds.add(runId)
     }
@@ -293,6 +305,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     /** Returns canonical details, dependency readiness, and the task's active run. */
     async get(id: string) {
       const task = inScope(await api.get(id))
+      // A run this process just started may not be in the run index yet; read it directly first.
+      const started = await rememberedActiveRun(id)
+      if (started) return { task, blockers: await blockers(task), activeRun: { ...started, ownedByThisInstance: true } }
       const [latest] = (await api.taskRuns(id, 1)).items
       const activeRun = latest?.state === 'active'
         ? { ...latest, ownedByThisInstance: (await activeRuns(true)).some((run) => run.runId === latest.runId) }
