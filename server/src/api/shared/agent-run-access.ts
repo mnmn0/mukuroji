@@ -354,6 +354,8 @@ export async function prepareAgentRunCommentFence(
  * @param auditContext - Audit context of the Work Item write.
  * @param now - Write time.
  * @param summary - Audit summary of the release.
+ * @param revokeInstance - Whether the released instance stays revoked; false for a deleted Work Item,
+ * which nothing can act on again, so no revocation row would ever be cleared.
  * @returns Writes committed with the Work Item write.
  */
 export async function createAgentRunReleaseOnRemovalItems(
@@ -363,6 +365,7 @@ export async function createAgentRunReleaseOnRemovalItems(
   auditContext: MutationAuditContext,
   now: Date,
   summary: string,
+  revokeInstance = true,
 ): Promise<AgentRunTransactItem[]> {
   const store = workItemDependencies.agentRuns
   const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
@@ -371,7 +374,7 @@ export async function createAgentRunReleaseOnRemovalItems(
   if (!run || run.state !== 'active' || run.workItemId !== workItemId) throw createAgentRunIntegrityError()
   const released = finishAgentRun(run, 'released', principal.userKey, now)
   const auditPut = createAgentRunAuditPut(auditContext, released, 'released', summary, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM)
-  return [...store.createCloseItems(released), ...(auditPut ? [auditPut] : [])]
+  return [...store.createCloseItems(released, undefined, { revokeInstance }), ...(auditPut ? [auditPut] : [])]
 }
 
 /**
@@ -398,6 +401,7 @@ export async function createAgentRunDeletionFences(
     auditContext,
     now,
     'Agent Run was released because its Work Item was deleted.',
+    false,
   )
   return items.map((transactWriteItem): NamedWorkItemDeletionFence => ({ kind: 'agent-runs', transactWriteItem }))
 }

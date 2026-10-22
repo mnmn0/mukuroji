@@ -838,6 +838,8 @@ test('releases the active Agent Run of a Work Item in the same write that archiv
   expect(applyResponse.status).toBe(201)
   expect(await applyResponse.json()).toMatchObject({ status: 'succeeded' })
   expect(agentRuns.state.claims.size).toBe(0)
+  // An archived Work Item can be restored, so the released instance stays revoked.
+  expect(agentRuns.state.revocations.size).toBe(1)
   expect(await agentRuns.getRun('user#demo@example.com', 'core-team', run.runId))
     .toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com' })
 })

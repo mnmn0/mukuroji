@@ -170,9 +170,12 @@ export interface AgentRunStore {
    * revoke the run's instance on the Work Item.
    * @param run - Finished form of the run.
    * @param expectedInstanceIdHash - Instance that must still own the run, when an agent closes it.
+   * @param options - Close options.
+   * @param options.revokeInstance - Whether a release or take over revokes the instance; false when the
+   * Work Item itself is deleted, since nothing can act on it again.
    * @returns Run update and claim delete conditioned on the run still being active, then any revocation put.
    */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, options?: AgentRunCloseOptions): AgentRunTransactItem[]
   /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
@@ -195,6 +198,12 @@ export interface AgentRunStore {
    * @param now - Mutation time.
    */
   extendLeaseAfterMutation(run: StoredAgentRun, now: Date): Promise<void>
+}
+
+/** Options for closing a run. */
+export type AgentRunCloseOptions = {
+  /** Whether a release or take over revokes the run's instance on the Work Item; defaults to true. */
+  revokeInstance?: boolean
 }
 
 /** Input for building a mutation fence. */
@@ -765,7 +774,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, options: AgentRunCloseOptions = {}): AgentRunTransactItem[] {
     if (run.state !== 'finished' || !run.outcome || !run.finishedAt || !run.finishedBy) {
       throw new TypeError('createCloseItems requires the finished form of a run.')
     }
@@ -809,7 +818,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           ExpressionAttributeValues: { ':runId': run.runId },
         },
       },
-      ...(run.outcome === 'released' || run.outcome === 'superseded'
+      ...(options.revokeInstance !== false && (run.outcome === 'released' || run.outcome === 'superseded')
         ? [{
             Put: {
               TableName: this.#tableName,
