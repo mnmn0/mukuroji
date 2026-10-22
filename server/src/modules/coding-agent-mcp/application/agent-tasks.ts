@@ -121,7 +121,15 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     // The run index can lag behind a start this process just made; read those runs directly.
     for (const [taskId, runId] of startedRuns) {
       if (ownIds.has(runId)) continue
-      const run = await api.getRun(runId)
+      let run: AgentRunRecord
+      try {
+        run = await api.getRun(runId)
+      } catch (error) {
+        // A deleted or no longer visible task must not block selection of other work.
+        if (!(error instanceof AgentTaskError) || !['not_found', 'forbidden'].includes(error.code)) throw error
+        startedRuns.delete(taskId)
+        continue
+      }
       if (run.state !== 'active') {
         startedRuns.delete(taskId)
         continue

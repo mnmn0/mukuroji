@@ -215,6 +215,22 @@ describe('agent task lifecycle', () => {
     expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
   })
 
+  test('keeps selecting work after a task it just started is deleted', async () => {
+    const { api } = fixture()
+    let deleted = false
+    const lagging = createAgentTasks({
+      ...api,
+      async listActiveRuns() { return { items: [], hasMore: false } },
+      async getRun(runId) {
+        if (deleted) throw new AgentTaskError('not_found', 'Not found')
+        return api.getRun(runId)
+      },
+    }, baseScope)
+    await lagging.transition('one', 1, 'coding', 'start', 'claim')
+    deleted = true
+    expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
+  })
+
   test('closes its own run once and forwards a retry of a finished run to the server', async () => {
     const { service } = fixture()
     const claimed = await service.transition('one', 1, 'coding', 'start', 'claim')
