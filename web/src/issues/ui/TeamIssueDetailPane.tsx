@@ -29,6 +29,7 @@ import { type IssueCollaborationRoute } from '../model/collaborationTabs'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import {
   isCustomFieldApplicable,
   parseCustomFieldFormData,
@@ -906,25 +907,36 @@ function IssueDetailContent({
         ) : null
       case 'workflow':
         return (
-          <fieldset
-            className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
-          >
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.column.status')}
-              <select
-                className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
-                form={editorFormId}
-                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
-                name="workflowStatusId"
-              >
-                {workflowStatuses.map((status) => (
-                  <option key={status.id} value={status.id}>{status.name}</option>
-                ))}
-              </select>
-            </label>
-          </fieldset>
+          <>
+            <fieldset
+              className="contents"
+              disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+            >
+              <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('tasks.column.status')}
+                <select
+                  className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                  defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
+                  form={editorFormId}
+                  key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
+                  name="workflowStatusId"
+                >
+                  {workflowStatuses.map((status) => (
+                    <option key={status.id} value={status.id}>{status.name}</option>
+                  ))}
+                </select>
+              </label>
+            </fieldset>
+            {accessToken ? (
+              <WorkItemAgentRunsPanelContainer
+                accessToken={accessToken}
+                key={issue.teamId + ':' + issue.id + ':agent-runs'}
+                locale={locale}
+                teamId={issue.teamId}
+                workItemId={issue.id}
+              />
+            ) : null}
+          </>
         )
       case 'schedule':
         return (
