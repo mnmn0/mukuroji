@@ -824,40 +824,6 @@ export type CreateTeamIssueRequestBody = {
   idempotentRequestDigest?: string
 }
 
-/**
- * Builds a ConditionCheck that a Work Item is still assigned to a member.
- *
- * @param tableName - Work Item table name.
- * @param directoryId - Workspace ID.
- * @param teamId - Team that owns the Work Item.
- * @param workItemId - Work Item ID.
- * @param assigneeUserId - Member the Work Item must be assigned to.
- * @returns ConditionCheck for a transaction that does not write the Work Item row itself.
- */
-export function createWorkItemAssigneeConditionCheck(
-  tableName: string,
-  directoryId: string,
-  teamId: string,
-  workItemId: string,
-  assigneeUserId: string,
-): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
-  return {
-    ConditionCheck: {
-      TableName: readRequiredString(tableName, 'Work Item table name is required.'),
-      Key: {
-        directoryTeamId: createDirectoryTeamId(
-          readRequiredString(directoryId, 'Workspace ID is required.'),
-          readRequiredString(teamId, 'Team ID is required.'),
-        ),
-        issueId: readRequiredString(workItemId, 'Work Item ID is required.'),
-      },
-      ConditionExpression: '#assigneeUserId = :assigneeUserId',
-      ExpressionAttributeNames: { '#assigneeUserId': 'assigneeUserId' },
-      ExpressionAttributeValues: { ':assigneeUserId': readRequiredString(assigneeUserId, 'Assignee is required.') },
-    },
-  }
-}
-
 /** Creates a revision fence for an existing canonical Work Item reference.
  *
  * @param tableName - Canonical Work Item table name.

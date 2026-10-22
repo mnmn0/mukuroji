@@ -249,10 +249,10 @@ describe('public Agent Run service', () => {
       .map((check) => String(check.ConditionCheck.Key?.recordKey ?? ''))
     expect(fencedKeys).toContain(`agent-run#${held.runId}`)
     expect(fencedKeys).toContain('agent-run-claim#task-1')
-    // The comment commits only while the run owner is still the assignee.
-    expect(writes[0]?.authorizationConditionChecks?.some((check) =>
-      check.ConditionCheck.Key?.issueId === 'task-1' &&
-      check.ConditionCheck.ExpressionAttributeValues?.[':assigneeUserId'] === 'demo@example.com')).toBe(true)
+    // The comment writer conditions on the assignee it is given; the fence must not add a second
+    // operation on the Work Item row, which DynamoDB rejects in one transaction.
+    expect(writes[0]?.assigneeMemberKey).toBe('demo@example.com')
+    expect(writes[0]?.authorizationConditionChecks?.some((check) => check.ConditionCheck.Key?.issueId !== undefined)).toBe(false)
     expect((writes[1]?.authorizationConditionChecks ?? [])
       .some((check) => String(check.ConditionCheck.Key?.recordKey ?? '').startsWith('agent-run'))).toBe(false)
   })

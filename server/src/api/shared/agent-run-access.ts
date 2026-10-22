@@ -24,13 +24,11 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
-  createWorkItemAssigneeConditionCheck,
   type NamedWorkItemDeletionFence,
   type TeamIssueResponseItem,
 } from '../../modules/work-items'
 import { workItemDependencies } from './app-dependencies'
 import type { WorkspacePrincipal } from './project-access'
-import { getTeamIssuesTableName } from './work-item-access'
 
 /** Context passed to an extension after the Work Item update was authorized and validated. */
 export type PublicWorkItemUpdateExtensionContext = {
@@ -328,12 +326,10 @@ export async function prepareAgentRunCommentFence(
   const store = workItemDependencies.agentRuns
   const { run } = await resolveAgentRunFence(principal, teamId, workItemId, fence, now)
   // A run outlives a reassignment only until its lease expires; the former assignee's agent
-  // must not renew it, so the comment also checks that the assignment has not changed.
+  // must not renew it. The comment writer already conditions on the assignee it was given, so a
+  // reassignment after this read still fails the comment.
   if (run && workItemAssigneeUserId !== run.assigneeUserId) throw createAgentRunForbiddenError()
-  const assignmentChecks = run
-    ? [createWorkItemAssigneeConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, run.assigneeUserId)]
-    : []
-  const conditionChecks = [...store.createMutationFenceConditionChecks({
+  const conditionChecks = store.createMutationFenceConditionChecks({
     directoryId: principal.directoryId,
     teamId,
     workItemId,
@@ -341,7 +337,7 @@ export async function prepareAgentRunCommentFence(
     assigneeUserId: principal.userKey,
     ...(run ? { run } : {}),
     now,
-  }), ...assignmentChecks].flatMap((item) => item.ConditionCheck ? [{ ConditionCheck: item.ConditionCheck }] : [])
+  }).flatMap((item) => item.ConditionCheck ? [{ ConditionCheck: item.ConditionCheck }] : [])
   return {
     conditionChecks,
     afterCommit: () => extendLeaseBestEffort(run, new Date()),

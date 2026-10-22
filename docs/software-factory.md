@@ -415,7 +415,7 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   を条件にするため、並行する mutation や heartbeat の順序が入れ替わっても lease は戻らない。
   延長の失敗で mutation を失敗にはしない。Run で fence する mutation は、Work Item の現在の担当者が
   Run の開始者である場合だけ受け付ける（`agent_run_forbidden`）。PATCH は revision CAS で、comment は
-  担当者の ConditionCheck で、読んだ後の担当変更と競合した mutation を確定しない。
+  comment 保存が既に持つ担当者の ConditionCheck で、読んだ後の担当変更と競合した mutation を確定しない。
 - heartbeat と finish は Run 開始時の `instanceId` を必須とし、その hash を Run の条件式でも
   照合する。同じ credential を共有する別 instance は、他 instance の Run を延長・終了できない。
 - `agentRunId` は `agentInstanceId` と一緒に送る。`agentInstanceId` だけの mutation は、別
