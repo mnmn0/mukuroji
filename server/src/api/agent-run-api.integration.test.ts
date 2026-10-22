@@ -66,7 +66,8 @@ function createHeldRun(workItemId: string, instanceId = 'other-laptop'): StoredA
     credentialId: 'agent-key',
     startRevision: 2,
     leaseMinutes: 30,
-    now: new Date(),
+    // Started a minute ago, so a heartbeat in the same millisecond cannot look like an older renewal.
+    now: new Date(Date.now() - 60_000),
   })
 }
 
