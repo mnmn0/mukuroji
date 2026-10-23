@@ -372,6 +372,12 @@ describe('public Agent Run service', () => {
     // A claim that keeps naming a finished run is still an integrity failure.
     staleReads = 2
     await expect(claimedBy()).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    // So is a claim whose recorded holder differs from the active run it names.
+    store.getClaim = async (directoryId, teamId, workItemId) => {
+      const claim = await getClaim(directoryId, teamId, workItemId)
+      return claim ? { ...claim, instanceIdHash: hashAgentInstanceId('someone-else') } : claim
+    }
+    await expect(claimedBy()).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
   test('stops an agent whose run a person released, even when it omits the run ID', async () => {
@@ -848,6 +854,11 @@ describe('Web Agent Run routes', () => {
       method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: false }),
     })
     expect(changedRetry.status).toBe(409)
+    // Reusing the key for a different save against the current revision is a conflict, not a second save.
+    const reusedKey = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(reusedKey.status).toBe(409)
     const stale = await app.request('http://localhost/api/teams/core-team/agent-settings', {
       method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
     })

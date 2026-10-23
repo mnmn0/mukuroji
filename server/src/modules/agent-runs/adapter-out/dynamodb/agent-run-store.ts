@@ -660,14 +660,15 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
                 ...settings,
                 lastMutationKey: mutationKey,
               },
+              // A key that already produced the current settings may only replay that save.
               ConditionExpression: update.expectedRevision === 0
                 ? 'attribute_not_exists(recordKey)'
-                : '#revision = :expectedRevision',
+                : '#revision = :expectedRevision AND (attribute_not_exists(#lastMutationKey) OR #lastMutationKey <> :mutationKey)',
               ...(update.expectedRevision === 0
                 ? {}
                 : {
-                    ExpressionAttributeNames: { '#revision': 'revision' },
-                    ExpressionAttributeValues: { ':expectedRevision': update.expectedRevision },
+                    ExpressionAttributeNames: { '#revision': 'revision', '#lastMutationKey': 'lastMutationKey' },
+                    ExpressionAttributeValues: { ':expectedRevision': update.expectedRevision, ':mutationKey': mutationKey },
                   }),
             },
           },

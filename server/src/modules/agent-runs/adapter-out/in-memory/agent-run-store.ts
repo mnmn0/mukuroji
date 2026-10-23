@@ -164,8 +164,9 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   ): Promise<AgentSettings> {
     const settingsKey = `${directoryId}|${teamId}`
     const current = await this.getSettings(directoryId, teamId)
-    if (current.revision !== update.expectedRevision) {
-      if (this.#settingsMutationKeys.get(settingsKey) === mutationKey && isSameSettingsSave(current, update)) return current
+    const reusedKey = this.#settingsMutationKeys.get(settingsKey) === mutationKey
+    if (current.revision !== update.expectedRevision || reusedKey) {
+      if (reusedKey && isSameSettingsSave(current, update)) return current
       throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
     }
     const settings: AgentSettings = {

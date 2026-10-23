@@ -139,7 +139,11 @@ async function readClaimedRun(principal: WorkspacePrincipal, teamId: string, wor
     const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
     if (!claim) return undefined
     const run = await store.getRun(principal.directoryId, teamId, claim.runId)
-    if (run?.state === 'active' && run.workItemId === workItemId) return run
+    if (run?.state === 'active' && run.workItemId === workItemId) {
+      // An active run must be the holder the claim records; a mismatch is not a race.
+      if (run.instanceIdHash !== claim.instanceIdHash || run.assigneeUserId !== claim.assigneeUserId) break
+      return run
+    }
     if (claim.runId === previousRunId) break
     previousRunId = claim.runId
   }

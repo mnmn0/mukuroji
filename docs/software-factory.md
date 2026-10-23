@@ -296,7 +296,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | --- | --- |
 | `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
 | `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
-| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存した設定 row に `Idempotency-Key` 由来の key を残し、応答を失った同じ key と同じ値の再送は revision 不一致でも保存済みの設定を返す。 |
+| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存した設定 row に `Idempotency-Key` 由来の key を残し、応答を失った同じ key と同じ値の再送は revision 不一致でも保存済みの設定を返し、同じ key を別の値で再利用した保存は `409` にする。 |
 
 `ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
 Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem の `errors[].code` で返し、

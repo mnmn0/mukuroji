@@ -397,6 +397,12 @@ describe('DynamoDB Agent Run store', () => {
     const otherKey = createClient([cancelled, { Item: item }])
     await expect(new DynamoDbAgentRunStore(otherKey.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-2', []))
       .rejects.toMatchObject({ category: 'conflict' })
+    const next = createClient([{}])
+    await new DynamoDbAgentRunStore(next.client, 'AgentRuns').saveSettings('workspace-1', 'core', { ...update, expectedRevision: 1 }, 'member-1', now, 'key-2', [])
+    expect(next.commands[0]?.input).toMatchObject({ TransactItems: [{ Put: {
+      ConditionExpression: '#revision = :expectedRevision AND (attribute_not_exists(#lastMutationKey) OR #lastMutationKey <> :mutationKey)',
+      ExpressionAttributeValues: { ':expectedRevision': 1, ':mutationKey': 'key-2' },
+    } }] })
     const otherValues = createClient([cancelled, { Item: item }, { Item: item }])
     await expect(new DynamoDbAgentRunStore(otherValues.client, 'AgentRuns').saveSettings('workspace-1', 'core', { ...update, leaseMinutes: 60 }, 'member-1', now, 'key-1', []))
       .rejects.toMatchObject({ category: 'conflict' })
