@@ -144,6 +144,7 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 | table | `directoryTeamId` | `agent-run#<runId>` | Run の正本 |
 | table | `directoryTeamId` | `agent-run-claim#<workItemId>` | Work Item ごとの `active` Run を 1 件に固定する claim row |
 | table | `directoryTeamId` | `agent-run-revoked#<workItemId>#<member と instance の hash>` | 人が解放した、または別 instance が引き継いだ Run の member と instance。fence が強整合で読む |
+| table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
 | `ActiveRunIndex`（sparse） | `directoryTeamId` | `<leaseExpiresAt>#<runId>` | board の処理中・停滞一覧。`finished` で key を外す |
 
@@ -296,7 +297,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | --- | --- |
 | `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
 | `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
-| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存した設定 row に `Idempotency-Key` 由来の key を残し、応答を失った同じ key と同じ値の再送は revision 不一致でも保存済みの設定を返し、同じ key を別の値で再利用した保存は `409` にする。 |
+| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存ごとに `Idempotency-Key` 由来の key の receipt row（`agent-settings-mutation#<key hash>`）を同じ transaction で書き、応答を失った同じ key と同じ値の再送は revision 不一致でも receipt の設定を返す。一度確定した key は、後で別の key の保存があっても、別の値や別の revision で再利用すると `409` にする。 |
 
 `ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
 Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem の `errors[].code` で返し、
@@ -456,12 +457,14 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 - take over は `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` で受け付ける。
   `allowTakeoverAfterLeaseExpiry` が `true`、Work Item と停滞 Run の担当者がどちらも credential の
   member、Work Item が `started`、Run が別 instance のもので lease が切れている場合だけ成功する。停滞 Run の `superseded`
-  への更新（lease が切れたままであることを条件にする）、claim row の置き換え（停滞 Run を指して
-  いることを条件にする）、旧 instance の revocation row、新しい Run、Work Item revision と設定
+  への更新（lease が切れたままであることを条件にする）、claim row の置き換え（停滞 Run の
+  `runId`、instance、member をすべて保持していることを条件にする）、旧 instance の revocation row、新しい Run、Work Item revision と設定
   revision の ConditionCheck、旧 Run の `agent-run.taken-over` と新しい Run の `agent-run.started` の
   audit event、idempotency receipt を 1 つの transaction で確定
-  する。heartbeat が先に lease を延長した場合は `agent_run_conflict` で拒否する。Work Item の
-  status は変えない。
+  する。heartbeat が先に lease を延長した場合は `agent_run_conflict` で拒否する。Run の読み取り後に
+  finish、release、別の take over が先に確定して claim が消えた・置き換わった場合は Run を読み直し、
+  `agent_run_not_active` を返す。停滞したままの Run を claim が保持していない場合だけ `503` にする。
+  Work Item の status は変えない。
 - 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script
   による claim / Run 不整合の検査。不整合は読み取り時に fail-closed で検出する。
 

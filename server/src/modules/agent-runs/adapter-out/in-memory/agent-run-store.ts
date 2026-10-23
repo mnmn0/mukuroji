@@ -7,6 +7,7 @@ import {
 import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
+  isClaimHeldBy,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
@@ -109,8 +110,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }, 'in-memory-agent-runs')
   /** Effects of the items this store produced. */
   readonly #effects = new WeakMap<AgentRunTransactItem, InMemoryEffect>()
-  /** Key of the save that produced each Team's current settings. */
-  readonly #settingsMutationKeys = new Map<string, string>()
+  /** Settings each committed save key produced, by Team and key. */
+  readonly #settingsReceipts = new Map<string, AgentSettings>()
 
   /**
    * Seeds a run as the Work Item's newest run and, for an active run, its claim.
@@ -163,10 +164,14 @@ export class InMemoryAgentRunStore implements AgentRunStore {
     mutationKey: string,
   ): Promise<AgentSettings> {
     const settingsKey = `${directoryId}|${teamId}`
+    const receiptKey = `${settingsKey}|${mutationKey}`
+    const receipt = this.#settingsReceipts.get(receiptKey)
+    if (receipt) {
+      if (isSameSettingsSave(receipt, update)) return { ...receipt }
+      throw new AgentRunError('conflict', 'This Idempotency-Key was already used for a different settings save.')
+    }
     const current = await this.getSettings(directoryId, teamId)
-    const reusedKey = this.#settingsMutationKeys.get(settingsKey) === mutationKey
-    if (current.revision !== update.expectedRevision || reusedKey) {
-      if (reusedKey && isSameSettingsSave(current, update)) return current
+    if (current.revision !== update.expectedRevision) {
       throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
     }
     const settings: AgentSettings = {
@@ -179,7 +184,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       updatedBy: actorMemberKey,
     }
     this.state.settings.set(settingsKey, settings)
-    this.#settingsMutationKeys.set(settingsKey, mutationKey)
+    this.#settingsReceipts.set(receiptKey, settings)
     return { ...settings }
   }
 
@@ -328,7 +333,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
         },
       }),
       this.#register(claimPut, {
-        check: (state) => state.claims.get(claimKey)?.runId === superseded.runId,
+        check: (state) => isClaimHeldBy(state.claims.get(claimKey), superseded),
         apply: (state) => {
           state.claims.set(claimKey, {
             workItemId: successor.workItemId,

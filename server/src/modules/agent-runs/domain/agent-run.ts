@@ -396,6 +396,20 @@ export function calculateLeaseExpiry(from: Date, leaseMinutes: number): string {
 }
 
 /**
+ * Checks whether a claim records this run as its whole holder.
+ *
+ * @param claim - Stored claim, if any.
+ * @param run - Run expected to hold it.
+ * @returns True when the claim names the run, its instance, and its member.
+ */
+export function isClaimHeldBy(
+  claim: StoredAgentRunClaim | undefined,
+  run: Pick<StoredAgentRun, 'runId' | 'instanceIdHash' | 'assigneeUserId'>,
+): boolean {
+  return claim?.runId === run.runId && claim.instanceIdHash === run.instanceIdHash && claim.assigneeUserId === run.assigneeUserId
+}
+
+/**
  * Derives whether an active run has outlived its lease.
  *
  * @param run - Stored run.

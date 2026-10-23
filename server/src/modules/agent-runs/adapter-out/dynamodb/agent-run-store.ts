@@ -106,8 +106,8 @@ export interface AgentRunStore {
    * @param update - Validated update including the expected revision.
    * @param actorMemberKey - Editor.
    * @param now - Save time.
-   * @param mutationKey - Opaque key of this save; a retry with the same key and values whose revision
-   * check fails because this save already committed returns the saved settings instead of a conflict.
+   * @param mutationKey - Opaque key of this save. Every committed key keeps a receipt: a retry with the
+   * same key and values returns the settings that save committed, and any other reuse is a conflict.
    * @param extraItems - Audit writes committed with the settings.
    * @returns The saved settings.
    */
@@ -283,6 +283,16 @@ function revocationRecordKey(revocation: AgentRunRevocation): string {
 
 /** Sort key of the Team Agent settings row. */
 const settingsRecordKey = 'agent-settings'
+
+/**
+ * Builds the sort key of a settings save receipt.
+ *
+ * @param mutationKey - Opaque key of the save.
+ * @returns Sort key.
+ */
+function settingsMutationRecordKey(mutationKey: string): string {
+  return `agent-settings-mutation#${mutationKey}`
+}
 
 /**
  * Checks that a value is a record.
@@ -526,6 +536,37 @@ function isLeadingConditionalFailure(error: unknown, count: number): boolean {
   return reasons.slice(0, count).some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
 }
 
+/**
+ * Reads stored settings values from a settings row or a save receipt.
+ *
+ * @param item - Stored row.
+ * @param directoryId - Expected Workspace ID.
+ * @param teamId - Expected Team ID.
+ * @returns The settings.
+ */
+function readStoredSettings(item: Record<string, unknown>, directoryId: string, teamId: string): AgentSettings {
+  if (
+    item.schemaVersion !== AGENT_SETTINGS_SCHEMA_VERSION ||
+    item.workspaceId !== directoryId ||
+    item.teamId !== teamId ||
+    typeof item.allowTakeoverAfterLeaseExpiry !== 'boolean'
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  const revision = storedInteger(item, 'revision')
+  const leaseMinutes = storedInteger(item, 'leaseMinutes')
+  if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
+  return {
+    schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
+    teamId,
+    revision,
+    leaseMinutes,
+    allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
+    updatedAt: storedTimestamp(item, 'updatedAt'),
+    updatedBy: storedString(item, 'updatedBy'),
+  }
+}
+
 /** DynamoDB-backed Agent Run store. */
 export class DynamoDbAgentRunStore implements AgentRunStore {
   /** Document client configured by the composition root. */
@@ -604,27 +645,8 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
     }))
     const item = response.Item
     if (item === undefined) return createDefaultAgentSettings(teamId)
-    if (
-      item.entityType !== 'agent-settings' ||
-      item.schemaVersion !== AGENT_SETTINGS_SCHEMA_VERSION ||
-      item.workspaceId !== directoryId ||
-      item.teamId !== teamId ||
-      typeof item.allowTakeoverAfterLeaseExpiry !== 'boolean'
-    ) {
-      throw createAgentRunIntegrityError()
-    }
-    const revision = storedInteger(item, 'revision')
-    const leaseMinutes = storedInteger(item, 'leaseMinutes')
-    if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
-    return {
-      schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
-      teamId,
-      revision,
-      leaseMinutes,
-      allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
-      updatedAt: storedTimestamp(item, 'updatedAt'),
-      updatedBy: storedString(item, 'updatedBy'),
-    }
+    if (item.entityType !== 'agent-settings') throw createAgentRunIntegrityError()
+    return readStoredSettings(item, directoryId, teamId)
   }
 
   /** @inheritdoc */
@@ -646,40 +668,48 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       updatedAt: now.toISOString(),
       updatedBy: actorMemberKey,
     }
+    const partition = createAgentRunPartition(directoryId, teamId)
     try {
       await this.#client.send(new TransactWriteCommand({
         TransactItems: [
           {
             Put: {
               TableName: this.#tableName,
-              Item: {
-                directoryTeamId: createAgentRunPartition(directoryId, teamId),
-                recordKey: settingsRecordKey,
-                entityType: 'agent-settings',
-                workspaceId: directoryId,
-                ...settings,
-                lastMutationKey: mutationKey,
-              },
-              // A key that already produced the current settings may only replay that save.
-              ConditionExpression: update.expectedRevision === 0
-                ? 'attribute_not_exists(recordKey)'
-                : '#revision = :expectedRevision AND (attribute_not_exists(#lastMutationKey) OR #lastMutationKey <> :mutationKey)',
+              Item: { directoryTeamId: partition, recordKey: settingsRecordKey, entityType: 'agent-settings', workspaceId: directoryId, ...settings },
+              ConditionExpression: update.expectedRevision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :expectedRevision',
               ...(update.expectedRevision === 0
                 ? {}
                 : {
-                    ExpressionAttributeNames: { '#revision': 'revision', '#lastMutationKey': 'lastMutationKey' },
-                    ExpressionAttributeValues: { ':expectedRevision': update.expectedRevision, ':mutationKey': mutationKey },
+                    ExpressionAttributeNames: { '#revision': 'revision' },
+                    ExpressionAttributeValues: { ':expectedRevision': update.expectedRevision },
                   }),
+            },
+          },
+          {
+            // A durable receipt per key: a committed key may only ever replay the save that used it.
+            Put: {
+              TableName: this.#tableName,
+              Item: {
+                directoryTeamId: partition,
+                recordKey: settingsMutationRecordKey(mutationKey),
+                entityType: 'agent-settings-mutation',
+                workspaceId: directoryId,
+                ...settings,
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
             },
           },
           ...extraItems,
         ],
       }))
     } catch (error) {
-      if (isLeadingConditionalFailure(error, 1)) {
-        const replayed = await this.#readReplayedSettings(directoryId, teamId, update, mutationKey)
-        if (replayed) return replayed
-        throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
+      if (isLeadingConditionalFailure(error, 2)) {
+        const receipt = await this.#readSettingsReceipt(directoryId, teamId, mutationKey)
+        if (receipt === undefined) {
+          throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
+        }
+        if (isSameSettingsSave(receipt, update)) return receipt
+        throw new AgentRunError('conflict', 'This Idempotency-Key was already used for a different settings save.')
       }
       throw error
     }
@@ -687,27 +717,22 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /**
-   * Returns the saved settings when an earlier attempt of the same save already committed them.
+   * Reads the settings an earlier save with this key committed.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
-   * @param update - Values of the retried save.
-   * @param mutationKey - Opaque key of the retried save.
-   * @returns The committed settings, or undefined when another save changed them.
+   * @param mutationKey - Opaque key of the save.
+   * @returns The settings that save committed, or undefined when no save used the key.
    */
-  async #readReplayedSettings(
-    directoryId: string,
-    teamId: string,
-    update: UpdateAgentSettingsRequest,
-    mutationKey: string,
-  ): Promise<AgentSettings | undefined> {
+  async #readSettingsReceipt(directoryId: string, teamId: string, mutationKey: string): Promise<AgentSettings | undefined> {
     const response = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
-      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsMutationRecordKey(mutationKey) },
       ConsistentRead: true,
     }))
-    if (response.Item?.lastMutationKey !== mutationKey) return undefined
-    const current = await this.getSettings(directoryId, teamId)
-    return isSameSettingsSave(current, update) ? current : undefined
+    const item = response.Item
+    if (item === undefined) return undefined
+    if (item.entityType !== 'agent-settings-mutation') throw createAgentRunIntegrityError()
+    return readStoredSettings(item, directoryId, teamId)
   }
 
   /** @inheritdoc */
@@ -948,11 +973,16 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       },
       {
         // The claim is replaced in place; a delete and a put of the same row cannot share a transaction.
+        // Only a claim whose whole holder is the superseded run may be replaced.
         Put: {
           ...claimPut.Put,
-          ConditionExpression: '#runId = :supersededRunId',
-          ExpressionAttributeNames: { '#runId': 'runId' },
-          ExpressionAttributeValues: { ':supersededRunId': superseded.runId },
+          ConditionExpression: '#runId = :supersededRunId AND #instanceIdHash = :supersededInstanceIdHash AND #assigneeUserId = :supersededAssigneeUserId',
+          ExpressionAttributeNames: { '#runId': 'runId', '#instanceIdHash': 'instanceIdHash', '#assigneeUserId': 'assigneeUserId' },
+          ExpressionAttributeValues: {
+            ':supersededRunId': superseded.runId,
+            ':supersededInstanceIdHash': superseded.instanceIdHash,
+            ':supersededAssigneeUserId': superseded.assigneeUserId,
+          },
         },
       },
       revocationPut,

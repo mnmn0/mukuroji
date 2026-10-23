@@ -13,6 +13,7 @@ import {
   describeHoldingRun,
   finishAgentRun,
   isAgentRunStalled,
+  isClaimHeldBy,
   toAgentRun,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
@@ -141,13 +142,32 @@ async function readClaimedRun(principal: WorkspacePrincipal, teamId: string, wor
     const run = await store.getRun(principal.directoryId, teamId, claim.runId)
     if (run?.state === 'active' && run.workItemId === workItemId) {
       // An active run must be the holder the claim records; a mismatch is not a race.
-      if (run.instanceIdHash !== claim.instanceIdHash || run.assigneeUserId !== claim.assigneeUserId) break
+      if (!isClaimHeldBy(claim, run)) break
       return run
     }
     if (claim.runId === previousRunId) break
     previousRunId = claim.runId
   }
   throw createAgentRunIntegrityError()
+}
+
+/**
+ * Explains why a take over found the stalled run or its claim changed, by re-reading the run.
+ *
+ * @param principal - Authorized principal.
+ * @param teamId - Team ID.
+ * @param runId - Run being taken over.
+ * @returns Not active when the run closed first, a conflict when it renewed its lease, and an
+ * integrity error when a still stalled run no longer holds its claim.
+ */
+async function explainTakeOverMiss(principal: WorkspacePrincipal, teamId: string, runId: string): Promise<AgentRunError> {
+  // A finish, release, or other take over may have closed the run, or a heartbeat renewed it.
+  const latest = await workItemDependencies.agentRuns.getRun(principal.directoryId, teamId, runId)
+  const readAt = new Date()
+  if (latest?.state !== 'active') return createAgentRunNotActiveError()
+  if (!isAgentRunStalled(latest, readAt)) return createAgentRunConflictError(describeHoldingRun(latest, readAt), '/instanceId')
+  // A claim is closed together with its run, so a stalled run that does not hold its claim is inconsistent.
+  return createAgentRunIntegrityError()
 }
 
 /**
@@ -478,7 +498,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const now = new Date()
       if (!isAgentRunStalled(run, now)) throw createAgentRunConflictError(describeHoldingRun(run, now), '/instanceId')
       const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
-      if (claim?.runId !== run.runId) throw createAgentRunIntegrityError()
+      if (!isClaimHeldBy(claim, run)) throw await explainTakeOverMiss(principal, teamId, runId)
       const superseded = finishAgentRun(run, 'superseded', principal.userKey, now)
       const successor = createActiveAgentRun({
         directoryId: principal.directoryId,
@@ -521,13 +541,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ], 2)
       } catch (error) {
         if (!(error instanceof AgentRunError) || error.reason !== 'agent_run_not_active') throw error
-        // The stalled run changed first: it renewed its lease, or it was finished or taken over.
-        const latest = await store.getRun(principal.directoryId, teamId, runId)
-        const readAt = new Date()
-        if (latest?.state === 'active' && !isAgentRunStalled(latest, readAt)) {
-          throw createAgentRunConflictError(describeHoldingRun(latest, readAt), '/instanceId')
-        }
-        throw createAgentRunNotActiveError()
+        throw await explainTakeOverMiss(principal, teamId, runId)
       }
       return response
     },

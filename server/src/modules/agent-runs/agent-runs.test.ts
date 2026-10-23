@@ -227,8 +227,12 @@ describe('DynamoDB Agent Run store', () => {
       ExpressionAttributeValues: { ':takenOverAt': later.toISOString(), ':outcome': 'superseded' },
     })
     expect(claim?.Put).toMatchObject({
-      ConditionExpression: '#runId = :supersededRunId',
-      ExpressionAttributeValues: { ':supersededRunId': superseded.runId },
+      ConditionExpression: '#runId = :supersededRunId AND #instanceIdHash = :supersededInstanceIdHash AND #assigneeUserId = :supersededAssigneeUserId',
+      ExpressionAttributeValues: {
+        ':supersededRunId': superseded.runId,
+        ':supersededInstanceIdHash': superseded.instanceIdHash,
+        ':supersededAssigneeUserId': superseded.assigneeUserId,
+      },
       Item: { recordKey: 'agent-run-claim#task-1', runId: successor.runId, instanceIdHash: successor.instanceIdHash },
     })
     expect(revoke?.Put?.Item).toMatchObject({ instanceIdHash: superseded.instanceIdHash })
@@ -386,26 +390,29 @@ describe('DynamoDB Agent Run store', () => {
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
     const command = first.commands[0]
     if (!(command instanceof TransactWriteCommand)) throw new Error('The save must be a transaction.')
-    expect(command.input).toMatchObject({ TransactItems: [{ Put: { ConditionExpression: 'attribute_not_exists(recordKey)' } }] })
-    const item = command.input.TransactItems?.[0]?.Put?.Item
-    expect(item).toMatchObject({ lastMutationKey: 'key-1' })
+    expect(command.input).toMatchObject({ TransactItems: [
+      { Put: { Item: { recordKey: 'agent-settings' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+      { Put: { Item: { recordKey: 'agent-settings-mutation#key-1', entityType: 'agent-settings-mutation', revision: 1 }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+    ] })
+    const receipt = command.input.TransactItems?.[1]?.Put?.Item
 
-    // A retry of the committed save replays it; another key, or other values, is a lost update.
-    const replay = createClient([cancelled, { Item: item }, { Item: item }])
+    // A retry of the committed save replays its receipt; other values under that key, or a lost update, are conflicts.
+    const replay = createClient([cancelled, { Item: receipt }])
     expect(await new DynamoDbAgentRunStore(replay.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', []))
       .toEqual(saved)
-    const otherKey = createClient([cancelled, { Item: item }])
-    await expect(new DynamoDbAgentRunStore(otherKey.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-2', []))
-      .rejects.toMatchObject({ category: 'conflict' })
+    expect(replay.commands[1]?.input).toMatchObject({ Key: { recordKey: 'agent-settings-mutation#key-1' }, ConsistentRead: true })
+    const otherValues = createClient([cancelled, { Item: receipt }])
+    await expect(new DynamoDbAgentRunStore(otherValues.client, 'AgentRuns').saveSettings('workspace-1', 'core', { ...update, expectedRevision: 3 }, 'member-1', now, 'key-1', []))
+      .rejects.toThrow('already used for a different settings save')
+    const lostUpdate = createClient([cancelled, {}])
+    await expect(new DynamoDbAgentRunStore(lostUpdate.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-2', []))
+      .rejects.toMatchObject({ category: 'conflict', pointer: '/expectedRevision' })
     const next = createClient([{}])
     await new DynamoDbAgentRunStore(next.client, 'AgentRuns').saveSettings('workspace-1', 'core', { ...update, expectedRevision: 1 }, 'member-1', now, 'key-2', [])
     expect(next.commands[0]?.input).toMatchObject({ TransactItems: [{ Put: {
-      ConditionExpression: '#revision = :expectedRevision AND (attribute_not_exists(#lastMutationKey) OR #lastMutationKey <> :mutationKey)',
-      ExpressionAttributeValues: { ':expectedRevision': 1, ':mutationKey': 'key-2' },
-    } }] })
-    const otherValues = createClient([cancelled, { Item: item }, { Item: item }])
-    await expect(new DynamoDbAgentRunStore(otherValues.client, 'AgentRuns').saveSettings('workspace-1', 'core', { ...update, leaseMinutes: 60 }, 'member-1', now, 'key-1', []))
-      .rejects.toMatchObject({ category: 'conflict' })
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeValues: { ':expectedRevision': 1 },
+    } }, { Put: { Item: { recordKey: 'agent-settings-mutation#key-2' } } }] })
   })
 })
 

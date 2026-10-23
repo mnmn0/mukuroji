@@ -15,6 +15,7 @@ export {
   finishAgentRun,
   hashAgentInstanceId,
   isAgentRunStalled,
+  isClaimHeldBy,
   readAgentInstanceId,
   readAgentRunId,
   readAgentRunMutationFence,
