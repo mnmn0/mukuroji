@@ -115,8 +115,20 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
         (!filters.instanceId || run.instanceId === filters.instanceId) &&
         (!filters.assigneeUserId || run.assigneeUserId === filters.assigneeUserId)).map(publicRun), hasMore: false }
     },
-    async taskRuns(id) {
-      return { items: [...runs.values()].filter((run) => run.workItemId === id).reverse().map(publicRun), hasMore: false }
+    async takeOverRun(id, runId, input) {
+      const stalled = runs.get(runId)
+      if (!stalled || stalled.state !== 'active' || stalled.workItemId !== id) throw new AgentTaskError('agent_run_not_active', 'Finished')
+      if (stalled.instanceId === input.instanceId) throw new AgentTaskError('agent_run_conflict', 'Same instance')
+      const superseded = { ...stalled, state: 'finished' as const, outcome: 'superseded' as const, finishedBy: 'agent-member', finishedAt: '2026-09-01T01:00:00.000Z' }
+      runs.set(runId, superseded)
+      runSequence += 1
+      const run = { ...stalled, runId: `run_00000000-0000-4000-8000-${String(runSequence).padStart(12, '0')}`, instanceId: input.instanceId, runtime: input.runtime, agentName: input.agentName }
+      runs.set(run.runId, run)
+      return { run: publicRun(run), supersededRun: publicRun(superseded) }
+    },
+    async claimedRun(id, instanceId) {
+      const run = [...runs.values()].find((candidate) => candidate.workItemId === id && candidate.state === 'active')
+      return run && (!instanceId || run.instanceId === instanceId) ? publicRun(run) : undefined
     },
     async getRun(runId) {
       const run = runs.get(runId)
@@ -205,9 +217,6 @@ describe('agent task lifecycle', () => {
       async listActiveRuns(filters, cursor) {
         return indexed ? api.listActiveRuns(filters, cursor) : { items: [], hasMore: false }
       },
-      async taskRuns(id, limit) {
-        return indexed ? api.taskRuns(id, limit) : { items: [], hasMore: false }
-      },
     }, baseScope)
     const claimed = await lagging.transition('one', 1, 'coding', 'start', 'claim')
     const runId = 'run' in claimed ? claimed.run.runId : ''
@@ -219,23 +228,49 @@ describe('agent task lifecycle', () => {
     indexed = true
     release(runId)
     await lagging.report('one', 'After release', 'note-2')
-    // The remembered run ID still reaches the server, which reports the release.
-    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
+    // The claim is gone, so only the instance is sent; the server's revocation check rejects it.
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
     await expect(lagging.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
     indexed = false
     expect(await lagging.next({})).toMatchObject({ ownRuns: [] })
   })
 
-  test('keeps selecting work after a task it just started is deleted', async () => {
+  test('resumes its own run after a restart while the run index still lags', async () => {
+    const { api } = fixture()
+    const lagging = { ...api, async listActiveRuns() { return { items: [], hasMore: false } } }
+    const before = createAgentTasks(lagging, baseScope)
+    const claimed = await before.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    // A new process keeps no memory of the start; the claim alone identifies the run.
+    const restarted = createAgentTasks(lagging, baseScope)
+    expect(await restarted.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId }] })
+    expect(await restarted.get('one')).toMatchObject({ activeRun: { runId, ownedByThisInstance: true } })
+    expect(await restarted.heartbeat(runId)).toMatchObject({ runId })
+    const other = createAgentTasks(lagging, { ...baseScope, instanceId: 'instance-b' })
+    expect(await other.get('one')).toMatchObject({ activeRun: { runId, ownedByThisInstance: false } })
+    await expect(other.heartbeat(runId)).rejects.toMatchObject({ code: 'not_own_run' })
+  })
+
+  test('takes over a run of another instance and continues it as its own', async () => {
+    const { api, service } = fixture()
+    const claimed = await service.transition('one', 1, 'coding', 'start', 'claim')
+    const stalledRunId = 'run' in claimed ? claimed.run.runId : ''
+    const successor = createAgentTasks(api, { ...baseScope, instanceId: 'instance-b' })
+    const taken = await successor.takeOver('one', stalledRunId, 'take-over')
+    expect(taken.supersededRun).toMatchObject({ runId: stalledRunId, state: 'finished', outcome: 'superseded' })
+    expect(await successor.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId: taken.run.runId }] })
+    await expect(service.heartbeat(stalledRunId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    const unassigned = createAgentTasks(api, { ...baseScope, assigneeUserId: 'someone-else', instanceId: 'instance-c' })
+    await expect(unassigned.takeOver('one', taken.run.runId, 'take-over-2')).rejects.toMatchObject({ code: 'not_assigned' })
+  })
+
+  test('keeps selecting work once the claim of a task it started is gone', async () => {
     const { api } = fixture()
     let deleted = false
     const lagging = createAgentTasks({
       ...api,
       async listActiveRuns() { return { items: [], hasMore: false } },
-      async getRun(runId) {
-        if (deleted) throw new AgentTaskError('not_found', 'Not found')
-        return api.getRun(runId)
-      },
+      async claimedRun(id, instanceId) { return deleted ? undefined : api.claimedRun(id, instanceId) },
     }, baseScope)
     await lagging.transition('one', 1, 'coding', 'start', 'claim')
     deleted = true
@@ -331,6 +366,11 @@ describe('agent task lifecycle', () => {
       async get(id) {
         const current = await api.get(id)
         return moved ? { ...current, assignedProjectId: 'other-project' } : current
+      },
+      async list(filters, cursor, limit) {
+        // The server filters by Project, so a moved task leaves the scoped queue.
+        const page = await api.list(filters, cursor, limit)
+        return moved ? { ...page, items: page.items.filter((item) => item.id !== 'inside') } : page
       },
       async listActiveRuns() {
         return { items: [], hasMore: false }

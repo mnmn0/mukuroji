@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type {
   AgentRunView,
   AgentSettings,
@@ -233,5 +234,9 @@ export async function updateWebAgentSettings(
     ].filter((change) => change.before !== change.after),
     metadata: { adapter: 'agent-settings', teamId, beforeRevision: update.expectedRevision },
   })
-  return store.saveSettings(principal.directoryId, teamId, update, principal.userKey, now, auditPut ? [auditPut] : [])
+  // A retry with the same Idempotency-Key replays the committed save instead of failing its revision check.
+  const mutationKey = createHash('sha256')
+    .update(`agent-settings\0${principal.userKey}\0${auditContext.idempotencyKeyHash}`)
+    .digest('hex')
+  return store.saveSettings(principal.directoryId, teamId, update, principal.userKey, now, mutationKey, auditPut ? [auditPut] : [])
 }

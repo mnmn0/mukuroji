@@ -163,12 +163,26 @@ export interface AgentWorkItemApi {
    */
   listActiveRuns(filters: AgentRunFilters, cursor?: string): Promise<AgentPage<AgentRunRecord>>
   /**
-   * Lists the newest runs of one task.
+   * Strongly reads the run that currently claims one task, so a run started moments ago is found.
    * @param id - Task identifier within the configured Team.
-   * @param limit - Maximum number of runs.
-   * @returns Runs, newest first.
+   * @param instanceId - When given, returns the run only if this instance started it.
+   * @returns The claiming run, or undefined when there is none or it belongs to another instance.
    */
-  taskRuns(id: string, limit: number): Promise<AgentPage<AgentRunRecord>>
+  claimedRun(id: string, instanceId?: string): Promise<AgentRunRecord | undefined>
+  /**
+   * Takes over a stalled run of another instance of the same assignee.
+   * @param id - Task identifier within the configured Team.
+   * @param runId - Stalled run to supersede.
+   * @param input - Runtime, agent name, and instance of this process.
+   * @param key - Idempotency key reused for uncertain retries.
+   * @returns This instance's new run and the superseded run.
+   */
+  takeOverRun(id: string, runId: string, input: Pick<AgentRunStartInput, 'runtime' | 'agentName' | 'instanceId'>, key: string): Promise<{
+    /** New run of this instance. */
+    run: AgentRunRecord
+    /** Stalled run, now superseded. */
+    supersededRun: AgentRunRecord
+  }>
   /**
    * Reads one run.
    * @param runId - Run identifier.

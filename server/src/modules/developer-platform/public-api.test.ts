@@ -2690,6 +2690,8 @@ function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): 
     heartbeat: unexpected,
     authorizeFinish: unexpected,
     finish: unexpected,
+    authorizeTakeOver: unexpected,
+    takeOver: unexpected,
     getSettings: unexpected,
     ...overrides,
   }
@@ -2747,6 +2749,48 @@ describe('public Agent Run routes', () => {
     expect(await invalid.json()).toMatchObject({ code: 'validation_failed', errors: [{ pointer: '/runtime' }] })
   })
 
+  test('takes over a stalled run idempotently and reports a disabled Team setting', async () => {
+    const calls: unknown[] = []
+    let disabled = false
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      async authorizeTakeOver() {},
+      async takeOver(_credential, teamId, workItemId, runId, request) {
+        calls.push({ teamId, workItemId, runId, request })
+        if (disabled) throw new AgentRunError('forbidden', 'Disabled.', { reason: 'agent_run_takeover_disabled' })
+        return {
+          run: { ...agentRunFixture, runId: 'run_00000000-0000-4000-8000-000000000009' },
+          supersededRun: { ...agentRunFixture, state: 'finished', outcome: 'superseded', finishedBy: 'agent-owner', finishedAt: NOW.toISOString() },
+        }
+      },
+    }) })
+    const credential = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    /**
+     * Sends a take over request.
+     *
+     * @param key - Idempotency key.
+     * @param body - Request body.
+     * @returns Response.
+     */
+    const send = (key: string, body: unknown = { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' }) => router.request(
+      `/v1/work-items/work-item-1/agent-runs/${agentRunFixture.runId}/take-over?teamId=team-1`,
+      { method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body) },
+    )
+    const taken = await send('take-over-1')
+    expect(taken.status).toBe(201)
+    expect(await taken.json()).toMatchObject({ supersededRun: { outcome: 'superseded' } })
+    expect((await send('take-over-1')).headers.get('Idempotency-Replayed')).toBe('true')
+    expect(calls).toEqual([{
+      teamId: 'team-1', workItemId: 'work-item-1', runId: agentRunFixture.runId,
+      request: { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+    }])
+    disabled = true
+    const refused = await send('take-over-2')
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toMatchObject({ code: 'forbidden', errors: [{ code: 'agent_run_takeover_disabled' }] })
+    expect((await send('take-over-3', { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2', expectedRevision: 1 })).status).toBe(400)
+  })
+
   test('binds heartbeats and finishes to the instance, returns Retry-After, and 503 when runs are not configured', async () => {
     const finishes: unknown[] = []
     const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
@@ -2795,15 +2839,22 @@ describe('public Agent Run routes', () => {
     const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
       async list(_credential, teamId, filters) {
         expect(teamId).toBe('team-1')
-        expect(filters).toEqual({ state: 'active', instanceIdHash: hashAgentInstanceId('laptop-1') })
+        seenFilters.push(filters)
         return { items: [agentRunFixture], hasMore: false }
       },
     }) })
+    const seenFilters: unknown[] = []
     const credential = await createApiKey(platform, ['work-items:read'])
     const headers = { Authorization: `Bearer ${credential.secret}` }
     const listed = await router.request('/v1/agent-runs?teamId=team-1&instanceId=laptop-1', { headers })
     expect(await listed.json()).toEqual({ items: [agentRunFixture], hasMore: false })
+    await router.request('/v1/agent-runs?teamId=team-1&workItemId=work-item-1&instanceId=laptop-1', { headers })
+    expect(seenFilters).toEqual([
+      { state: 'active', instanceIdHash: hashAgentInstanceId('laptop-1') },
+      { state: 'active', instanceIdHash: hashAgentInstanceId('laptop-1'), workItemId: 'work-item-1' },
+    ])
     expect((await router.request('/v1/agent-runs?teamId=team-1&state=stalled', { headers })).status).toBe(400)
+    expect((await router.request('/v1/agent-runs?teamId=team-1&state=finished&workItemId=work-item-1', { headers })).status).toBe(400)
   })
 
   test('passes Agent Run fences to updates and comments without changing the patch', async () => {

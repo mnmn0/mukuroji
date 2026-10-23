@@ -2373,6 +2373,53 @@
         ],
         "type": "object"
       },
+      "TakeOverAgentRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agentName": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "instanceId": {
+            "description": "Opaque, stable identifier of the instance taking over. Mukuroji stores and compares only its hash.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "runtime": {
+            "enum": [
+              "claude-code",
+              "codex",
+              "kiro",
+              "other"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "runtime",
+          "agentName",
+          "instanceId"
+        ],
+        "type": "object"
+      },
+      "TakeOverAgentRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/AgentRun"
+          },
+          "supersededRun": {
+            "$ref": "#/components/schemas/AgentRun"
+          }
+        },
+        "required": [
+          "run",
+          "supersededRun"
+        ],
+        "type": "object"
+      },
       "UpdateExternalWorkItemLinkInput": {
         "additionalProperties": false,
         "properties": {
@@ -6921,6 +6968,16 @@
             }
           },
           {
+            "description": "Returns only the run that currently claims this Work Item, read strongly so that a run started moments ago is included. Requires state=active.",
+            "in": "query",
+            "name": "workItemId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
             "in": "query",
             "name": "cursor",
@@ -8350,6 +8407,127 @@
           }
         ],
         "summary": "Claim an assigned Work Item and move it to a started status in one transaction",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over": {
+      "post": {
+        "operationId": "takeOverPublicAgentRun",
+        "parameters": [
+          {
+            "description": "Work Item whose stalled run is taken over.",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stalled run to supersede.",
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "pattern": "^run_[0-9a-f-]{36}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TakeOverAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeOverAgentRunResponse"
+                }
+              }
+            },
+            "description": "New run of the caller and the superseded run",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Take over a stalled run of another instance of the same assignee, when the Team allows it",
         "tags": [
           "Agent Runs"
         ]

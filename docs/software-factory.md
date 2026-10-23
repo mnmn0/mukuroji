@@ -281,7 +281,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `POST /v1/work-items/{workItemId}/agent-runs?teamId=` | claim と `started` 遷移。body は `expectedRevision`、`workflowStatusId`、`runtime`、`agentName`、`instanceId`。Team は既存の Work Item route と同じく query で指定する。 |
 | `GET /v1/work-items/{workItemId}/agent-runs` | Work Item の Run 履歴。cursor pagination。 |
 | `GET /v1/agent-runs/{runId}` | Run 1 件。 |
-| `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。閲覧できない Work Item の Run は返さない。 |
+| `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=&workItemId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。`workItemId` を指定すると index ではなく claim row を強整合で読み、その Work Item を claim している Run だけを返す（`state=active` のみ）。閲覧できない Work Item の Run は返さない。 |
 | `GET /v1/agent-settings?teamId=` | Team の Agent settings。MCP の `get_configuration` が使う。 |
 | `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body は Run 開始時と同じ `instanceId`。 |
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
@@ -296,7 +296,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | --- | --- |
 | `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
 | `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
-| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。 |
+| `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存した設定 row に `Idempotency-Key` 由来の key を残し、応答を失った同じ key と同じ値の再送は revision 不一致でも保存済みの設定を返す。 |
 
 `ApiProblem.code` の enum は Public API の後方互換性（response enum を広げない）のため変えない。
 Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem の `errors[].code` で返し、
@@ -307,6 +307,7 @@ Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem
 | `409` | `conflict` | `agent_run_conflict` | 対象 Work Item に別 instance の `active` Run がある、または別 instance の `active` Run を heartbeat・finish しようとした。`detail` に保持 Run の agent 名、runtime、開始時刻、停滞かどうかを含める。 |
 | `409` | `conflict` | `agent_run_not_active` | 指定 Run が `finished`、別 instance のもの、または対象 Work Item と一致しない |
 | `403` | `forbidden` | `agent_run_forbidden` | credential の actor が Work Item または Run の `assigneeUserId` と異なる |
+| `403` | `forbidden` | `agent_run_takeover_disabled` | Team の Agent settings が take over を許可していない |
 | `409` | `conflict` | `invalid_transition` | start 対象が `backlog` / `unstarted` でない、または遷移先が `started` でない |
 | `409` | `conflict` | `not_ready` | start 対象が Agent settings の Ready 条件を満たさない（Slice 3） |
 | `422` | `validation_failed` | `invalid_artifact_url` | report の URL が許可形式でない（Slice 2） |
@@ -349,12 +350,13 @@ tool は次のとおり変更・追加する。
 | `start_task` | Run の start endpoint を呼ぶ。戻り値に `run` を追加。`not_ready` と `agent_run_conflict` をそのまま返す。 |
 | `heartbeat`（新規） | `runId` を受け取り lease を延長する。 |
 | `finish_run`（新規） | `runId`、`outcome`、`idempotencyKey`。`complete_task` の後、または中断・失敗時に呼ぶ。 |
-| `take_over_task`（新規） | 設定で許可された場合だけ登録する。停滞 Run を `superseded` にして新しい Run を開始する。 |
+| `take_over_task`（新規） | 停滞 Run を `superseded` にして新しい Run を開始する。tool は常に登録し、Team の設定が許可していない場合は server が `agent_run_takeover_disabled` を返す。ユーザーが明示的に引き継ぎを指示した場合だけ使う。 |
 | `report_progress` | `kind`、`verifications`、`artifacts`、`changedFileCount` を任意で追加。対象 Work Item と `workItemId` が一致する自分の `active` Run があれば report endpoint を呼ぶ。なければ `message` だけの場合は従来の comment endpoint（`agentInstanceId` 付き）を呼び、構造化 field がある場合は endpoint を呼ばずに `agent_run_not_active` を返す。 |
 | `update_task` / `move_task` / `complete_task` / `cancel_task` / `reopen_task` | 常に `agentInstanceId` を添え、対象 Work Item と `workItemId` が一致する自分の `active` Run があればその `runId` を `agentRunId` として添える。別の Work Item の Run は使わない。一致する Run がなく対象 Work Item に別 instance の `active` Run がある場合は server の fence で `agent_run_conflict` になる。 |
 
-- MCP process は自分の `active` Run を起動時に `GET /v1/agent-runs?instanceId=` で復元し、
-  process 再起動後も同じ Run を継続する。memory だけに持たない。
+- MCP process は自分の `active` Run を memory に持たず、`GET /v1/agent-runs?instanceId=` と、
+  対象タスクの claim を強整合で読む `workItemId` 指定の一覧で判定する。process 再起動の直後に
+  index がまだ Run を返さなくても、同じ Run を継続する。
 - resource `mukuroji://project/{projectId}/brief` を追加し、`get_configuration` の `brief` と
   同じ内容を返す。resources に対応しない client は tool だけで同じ情報を得られる。
 - guide と `work-on-next-task` prompt に、Run の開始・heartbeat・終了、`otherRuns` を引き継が
@@ -442,16 +444,25 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   30 秒ごと、および `active` Run の lease が切れる直後に再取得し、停滞を表示する。新しい 20 件より前の
   Run がある場合は、表示が新しい Run に限られることを示す。
 - `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は、Project 外のタスクの Run を `ownRuns` / `otherRuns` に
-  含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。プロセスが開始したばかりで
-  一覧 index にまだない Run も同じ範囲で絞り込む。
+  含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。
 - `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
-  `in_progress` とする。Run 一覧の index は結果整合のため、同じ process が開始した直後の Run は
-  `getRun` で直接読み、`ownRuns` と `get_task` の `activeRun` に含める。それ以外の自 Run は `ownRuns` に残し、agent に `finish_run` を促す。
+  `in_progress` とする。Run 一覧の index は結果整合のため、index にない `started` タスク（更新の新しい
+  10 件まで）は claim を強整合で読み、自 instance の Run を `ownRuns` に含める。`get_task` の
+  `activeRun`、`heartbeat` / `finish_run` の所有確認、mutation の fence も claim を読んで決めるため、
+  開始直後や process 再起動直後でも同じ Run を扱える。それ以外の自 Run は `ownRuns` に残し、agent に
+  `finish_run` を促す。
   Run のない `started` Work Item は再開対象にしない。
-- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、`allowTakeoverAfterLeaseExpiry`
-  を使う take over、data-integrity の verify script による claim / Run 不整合の検査。
-  不整合は読み取り時に fail-closed で検出する。
+- take over は `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` で受け付ける。
+  `allowTakeoverAfterLeaseExpiry` が `true`、Work Item と停滞 Run の担当者がどちらも credential の
+  member、Work Item が `started`、Run が別 instance のもので lease が切れている場合だけ成功する。停滞 Run の `superseded`
+  への更新（lease が切れたままであることを条件にする）、claim row の置き換え（停滞 Run を指して
+  いることを条件にする）、旧 instance の revocation row、新しい Run、Work Item revision と設定
+  revision の ConditionCheck、2 件の audit event、idempotency receipt を 1 つの transaction で確定
+  する。heartbeat が先に lease を延長した場合は `agent_run_conflict` で拒否する。Work Item の
+  status は変えない。
+- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script
+  による claim / Run 不整合の検査。不整合は読み取り時に fail-closed で検出する。
 
 ## 後続 Phase
 

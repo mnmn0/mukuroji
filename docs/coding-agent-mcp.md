@@ -92,6 +92,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `cancel_task` | 未完了タスクをcanceledへ遷移 |
 | `heartbeat` | 自インスタンスのAgent Runのleaseを延長。10秒に1回まで |
 | `finish_run` | 自インスタンスのAgent Runを `completed`、`paused`、`failed` で終了。タスクのstatusは変えない |
+| `take_over_task` | ユーザーが明示的に引き継ぎを指示した場合だけ、同じメンバーの別インスタンスが持つ停滞Runを `superseded` にして自インスタンスのRunを開始。Teamの設定で許可されている場合だけ成功する |
 
 読み取りはcredentialの現在の権限範囲、更新はさらに設定された担当メンバーのタスクに限定します。
 タスクの更新・遷移・進捗報告には常にインスタンスIDを添え、自インスタンスがそのタスクのAgent Runを持つ場合はRun IDも添えます。他インスタンスがRunを持つタスクへの更新はサーバーが `agent_run_conflict` で拒否します。
@@ -101,7 +102,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 
 1. `get_configuration` でstatus IDと必須fieldを確認します。`started` 等は共通カテゴリー名であり、status IDとは限りません。
 2. `get_work_status` と `get_next_task` を呼びます。候補は優先度 high→medium→low、期限の早い順（未設定は後）、作成日時、IDの順です。完了・取り消し・archive済みタスクは新規候補から除外します。
-3. `action: in_progress` は、自インスタンスがAgent Runを持つstartedタスクです。そのまま再開します。`otherRuns` は同じメンバーの別インスタンスが持つタスクで、ユーザーから明示的に引き継がない限り続けません。`ownRuns` に残っていてタスクがstartedでないRunは `finish_run` で閉じます。
+3. `action: in_progress` は、自インスタンスがAgent Runを持つstartedタスクです。そのまま再開します。`otherRuns` は同じメンバーの別インスタンスが持つタスクで、ユーザーから明示的に引き継がない限り続けません。引き継ぐ場合、Runが停滞していてTeamの設定で許可されていれば `take_over_task` を使い、そうでなければ人に解放を依頼します。`ownRuns` に残っていてタスクがstartedでないRunは `finish_run` で閉じます。
 4. `action: start` の場合、候補の `revision`、startedカテゴリーの `workflowStatusId`、新規UUIDの `idempotencyKey` を `start_task` に渡します。成功するとタスクとRunが返ります。成功後に作業を開始します。候補取得だけでは着手済みになりません。
 5. `report_progress` に実装方針・進捗・blocker・検証結果・成果物リンクを記録します。タスクの説明は変更しません。既存コメントは `list_progress` で読みます。更新と進捗報告はleaseを延長します。ツールを呼ばない長い作業ではlease切れの前に `heartbeat` を呼びます。
 6. レビュー待ちなどは該当するstatusを設定し、要求と必要な検証が満たされたら `complete_task` を呼びます。進捗コメントだけでは完了になりません。

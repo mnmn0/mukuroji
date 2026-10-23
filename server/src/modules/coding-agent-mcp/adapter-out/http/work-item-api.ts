@@ -56,10 +56,11 @@ const problemSchema = z.object({
 })
 /** Safe guidance for Agent Run fence reasons; remote detail text is never forwarded. */
 const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string> = {
-  agent_run_conflict: 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; do not take it over.',
+  agent_run_conflict: 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.',
   agent_run_not_active: 'Your Agent Run is no longer active for this task (finished or released by a person). Stop working on it and report the situation to the user.',
   agent_run_forbidden: 'Only the task assignee can start or operate an Agent Run with this credential. Check MUKUROJI_MCP_ASSIGNEE_ID and the credential owner.',
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
+  agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
 }
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */
@@ -230,15 +231,30 @@ export function createAgentWorkItemApi(
       const started = await request(`work-items/${encodeURIComponent(id)}/agent-runs`, z.object({ run: runSchema, workItem: taskSchema }), 'POST', input, key)
       return { run: scopedRun(started.run), task: scoped(started.workItem, id) }
     },
+    /** Takes over a stalled run with the original idempotency key. */
+    async takeOverRun(id, runId, input, key) {
+      const taken = await request(
+        `work-items/${encodeURIComponent(id)}/agent-runs/${encodeURIComponent(runId)}/take-over`,
+        z.object({ run: runSchema, supersededRun: runSchema }), 'POST', input, key,
+      )
+      const run = scopedRun(taken.run)
+      const supersededRun = scopedRun(taken.supersededRun, runId)
+      if (run.workItemId !== id || supersededRun.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned runs for another task.')
+      }
+      return { run, supersededRun }
+    },
     /** Lists one page of active runs. */
     async listActiveRuns(filters, cursor) {
       const page = await request('agent-runs', pageSchema(runSchema), 'GET', undefined, undefined, { state: 'active', ...filters, cursor, limit: 100 })
       return { ...page, items: page.items.map((run) => scopedRun(run)) }
     },
-    /** Lists the newest runs of one task. */
-    async taskRuns(id, limit) {
-      const page = await request(`work-items/${encodeURIComponent(id)}/agent-runs`, pageSchema(runSchema), 'GET', undefined, undefined, { limit })
-      return { ...page, items: page.items.map((run) => scopedRun(run)) }
+    /** Strongly reads the run that currently claims one task. */
+    async claimedRun(id, instanceId) {
+      const page = await request('agent-runs', pageSchema(runSchema), 'GET', undefined, undefined, { state: 'active', workItemId: id, instanceId, limit: 1 })
+      const [run] = page.items.map((item) => scopedRun(item))
+      if (run && run.workItemId !== id) throw new AgentTaskError('invalid_response', 'The API returned a run for another task.')
+      return run
     },
     /** Reads one run. */
     async getRun(runId) { return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}`, runSchema), runId) },

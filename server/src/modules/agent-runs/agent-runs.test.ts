@@ -213,6 +213,31 @@ describe('DynamoDB Agent Run store', () => {
     expect(() => store.createCloseItems(createRun())).toThrow(TypeError)
   })
 
+  test('takes over only a stalled run and replaces its claim in place', () => {
+    const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const later = new Date(now.getTime() + 31 * 60_000)
+    const superseded = finishAgentRun(createRun(), 'superseded', 'member-1', later)
+    const successor = createRun({
+      runId: 'run_00000000-0000-4000-8000-000000000002', instanceIdHash: hashAgentInstanceId('laptop-2'),
+      startedAt: later.toISOString(), lastHeartbeatAt: later.toISOString(),
+    })
+    const [update, claim, revoke, put, unrevoke] = store.createTakeOverItems(superseded, successor)
+    expect(update?.Update).toMatchObject({
+      ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #leaseExpiresAt < :takenOverAt',
+      ExpressionAttributeValues: { ':takenOverAt': later.toISOString(), ':outcome': 'superseded' },
+    })
+    expect(claim?.Put).toMatchObject({
+      ConditionExpression: '#runId = :supersededRunId',
+      ExpressionAttributeValues: { ':supersededRunId': superseded.runId },
+      Item: { recordKey: 'agent-run-claim#task-1', runId: successor.runId, instanceIdHash: successor.instanceIdHash },
+    })
+    expect(revoke?.Put?.Item).toMatchObject({ instanceIdHash: superseded.instanceIdHash })
+    expect(put?.Put).toMatchObject({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: { runId: successor.runId } })
+    expect(unrevoke?.Delete).toBeDefined()
+    expect(() => store.createTakeOverItems(superseded, { ...successor, instanceIdHash: superseded.instanceIdHash })).toThrow(TypeError)
+    expect(() => store.createTakeOverItems(finishAgentRun(createRun(), 'released', 'member-2', later), successor)).toThrow(TypeError)
+  })
+
   test('reads runs strictly and fails closed on rows from another Team', async () => {
     const run = createRun()
     const item = store().createStartItems(run)[0]?.Put?.Item
@@ -355,12 +380,25 @@ describe('DynamoDB Agent Run store', () => {
         CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
       })
     }
-    const { client, commands } = createClient([{}, cancelled])
-    const store = new DynamoDbAgentRunStore(client, 'AgentRuns')
-    const saved = await store.saveSettings('workspace-1', 'core', { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }, 'member-1', now, [])
+    const first = createClient([{}])
+    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }
+    const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', [])
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
-    expect(commands[0]?.input).toMatchObject({ TransactItems: [{ Put: { ConditionExpression: 'attribute_not_exists(recordKey)' } }] })
-    await expect(store.saveSettings('workspace-1', 'core', { expectedRevision: 1, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }, 'member-1', now, []))
+    const command = first.commands[0]
+    if (!(command instanceof TransactWriteCommand)) throw new Error('The save must be a transaction.')
+    expect(command.input).toMatchObject({ TransactItems: [{ Put: { ConditionExpression: 'attribute_not_exists(recordKey)' } }] })
+    const item = command.input.TransactItems?.[0]?.Put?.Item
+    expect(item).toMatchObject({ lastMutationKey: 'key-1' })
+
+    // A retry of the committed save replays it; another key, or other values, is a lost update.
+    const replay = createClient([cancelled, { Item: item }, { Item: item }])
+    expect(await new DynamoDbAgentRunStore(replay.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', []))
+      .toEqual(saved)
+    const otherKey = createClient([cancelled, { Item: item }])
+    await expect(new DynamoDbAgentRunStore(otherKey.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-2', []))
+      .rejects.toMatchObject({ category: 'conflict' })
+    const otherValues = createClient([cancelled, { Item: item }, { Item: item }])
+    await expect(new DynamoDbAgentRunStore(otherValues.client, 'AgentRuns').saveSettings('workspace-1', 'core', { ...update, leaseMinutes: 60 }, 'member-1', now, 'key-1', []))
       .rejects.toMatchObject({ category: 'conflict' })
   })
 })

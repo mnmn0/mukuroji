@@ -106,6 +106,8 @@ export interface AgentRunStore {
    * @param update - Validated update including the expected revision.
    * @param actorMemberKey - Editor.
    * @param now - Save time.
+   * @param mutationKey - Opaque key of this save; a retry with the same key and values whose revision
+   * check fails because this save already committed returns the saved settings instead of a conflict.
    * @param extraItems - Audit writes committed with the settings.
    * @returns The saved settings.
    */
@@ -115,6 +117,7 @@ export interface AgentRunStore {
     update: UpdateAgentSettingsRequest,
     actorMemberKey: string,
     now: Date,
+    mutationKey: string,
     extraItems: readonly AgentRunTransactItem[],
   ): Promise<AgentSettings>
   /**
@@ -184,6 +187,15 @@ export interface AgentRunStore {
    * @returns Run update and claim delete conditioned on the run still being active, then any revocation put.
    */
   createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
+  /**
+   * Builds the writes that hand a stalled run's Work Item to another instance: the stalled run is
+   * superseded and its instance revoked, and the successor takes over the claim in place.
+   * @param superseded - Superseded form of the stalled run.
+   * @param successor - New active run of another instance on the same Work Item.
+   * @returns Run update and claim replacement conditioned on the stalled run still holding an expired
+   * lease, then the revocation put, the successor run put, and the successor's revocation delete.
+   */
+  createTakeOverItems(superseded: StoredAgentRun, successor: StoredAgentRun): AgentRunTransactItem[]
   /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
@@ -470,6 +482,18 @@ function decodeCursor(cursor: string | undefined, partitionAttribute: string, pa
  * @param limit - Requested size.
  * @returns The size.
  */
+/**
+ * Checks whether saved settings are exactly what a save with these values committed.
+ * @param saved - Current settings.
+ * @param update - Values of the save.
+ * @returns True when the save produced the current revision and values.
+ */
+export function isSameSettingsSave(saved: AgentSettings, update: UpdateAgentSettingsRequest): boolean {
+  return saved.revision === update.expectedRevision + 1 &&
+    saved.leaseMinutes === update.leaseMinutes &&
+    saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry
+}
+
 function readLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximumPageSize) {
     throw new AgentRunError('validation_failed', `limit must be an integer from 1 to ${maximumPageSize}.`, { pointer: '/limit' })
@@ -610,6 +634,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
     update: UpdateAgentSettingsRequest,
     actorMemberKey: string,
     now: Date,
+    mutationKey: string,
     extraItems: readonly AgentRunTransactItem[],
   ): Promise<AgentSettings> {
     const settings: AgentSettings = {
@@ -633,6 +658,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
                 entityType: 'agent-settings',
                 workspaceId: directoryId,
                 ...settings,
+                lastMutationKey: mutationKey,
               },
               ConditionExpression: update.expectedRevision === 0
                 ? 'attribute_not_exists(recordKey)'
@@ -650,11 +676,37 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       }))
     } catch (error) {
       if (isLeadingConditionalFailure(error, 1)) {
+        const replayed = await this.#readReplayedSettings(directoryId, teamId, update, mutationKey)
+        if (replayed) return replayed
         throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
       }
       throw error
     }
     return settings
+  }
+
+  /**
+   * Returns the saved settings when an earlier attempt of the same save already committed them.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param update - Values of the retried save.
+   * @param mutationKey - Opaque key of the retried save.
+   * @returns The committed settings, or undefined when another save changed them.
+   */
+  async #readReplayedSettings(
+    directoryId: string,
+    teamId: string,
+    update: UpdateAgentSettingsRequest,
+    mutationKey: string,
+  ): Promise<AgentSettings | undefined> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: settingsRecordKey },
+      ConsistentRead: true,
+    }))
+    if (response.Item?.lastMutationKey !== mutationKey) return undefined
+    const current = await this.getSettings(directoryId, teamId)
+    return isSameSettingsSave(current, update) ? current : undefined
   }
 
   /** @inheritdoc */
@@ -865,6 +917,46 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             },
           }]
         : []),
+    ]
+  }
+
+  /** @inheritdoc */
+  createTakeOverItems(superseded: StoredAgentRun, successor: StoredAgentRun): AgentRunTransactItem[] {
+    if (
+      superseded.outcome !== 'superseded' ||
+      successor.state !== 'active' ||
+      successor.workItemId !== superseded.workItemId ||
+      successor.instanceIdHash === superseded.instanceIdHash
+    ) {
+      throw new TypeError('createTakeOverItems requires a superseded run and an active successor of another instance.')
+    }
+    const [closeUpdate, , revocationPut] = this.createCloseItems(superseded, superseded.instanceIdHash)
+    const [runPut, claimPut, revocationDelete] = this.createStartItems(successor)
+    if (!closeUpdate?.Update || !revocationPut || !runPut || !claimPut?.Put || !revocationDelete) {
+      throw new TypeError('The close and start builders returned unexpected items.')
+    }
+    return [
+      {
+        Update: {
+          ...closeUpdate.Update,
+          // A heartbeat that renews the lease first wins; only a stalled run can be taken over.
+          ConditionExpression: `${closeUpdate.Update.ConditionExpression} AND #leaseExpiresAt < :takenOverAt`,
+          ExpressionAttributeNames: { ...closeUpdate.Update.ExpressionAttributeNames, '#leaseExpiresAt': 'leaseExpiresAt' },
+          ExpressionAttributeValues: { ...closeUpdate.Update.ExpressionAttributeValues, ':takenOverAt': successor.startedAt },
+        },
+      },
+      {
+        // The claim is replaced in place; a delete and a put of the same row cannot share a transaction.
+        Put: {
+          ...claimPut.Put,
+          ConditionExpression: '#runId = :supersededRunId',
+          ExpressionAttributeNames: { '#runId': 'runId' },
+          ExpressionAttributeValues: { ':supersededRunId': superseded.runId },
+        },
+      },
+      revocationPut,
+      runPut,
+      revocationDelete,
     ]
   }
 

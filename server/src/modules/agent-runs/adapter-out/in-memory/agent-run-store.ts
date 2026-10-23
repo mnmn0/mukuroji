@@ -19,6 +19,7 @@ import {
 } from '../../domain/agent-run-error'
 import {
   DynamoDbAgentRunStore,
+  isSameSettingsSave,
   type AgentRunFenceInput,
   type AgentRunPage,
   type AgentRunStore,
@@ -108,6 +109,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }, 'in-memory-agent-runs')
   /** Effects of the items this store produced. */
   readonly #effects = new WeakMap<AgentRunTransactItem, InMemoryEffect>()
+  /** Key of the save that produced each Team's current settings. */
+  readonly #settingsMutationKeys = new Map<string, string>()
 
   /**
    * Seeds a run as the Work Item's newest run and, for an active run, its claim.
@@ -157,9 +160,12 @@ export class InMemoryAgentRunStore implements AgentRunStore {
     update: UpdateAgentSettingsRequest,
     actorMemberKey: string,
     now: Date,
+    mutationKey: string,
   ): Promise<AgentSettings> {
+    const settingsKey = `${directoryId}|${teamId}`
     const current = await this.getSettings(directoryId, teamId)
     if (current.revision !== update.expectedRevision) {
+      if (this.#settingsMutationKeys.get(settingsKey) === mutationKey && isSameSettingsSave(current, update)) return current
       throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
     }
     const settings: AgentSettings = {
@@ -171,7 +177,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       updatedAt: now.toISOString(),
       updatedBy: actorMemberKey,
     }
-    this.state.settings.set(`${directoryId}|${teamId}`, settings)
+    this.state.settings.set(settingsKey, settings)
+    this.#settingsMutationKeys.set(settingsKey, mutationKey)
     return { ...settings }
   }
 
@@ -287,6 +294,61 @@ export class InMemoryAgentRunStore implements AgentRunStore {
             apply: (state) => { state.revocations.add(revocationKey(run.directoryId, run.teamId, run)) },
           })]
         : []),
+    ]
+  }
+
+  /** @inheritdoc */
+  createTakeOverItems(superseded: StoredAgentRun, successor: StoredAgentRun): AgentRunTransactItem[] {
+    const [runUpdate, claimPut, revocationPut, runPut, revocationDelete] = this.#builder.createTakeOverItems(superseded, successor)
+    if (!runUpdate || !claimPut || !revocationPut || !runPut || !revocationDelete) {
+      throw new Error('The take over builder returned an unexpected item count.')
+    }
+    const supersededKey = key(superseded.directoryId, superseded.teamId, superseded.runId)
+    const successorKey = key(successor.directoryId, successor.teamId, successor.runId)
+    const claimKey = key(successor.directoryId, successor.teamId, successor.workItemId)
+    return [
+      this.#register(runUpdate, {
+        check: (state) => {
+          const current = state.runs.get(supersededKey)
+          return current?.state === 'active' && current.instanceIdHash === superseded.instanceIdHash &&
+            current.leaseExpiresAt < successor.startedAt
+        },
+        apply: (state) => {
+          const current = state.runs.get(supersededKey)
+          if (!current) return
+          const { lastHeartbeatRequestAt: _lastHeartbeatRequestAt, ...rest } = current
+          state.runs.set(supersededKey, {
+            ...rest,
+            state: 'finished',
+            outcome: 'superseded',
+            ...(superseded.finishedAt ? { finishedAt: superseded.finishedAt } : {}),
+            ...(superseded.finishedBy ? { finishedBy: superseded.finishedBy } : {}),
+          })
+        },
+      }),
+      this.#register(claimPut, {
+        check: (state) => state.claims.get(claimKey)?.runId === superseded.runId,
+        apply: (state) => {
+          state.claims.set(claimKey, {
+            workItemId: successor.workItemId,
+            runId: successor.runId,
+            instanceIdHash: successor.instanceIdHash,
+            assigneeUserId: successor.assigneeUserId,
+          })
+        },
+      }),
+      this.#register(revocationPut, {
+        check: () => true,
+        apply: (state) => { state.revocations.add(revocationKey(superseded.directoryId, superseded.teamId, superseded)) },
+      }),
+      this.#register(runPut, {
+        check: (state) => !state.runs.has(successorKey),
+        apply: (state) => { state.runs.set(successorKey, structuredClone(successor)) },
+      }),
+      this.#register(revocationDelete, {
+        check: () => true,
+        apply: (state) => { state.revocations.delete(revocationKey(successor.directoryId, successor.teamId, successor)) },
+      }),
     ]
   }
 

@@ -52,6 +52,7 @@ export const AGENT_RUN_PROBLEM_REASONS = [
   'agent_run_not_active',
   'agent_run_forbidden',
   'invalid_transition',
+  'agent_run_takeover_disabled',
 ] as const
 
 /** Stable Agent Run fence reason carried in a problem violation code. */
@@ -123,6 +124,24 @@ export type StartAgentRunResponse = {
   run: AgentRun
   /** Work Item after the start transition, in the Public API projection. */
   workItem: PublicWorkItem
+}
+
+/** Request body that takes over a stalled run of another instance of the same assignee. */
+export type TakeOverAgentRunRequest = {
+  /** Client runtime that drives the agent taking over. */
+  runtime: AgentRunRuntime
+  /** Display name of the agent taking over. */
+  agentName: string
+  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. */
+  instanceId: string
+}
+
+/** Response of a successful take over. */
+export type TakeOverAgentRunResponse = {
+  /** New run of the instance that took over. */
+  run: AgentRun
+  /** Stalled run, now finished as `superseded`. */
+  supersededRun: AgentRun
 }
 
 /** Request body that extends the lease of an agent's own run. */

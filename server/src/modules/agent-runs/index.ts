@@ -3,6 +3,7 @@ export {
   createAgentRunCommitConflictError,
   createAgentRunConflictError,
   createAgentRunForbiddenError,
+  createAgentRunTakeoverDisabledError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
   type AgentRunErrorCategory,
@@ -20,6 +21,7 @@ export {
   readFinishAgentRunRequest,
   readHeartbeatAgentRunRequest,
   readStartAgentRunRequest,
+  readTakeOverAgentRunRequest,
   readUpdateAgentSettingsRequest,
   splitAgentRunMutationFence,
   toAgentRun,
@@ -28,6 +30,7 @@ export {
   type ValidatedAgentRunFence,
   type ValidatedAgentRunFinish,
   type ValidatedAgentRunStart,
+  type ValidatedAgentRunTakeOver,
 } from './domain/agent-run'
 export {
   AGENT_RUN_ACTIVE_INDEX_NAME,

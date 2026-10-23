@@ -89,6 +89,19 @@ export function createAgentRunNotActiveError(): AgentRunError {
 }
 
 /**
+ * Reports that the Team does not let another instance take over a stalled run.
+ *
+ * @returns Forbidden error with the `agent_run_takeover_disabled` reason.
+ */
+export function createAgentRunTakeoverDisabledError(): AgentRunError {
+  return new AgentRunError(
+    'forbidden',
+    'This Team does not allow taking over stalled Agent Runs. Ask a person to release the run instead.',
+    { reason: 'agent_run_takeover_disabled' },
+  )
+}
+
+/**
  * Reports that the credential owner is not the member responsible for the run.
  *
  * @returns Forbidden error with the `agent_run_forbidden` reason.
