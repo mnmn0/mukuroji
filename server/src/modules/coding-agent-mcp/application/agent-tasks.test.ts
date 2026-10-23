@@ -251,6 +251,25 @@ describe('agent task lifecycle', () => {
     await expect(other.heartbeat(runId)).rejects.toMatchObject({ code: 'not_own_run' })
   })
 
+  test('reports a run released between its read and the claim read as not active', async () => {
+    const { api, release } = fixture()
+    let releaseOnClaimRead = false
+    const racing = createAgentTasks({
+      ...api,
+      async claimedRun(id, instanceId) {
+        if (releaseOnClaimRead) {
+          releaseOnClaimRead = false
+          for (const run of (await api.listActiveRuns({}, undefined)).items) release(run.runId)
+        }
+        return api.claimedRun(id, instanceId)
+      },
+    }, baseScope)
+    const claimed = await racing.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    releaseOnClaimRead = true
+    await expect(racing.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
+  })
+
   test('resumes its own run when only the unfiltered run list has caught up', async () => {
     const { api } = fixture()
     const racing = {

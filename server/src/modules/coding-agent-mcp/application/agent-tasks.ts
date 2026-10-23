@@ -203,6 +203,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       throw new AgentTaskError('out_of_scope', 'This run belongs to a task outside the configured Project.')
     }
     if ((await claimedRun(run.workItemId, true))?.runId === runId) return run
+    // A release, finish, or take over may have closed the run between the two reads.
+    if ((await api.getRun(runId)).state !== 'active') return undefined
     throw new AgentTaskError('not_own_run', 'This run belongs to another agent instance. Do not operate on it; ask the user.')
   }
 

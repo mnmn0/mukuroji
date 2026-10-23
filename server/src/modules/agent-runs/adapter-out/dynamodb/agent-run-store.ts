@@ -487,12 +487,6 @@ function decodeCursor(cursor: string | undefined, partitionAttribute: string, pa
 }
 
 /**
- * Validates a page size.
- *
- * @param limit - Requested size.
- * @returns The size.
- */
-/**
  * Checks whether saved settings are exactly what a save with these values committed.
  * @param saved - Current settings.
  * @param update - Values of the save.
@@ -504,6 +498,12 @@ export function isSameSettingsSave(saved: AgentSettings, update: UpdateAgentSett
     saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry
 }
 
+/**
+ * Validates a page size.
+ *
+ * @param limit - Requested size.
+ * @returns The size.
+ */
 function readLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximumPageSize) {
     throw new AgentRunError('validation_failed', `limit must be an integer from 1 to ${maximumPageSize}.`, { pointer: '/limit' })
