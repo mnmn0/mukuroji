@@ -217,10 +217,18 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
       artifacts: [{ type: 'pull-request', url: 'https://example.test/pr/1', label: 'PR 1' }],
     })
     expect(fake.commentBodies).toEqual([])
-    const invalidLink = await call(client, 'report_progress', {
-      taskId: 'task', message: 'Link', artifacts: [{ type: 'url', url: 'http://example.test' }], idempotencyKey: crypto.randomUUID(),
-    })
-    expect(invalidLink.isError).toBe(true)
+    // Values the report endpoint always rejects fail at the tool boundary and never reach the API.
+    const reportsBeforeInvalid = fake.reportBodies.length
+    for (const invalid of [
+      { message: 'Link', artifacts: [{ type: 'url', url: 'http://example.test' }] },
+      { message: 'Link', artifacts: [{ type: 'url', url: 'https://user:pass@example.test/log' }] },
+      { message: 'Link', artifacts: [{ type: 'url', url: 'https://example.test/log?token=x' }] },
+      { message: 'Ran', verifications: [{ command: 'bun\ntest', status: 'passed' }] },
+      { message: 'Bell\u0007' },
+    ]) {
+      expect((await call(client, 'report_progress', { taskId: 'task', ...invalid, idempotencyKey: crypto.randomUUID() })).isError).toBe(true)
+    }
+    expect(fake.reportBodies).toHaveLength(reportsBeforeInvalid)
     expect((await call(client, 'complete_task', { taskId: 'task', expectedRevision: 2, workflowStatusId: 'done', idempotencyKey: crypto.randomUUID() })).content)
       .toMatchObject({ data: { statusCategory: 'completed' } })
     expect((await call(client, 'finish_run', { runId: 'run_00000000-0000-4000-8000-000000000001', outcome: 'completed', idempotencyKey: crypto.randomUUID() })).content)

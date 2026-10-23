@@ -1,6 +1,12 @@
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server'
 import { z } from 'zod'
-import { createDefaultDueDateWorkItemSchedule, createDefaultUnscheduledWorkItemSchedule } from '@mukuroji/contracts'
+import {
+  AGENT_RUN_ARTIFACT_URL_PATTERN,
+  AGENT_RUN_REPORT_LINE_PATTERN,
+  AGENT_RUN_REPORT_MESSAGE_PATTERN,
+  createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
+} from '@mukuroji/contracts'
 import { createAgentTasks, type AgentTaskScope } from '../../application/agent-tasks'
 import { AgentTaskError, type AgentWorkItemApi } from '../../application/work-item-api'
 
@@ -106,17 +112,17 @@ export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTa
     description: 'Append a durable progress/blocker/verification/artifact/handoff report to the task discussion with the agent label. With your active run on the task, kind, verifications (commands you ran and their results), artifacts (https PR/branch/commit/URL links without credentials or query strings; never presigned URLs), and changedFileCount are saved as a structured report of the run and renew its lease; without a run, only a plain message is accepted. Does not change task status.',
     inputSchema: z.object({
       taskId: id,
-      message: z.string().trim().min(1).max(3900),
+      message: z.string().trim().min(1).max(3900).regex(new RegExp(AGENT_RUN_REPORT_MESSAGE_PATTERN)),
       kind: z.enum(['progress', 'blocker', 'verification', 'artifact', 'handoff']).optional(),
       verifications: z.array(z.object({
-        command: z.string().trim().min(1).max(512),
+        command: z.string().trim().min(1).max(512).regex(new RegExp(AGENT_RUN_REPORT_LINE_PATTERN)),
         status: z.enum(['passed', 'failed', 'skipped']),
-        summary: z.string().trim().min(1).max(512).optional(),
+        summary: z.string().trim().min(1).max(512).regex(new RegExp(AGENT_RUN_REPORT_LINE_PATTERN)).optional(),
       })).max(20).optional(),
       artifacts: z.array(z.object({
         type: z.enum(['pull-request', 'branch', 'commit', 'url']),
-        url: z.string().max(2048).startsWith('https://'),
-        label: z.string().trim().min(1).max(128).optional(),
+        url: z.string().max(2048).regex(new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN)),
+        label: z.string().trim().min(1).max(128).regex(new RegExp(AGENT_RUN_REPORT_LINE_PATTERN)).optional(),
       })).max(20).optional(),
       changedFileCount: z.number().int().nonnegative().optional(),
       idempotencyKey: key,

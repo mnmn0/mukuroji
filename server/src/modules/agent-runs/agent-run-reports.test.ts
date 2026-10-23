@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { PUBLIC_API_OPENAPI_DOCUMENT } from '@mukuroji/contracts'
+import {
+  AGENT_RUN_ARTIFACT_URL_PATTERN,
+  AGENT_RUN_REPORT_LINE_PATTERN,
+  AGENT_RUN_REPORT_MESSAGE_PATTERN,
+  PUBLIC_API_OPENAPI_DOCUMENT,
+} from '@mukuroji/contracts'
 import { QueryCommand, TransactWriteCommand, type GetCommand, type UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbAgentRunStore, type AgentRunDocumentClient } from './adapter-out/dynamodb/agent-run-store'
 import { InMemoryAgentRunStore } from './adapter-out/in-memory/agent-run-store'
@@ -147,8 +152,56 @@ describe('Agent Run report validation', () => {
     }
   })
 
+  test('publishes the shared patterns in the OpenAPI document', () => {
+    const schemas = PUBLIC_API_OPENAPI_DOCUMENT.components.schemas
+    expect(schemas.AgentRunArtifact.properties.url.pattern).toBe(AGENT_RUN_ARTIFACT_URL_PATTERN)
+    expect(schemas.AgentRunArtifact.properties.label.pattern).toBe(AGENT_RUN_REPORT_LINE_PATTERN)
+    expect(schemas.AgentRunVerification.properties.command.pattern).toBe(AGENT_RUN_REPORT_LINE_PATTERN)
+    expect(schemas.AgentRunVerification.properties.summary.pattern).toBe(AGENT_RUN_REPORT_LINE_PATTERN)
+    expect(schemas.ReportAgentRunRequest.properties.message.pattern).toBe(AGENT_RUN_REPORT_MESSAGE_PATTERN)
+  })
+
+  test('agrees with the published one-line text and message patterns', () => {
+    /**
+     * Checks whether the server accepts a value as a verification command.
+     *
+     * @param command - Command text.
+     * @returns True when the server accepts it.
+     */
+    const acceptsCommand = (command: string) => {
+      try {
+        readReportAgentRunRequest({ instanceId: 'laptop-1', message: 'Ran', verifications: [{ command, status: 'passed' }] })
+        return true
+      } catch {
+        return false
+      }
+    }
+    /**
+     * Checks whether the server accepts a value as a report message.
+     *
+     * @param message - Message text.
+     * @returns True when the server accepts it.
+     */
+    const acceptsMessage = (message: string) => {
+      try {
+        readReportAgentRunRequest({ instanceId: 'laptop-1', message })
+        return true
+      } catch {
+        return false
+      }
+    }
+    const line = new RegExp(AGENT_RUN_REPORT_LINE_PATTERN)
+    const message = new RegExp(AGENT_RUN_REPORT_MESSAGE_PATTERN)
+    for (const value of ['bun test', ' bun test ', 'bun\ttest', 'bun\ntest', 'bun\rtest', '   ', '\t', 'bun\u0001test', 'bun\u007ftest']) {
+      expect({ value, accepted: line.test(value) }).toEqual({ value, accepted: acceptsCommand(value) })
+    }
+    for (const value of ['Done', 'Line 1\nLine 2', 'Line 1\r\nLine 2', 'Tab\there', '   ', '\n\n', 'Bell\u0007', 'Form\ffeed']) {
+      expect({ value, accepted: message.test(value) }).toEqual({ value, accepted: acceptsMessage(value) })
+    }
+  })
+
   test('agrees with the OpenAPI artifact URL pattern', () => {
-    const pattern = new RegExp(PUBLIC_API_OPENAPI_DOCUMENT.components.schemas.AgentRunArtifact.properties.url.pattern)
+    const pattern = new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN)
     for (const url of [
       'https://github.com/example/repo/pull/1',
       'https://github.com/example/repo/pull/1#discussion_r1',

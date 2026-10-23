@@ -438,8 +438,10 @@
         "description": "One artifact link. Mukuroji stores it without fetching or resolving it.",
         "properties": {
           "label": {
+            "description": "Display label. One line: no line break or control character other than a tab, and not only whitespace; surrounding whitespace is trimmed.",
             "maxLength": 128,
             "minLength": 1,
+            "pattern": "^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0A-\\x1F\\x7F]*$",
             "type": "string"
           },
           "type": {
@@ -593,8 +595,10 @@
         "description": "One verification command and its result, as the agent reported it.",
         "properties": {
           "command": {
+            "description": "Command the agent ran. One line: no line break or control character other than a tab, and not only whitespace; surrounding whitespace is trimmed.",
             "maxLength": 512,
             "minLength": 1,
+            "pattern": "^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0A-\\x1F\\x7F]*$",
             "type": "string"
           },
           "status": {
@@ -606,8 +610,10 @@
             "type": "string"
           },
           "summary": {
+            "description": "Short result summary. One line: no line break or control character other than a tab, and not only whitespace; surrounding whitespace is trimmed.",
             "maxLength": 512,
             "minLength": 1,
+            "pattern": "^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0A-\\x1F\\x7F]*$",
             "type": "string"
           }
         },
@@ -2461,9 +2467,10 @@
             "type": "string"
           },
           "message": {
-            "description": "Comment text, saved after the run's agent label.",
+            "description": "Comment text, saved after the run's agent label. Line breaks and tabs are allowed, other control characters are not, and it must not be only whitespace; line endings are normalized and surrounding whitespace is trimmed.",
             "maxLength": 3900,
             "minLength": 1,
+            "pattern": "^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]*$",
             "type": "string"
           },
           "verifications": {

@@ -209,6 +209,25 @@ export const AGENT_RUN_ARTIFACT_LABEL_MAX_LENGTH = 128
 /** Maximum length of an artifact URL. */
 export const AGENT_RUN_ARTIFACT_URL_MAX_LENGTH = 2_048
 
+/**
+ * Pattern of an artifact URL the report endpoint accepts: lowercase `https://` and a host, with no
+ * userinfo, backslash, whitespace, control character, or query, and no `?` or `=` in the fragment.
+ * The endpoint also requires the URL to parse with a host.
+ */
+export const AGENT_RUN_ARTIFACT_URL_PATTERN: string = '^https://[^/?#@\\\\\\s\\x00-\\x1F\\x7F]+(/[^?#\\\\\\s\\x00-\\x1F\\x7F]*)?(#[^?=\\\\\\s\\x00-\\x1F\\x7F]*)?$'
+
+/**
+ * Pattern of one-line report text (a verification command or summary, or an artifact label): no
+ * line break or control character other than a tab, and not only whitespace.
+ */
+export const AGENT_RUN_REPORT_LINE_PATTERN: string = '^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0A-\\x1F\\x7F]*$'
+
+/**
+ * Pattern of a report message: line breaks and tabs are allowed, other control characters are not,
+ * and it must not be only whitespace.
+ */
+export const AGENT_RUN_REPORT_MESSAGE_PATTERN: string = '^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]*$'
+
 /** One verification command and its result, as the agent reported it. */
 export type AgentRunVerification = {
   /** Command the agent ran, such as `bun run server:test`. */
