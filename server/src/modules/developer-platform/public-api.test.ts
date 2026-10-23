@@ -2690,6 +2690,8 @@ function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): 
     heartbeat: unexpected,
     authorizeFinish: unexpected,
     finish: unexpected,
+    authorizeReport: unexpected,
+    report: unexpected,
     authorizeTakeOver: unexpected,
     takeOver: unexpected,
     getSettings: unexpected,
@@ -2802,6 +2804,77 @@ describe('public Agent Run routes', () => {
     expect(refused.status).toBe(403)
     expect(await refused.json()).toMatchObject({ code: 'forbidden', errors: [{ code: 'agent_run_takeover_disabled' }] })
     expect((await send('take-over-3', { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2', expectedRevision: 1 })).status).toBe(400)
+  })
+
+  test('saves a structured report idempotently and rejects an unsafe artifact URL before any write', async () => {
+    const calls: unknown[] = []
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      /**
+       * Accepts every report authorization in this test.
+       */
+      async authorizeReport() {},
+      /**
+       * Returns a saved report for the requested run.
+       *
+       * @param _credential - Ignored credential.
+       * @param teamId - Team ID.
+       * @param runId - Reporting run.
+       * @param request - Validated report.
+       * @param _context - Ignored request identifiers.
+       * @param _idempotency - Ignored reservation.
+       * @param assignedProjectId - Requested Project, if any.
+       * @returns The report, its comment, and the run.
+       */
+      async report(_credential, teamId, runId, request, _context, _idempotency, assignedProjectId) {
+        calls.push({ teamId, runId, request, ...(assignedProjectId ? { assignedProjectId } : {}) })
+        return {
+          report: {
+            schemaVersion: 1, runId, teamId, workItemId: 'work-item-1', sequence: 1, kind: request.kind, commentId: 'cmt_1',
+            verifications: request.verifications, artifacts: request.artifacts, createdAt: NOW.toISOString(),
+          },
+          comment: { id: 'cmt_1', actorUserId: 'agent-owner', body: `[Codex]\n\n${request.message}`, createdAt: NOW.toISOString() },
+          run: { ...agentRunFixture, reportCount: 1 },
+        }
+      },
+    }) })
+    const credential = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    /**
+     * Sends a report request.
+     *
+     * @param key - Idempotency key.
+     * @param body - Request body.
+     * @returns Response.
+     */
+    const send = (key: string, body: unknown, query = '') => router.request(
+      `/v1/agent-runs/${agentRunFixture.runId}/reports?teamId=team-1${query}`,
+      { method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body) },
+    )
+    const body = {
+      instanceId: 'laptop-1', kind: 'verification', message: 'Tests passed',
+      verifications: [{ command: 'bun test', status: 'passed' }],
+      artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/1' }],
+    }
+    const saved = await send('report-1', body)
+    expect(saved.status).toBe(201)
+    expect(await saved.json()).toMatchObject({ report: { sequence: 1, kind: 'verification' }, run: { reportCount: 1 } })
+    expect((await send('report-1', body)).headers.get('Idempotency-Replayed')).toBe('true')
+    expect(calls).toEqual([{
+      teamId: 'team-1', runId: agentRunFixture.runId,
+      request: {
+        instanceIdHash: hashAgentInstanceId('laptop-1'), kind: 'verification', message: 'Tests passed',
+        verifications: [{ command: 'bun test', status: 'passed' }],
+        artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/1' }],
+      },
+    }])
+    expect((await send('report-scoped', body, '&assignedProjectId=project-1')).status).toBe(201)
+    expect(calls.at(-1)).toMatchObject({ assignedProjectId: 'project-1' })
+    const unsafe = await send('report-2', { ...body, artifacts: [{ type: 'url', url: 'https://user:secret@example.test/log' }] })
+    expect(unsafe.status).toBe(400)
+    const problem = await unsafe.json()
+    expect(problem).toMatchObject({ code: 'validation_failed', errors: [{ pointer: '/artifacts/0/url', code: 'invalid_artifact_url' }] })
+    expect(JSON.stringify(problem)).not.toContain('secret')
+    expect(calls).toHaveLength(2)
   })
 
   test('binds heartbeats and finishes to the instance, returns Retry-After, and 503 when runs are not configured', async () => {

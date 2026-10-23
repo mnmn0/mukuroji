@@ -12,6 +12,7 @@ import {
   type AgentRunRevocation,
   type StoredAgentRunClaim,
 } from '../../domain/agent-run'
+import type { StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
@@ -23,6 +24,7 @@ import {
   isSameSettingsSave,
   type AgentRunFenceInput,
   type AgentRunPage,
+  type AgentRunReportPage,
   type AgentRunStore,
   type AgentRunTransactItem,
 } from '../dynamodb/agent-run-store'
@@ -37,6 +39,8 @@ type InMemoryAgentRunState = {
   revocations: Set<string>
   /** Settings by `<directoryId>|<teamId>`. */
   settings: Map<string, AgentSettings>
+  /** Structured reports by `<directoryId>|<teamId>|<runId>|<sequence>`. */
+  reports: Map<string, StoredAgentRunReport>
 }
 
 /** Condition and effect of one transaction item, evaluated against in-memory state. */
@@ -101,7 +105,9 @@ function revocationKey(directoryId: string, teamId: string, revocation: AgentRun
  */
 export class InMemoryAgentRunStore implements AgentRunStore {
   /** Current state. */
-  readonly state: InMemoryAgentRunState = { runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map() }
+  readonly state: InMemoryAgentRunState = {
+    runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
+  }
   /** Builder that produces DynamoDB-shaped items. */
   readonly #builder = new DynamoDbAgentRunStore({
     send: async () => {
@@ -210,6 +216,69 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       .filter((run) => run.directoryId === directoryId && run.teamId === teamId && run.state === 'finished')
       .sort((left, right) => left.runId.localeCompare(right.runId))
     return this.#page(runs, cursor, limit)
+  }
+
+  /** @inheritdoc */
+  async listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage> {
+    /**
+     * Builds the creation-time sort key the DynamoDB store uses.
+     *
+     * @param report - Report.
+     * @returns Sort key.
+     */
+    const order = (report: StoredAgentRunReport) => `${report.createdAt}#${report.runId}#${String(report.sequence).padStart(6, '0')}`
+    const reports = [...this.state.reports.values()]
+      .filter((report) => report.directoryId === directoryId && report.teamId === teamId && report.workItemId === workItemId)
+      .sort((left, right) => order(right).localeCompare(order(left)))
+    const offset = cursor === undefined ? 0 : Number(cursor)
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
+    }
+    return {
+      reports: reports.slice(offset, offset + limit).map((report) => structuredClone(report)),
+      ...(offset + limit < reports.length ? { nextCursor: String(offset + limit) } : {}),
+    }
+  }
+
+  /** @inheritdoc */
+  createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[] {
+    const [runUpdate, claimCheck, reportPut] = this.#builder.createReportItems(run, report, now)
+    if (!runUpdate || !claimCheck || !reportPut) throw new Error('The report builder returned an unexpected item count.')
+    const runKey = key(run.directoryId, run.teamId, run.runId)
+    const claimKey = key(run.directoryId, run.teamId, run.workItemId)
+    const reportKey = `${key(run.directoryId, run.teamId, run.runId)}|${report.sequence}`
+    const leaseExpiresAt = calculateLeaseExpiry(now, run.leaseMinutes)
+    return [
+      this.#register(runUpdate, {
+        check: (state) => {
+          const current = state.runs.get(runKey)
+          return current?.state === 'active' && current.instanceIdHash === run.instanceIdHash && current.reportCount === run.reportCount
+        },
+        apply: (state) => {
+          const current = state.runs.get(runKey)
+          if (!current) return
+          state.runs.set(runKey, {
+            ...current,
+            reportCount: report.sequence,
+            lastReportKind: report.kind,
+            lastReportAt: report.createdAt,
+            lastHeartbeatAt: report.createdAt,
+            leaseExpiresAt,
+          })
+        },
+      }),
+      this.#register(claimCheck, {
+        check: (state) => {
+          const claim = state.claims.get(claimKey)
+          return claim?.runId === run.runId && claim.instanceIdHash === run.instanceIdHash
+        },
+        apply: () => undefined,
+      }),
+      this.#register(reportPut, {
+        check: (state) => !state.reports.has(reportKey),
+        apply: (state) => { state.reports.set(reportKey, structuredClone(report)) },
+      }),
+    ]
   }
 
   /** @inheritdoc */

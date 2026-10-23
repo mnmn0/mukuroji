@@ -9,6 +9,7 @@ import {
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
+  readReportAgentRunRequest,
   readStartAgentRunRequest,
   type StoredAgentRun,
 } from '../modules/agent-runs'
@@ -21,7 +22,11 @@ import {
 } from './shared/agent-run-access'
 import { resolveDeveloperCredentialPrincipal } from './shared/developer-platform-access'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
-import type { CollaborationClient } from '../modules/collaboration/collaboration'
+import {
+  CollaborationError,
+  deriveAuditedCommentId,
+  type CollaborationClient,
+} from '../modules/collaboration/collaboration'
 
 const {
   app,
@@ -914,8 +919,181 @@ describe('public Agent Run service', () => {
   })
 })
 
+describe('Agent Run reports', () => {
+  /**
+   * Prepares a started Work Item held by a run, a receipt writer, and a comment writer that commits
+   * the report's co-writes against the in-memory store the way the real transaction does.
+   *
+   * @param beforeCommit - Runs before the co-writes apply, to simulate a concurrent write.
+   * @param assigneeUserId - Current assignee of the Work Item; the run's member by default.
+   * @returns Store, held run, recorded comment writes, and a report call.
+   */
+  function configureReport(beforeCommit?: () => void, assigneeUserId?: string) {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', ...(assigneeUserId ? { assigneeUserId } : {}) })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    const comments: Parameters<CollaborationClient['createComment']>[0][] = []
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+      collaboration: createCollaborationStub({
+        /**
+         * Commits the co-writes with the comment, failing like the real writer on a cancelled condition.
+         *
+         * @param input - Comment write.
+         * @returns The stored comment.
+         */
+        async createComment(input) {
+          if (!input.auditContext) throw new Error('A report comment must be audited.')
+          beforeCommit?.()
+          try {
+            store.applyTransactItems(input.coWrites ?? [])
+          } catch (error) {
+            if (error instanceof InMemoryTransactionCanceledError) {
+              throw new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+            }
+            throw error
+          }
+          comments.push(input)
+          const id = deriveAuditedCommentId(input.entityKey, input.auditContext)
+          return {
+            id, rootCommentId: id, authorMemberKey: input.actorMemberKey, bodyMarkdown: input.bodyMarkdown, version: 1,
+            mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+            createdAt: input.auditContext.occurredAt, updatedAt: input.auditContext.occurredAt,
+          }
+        },
+      }),
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Reports on the held run.
+     *
+     * @param body - Raw report body.
+     * @param key - Idempotency key.
+     * @returns The report response.
+     */
+    const report = (body: Record<string, unknown>, key: string) => runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', held.runId, readReportAgentRunRequest({ instanceId: 'laptop-1', ...body }),
+      { requestId: 'report', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    return { store, held, comments, report, service }
+  }
+
+  test('saves a numbered report with its labelled comment and renews the lease in one transaction', async () => {
+    const { store, held, comments, report } = configureReport()
+    const first = await report({
+      kind: 'verification', message: 'Tests passed',
+      verifications: [{ command: 'bun run server:test', status: 'passed' }],
+      artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/1', label: 'PR 1' }],
+      changedFileCount: 4,
+    }, 'report-1')
+    expect(first).toMatchObject({
+      report: {
+        runId: held.runId, workItemId: 'task-1', sequence: 1, kind: 'verification', changedFileCount: 4,
+        verifications: [{ command: 'bun run server:test', status: 'passed' }],
+        artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/1', label: 'PR 1' }],
+      },
+      comment: { body: '[Codex]\n\nTests passed', actorUserId: 'demo@example.com' },
+      run: { reportCount: 1, state: 'active' },
+    })
+    expect(first.report.commentId).toBe(first.comment.id)
+    expect(comments[0]?.bodyMarkdown).toBe('[Codex]\n\nTests passed')
+    expect(comments[0]?.coWrites?.some((item) => item.Put?.TableName === 'DeveloperPlatformTable')).toBe(true)
+    const stored = store.state.runs.get(`${workspaceId}|core-team|${held.runId}`)
+    expect(stored).toMatchObject({ reportCount: 1, lastReportKind: 'verification' })
+    expect(Date.parse(stored?.leaseExpiresAt ?? '')).toBeGreaterThan(Date.parse(held.leaseExpiresAt))
+    // The agent's instance ID never reaches the audit record of the request.
+    expect(JSON.stringify(comments[0]?.auditContext)).not.toContain('laptop-1')
+
+    const second = await report({ kind: 'blocker', message: 'Need a decision' }, 'report-2')
+    expect(second.report).toMatchObject({ sequence: 2, kind: 'blocker', verifications: [], artifacts: [] })
+    expect(store.state.reports.size).toBe(2)
+  })
+
+  test('refuses reports from another instance, after the run closed, or after a reassignment', async () => {
+    const { store, held, comments, service } = configureReport()
+    await expect(runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', held.runId, readReportAgentRunRequest({ instanceId: 'laptop-2', message: 'Not mine' }),
+      { requestId: 'report', idempotencyKey: 'other' },
+      { credentialId: 'agent-key', idempotencyKey: 'other', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'agent_run_conflict', pointer: '/instanceId' })
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'released', 'sato@example.com', new Date())))
+    await expect(runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', held.runId, readReportAgentRunRequest({ instanceId: 'laptop-1', message: 'Late' }),
+      { requestId: 'report', idempotencyKey: 'late' },
+      { credentialId: 'agent-key', idempotencyKey: 'late', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    expect(comments).toHaveLength(0)
+
+    const scoped = configureReport()
+    await expect(runWithTestAppDependencies(() => scoped.service.report(
+      credential, 'core-team', scoped.held.runId, readReportAgentRunRequest({ instanceId: 'laptop-1', message: 'Moved' }),
+      { requestId: 'report', idempotencyKey: 'moved' },
+      { credentialId: 'agent-key', idempotencyKey: 'moved', requestFingerprint: 'fp', reservationId: 'reservation' },
+      'another-project',
+    ))).rejects.toMatchObject({ category: 'forbidden' })
+    await expect(runWithTestAppDependencies(() => scoped.service.authorizeReport(
+      credential, 'core-team', scoped.held.runId, scoped.held.instanceIdHash, 'another-project',
+    ))).rejects.toMatchObject({ category: 'forbidden' })
+    expect(scoped.comments).toHaveLength(0)
+
+    const reassigned = configureReport(undefined, 'sato@example.com')
+    await expect(reassigned.report({ message: 'Still mine?' }, 'reassigned')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+  })
+
+  test('classifies a concurrent report or close that wins the transaction', async () => {
+    let interfere: (() => void) | undefined
+    const { store, held, report } = configureReport(() => interfere?.())
+    const runKey = `${workspaceId}|core-team|${held.runId}`
+    interfere = () => {
+      const current = store.state.runs.get(runKey)
+      if (current) store.state.runs.set(runKey, { ...current, reportCount: current.reportCount + 1 })
+    }
+    // Retrying with the same key renumbers the report after the one that won.
+    await expect(report({ message: 'Raced' }, 'raced')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    interfere = () => {
+      const current = store.state.runs.get(runKey)
+      if (current) store.applyTransactItems(store.createCloseItems(finishAgentRun(current, 'released', 'sato@example.com', new Date())))
+    }
+    await expect(report({ message: 'Closed' }, 'closed')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+})
+
 describe('Web Agent Run routes', () => {
   const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  test('lists a Work Item\'s structured reports newest first for its viewers', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    for (const [sequence, createdAt] of [[1, '2026-10-22T00:00:00.000Z'], [2, '2026-10-22T00:05:00.000Z']] as const) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind: sequence === 1 ? 'verification' : 'handoff', commentId: `cmt_${sequence}`,
+        verifications: [], artifacts: [{ type: 'url', url: 'https://example.test/log' }], createdAt, createdBy: 'demo@example.com',
+      })
+    }
+    const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports?limit=1', { headers })
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toEqual({
+      items: [{
+        schemaVersion: 1, runId: held.runId, teamId: 'core-team', workItemId: 'task-1', sequence: 2, kind: 'handoff', commentId: 'cmt_2',
+        verifications: [], artifacts: [{ type: 'url', url: 'https://example.test/log' }], createdAt: '2026-10-22T00:05:00.000Z',
+      }],
+      hasMore: true,
+    })
+    const invalid = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports?limit=0', { headers })
+    expect(invalid.status).toBe(400)
+  })
 
   test('lists a Work Item history with release permissions and releases an active run', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })

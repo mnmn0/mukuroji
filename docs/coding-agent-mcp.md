@@ -86,7 +86,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `update_task` | タイトル・説明・優先度・custom fieldをrevision付きで更新 |
 | `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
 | `move_task` | 作業中から同じstartedカテゴリーの「レビュー中」「ブロック中」などへ移動 |
-| `report_progress` | 進捗・問題・テスト結果・PRリンクを、エージェント名付きコメントとして保存 |
+| `report_progress` | 進捗・問題・テスト結果・PRリンクを、エージェント名付きコメントとして保存。自インスタンスのAgent Runがあれば、`kind`・`verifications`・`artifacts`・`changedFileCount` をRunの構造化reportとして同じtransactionで保存 |
 | `complete_task` | startedからcompletedへ遷移 |
 | `reopen_task` | completed/canceledからbacklog/unstartedへ戻す |
 | `cancel_task` | 未完了タスクをcanceledへ遷移 |
@@ -105,6 +105,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 3. `action: in_progress` は、自インスタンスがAgent Runを持つstartedタスクです。そのまま再開します。`otherRuns` は同じメンバーの別インスタンスが持つタスクで、ユーザーから明示的に引き継がない限り続けません。引き継ぐ場合、Runが停滞していてTeamの設定で許可されていれば `take_over_task` を使い、そうでなければ人に解放を依頼します。`ownRuns` に残っていてタスクがstartedでないRunは `finish_run` で閉じます。
 4. `action: start` の場合、候補の `revision`、startedカテゴリーの `workflowStatusId`、新規UUIDの `idempotencyKey` を `start_task` に渡します。成功するとタスクとRunが返ります。成功後に作業を開始します。候補取得だけでは着手済みになりません。
 5. `report_progress` に実装方針・進捗・blocker・検証結果・成果物リンクを記録します。タスクの説明は変更しません。既存コメントは `list_progress` で読みます。更新と進捗報告はleaseを延長します。ツールを呼ばない長い作業ではlease切れの前に `heartbeat` を呼びます。
+   自インスタンスのRunがある間は、実行した検証コマンドと結果を `verifications`、PR・branch・commit・URLを `artifacts`（credentialを含まない `https` URLのみ）に入れます。人の判断が必要な場合は `kind` を `blocker` または `handoff` にし、statusも変える場合は別途 `move_task` を呼びます。Runがある場合の戻り値は `{ comment, report, run }`、Runがなくメッセージだけの場合は `{ comment }` です。Runがないのに構造化fieldを送ると何も保存せず `agent_run_not_active` を返します。
 6. レビュー待ちなどは該当するstatusを設定し、要求と必要な検証が満たされたら `complete_task` を呼びます。進捗コメントだけでは完了になりません。
 7. `complete_task` の後に `finish_run` を `outcome: completed` で呼びます。完了せずに止める場合は、レビュー待ち・blocker・ユーザーの指示なら `paused`、完了できないと判断した場合は `failed` で閉じます。
 

@@ -433,6 +433,38 @@
         ],
         "type": "object"
       },
+      "AgentRunArtifact": {
+        "additionalProperties": false,
+        "description": "One artifact link. Mukuroji stores it without fetching or resolving it.",
+        "properties": {
+          "label": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "pull-request",
+              "branch",
+              "commit",
+              "url"
+            ],
+            "type": "string"
+          },
+          "url": {
+            "description": "HTTPS URL without credentials.",
+            "maxLength": 2048,
+            "minLength": 9,
+            "pattern": "^https://[^/]",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "url"
+        ],
+        "type": "object"
+      },
       "AgentRunPage": {
         "additionalProperties": false,
         "properties": {
@@ -452,6 +484,136 @@
         "required": [
           "items",
           "hasMore"
+        ],
+        "type": "object"
+      },
+      "AgentRunReport": {
+        "additionalProperties": false,
+        "description": "Structured report saved with the comment an agent posted for its run.",
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunArtifact"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "changedFileCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "commentId": {
+            "description": "Comment saved with the report.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "progress",
+              "blocker",
+              "verification",
+              "artifact",
+              "handoff"
+            ],
+            "type": "string"
+          },
+          "runId": {
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "sequence": {
+            "description": "Server-assigned position of the report within its run, starting at 1.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "verifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunVerification"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "teamId",
+          "workItemId",
+          "sequence",
+          "kind",
+          "commentId",
+          "verifications",
+          "artifacts",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "AgentRunReportComment": {
+        "additionalProperties": false,
+        "description": "Comment saved with a structured report.",
+        "properties": {
+          "actorUserId": {
+            "type": "string"
+          },
+          "body": {
+            "description": "Comment body, starting with the run's agent label.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "actorUserId",
+          "body",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "AgentRunVerification": {
+        "additionalProperties": false,
+        "description": "One verification command and its result, as the agent reported it.",
+        "properties": {
+          "command": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "skipped"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "status"
         ],
         "type": "object"
       },
@@ -2262,6 +2424,80 @@
           "name",
           "category",
           "sortOrder"
+        ],
+        "type": "object"
+      },
+      "ReportAgentRunRequest": {
+        "additionalProperties": false,
+        "description": "Structured report and comment for the caller's own active run.",
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunArtifact"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "changedFileCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "instanceId": {
+            "description": "Instance identifier sent when the run started. Mukuroji stores and compares only its hash.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "default": "progress",
+            "description": "`blocker` and `handoff` ask a person to decide.",
+            "enum": [
+              "progress",
+              "blocker",
+              "verification",
+              "artifact",
+              "handoff"
+            ],
+            "type": "string"
+          },
+          "message": {
+            "description": "Comment text, saved after the run's agent label.",
+            "maxLength": 3900,
+            "minLength": 1,
+            "type": "string"
+          },
+          "verifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunVerification"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        "required": [
+          "instanceId",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ReportAgentRunResponse": {
+        "additionalProperties": false,
+        "description": "Saved report, its comment, and the run with its renewed lease.",
+        "properties": {
+          "comment": {
+            "$ref": "#/components/schemas/AgentRunReportComment"
+          },
+          "report": {
+            "$ref": "#/components/schemas/AgentRunReport"
+          },
+          "run": {
+            "$ref": "#/components/schemas/AgentRun"
+          }
+        },
+        "required": [
+          "report",
+          "comment",
+          "run"
         ],
         "type": "object"
       },
@@ -7369,6 +7605,127 @@
           }
         ],
         "summary": "Extend the lease of the caller's own active run, at most once every 10 seconds",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/agent-runs/{runId}/reports": {
+      "post": {
+        "operationId": "reportPublicAgentRun",
+        "parameters": [
+          {
+            "description": "Caller's own active run.",
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "pattern": "^run_[0-9a-f-]{36}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the run.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project the run's Work Item must currently belong to. A Work Item in another Project is refused with `403`.",
+            "in": "query",
+            "name": "assignedProjectId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportAgentRunResponse"
+                }
+              }
+            },
+            "description": "Saved report, its comment, and the run with its renewed lease",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Save a structured report and its comment for the caller's own active run, renewing its lease",
         "tags": [
           "Agent Runs"
         ]

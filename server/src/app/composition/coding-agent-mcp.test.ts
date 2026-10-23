@@ -23,6 +23,7 @@ function startFakeApi() {
     createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
   const notes: { id: string; actorUserId: string; body: string; createdAt: string }[] = []
   const commentBodies: Record<string, unknown>[] = []
+  const reportBodies: Record<string, unknown>[] = []
   const seenKeys: string[] = []
   const runs: FakeRun[] = []
   /** Builds an Agent Run problem response. */
@@ -60,7 +61,7 @@ function startFakeApi() {
       const instanceId = url.searchParams.get('instanceId')
       return Response.json({ items: runs.filter((entry) => entry.run.state === 'active' && (!instanceId || entry.instanceId === instanceId)).map((entry) => entry.run), hasMore: false })
     }
-    const runMatch = /^\/api\/v1\/agent-runs\/([^/]+)(?:\/(finish|heartbeat))?$/u.exec(url.pathname)
+    const runMatch = /^\/api\/v1\/agent-runs\/([^/]+)(?:\/(finish|heartbeat|reports))?$/u.exec(url.pathname)
     if (runMatch) {
       const entry = runs.find((candidate) => candidate.run.runId === runMatch[1])
       if (!entry) return Response.json({}, { status: 404 })
@@ -71,6 +72,22 @@ function startFakeApi() {
           return problem(409, 'agent_run_conflict')
         }
         if (runMatch[2] === 'heartbeat') return Response.json(entry.run)
+        if (runMatch[2] === 'reports') {
+          const { instanceId: _instanceId, ...report } = { ...body }
+          reportBodies.push(report)
+          entry.run = { ...entry.run, reportCount: Number(entry.run.reportCount) + 1 }
+          const message = 'message' in body && typeof body.message === 'string' ? body.message : ''
+          return Response.json({
+            report: {
+              schemaVersion: 1, runId: entry.run.runId, teamId: 'team', workItemId: 'task', sequence: entry.run.reportCount,
+              kind: 'kind' in body && typeof body.kind === 'string' ? body.kind : 'progress', commentId: 'note',
+              verifications: 'verifications' in body ? body.verifications : [], artifacts: 'artifacts' in body ? body.artifacts : [],
+              createdAt: task.updatedAt,
+            },
+            comment: { id: 'note', actorUserId: 'agent', body: `[${String(entry.run.agentName)}]\n\n${message}`, createdAt: task.updatedAt },
+            run: entry.run,
+          }, { status: 201 })
+        }
         seenKeys.push(request.headers.get('Idempotency-Key') ?? '')
         entry.run = { ...entry.run, state: 'finished', outcome: body && typeof body === 'object' && 'outcome' in body ? body.outcome : 'completed', finishedAt: task.updatedAt, finishedBy: 'agent' }
       }
@@ -121,6 +138,7 @@ function startFakeApi() {
   return {
     api,
     commentBodies,
+    reportBodies,
     seenKeys,
     /** Releases the active run and moves the task back to Todo, as a person would. */
     releaseAndReopen() {
@@ -187,8 +205,22 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     const started = await call(client, 'start_task', { taskId: 'task', expectedRevision: 1, workflowStatusId: 'coding', idempotencyKey: startKey })
     expect(started).toMatchObject({ isError: false, content: { data: { task: { statusCategory: 'started' }, run: { runtime: 'claude-code', state: 'active' } } } })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'in_progress', task: { id: 'task' } } })
-    expect((await call(client, 'report_progress', { taskId: 'task', message: 'Tests passed; PR https://example.test/pr/1', idempotencyKey: crypto.randomUUID() })).isError).toBe(false)
-    expect(fake.commentBodies.at(-1)).toMatchObject({ agentInstanceId: 'instance-a', agentRunId: 'run_00000000-0000-4000-8000-000000000001' })
+    const reported = await call(client, 'report_progress', {
+      taskId: 'task', message: 'Tests passed', kind: 'verification',
+      verifications: [{ command: 'bun test', status: 'passed' }],
+      artifacts: [{ type: 'pull-request', url: 'https://example.test/pr/1', label: 'PR 1' }],
+      idempotencyKey: crypto.randomUUID(),
+    })
+    expect(reported).toMatchObject({ isError: false, content: { data: { report: { kind: 'verification', sequence: 1 }, comment: { id: 'note' } } } })
+    expect(fake.reportBodies.at(-1)).toEqual({
+      kind: 'verification', message: 'Tests passed', verifications: [{ command: 'bun test', status: 'passed' }],
+      artifacts: [{ type: 'pull-request', url: 'https://example.test/pr/1', label: 'PR 1' }],
+    })
+    expect(fake.commentBodies).toEqual([])
+    const invalidLink = await call(client, 'report_progress', {
+      taskId: 'task', message: 'Link', artifacts: [{ type: 'url', url: 'http://example.test' }], idempotencyKey: crypto.randomUUID(),
+    })
+    expect(invalidLink.isError).toBe(true)
     expect((await call(client, 'complete_task', { taskId: 'task', expectedRevision: 2, workflowStatusId: 'done', idempotencyKey: crypto.randomUUID() })).content)
       .toMatchObject({ data: { statusCategory: 'completed' } })
     expect((await call(client, 'finish_run', { runId: 'run_00000000-0000-4000-8000-000000000001', outcome: 'completed', idempotencyKey: crypto.randomUUID() })).content)

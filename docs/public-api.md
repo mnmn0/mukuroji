@@ -90,19 +90,29 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   返します。
 - `POST /api/v1/agent-runs/{runId}/finish` は `Idempotency-Key` を要求し、`outcome` に
   `completed`、`paused`、`failed` を、`instanceId` に Run 開始時と同じ値を受け付けます。
+- `POST /api/v1/agent-runs/{runId}/reports` は `Idempotency-Key` を要求し、呼び出し元の `active`
+  Run の構造化 report とその comment を 1 つの transaction で保存し、lease を延長します。body は
+  `instanceId`、`message`（最大 3,900 文字）、任意の `kind`（`progress` 既定、`blocker`、
+  `verification`、`artifact`、`handoff`）、`verifications[]`（`command`、`status`、`summary`）、
+  `artifacts[]`（`type`、`url`、`label`）、`changedFileCount` です。comment 本文は Run の agent 名の
+  label の後に `message` を続けたものです。`201` で `report`（Run 内の連番 `sequence` と comment の
+  `commentId` を含む）、`comment`、延長後の `run` を返します。artifact の `url` は credential を含まない
+  `https` URL に限り、違反は `400 validation_failed` と `errors[].code` の `invalid_artifact_url`
+  で返します。server は URL を取得しません。任意の query `assignedProjectId` を送ると、Run の
+  Work Item がその Project にない場合は保存せず `403` を返し、receipt の再送時にも再検証します。
 - `POST /api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over` は `Idempotency-Key` を
   要求し、同じメンバーの別 instance が持つ停滞 Run（lease 切れ）を `superseded` にして、呼び出し元
   instance の新しい Run を開始します。body は `runtime`、`agentName`、`instanceId` です。Team の
   Agent settings で `allowTakeoverAfterLeaseExpiry` が `true` の場合だけ成功し、許可されていない
   場合は `403` と `agent_run_takeover_disabled`、lease が切れていない場合は `agent_run_conflict`
   を返します。
-- 同じメンバーの別 instance は、他 instance の Run を heartbeat・finish できません。`active` な
+- 同じメンバーの別 instance は、他 instance の Run を heartbeat・report・finish できません。`active` な
   Run には `agent_run_conflict`、終了済みの Run には `agent_run_not_active` を返します。
 - `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
   `agentInstanceId` を受け付けます。どちらも送らない既存 client の挙動は変わりません。
 - Run 固有の拒否理由は problem の `errors[].code`（`agent_run_conflict`、`agent_run_not_active`、
-  `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`）で返し、`code` は既存の
-  `conflict` / `forbidden` です。
+  `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`、`invalid_artifact_url`）で
+  返し、`code` は既存の `conflict` / `forbidden` / `validation_failed` です。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
 ### Pagination contract

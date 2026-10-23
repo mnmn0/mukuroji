@@ -38,6 +38,7 @@ import {
   type WorkItemSyncConflict,
   type WorkItemTypeChangeResolution,
   type StartAgentRunResponse,
+  type ReportAgentRunResponse,
   type TakeOverAgentRunResponse,
   type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
@@ -50,11 +51,13 @@ import {
   readAgentRunMutationFence,
   readFinishAgentRunRequest,
   readHeartbeatAgentRunRequest,
+  readReportAgentRunRequest,
   readStartAgentRunRequest,
   readTakeOverAgentRunRequest,
   splitAgentRunMutationFence,
   type ValidatedAgentRunFence,
   type ValidatedAgentRunFinish,
+  type ValidatedAgentRunReport,
   type ValidatedAgentRunStart,
   type ValidatedAgentRunTakeOver,
 } from '../agent-runs'
@@ -465,6 +468,42 @@ export interface PublicAgentRunService {
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ): Promise<AgentRun>
+  /**
+   * Revalidates report permissions before replaying a report receipt.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param runId - Run ID.
+   * @param instanceIdHash - Hash of the instance ID that started the run.
+   * @param assignedProjectId - Project the caller restricts the run's Work Item to, when it sent one.
+   * @returns A promise that resolves when the caller still owns the run.
+   */
+  authorizeReport(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    runId: string,
+    instanceIdHash: string,
+    assignedProjectId?: string,
+  ): Promise<void>
+  /**
+   * Saves a structured report and its comment for the caller's own active run.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @param runId - Run ID.
+   * @param request - Validated report and the hash of the instance ID that started the run.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @param assignedProjectId - Project the caller restricts the run's Work Item to, when it sent one.
+   * @returns The report, its comment, and the run with its renewed lease.
+   */
+  report(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    runId: string,
+    request: ValidatedAgentRunReport,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+    assignedProjectId?: string,
+  ): Promise<ReportAgentRunResponse>
   /**
    * Revalidates take over permissions before replaying a take over receipt.
    * @param credential - Authenticated developer credential.
@@ -1113,6 +1152,24 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body: await agentRuns.finish(credential, teamId, runId, finishRequest, context, idempotency),
     }), {
       authorizeReplay: () => agentRuns.authorizeFinish(credential, teamId, runId, finishRequest.instanceIdHash),
+    })
+  })
+
+  router.post('/v1/agent-runs/:runId/reports', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const rawBody = await readJson(c)
+    const reportRequest = readReportAgentRunRequest(rawBody)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const runId = readAgentRunId(c.req.param('runId'), '/runId')
+    const assignedProjectId = c.req.query('assignedProjectId') === undefined
+      ? undefined
+      : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId')
+    return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
+      status: 201,
+      body: await agentRuns.report(credential, teamId, runId, reportRequest, context, idempotency, assignedProjectId),
+    }), {
+      authorizeReplay: () => agentRuns.authorizeReport(credential, teamId, runId, reportRequest.instanceIdHash, assignedProjectId),
     })
   })
 

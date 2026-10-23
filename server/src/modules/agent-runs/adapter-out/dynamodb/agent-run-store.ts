@@ -7,11 +7,16 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  AGENT_RUN_ARTIFACT_TYPES,
+  AGENT_RUN_REPORT_KINDS,
   AGENT_RUN_RUNTIMES,
   AGENT_RUN_SCHEMA_VERSION,
+  AGENT_RUN_VERIFICATION_STATUSES,
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
+  type AgentRunArtifact,
   type AgentRunOutcome,
+  type AgentRunVerification,
   type AgentSettings,
   type UpdateAgentSettingsRequest,
 } from '@mukuroji/contracts'
@@ -22,6 +27,7 @@ import {
   type AgentRunRevocation,
   type StoredAgentRunClaim,
 } from '../../domain/agent-run'
+import type { StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
@@ -197,6 +203,25 @@ export interface AgentRunStore {
    */
   createTakeOverItems(superseded: StoredAgentRun, successor: StoredAgentRun): AgentRunTransactItem[]
   /**
+   * Builds the writes that save a structured report of an active run and renew its lease.
+   * @param run - Active run as read; its `reportCount` is the sequence of its previous report.
+   * @param report - Report numbered `run.reportCount + 1`, created at `now`.
+   * @param now - Report time the lease is renewed from.
+   * @returns Run update conditioned on the run still being active for the same instance and report
+   * count, the check that the run still holds its claim, and the report put.
+   */
+  createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
+  /**
+   * Lists one Work Item's structured reports, newest first, with strongly consistent reads.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param workItemId - Work Item ID.
+   * @param cursor - Continuation from a previous page of the same query.
+   * @param limit - Page size from 1 to 100.
+   * @returns One page of reports.
+   */
+  listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage>
+  /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
    * @param fenceItemCount - Number of leading Agent Run writes whose failure means the run changed.
@@ -218,6 +243,14 @@ export interface AgentRunStore {
    * @param now - Mutation time.
    */
   extendLeaseAfterMutation(run: StoredAgentRun, now: Date): Promise<void>
+}
+
+/** One page of structured reports. */
+export type AgentRunReportPage = {
+  /** Reports in page order. */
+  reports: StoredAgentRunReport[]
+  /** Opaque continuation, present when more reports may exist. */
+  nextCursor?: string
 }
 
 /** Input for building a mutation fence. */
@@ -421,7 +454,145 @@ function parseRun(
     ...(finishedAt === undefined ? {} : { finishedAt }),
     ...(optionalStoredString(item, 'finishedBy') === undefined ? {} : { finishedBy: storedString(item, 'finishedBy') }),
     reportCount: storedInteger(item, 'reportCount'),
+    ...readLastReport(item),
   }
+}
+
+/**
+ * Reads the latest report summary a run row carries.
+ *
+ * @param item - Stored run row.
+ * @returns Kind and time of the latest report, or nothing before the first report.
+ */
+function readLastReport(item: Record<string, unknown>): Pick<StoredAgentRun, 'lastReportKind' | 'lastReportAt'> {
+  if (item.lastReportKind === undefined && item.lastReportAt === undefined) return {}
+  const lastReportKind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === item.lastReportKind)
+  if (!lastReportKind) throw createAgentRunIntegrityError()
+  return { lastReportKind, lastReportAt: storedTimestamp(item, 'lastReportAt') }
+}
+
+/**
+ * Builds the sort-key prefix shared by one Work Item's reports. The Work Item ID is encoded so
+ * that it cannot contain the key separator.
+ *
+ * @param workItemId - Work Item ID.
+ * @returns Sort-key prefix ending with the separator.
+ */
+function reportRecordKeyPrefix(workItemId: string): string {
+  return `agent-run-report#${encodeURIComponent(workItemId)}#`
+}
+
+/**
+ * Builds a report row key that sorts a Work Item's reports by creation time.
+ *
+ * @param report - Report.
+ * @returns Sort key.
+ */
+function reportRecordKey(report: Pick<StoredAgentRunReport, 'workItemId' | 'createdAt' | 'runId' | 'sequence'>): string {
+  return `${reportRecordKeyPrefix(report.workItemId)}${report.createdAt}#${report.runId}#${String(report.sequence).padStart(6, '0')}`
+}
+
+/**
+ * Serializes a report row.
+ *
+ * @param report - Report.
+ * @returns Stored item.
+ */
+function serializeReport(report: StoredAgentRunReport): Record<string, unknown> {
+  const { directoryId, ...fields } = report
+  return {
+    directoryTeamId: createAgentRunPartition(directoryId, report.teamId),
+    recordKey: reportRecordKey(report),
+    entityType: 'agent-run-report',
+    workspaceId: directoryId,
+    ...fields,
+  }
+}
+
+/**
+ * Parses a stored verification list.
+ *
+ * @param value - Stored value.
+ * @returns Verifications.
+ */
+function parseVerifications(value: unknown): AgentRunVerification[] {
+  if (!Array.isArray(value)) throw createAgentRunIntegrityError()
+  return value.map((item) => {
+    if (!isRecord(item)) throw createAgentRunIntegrityError()
+    const status = AGENT_RUN_VERIFICATION_STATUSES.find((candidate) => candidate === item.status)
+    if (!status) throw createAgentRunIntegrityError()
+    const summary = optionalStoredString(item, 'summary')
+    return { command: storedString(item, 'command'), status, ...(summary === undefined ? {} : { summary }) }
+  })
+}
+
+/**
+ * Parses a stored artifact list.
+ *
+ * @param value - Stored value.
+ * @returns Artifacts.
+ */
+function parseArtifacts(value: unknown): AgentRunArtifact[] {
+  if (!Array.isArray(value)) throw createAgentRunIntegrityError()
+  return value.map((item) => {
+    if (!isRecord(item)) throw createAgentRunIntegrityError()
+    const type = AGENT_RUN_ARTIFACT_TYPES.find((candidate) => candidate === item.type)
+    const url = storedString(item, 'url')
+    if (!type || !url.startsWith('https://')) throw createAgentRunIntegrityError()
+    const label = optionalStoredString(item, 'label')
+    return { type, url, ...(label === undefined ? {} : { label }) }
+  })
+}
+
+/**
+ * Parses a stored report row and fails closed on any unexpected shape.
+ *
+ * @param item - Stored row.
+ * @param expected - Workspace, Team, and Work Item the row must belong to.
+ * @returns The report.
+ */
+function parseReport(
+  item: Record<string, unknown>,
+  expected: {
+    /** Expected Workspace ID. */
+    directoryId: string
+    /** Expected Team ID. */
+    teamId: string
+    /** Expected Work Item ID. */
+    workItemId: string
+  },
+): StoredAgentRunReport {
+  if (item.schemaVersion !== AGENT_RUN_SCHEMA_VERSION || item.entityType !== 'agent-run-report') throw createAgentRunIntegrityError()
+  const kind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === item.kind)
+  const sequence = storedInteger(item, 'sequence')
+  const changedFileCount = item.changedFileCount === undefined ? undefined : storedInteger(item, 'changedFileCount')
+  const report: StoredAgentRunReport = {
+    schemaVersion: AGENT_RUN_SCHEMA_VERSION,
+    runId: storedString(item, 'runId'),
+    directoryId: expected.directoryId,
+    teamId: expected.teamId,
+    workItemId: storedString(item, 'workItemId'),
+    sequence,
+    kind: kind ?? 'progress',
+    commentId: storedString(item, 'commentId'),
+    verifications: parseVerifications(item.verifications),
+    artifacts: parseArtifacts(item.artifacts),
+    ...(changedFileCount === undefined ? {} : { changedFileCount }),
+    createdAt: storedTimestamp(item, 'createdAt'),
+    createdBy: storedString(item, 'createdBy'),
+  }
+  if (
+    !kind ||
+    sequence < 1 ||
+    item.directoryTeamId !== createAgentRunPartition(expected.directoryId, expected.teamId) ||
+    item.workspaceId !== expected.directoryId ||
+    item.teamId !== expected.teamId ||
+    report.workItemId !== expected.workItemId ||
+    item.recordKey !== reportRecordKey(report)
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  return report
 }
 
 /** Every outcome a stored run can carry. */
@@ -794,6 +965,92 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       ExclusiveStartKey: decodeCursor(cursor, 'directoryTeamId', partition),
     }))
     return this.#page((response.Items ?? []).map((item) => parseRun(item, { directoryId, teamId })), response.LastEvaluatedKey)
+  }
+
+  /** @inheritdoc */
+  async listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage> {
+    const partition = createAgentRunPartition(directoryId, teamId)
+    const prefix = reportRecordKeyPrefix(workItemId)
+    const start = decodeCursor(cursor, 'directoryTeamId', partition)
+    if (start !== undefined && (typeof start.recordKey !== 'string' || !start.recordKey.startsWith(prefix))) {
+      throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
+    }
+    const response = await this.#client.send(new QueryCommand({
+      TableName: this.#tableName,
+      KeyConditionExpression: '#directoryTeamId = :partition AND begins_with(#recordKey, :prefix)',
+      ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId', '#recordKey': 'recordKey' },
+      ExpressionAttributeValues: { ':partition': partition, ':prefix': prefix },
+      ScanIndexForward: false,
+      ConsistentRead: true,
+      Limit: readLimit(limit),
+      ExclusiveStartKey: start,
+    }))
+    const reports = (response.Items ?? []).map((item) => parseReport(item, { directoryId, teamId, workItemId }))
+    const nextCursor = encodeCursor(response.LastEvaluatedKey)
+    return { reports, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
+  createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[] {
+    if (
+      run.state !== 'active' ||
+      report.runId !== run.runId ||
+      report.workItemId !== run.workItemId ||
+      report.sequence !== run.reportCount + 1 ||
+      report.createdAt !== now.toISOString()
+    ) {
+      throw new TypeError('createReportItems requires the next report of an active run, created at the report time.')
+    }
+    const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const leaseExpiresAt = calculateLeaseExpiry(now, run.leaseMinutes)
+    return [
+      {
+        Update: {
+          TableName: this.#tableName,
+          Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
+          UpdateExpression: 'SET #reportCount = :sequence, #lastReportKind = :kind, #lastReportAt = :now, ' +
+            '#lastHeartbeatAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
+          // Reports are numbered by the run; a concurrent report or a closed run fails this write.
+          ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #reportCount = :previous',
+          ExpressionAttributeNames: {
+            '#reportCount': 'reportCount',
+            '#lastReportKind': 'lastReportKind',
+            '#lastReportAt': 'lastReportAt',
+            '#lastHeartbeatAt': 'lastHeartbeatAt',
+            '#leaseExpiresAt': 'leaseExpiresAt',
+            '#activeRunSortKey': 'activeRunSortKey',
+            '#state': 'state',
+            '#instanceIdHash': 'instanceIdHash',
+          },
+          ExpressionAttributeValues: {
+            ':sequence': report.sequence,
+            ':kind': report.kind,
+            ':now': report.createdAt,
+            ':leaseExpiresAt': leaseExpiresAt,
+            ':activeRunSortKey': `${leaseExpiresAt}#${run.runId}`,
+            ':active': 'active',
+            ':instanceIdHash': run.instanceIdHash,
+            ':previous': run.reportCount,
+          },
+        },
+      },
+      this.#claimCheck({
+        directoryId: run.directoryId,
+        teamId: run.teamId,
+        workItemId: run.workItemId,
+        instanceIdHash: run.instanceIdHash,
+        assigneeUserId: run.assigneeUserId,
+        run,
+        now,
+      }),
+      {
+        Put: {
+          TableName: this.#tableName,
+          Item: serializeReport(report),
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+        },
+      },
+    ]
   }
 
   /** @inheritdoc */

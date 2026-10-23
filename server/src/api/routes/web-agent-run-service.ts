@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type {
   AgentRunView,
   AgentSettings,
+  WorkItemAgentRunReportsResponse,
   WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
 import {
@@ -10,6 +11,7 @@ import {
   finishAgentRun,
   readUpdateAgentSettingsRequest,
   toAgentRun,
+  toAgentRunReport,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
 import {
@@ -129,6 +131,27 @@ export async function listWebWorkItemAgentRuns(
     )),
     hasMore: page.nextCursor !== undefined,
   }
+}
+
+/**
+ * Lists a Work Item's newest structured reports for anyone who can see the Work Item. Store cursors
+ * never leave the server.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @param limit - Number of reports from 1 to 100.
+ * @returns Newest reports and whether older ones exist.
+ */
+export async function listWebWorkItemAgentRunReports(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+  limit: number,
+): Promise<WorkItemAgentRunReportsResponse> {
+  await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+  const page = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, undefined, limit)
+  return { items: page.reports.map(toAgentRunReport), hasMore: page.nextCursor !== undefined }
 }
 
 /**

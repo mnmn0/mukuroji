@@ -9,6 +9,7 @@ import {
   createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
+  deriveAuditedCommentId,
   DynamoDbCollaborationClient,
 } from './collaboration'
 
@@ -1461,6 +1462,63 @@ test('includes caller authorization guards in comment transactions', async () =>
     }),
   ]))
 })
+
+test('commits caller co-writes with an audited comment and leaves a failed co-write to the caller', async () => {
+  const transactions: Record<string, unknown>[] = []
+  let cancel = false
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createTestAuditContext('agent-report', '2026-07-12T00:00:00.000Z', { message: 'Report' })
+  const coWrite = { Put: { TableName: 'agent-runs-table', Item: { recordKey: 'agent-run-report#issue-1#1' } } }
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+      if (cancel) {
+        throw Object.assign(new Error('cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+        })
+      }
+      return {}
+    }
+    // The comment of the first attempt exists, so without co-writes the write would replay it.
+    return { Item: transactions[0] ? findCommentItem(transactions[0]) : undefined }
+  })
+  /**
+   * Creates the audited comment with the co-write.
+   *
+   * @returns The created comment.
+   */
+  const create = () => client.createComment({
+    entityKey, issueId: 'issue-1', teamId: 'team-a', workspaceId: 'workspace#one',
+    actorMemberKey: 'member@example.com', bodyMarkdown: '[Codex]\n\nReport', auditContext, coWrites: [coWrite],
+  })
+  const created = await create()
+  expect(created.id).toBe(deriveAuditedCommentId(entityKey, auditContext))
+  expect(created.createdAt).toBe(auditContext.occurredAt)
+  expect(transactions[0]?.TransactItems).toEqual(expect.arrayContaining([coWrite]))
+  cancel = true
+  await expect(create()).rejects.toMatchObject({ code: 'CollaborationConflict' })
+})
+
+/**
+ * Finds the comment row a transaction puts.
+ *
+ * @param transaction - TransactWrite input.
+ * @returns Comment item, if any.
+ */
+function findCommentItem(transaction: Record<string, unknown>): unknown {
+  const items = Array.isArray(transaction.TransactItems) ? transaction.TransactItems : []
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null || !('Put' in item)) continue
+    const put = item.Put
+    if (typeof put === 'object' && put !== null && 'Item' in put) {
+      const row = put.Item
+      if (typeof row === 'object' && row !== null && 'entryType' in row && row.entryType === 'comment') return row
+    }
+  }
+  return undefined
+}
 
 test('finds a committed comment by its deterministic mutation identity', async () => {
   const memory = createCollaborationMemory()

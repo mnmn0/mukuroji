@@ -1,10 +1,15 @@
 import {
+  AGENT_RUN_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type AgentRun,
+  type ReportAgentRunResponse,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  calculateLeaseExpiry,
   createActiveAgentRun,
+  createAgentRunCommitConflictError,
+  createAgentRunReportCommentBody,
   createAgentRunConflictError,
   createAgentRunForbiddenError,
   createAgentRunIntegrityError,
@@ -15,11 +20,20 @@ import {
   isAgentRunStalled,
   isClaimHeldBy,
   toAgentRun,
+  toAgentRunReport,
   type StoredAgentRun,
+  type StoredAgentRunReport,
 } from '../../modules/agent-runs'
+import {
+  CollaborationError,
+  createProjectCollaborationEntityKey,
+  createWorkItemCollaborationEntityKey,
+  deriveAuditedCommentId,
+} from '../../modules/collaboration'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
 import type { PublicAgentRunService } from '../../modules/developer-platform/public-api'
 import { ProjectDataError } from '../../modules/directory'
+import { createTeamIssueDeepLink } from '../../modules/work-items'
 import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
@@ -28,6 +42,12 @@ import {
   isAgentRunFenceConflict,
 } from '../shared/agent-run-access'
 import { workItemDependencies } from '../shared/app-dependencies'
+import {
+  createCollaborationCommentAuthorizationConditionChecks,
+  createTeamIssueAutomaticWatcherCandidates,
+} from '../shared/collaboration-access'
+import { createCommentSearchDocument } from '../shared/document-access'
+import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-access'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
 import {
   canAccessAssignedProject,
@@ -108,6 +128,8 @@ async function requireOwnRun(
   run: StoredAgentRun
   /** Current assignee of the run's Work Item. */
   workItemAssigneeUserId: string
+  /** Current Project of the run's Work Item. */
+  workItemProjectId: string | undefined
   /** Revision of the run's Work Item that was read. */
   workItemRevision: number
 }> {
@@ -119,7 +141,24 @@ async function requireOwnRun(
     if (run.state !== 'active') throw createAgentRunNotActiveError()
     throw createAgentRunConflictError(describeHoldingRun(run, new Date()))
   }
-  return { run, workItemAssigneeUserId: detail.issue.assigneeUserId, workItemRevision: detail.issue.revision }
+  return {
+    run,
+    workItemAssigneeUserId: detail.issue.assigneeUserId,
+    workItemProjectId: detail.issue.assignedProjectId,
+    workItemRevision: detail.issue.revision,
+  }
+}
+
+/**
+ * Rejects a Work Item outside the Project the caller restricted its request to.
+ *
+ * @param workItemProjectId - Current Project of the Work Item.
+ * @param assignedProjectId - Project the caller sent, if any.
+ */
+function requireRequestedProject(workItemProjectId: string | undefined, assignedProjectId: string | undefined): void {
+  if (assignedProjectId !== undefined && workItemProjectId !== assignedProjectId) {
+    throw new AgentRunError('forbidden', 'Work Item is outside the requested Project.')
+  }
 }
 
 /**
@@ -168,6 +207,34 @@ async function explainTakeOverMiss(principal: WorkspacePrincipal, teamId: string
   if (!isAgentRunStalled(latest, readAt)) return createAgentRunConflictError(describeHoldingRun(latest, readAt), '/instanceId')
   // A claim is closed together with its run, so a stalled run that does not hold its claim is inconsistent.
   return createAgentRunIntegrityError()
+}
+
+/**
+ * Explains why a report's transaction failed, by re-reading the run.
+ *
+ * @param principal - Authorized principal.
+ * @param teamId - Team ID.
+ * @param run - Run as read before the report.
+ * @param error - Error the comment write raised.
+ * @returns Not active when the run closed or changed hands, a retryable conflict when another
+ * report of the run committed first, an integrity error when the active run lost its claim, and the
+ * original error otherwise.
+ */
+async function explainReportFailure(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  run: StoredAgentRun,
+  error: unknown,
+): Promise<unknown> {
+  if (!(error instanceof CollaborationError) || error.status !== 409) return error
+  const store = workItemDependencies.agentRuns
+  const latest = await store.getRun(principal.directoryId, teamId, run.runId)
+  if (latest?.state !== 'active' || latest.instanceIdHash !== run.instanceIdHash) return createAgentRunNotActiveError()
+  // Retrying with the same key renumbers the report after the one that committed first.
+  if (latest.reportCount !== run.reportCount) return createAgentRunCommitConflictError()
+  const claim = await store.getClaim(principal.directoryId, teamId, run.workItemId)
+  if (!isClaimHeldBy(claim, latest)) return createAgentRunIntegrityError()
+  return error
 }
 
 /**
@@ -464,6 +531,130 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ...(auditPut ? [auditPut] : []),
         ...(receipt ? [receipt.transactWriteItem] : []),
       ], closeItems.length)
+      return response
+    },
+
+    /** Rechecks ownership and the requested Project before a report receipt replays. */
+    async authorizeReport(credential, teamId, runId, instanceIdHash, assignedProjectId) {
+      const principal = await resolveWriter(credential, teamId)
+      const { workItemProjectId } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+      requireRequestedProject(workItemProjectId, assignedProjectId)
+    },
+
+    /** Saves a structured report, its comment, and the run's renewed lease in one transaction. */
+    async report(credential, teamId, runId, input, context, idempotency, assignedProjectId) {
+      const principal = await resolveWriter(credential, teamId)
+      const run = await requireRun(principal, teamId, runId)
+      if (run.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+      const { context: permissionContext, detail } = await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
+      if (run.instanceIdHash !== input.instanceIdHash) {
+        if (run.state !== 'active') throw createAgentRunNotActiveError()
+        throw createAgentRunConflictError(describeHoldingRun(run, new Date()), '/instanceId')
+      }
+      if (run.state !== 'active') throw createAgentRunNotActiveError()
+      // Like heartbeats, reports cannot keep alive a run whose Work Item now belongs to someone else.
+      if (detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+      // The comment write conditions on the Work Item's current Project, so a later move also fails it.
+      requireRequestedProject(detail.issue.assignedProjectId, assignedProjectId)
+      const store = workItemDependencies.agentRuns
+      const claim = await store.getClaim(principal.directoryId, teamId, run.workItemId)
+      if (!isClaimHeldBy(claim, run)) {
+        const latest = await store.getRun(principal.directoryId, teamId, runId)
+        if (latest?.state !== 'active') throw createAgentRunNotActiveError()
+        throw createAgentRunIntegrityError()
+      }
+      const now = new Date()
+      const createdAt = now.toISOString()
+      const path = `/api/v1/agent-runs/${encodeURIComponent(runId)}/reports`
+      const auditContext = createMutationAuditContext({
+        workspaceId: principal.directoryId,
+        actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
+        idempotencyKey: context.idempotencyKey,
+        ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+        occurredAt: createdAt,
+        request: {
+          method: 'POST',
+          path,
+          query: { teamId },
+          // The instance ID is a bearer-like secret of the agent and is never audited.
+          body: {
+            kind: input.kind,
+            message: input.message,
+            verifications: input.verifications,
+            artifacts: input.artifacts,
+            ...(input.changedFileCount === undefined ? {} : { changedFileCount: input.changedFileCount }),
+          },
+        },
+        source: { kind: 'api', requestId: context.requestId, method: 'POST', route: path },
+      })
+      const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, run.workItemId)
+      const commentId = deriveAuditedCommentId(entityKey, auditContext)
+      const report: StoredAgentRunReport = {
+        schemaVersion: AGENT_RUN_SCHEMA_VERSION,
+        runId,
+        directoryId: principal.directoryId,
+        teamId,
+        workItemId: run.workItemId,
+        sequence: run.reportCount + 1,
+        kind: input.kind,
+        commentId,
+        verifications: input.verifications,
+        artifacts: input.artifacts,
+        ...(input.changedFileCount === undefined ? {} : { changedFileCount: input.changedFileCount }),
+        createdAt,
+        createdBy: principal.userKey,
+      }
+      const reported: StoredAgentRun = {
+        ...run,
+        reportCount: report.sequence,
+        lastReportKind: report.kind,
+        lastReportAt: createdAt,
+        lastHeartbeatAt: createdAt,
+        leaseExpiresAt: calculateLeaseExpiry(now, run.leaseMinutes),
+      }
+      const body = createAgentRunReportCommentBody(run.agentName, input.message)
+      const response: ReportAgentRunResponse = {
+        report: toAgentRunReport(report),
+        comment: { id: commentId, actorUserId: principal.userKey, body, createdAt },
+        run: toAgentRun(reported, now),
+      }
+      const auditPut = createAgentRunAuditPut(
+        auditContext, reported, 'reported', `Agent Run saved a ${report.kind} report.`, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+      )
+      const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
+        ?.prepare({ status: 201, body: response })
+      const projectId = detail.issue.assignedProjectId
+      const authorizationConditionChecks = await createCollaborationCommentAuthorizationConditionChecks(
+        principal, permissionContext, teamId, projectId,
+      )
+      const comment = await workItemDependencies.collaboration.createComment({
+        workspaceId: principal.directoryId,
+        teamId,
+        issueId: run.workItemId,
+        workItemTitle: detail.issue.title,
+        entityKey,
+        projectId,
+        projectEntityKey: projectId ? createProjectCollaborationEntityKey(principal.directoryId, projectId) : undefined,
+        assigneeMemberKey: detail.issue.assigneeUserId,
+        actorMemberKey: principal.userKey,
+        bodyMarkdown: body,
+        mentionMemberKeys: [],
+        automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
+        deepLink: createTeamIssueDeepLink(teamId, run.workItemId),
+        authorizationConditionChecks,
+        coWrites: [
+          ...store.createReportItems(run, report, now),
+          ...(auditPut ? [auditPut] : []),
+          ...(receipt ? [receipt.transactWriteItem] : []),
+        ],
+        auditContext,
+      }).catch(async (error: unknown) => {
+        throw await explainReportFailure(principal, teamId, run, error)
+      })
+      if (comment.id !== commentId || comment.createdAt !== createdAt) throw createAgentRunIntegrityError()
+      await projectWorkspaceSearchDocumentBestEffort(() => createCommentSearchDocument(
+        principal.directoryId, teamId, detail.issue, comment,
+      ), 'Agent Run report comment creation')
       return response
     },
 

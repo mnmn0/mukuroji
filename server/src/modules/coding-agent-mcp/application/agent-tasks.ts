@@ -9,6 +9,7 @@ import {
 import {
   AgentTaskError,
   type AgentRunRecord,
+  type AgentRunReportInput,
   type AgentTask,
   type AgentTaskFilters,
   type AgentWorkItemApi,
@@ -399,10 +400,26 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const selection = filters({ assignedProjectId: input.assignedProjectId })
       return api.create({ ...input, assignedProjectId: selection.assignedProjectId, assigneeUserId: scope.assigneeUserId }, key)
     },
-    /** Adds a durable progress, blocker, or completion report to the existing discussion. */
-    async report(id: string, message: string, key: string) {
+    /**
+     * Adds a durable report to the task discussion. With this instance's active run on the task it is
+     * saved as a structured report of that run; without one, only a plain message is accepted.
+     */
+    async report(id: string, input: AgentRunReportInput, key: string) {
       await owned(id)
-      return api.comment(id, `[${scope.agentName}]\n\n${message}`, key, scope.assignedProjectId, scope.assigneeUserId, await fenceFor(id))
+      const run = await claimedRun(id, true)
+      if (run) return api.reportRun(run.runId, scope.instanceId, input, key, scope.assignedProjectId)
+      const structured = (input.kind !== undefined && input.kind !== 'progress') ||
+        (input.verifications?.length ?? 0) > 0 || (input.artifacts?.length ?? 0) > 0 || input.changedFileCount !== undefined
+      if (structured) {
+        throw new AgentTaskError(
+          'agent_run_not_active',
+          'Structured reports need your active run on this task, and you have none. Nothing was saved; stop and ask the user.',
+        )
+      }
+      const comment = await api.comment(
+        id, `[${scope.agentName}]\n\n${input.message}`, key, scope.assignedProjectId, scope.assigneeUserId, await fenceFor(id),
+      )
+      return { comment }
     },
     /** Extends the lease of this instance's own run. */
     async heartbeat(runId: string) {

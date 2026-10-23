@@ -177,18 +177,33 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
 | `artifacts[]` | no | 最大 20 件。`type`（`pull-request`、`branch`、`commit`、`url`）、`url`、`label`（最大 128 文字）。 |
 | `changedFileCount` | no | 0 以上の整数。 |
 
-- report は Run に紐づく `AgentRunReport` row（`agent-run-report#<runId>#<sequence>`）と、
-  canonical Collaboration の comment を 1 つの transaction で保存する。comment には既存どおり
-  agent 名の label を付け、構造化 field は comment 本文へ埋め込まず row に保存する。
-  Web は comment の横に検証結果と成果物を chip として表示する。
-- `url` は `https` のみ、credential 付き URL を拒否し、最大 2,048 文字とする。server は URL を
-  取得・解決しない。表示時は既存の rich text safety と同じ link 方針に従う。
+- report は Run に紐づく `AgentRunReport` row と canonical Collaboration の comment を 1 つの
+  transaction で保存する。row の sort key は
+  `agent-run-report#<URL encode した workItemId>#<createdAt>#<runId>#<sequence>` とし、Work Item の
+  report を作成順に強整合の Query 1 回で読めるようにする。comment 本文は Run に記録した agent 名の
+  label（`[agentName]`）と `message` で server が組み立て、構造化 field は本文へ埋め込まず row に
+  保存する。Web は comment の横に検証結果と成果物を chip として表示する（Slice 2 の Web 変更）。
+- 同じ transaction で Run row の `reportCount` を読み取り時の値で条件付き更新し（report の
+  `sequence` になる）、lease を延長し、最新 report の kind と時刻（`lastReportKind`、
+  `lastReportAt`）を Run row に残す。後者は Factory board 用で、Public API の Run には返さない。
+  claim の保持確認、`agent-run.reported` audit event、idempotency receipt も同じ transaction に入れる。
+  comment の ID は audit context から決定的に導出するため、receipt に comment を含められる。
+- 並行する別の report が先に確定した場合は、同じ引数と key の再送で次の `sequence` として保存できる
+  `503 temporarily_unavailable` を返す。Run が先に終了・解放・引き継ぎされた場合は
+  `agent_run_not_active`、別 instance の Run への report は `agent_run_conflict`（pointer
+  `/instanceId`）、Work Item の担当者が変わった場合は `agent_run_forbidden` とする。
+- `url` は小文字の `https://` で始まり host を持つもののみ、credential 付き URL と空白・制御文字を
+  拒否し、最大 2,048 文字とする。違反は `400 validation_failed` と `errors[].code`
+  `invalid_artifact_url` で返す。server は URL を取得・解決しない。表示時は既存の rich text safety と
+  同じ link 方針に従う。
+- Web は `GET /api/teams/{teamId}/work-items/{workItemId}/agent-run-reports?limit=`（既定 100 件、
+  新しい順）で Work Item を閲覧できる member に report を返す。
 - `kind=blocker` と `kind=handoff` は Factory board の「判断待ち」lane に出す。status 変更は
   伴わないため、agent は必要に応じて `move_task` を別途呼ぶ。
 - `message` だけの `report_progress` は、対象 Work Item と一致する自分の `active` Run がある場合、
-  report endpoint を呼び、`AgentRunReport` row と comment を保存して成功を返す。一致する Run がなく、
+  report endpoint を呼び、`AgentRunReport` row と comment を保存して `{ comment, report, run }` を返す。一致する Run がなく、
   対象 Work Item に別 instance の `active` Run もない場合は、従来どおり comment endpoint で comment
-  だけを保存して成功を返す。別 instance の `active` Run がある場合は、`agentInstanceId` の fence に
+  だけを保存して `{ comment }` を返す。別 instance の `active` Run がある場合は、`agentInstanceId` の fence に
   より `409 agent_run_conflict` を返す。
   構造化 field（`verifications`、`artifacts`、`changedFileCount`、または `progress` 以外の `kind`）
   を含む `report_progress` は、一致する Run がなければ何も保存せずに `agent_run_not_active` を返す。
@@ -311,7 +326,7 @@ Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem
 | `403` | `forbidden` | `agent_run_takeover_disabled` | Team の Agent settings が take over を許可していない |
 | `409` | `conflict` | `invalid_transition` | start 対象が `backlog` / `unstarted` でない、または遷移先が `started` でない |
 | `409` | `conflict` | `not_ready` | start 対象が Agent settings の Ready 条件を満たさない（Slice 3） |
-| `422` | `validation_failed` | `invalid_artifact_url` | report の URL が許可形式でない（Slice 2） |
+| `400` | `validation_failed` | `invalid_artifact_url` | report の URL が許可形式でない |
 
 Run と claim の行が食い違う場合は修復せず `503 temporarily_unavailable` とする。
 
@@ -471,6 +486,16 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   Work Item の status は変えない。
 - 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script
   による claim / Run 不整合の検査。不整合は読み取り時に fail-closed で検出する。
+
+### Slice 2 の実装状況
+
+- 実装済み（server と MCP）: `POST /v1/agent-runs/{runId}/reports`、report row と comment・Run の
+  `reportCount`・lease・audit・receipt の単一 transaction、artifact URL の検証、Web 用の
+  `GET /api/teams/{teamId}/work-items/{workItemId}/agent-run-reports`、`report_progress` の構造化 field。
+  Collaboration の comment 作成は、信頼できる呼び出し元の書き込み（co-write）を同じ transaction に
+  含められる。co-write 付きの作成は既存 comment の replay で失敗を隠さず、呼び出し元が分類する。
+- 次の変更で入れる点: Web の comment chip 表示、Claude Code / Codex / Kiro の設定例、`mcp.mjs` の
+  配布 build。
 
 ## 後続 Phase
 

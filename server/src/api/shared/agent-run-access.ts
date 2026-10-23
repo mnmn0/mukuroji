@@ -242,8 +242,9 @@ export function createAgentRunMutationFenceExtension(
 }
 
 /**
- * Audit sequence slot of an Agent Run event committed with a Work Item update or deletion.
- * Audit event IDs derive from the idempotency key and the slot, and the Work Item event uses slot 0.
+ * Audit sequence slot of an Agent Run event committed with a Work Item update or deletion, or with
+ * the comment of a report. Audit event IDs derive from the idempotency key and the slot, and the
+ * Work Item or comment event uses slot 0.
  */
 export const AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM = 1
 
@@ -260,7 +261,7 @@ export const AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM = 1
 export function createAgentRunAuditPut(
   auditContext: MutationAuditContext,
   run: StoredAgentRun,
-  action: 'started' | 'finished' | 'released' | 'taken-over',
+  action: 'started' | 'reported' | 'finished' | 'released' | 'taken-over',
   summary: string,
   sequence?: number,
 ): AgentRunTransactItem | undefined {

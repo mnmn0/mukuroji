@@ -1,6 +1,6 @@
 import type {
-  AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunRuntime, AgentSettings,
-  CanonicalWorkItem, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
+  AgentSettings, CanonicalWorkItem, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 
@@ -74,6 +74,19 @@ export type AgentRunStartInput = {
   agentName: string
   /** Stable instance identifier of this process. */
   instanceId: string
+}
+
+/** Structured report fields sent for this instance's run; the instance ID is added by the adapter. */
+export type AgentRunReportInput = Omit<ReportAgentRunRequest, 'instanceId'>
+
+/** Saved structured report, its comment, and the run with its renewed lease. */
+export type AgentRunReportResult = {
+  /** Saved report. */
+  report: AgentRunReport
+  /** Comment saved with the report. */
+  comment: AgentRunReportComment
+  /** Run after the report. */
+  run: AgentRunRecord
 }
 
 /** Filters for listing the Team's active runs. */
@@ -183,6 +196,16 @@ export interface AgentWorkItemApi {
     /** Stalled run, now superseded. */
     supersededRun: AgentRunRecord
   }>
+  /**
+   * Saves a structured report and its comment for this instance's run.
+   * @param runId - Run identifier.
+   * @param instanceId - Instance identifier that started the run.
+   * @param input - Report kind, message, and structured fields.
+   * @param key - Idempotency key reused for uncertain retries.
+   * @param assignedProjectId - Configured Project the server must find the task in.
+   * @returns The report, its comment, and the run with its renewed lease.
+   */
+  reportRun(runId: string, instanceId: string, input: AgentRunReportInput, key: string, assignedProjectId?: string): Promise<AgentRunReportResult>
   /**
    * Reads one run.
    * @param runId - Run identifier.
