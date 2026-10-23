@@ -41,10 +41,10 @@ const maximumSkippedReports = 5
 const maximumRunPages = 10
 
 /**
- * Started tasks whose claim is read directly during one selection. The run index can briefly miss a
- * run started just before this process restarted; that task is among the most recently updated.
+ * Claims read concurrently while recovering runs the eventually consistent run index has not shown yet.
+ * Every started task missing from this instance's runs is read, in batches of this size.
  */
-const maximumClaimReads = 10
+const claimReadBatchSize = 10
 
 /** Explicit lifecycle intent; the target status is always selected from current configuration. */
 export type AgentTransition = 'start' | 'complete' | 'reopen' | 'cancel' | 'move'
@@ -172,14 +172,14 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     const [own, all] = await Promise.all([activeRuns(true), activeRuns(false)])
     const ownIds = new Set(own.map((run) => run.runId))
     const ownTaskIds = new Set(own.map((run) => run.workItemId))
-    const unconfirmed = startedTasks
-      .filter((task) => !ownTaskIds.has(task.id))
-      .sort((first, second) => second.updatedAt.localeCompare(first.updatedAt))
-      .slice(0, maximumClaimReads)
-    for (const run of await Promise.all(unconfirmed.map((task) => claimedRun(task.id, true)))) {
-      if (!run || ownIds.has(run.runId)) continue
-      own.push(run)
-      ownIds.add(run.runId)
+    const unconfirmed = startedTasks.filter((task) => !ownTaskIds.has(task.id))
+    for (let start = 0; start < unconfirmed.length; start += claimReadBatchSize) {
+      const batch = unconfirmed.slice(start, start + claimReadBatchSize)
+      for (const run of await Promise.all(batch.map((task) => claimedRun(task.id, true)))) {
+        if (!run || ownIds.has(run.runId)) continue
+        own.push(run)
+        ownIds.add(run.runId)
+      }
     }
     return {
       own,

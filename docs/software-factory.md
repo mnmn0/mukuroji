@@ -448,8 +448,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。
 - `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
-  `in_progress` とする。Run 一覧の index は結果整合のため、index にない `started` タスク（更新の新しい
-  10 件まで）は claim を強整合で読み、自 instance の Run を `ownRuns` に含める。`get_task` の
+  `in_progress` とする。Run 一覧の index は結果整合のため、index にない `started` タスクはすべて
+  claim を強整合で読み（同時 10 件ずつ）、自 instance の Run を `ownRuns` に含める。`get_task` の
   `activeRun`、`heartbeat` / `finish_run` の所有確認、mutation の fence も claim を読んで決めるため、
   開始直後や process 再起動直後でも同じ Run を扱える。所有は member と instance の組で判定し、claim の
   読み取りにも担当者を含める。それ以外の自 Run は `ownRuns` に残し、agent に

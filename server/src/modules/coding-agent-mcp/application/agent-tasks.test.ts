@@ -115,6 +115,14 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
         (!filters.instanceId || run.instanceId === filters.instanceId) &&
         (!filters.assigneeUserId || run.assigneeUserId === filters.assigneeUserId)).map(publicRun), hasMore: false }
     },
+    /**
+     * Supersedes a stalled run of another instance and starts this instance's run.
+     *
+     * @param id - Task ID.
+     * @param runId - Stalled run.
+     * @param input - Runtime, agent name, and instance of the caller.
+     * @returns The new run and the superseded run.
+     */
     async takeOverRun(id, runId, input) {
       const stalled = runs.get(runId)
       if (!stalled || stalled.state !== 'active' || stalled.workItemId !== id) throw new AgentTaskError('agent_run_not_active', 'Finished')
@@ -126,6 +134,13 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       runs.set(run.runId, run)
       return { run: publicRun(run), supersededRun: publicRun(superseded) }
     },
+    /**
+     * Returns the active run of a task when it matches the requested owner.
+     *
+     * @param id - Task ID.
+     * @param owner - Assignee and instance the run must belong to.
+     * @returns The claiming run, or undefined.
+     */
     async claimedRun(id, owner = {}) {
       const run = [...runs.values()].find((candidate) => candidate.workItemId === id && candidate.state === 'active')
       return run && (!owner.instanceId || run.instanceId === owner.instanceId) &&
@@ -277,6 +292,13 @@ describe('agent task lifecycle', () => {
     let releaseOnClaimRead = false
     const racing = createAgentTasks({
       ...api,
+      /**
+       * Releases the run once before reading the claim, to simulate a concurrent release.
+       *
+       * @param id - Task ID.
+       * @param owner - Assignee and instance the run must belong to.
+       * @returns The claiming run, or undefined.
+       */
       async claimedRun(id, owner) {
         if (releaseOnClaimRead) {
           releaseOnClaimRead = false
@@ -289,6 +311,18 @@ describe('agent task lifecycle', () => {
     const runId = 'run' in claimed ? claimed.run.runId : ''
     releaseOnClaimRead = true
     await expect(racing.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
+  })
+
+  test('resumes its own run after a restart even behind many newer started tasks', async () => {
+    const newer = Array.from({ length: 12 }, (_, index) => task(`newer-${index}`, {
+      workflowStatusId: 'coding', statusCategory: 'started', updatedAt: `2026-09-02T00:00:${String(index).padStart(2, '0')}.000Z`,
+    }))
+    const { api } = fixture([task(), ...newer])
+    const lagging = { ...api, async listActiveRuns() { return { items: [], hasMore: false } } }
+    const claimed = await createAgentTasks(lagging, baseScope).transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    const restarted = createAgentTasks(lagging, baseScope)
+    expect(await restarted.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId }] })
   })
 
   test('resumes its own run when only the unfiltered run list has caught up', async () => {
@@ -325,6 +359,13 @@ describe('agent task lifecycle', () => {
     const lagging = createAgentTasks({
       ...api,
       async listActiveRuns() { return { items: [], hasMore: false } },
+      /**
+       * Reads the claim unless the test has deleted it.
+       *
+       * @param id - Task ID.
+       * @param owner - Assignee and instance the run must belong to.
+       * @returns The claiming run, or undefined.
+       */
       async claimedRun(id, owner) { return deleted ? undefined : api.claimedRun(id, owner) },
     }, baseScope)
     await lagging.transition('one', 1, 'coding', 'start', 'claim')
@@ -422,6 +463,14 @@ describe('agent task lifecycle', () => {
         const current = await api.get(id)
         return moved ? { ...current, assignedProjectId: 'other-project' } : current
       },
+      /**
+       * Lists the queue without tasks the test moved out of the Project.
+       *
+       * @param filters - Queue filters.
+       * @param cursor - Continuation.
+       * @param limit - Page size.
+       * @returns One queue page.
+       */
       async list(filters, cursor, limit) {
         // The server filters by Project, so a moved task leaves the scoped queue.
         const page = await api.list(filters, cursor, limit)
