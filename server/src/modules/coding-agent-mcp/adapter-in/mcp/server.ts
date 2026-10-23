@@ -6,6 +6,7 @@ import {
   AGENT_RUN_REPORT_MESSAGE_PATTERN,
   createDefaultDueDateWorkItemSchedule,
   createDefaultUnscheduledWorkItemSchedule,
+  isAgentRunArtifactUrl,
 } from '@mukuroji/contracts'
 import { createAgentTasks, type AgentTaskScope } from '../../application/agent-tasks'
 import { AgentTaskError, type AgentWorkItemApi } from '../../application/work-item-api'
@@ -121,7 +122,8 @@ export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTa
       })).max(20).optional(),
       artifacts: z.array(z.object({
         type: z.enum(['pull-request', 'branch', 'commit', 'url']),
-        url: z.string().max(2048).regex(new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN)),
+        url: z.string().max(2048).regex(new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN))
+          .refine(isAgentRunArtifactUrl, 'Artifact url must parse as an https URL with a host.'),
         label: z.string().trim().min(1).max(128).regex(new RegExp(AGENT_RUN_REPORT_LINE_PATTERN)).optional(),
       })).max(20).optional(),
       changedFileCount: z.number().int().nonnegative().optional(),

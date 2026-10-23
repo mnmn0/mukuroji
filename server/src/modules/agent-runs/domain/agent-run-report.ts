@@ -12,6 +12,7 @@ import {
   type AgentRunReport,
   type AgentRunReportKind,
   type AgentRunVerification,
+  isAgentRunArtifactUrl,
 } from '@mukuroji/contracts'
 import { hashAgentInstanceId, readAgentInstanceId } from './agent-run'
 import { AgentRunError } from './agent-run-error'
@@ -169,20 +170,7 @@ export function readAgentRunArtifactUrl(value: unknown, pointer: string): string
     `Artifact url must be an https URL of at most ${AGENT_RUN_ARTIFACT_URL_MAX_LENGTH} characters without credentials, a query, or fragment parameters.`,
     { reason: 'invalid_artifact_url', pointer },
   )
-  if (typeof value !== 'string' || value.length === 0 || value.length > AGENT_RUN_ARTIFACT_URL_MAX_LENGTH) throw invalid()
-  if (value !== value.trim() || /\s/.test(value) || hasControlCharacter(value)) throw invalid()
-  // The authority must follow the lowercase scheme directly, so the stored text reads as it parses.
-  // A backslash or an `@` in the authority would make the text read differently from how it parses.
-  if (!value.startsWith('https://') || value.startsWith('https:///') || value.includes('\\')) throw invalid()
-  if (/^[^/?#]*@/.test(value.slice('https://'.length))) throw invalid()
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  } catch {
-    throw invalid()
-  }
-  if (parsed.protocol !== 'https:' || parsed.hostname === '' || parsed.username !== '' || parsed.password !== '') throw invalid()
-  if (value.includes('?') || parsed.hash.includes('=')) throw invalid()
+  if (!isAgentRunArtifactUrl(value)) throw invalid()
   return value
 }
 

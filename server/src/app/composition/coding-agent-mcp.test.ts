@@ -223,6 +223,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
       { message: 'Link', artifacts: [{ type: 'url', url: 'http://example.test' }] },
       { message: 'Link', artifacts: [{ type: 'url', url: 'https://user:pass@example.test/log' }] },
       { message: 'Link', artifacts: [{ type: 'url', url: 'https://example.test/log?token=x' }] },
+      { message: 'Link', artifacts: [{ type: 'url', url: 'https://example.test:99999/log' }] },
       { message: 'Ran', verifications: [{ command: 'bun\ntest', status: 'passed' }] },
       { message: 'Bell\u0007' },
     ]) {

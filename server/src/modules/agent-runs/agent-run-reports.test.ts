@@ -5,6 +5,7 @@ import {
   AGENT_RUN_REPORT_LINE_PATTERN,
   AGENT_RUN_REPORT_MESSAGE_PATTERN,
   PUBLIC_API_OPENAPI_DOCUMENT,
+  isAgentRunArtifactUrl,
 } from '@mukuroji/contracts'
 import { QueryCommand, TransactWriteCommand, type GetCommand, type UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbAgentRunStore, type AgentRunDocumentClient } from './adapter-out/dynamodb/agent-run-store'
@@ -209,7 +210,7 @@ describe('Agent Run report validation', () => {
     }
   })
 
-  test('agrees with the OpenAPI artifact URL pattern', () => {
+  test('agrees with the shared artifact URL check, whose pattern accepts every URL the server accepts', () => {
     const pattern = new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN)
     for (const url of [
       'https://github.com/example/repo/pull/1',
@@ -226,6 +227,8 @@ describe('Agent Run report validation', () => {
       'https:///path',
       'https://example.test/a b',
       'https://example.test/a\tb',
+      'https://example.test:99999/log',
+      'https://exa mple.test/log',
     ]) {
       /**
        * Checks whether the server accepts the URL.
@@ -240,7 +243,9 @@ describe('Agent Run report validation', () => {
           return false
         }
       }
-      expect({ url, accepted: pattern.test(url) }).toEqual({ url, accepted: accepted() })
+      expect({ url, accepted: isAgentRunArtifactUrl(url) }).toEqual({ url, accepted: accepted() })
+      // The published pattern is a necessary condition: it never rejects a URL the server accepts.
+      if (accepted()) expect({ url, matches: pattern.test(url) }).toEqual({ url, matches: true })
     }
   })
 })

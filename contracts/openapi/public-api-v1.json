@@ -454,7 +454,8 @@
             "type": "string"
           },
           "url": {
-            "description": "HTTPS URL with a host and at most 2048 characters. It must not contain userinfo (`user:password@`), a backslash, whitespace or control characters, a query string (`?`), or `=` in its fragment, because presigned links and tokens are carried there; an anchor fragment such as `#discussion_r1` is allowed. Violations are rejected with `invalid_artifact_url`.",
+            "description": "HTTPS URL with a host and at most 2048 characters. It must not contain userinfo (`user:password@`), a backslash, whitespace or control characters, a query string (`?`), or `=` in its fragment, because presigned links and tokens are carried there; an anchor fragment such as `#discussion_r1` is allowed. The URL must also parse as an absolute https URL with a valid host and port. Violations are rejected with `invalid_artifact_url`.",
+            "format": "uri",
             "maxLength": 2048,
             "minLength": 9,
             "pattern": "^https://[^/?#@\\\\\\s\\x00-\\x1F\\x7F]+(/[^?#\\\\\\s\\x00-\\x1F\\x7F]*)?(#[^?=\\\\\\s\\x00-\\x1F\\x7F]*)?$",

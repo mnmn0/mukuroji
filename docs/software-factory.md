@@ -204,7 +204,9 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   同じ link 方針に従う。
 - verification の `command`・`summary` と artifact の `label` は改行と tab 以外の制御文字を含まない 1 行、
   `message` は改行と tab のみ許可し、いずれも空白だけの値は拒否する。URL と合わせ、これらの pattern は
-  contracts の定数として OpenAPI と MCP の tool schema に同じものを公開する。
+  contracts の定数として OpenAPI と MCP の tool schema に同じものを公開する。URL は pattern に加えて
+  URL として解釈できること（host と port の妥当性）も必要で、server と MCP は contracts の
+  `isAgentRunArtifactUrl` で同じ判定を行う。OpenAPI では `format: uri` と説明で示す。
 - Web は `GET /api/teams/{teamId}/work-items/{workItemId}/agent-run-reports?limit=`（既定 100 件、
   新しい順）で Work Item を閲覧できる member に report を返す。page の JSON が約 1 MB を超える場合は
   そこで打ち切り（最新の 1 件は必ず含める）、`hasMore: true` を返して Lambda の応答上限に収める。

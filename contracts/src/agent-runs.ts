@@ -217,6 +217,26 @@ export const AGENT_RUN_ARTIFACT_URL_MAX_LENGTH = 2_048
 export const AGENT_RUN_ARTIFACT_URL_PATTERN: string = '^https://[^/?#@\\\\\\s\\x00-\\x1F\\x7F]+(/[^?#\\\\\\s\\x00-\\x1F\\x7F]*)?(#[^?=\\\\\\s\\x00-\\x1F\\x7F]*)?$'
 
 /**
+ * Checks whether a value is an artifact URL the report endpoint accepts. Beyond
+ * {@link AGENT_RUN_ARTIFACT_URL_PATTERN}, the URL must parse with an https scheme and a host, so a
+ * client can reject an out-of-range port or a malformed host before sending the report.
+ *
+ * @param value - Candidate URL.
+ * @returns True when the endpoint accepts the URL as sent.
+ */
+export function isAgentRunArtifactUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > AGENT_RUN_ARTIFACT_URL_MAX_LENGTH) return false
+  if (!new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN).test(value)) return false
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return false
+  }
+  return parsed.protocol === 'https:' && parsed.hostname !== '' && parsed.username === '' && parsed.password === ''
+}
+
+/**
  * Pattern of one-line report text (a verification command or summary, or an artifact label): no
  * line break or control character other than a tab, and not only whitespace.
  */
