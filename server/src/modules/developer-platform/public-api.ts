@@ -38,6 +38,7 @@ import {
   type WorkItemSyncConflict,
   type WorkItemTypeChangeResolution,
   type StartAgentRunResponse,
+  type TakeOverAgentRunResponse,
   type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
@@ -50,10 +51,12 @@ import {
   readFinishAgentRunRequest,
   readHeartbeatAgentRunRequest,
   readStartAgentRunRequest,
+  readTakeOverAgentRunRequest,
   splitAgentRunMutationFence,
   type ValidatedAgentRunFence,
   type ValidatedAgentRunFinish,
   type ValidatedAgentRunStart,
+  type ValidatedAgentRunTakeOver,
 } from '../agent-runs'
 import type {
   ApiKeyPort,
@@ -354,6 +357,8 @@ export type PublicAgentRunListFilters = {
   instanceIdHash?: string
   /** Responsible member restriction. */
   assigneeUserId?: string
+  /** Work Item whose claimed run is read strongly instead of from the eventually consistent index. */
+  workItemId?: string
 }
 
 /** Public Agent Run API and the canonical Work Item and run persistence behind it. */
@@ -460,6 +465,34 @@ export interface PublicAgentRunService {
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ): Promise<AgentRun>
+  /**
+   * Revalidates take over permissions before replaying a take over receipt.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item of the stalled run.
+   * @returns A promise that resolves when the caller may still act on the Work Item.
+   */
+  authorizeTakeOver(credential: AuthenticatedDeveloperCredential, teamId: string, workItemId: string): Promise<void>
+  /**
+   * Supersedes a stalled run of another instance of the same assignee and starts a run for the caller.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item of the stalled run.
+   * @param runId - Stalled run to supersede.
+   * @param request - Runtime, agent name, and instance hash of the caller.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @returns The caller's new run and the superseded run.
+   */
+  takeOver(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    runId: string,
+    request: ValidatedAgentRunTakeOver,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<TakeOverAgentRunResponse>
   /**
    * Reads Team Agent settings.
    * @param credential - Authenticated developer credential.
@@ -1016,10 +1049,17 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const assigneeUserId = c.req.query('assigneeUserId') === undefined
       ? undefined
       : readRouteId(c.req.query('assigneeUserId') ?? '', 'assigneeUserId')
+    const workItemId = c.req.query('workItemId') === undefined
+      ? undefined
+      : readRouteId(c.req.query('workItemId') ?? '', 'workItemId')
+    if (workItemId !== undefined && stateQuery !== 'active') {
+      throw new PublicApiServiceError(400, 'invalid_request', 'workItemId can be combined only with state=active.')
+    }
     const filters: PublicAgentRunListFilters = {
       state: stateQuery,
       ...(instanceId === undefined ? {} : { instanceIdHash: hashAgentInstanceId(readAgentInstanceId(instanceId, '/instanceId')) }),
       ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
+      ...(workItemId === undefined ? {} : { workItemId }),
     }
     return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
       workspaceId: credential.workspaceId,
@@ -1030,6 +1070,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         state: filters.state,
         ...(filters.instanceIdHash ? { instanceIdHash: filters.instanceIdHash } : {}),
         ...(filters.assigneeUserId ? { assigneeUserId: filters.assigneeUserId } : {}),
+        ...(filters.workItemId ? { workItemId: filters.workItemId } : {}),
       },
     }, (continuation, limit) => agentRuns.list(credential, teamId, filters, continuation, limit)))
   })
@@ -1072,6 +1113,22 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body: await agentRuns.finish(credential, teamId, runId, finishRequest, context, idempotency),
     }), {
       authorizeReplay: () => agentRuns.authorizeFinish(credential, teamId, runId, finishRequest.instanceIdHash),
+    })
+  })
+
+  router.post('/v1/work-items/:workItemId/agent-runs/:runId/take-over', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const rawBody = await readJson(c)
+    const input = readTakeOverAgentRunRequest(rawBody)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const runId = readAgentRunId(c.req.param('runId'), '/runId')
+    return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
+      status: 201,
+      body: await agentRuns.takeOver(credential, teamId, workItemId, runId, input, context, idempotency),
+    }), {
+      authorizeReplay: () => agentRuns.authorizeTakeOver(credential, teamId, workItemId),
     })
   })
 

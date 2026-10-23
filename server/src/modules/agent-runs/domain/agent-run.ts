@@ -97,6 +97,9 @@ export type ValidatedAgentRunStart = Omit<StartAgentRunRequest, 'instanceId'> & 
   instanceIdHash: string
 }
 
+/** Validated take over request, with the instance ID already hashed. */
+export type ValidatedAgentRunTakeOver = Omit<ValidatedAgentRunStart, 'expectedRevision' | 'workflowStatusId'>
+
 /** Validated mutation fence, with the instance ID already hashed. */
 export type ValidatedAgentRunFence = {
   /** Run the caller claims to hold. */
@@ -260,6 +263,32 @@ function readIdentifier(value: unknown, name: string): string {
 export function readStartAgentRunRequest(value: unknown): ValidatedAgentRunStart {
   if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent Run start body is required.')
   assertKnownFields(value, ['expectedRevision', 'workflowStatusId', 'runtime', 'agentName', 'instanceId'], 'Agent Run start')
+  return {
+    expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', false),
+    workflowStatusId: readIdentifier(value.workflowStatusId, 'workflowStatusId'),
+    ...readAgentIdentity(value),
+  }
+}
+
+/**
+ * Validates a take over request body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Runtime, agent name, and the hash of the instance taking over.
+ */
+export function readTakeOverAgentRunRequest(value: unknown): ValidatedAgentRunTakeOver {
+  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent Run take over body is required.')
+  assertKnownFields(value, ['runtime', 'agentName', 'instanceId'], 'Agent Run take over')
+  return readAgentIdentity(value)
+}
+
+/**
+ * Validates the runtime, display name, and instance of an agent.
+ *
+ * @param value - Untrusted JSON object.
+ * @returns Runtime, agent name, and instance hash.
+ */
+function readAgentIdentity(value: Record<string, unknown>): ValidatedAgentRunTakeOver {
   if (typeof value.runtime !== 'string' || !AGENT_RUN_RUNTIMES.some((runtime) => runtime === value.runtime)) {
     throw new AgentRunError('validation_failed', `runtime must be one of ${AGENT_RUN_RUNTIMES.join(', ')}.`, { pointer: '/runtime' })
   }
@@ -278,8 +307,6 @@ export function readStartAgentRunRequest(value: unknown): ValidatedAgentRunStart
     )
   }
   return {
-    expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', false),
-    workflowStatusId: readIdentifier(value.workflowStatusId, 'workflowStatusId'),
     runtime,
     agentName: value.agentName,
     instanceIdHash: hashAgentInstanceId(readAgentInstanceId(value.instanceId, '/instanceId')),
@@ -369,6 +396,20 @@ export function calculateLeaseExpiry(from: Date, leaseMinutes: number): string {
 }
 
 /**
+ * Checks whether a claim records this run as its whole holder.
+ *
+ * @param claim - Stored claim, if any.
+ * @param run - Run expected to hold it.
+ * @returns True when the claim names the run, its instance, and its member.
+ */
+export function isClaimHeldBy(
+  claim: StoredAgentRunClaim | undefined,
+  run: Pick<StoredAgentRun, 'runId' | 'instanceIdHash' | 'assigneeUserId'>,
+): boolean {
+  return claim?.runId === run.runId && claim.instanceIdHash === run.instanceIdHash && claim.assigneeUserId === run.assigneeUserId
+}
+
+/**
  * Derives whether an active run has outlived its lease.
  *
  * @param run - Stored run.
@@ -394,8 +435,8 @@ export function createActiveAgentRun(input: {
   workItemId: string
   /** Responsible member. */
   assigneeUserId: string
-  /** Validated start input. */
-  start: ValidatedAgentRunStart
+  /** Runtime, agent name, and instance hash of the agent that starts or takes over the run. */
+  start: ValidatedAgentRunTakeOver
   /** Credential public ID. */
   credentialId: string
   /** Revision the start transition produces. */

@@ -92,6 +92,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `cancel_task` | 未完了タスクをcanceledへ遷移 |
 | `heartbeat` | 自インスタンスのAgent Runのleaseを延長。10秒に1回まで |
 | `finish_run` | 自インスタンスのAgent Runを `completed`、`paused`、`failed` で終了。タスクのstatusは変えない |
+| `take_over_task` | ユーザーが明示的に引き継ぎを指示した場合だけ、同じメンバーの別インスタンスが持つ停滞Runを `superseded` にして自インスタンスのRunを開始。Teamの設定で許可されている場合だけ成功する |
 
 読み取りはcredentialの現在の権限範囲、更新はさらに設定された担当メンバーのタスクに限定します。
 タスクの更新・遷移・進捗報告には常にインスタンスIDを添え、自インスタンスがそのタスクのAgent Runを持つ場合はRun IDも添えます。他インスタンスがRunを持つタスクへの更新はサーバーが `agent_run_conflict` で拒否します。
@@ -101,7 +102,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 
 1. `get_configuration` でstatus IDと必須fieldを確認します。`started` 等は共通カテゴリー名であり、status IDとは限りません。
 2. `get_work_status` と `get_next_task` を呼びます。候補は優先度 high→medium→low、期限の早い順（未設定は後）、作成日時、IDの順です。完了・取り消し・archive済みタスクは新規候補から除外します。
-3. `action: in_progress` は、自インスタンスがAgent Runを持つstartedタスクです。そのまま再開します。`otherRuns` は同じメンバーの別インスタンスが持つタスクで、ユーザーから明示的に引き継がない限り続けません。`ownRuns` に残っていてタスクがstartedでないRunは `finish_run` で閉じます。
+3. `action: in_progress` は、自インスタンスがAgent Runを持つstartedタスクです。そのまま再開します。`otherRuns` は同じメンバーの別インスタンスが持つタスクで、ユーザーから明示的に引き継がない限り続けません。引き継ぐ場合、Runが停滞していてTeamの設定で許可されていれば `take_over_task` を使い、そうでなければ人に解放を依頼します。`ownRuns` に残っていてタスクがstartedでないRunは `finish_run` で閉じます。
 4. `action: start` の場合、候補の `revision`、startedカテゴリーの `workflowStatusId`、新規UUIDの `idempotencyKey` を `start_task` に渡します。成功するとタスクとRunが返ります。成功後に作業を開始します。候補取得だけでは着手済みになりません。
 5. `report_progress` に実装方針・進捗・blocker・検証結果・成果物リンクを記録します。タスクの説明は変更しません。既存コメントは `list_progress` で読みます。更新と進捗報告はleaseを延長します。ツールを呼ばない長い作業ではlease切れの前に `heartbeat` を呼びます。
 6. レビュー待ちなどは該当するstatusを設定し、要求と必要な検証が満たされたら `complete_task` を呼びます。進捗コメントだけでは完了になりません。
@@ -134,9 +135,9 @@ Webのタスク一覧・詳細から状態とコメントを確認できます�
 - `report_progress` は最大3900文字です。長い報告は複数コメントへ分けます。`update_task.description` は公開APIの制約に合わせ最大4096文字です。
 - コメントAPIはcanonical Collaboration保存先を読みます。新しい進捗コメントも常にcanonical保存先に入ります。
 - コメントはCollaborationの時系列索引から新しい順に読み、各索引行がコメントと一致することを検証します。不整合な索引行は `503` になり、不完全な順序を成功として返しません。
-- Agent Runはleaseで有効期間を表します。leaseはTeamのAgent settings（既定30分、5〜240分）で決まり、Run開始時の値に固定されます。lease切れのRunはWebで「停滞」と表示されますが、自動では終了・再割り当てされず、人が解放するまでそのインスタンスのRunのままです。
-- `agent_run_conflict` は別インスタンスがタスクを保持していることを示します。`get_task` で保持者と停滞かどうかを確認し、ユーザーに相談してください。引き継ぎは行いません。
-- `agent_run_not_active` は自分のRunが終了済み、または人によって解放されたことを示します。そのタスクの作業を止めてユーザーへ報告します。
+- Agent Runはleaseで有効期間を表します。leaseはTeamのAgent settings（既定30分、5〜240分）で決まり、Run開始時の値に固定されます。lease切れのRunはWebで「停滞」と表示されますが、自動では終了・再割り当てされません。人が解放するか、Teamの設定が許可しユーザーが指示した場合に同じメンバーの別インスタンスが `take_over_task` で引き継ぐまで、そのインスタンスのRunのままです。
+- `agent_run_conflict` は別インスタンスがタスクを保持していることを示します。`get_task` で保持者と停滞かどうかを確認し、ユーザーに相談してください。ユーザーの明示的な指示がない限り引き継ぎません。
+- `agent_run_not_active` は自分のRunが終了済み、人によって解放された、または別インスタンスに引き継がれたことを示します。そのタスクの作業を止めてユーザーへ報告します。
 - `agent_run_forbidden` はcredentialの所有者がタスク担当者ではないことを示します。`ASSIGNEE_ID` とキー所有者を確認してください。
 - Mukurojiはエージェントプロセスの起動・停止・切断監視、作業の自動実行、lease切れ時の状態変更を行いません。不要になった作業は意図を確認して再オープン・取り消し・Runの解放などで更新します。
 

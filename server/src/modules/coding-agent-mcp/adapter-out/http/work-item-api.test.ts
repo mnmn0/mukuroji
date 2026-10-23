@@ -144,6 +144,11 @@ test('starts, lists, heartbeats, and finishes runs on the versioned Agent Run en
   expect(seen.at(-1)?.body).toEqual({ expectedRevision: 2, title: 'New', agentInstanceId: 'laptop', agentRunId: validRun.runId })
   await api.comment('task', 'Progress', 'comment-key', undefined, 'agent', { agentInstanceId: 'laptop' })
   expect(seen.at(-1)?.body).toEqual({ body: 'Progress', agentInstanceId: 'laptop' })
+  expect(await api.claimedRun('task', { assigneeUserId: 'agent', instanceId: 'laptop' })).toMatchObject({ runId: validRun.runId })
+  expect(new URLSearchParams(seen.at(-1)?.query))
+    .toEqual(new URLSearchParams('?teamId=team&state=active&workItemId=task&assigneeUserId=agent&instanceId=laptop&limit=1'))
+  await expect(api.claimedRun('task', { assigneeUserId: 'someone-else', instanceId: 'laptop' })).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.claimedRun('other-task')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
 test('maps Agent Run problem reasons to stable codes without forwarding remote detail', async () => {

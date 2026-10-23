@@ -5,6 +5,7 @@ import {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
+  createAgentRunCommitConflictError,
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
@@ -120,6 +121,12 @@ describe('public Agent Run service', () => {
     const receipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
+        /**
+         * Records the receipt request and returns a receipt write for the transaction.
+         *
+         * @param input - Receipt to write.
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite(input) {
           receipts.push(input.response)
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
@@ -266,6 +273,12 @@ describe('public Agent Run service', () => {
     const receipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
+        /**
+         * Records the receipt request and returns a receipt write for the transaction.
+         *
+         * @param input - Receipt to write.
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite(input) {
           receipts.push(input.response)
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
@@ -333,6 +346,51 @@ describe('public Agent Run service', () => {
     const service = createCanonicalPublicAgentRunService()
     const page = await runWithTestAppDependencies(() => service.list(credential, 'core-team', { state: 'active' }, undefined, 50))
     expect(page.items).toEqual([])
+  })
+
+  test('finds the run that claims a Work Item before the active index lists it', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    // The index has not caught up with the start yet.
+    store.listActiveRuns = async () => ({ runs: [] })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Lists the active run of the fixture Work Item, optionally for one instance.
+     *
+     * @param instanceId - Raw instance ID to filter by.
+     * @returns Listed run IDs.
+     */
+    const claimedBy = async (instanceId?: string) => (await runWithTestAppDependencies(() => service.list(credential, 'core-team', {
+      state: 'active', workItemId: 'task-1', ...(instanceId ? { instanceIdHash: hashAgentInstanceId(instanceId) } : {}),
+    }, undefined, 50))).items.map((run) => run.runId)
+    expect(await claimedBy()).toEqual([held.runId])
+    expect(await claimedBy('laptop-1')).toEqual([held.runId])
+    expect(await claimedBy('other-laptop')).toEqual([])
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'completed', 'agent', new Date())))
+    expect(await claimedBy('laptop-1')).toEqual([])
+
+    // A claim read just before its run closed is read again rather than reported as inconsistent.
+    const successor = createHeldRun('task-1', 'laptop-2')
+    store.seed(successor)
+    const getClaim = store.getClaim.bind(store)
+    let staleReads = 1
+    store.getClaim = async (directoryId, teamId, workItemId) => {
+      const claim = await getClaim(directoryId, teamId, workItemId)
+      if (staleReads === 0 || !claim) return claim
+      staleReads -= 1
+      return { ...claim, runId: held.runId }
+    }
+    expect(await claimedBy()).toEqual([successor.runId])
+    // A claim that keeps naming a finished run is still an integrity failure.
+    staleReads = 2
+    await expect(claimedBy()).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    // So is a claim whose recorded holder differs from the active run it names.
+    store.getClaim = async (directoryId, teamId, workItemId) => {
+      const claim = await getClaim(directoryId, teamId, workItemId)
+      return claim ? { ...claim, instanceIdHash: hashAgentInstanceId('someone-else') } : claim
+    }
+    await expect(claimedBy()).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
   test('stops an agent whose run a person released, even when it omits the run ID', async () => {
@@ -470,6 +528,11 @@ describe('public Agent Run service', () => {
     store.seed(held)
     setTestAppDependencies({
       transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite() {
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
         },
@@ -532,6 +595,313 @@ describe('public Agent Run service', () => {
       { credentialId: 'agent-key', idempotencyKey: 'start-settings-race', requestFingerprint: 'fp', reservationId: 'reservation' },
     ))).rejects.toThrow('Agent settings changed during the request. Retry the start.')
     expect(store.state.claims.size).toBe(0)
+  })
+
+  test('takes over a stalled run of another instance only when the Team allows it', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.seed(stalled)
+    const receipts: unknown[] = []
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Records the receipt request and returns a receipt write for the transaction.
+         *
+         * @param input - Receipt to write.
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite(input) {
+          receipts.push(input.response)
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over the stalled run as an instance.
+     *
+     * @param instanceId - Raw instance ID taking over.
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOver = (instanceId: string, key: string) => runWithTestAppDependencies(() => service.takeOver(
+      credential, 'core-team', 'task-1', stalled.runId,
+      { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId(instanceId) },
+      { requestId: 'take-over', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    await expect(takeOver('laptop-2', 'take-over-0')).rejects.toMatchObject({ reason: 'agent_run_takeover_disabled' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    await expect(takeOver('laptop-1', 'take-over-1')).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+
+    const taken = await takeOver('laptop-2', 'take-over-2')
+    expect(taken.supersededRun).toMatchObject({ runId: stalled.runId, state: 'finished', outcome: 'superseded', finishedBy: 'demo@example.com' })
+    expect(taken.run).toMatchObject({ workItemId: 'task-1', state: 'active', runtime: 'codex', stalled: false })
+    expect(receipts).toEqual([{ status: 201, body: taken }])
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({
+      runId: taken.run.runId, instanceIdHash: hashAgentInstanceId('laptop-2'),
+    })
+    // The successor's claim fences the superseded instance, and its revocation keeps fencing it later.
+    expect(store.state.revocations.size).toBe(1)
+    const workItems = createCanonicalPublicWorkItemService()
+    await expect(runWithTestAppDependencies(() => workItems.update(
+      credential, 'core-team', 'task-1', { expectedRevision: 1, title: 'Renamed' },
+      { requestId: 'update', idempotencyKey: 'after-take-over' }, undefined, { instanceIdHash: stalled.instanceIdHash },
+    ))).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    await expect(runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', stalled.runId, stalled.instanceIdHash)))
+      .rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    await expect(takeOver('laptop-3', 'take-over-3')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('audits a take over with stable event types and points conflicts at instanceId', async () => {
+    const previous = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditEvents'
+    try {
+      const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+      store.state.settings.set(`${workspaceId}|core-team`, {
+        ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+        updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+      })
+      const live = createHeldRun('task-1', 'laptop-1')
+      store.seed(live)
+      setTestAppDependencies({
+        transactions: {
+          /**
+           * Returns a receipt write for the transaction.
+           *
+           * @returns The receipt write.
+           */
+          async prepareIdempotencyCompletionTransactWrite() {
+            return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+          },
+        },
+      })
+      const committed: unknown[][] = []
+      const commit = store.commit.bind(store)
+      store.commit = async (items, fenceItemCount) => {
+        committed.push([...items])
+        return commit(items, fenceItemCount)
+      }
+      const service = createCanonicalPublicAgentRunService()
+      /**
+       * Takes over the fixture run as another instance.
+       *
+       * @param key - Idempotency key.
+       * @returns The take over response.
+       */
+      const takeOver = (key: string) => runWithTestAppDependencies(() => service.takeOver(
+        credential, 'core-team', 'task-1', live.runId,
+        { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+        { requestId: 'take-over', idempotencyKey: key },
+        { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+      ))
+      await expect(takeOver('live')).rejects.toMatchObject({ reason: 'agent_run_conflict', pointer: '/instanceId' })
+      store.state.runs.set(`${workspaceId}|core-team|${live.runId}`, { ...live, leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() })
+      await takeOver('stalled')
+      const auditTypes = (committed[0] ?? []).flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('Put' in item)) return []
+        const put = item.Put
+        if (typeof put !== 'object' || put === null || !('TableName' in put) || put.TableName !== 'AuditEvents') return []
+        return 'Item' in put && typeof put.Item === 'object' && put.Item !== null && 'eventType' in put.Item ? [put.Item.eventType] : []
+      })
+      expect(auditTypes).toEqual(['agent-run.taken-over', 'agent-run.started'])
+    } finally {
+      if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+      else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
+    }
+  })
+
+  test('classifies a take over cancelled by a concurrent settings change', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const settingsKey = `${workspaceId}|core-team`
+    const enabled = {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    }
+    store.state.settings.set(settingsKey, enabled)
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.seed(stalled)
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over the stalled run while a concurrent change cancels the transaction.
+     *
+     * @param change - Settings written by the concurrent request, or undefined for an unrelated cancellation.
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOverDuring = (change: typeof enabled | undefined, key: string) => {
+      store.state.settings.set(settingsKey, enabled)
+      store.commit = async () => {
+        if (change) store.state.settings.set(settingsKey, change)
+        throw createAgentRunCommitConflictError()
+      }
+      return runWithTestAppDependencies(() => service.takeOver(
+        credential, 'core-team', 'task-1', stalled.runId,
+        { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+        { requestId: 'take-over', idempotencyKey: key },
+        { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+      ))
+    }
+    await expect(takeOverDuring({ ...enabled, revision: 2, allowTakeoverAfterLeaseExpiry: false }, 'disabled'))
+      .rejects.toMatchObject({ reason: 'agent_run_takeover_disabled' })
+    await expect(takeOverDuring({ ...enabled, revision: 2, leaseMinutes: 45 }, 'changed'))
+      .rejects.toMatchObject({ category: 'conflict' })
+    // A cancellation with nothing changed, such as an identical request's receipt, stays retryable.
+    await expect(takeOverDuring(undefined, 'unrelated')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
+  test('does not take over a run on a Work Item that is no longer started', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'unstarted' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.seed(stalled)
+    const service = createCanonicalPublicAgentRunService()
+    await expect(runWithTestAppDependencies(() => service.takeOver(
+      credential, 'core-team', 'task-1', stalled.runId,
+      { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'take-over', idempotencyKey: 'not-started' },
+      { credentialId: 'agent-key', idempotencyKey: 'not-started', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'invalid_transition' })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({ runId: stalled.runId })
+  })
+
+  test('does not take over a run that renewed its lease or belongs to another member', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const live = createHeldRun('task-1', 'laptop-1')
+    store.seed(live)
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over a run as another instance.
+     *
+     * @param runId - Run to take over.
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOver = (runId: string, key: string) => runWithTestAppDependencies(() => service.takeOver(
+      credential, 'core-team', 'task-1', runId,
+      { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'take-over', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    await expect(takeOver(live.runId, 'live')).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+
+    // A heartbeat that lands before the take over commits keeps the run.
+    store.state.runs.set(`${workspaceId}|core-team|${live.runId}`, { ...live, leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() })
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      store.state.runs.set(`${workspaceId}|core-team|${live.runId}`, { ...live, leaseExpiresAt: new Date(Date.now() + 600_000).toISOString() })
+      return commit(items, fenceItemCount)
+    }
+    await expect(takeOver(live.runId, 'renewed')).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({ runId: live.runId })
+    store.commit = commit
+
+    const foreign = { ...createHeldRun('task-1', 'laptop-9'), assigneeUserId: 'sato@example.com', leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.state.claims.clear()
+    store.seed(foreign)
+    await expect(takeOver(foreign.runId, 'foreign')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+  })
+
+  test('re-reads a take over whose run closed first, and refuses a claim held by another instance', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    const runKey = `${workspaceId}|core-team|${stalled.runId}`
+    const claimKey = `${workspaceId}|core-team|task-1`
+    store.seed(stalled)
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over the stalled run as another instance.
+     *
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOver = (key: string) => runWithTestAppDependencies(() => service.takeOver(
+      credential, 'core-team', 'task-1', stalled.runId,
+      { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'take-over', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+
+    // The run finishes between the run read and the claim read.
+    const getClaim = store.getClaim.bind(store)
+    store.getClaim = async (directoryId, teamId, workItemId) => {
+      store.state.runs.set(runKey, finishAgentRun(stalled, 'completed', 'agent', new Date()))
+      store.state.claims.delete(claimKey)
+      return getClaim(directoryId, teamId, workItemId)
+    }
+    await expect(takeOver('finished-first')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    store.getClaim = getClaim
+
+    // A claim that names the run but another instance or member is not the run's to give away.
+    store.state.claims.clear()
+    store.seed(stalled)
+    const claim = store.state.claims.get(claimKey)
+    if (!claim) throw new Error('The stalled run must hold its claim.')
+    store.state.claims.set(claimKey, { ...claim, instanceIdHash: hashAgentInstanceId('laptop-9') })
+    await expect(takeOver('other-instance')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    store.state.claims.set(claimKey, { ...claim, assigneeUserId: 'sato@example.com' })
+    await expect(takeOver('other-member')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+
+    // The transaction checks the whole holder too, when the claim changes after the precheck.
+    store.state.claims.set(claimKey, claim)
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      store.state.claims.set(claimKey, { ...claim, instanceIdHash: hashAgentInstanceId('laptop-9') })
+      return commit(items, fenceItemCount)
+    }
+    await expect(takeOver('changed-claim')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    store.commit = commit
+    expect(store.state.runs.get(runKey)).toMatchObject({ state: 'active' })
   })
 
   test('refuses heartbeats and finishes on another member run', async () => {
@@ -620,15 +990,45 @@ describe('Web Agent Run routes', () => {
     configureUnstartedAssignedWorkItem({ role: 'manager' })
     const read = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
     expect(await read.json()).toMatchObject({ revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    const keyed = { ...headers, 'Idempotency-Key': 'settings-1' }
     const saved = await app.request('http://localhost/api/teams/core-team/agent-settings', {
-      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
+      method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
     })
     expect(saved.status).toBe(200)
-    expect(await saved.json()).toMatchObject({ revision: 1, leaseMinutes: 60 })
+    const savedBody = await saved.json()
+    expect(savedBody).toMatchObject({ revision: 1, leaseMinutes: 60 })
+    // A retry after a lost response replays the committed save.
+    const retried = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(retried.status).toBe(200)
+    expect(await retried.json()).toEqual(savedBody)
+    const changedRetry = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(changedRetry.status).toBe(409)
+    // Reusing the key for a different save against the current revision is a conflict, not a second save.
+    const reusedKey = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(reusedKey.status).toBe(409)
     const stale = await app.request('http://localhost/api/teams/core-team/agent-settings', {
-      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: false }),
+      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
     })
     expect(stale.status).toBe(409)
+    // An older key stays spent after a later save with another key.
+    const later = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'settings-2' },
+      body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 90, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    expect(later.status).toBe(200)
+    const olderKey = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers: keyed, body: JSON.stringify({ expectedRevision: 2, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }),
+    })
+    expect(olderKey.status).toBe(409)
+    const current = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
+    expect(await current.json()).toMatchObject({ revision: 2, leaseMinutes: 90, allowTakeoverAfterLeaseExpiry: false })
   })
 
   test('rejects Agent settings changes from Team members', async () => {

@@ -65,13 +65,14 @@ export class AgentRunError extends Error {
  * Reports that another agent instance holds the Work Item claim.
  *
  * @param detail - Safe summary of the holding run.
+ * @param pointer - Request field that names the caller's instance; `agentInstanceId` on mutations.
  * @returns Conflict error with the `agent_run_conflict` reason.
  */
-export function createAgentRunConflictError(detail?: string): AgentRunError {
+export function createAgentRunConflictError(detail?: string, pointer = '/agentInstanceId'): AgentRunError {
   return new AgentRunError(
     'conflict',
     `Another agent instance holds this Work Item.${detail ? ` ${detail}` : ''} Inspect the task before continuing; do not take it over without the user's approval.`,
-    { reason: 'agent_run_conflict', pointer: '/agentInstanceId' },
+    { reason: 'agent_run_conflict', pointer },
   )
 }
 
@@ -85,6 +86,19 @@ export function createAgentRunNotActiveError(): AgentRunError {
     'conflict',
     'The Agent Run is no longer active for this Work Item. Stop working on it and report the situation to the user.',
     { reason: 'agent_run_not_active', pointer: '/agentRunId' },
+  )
+}
+
+/**
+ * Reports that the Team does not let another instance take over a stalled run.
+ *
+ * @returns Forbidden error with the `agent_run_takeover_disabled` reason.
+ */
+export function createAgentRunTakeoverDisabledError(): AgentRunError {
+  return new AgentRunError(
+    'forbidden',
+    'This Team does not allow taking over stalled Agent Runs. Ask a person to release the run instead.',
+    { reason: 'agent_run_takeover_disabled' },
   )
 }
 

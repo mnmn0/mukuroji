@@ -9,8 +9,11 @@ import {
   createAgentRunForbiddenError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
+  createAgentRunTakeoverDisabledError,
   describeHoldingRun,
   finishAgentRun,
+  isAgentRunStalled,
+  isClaimHeldBy,
   toAgentRun,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
@@ -117,6 +120,54 @@ async function requireOwnRun(
     throw createAgentRunConflictError(describeHoldingRun(run, new Date()))
   }
   return { run, workItemAssigneeUserId: detail.issue.assigneeUserId, workItemRevision: detail.issue.revision }
+}
+
+/**
+ * Strongly reads the run that claims a Work Item.
+ *
+ * A finish, release, or take over can commit between the claim read and the run read, so a claim
+ * whose run is no longer active is read once more; only a claim that still names it is inconsistent.
+ *
+ * @param principal - Authorized reader.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @returns The claiming active run, or undefined when no run claims the Work Item.
+ */
+async function readClaimedRun(principal: WorkspacePrincipal, teamId: string, workItemId: string): Promise<StoredAgentRun | undefined> {
+  const store = workItemDependencies.agentRuns
+  let previousRunId: string | undefined
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
+    if (!claim) return undefined
+    const run = await store.getRun(principal.directoryId, teamId, claim.runId)
+    if (run?.state === 'active' && run.workItemId === workItemId) {
+      // An active run must be the holder the claim records; a mismatch is not a race.
+      if (!isClaimHeldBy(claim, run)) break
+      return run
+    }
+    if (claim.runId === previousRunId) break
+    previousRunId = claim.runId
+  }
+  throw createAgentRunIntegrityError()
+}
+
+/**
+ * Explains why a take over found the stalled run or its claim changed, by re-reading the run.
+ *
+ * @param principal - Authorized principal.
+ * @param teamId - Team ID.
+ * @param runId - Run being taken over.
+ * @returns Not active when the run closed first, a conflict when it renewed its lease, and an
+ * integrity error when a still stalled run no longer holds its claim.
+ */
+async function explainTakeOverMiss(principal: WorkspacePrincipal, teamId: string, runId: string): Promise<AgentRunError> {
+  // A finish, release, or other take over may have closed the run, or a heartbeat renewed it.
+  const latest = await workItemDependencies.agentRuns.getRun(principal.directoryId, teamId, runId)
+  const readAt = new Date()
+  if (latest?.state !== 'active') return createAgentRunNotActiveError()
+  if (!isAgentRunStalled(latest, readAt)) return createAgentRunConflictError(describeHoldingRun(latest, readAt), '/instanceId')
+  // A claim is closed together with its run, so a stalled run that does not hold its claim is inconsistent.
+  return createAgentRunIntegrityError()
 }
 
 /**
@@ -308,10 +359,22 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const principal = await resolveReader(credential, teamId)
       const permission = await requireTeamPermission(principal, teamId, 'viewer')
       const store = workItemDependencies.agentRuns
+      const now = new Date()
+      if (filters.workItemId !== undefined) {
+        // The claim row is read strongly, so a run started moments ago is found before the index has it.
+        const assignedProjectId = await readAssignedProjectId(principal, teamId, filters.workItemId)
+        if (assignedProjectId === null || !canAccessAssignedProject(principal, permission, assignedProjectId, 'viewer')) {
+          return { items: [], hasMore: false }
+        }
+        const run = await readClaimedRun(principal, teamId, filters.workItemId)
+        const matches = run !== undefined &&
+          (filters.instanceIdHash === undefined || run.instanceIdHash === filters.instanceIdHash) &&
+          (filters.assigneeUserId === undefined || run.assigneeUserId === filters.assigneeUserId)
+        return { items: matches ? [toAgentRun(run, now)] : [], hasMore: false }
+      }
       const page = filters.state === 'active'
         ? await store.listActiveRuns(principal.directoryId, teamId, continuation, limit)
         : await store.listFinishedRuns(principal.directoryId, teamId, continuation, limit)
-      const now = new Date()
       const candidates = page.runs.filter((run) =>
         (filters.instanceIdHash === undefined || run.instanceIdHash === filters.instanceIdHash) &&
         (filters.assigneeUserId === undefined || run.assigneeUserId === filters.assigneeUserId))
@@ -401,6 +464,103 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ...(auditPut ? [auditPut] : []),
         ...(receipt ? [receipt.transactWriteItem] : []),
       ], closeItems.length)
+      return response
+    },
+
+    /** Rechecks permissions before a take over receipt replays. */
+    async authorizeTakeOver(credential, teamId, workItemId) {
+      const principal = await resolveWriter(credential, teamId)
+      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+    },
+
+    /** Supersedes a stalled run of another instance and claims the Work Item for the caller in one transaction. */
+    async takeOver(credential, teamId, workItemId, runId, input, context, idempotency) {
+      const principal = await resolveWriter(credential, teamId)
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      if (detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+      const store = workItemDependencies.agentRuns
+      const settings = await store.getSettings(principal.directoryId, teamId)
+      if (!settings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
+      if (detail.issue.statusCategory !== 'started') {
+        throw new AgentRunError('conflict', 'Only a run on a started Work Item can be taken over. Ask a person to release it.', {
+          reason: 'invalid_transition',
+        })
+      }
+      const run = await requireRun(principal, teamId, runId)
+      if (run.workItemId !== workItemId || run.state !== 'active') throw createAgentRunNotActiveError()
+      // Only another instance of the same member may take over; other members' runs need a person to release them.
+      if (run.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+      if (run.instanceIdHash === input.instanceIdHash) {
+        throw new AgentRunError('conflict', 'This instance already holds the run. Continue it instead of taking it over.', {
+          reason: 'agent_run_conflict', pointer: '/instanceId',
+        })
+      }
+      const now = new Date()
+      if (!isAgentRunStalled(run, now)) throw createAgentRunConflictError(describeHoldingRun(run, now), '/instanceId')
+      const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
+      if (!isClaimHeldBy(claim, run)) throw await explainTakeOverMiss(principal, teamId, runId)
+      const superseded = finishAgentRun(run, 'superseded', principal.userKey, now)
+      const successor = createActiveAgentRun({
+        directoryId: principal.directoryId,
+        teamId,
+        workItemId,
+        assigneeUserId: principal.userKey,
+        start: input,
+        credentialId: credential.credentialId,
+        startRevision: detail.issue.revision,
+        leaseMinutes: settings.leaseMinutes,
+        now,
+      })
+      const path = `/api/v1/work-items/${encodeURIComponent(workItemId)}/agent-runs/${encodeURIComponent(runId)}/take-over`
+      const auditContext = createMutationAuditContext({
+        workspaceId: principal.directoryId,
+        actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
+        idempotencyKey: context.idempotencyKey,
+        ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+        // The instance ID is a bearer-like secret of the agent; only its runtime and name are audited.
+        request: { method: 'POST', path, body: { runtime: input.runtime, agentName: input.agentName } },
+        source: { kind: 'api', requestId: context.requestId, method: 'POST', route: path },
+      })
+      const response = { run: toAgentRun(successor, now), supersededRun: toAgentRun(superseded, now) }
+      const supersededAudit = createAgentRunAuditPut(auditContext, superseded, 'taken-over', 'Agent Run was taken over by another instance.')
+      const startedAudit = createAgentRunAuditPut(
+        auditContext, successor, 'started', 'Agent Run took over a stalled run.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+      )
+      const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
+        ?.prepare({ status: 201, body: response })
+      const takeOverItems = store.createTakeOverItems(superseded, successor)
+      try {
+        await store.commit([
+          ...takeOverItems,
+          // The take over was authorized against this assignment and these settings.
+          createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
+          store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          ...(supersededAudit ? [supersededAudit] : []),
+          ...(startedAudit ? [startedAudit] : []),
+          ...(receipt ? [receipt.transactWriteItem] : []),
+        ], 2)
+      } catch (error) {
+        if (!(error instanceof AgentRunError)) throw error
+        if (error.reason === 'agent_run_not_active') throw await explainTakeOverMiss(principal, teamId, runId)
+        if (error.category !== 'temporarily_unavailable') throw error
+        // The Work Item or settings guard failed: report what changed instead of a retryable failure.
+        const latest = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        if (latest.detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+        if (latest.detail.issue.statusCategory !== 'started') {
+          throw new AgentRunError('conflict', 'Only a run on a started Work Item can be taken over. Ask a person to release it.', {
+            reason: 'invalid_transition',
+          })
+        }
+        if (latest.detail.issue.revision !== detail.issue.revision) {
+          throw new AgentRunError('conflict', 'The Work Item changed during the request. Reload it and retry the take over.')
+        }
+        const latestSettings = await store.getSettings(principal.directoryId, teamId)
+        if (!latestSettings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
+        if (latestSettings.revision !== settings.revision) {
+          throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
+        }
+        throw error
+      }
       return response
     },
 
