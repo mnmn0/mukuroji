@@ -7,16 +7,12 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  AGENT_RUN_ARTIFACT_TYPES,
   AGENT_RUN_REPORT_KINDS,
   AGENT_RUN_RUNTIMES,
   AGENT_RUN_SCHEMA_VERSION,
-  AGENT_RUN_VERIFICATION_STATUSES,
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
-  type AgentRunArtifact,
   type AgentRunOutcome,
-  type AgentRunVerification,
   type AgentSettings,
   type UpdateAgentSettingsRequest,
 } from '@mukuroji/contracts'
@@ -27,7 +23,7 @@ import {
   type AgentRunRevocation,
   type StoredAgentRunClaim,
 } from '../../domain/agent-run'
-import { readAgentRunArtifactUrl, type StoredAgentRunReport } from '../../domain/agent-run-report'
+import { readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
@@ -475,14 +471,15 @@ function readLastReport(item: Record<string, unknown>): Pick<StoredAgentRun, 'la
 }
 
 /**
- * Builds the sort-key prefix shared by one Work Item's reports. The Work Item ID is encoded so
- * that it cannot contain the key separator.
+ * Builds the sort-key prefix shared by one Work Item's reports from a digest of the Work Item ID.
  *
  * @param workItemId - Work Item ID.
  * @returns Sort-key prefix ending with the separator.
  */
 function reportRecordKeyPrefix(workItemId: string): string {
-  return `agent-run-report#${encodeURIComponent(workItemId)}#`
+  // A Work Item ID can hold many multi-byte letters; a fixed-length digest keeps the key far below
+  // DynamoDB's 1,024-byte sort key limit and free of the separator. Rows also store the ID itself.
+  return `agent-run-report#${createHash('sha256').update(workItemId).digest('base64url')}#`
 }
 
 /**
@@ -513,52 +510,20 @@ function serializeReport(report: StoredAgentRunReport): Record<string, unknown> 
 }
 
 /**
- * Parses a stored verification list.
+ * Re-applies the request rules to a stored row's structured fields, so a row written outside the
+ * validator never reaches viewers.
  *
- * @param value - Stored value.
- * @returns Verifications.
+ * @param item - Stored row.
+ * @returns The validated fields.
  */
-function parseVerifications(value: unknown): AgentRunVerification[] {
-  if (!Array.isArray(value)) throw createAgentRunIntegrityError()
-  return value.map((item) => {
-    if (!isRecord(item)) throw createAgentRunIntegrityError()
-    const status = AGENT_RUN_VERIFICATION_STATUSES.find((candidate) => candidate === item.status)
-    if (!status) throw createAgentRunIntegrityError()
-    const summary = optionalStoredString(item, 'summary')
-    return { command: storedString(item, 'command'), status, ...(summary === undefined ? {} : { summary }) }
-  })
-}
-
-/**
- * Re-applies the request rule to a stored artifact URL, so a row written outside the validator
- * never reaches viewers.
- *
- * @param value - Stored value.
- * @returns The URL.
- */
-function parseStoredArtifactUrl(value: unknown): string {
+function parseReportDetails(item: Record<string, unknown>): AgentRunReportDetails {
+  // A list is optional in a request but always written on a row.
+  if (!Array.isArray(item.verifications) || !Array.isArray(item.artifacts)) throw createAgentRunIntegrityError()
   try {
-    return readAgentRunArtifactUrl(value, '/url')
+    return readAgentRunReportDetails(item)
   } catch {
     throw createAgentRunIntegrityError()
   }
-}
-
-/**
- * Parses a stored artifact list.
- *
- * @param value - Stored value.
- * @returns Artifacts.
- */
-function parseArtifacts(value: unknown): AgentRunArtifact[] {
-  if (!Array.isArray(value)) throw createAgentRunIntegrityError()
-  return value.map((item) => {
-    if (!isRecord(item)) throw createAgentRunIntegrityError()
-    const type = AGENT_RUN_ARTIFACT_TYPES.find((candidate) => candidate === item.type)
-    if (!type) throw createAgentRunIntegrityError()
-    const label = optionalStoredString(item, 'label')
-    return { type, url: parseStoredArtifactUrl(item.url), ...(label === undefined ? {} : { label }) }
-  })
 }
 
 /**
@@ -582,7 +547,6 @@ function parseReport(
   if (item.schemaVersion !== AGENT_RUN_SCHEMA_VERSION || item.entityType !== 'agent-run-report') throw createAgentRunIntegrityError()
   const kind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === item.kind)
   const sequence = storedInteger(item, 'sequence')
-  const changedFileCount = item.changedFileCount === undefined ? undefined : storedInteger(item, 'changedFileCount')
   const report: StoredAgentRunReport = {
     schemaVersion: AGENT_RUN_SCHEMA_VERSION,
     runId: storedString(item, 'runId'),
@@ -592,9 +556,7 @@ function parseReport(
     sequence,
     kind: kind ?? 'progress',
     commentId: storedString(item, 'commentId'),
-    verifications: parseVerifications(item.verifications),
-    artifacts: parseArtifacts(item.artifacts),
-    ...(changedFileCount === undefined ? {} : { changedFileCount }),
+    ...parseReportDetails(item),
     createdAt: storedTimestamp(item, 'createdAt'),
     createdBy: storedString(item, 'createdBy'),
   }

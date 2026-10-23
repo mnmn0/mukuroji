@@ -80,7 +80,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   /**
    * Endpoint each recent report key was sent to, per task. A retry after a lost response must send
    * the same request to replay its receipt, even if a run closed or started in between; a key reused
-   * for another task is sent as that task's own request, so the server rejects the reuse.
+   * for another task is sent as that task's own request, so the server rejects the reuse. The routes
+   * live only in this process: after a restart, such a retry fails with an error instead of replaying,
+   * and never saves a second report.
    */
   const reportRoutesByKey = new Map<string, ReportRoute>()
 
@@ -453,7 +455,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       if (structured) {
         throw new AgentTaskError(
           'agent_run_not_active',
-          'Structured reports need your active run on this task, and you have none. Nothing was saved; stop and ask the user.',
+          'Structured reports need your active run on this task, and you have none. This call saved nothing, but a report sent earlier with the same key may already be on the task; check its discussion, then stop and ask the user.',
         )
       }
       const fence = remembered && 'fence' in remembered ? remembered.fence : await fenceFor(id)

@@ -179,7 +179,7 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
 
 - report は Run に紐づく `AgentRunReport` row と canonical Collaboration の comment を 1 つの
   transaction で保存する。row の sort key は
-  `agent-run-report#<URL encode した workItemId>#<createdAt>#<runId>#<sequence>` とし、Work Item の
+  `agent-run-report#<workItemId の SHA-256（base64url）>#<createdAt>#<runId>#<sequence>` とし、Work Item の
   report を作成順に強整合の Query 1 回で読めるようにする。Run row の更新は `lastHeartbeatAt` が report
   時刻以下であることも条件にし、report より新しい heartbeat の lease を巻き戻さない。comment 本文は Run に記録した agent 名の
   label（`[agentName]`）と `message` で server が組み立て、構造化 field は本文へ埋め込まず row に
@@ -221,7 +221,9 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
 - MCP は直近 100 件の report key を Work Item ごとに、送った先（Run の report endpoint、または comment
   endpoint とその fence）と一緒に覚える。応答が失われた後の再送は、間に Run が終了・開始しても同じ
   request を送り、server の receipt を再生する。別の Work Item に同じ key を使った場合はその Work Item の
-  request として送るため、server が idempotency conflict として拒否する。
+  request として送るため、server が idempotency conflict として拒否する。この記憶は MCP の process 内だけに
+  あり、再起動後や 100 件を超えて追い出された後の再送は、Run が終了していれば `agent_run_not_active`、
+  新しい Run が始まっていれば idempotency conflict になる。どちらも 2 件目を保存することはない。
 
 ## 仕様と context
 

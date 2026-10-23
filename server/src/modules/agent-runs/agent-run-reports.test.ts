@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import {
   AGENT_RUN_ARTIFACT_URL_PATTERN,
   AGENT_RUN_REPORT_LINE_PATTERN,
@@ -18,6 +19,14 @@ import {
 } from './domain/agent-run-report'
 
 const now = new Date('2026-10-22T00:00:00.000Z')
+
+/**
+ * Builds the report sort-key prefix of a Work Item, as the store does.
+ *
+ * @param workItemId - Work Item ID.
+ * @returns Sort-key prefix.
+ */
+const reportPrefix = (workItemId: string) => `agent-run-report#${createHash('sha256').update(workItemId).digest('base64url')}#`
 
 /**
  * Creates an active run fixture.
@@ -255,7 +264,7 @@ describe('DynamoDB Agent Run reports', () => {
     })
     expect(reportPut?.Put).toMatchObject({
       Item: {
-        recordKey: `agent-run-report#task-1#${now.toISOString()}#${run.runId}#000003`,
+        recordKey: `${reportPrefix('task-1')}${now.toISOString()}#${run.runId}#000003`,
         entityType: 'agent-run-report', workspaceId: 'workspace-1', sequence: 3, commentId: 'cmt_1',
       },
       ConditionExpression: 'attribute_not_exists(recordKey)',
@@ -264,11 +273,17 @@ describe('DynamoDB Agent Run reports', () => {
     expect(() => store.createReportItems(createRun({ state: 'finished' }), createReport(run), now)).toThrow(TypeError)
   })
 
-  test('encodes the Work Item ID so that report keys of different Work Items never share a prefix', () => {
-    const run = createRun({ workItemId: 'a#b' })
+  test('keys reports by a fixed-length digest of the Work Item ID', () => {
     const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
-    const [, , reportPut] = store.createReportItems(run, createReport(run), now)
-    expect(String(reportPut?.Put?.Item?.recordKey)).toStartWith('agent-run-report#a%23b#')
+    // A separator in the ID cannot make one Work Item's prefix match another's.
+    const separated = createRun({ workItemId: 'a#b' })
+    const [, , separatedPut] = store.createReportItems(separated, createReport(separated), now)
+    expect(String(separatedPut?.Put?.Item?.recordKey)).toStartWith(reportPrefix('a#b'))
+    // A long multi-byte ID still yields a key far below DynamoDB's 1,024-byte sort key limit.
+    const long = createRun({ workItemId: '漢'.repeat(300) })
+    const [, , longPut] = store.createReportItems(long, createReport(long), now)
+    expect(Buffer.byteLength(String(longPut?.Put?.Item?.recordKey))).toBeLessThan(200)
+    expect(longPut?.Put?.Item?.workItemId).toBe('漢'.repeat(300))
   })
 
   test('lists a Work Item\'s reports newest first with strong reads and fails closed on foreign rows', async () => {
@@ -288,7 +303,7 @@ describe('DynamoDB Agent Run reports', () => {
     if (!(query instanceof QueryCommand)) throw new Error('Reports must be queried.')
     expect(query.input).toMatchObject({
       KeyConditionExpression: '#directoryTeamId = :partition AND begins_with(#recordKey, :prefix)',
-      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core', ':prefix': 'agent-run-report#task-1#' },
+      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core', ':prefix': reportPrefix('task-1') },
       ScanIndexForward: false,
       ConsistentRead: true,
     })
@@ -298,7 +313,7 @@ describe('DynamoDB Agent Run reports', () => {
     expect(exactPage).toEqual({ reports: [expect.objectContaining({ sequence: 1 })] })
     expect(exact.commands).toHaveLength(2)
     // More reports than the limit continue after the last returned report.
-    const older = { ...item, recordKey: `agent-run-report#task-1#2026-10-21T00:00:00.000Z#${run.runId}#000001`, createdAt: '2026-10-21T00:00:00.000Z' }
+    const older = { ...item, recordKey: `${reportPrefix('task-1')}2026-10-21T00:00:00.000Z#${run.runId}#000001`, createdAt: '2026-10-21T00:00:00.000Z' }
     const more = createClient([{ Items: [item, older] }])
     const morePage = await new DynamoDbAgentRunStore(more.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 1)
     expect(morePage.reports).toHaveLength(1)
@@ -307,10 +322,20 @@ describe('DynamoDB Agent Run reports', () => {
     const foreign = createClient([{ Items: [{ ...item, workItemId: 'task-2' }] }])
     await expect(new DynamoDbAgentRunStore(foreign.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 20))
       .rejects.toMatchObject({ category: 'temporarily_unavailable' })
-    // A stored URL that the request validator would reject never reaches viewers.
-    const unsafe = createClient([{ Items: [{ ...item, artifacts: [{ type: 'url', url: 'https://example.test/log?token=secret' }] }] }])
-    await expect(new DynamoDbAgentRunStore(unsafe.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 20))
-      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    // Stored fields that the request validator would reject never reach viewers.
+    for (const corrupted of [
+      { artifacts: [{ type: 'url', url: 'https://example.test/log?token=secret' }] },
+      { artifacts: [{ type: 'url', url: 'https://example.test/log', label: 'two\nlines' }] },
+      { verifications: [{ command: 'bun\ntest', status: 'passed' }] },
+      { verifications: [{ command: 'bun test', status: 'passed', summary: '   ' }] },
+      { verifications: Array.from({ length: 21 }, () => ({ command: 'bun test', status: 'passed' })) },
+      { verifications: undefined },
+      { changedFileCount: -1 },
+    ]) {
+      const unsafe = createClient([{ Items: [{ ...item, ...corrupted }] }])
+      await expect(new DynamoDbAgentRunStore(unsafe.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 20))
+        .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    }
     const cursor = Buffer.from(JSON.stringify({ directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run#other' })).toString('base64url')
     await expect(new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', cursor, 20))
       .rejects.toMatchObject({ category: 'validation_failed' })

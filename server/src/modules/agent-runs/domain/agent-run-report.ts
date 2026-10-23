@@ -205,6 +205,29 @@ function readArtifact(value: unknown, pointer: string): AgentRunArtifact {
   }
 }
 
+/** Validated structured fields of a report: what it saves besides its comment. */
+export type AgentRunReportDetails = Pick<ValidatedAgentRunReport, 'verifications' | 'artifacts' | 'changedFileCount'>
+
+/**
+ * Validates the structured fields of a report. Requests and stored rows share these rules.
+ *
+ * @param value - Record holding `verifications`, `artifacts`, and `changedFileCount`.
+ * @returns The validated fields.
+ */
+export function readAgentRunReportDetails(value: Record<string, unknown>): AgentRunReportDetails {
+  const changedFileCount = value.changedFileCount
+  if (changedFileCount !== undefined && (typeof changedFileCount !== 'number' || !Number.isSafeInteger(changedFileCount) || changedFileCount < 0)) {
+    throw new AgentRunError('validation_failed', 'changedFileCount must be a non-negative integer.', { pointer: '/changedFileCount' })
+  }
+  return {
+    verifications: readList(value.verifications, '/verifications', 'verifications')
+      .map((item, index) => readVerification(item, `/verifications/${index}`)),
+    artifacts: readList(value.artifacts, '/artifacts', 'artifacts')
+      .map((item, index) => readArtifact(item, `/artifacts/${index}`)),
+    ...(changedFileCount === undefined ? {} : { changedFileCount }),
+  }
+}
+
 /**
  * Validates a structured report request body.
  *
@@ -222,19 +245,11 @@ export function readReportAgentRunRequest(value: unknown): ValidatedAgentRunRepo
       { pointer: '/message' },
     )
   }
-  const changedFileCount = value.changedFileCount
-  if (changedFileCount !== undefined && (typeof changedFileCount !== 'number' || !Number.isSafeInteger(changedFileCount) || changedFileCount < 0)) {
-    throw new AgentRunError('validation_failed', 'changedFileCount must be a non-negative integer.', { pointer: '/changedFileCount' })
-  }
   return {
     instanceIdHash: hashAgentInstanceId(readAgentInstanceId(value.instanceId, '/instanceId')),
     kind: value.kind === undefined ? 'progress' : readChoice(value.kind, AGENT_RUN_REPORT_KINDS, '/kind', 'kind'),
     message,
-    verifications: readList(value.verifications, '/verifications', 'verifications')
-      .map((item, index) => readVerification(item, `/verifications/${index}`)),
-    artifacts: readList(value.artifacts, '/artifacts', 'artifacts')
-      .map((item, index) => readArtifact(item, `/artifacts/${index}`)),
-    ...(changedFileCount === undefined ? {} : { changedFileCount }),
+    ...readAgentRunReportDetails(value),
   }
 }
 
