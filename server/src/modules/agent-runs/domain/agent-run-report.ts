@@ -172,7 +172,9 @@ export function readAgentRunArtifactUrl(value: unknown, pointer: string): string
   if (typeof value !== 'string' || value.length === 0 || value.length > AGENT_RUN_ARTIFACT_URL_MAX_LENGTH) throw invalid()
   if (value !== value.trim() || /\s/.test(value) || hasControlCharacter(value)) throw invalid()
   // The authority must follow the lowercase scheme directly, so the stored text reads as it parses.
-  if (!value.startsWith('https://') || value.startsWith('https:///')) throw invalid()
+  // A backslash or an `@` in the authority would make the text read differently from how it parses.
+  if (!value.startsWith('https://') || value.startsWith('https:///') || value.includes('\\')) throw invalid()
+  if (/^[^/?#]*@/.test(value.slice('https://'.length))) throw invalid()
   let parsed: URL
   try {
     parsed = new URL(value)

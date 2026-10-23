@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { PUBLIC_API_OPENAPI_DOCUMENT } from '@mukuroji/contracts'
 import { QueryCommand, TransactWriteCommand, type GetCommand, type UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbAgentRunStore, type AgentRunDocumentClient } from './adapter-out/dynamodb/agent-run-store'
 import { InMemoryAgentRunStore } from './adapter-out/in-memory/agent-run-store'
@@ -132,6 +133,9 @@ describe('Agent Run report validation', () => {
       'https://token@github.com/example',
       'javascript:alert(1)',
       'https:///path',
+      'https://@github.com/example',
+      'https://github.com\\@evil.test/example',
+      'https://github.com/a\\b',
       ' https://github.com',
       'https://github.com/a b',
       `https://example.test/${'a'.repeat(2_048)}`,
@@ -140,6 +144,41 @@ describe('Agent Run report validation', () => {
       expect(() => readAgentRunArtifactUrl(url, '/artifacts/0/url')).toThrow(expect.objectContaining({
         category: 'validation_failed', reason: 'invalid_artifact_url', pointer: '/artifacts/0/url',
       }))
+    }
+  })
+
+  test('agrees with the OpenAPI artifact URL pattern', () => {
+    const pattern = new RegExp(PUBLIC_API_OPENAPI_DOCUMENT.components.schemas.AgentRunArtifact.properties.url.pattern)
+    for (const url of [
+      'https://github.com/example/repo/pull/1',
+      'https://github.com/example/repo/pull/1#discussion_r1',
+      'https://example.test',
+      'https://example.test:8443/a@b/c#top',
+      'https://example.test/log?token=x',
+      'https://example.test/log#access_token=x',
+      'https://example.test/log#a?b',
+      'https://user:pass@example.test/log',
+      'https://@example.test/log',
+      'https://example.test\\@evil.test/log',
+      'https://example.test/a\\b',
+      'https:///path',
+      'https://example.test/a b',
+      'https://example.test/a\tb',
+    ]) {
+      /**
+       * Checks whether the server accepts the URL.
+       *
+       * @returns True when the server stores the URL.
+       */
+      const accepted = () => {
+        try {
+          readAgentRunArtifactUrl(url, '/url')
+          return true
+        } catch {
+          return false
+        }
+      }
+      expect({ url, accepted: pattern.test(url) }).toEqual({ url, accepted: accepted() })
     }
   })
 })

@@ -197,8 +197,8 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   条件にする。先に report・heartbeat・lease 延長が確定した場合は close を確定させず、Run を読み直して
   組み立て直す（最大 3 回、超えたら `503 temporarily_unavailable`）。これにより finish の応答と receipt、
   解放の応答は確定した Run row と一致する。Work Item の削除・archive に伴う解放はこの条件を付けない。
-- `url` は小文字の `https://` で始まり host を持つもののみ、credential 付き URL と空白・制御文字を
-  拒否し、最大 2,048 文字とする。presigned URL や token parameter を保存しないよう、query と `=` を
+- `url` は小文字の `https://` で始まり host を持つもののみ、credential 付き URL（authority 内の `@`）、
+  backslash、空白・制御文字を拒否し、最大 2,048 文字とする。presigned URL や token parameter を保存しないよう、query と `=` を
   含む fragment も拒否する（`#discussion_r1` のような anchor は許可する）。違反は `400 validation_failed` と `errors[].code`
   `invalid_artifact_url` で返す。server は URL を取得・解決しない。表示時は既存の rich text safety と
   同じ link 方針に従う。
