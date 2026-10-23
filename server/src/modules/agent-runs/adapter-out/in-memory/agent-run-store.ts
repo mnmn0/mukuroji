@@ -335,8 +335,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
-    const [runUpdate, claimDelete, revocationPut] = this.#builder.createCloseItems(run, expectedInstanceIdHash)
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, fenceProgress = false): AgentRunTransactItem[] {
+    const [runUpdate, claimDelete, revocationPut] = this.#builder.createCloseItems(run, expectedInstanceIdHash, fenceProgress)
     if (!runUpdate || !claimDelete) throw new Error('The close builder returned an unexpected item count.')
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const claimKey = key(run.directoryId, run.teamId, run.workItemId)
@@ -345,7 +345,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
         check: (state) => {
           const current = state.runs.get(runKey)
           return current?.state === 'active' &&
-            (expectedInstanceIdHash === undefined || current.instanceIdHash === expectedInstanceIdHash)
+            (expectedInstanceIdHash === undefined || current.instanceIdHash === expectedInstanceIdHash) &&
+            (!fenceProgress || (current.reportCount === run.reportCount && current.lastHeartbeatAt === run.lastHeartbeatAt))
         },
         apply: (state) => {
           const current = state.runs.get(runKey)

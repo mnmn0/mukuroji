@@ -10,6 +10,7 @@ import {
 } from '../../modules/collaboration/collaboration'
 import {
   AgentRunError,
+  createAgentRunCommitConflictError,
   createAgentRunConflictError,
   createAgentRunForbiddenError,
   createAgentRunIntegrityError,
@@ -182,6 +183,55 @@ export async function classifyAgentRunFenceFailure(
     return classified
   }
   return new AgentRunError('conflict', 'The Agent Run claim changed during the request. Reload the task and retry.')
+}
+
+/** Attempts a close makes before a report or heartbeat that keeps moving the run is reported as a conflict. */
+const AGENT_RUN_CLOSE_ATTEMPTS = 3
+
+/**
+ * Commits a close built with `fenceProgress` from an active run as read.
+ *
+ * A report, heartbeat, or lease extension of the same run that commits after the read fails the
+ * close's progress fence. The close is then not committed, and the caller rebuilds it from a fresh
+ * read so that its response and receipt describe the row it commits.
+ *
+ * @param items - Close writes first, then the caller's other writes.
+ * @param fenceItemCount - Number of leading close writes.
+ * @param run - Active run the close was built from.
+ * @returns True once committed; false when the run moved and the close must be rebuilt.
+ */
+export async function commitProgressFencedClose(
+  items: readonly AgentRunTransactItem[],
+  fenceItemCount: number,
+  run: StoredAgentRun,
+): Promise<boolean> {
+  const store = workItemDependencies.agentRuns
+  try {
+    await store.commit(items, fenceItemCount)
+    return true
+  } catch (error) {
+    if (!(error instanceof AgentRunError) || error.reason !== 'agent_run_not_active') throw error
+    const latest = await store.getRun(run.directoryId, run.teamId, run.runId)
+    const moved = latest?.state === 'active' && latest.instanceIdHash === run.instanceIdHash &&
+      (latest.reportCount !== run.reportCount || latest.lastHeartbeatAt !== run.lastHeartbeatAt)
+    if (!moved) throw error
+    return false
+  }
+}
+
+/**
+ * Repeats a progress-fenced close until it commits from an unchanged read.
+ *
+ * @param closeOnce - Reads the run, commits its close, and returns the response, or undefined when
+ *   {@link commitProgressFencedClose} reported that the run moved after the read.
+ * @returns The response of the committed close.
+ */
+export async function retryProgressFencedClose<T>(closeOnce: () => Promise<T | undefined>): Promise<T> {
+  for (let attempt = 0; attempt < AGENT_RUN_CLOSE_ATTEMPTS; attempt += 1) {
+    const response = await closeOnce()
+    if (response !== undefined) return response
+  }
+  throw createAgentRunCommitConflictError()
 }
 
 /**

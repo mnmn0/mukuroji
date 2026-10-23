@@ -1084,6 +1084,51 @@ describe('Agent Run reports', () => {
     }
     await expect(report({ message: 'Reassigned meanwhile' }, 'reassigned')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
   })
+
+  test('rebuilds a finish that a concurrent report overtakes so its response matches the closed row', async () => {
+    const { store, held, report, service } = configureReport()
+    let interfere: (() => Promise<unknown>) | undefined
+    const commit = store.commit.bind(store)
+    const attempts: unknown[][] = []
+    store.commit = async (items, fenceItemCount) => {
+      attempts.push([...items])
+      const pending = interfere
+      interfere = undefined
+      await pending?.()
+      return commit(items, fenceItemCount)
+    }
+    interfere = () => report({ message: 'Just before finishing' }, 'overtaking')
+    const finished = await runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-overtaken' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-overtaken', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    const stored = store.state.runs.get(`${workspaceId}|core-team|${held.runId}`)
+    expect(stored).toMatchObject({ state: 'finished', outcome: 'completed', reportCount: 1 })
+    expect(finished).toMatchObject({ state: 'finished', reportCount: 1, lastHeartbeatAt: stored?.lastHeartbeatAt, leaseExpiresAt: stored?.leaseExpiresAt })
+    expect(attempts).toHaveLength(2)
+    expect(JSON.stringify(attempts[0])).toContain('#reportCount = :reportCount AND #lastHeartbeatAt = :lastHeartbeatAt')
+  })
+
+  test('reports a finish that keeps losing to the run\'s progress as retryable and leaves the run active', async () => {
+    const { store, held, service } = configureReport()
+    const runKey = `${workspaceId}|core-team|${held.runId}`
+    const commit = store.commit.bind(store)
+    let beats = 0
+    store.commit = async (items, fenceItemCount) => {
+      const current = store.state.runs.get(runKey)
+      beats += 1
+      if (current) store.state.runs.set(runKey, { ...current, lastHeartbeatAt: new Date(Date.now() + beats * 1_000).toISOString() })
+      return commit(items, fenceItemCount)
+    }
+    await expect(runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-starved' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-starved', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    expect(beats).toBe(3)
+    expect(store.state.runs.get(runKey)).toMatchObject({ state: 'active' })
+  })
 })
 
 describe('Web Agent Run routes', () => {
@@ -1135,6 +1180,33 @@ describe('Web Agent Run routes', () => {
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
     const again = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
     expect(again.status).toBe(200)
+  })
+
+  test('rebuilds a release that a concurrent report overtakes so it returns the closed row', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const runKey = `${workspaceId}|core-team|${held.runId}`
+    const commit = store.commit.bind(store)
+    let overtaken = false
+    store.commit = async (items, fenceItemCount) => {
+      const current = store.state.runs.get(runKey)
+      if (!overtaken && current) {
+        overtaken = true
+        const reportedAt = new Date(Date.now() + 1_000)
+        store.applyTransactItems(store.createReportItems(current, {
+          schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1',
+          sequence: current.reportCount + 1, kind: 'progress', commentId: 'cmt_overtaking', verifications: [], artifacts: [],
+          createdAt: reportedAt.toISOString(), createdBy: 'demo@example.com',
+        }, reportedAt))
+      }
+      return commit(items, fenceItemCount)
+    }
+    const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
+    expect(released.status).toBe(200)
+    const stored = store.state.runs.get(runKey)
+    expect(stored).toMatchObject({ state: 'finished', outcome: 'released', reportCount: 1 })
+    expect(await released.json()).toMatchObject({ state: 'finished', reportCount: 1, leaseExpiresAt: stored?.leaseExpiresAt })
   })
 
   test('lets only the assignee or a Team manager release a run', async () => {

@@ -223,7 +223,7 @@ export type AgentRunVerification = {
 export type AgentRunArtifact = {
   /** Kind of artifact. */
   type: AgentRunArtifactType
-  /** HTTPS URL without credentials. */
+  /** HTTPS URL with a host, without userinfo, whitespace, a query, or `=` in its fragment. */
   url: string
   /** Optional display label. */
   label?: string

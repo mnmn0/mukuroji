@@ -38,8 +38,10 @@ import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/a
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+  commitProgressFencedClose,
   createAgentRunAuditPut,
   isAgentRunFenceConflict,
+  retryProgressFencedClose,
 } from '../shared/agent-run-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import {
@@ -502,46 +504,50 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     /** Closes the caller's own run and removes its claim. */
     async finish(credential, teamId, runId, { outcome, instanceIdHash }, context, idempotency) {
       const principal = await resolveWriter(credential, teamId)
-      const { run, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
-      const now = new Date()
-      if (run.state !== 'active') {
-        if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)
-        throw createAgentRunNotActiveError()
-      }
-      const finished = finishAgentRun(run, outcome, 'agent', now)
-      const auditContext = createMutationAuditContext({
-        workspaceId: principal.directoryId,
-        actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
-        idempotencyKey: context.idempotencyKey,
-        ...(context.correlationId ? { correlationId: context.correlationId } : {}),
-        request: {
-          method: 'POST',
-          path: `/api/v1/agent-runs/${encodeURIComponent(runId)}/finish`,
-          // The instance ID is a bearer-like secret of the agent; only the outcome is audited.
-          body: { outcome },
-        },
-        source: {
-          kind: 'api',
-          requestId: context.requestId,
-          method: 'POST',
-          route: `/api/v1/agent-runs/${encodeURIComponent(runId)}/finish`,
-        },
+      // The response and receipt are built from the run as read, so a report or heartbeat that
+      // commits first sends the close back to read the run again.
+      return retryProgressFencedClose(async () => {
+        const { run, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+        const now = new Date()
+        if (run.state !== 'active') {
+          if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)
+          throw createAgentRunNotActiveError()
+        }
+        const finished = finishAgentRun(run, outcome, 'agent', now)
+        const auditContext = createMutationAuditContext({
+          workspaceId: principal.directoryId,
+          actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
+          idempotencyKey: context.idempotencyKey,
+          ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+          request: {
+            method: 'POST',
+            path: `/api/v1/agent-runs/${encodeURIComponent(runId)}/finish`,
+            // The instance ID is a bearer-like secret of the agent; only the outcome is audited.
+            body: { outcome },
+          },
+          source: {
+            kind: 'api',
+            requestId: context.requestId,
+            method: 'POST',
+            route: `/api/v1/agent-runs/${encodeURIComponent(runId)}/finish`,
+          },
+        })
+        const response = toAgentRun(finished, now)
+        const auditPut = createAgentRunAuditPut(auditContext, finished, 'finished', `Agent Run finished as ${outcome}.`)
+        const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
+          ?.prepare({ status: 200, body: response })
+        const store = workItemDependencies.agentRuns
+        const closeItems = store.createCloseItems(finished, instanceIdHash, true)
+        const committed = await commitProgressFencedClose([
+          ...closeItems,
+          // The finish was authorized against this Work Item state; a concurrent move out of the
+          // credential's scope must win.
+          createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, run.workItemId, workItemRevision),
+          ...(auditPut ? [auditPut] : []),
+          ...(receipt ? [receipt.transactWriteItem] : []),
+        ], closeItems.length, run)
+        return committed ? response : undefined
       })
-      const response = toAgentRun(finished, now)
-      const auditPut = createAgentRunAuditPut(auditContext, finished, 'finished', `Agent Run finished as ${outcome}.`)
-      const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
-        ?.prepare({ status: 200, body: response })
-      const store = workItemDependencies.agentRuns
-      const closeItems = store.createCloseItems(finished, instanceIdHash)
-      await store.commit([
-        ...closeItems,
-        // The finish was authorized against this Work Item state; a concurrent move out of the
-        // credential's scope must win.
-        createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, run.workItemId, workItemRevision),
-        ...(auditPut ? [auditPut] : []),
-        ...(receipt ? [receipt.transactWriteItem] : []),
-      ], closeItems.length)
-      return response
     },
 
     /** Rechecks ownership and the requested Project before a report receipt replays. */

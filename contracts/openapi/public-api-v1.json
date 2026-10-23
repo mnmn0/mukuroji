@@ -452,10 +452,10 @@
             "type": "string"
           },
           "url": {
-            "description": "HTTPS URL without credentials.",
+            "description": "HTTPS URL with a host and at most 2048 characters. It must not contain userinfo (`user:password@`), whitespace or control characters, a query string (`?`), or `=` in its fragment, because presigned links and tokens are carried there; an anchor fragment such as `#discussion_r1` is allowed. Violations are rejected with `invalid_artifact_url`.",
             "maxLength": 2048,
             "minLength": 9,
-            "pattern": "^https://[^/]",
+            "pattern": "^https://[^/?#@\\s\\x00-\\x1F\\x7F]+(/[^?#\\s\\x00-\\x1F\\x7F]*)?(#[^?=\\s\\x00-\\x1F\\x7F]*)?$",
             "type": "string"
           }
         },

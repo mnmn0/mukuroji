@@ -190,9 +190,12 @@ export interface AgentRunStore {
    * revoke the run's instance on the Work Item.
    * @param run - Finished form of the run.
    * @param expectedInstanceIdHash - Instance that must still own the run, when an agent closes it.
+   * @param fenceProgress - Also require the report count and last heartbeat that were read, so a
+   *   response built from the read run describes the committed row; a concurrent report or
+   *   heartbeat then fails the close like a run that is no longer active.
    * @returns Run update and claim delete conditioned on the run still being active, then any revocation put.
    */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, fenceProgress?: boolean): AgentRunTransactItem[]
   /**
    * Builds the writes that hand a stalled run's Work Item to another instance: the stalled run is
    * superseded and its instance revoked, and the successor takes over the claim in place.
@@ -1152,11 +1155,16 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, fenceProgress = false): AgentRunTransactItem[] {
     if (run.state !== 'finished' || !run.outcome || !run.finishedAt || !run.finishedBy) {
       throw new TypeError('createCloseItems requires the finished form of a run.')
     }
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const conditions = [
+      '#state = :active',
+      ...(expectedInstanceIdHash === undefined ? [] : ['#instanceIdHash = :instanceIdHash']),
+      ...(fenceProgress ? ['#reportCount = :reportCount', '#lastHeartbeatAt = :lastHeartbeatAt'] : []),
+    ]
     return [
       {
         Update: {
@@ -1164,12 +1172,11 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
           UpdateExpression: 'SET #state = :finished, #outcome = :outcome, #finishedAt = :finishedAt, #finishedBy = :finishedBy ' +
             'REMOVE #activeRunPartition, #activeRunSortKey, #lastHeartbeatRequestAt',
-          ConditionExpression: expectedInstanceIdHash === undefined
-            ? '#state = :active'
-            : '#state = :active AND #instanceIdHash = :instanceIdHash',
+          ConditionExpression: conditions.join(' AND '),
           ExpressionAttributeNames: {
             '#state': 'state',
             ...(expectedInstanceIdHash === undefined ? {} : { '#instanceIdHash': 'instanceIdHash' }),
+            ...(fenceProgress ? { '#reportCount': 'reportCount', '#lastHeartbeatAt': 'lastHeartbeatAt' } : {}),
             '#outcome': 'outcome',
             '#finishedAt': 'finishedAt',
             '#finishedBy': 'finishedBy',
@@ -1184,6 +1191,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             ':finishedBy': run.finishedBy,
             ':active': 'active',
             ...(expectedInstanceIdHash === undefined ? {} : { ':instanceIdHash': expectedInstanceIdHash }),
+            ...(fenceProgress ? { ':reportCount': run.reportCount, ':lastHeartbeatAt': run.lastHeartbeatAt } : {}),
           },
         },
       },
