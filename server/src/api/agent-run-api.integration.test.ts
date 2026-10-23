@@ -356,6 +356,22 @@ describe('public Agent Run service', () => {
     expect(await claimedBy('other-laptop')).toEqual([])
     store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'completed', 'agent', new Date())))
     expect(await claimedBy('laptop-1')).toEqual([])
+
+    // A claim read just before its run closed is read again rather than reported as inconsistent.
+    const successor = createHeldRun('task-1', 'laptop-2')
+    store.seed(successor)
+    const getClaim = store.getClaim.bind(store)
+    let staleReads = 1
+    store.getClaim = async (directoryId, teamId, workItemId) => {
+      const claim = await getClaim(directoryId, teamId, workItemId)
+      if (staleReads === 0 || !claim) return claim
+      staleReads -= 1
+      return { ...claim, runId: held.runId }
+    }
+    expect(await claimedBy()).toEqual([successor.runId])
+    // A claim that keeps naming a finished run is still an integrity failure.
+    staleReads = 2
+    await expect(claimedBy()).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
   test('stops an agent whose run a person released, even when it omits the run ID', async () => {

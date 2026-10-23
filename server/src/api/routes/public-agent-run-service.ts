@@ -122,6 +122,31 @@ async function requireOwnRun(
 }
 
 /**
+ * Strongly reads the run that claims a Work Item.
+ *
+ * A finish, release, or take over can commit between the claim read and the run read, so a claim
+ * whose run is no longer active is read once more; only a claim that still names it is inconsistent.
+ *
+ * @param principal - Authorized reader.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @returns The claiming active run, or undefined when no run claims the Work Item.
+ */
+async function readClaimedRun(principal: WorkspacePrincipal, teamId: string, workItemId: string): Promise<StoredAgentRun | undefined> {
+  const store = workItemDependencies.agentRuns
+  let previousRunId: string | undefined
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
+    if (!claim) return undefined
+    const run = await store.getRun(principal.directoryId, teamId, claim.runId)
+    if (run?.state === 'active' && run.workItemId === workItemId) return run
+    if (claim.runId === previousRunId) break
+    previousRunId = claim.runId
+  }
+  throw createAgentRunIntegrityError()
+}
+
+/**
  * Reports that another run holds a Work Item, failing closed when the claim is inconsistent.
  *
  * @param principal - Authorized principal.
@@ -317,9 +342,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (assignedProjectId === null || !canAccessAssignedProject(principal, permission, assignedProjectId, 'viewer')) {
           return { items: [], hasMore: false }
         }
-        const claim = await store.getClaim(principal.directoryId, teamId, filters.workItemId)
-        const run = claim ? await store.getRun(principal.directoryId, teamId, claim.runId) : undefined
-        if (claim && (!run || run.state !== 'active' || run.workItemId !== filters.workItemId)) throw createAgentRunIntegrityError()
+        const run = await readClaimedRun(principal, teamId, filters.workItemId)
         const matches = run !== undefined &&
           (filters.instanceIdHash === undefined || run.instanceIdHash === filters.instanceIdHash) &&
           (filters.assigneeUserId === undefined || run.assigneeUserId === filters.assigneeUserId)

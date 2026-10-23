@@ -57,7 +57,7 @@ const problemSchema = z.object({
 /** Safe guidance for Agent Run fence reasons; remote detail text is never forwarded. */
 const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string> = {
   agent_run_conflict: 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.',
-  agent_run_not_active: 'Your Agent Run is no longer active for this task (finished or released by a person). Stop working on it and report the situation to the user.',
+  agent_run_not_active: 'Your Agent Run is no longer active for this task (finished, released by a person, or taken over by another instance). Stop working on it and report the situation to the user.',
   agent_run_forbidden: 'Only the task assignee can start or operate an Agent Run with this credential. Check MUKUROJI_MCP_ASSIGNEE_ID and the credential owner.',
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',

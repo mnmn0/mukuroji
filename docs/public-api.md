@@ -101,7 +101,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 - `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
   `agentInstanceId` を受け付けます。どちらも送らない既存 client の挙動は変わりません。
 - Run 固有の拒否理由は problem の `errors[].code`（`agent_run_conflict`、`agent_run_not_active`、
-  `agent_run_forbidden`、`invalid_transition`）で返し、`code` は既存の `conflict` / `forbidden` です。
+  `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`）で返し、`code` は既存の
+  `conflict` / `forbidden` です。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
 ### Pagination contract
