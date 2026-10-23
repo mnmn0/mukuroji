@@ -200,6 +200,18 @@ describe('DynamoDB Agent Run reports', () => {
       ScanIndexForward: false,
       ConsistentRead: true,
     })
+    // A page that ends exactly at the limit has no older reports, even when DynamoDB returns a key.
+    const exact = createClient([{ Items: [item], LastEvaluatedKey: { directoryTeamId: item.directoryTeamId, recordKey: item.recordKey } }, { Items: [] }])
+    const exactPage = await new DynamoDbAgentRunStore(exact.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 1)
+    expect(exactPage).toEqual({ reports: [expect.objectContaining({ sequence: 1 })] })
+    expect(exact.commands).toHaveLength(2)
+    // More reports than the limit continue after the last returned report.
+    const older = { ...item, recordKey: `agent-run-report#task-1#2026-10-21T00:00:00.000Z#${run.runId}#000001`, createdAt: '2026-10-21T00:00:00.000Z' }
+    const more = createClient([{ Items: [item, older] }])
+    const morePage = await new DynamoDbAgentRunStore(more.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 1)
+    expect(morePage.reports).toHaveLength(1)
+    expect(JSON.parse(Buffer.from(morePage.nextCursor ?? '', 'base64url').toString('utf8')))
+      .toEqual({ directoryTeamId: 'workspace-1#team#core', recordKey: item.recordKey })
     const foreign = createClient([{ Items: [{ ...item, workItemId: 'task-2' }] }])
     await expect(new DynamoDbAgentRunStore(foreign.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 20))
       .rejects.toMatchObject({ category: 'temporarily_unavailable' })

@@ -975,18 +975,31 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
     if (start !== undefined && (typeof start.recordKey !== 'string' || !start.recordKey.startsWith(prefix))) {
       throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
     }
-    const response = await this.#client.send(new QueryCommand({
-      TableName: this.#tableName,
-      KeyConditionExpression: '#directoryTeamId = :partition AND begins_with(#recordKey, :prefix)',
-      ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId', '#recordKey': 'recordKey' },
-      ExpressionAttributeValues: { ':partition': partition, ':prefix': prefix },
-      ScanIndexForward: false,
-      ConsistentRead: true,
-      Limit: readLimit(limit),
-      ExclusiveStartKey: start,
-    }))
-    const reports = (response.Items ?? []).map((item) => parseReport(item, { directoryId, teamId, workItemId }))
-    const nextCursor = encodeCursor(response.LastEvaluatedKey)
+    const pageSize = readLimit(limit)
+    // A page can end at the item limit or at 1 MB with nothing left, so one more report is read to
+    // know whether older ones exist, and the cursor continues after the last returned report.
+    const items: Record<string, unknown>[] = []
+    let next = start
+    do {
+      const response = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: '#directoryTeamId = :partition AND begins_with(#recordKey, :prefix)',
+        ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId', '#recordKey': 'recordKey' },
+        ExpressionAttributeValues: { ':partition': partition, ':prefix': prefix },
+        ScanIndexForward: false,
+        ConsistentRead: true,
+        Limit: pageSize + 1 - items.length,
+        ExclusiveStartKey: next,
+      }))
+      items.push(...(response.Items ?? []))
+      next = response.LastEvaluatedKey
+    } while (items.length <= pageSize && next !== undefined)
+    const page = items.slice(0, pageSize)
+    const reports = page.map((item) => parseReport(item, { directoryId, teamId, workItemId }))
+    const last = page.at(-1)
+    const nextCursor = items.length > pageSize && last !== undefined
+      ? encodeCursor({ directoryTeamId: last.directoryTeamId, recordKey: last.recordKey })
+      : undefined
     return { reports, ...(nextCursor === undefined ? {} : { nextCursor }) }
   }
 

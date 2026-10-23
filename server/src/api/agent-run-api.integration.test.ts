@@ -97,7 +97,8 @@ function configureUnstartedAssignedWorkItem(overrides: {
 } = {}) {
   const store = new InMemoryAgentRunStore()
   const observed: unknown[][] = []
-  configureFakeProjectClients(true, {
+  // The fake reads these options on every call, so a test can change the Work Item mid-request.
+  const projectOptions: NonNullable<Parameters<typeof configureFakeProjectClients>[1]> = {
     directoryId: workspaceId,
     role: overrides.role ?? 'member',
     workspaceRole: 'member',
@@ -115,9 +116,10 @@ function configureUnstartedAssignedWorkItem(overrides: {
         throw error
       }
     },
-  })
+  }
+  configureFakeProjectClients(true, projectOptions)
   setTestAppDependencies({ agentRuns: store })
-  return { store, observed }
+  return { store, observed, projectOptions }
 }
 
 describe('public Agent Run service', () => {
@@ -929,7 +931,7 @@ describe('Agent Run reports', () => {
    * @returns Store, held run, recorded comment writes, and a report call.
    */
   function configureReport(beforeCommit?: () => void, assigneeUserId?: string) {
-    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', ...(assigneeUserId ? { assigneeUserId } : {}) })
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', ...(assigneeUserId ? { assigneeUserId } : {}) })
     const held = createHeldRun('task-1', 'laptop-1')
     store.seed(held)
     const comments: Parameters<CollaborationClient['createComment']>[0][] = []
@@ -985,7 +987,7 @@ describe('Agent Run reports', () => {
       { requestId: 'report', idempotencyKey: key },
       { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
     ))
-    return { store, held, comments, report, service }
+    return { store, held, comments, report, service, projectOptions }
   }
 
   test('saves a numbered report with its labelled comment and renews the lease in one transaction', async () => {
@@ -1071,6 +1073,16 @@ describe('Agent Run reports', () => {
       if (current) store.applyTransactItems(store.createCloseItems(finishAgentRun(current, 'released', 'sato@example.com', new Date())))
     }
     await expect(report({ message: 'Closed' }, 'closed')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('reports a reassignment that wins the transaction as forbidden', async () => {
+    let interfere: (() => void) | undefined
+    const { report, projectOptions } = configureReport(() => interfere?.())
+    interfere = () => {
+      projectOptions.detailAssigneeUserId = 'sato@example.com'
+      throw new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+    }
+    await expect(report({ message: 'Reassigned meanwhile' }, 'reassigned')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
   })
 })
 

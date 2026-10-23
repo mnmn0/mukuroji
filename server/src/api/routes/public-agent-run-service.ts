@@ -215,15 +215,18 @@ async function explainTakeOverMiss(principal: WorkspacePrincipal, teamId: string
  * @param principal - Authorized principal.
  * @param teamId - Team ID.
  * @param run - Run as read before the report.
+ * @param assignedProjectId - Project the caller restricted the report to, when it sent one.
  * @param error - Error the comment write raised.
  * @returns Not active when the run closed or changed hands, a retryable conflict when another
- * report or a heartbeat of the run committed first, an integrity error when the active run lost its claim, and the
- * original error otherwise.
+ * report or a heartbeat of the run committed first, an integrity error when the active run lost its claim,
+ * a permission error when the Work Item was reassigned or left the requested Project, and the original
+ * error otherwise.
  */
 async function explainReportFailure(
   principal: WorkspacePrincipal,
   teamId: string,
   run: StoredAgentRun,
+  assignedProjectId: string | undefined,
   error: unknown,
 ): Promise<unknown> {
   if (!(error instanceof CollaborationError) || error.status !== 409) return error
@@ -235,6 +238,12 @@ async function explainReportFailure(
   if (latest.reportCount !== run.reportCount || latest.lastHeartbeatAt !== run.lastHeartbeatAt) return createAgentRunCommitConflictError()
   const claim = await store.getClaim(principal.directoryId, teamId, run.workItemId)
   if (!isClaimHeldBy(claim, latest)) return createAgentRunIntegrityError()
+  // The comment write conditions on the Work Item's assignee and Project, which may have changed since the read.
+  const { detail } = await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
+  if (detail.issue.assigneeUserId !== principal.userKey) return createAgentRunForbiddenError()
+  if (assignedProjectId !== undefined && detail.issue.assignedProjectId !== assignedProjectId) {
+    return new AgentRunError('forbidden', 'Work Item is outside the requested Project.')
+  }
   return error
 }
 
@@ -650,7 +659,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ],
         auditContext,
       }).catch(async (error: unknown) => {
-        throw await explainReportFailure(principal, teamId, run, error)
+        throw await explainReportFailure(principal, teamId, run, assignedProjectId, error)
       })
       if (comment.id !== commentId || comment.createdAt !== createdAt) throw createAgentRunIntegrityError()
       await projectWorkspaceSearchDocumentBestEffort(() => createCommentSearchDocument(
