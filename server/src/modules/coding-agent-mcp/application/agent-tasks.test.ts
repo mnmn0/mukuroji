@@ -251,6 +251,21 @@ describe('agent task lifecycle', () => {
     await expect(other.heartbeat(runId)).rejects.toMatchObject({ code: 'not_own_run' })
   })
 
+  test('resumes its own run when only the unfiltered run list has caught up', async () => {
+    const { api } = fixture()
+    const racing = {
+      ...api,
+      async listActiveRuns(filters: Parameters<typeof api.listActiveRuns>[0], cursor?: string) {
+        // The instance-filtered read ran just before the index exposed the run.
+        return filters.instanceId ? { items: [], hasMore: false } : api.listActiveRuns(filters, cursor)
+      },
+    }
+    const tasks = createAgentTasks(racing, baseScope)
+    const claimed = await tasks.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await tasks.next({})).toMatchObject({ action: 'in_progress', ownRuns: [{ runId }], otherRuns: [] })
+  })
+
   test('takes over a run of another instance and continues it as its own', async () => {
     const { api, service } = fixture()
     const claimed = await service.transition('one', 1, 'coding', 'start', 'claim')

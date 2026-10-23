@@ -157,8 +157,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   /**
    * Splits active runs into this instance's runs and other instances' runs.
    *
-   * @param startedTasks - Started tasks of the queue whose claims are also read directly, because the
-   * run index can miss a run started just before this process restarted.
+   * @param startedTasks - Started tasks of the queue whose claims are also read directly when they are
+   * missing from this instance's runs, because the run index can miss a run started just before this
+   * process restarted, or show it in one of the two concurrent reads but not the other.
    * @returns This instance's runs and summaries of other instances' runs.
    */
   async function runsByOwner(startedTasks: readonly AgentTask[] = []): Promise<{
@@ -169,12 +170,12 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   }> {
     const [own, all] = await Promise.all([activeRuns(true), activeRuns(false)])
     const ownIds = new Set(own.map((run) => run.runId))
-    const indexed = new Set(all.map((run) => run.workItemId))
-    const unindexed = startedTasks
-      .filter((task) => !indexed.has(task.id))
+    const ownTaskIds = new Set(own.map((run) => run.workItemId))
+    const unconfirmed = startedTasks
+      .filter((task) => !ownTaskIds.has(task.id))
       .sort((first, second) => second.updatedAt.localeCompare(first.updatedAt))
       .slice(0, maximumClaimReads)
-    for (const run of await Promise.all(unindexed.map((task) => claimedRun(task.id, true)))) {
+    for (const run of await Promise.all(unconfirmed.map((task) => claimedRun(task.id, true)))) {
       if (!run || ownIds.has(run.runId)) continue
       own.push(run)
       ownIds.add(run.runId)

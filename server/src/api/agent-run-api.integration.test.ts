@@ -626,6 +626,59 @@ describe('public Agent Run service', () => {
     await expect(takeOver('laptop-3', 'take-over-3')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
   })
 
+  test('audits a take over with stable event types and points conflicts at instanceId', async () => {
+    const previous = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditEvents'
+    try {
+      const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+      store.state.settings.set(`${workspaceId}|core-team`, {
+        ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+        updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+      })
+      const live = createHeldRun('task-1', 'laptop-1')
+      store.seed(live)
+      setTestAppDependencies({
+        transactions: {
+          async prepareIdempotencyCompletionTransactWrite() {
+            return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+          },
+        },
+      })
+      const committed: unknown[][] = []
+      const commit = store.commit.bind(store)
+      store.commit = async (items, fenceItemCount) => {
+        committed.push([...items])
+        return commit(items, fenceItemCount)
+      }
+      const service = createCanonicalPublicAgentRunService()
+      /**
+       * Takes over the fixture run as another instance.
+       *
+       * @param key - Idempotency key.
+       * @returns The take over response.
+       */
+      const takeOver = (key: string) => runWithTestAppDependencies(() => service.takeOver(
+        credential, 'core-team', 'task-1', live.runId,
+        { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+        { requestId: 'take-over', idempotencyKey: key },
+        { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+      ))
+      await expect(takeOver('live')).rejects.toMatchObject({ reason: 'agent_run_conflict', pointer: '/instanceId' })
+      store.state.runs.set(`${workspaceId}|core-team|${live.runId}`, { ...live, leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() })
+      await takeOver('stalled')
+      const auditTypes = (committed[0] ?? []).flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('Put' in item)) return []
+        const put = item.Put
+        if (typeof put !== 'object' || put === null || !('TableName' in put) || put.TableName !== 'AuditEvents') return []
+        return 'Item' in put && typeof put.Item === 'object' && put.Item !== null && 'eventType' in put.Item ? [put.Item.eventType] : []
+      })
+      expect(auditTypes).toEqual(['agent-run.taken-over', 'agent-run.started'])
+    } finally {
+      if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+      else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
+    }
+  })
+
   test('does not take over a run on a Work Item that is no longer started', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'unstarted' })
     store.state.settings.set(`${workspaceId}|core-team`, {

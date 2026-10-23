@@ -458,7 +458,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   member、Work Item が `started`、Run が別 instance のもので lease が切れている場合だけ成功する。停滞 Run の `superseded`
   への更新（lease が切れたままであることを条件にする）、claim row の置き換え（停滞 Run を指して
   いることを条件にする）、旧 instance の revocation row、新しい Run、Work Item revision と設定
-  revision の ConditionCheck、2 件の audit event、idempotency receipt を 1 つの transaction で確定
+  revision の ConditionCheck、旧 Run の `agent-run.taken-over` と新しい Run の `agent-run.started` の
+  audit event、idempotency receipt を 1 つの transaction で確定
   する。heartbeat が先に lease を延長した場合は `agent_run_conflict` で拒否する。Work Item の
   status は変えない。
 - 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script

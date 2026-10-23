@@ -65,13 +65,14 @@ export class AgentRunError extends Error {
  * Reports that another agent instance holds the Work Item claim.
  *
  * @param detail - Safe summary of the holding run.
+ * @param pointer - Request field that names the caller's instance; `agentInstanceId` on mutations.
  * @returns Conflict error with the `agent_run_conflict` reason.
  */
-export function createAgentRunConflictError(detail?: string): AgentRunError {
+export function createAgentRunConflictError(detail?: string, pointer = '/agentInstanceId'): AgentRunError {
   return new AgentRunError(
     'conflict',
     `Another agent instance holds this Work Item.${detail ? ` ${detail}` : ''} Inspect the task before continuing; do not take it over without the user's approval.`,
-    { reason: 'agent_run_conflict', pointer: '/agentInstanceId' },
+    { reason: 'agent_run_conflict', pointer },
   )
 }
 

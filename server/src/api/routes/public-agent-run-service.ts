@@ -472,7 +472,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         })
       }
       const now = new Date()
-      if (!isAgentRunStalled(run, now)) throw createAgentRunConflictError(describeHoldingRun(run, now))
+      if (!isAgentRunStalled(run, now)) throw createAgentRunConflictError(describeHoldingRun(run, now), '/instanceId')
       const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
       if (claim?.runId !== run.runId) throw createAgentRunIntegrityError()
       const superseded = finishAgentRun(run, 'superseded', principal.userKey, now)
@@ -498,7 +498,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         source: { kind: 'api', requestId: context.requestId, method: 'POST', route: path },
       })
       const response = { run: toAgentRun(successor, now), supersededRun: toAgentRun(superseded, now) }
-      const supersededAudit = createAgentRunAuditPut(auditContext, superseded, 'finished', 'Agent Run was superseded by a take over.')
+      const supersededAudit = createAgentRunAuditPut(auditContext, superseded, 'taken-over', 'Agent Run was taken over by another instance.')
       const startedAudit = createAgentRunAuditPut(
         auditContext, successor, 'started', 'Agent Run took over a stalled run.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
       )
@@ -521,7 +521,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         const latest = await store.getRun(principal.directoryId, teamId, runId)
         const readAt = new Date()
         if (latest?.state === 'active' && !isAgentRunStalled(latest, readAt)) {
-          throw createAgentRunConflictError(describeHoldingRun(latest, readAt))
+          throw createAgentRunConflictError(describeHoldingRun(latest, readAt), '/instanceId')
         }
         throw createAgentRunNotActiveError()
       }
