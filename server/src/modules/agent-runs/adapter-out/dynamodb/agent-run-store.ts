@@ -208,7 +208,7 @@ export interface AgentRunStore {
    * @param report - Report numbered `run.reportCount + 1`, created at `now`.
    * @param now - Report time the lease is renewed from.
    * @returns Run update conditioned on the run still being active for the same instance and report
-   * count, the check that the run still holds its claim, and the report put.
+   * count with no newer heartbeat, the check that the run still holds its claim, and the report put.
    */
   createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
   /**
@@ -1010,8 +1010,9 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
           UpdateExpression: 'SET #reportCount = :sequence, #lastReportKind = :kind, #lastReportAt = :now, ' +
             '#lastHeartbeatAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
-          // Reports are numbered by the run; a concurrent report or a closed run fails this write.
-          ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #reportCount = :previous',
+          // Reports are numbered by the run; a concurrent report or a closed run fails this write, and a
+          // heartbeat newer than the report keeps its later lease.
+          ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #reportCount = :previous AND #lastHeartbeatAt <= :now',
           ExpressionAttributeNames: {
             '#reportCount': 'reportCount',
             '#lastReportKind': 'lastReportKind',

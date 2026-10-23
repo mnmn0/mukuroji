@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { createAgentTasks } from './agent-tasks'
 import type { AgentRunMutationFence } from '@mukuroji/contracts'
 import {
-  AgentTaskError, type AgentCatalog, type AgentRunRecord, type AgentRunReportInput, type AgentTask, type AgentWorkItemApi,
+  AgentTaskError, type AgentCatalog, type AgentRunRecord, type AgentRunReportInput, type AgentRunReportResult, type AgentTask,
+  type AgentWorkItemApi,
 } from './work-item-api'
 
 /** Creates a minimal validated canonical task projection. */
@@ -37,6 +38,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
   const receipts = new Map<string, { fingerprint: string; task: AgentTask }>()
   const notes: string[] = []
   const reports: (AgentRunReportInput & { runId: string })[] = []
+  const reportReceipts = new Map<string, { runId: string; result: AgentRunReportResult }>()
   const fences: (AgentRunMutationFence | undefined)[] = []
   const runs = new Map<string, AgentRunRecord & { instanceId: string }>()
   let runSequence = 0
@@ -130,9 +132,15 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
      * @param runId - Reporting run.
      * @param instanceId - Instance that started the run.
      * @param input - Report fields.
+     * @param key - Idempotency key; a reused key replays the saved response like the server.
      * @returns The report, its comment, and the run.
      */
-    async reportRun(runId, instanceId, input) {
+    async reportRun(runId, instanceId, input, key) {
+      const replay = reportReceipts.get(key)
+      if (replay) {
+        if (replay.runId !== runId) throw new AgentTaskError('idempotency_conflict', 'Different request')
+        return structuredClone(replay.result)
+      }
       const run = runs.get(runId)
       if (!run || run.state !== 'active' || run.instanceId !== instanceId) throw new AgentTaskError('agent_run_not_active', 'Finished')
       const body = `[${run.agentName}]\n\n${input.message}`
@@ -140,15 +148,17 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       reports.push({ runId, ...input })
       const reported = { ...run, reportCount: run.reportCount + 1 }
       runs.set(runId, reported)
-      return {
+      const result = {
         report: {
-          schemaVersion: 1, runId, teamId: 'team', workItemId: run.workItemId, sequence: reported.reportCount,
+          schemaVersion: 1 as const, runId, teamId: 'team', workItemId: run.workItemId, sequence: reported.reportCount,
           kind: input.kind ?? 'progress', commentId: 'comment', verifications: input.verifications ?? [],
           artifacts: input.artifacts ?? [], createdAt: '2026-09-01T00:10:00.000Z',
         },
         comment: { id: 'comment', actorUserId: 'agent-member', body, createdAt: '2026-09-01T00:10:00.000Z' },
         run: publicRun(reported),
       }
+      reportReceipts.set(key, { runId, result })
+      return structuredClone(result)
     },
     /**
      * Supersedes a stalled run of another instance and starts this instance's run.
@@ -454,7 +464,7 @@ describe('agent task lifecycle', () => {
   })
 
   test('saves structured reports only for its own run and keeps plain notes as comments without one', async () => {
-    const { service, notes, reports, fences } = fixture()
+    const { service, notes, reports, fences, release } = fixture()
     const structured = {
       message: 'Ready', kind: 'handoff' as const,
       verifications: [{ command: 'bun test', status: 'passed' as const }],
@@ -471,6 +481,10 @@ describe('agent task lifecycle', () => {
     const runId = 'run' in claimed ? claimed.run.runId : ''
     expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { kind: 'handoff', sequence: 1 }, run: { reportCount: 1 } })
     expect(reports).toEqual([{ runId, ...structured }])
+    // A retry after a lost response reaches the same run's report endpoint even once the run closed.
+    release(runId)
+    expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { runId, sequence: 1 } })
+    expect(reports).toHaveLength(1)
   })
 
   test('records progress separately, completes, reopens, and cancels using custom status IDs', async () => {

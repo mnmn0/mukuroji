@@ -180,7 +180,8 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
 - report は Run に紐づく `AgentRunReport` row と canonical Collaboration の comment を 1 つの
   transaction で保存する。row の sort key は
   `agent-run-report#<URL encode した workItemId>#<createdAt>#<runId>#<sequence>` とし、Work Item の
-  report を作成順に強整合の Query 1 回で読めるようにする。comment 本文は Run に記録した agent 名の
+  report を作成順に強整合の Query 1 回で読めるようにする。Run row の更新は `lastHeartbeatAt` が report
+  時刻以下であることも条件にし、report より新しい heartbeat の lease を巻き戻さない。comment 本文は Run に記録した agent 名の
   label（`[agentName]`）と `message` で server が組み立て、構造化 field は本文へ埋め込まず row に
   保存する。Web は comment の横に検証結果と成果物を chip として表示する（Slice 2 の Web 変更）。
 - 同じ transaction で Run row の `reportCount` を読み取り時の値で条件付き更新し（report の
@@ -193,7 +194,8 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   `agent_run_not_active`、別 instance の Run への report は `agent_run_conflict`（pointer
   `/instanceId`）、Work Item の担当者が変わった場合は `agent_run_forbidden` とする。
 - `url` は小文字の `https://` で始まり host を持つもののみ、credential 付き URL と空白・制御文字を
-  拒否し、最大 2,048 文字とする。違反は `400 validation_failed` と `errors[].code`
+  拒否し、最大 2,048 文字とする。presigned URL や token parameter を保存しないよう、query と `=` を
+  含む fragment も拒否する（`#discussion_r1` のような anchor は許可する）。違反は `400 validation_failed` と `errors[].code`
   `invalid_artifact_url` で返す。server は URL を取得・解決しない。表示時は既存の rich text safety と
   同じ link 方針に従う。
 - Web は `GET /api/teams/{teamId}/work-items/{workItemId}/agent-run-reports?limit=`（既定 100 件、

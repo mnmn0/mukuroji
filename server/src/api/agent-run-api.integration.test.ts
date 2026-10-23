@@ -1060,6 +1060,12 @@ describe('Agent Run reports', () => {
     }
     // Retrying with the same key renumbers the report after the one that won.
     await expect(report({ message: 'Raced' }, 'raced')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    // A heartbeat that commits after the report read its time keeps its later lease; the retry reports from a later time.
+    interfere = () => {
+      const current = store.state.runs.get(runKey)
+      if (current) store.state.runs.set(runKey, { ...current, lastHeartbeatAt: new Date(Date.now() + 60_000).toISOString() })
+    }
+    await expect(report({ message: 'Behind a heartbeat' }, 'heartbeat')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
     interfere = () => {
       const current = store.state.runs.get(runKey)
       if (current) store.applyTransactItems(store.createCloseItems(finishAgentRun(current, 'released', 'sato@example.com', new Date())))

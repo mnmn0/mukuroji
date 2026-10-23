@@ -103,7 +103,7 @@ export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTa
     }, ({ taskId, expectedRevision, workflowStatusId, idempotencyKey }) => result(() => tasks.transition(taskId, expectedRevision, workflowStatusId, action, idempotencyKey)))
   }
   server.registerTool('report_progress', {
-    description: 'Append a durable progress/blocker/verification/artifact/handoff report to the task discussion with the agent label. With your active run on the task, kind, verifications (commands you ran and their results), artifacts (https PR/branch/commit/URL links), and changedFileCount are saved as a structured report of the run and renew its lease; without a run, only a plain message is accepted. Does not change task status.',
+    description: 'Append a durable progress/blocker/verification/artifact/handoff report to the task discussion with the agent label. With your active run on the task, kind, verifications (commands you ran and their results), artifacts (https PR/branch/commit/URL links without credentials or query strings; never presigned URLs), and changedFileCount are saved as a structured report of the run and renew its lease; without a run, only a plain message is accepted. Does not change task status.',
     inputSchema: z.object({
       taskId: id,
       message: z.string().trim().min(1).max(3900),

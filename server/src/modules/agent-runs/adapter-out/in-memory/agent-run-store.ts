@@ -252,7 +252,8 @@ export class InMemoryAgentRunStore implements AgentRunStore {
       this.#register(runUpdate, {
         check: (state) => {
           const current = state.runs.get(runKey)
-          return current?.state === 'active' && current.instanceIdHash === run.instanceIdHash && current.reportCount === run.reportCount
+          return current?.state === 'active' && current.instanceIdHash === run.instanceIdHash &&
+            current.reportCount === run.reportCount && current.lastHeartbeatAt <= report.createdAt
         },
         apply: (state) => {
           const current = state.runs.get(runKey)

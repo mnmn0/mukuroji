@@ -47,6 +47,9 @@ const maximumRunPages = 10
  */
 const claimReadBatchSize = 10
 
+/** Report idempotency keys this process remembers with the run they were sent to. */
+const maximumRememberedReportKeys = 100
+
 /** Explicit lifecycle intent; the target status is always selected from current configuration. */
 export type AgentTransition = 'start' | 'complete' | 'reopen' | 'cancel' | 'move'
 
@@ -63,6 +66,12 @@ export type AgentBlockers = {
  * @returns Task selection, lifecycle, progress, and status operations.
  */
 export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
+  /**
+   * Run each recent report key was sent to. A retry after a lost response must reach the same report
+   * endpoint to replay its receipt, even if the run closed in between.
+   */
+  const reportRunsByKey = new Map<string, string>()
+
   /** Verifies the optional process-wide Project restriction. */
   function inScope(task: AgentTask): AgentTask {
     if (scope.assignedProjectId !== undefined && task.assignedProjectId !== scope.assignedProjectId) {
@@ -406,8 +415,16 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
      */
     async report(id: string, input: AgentRunReportInput, key: string) {
       await owned(id)
-      const run = await claimedRun(id, true)
-      if (run) return api.reportRun(run.runId, scope.instanceId, input, key, scope.assignedProjectId)
+      const runId = reportRunsByKey.get(key) ?? (await claimedRun(id, true))?.runId
+      if (runId) {
+        reportRunsByKey.delete(key)
+        reportRunsByKey.set(key, runId)
+        if (reportRunsByKey.size > maximumRememberedReportKeys) {
+          const oldest = reportRunsByKey.keys().next().value
+          if (oldest !== undefined) reportRunsByKey.delete(oldest)
+        }
+        return api.reportRun(runId, scope.instanceId, input, key, scope.assignedProjectId)
+      }
       const structured = (input.kind !== undefined && input.kind !== 'progress') ||
         (input.verifications?.length ?? 0) > 0 || (input.artifacts?.length ?? 0) > 0 || input.changedFileCount !== undefined
       if (structured) {

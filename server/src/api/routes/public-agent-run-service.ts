@@ -217,7 +217,7 @@ async function explainTakeOverMiss(principal: WorkspacePrincipal, teamId: string
  * @param run - Run as read before the report.
  * @param error - Error the comment write raised.
  * @returns Not active when the run closed or changed hands, a retryable conflict when another
- * report of the run committed first, an integrity error when the active run lost its claim, and the
+ * report or a heartbeat of the run committed first, an integrity error when the active run lost its claim, and the
  * original error otherwise.
  */
 async function explainReportFailure(
@@ -230,8 +230,9 @@ async function explainReportFailure(
   const store = workItemDependencies.agentRuns
   const latest = await store.getRun(principal.directoryId, teamId, run.runId)
   if (latest?.state !== 'active' || latest.instanceIdHash !== run.instanceIdHash) return createAgentRunNotActiveError()
-  // Retrying with the same key renumbers the report after the one that committed first.
-  if (latest.reportCount !== run.reportCount) return createAgentRunCommitConflictError()
+  // Retrying with the same key renumbers the report after the one that committed first, or renews the
+  // lease from a time after the heartbeat that won.
+  if (latest.reportCount !== run.reportCount || latest.lastHeartbeatAt !== run.lastHeartbeatAt) return createAgentRunCommitConflictError()
   const claim = await store.getClaim(principal.directoryId, teamId, run.workItemId)
   if (!isClaimHeldBy(claim, latest)) return createAgentRunIntegrityError()
   return error

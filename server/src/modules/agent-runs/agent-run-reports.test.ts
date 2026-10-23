@@ -120,7 +120,13 @@ describe('Agent Run report validation', () => {
 
   test('accepts only https artifact URLs without credentials', () => {
     expect(readAgentRunArtifactUrl('https://github.com/example/repo/pull/1', '/url')).toBe('https://github.com/example/repo/pull/1')
+    expect(readAgentRunArtifactUrl('https://github.com/example/repo/pull/1#discussion_r1', '/url')).toBe('https://github.com/example/repo/pull/1#discussion_r1')
     for (const url of [
+      // Query strings and parameterized fragments are where presigned links and tokens live.
+      'https://bucket.s3.amazonaws.com/log.txt?X-Amz-Credential=a&X-Amz-Signature=b',
+      'https://example.test/build?access_token=secret',
+      'https://example.test/build?',
+      'https://example.test/callback#access_token=secret',
       'http://github.com/example',
       'https://user:secret@github.com/example',
       'https://token@github.com/example',
@@ -145,7 +151,7 @@ describe('DynamoDB Agent Run reports', () => {
     const [runUpdate, claimCheck, reportPut] = store.createReportItems(run, createReport(run), now)
     expect(runUpdate?.Update).toMatchObject({
       Key: { recordKey: `agent-run#${run.runId}` },
-      ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #reportCount = :previous',
+      ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #reportCount = :previous AND #lastHeartbeatAt <= :now',
       ExpressionAttributeValues: {
         ':sequence': 3, ':previous': 2, ':kind': 'verification', ':now': now.toISOString(),
         ':leaseExpiresAt': '2026-10-22T00:30:00.000Z', ':instanceIdHash': run.instanceIdHash,
@@ -223,5 +229,15 @@ describe('in-memory Agent Run reports', () => {
     const latest = store.state.runs.get(runKey)
     if (!latest) throw new Error('The run must exist.')
     expect(() => store.applyTransactItems(store.createReportItems(latest, createReport(latest), now))).toThrow('Transaction cancelled.')
+  })
+
+  test('keeps a heartbeat that is newer than the report', () => {
+    const store = new InMemoryAgentRunStore()
+    const run = createRun()
+    store.seed(run)
+    const runKey = `workspace-1|core|${run.runId}`
+    store.state.runs.set(runKey, { ...run, lastHeartbeatAt: '2026-10-22T00:00:05.000Z', leaseExpiresAt: '2026-10-22T00:30:05.000Z' })
+    expect(() => store.applyTransactItems(store.createReportItems(run, createReport(run), now))).toThrow('Transaction cancelled.')
+    expect(store.state.runs.get(runKey)).toMatchObject({ reportCount: 0, leaseExpiresAt: '2026-10-22T00:30:05.000Z' })
   })
 })

@@ -150,7 +150,9 @@ function readVerification(value: unknown, pointer: string): AgentRunVerification
 
 /**
  * Validates an artifact URL. The server never fetches or resolves it, so only its form is checked:
- * HTTPS with a host, no embedded credentials, and a bounded length.
+ * HTTPS with a host, a bounded length, and nothing that can carry a credential. Presigned links and
+ * token parameters live in the query or in a parameterized fragment, so both are rejected; an
+ * anchor fragment such as `#discussion_r1` stays allowed.
  *
  * @param value - Untrusted value.
  * @param pointer - JSON Pointer reported on failure.
@@ -164,7 +166,7 @@ export function readAgentRunArtifactUrl(value: unknown, pointer: string): string
    */
   const invalid = () => new AgentRunError(
     'validation_failed',
-    `Artifact url must be an https URL of at most ${AGENT_RUN_ARTIFACT_URL_MAX_LENGTH} characters without credentials.`,
+    `Artifact url must be an https URL of at most ${AGENT_RUN_ARTIFACT_URL_MAX_LENGTH} characters without credentials, a query, or fragment parameters.`,
     { reason: 'invalid_artifact_url', pointer },
   )
   if (typeof value !== 'string' || value.length === 0 || value.length > AGENT_RUN_ARTIFACT_URL_MAX_LENGTH) throw invalid()
@@ -178,6 +180,7 @@ export function readAgentRunArtifactUrl(value: unknown, pointer: string): string
     throw invalid()
   }
   if (parsed.protocol !== 'https:' || parsed.hostname === '' || parsed.username !== '' || parsed.password !== '') throw invalid()
+  if (value.includes('?') || parsed.hash.includes('=')) throw invalid()
   return value
 }
 
