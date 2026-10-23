@@ -121,6 +121,12 @@ describe('public Agent Run service', () => {
     const receipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
+        /**
+         * Records the receipt request and returns a receipt write for the transaction.
+         *
+         * @param input - Receipt to write.
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite(input) {
           receipts.push(input.response)
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
@@ -267,6 +273,12 @@ describe('public Agent Run service', () => {
     const receipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
+        /**
+         * Records the receipt request and returns a receipt write for the transaction.
+         *
+         * @param input - Receipt to write.
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite(input) {
           receipts.push(input.response)
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
@@ -516,6 +528,11 @@ describe('public Agent Run service', () => {
     store.seed(held)
     setTestAppDependencies({
       transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite() {
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
         },
@@ -587,6 +604,12 @@ describe('public Agent Run service', () => {
     const receipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
+        /**
+         * Records the receipt request and returns a receipt write for the transaction.
+         *
+         * @param input - Receipt to write.
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite(input) {
           receipts.push(input.response)
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
@@ -646,6 +669,11 @@ describe('public Agent Run service', () => {
       store.seed(live)
       setTestAppDependencies({
         transactions: {
+          /**
+           * Returns a receipt write for the transaction.
+           *
+           * @returns The receipt write.
+           */
           async prepareIdempotencyCompletionTransactWrite() {
             return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
           },
@@ -698,6 +726,11 @@ describe('public Agent Run service', () => {
     store.seed(stalled)
     setTestAppDependencies({
       transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite() {
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
         },
@@ -760,6 +793,11 @@ describe('public Agent Run service', () => {
     store.seed(live)
     setTestAppDependencies({
       transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite() {
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
         },
@@ -810,6 +848,11 @@ describe('public Agent Run service', () => {
     store.seed(stalled)
     setTestAppDependencies({
       transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
         async prepareIdempotencyCompletionTransactWrite() {
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
         },

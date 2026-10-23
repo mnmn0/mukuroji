@@ -2753,7 +2753,20 @@ describe('public Agent Run routes', () => {
     const calls: unknown[] = []
     let disabled = false
     const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      /**
+       * Accepts every take over authorization in this test.
+       */
       async authorizeTakeOver() {},
+      /**
+       * Returns a take over response for the requested run, or the disabled error the test configures.
+       *
+       * @param _credential - Ignored credential.
+       * @param teamId - Team ID.
+       * @param workItemId - Work Item ID.
+       * @param runId - Stalled run.
+       * @param request - Take over request.
+       * @returns The new and superseded runs.
+       */
       async takeOver(_credential, teamId, workItemId, runId, request) {
         calls.push({ teamId, workItemId, runId, request })
         if (disabled) throw new AgentRunError('forbidden', 'Disabled.', { reason: 'agent_run_takeover_disabled' })

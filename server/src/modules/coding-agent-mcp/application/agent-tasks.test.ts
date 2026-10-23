@@ -110,6 +110,12 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       startReceipts.set(key, { fingerprint: JSON.stringify({ id, input }), response })
       return structuredClone(response)
     },
+    /**
+     * Lists active runs matching the filters.
+     *
+     * @param filters - Assignee and instance restrictions.
+     * @returns One page of active runs.
+     */
     async listActiveRuns(filters) {
       return { items: [...runs.values()].filter((run) => run.state === 'active' &&
         (!filters.instanceId || run.instanceId === filters.instanceId) &&
@@ -230,6 +236,13 @@ describe('agent task lifecycle', () => {
     const { api, release, fences } = fixture()
     const lagging = createAgentTasks({
       ...api,
+      /**
+       * Lists active runs once the test marks the run index as caught up.
+       *
+       * @param filters - Assignee and instance restrictions.
+       * @param cursor - Continuation.
+       * @returns One page of active runs, empty while the index lags.
+       */
       async listActiveRuns(filters, cursor) {
         return indexed ? api.listActiveRuns(filters, cursor) : { items: [], hasMore: false }
       },
@@ -329,6 +342,13 @@ describe('agent task lifecycle', () => {
     const { api } = fixture()
     const racing = {
       ...api,
+      /**
+       * Lists active runs, leaving the instance-filtered read behind the unfiltered one.
+       *
+       * @param filters - Assignee and instance restrictions.
+       * @param cursor - Continuation.
+       * @returns One page of active runs.
+       */
       async listActiveRuns(filters: Parameters<typeof api.listActiveRuns>[0], cursor?: string) {
         // The instance-filtered read ran just before the index exposed the run.
         return filters.instanceId ? { items: [], hasMore: false } : api.listActiveRuns(filters, cursor)
@@ -358,6 +378,11 @@ describe('agent task lifecycle', () => {
     let deleted = false
     const lagging = createAgentTasks({
       ...api,
+      /**
+       * Simulates a run index that has not shown any run yet.
+       *
+       * @returns An empty page.
+       */
       async listActiveRuns() { return { items: [], hasMore: false } },
       /**
        * Reads the claim unless the test has deleted it.
@@ -476,6 +501,11 @@ describe('agent task lifecycle', () => {
         const page = await api.list(filters, cursor, limit)
         return moved ? { ...page, items: page.items.filter((item) => item.id !== 'inside') } : page
       },
+      /**
+       * Simulates a run index that has not shown any run yet.
+       *
+       * @returns An empty page.
+       */
       async listActiveRuns() {
         return { items: [], hasMore: false }
       },
