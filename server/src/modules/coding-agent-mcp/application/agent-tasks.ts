@@ -150,7 +150,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
    * @returns The claiming run, or undefined.
    */
   async function claimedRun(taskId: string, onlyThisInstance: boolean): Promise<AgentRunRecord | undefined> {
-    const run = await api.claimedRun(taskId, onlyThisInstance ? scope.instanceId : undefined)
+    // Ownership is the member and instance pair; two members may configure the same instance ID.
+    const run = await api.claimedRun(taskId, onlyThisInstance ? { assigneeUserId: scope.assigneeUserId, instanceId: scope.instanceId } : undefined)
     return run?.state === 'active' ? run : undefined
   }
 

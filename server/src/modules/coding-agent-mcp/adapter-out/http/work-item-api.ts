@@ -250,10 +250,15 @@ export function createAgentWorkItemApi(
       return { ...page, items: page.items.map((run) => scopedRun(run)) }
     },
     /** Strongly reads the run that currently claims one task. */
-    async claimedRun(id, instanceId) {
-      const page = await request('agent-runs', pageSchema(runSchema), 'GET', undefined, undefined, { state: 'active', workItemId: id, instanceId, limit: 1 })
+    async claimedRun(id, owner = {}) {
+      const page = await request('agent-runs', pageSchema(runSchema), 'GET', undefined, undefined, {
+        state: 'active', workItemId: id, assigneeUserId: owner.assigneeUserId, instanceId: owner.instanceId, limit: 1,
+      })
       const [run] = page.items.map((item) => scopedRun(item))
       if (run && run.workItemId !== id) throw new AgentTaskError('invalid_response', 'The API returned a run for another task.')
+      if (run && owner.assigneeUserId !== undefined && run.assigneeUserId !== owner.assigneeUserId) {
+        throw new AgentTaskError('invalid_response', 'The API returned a run of another assignee.')
+      }
       return run
     },
     /** Reads one run. */

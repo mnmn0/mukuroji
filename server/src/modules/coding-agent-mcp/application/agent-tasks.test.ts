@@ -126,9 +126,10 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       runs.set(run.runId, run)
       return { run: publicRun(run), supersededRun: publicRun(superseded) }
     },
-    async claimedRun(id, instanceId) {
+    async claimedRun(id, owner = {}) {
       const run = [...runs.values()].find((candidate) => candidate.workItemId === id && candidate.state === 'active')
-      return run && (!instanceId || run.instanceId === instanceId) ? publicRun(run) : undefined
+      return run && (!owner.instanceId || run.instanceId === owner.instanceId) &&
+        (!owner.assigneeUserId || run.assigneeUserId === owner.assigneeUserId) ? publicRun(run) : undefined
     },
     async getRun(runId) {
       const run = runs.get(runId)
@@ -251,17 +252,37 @@ describe('agent task lifecycle', () => {
     await expect(other.heartbeat(runId)).rejects.toMatchObject({ code: 'not_own_run' })
   })
 
+  test('does not treat another member run with the same instance ID as its own', async () => {
+    const { api, runs, records } = fixture()
+    const former = createAgentTasks(api, { ...baseScope, assigneeUserId: 'former-member' })
+    const formerTask = records.get('one')
+    if (!formerTask) throw new Error('The fixture task must exist.')
+    records.set('one', { ...formerTask, assigneeUserId: 'former-member' })
+    const claimed = await former.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    const held = runs.get(runId)
+    if (!held) throw new Error('The run must be stored.')
+    runs.set(runId, { ...held, assigneeUserId: 'former-member' })
+    // The task is reassigned while the former member's run, started with the same instance ID, stays active.
+    const reassigned = records.get('one')
+    if (!reassigned) throw new Error('The fixture task must exist.')
+    records.set('one', { ...reassigned, assigneeUserId: 'agent-member' })
+    const service = createAgentTasks(api, baseScope)
+    expect(await service.get('one')).toMatchObject({ activeRun: { runId, ownedByThisInstance: false } })
+    await expect(service.heartbeat(runId)).rejects.toMatchObject({ code: 'not_own_run' })
+  })
+
   test('reports a run released between its read and the claim read as not active', async () => {
     const { api, release } = fixture()
     let releaseOnClaimRead = false
     const racing = createAgentTasks({
       ...api,
-      async claimedRun(id, instanceId) {
+      async claimedRun(id, owner) {
         if (releaseOnClaimRead) {
           releaseOnClaimRead = false
           for (const run of (await api.listActiveRuns({}, undefined)).items) release(run.runId)
         }
-        return api.claimedRun(id, instanceId)
+        return api.claimedRun(id, owner)
       },
     }, baseScope)
     const claimed = await racing.transition('one', 1, 'coding', 'start', 'claim')
@@ -304,7 +325,7 @@ describe('agent task lifecycle', () => {
     const lagging = createAgentTasks({
       ...api,
       async listActiveRuns() { return { items: [], hasMore: false } },
-      async claimedRun(id, instanceId) { return deleted ? undefined : api.claimedRun(id, instanceId) },
+      async claimedRun(id, owner) { return deleted ? undefined : api.claimedRun(id, owner) },
     }, baseScope)
     await lagging.transition('one', 1, 'coding', 'start', 'claim')
     deleted = true

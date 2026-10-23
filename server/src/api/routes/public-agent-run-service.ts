@@ -540,8 +540,26 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           ...(receipt ? [receipt.transactWriteItem] : []),
         ], 2)
       } catch (error) {
-        if (!(error instanceof AgentRunError) || error.reason !== 'agent_run_not_active') throw error
-        throw await explainTakeOverMiss(principal, teamId, runId)
+        if (!(error instanceof AgentRunError)) throw error
+        if (error.reason === 'agent_run_not_active') throw await explainTakeOverMiss(principal, teamId, runId)
+        if (error.category !== 'temporarily_unavailable') throw error
+        // The Work Item or settings guard failed: report what changed instead of a retryable failure.
+        const latest = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        if (latest.detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+        if (latest.detail.issue.statusCategory !== 'started') {
+          throw new AgentRunError('conflict', 'Only a run on a started Work Item can be taken over. Ask a person to release it.', {
+            reason: 'invalid_transition',
+          })
+        }
+        if (latest.detail.issue.revision !== detail.issue.revision) {
+          throw new AgentRunError('conflict', 'The Work Item changed during the request. Reload it and retry the take over.')
+        }
+        const latestSettings = await store.getSettings(principal.directoryId, teamId)
+        if (!latestSettings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
+        if (latestSettings.revision !== settings.revision) {
+          throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
+        }
+        throw error
       }
       return response
     },

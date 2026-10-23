@@ -451,7 +451,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   `in_progress` とする。Run 一覧の index は結果整合のため、index にない `started` タスク（更新の新しい
   10 件まで）は claim を強整合で読み、自 instance の Run を `ownRuns` に含める。`get_task` の
   `activeRun`、`heartbeat` / `finish_run` の所有確認、mutation の fence も claim を読んで決めるため、
-  開始直後や process 再起動直後でも同じ Run を扱える。それ以外の自 Run は `ownRuns` に残し、agent に
+  開始直後や process 再起動直後でも同じ Run を扱える。所有は member と instance の組で判定し、claim の
+  読み取りにも担当者を含める。それ以外の自 Run は `ownRuns` に残し、agent に
   `finish_run` を促す。
   Run のない `started` Work Item は再開対象にしない。
 - take over は `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` で受け付ける。
@@ -464,6 +465,9 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   する。heartbeat が先に lease を延長した場合は `agent_run_conflict` で拒否する。Run の読み取り後に
   finish、release、別の take over が先に確定して claim が消えた・置き換わった場合は Run を読み直し、
   `agent_run_not_active` を返す。停滞したままの Run を claim が保持していない場合だけ `503` にする。
+  Work Item revision や設定 revision の ConditionCheck で取り消された場合は両方を読み直し、担当者の
+  変更は `403`、`started` 以外への移動は `invalid_transition`、take over の無効化は
+  `agent_run_takeover_disabled`、それ以外の変更は `409` として返す。
   Work Item の status は変えない。
 - 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script
   による claim / Run 不整合の検査。不整合は読み取り時に fail-closed で検出する。

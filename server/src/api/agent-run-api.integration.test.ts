@@ -5,6 +5,7 @@ import {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
+  createAgentRunCommitConflictError,
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
@@ -683,6 +684,52 @@ describe('public Agent Run service', () => {
       if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
       else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
     }
+  })
+
+  test('classifies a take over cancelled by a concurrent settings change', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const settingsKey = `${workspaceId}|core-team`
+    const enabled = {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    }
+    store.state.settings.set(settingsKey, enabled)
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.seed(stalled)
+    setTestAppDependencies({
+      transactions: {
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over the stalled run while a concurrent change cancels the transaction.
+     *
+     * @param change - Settings written by the concurrent request, or undefined for an unrelated cancellation.
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOverDuring = (change: typeof enabled | undefined, key: string) => {
+      store.state.settings.set(settingsKey, enabled)
+      store.commit = async () => {
+        if (change) store.state.settings.set(settingsKey, change)
+        throw createAgentRunCommitConflictError()
+      }
+      return runWithTestAppDependencies(() => service.takeOver(
+        credential, 'core-team', 'task-1', stalled.runId,
+        { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+        { requestId: 'take-over', idempotencyKey: key },
+        { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+      ))
+    }
+    await expect(takeOverDuring({ ...enabled, revision: 2, allowTakeoverAfterLeaseExpiry: false }, 'disabled'))
+      .rejects.toMatchObject({ reason: 'agent_run_takeover_disabled' })
+    await expect(takeOverDuring({ ...enabled, revision: 2, leaseMinutes: 45 }, 'changed'))
+      .rejects.toMatchObject({ category: 'conflict' })
+    // A cancellation with nothing changed, such as an identical request's receipt, stays retryable.
+    await expect(takeOverDuring(undefined, 'unrelated')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
   test('does not take over a run on a Work Item that is no longer started', async () => {

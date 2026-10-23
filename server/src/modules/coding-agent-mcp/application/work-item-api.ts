@@ -165,10 +165,10 @@ export interface AgentWorkItemApi {
   /**
    * Strongly reads the run that currently claims one task, so a run started moments ago is found.
    * @param id - Task identifier within the configured Team.
-   * @param instanceId - When given, returns the run only if this instance started it.
-   * @returns The claiming run, or undefined when there is none or it belongs to another instance.
+   * @param owner - When given, returns the run only if this assignee and instance started it.
+   * @returns The claiming run, or undefined when there is none or it belongs to another owner.
    */
-  claimedRun(id: string, instanceId?: string): Promise<AgentRunRecord | undefined>
+  claimedRun(id: string, owner?: AgentRunFilters): Promise<AgentRunRecord | undefined>
   /**
    * Takes over a stalled run of another instance of the same assignee.
    * @param id - Task identifier within the configured Team.
