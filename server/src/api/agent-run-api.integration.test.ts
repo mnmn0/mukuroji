@@ -1158,6 +1158,31 @@ describe('Web Agent Run routes', () => {
     expect(invalid.status).toBe(400)
   })
 
+  test('stops a report page at its byte budget so the response stays within the Lambda limit', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const artifacts = Array.from({ length: 20 }, (_, index) => ({
+      type: 'url' as const, url: `https://example.test/${index}/${'a'.repeat(2_000)}`, label: 'l'.repeat(128),
+    }))
+    const verifications = Array.from({ length: 20 }, () => ({ command: 'c'.repeat(512), status: 'passed' as const, summary: 's'.repeat(512) }))
+    for (let sequence = 1; sequence <= 30; sequence += 1) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind: 'artifact', commentId: `cmt_${sequence}`, verifications, artifacts,
+        createdAt: new Date(Date.UTC(2026, 9, 22, 0, sequence)).toISOString(), createdBy: 'demo@example.com',
+      })
+    }
+    const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports', { headers })
+    expect(listed.status).toBe(200)
+    const text = await listed.text()
+    expect(JSON.parse(text)).toMatchObject({ hasMore: true })
+    // The newest report leads the page.
+    expect(text.match(/"sequence":(\d+)/)?.[1]).toBe('30')
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(1_000_100)
+    expect(text.match(/"commentId"/g)?.length ?? 0).toBeLessThan(30)
+  })
+
   test('lists a Work Item history with release permissions and releases an active run', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const held = createHeldRun('task-1')

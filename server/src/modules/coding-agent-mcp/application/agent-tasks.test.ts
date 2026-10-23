@@ -464,7 +464,7 @@ describe('agent task lifecycle', () => {
   })
 
   test('saves structured reports only for its own run and keeps plain notes as comments without one', async () => {
-    const { service, notes, reports, fences, release } = fixture()
+    const { service, notes, reports, fences, release } = fixture([task(), task('two')])
     const structured = {
       message: 'Ready', kind: 'handoff' as const,
       verifications: [{ command: 'bun test', status: 'passed' as const }],
@@ -481,6 +481,12 @@ describe('agent task lifecycle', () => {
     const runId = 'run' in claimed ? claimed.run.runId : ''
     expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { kind: 'handoff', sequence: 1 }, run: { reportCount: 1 } })
     expect(reports).toEqual([{ runId, ...structured }])
+    // A plain note retried after the run started is sent to the comment endpoint again, with its first fence.
+    expect(await service.report('one', { message: 'Plan', kind: 'progress' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
+    expect(reports).toHaveLength(1)
+    // A key reused for another task is that task's own request and never replays the first task's report.
+    await expect(service.report('two', structured, 'handoff')).rejects.toMatchObject({ code: 'agent_run_not_active' })
     // A retry after a lost response reaches the same run's report endpoint even once the run closed.
     release(runId)
     expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { runId, sequence: 1 } })

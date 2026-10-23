@@ -254,6 +254,10 @@ describe('DynamoDB Agent Run reports', () => {
     const foreign = createClient([{ Items: [{ ...item, workItemId: 'task-2' }] }])
     await expect(new DynamoDbAgentRunStore(foreign.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 20))
       .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    // A stored URL that the request validator would reject never reaches viewers.
+    const unsafe = createClient([{ Items: [{ ...item, artifacts: [{ type: 'url', url: 'https://example.test/log?token=secret' }] }] }])
+    await expect(new DynamoDbAgentRunStore(unsafe.client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', undefined, 20))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
     const cursor = Buffer.from(JSON.stringify({ directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run#other' })).toString('base64url')
     await expect(new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').listWorkItemReports('workspace-1', 'core', 'task-1', cursor, 20))
       .rejects.toMatchObject({ category: 'validation_failed' })

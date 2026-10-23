@@ -27,7 +27,7 @@ import {
   type AgentRunRevocation,
   type StoredAgentRunClaim,
 } from '../../domain/agent-run'
-import type { StoredAgentRunReport } from '../../domain/agent-run-report'
+import { readAgentRunArtifactUrl, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
@@ -530,6 +530,21 @@ function parseVerifications(value: unknown): AgentRunVerification[] {
 }
 
 /**
+ * Re-applies the request rule to a stored artifact URL, so a row written outside the validator
+ * never reaches viewers.
+ *
+ * @param value - Stored value.
+ * @returns The URL.
+ */
+function parseStoredArtifactUrl(value: unknown): string {
+  try {
+    return readAgentRunArtifactUrl(value, '/url')
+  } catch {
+    throw createAgentRunIntegrityError()
+  }
+}
+
+/**
  * Parses a stored artifact list.
  *
  * @param value - Stored value.
@@ -540,10 +555,9 @@ function parseArtifacts(value: unknown): AgentRunArtifact[] {
   return value.map((item) => {
     if (!isRecord(item)) throw createAgentRunIntegrityError()
     const type = AGENT_RUN_ARTIFACT_TYPES.find((candidate) => candidate === item.type)
-    const url = storedString(item, 'url')
-    if (!type || !url.startsWith('https://')) throw createAgentRunIntegrityError()
+    if (!type) throw createAgentRunIntegrityError()
     const label = optionalStoredString(item, 'label')
-    return { type, url, ...(label === undefined ? {} : { label }) }
+    return { type, url: parseStoredArtifactUrl(item.url), ...(label === undefined ? {} : { label }) }
   })
 }
 

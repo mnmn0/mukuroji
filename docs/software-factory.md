@@ -203,7 +203,8 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   `invalid_artifact_url` で返す。server は URL を取得・解決しない。表示時は既存の rich text safety と
   同じ link 方針に従う。
 - Web は `GET /api/teams/{teamId}/work-items/{workItemId}/agent-run-reports?limit=`（既定 100 件、
-  新しい順）で Work Item を閲覧できる member に report を返す。
+  新しい順）で Work Item を閲覧できる member に report を返す。page の JSON が約 1 MB を超える場合は
+  そこで打ち切り（最新の 1 件は必ず含める）、`hasMore: true` を返して Lambda の応答上限に収める。
 - `kind=blocker` と `kind=handoff` は Factory board の「判断待ち」lane に出す。status 変更は
   伴わないため、agent は必要に応じて `move_task` を別途呼ぶ。
 - `message` だけの `report_progress` は、対象 Work Item と一致する自分の `active` Run がある場合、
@@ -214,6 +215,10 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   構造化 field（`verifications`、`artifacts`、`changedFileCount`、または `progress` 以外の `kind`）
   を含む `report_progress` は、一致する Run がなければ何も保存せずに `agent_run_not_active` を返す。
   comment だけを保存して error を返す部分保存はしない。agent は停止して人に確認する。
+- MCP は直近 100 件の report key を Work Item ごとに、送った先（Run の report endpoint、または comment
+  endpoint とその fence）と一緒に覚える。応答が失われた後の再送は、間に Run が終了・開始しても同じ
+  request を送り、server の receipt を再生する。別の Work Item に同じ key を使った場合はその Work Item の
+  request として送るため、server が idempotency conflict として拒否する。
 
 ## 仕様と context
 

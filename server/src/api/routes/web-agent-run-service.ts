@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type {
+  AgentRunReport,
   AgentRunView,
   AgentSettings,
   WorkItemAgentRunReportsResponse,
@@ -138,8 +139,14 @@ export async function listWebWorkItemAgentRuns(
 }
 
 /**
+ * Serialized size a page of reports may reach. One report holds at most about 200 KB, so a page
+ * always fits the buffered Lambda response limit and still holds several reports.
+ */
+const maximumReportPageBytes = 1_000_000
+
+/**
  * Lists a Work Item's newest structured reports for anyone who can see the Work Item. Store cursors
- * never leave the server.
+ * never leave the server. The page stops early once its serialized size reaches the byte budget.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
@@ -155,7 +162,16 @@ export async function listWebWorkItemAgentRunReports(
 ): Promise<WorkItemAgentRunReportsResponse> {
   await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
   const page = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, undefined, limit)
-  return { items: page.reports.map(toAgentRunReport), hasMore: page.nextCursor !== undefined }
+  const items: AgentRunReport[] = []
+  let bytes = 0
+  for (const stored of page.reports) {
+    const report = toAgentRunReport(stored)
+    bytes += Buffer.byteLength(JSON.stringify(report))
+    // The newest report is always returned, so a page is never empty while reports exist.
+    if (items.length > 0 && bytes > maximumReportPageBytes) return { items, hasMore: true }
+    items.push(report)
+  }
+  return { items, hasMore: page.nextCursor !== undefined }
 }
 
 /**
