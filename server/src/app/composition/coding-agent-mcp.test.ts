@@ -162,6 +162,7 @@ function startFakeApi() {
  * @param mode - Protocol negotiation mode.
  * @param extra - Additional environment variables.
  * @param entry - Script the server process runs; the source handler by default.
+ * @param command - Runtime that runs the script; Bun by default.
  * @returns Connected client.
  */
 async function connect(
@@ -169,10 +170,11 @@ async function connect(
   mode: 'legacy' | 'auto',
   extra: Record<string, string>,
   entry = handlerPath,
+  command = process.execPath,
 ): Promise<Client> {
   const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' }, { versionNegotiation: { mode } })
   const transport = new StdioClientTransport({
-    command: process.execPath,
+    command,
     args: [entry],
     env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
       MUKUROJI_MCP_TEAM_ID: 'team', MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_AGENT_NAME: 'test-agent', ...extra },
@@ -296,7 +298,8 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     const notices = await Bun.file(join(outdir, 'mcp.mjs.LICENSES.txt')).text()
     expect(notices).toContain('@modelcontextprotocol/server@')
     expect(notices).toContain('zod@')
-    client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'))
+    // The bundle is published for Node, so it runs under Node wherever Node is installed.
+    client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), Bun.which('node') ?? process.execPath)
     expect((await client.listTools()).tools).toHaveLength(17)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { runtime: 'codex' } })
   } finally {
