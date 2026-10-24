@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import useSWR from 'swr'
 import { listWorkItemAgentRunReports } from '../api/agentRuns'
 
@@ -32,9 +32,13 @@ export function useWorkItemAgentRunReports(
     },
   )
   const { mutate } = state
+  const observedCommentCount = useRef(commentCount)
   useEffect(() => {
-    // A new agent comment usually carries a report; the first render reads through the key instead.
-    if (commentCount > 0) void mutate()
+    // A new agent comment usually carries a report. The first render reads through the key, so only
+    // a later change of the comment count reads the reports again.
+    if (observedCommentCount.current === commentCount) return
+    observedCommentCount.current = commentCount
+    void mutate()
   }, [commentCount, mutate])
   return state
 }
