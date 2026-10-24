@@ -53,6 +53,7 @@ export const AGENT_RUN_PROBLEM_REASONS = [
   'agent_run_forbidden',
   'invalid_transition',
   'agent_run_takeover_disabled',
+  'invalid_artifact_url',
 ] as const
 
 /** Stable Agent Run fence reason carried in a problem violation code. */
@@ -173,6 +174,170 @@ export type AgentFencedWorkItemUpdateRequest = UpdatePublicWorkItemRequest & Age
 export type AgentFencedCommentRequest = AgentRunMutationFence & {
   /** Comment text. */
   body: string
+}
+
+/** Kinds of structured report an agent records; `progress` is the default. */
+export const AGENT_RUN_REPORT_KINDS = ['progress', 'blocker', 'verification', 'artifact', 'handoff'] as const
+
+/** Kind of a structured report; `blocker` and `handoff` ask a person to decide. */
+export type AgentRunReportKind = (typeof AGENT_RUN_REPORT_KINDS)[number]
+
+/** Results an agent records for one verification command. */
+export const AGENT_RUN_VERIFICATION_STATUSES = ['passed', 'failed', 'skipped'] as const
+
+/** Result of one verification command. */
+export type AgentRunVerificationStatus = (typeof AGENT_RUN_VERIFICATION_STATUSES)[number]
+
+/** Kinds of artifact link an agent records. */
+export const AGENT_RUN_ARTIFACT_TYPES = ['pull-request', 'branch', 'commit', 'url'] as const
+
+/** Kind of one artifact link. */
+export type AgentRunArtifactType = (typeof AGENT_RUN_ARTIFACT_TYPES)[number]
+
+/** Maximum length of a report message, which becomes the comment body after the agent label. */
+export const AGENT_RUN_REPORT_MESSAGE_MAX_LENGTH = 3_900
+
+/** Maximum number of verifications, and separately of artifacts, in one report. */
+export const AGENT_RUN_REPORT_MAX_ITEMS = 20
+
+/** Maximum length of a verification command and of its summary. */
+export const AGENT_RUN_VERIFICATION_TEXT_MAX_LENGTH = 512
+
+/** Maximum length of an artifact label. */
+export const AGENT_RUN_ARTIFACT_LABEL_MAX_LENGTH = 128
+
+/** Maximum length of an artifact URL. */
+export const AGENT_RUN_ARTIFACT_URL_MAX_LENGTH = 2_048
+
+/**
+ * Pattern of an artifact URL the report endpoint accepts: lowercase `https://` and a host, with no
+ * userinfo, backslash, whitespace, control character, or query, and no `?` or `=` in the fragment.
+ * The endpoint also requires the URL to parse with a host.
+ */
+export const AGENT_RUN_ARTIFACT_URL_PATTERN: string = '^https://[^/?#@\\\\\\s\\x00-\\x1F\\x7F]+(/[^?#\\\\\\s\\x00-\\x1F\\x7F]*)?(#[^?=\\\\\\s\\x00-\\x1F\\x7F]*)?$'
+
+/**
+ * Checks whether a value is an artifact URL the report endpoint accepts. Beyond
+ * {@link AGENT_RUN_ARTIFACT_URL_PATTERN}, the URL must parse with an https scheme and a host, so a
+ * client can reject an out-of-range port or a malformed host before sending the report.
+ *
+ * @param value - Candidate URL.
+ * @returns True when the endpoint accepts the URL as sent.
+ */
+export function isAgentRunArtifactUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > AGENT_RUN_ARTIFACT_URL_MAX_LENGTH) return false
+  if (!new RegExp(AGENT_RUN_ARTIFACT_URL_PATTERN).test(value)) return false
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return false
+  }
+  return parsed.protocol === 'https:' && parsed.hostname !== '' && parsed.username === '' && parsed.password === ''
+}
+
+/**
+ * Pattern of one-line report text (a verification command or summary, or an artifact label): no
+ * line break or control character other than a tab, and not only whitespace.
+ */
+export const AGENT_RUN_REPORT_LINE_PATTERN: string = '^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0A-\\x1F\\x7F]*$'
+
+/**
+ * Pattern of a report message: line breaks and tabs are allowed, other control characters are not,
+ * and it must not be only whitespace.
+ */
+export const AGENT_RUN_REPORT_MESSAGE_PATTERN: string = '^(?=[\\s\\S]*[^\\s\\x00-\\x1F\\x7F])[^\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]*$'
+
+/** One verification command and its result, as the agent reported it. */
+export type AgentRunVerification = {
+  /** Command the agent ran, such as `bun run server:test`. */
+  command: string
+  /** Result the agent observed. */
+  status: AgentRunVerificationStatus
+  /** Optional short result summary. */
+  summary?: string
+}
+
+/** One artifact link the agent reported. The server stores it without fetching or resolving it. */
+export type AgentRunArtifact = {
+  /** Kind of artifact. */
+  type: AgentRunArtifactType
+  /** HTTPS URL with a host, without userinfo, whitespace, a query, or `=` in its fragment. */
+  url: string
+  /** Optional display label. */
+  label?: string
+}
+
+/** Structured report saved with the comment an agent posted for its run. */
+export type AgentRunReport = {
+  /** Agent Run contract schema version. */
+  schemaVersion: typeof AGENT_RUN_SCHEMA_VERSION
+  /** Run the report belongs to. */
+  runId: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item the run claims. */
+  workItemId: string
+  /** Server-assigned position of the report within its run, starting at 1. */
+  sequence: number
+  /** Kind of report. */
+  kind: AgentRunReportKind
+  /** Comment saved with the report; its body carries the message. */
+  commentId: string
+  /** Verification results, in the order the agent reported them. */
+  verifications: AgentRunVerification[]
+  /** Artifact links, in the order the agent reported them. */
+  artifacts: AgentRunArtifact[]
+  /** Number of files the agent reported as changed. */
+  changedFileCount?: number
+  /** UTC ISO 8601 time the report was saved. */
+  createdAt: string
+}
+
+/** Request body that saves a structured report and its comment for an agent's own run. */
+export type ReportAgentRunRequest = {
+  /** Instance identifier sent when the run started; other instances cannot report on the run. */
+  instanceId: string
+  /** Kind of report; `progress` when omitted. */
+  kind?: AgentRunReportKind
+  /** Comment text, saved after the run's agent label. */
+  message: string
+  /** Verification results. */
+  verifications?: AgentRunVerification[]
+  /** Artifact links. */
+  artifacts?: AgentRunArtifact[]
+  /** Number of changed files. */
+  changedFileCount?: number
+}
+
+/** Comment saved with a structured report, in the Public API comment projection. */
+export type AgentRunReportComment = {
+  /** Comment ID. */
+  id: string
+  /** Member the comment is attributed to. */
+  actorUserId: string
+  /** Comment body, starting with the run's agent label. */
+  body: string
+  /** UTC ISO 8601 creation time. */
+  createdAt: string
+}
+
+/** Response of a saved structured report. */
+export type ReportAgentRunResponse = {
+  /** Saved report. */
+  report: AgentRunReport
+  /** Comment saved with the report. */
+  comment: AgentRunReportComment
+  /** Run after the report, with its renewed lease. */
+  run: AgentRun
+}
+
+/** Structured reports of one Work Item for the Web application. */
+export type WorkItemAgentRunReportsResponse = {
+  /** Reports, newest first. */
+  items: AgentRunReport[]
+  /** Whether older reports exist beyond the returned ones. */
+  hasMore: boolean
 }
 
 /** Team configuration that controls how agents claim work. */

@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
 import type {
+  AgentRunReport,
   AgentRunView,
   AgentSettings,
+  WorkItemAgentRunReportsResponse,
   WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
 import {
@@ -10,6 +12,7 @@ import {
   finishAgentRun,
   readUpdateAgentSettingsRequest,
   toAgentRun,
+  toAgentRunReport,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
 import {
@@ -19,7 +22,11 @@ import {
 } from '../../modules/audit/audit'
 import { ProjectDataError } from '../../modules/directory'
 import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
-import { createAgentRunAuditPut } from '../shared/agent-run-access'
+import {
+  commitProgressFencedClose,
+  createAgentRunAuditPut,
+  retryProgressFencedClose,
+} from '../shared/agent-run-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import {
   canWorkspaceBusinessWrite,
@@ -132,6 +139,42 @@ export async function listWebWorkItemAgentRuns(
 }
 
 /**
+ * Serialized size a page of reports may reach. One report holds at most about 200 KB, so a page
+ * always fits the buffered Lambda response limit and still holds several reports.
+ */
+const maximumReportPageBytes = 1_000_000
+
+/**
+ * Lists a Work Item's newest structured reports for anyone who can see the Work Item. Store cursors
+ * never leave the server. The page stops early once its serialized size reaches the byte budget.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @param limit - Number of reports from 1 to 100.
+ * @returns Newest reports and whether older ones exist.
+ */
+export async function listWebWorkItemAgentRunReports(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+  limit: number,
+): Promise<WorkItemAgentRunReportsResponse> {
+  await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+  const page = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, undefined, limit)
+  const items: AgentRunReport[] = []
+  let bytes = 0
+  for (const stored of page.reports) {
+    const report = toAgentRunReport(stored)
+    bytes += Buffer.byteLength(JSON.stringify(report))
+    // The newest report is always returned, so a page is never empty while reports exist.
+    if (items.length > 0 && bytes > maximumReportPageBytes) return { items, hasMore: true }
+    items.push(report)
+  }
+  return { items, hasMore: page.nextCursor !== undefined }
+}
+
+/**
  * Releases an active run for a Team manager, the member who started it, or the Work Item's current
  * assignee. When only the current assignment grants the authority, the release commits only while
  * the Work Item is still at the revision that was read.
@@ -150,36 +193,40 @@ export async function releaseWebAgentRun(
 ): Promise<AgentRunView> {
   requireWorkspaceBusinessWrite(principal)
   const store = workItemDependencies.agentRuns
-  const run = await store.getRun(principal.directoryId, teamId, runId)
-  if (!run) throw new AgentRunError('not_found', 'Agent Run was not found.')
-  const { detail } = await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
-  const manager = await isTeamManager(principal, teamId)
-  if (!mayRelease(run, principal, manager, detail.issue.assigneeUserId)) {
-    throw new AgentRunError('forbidden', 'Only the Work Item assignee or a Team manager can release an Agent Run.')
-  }
-  const now = new Date()
-  if (run.state !== 'active') {
-    if (run.outcome === 'released') return toAgentRunView(run, true, now)
-    throw createAgentRunNotActiveError()
-  }
-  const released = finishAgentRun(run, 'released', principal.userKey, now)
-  const auditPut = createAgentRunAuditPut(auditContext, released, 'released', 'Agent Run was released by a member.')
-  const closeItems = store.createCloseItems(released)
-  const assignmentOnly = !manager && run.assigneeUserId !== principal.userKey
-  await store.commit([
-    ...closeItems,
-    ...(assignmentOnly
-      ? [createWorkItemRevisionConditionCheck(
-          getTeamIssuesTableName(),
-          principal.directoryId,
-          teamId,
-          run.workItemId,
-          detail.issue.revision,
-        )]
-      : []),
-    ...(auditPut ? [auditPut] : []),
-  ], closeItems.length)
-  return toAgentRunView(released, true, now)
+  // The returned run is built from the run as read, so a report or heartbeat that commits first
+  // sends the release back to read the run again.
+  return retryProgressFencedClose(async () => {
+    const run = await store.getRun(principal.directoryId, teamId, runId)
+    if (!run) throw new AgentRunError('not_found', 'Agent Run was not found.')
+    const { detail } = await loadAuthorizedTeamIssue(principal, teamId, run.workItemId, 'member')
+    const manager = await isTeamManager(principal, teamId)
+    if (!mayRelease(run, principal, manager, detail.issue.assigneeUserId)) {
+      throw new AgentRunError('forbidden', 'Only the Work Item assignee or a Team manager can release an Agent Run.')
+    }
+    const now = new Date()
+    if (run.state !== 'active') {
+      if (run.outcome === 'released') return toAgentRunView(run, true, now)
+      throw createAgentRunNotActiveError()
+    }
+    const released = finishAgentRun(run, 'released', principal.userKey, now)
+    const auditPut = createAgentRunAuditPut(auditContext, released, 'released', 'Agent Run was released by a member.')
+    const closeItems = store.createCloseItems(released, undefined, true)
+    const assignmentOnly = !manager && run.assigneeUserId !== principal.userKey
+    const committed = await commitProgressFencedClose([
+      ...closeItems,
+      ...(assignmentOnly
+        ? [createWorkItemRevisionConditionCheck(
+            getTeamIssuesTableName(),
+            principal.directoryId,
+            teamId,
+            run.workItemId,
+            detail.issue.revision,
+          )]
+        : []),
+      ...(auditPut ? [auditPut] : []),
+    ], closeItems.length, run)
+    return committed ? toAgentRunView(released, true, now) : undefined
+  })
 }
 
 /**

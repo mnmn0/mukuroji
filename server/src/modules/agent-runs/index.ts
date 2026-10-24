@@ -9,6 +9,7 @@ export {
   type AgentRunErrorCategory,
 } from './domain/agent-run-error'
 export {
+  calculateLeaseExpiry,
   createActiveAgentRun,
   createDefaultAgentSettings,
   describeHoldingRun,
@@ -34,6 +35,14 @@ export {
   type ValidatedAgentRunTakeOver,
 } from './domain/agent-run'
 export {
+  createAgentRunReportCommentBody,
+  readAgentRunArtifactUrl,
+  readReportAgentRunRequest,
+  toAgentRunReport,
+  type StoredAgentRunReport,
+  type ValidatedAgentRunReport,
+} from './domain/agent-run-report'
+export {
   AGENT_RUN_ACTIVE_INDEX_NAME,
   AGENT_RUN_WORK_ITEM_INDEX_NAME,
   DynamoDbAgentRunStore,
@@ -41,6 +50,7 @@ export {
   type AgentRunDocumentClient,
   type AgentRunFenceInput,
   type AgentRunPage,
+  type AgentRunReportPage,
   type AgentRunStore,
   type AgentRunTransactItem,
 } from './adapter-out/dynamodb/agent-run-store'

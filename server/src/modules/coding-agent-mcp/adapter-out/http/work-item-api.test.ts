@@ -151,10 +151,40 @@ test('starts, lists, heartbeats, and finishes runs on the versioned Agent Run en
   await expect(api.claimedRun('other-task')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
+test('saves a structured report on the run endpoint and checks its scope', async () => {
+  const seen: { path: string; query: string; body: unknown; key: string | null }[] = []
+  let reportRunId = validRun.runId
+  const api = createAgentWorkItemApi(config, async (url, init) => {
+    const body: unknown = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+    seen.push({ path: url.pathname, query: url.search, body, key: new Headers(init.headers).get('Idempotency-Key') })
+    return Response.json({
+      report: {
+        schemaVersion: 1, runId: reportRunId, teamId: 'team', workItemId: 'task', sequence: 1, kind: 'artifact', commentId: 'note',
+        verifications: [], artifacts: [{ type: 'commit', url: 'https://github.com/example/repo/commit/abc' }], createdAt: validTask.createdAt,
+      },
+      comment: { id: 'note', actorUserId: 'agent', body: '[Codex]\n\nPushed', createdAt: validTask.createdAt },
+      run: { ...validRun, reportCount: 1 },
+    }, { status: 201 })
+  })
+  const input = { kind: 'artifact' as const, message: 'Pushed', artifacts: [{ type: 'commit' as const, url: 'https://github.com/example/repo/commit/abc' }] }
+  expect(await api.reportRun(validRun.runId, 'laptop', input, 'report-key', 'project')).toMatchObject({
+    report: { sequence: 1, kind: 'artifact' }, run: { reportCount: 1 },
+  })
+  expect(seen[0]).toEqual({
+    path: `/api/v1/agent-runs/${validRun.runId}/reports`, query: '?teamId=team&assignedProjectId=project',
+    key: 'report-key', body: { instanceId: 'laptop', ...input },
+  })
+  reportRunId = 'run_00000000-0000-4000-8000-000000000002'
+  await expect(api.reportRun(validRun.runId, 'laptop', input, 'report-key')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
 test('maps Agent Run problem reasons to stable codes without forwarding remote detail', async () => {
-  for (const [status, reason] of [[409, 'agent_run_conflict'], [409, 'agent_run_not_active'], [403, 'agent_run_forbidden'], [409, 'invalid_transition']] as const) {
+  for (const [status, reason] of [
+    [409, 'agent_run_conflict'], [409, 'agent_run_not_active'], [403, 'agent_run_forbidden'], [409, 'invalid_transition'],
+    [400, 'invalid_artifact_url'],
+  ] as const) {
     const api = createAgentWorkItemApi(config, async () => Response.json({
-      status, code: status === 403 ? 'forbidden' : 'conflict', retryable: false, detail: 'secret-test-token',
+      status, code: status === 403 ? 'forbidden' : status === 400 ? 'validation_failed' : 'conflict', retryable: false, detail: 'secret-test-token',
       errors: [{ pointer: '/agentInstanceId', code: reason, message: 'secret-test-token' }],
     }, { status, headers: { 'Content-Type': 'application/problem+json' } }))
     const error = await api.update('task', { expectedRevision: 1, title: 'New' }, 'key').catch((caught: unknown) => caught)

@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { createAgentTasks } from './agent-tasks'
 import type { AgentRunMutationFence } from '@mukuroji/contracts'
-import { AgentTaskError, type AgentCatalog, type AgentRunRecord, type AgentTask, type AgentWorkItemApi } from './work-item-api'
+import {
+  AgentTaskError, type AgentCatalog, type AgentRunRecord, type AgentRunReportInput, type AgentRunReportResult, type AgentTask,
+  type AgentWorkItemApi,
+} from './work-item-api'
 
 /** Creates a minimal validated canonical task projection. */
 function task(id = 'one', patch: Partial<AgentTask> = {}): AgentTask {
@@ -34,6 +37,8 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
   const records = new Map(initial.map((item) => [item.id, structuredClone(item)]))
   const receipts = new Map<string, { fingerprint: string; task: AgentTask }>()
   const notes: string[] = []
+  const reports: (AgentRunReportInput & { runId: string })[] = []
+  const reportReceipts = new Map<string, { runId: string; result: AgentRunReportResult }>()
   const fences: (AgentRunMutationFence | undefined)[] = []
   const runs = new Map<string, AgentRunRecord & { instanceId: string }>()
   let runSequence = 0
@@ -122,6 +127,40 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
         (!filters.assigneeUserId || run.assigneeUserId === filters.assigneeUserId)).map(publicRun), hasMore: false }
     },
     /**
+     * Saves a structured report for an active run of the same instance, labelling its comment like the server.
+     *
+     * @param runId - Reporting run.
+     * @param instanceId - Instance that started the run.
+     * @param input - Report fields.
+     * @param key - Idempotency key; a reused key replays the saved response like the server.
+     * @returns The report, its comment, and the run.
+     */
+    async reportRun(runId, instanceId, input, key) {
+      const replay = reportReceipts.get(key)
+      if (replay) {
+        if (replay.runId !== runId) throw new AgentTaskError('idempotency_conflict', 'Different request')
+        return structuredClone(replay.result)
+      }
+      const run = runs.get(runId)
+      if (!run || run.state !== 'active' || run.instanceId !== instanceId) throw new AgentTaskError('agent_run_not_active', 'Finished')
+      const body = `[${run.agentName}]\n\n${input.message}`
+      notes.push(body)
+      reports.push({ runId, ...input })
+      const reported = { ...run, reportCount: run.reportCount + 1 }
+      runs.set(runId, reported)
+      const result = {
+        report: {
+          schemaVersion: 1 as const, runId, teamId: 'team', workItemId: run.workItemId, sequence: reported.reportCount,
+          kind: input.kind ?? 'progress', commentId: 'comment', verifications: input.verifications ?? [],
+          artifacts: input.artifacts ?? [], createdAt: '2026-09-01T00:10:00.000Z',
+        },
+        comment: { id: 'comment', actorUserId: 'agent-member', body, createdAt: '2026-09-01T00:10:00.000Z' },
+        run: publicRun(reported),
+      }
+      reportReceipts.set(key, { runId, result })
+      return structuredClone(result)
+    },
+    /**
      * Supersedes a stalled run of another instance and starts this instance's run.
      *
      * @param id - Task ID.
@@ -179,7 +218,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     const run = runs.get(runId)
     if (run) runs.set(runId, { ...run, state: 'finished', outcome: 'released', finishedBy: 'member', finishedAt: '2026-09-01T01:00:00.000Z' })
   }
-  return { api, records, notes, fences, runs, release, service: createAgentTasks(api, baseScope) }
+  return { api, records, notes, reports, fences, runs, release, service: createAgentTasks(api, baseScope) }
 }
 
 describe('agent task lifecycle', () => {
@@ -208,7 +247,7 @@ describe('agent task lifecycle', () => {
   })
 
   test('reports another instance\'s run without resuming it, skips its task, and fences mutations', async () => {
-    const { api, service, fences, release, runs } = fixture([task('first', { priority: 'high' }), task('second')])
+    const { api, service, fences, release, runs, reports } = fixture([task('first', { priority: 'high' }), task('second')])
     const other = createAgentTasks(api, { ...baseScope, instanceId: 'instance-b', runtime: 'codex' })
     await other.transition('first', 1, 'coding', 'start', 'other-claim')
     const next = await service.next({})
@@ -225,15 +264,16 @@ describe('agent task lifecycle', () => {
     await expect(service.heartbeat(held?.runId ?? '')).rejects.toMatchObject({ code: 'not_own_run' })
     expect(await service.get('first')).toMatchObject({ activeRun: { workItemId: 'first', ownedByThisInstance: false } })
 
-    await other.report('first', 'Progress', 'note')
-    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-b', agentRunId: held?.runId })
+    // The other instance holds the run, so its report is saved for that run.
+    await other.report('first', { message: 'Progress' }, 'note')
+    expect(reports.at(-1)).toEqual({ runId: held?.runId, message: 'Progress' })
     release(held?.runId ?? '')
     expect(await other.next({})).toMatchObject({ ownRuns: [] })
   })
 
   test('recognizes a run it just started while the run index still lags, and stops after a release', async () => {
     let indexed = false
-    const { api, release, fences } = fixture()
+    const { api, release, fences, reports } = fixture()
     const lagging = createAgentTasks({
       ...api,
       /**
@@ -252,11 +292,14 @@ describe('agent task lifecycle', () => {
     expect(await lagging.get('one')).toMatchObject({ activeRun: { runId, ownedByThisInstance: true } })
     expect(await lagging.heartbeat(runId)).toMatchObject({ runId })
     expect(await lagging.next({})).toMatchObject({ action: 'in_progress', task: { id: 'one' }, ownRuns: [{ runId }] })
-    await lagging.report('one', 'Progress', 'note')
+    // Its own run is found through the claim, so the report is saved for that run.
+    await lagging.report('one', { message: 'Progress' }, 'note')
+    expect(reports.at(-1)).toEqual({ runId, message: 'Progress' })
+    await lagging.update('one', { expectedRevision: 2, title: 'Renamed' }, 'rename')
     expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a', agentRunId: runId })
     indexed = true
     release(runId)
-    await lagging.report('one', 'After release', 'note-2')
+    await lagging.report('one', { message: 'After release' }, 'note-2')
     // The claim is gone, so only the instance is sent; the server's revocation check rejects it.
     expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
     await expect(lagging.heartbeat(runId)).rejects.toMatchObject({ code: 'agent_run_not_active' })
@@ -420,10 +463,40 @@ describe('agent task lifecycle', () => {
     await expect(service.transition('one', 2, 'coding', 'start', 'new-claim')).rejects.toMatchObject({ code: 'invalid_transition' })
   })
 
+  test('saves structured reports only for its own run and keeps plain notes as comments without one', async () => {
+    const { service, notes, reports, fences, release } = fixture([task(), task('two')])
+    const structured = {
+      message: 'Ready', kind: 'handoff' as const,
+      verifications: [{ command: 'bun test', status: 'passed' as const }],
+      artifacts: [{ type: 'pull-request' as const, url: 'https://github.com/example/repo/pull/1' }],
+    }
+    // Without a run, nothing is saved: neither a report nor a partial comment.
+    await expect(service.report('one', structured, 'early')).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    await expect(service.report('one', { message: 'Count', changedFileCount: 2 }, 'early-count')).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    expect(notes).toEqual([])
+    expect(await service.report('one', { message: 'Plan', kind: 'progress' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(notes).toEqual(['[test-agent]\n\nPlan'])
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
+    const claimed = await service.transition('one', 1, 'coding', 'start', 'claim')
+    const runId = 'run' in claimed ? claimed.run.runId : ''
+    expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { kind: 'handoff', sequence: 1 }, run: { reportCount: 1 } })
+    expect(reports).toEqual([{ runId, ...structured }])
+    // A plain note retried after the run started is sent to the comment endpoint again, with its first fence.
+    expect(await service.report('one', { message: 'Plan', kind: 'progress' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
+    expect(reports).toHaveLength(1)
+    // A key reused for another task is that task's own request and never replays the first task's report.
+    await expect(service.report('two', structured, 'handoff')).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    // A retry after a lost response reaches the same run's report endpoint even once the run closed.
+    release(runId)
+    expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { runId, sequence: 1 } })
+    expect(reports).toHaveLength(1)
+  })
+
   test('records progress separately, completes, reopens, and cancels using custom status IDs', async () => {
     const { service, records, notes } = fixture()
     await service.transition('one', 1, 'coding', 'start', 'a')
-    await service.report('one', 'Tests passed. PR: https://example.test/pr/1', 'note')
+    await service.report('one', { message: 'Tests passed. PR: https://example.test/pr/1' }, 'note')
     expect(records.get('one')?.description).toBe('Original instructions')
     expect(notes).toEqual(['[test-agent]\n\nTests passed. PR: https://example.test/pr/1'])
     await service.transition('one', 2, 'review', 'move', 'b')
@@ -459,11 +532,31 @@ describe('agent task lifecycle', () => {
         return { id: 'comment', actorUserId: 'member', body, createdAt: '2026-09-01T00:00:00.000Z' }
       },
     })
+    const reportRun = api.reportRun.bind(api)
+    const reportedProjects: (string | undefined)[] = []
+    /**
+     * Records the Project a report is restricted to.
+     *
+     * @param runId - Reporting run.
+     * @param instanceId - Instance that started the run.
+     * @param input - Report fields.
+     * @param key - Idempotency key.
+     * @param project - Requested Project.
+     * @returns The saved report.
+     */
+    api.reportRun = async (runId, instanceId, input, key, project) => {
+      reportedProjects.push(project)
+      return reportRun(runId, instanceId, input, key, project)
+    }
     const scoped = createAgentTasks(api, { ...baseScope, agentName: 'test', assignedProjectId: 'project' })
     await scoped.configuration()
+    // Without a run, a plain report is a comment scoped like every other request.
+    await scoped.report('one', { message: 'Before starting' }, 'early-note')
     await scoped.transition('one', 1, 'coding', 'start', 'claim')
     await scoped.comments('one')
-    await scoped.report('one', 'Progress', 'note')
+    // With its run, the report is restricted to the configured Project on the server too.
+    await scoped.report('one', { message: 'Started' }, 'late-note')
+    expect(reportedProjects).toEqual(['project'])
   })
 
   test('keeps runs of tasks outside the configured Project out of selection, heartbeats, and finishing', async () => {

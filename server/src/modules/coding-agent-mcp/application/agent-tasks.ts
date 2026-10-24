@@ -9,6 +9,7 @@ import {
 import {
   AgentTaskError,
   type AgentRunRecord,
+  type AgentRunReportInput,
   type AgentTask,
   type AgentTaskFilters,
   type AgentWorkItemApi,
@@ -46,6 +47,20 @@ const maximumRunPages = 10
  */
 const claimReadBatchSize = 10
 
+/** Report idempotency keys this process remembers with the endpoint they were sent to. */
+const maximumRememberedReportKeys = 100
+
+/** Endpoint a report was sent to: a run's report endpoint, or the comment endpoint with its fence. */
+type ReportRoute =
+  | {
+      /** Run whose report endpoint received the report. */
+      runId: string
+    }
+  | {
+      /** Exact fence the plain comment was sent with. */
+      fence: AgentRunMutationFence
+    }
+
 /** Explicit lifecycle intent; the target status is always selected from current configuration. */
 export type AgentTransition = 'start' | 'complete' | 'reopen' | 'cancel' | 'move'
 
@@ -62,6 +77,29 @@ export type AgentBlockers = {
  * @returns Task selection, lifecycle, progress, and status operations.
  */
 export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
+  /**
+   * Endpoint each recent report key was sent to, per task. A retry after a lost response must send
+   * the same request to replay its receipt, even if a run closed or started in between; a key reused
+   * for another task is sent as that task's own request, so the server rejects the reuse. The routes
+   * live only in this process: after a restart, such a retry fails with an error instead of replaying,
+   * and never saves a second report.
+   */
+  const reportRoutesByKey = new Map<string, ReportRoute>()
+
+  /**
+   * Remembers where a report key was sent, keeping only the most recent keys.
+   * @param rememberedKey - Task and idempotency key.
+   * @param route - Endpoint the report is sent to.
+   */
+  function rememberReportRoute(rememberedKey: string, route: ReportRoute): void {
+    reportRoutesByKey.delete(rememberedKey)
+    reportRoutesByKey.set(rememberedKey, route)
+    if (reportRoutesByKey.size > maximumRememberedReportKeys) {
+      const oldest = reportRoutesByKey.keys().next().value
+      if (oldest !== undefined) reportRoutesByKey.delete(oldest)
+    }
+  }
+
   /** Verifies the optional process-wide Project restriction. */
   function inScope(task: AgentTask): AgentTask {
     if (scope.assignedProjectId !== undefined && task.assignedProjectId !== scope.assignedProjectId) {
@@ -399,10 +437,33 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const selection = filters({ assignedProjectId: input.assignedProjectId })
       return api.create({ ...input, assignedProjectId: selection.assignedProjectId, assigneeUserId: scope.assigneeUserId }, key)
     },
-    /** Adds a durable progress, blocker, or completion report to the existing discussion. */
-    async report(id: string, message: string, key: string) {
+    /**
+     * Adds a durable report to the task discussion. With this instance's active run on the task it is
+     * saved as a structured report of that run; without one, only a plain message is accepted.
+     */
+    async report(id: string, input: AgentRunReportInput, key: string) {
       await owned(id)
-      return api.comment(id, `[${scope.agentName}]\n\n${message}`, key, scope.assignedProjectId, scope.assigneeUserId, await fenceFor(id))
+      const rememberedKey = JSON.stringify([id, key])
+      const remembered = reportRoutesByKey.get(rememberedKey)
+      const runId = remembered ? ('runId' in remembered ? remembered.runId : undefined) : (await claimedRun(id, true))?.runId
+      if (runId) {
+        rememberReportRoute(rememberedKey, { runId })
+        return api.reportRun(runId, scope.instanceId, input, key, scope.assignedProjectId)
+      }
+      const structured = (input.kind !== undefined && input.kind !== 'progress') ||
+        (input.verifications?.length ?? 0) > 0 || (input.artifacts?.length ?? 0) > 0 || input.changedFileCount !== undefined
+      if (structured) {
+        throw new AgentTaskError(
+          'agent_run_not_active',
+          'Structured reports need your active run on this task, and you have none. This call saved nothing, but a report sent earlier with the same key may already be on the task; check its discussion, then stop and ask the user.',
+        )
+      }
+      const fence = remembered && 'fence' in remembered ? remembered.fence : await fenceFor(id)
+      rememberReportRoute(rememberedKey, { fence })
+      const comment = await api.comment(
+        id, `[${scope.agentName}]\n\n${input.message}`, key, scope.assignedProjectId, scope.assigneeUserId, fence,
+      )
+      return { comment }
     },
     /** Extends the lease of this instance's own run. */
     async heartbeat(runId: string) {

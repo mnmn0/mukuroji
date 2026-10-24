@@ -11,6 +11,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 import {
   getWebAgentSettings,
+  listWebWorkItemAgentRunReports,
   listWebWorkItemAgentRuns,
   releaseWebAgentRun,
   updateWebAgentSettings,
@@ -18,6 +19,9 @@ import {
 
 /** Default number of runs in a Work Item history page. */
 const defaultHistoryPageSize = 20
+
+/** Default number of reports read for a Work Item's discussion. */
+const defaultReportPageSize = 100
 
 /**
  * Converts Agent Run route failures to safe API responses.
@@ -43,13 +47,14 @@ function toAgentRunErrorResponse(c: Context, error: unknown): Response {
 }
 
 /**
- * Reads an optional history page size.
+ * Reads an optional page size.
  *
  * @param value - Raw query value.
+ * @param defaultLimit - Size used when the query omits it.
  * @returns Page size.
  */
-function readHistoryLimit(value: string | undefined): number {
-  if (value === undefined) return defaultHistoryPageSize
+function readHistoryLimit(value: string | undefined, defaultLimit = defaultHistoryPageSize): number {
+  if (value === undefined) return defaultLimit
   const limit = Number(value)
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     throw new AgentRunError('validation_failed', 'limit must be an integer from 1 to 100.', { pointer: '/limit' })
@@ -73,6 +78,22 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
         c.req.param('teamId'),
         c.req.param('workItemId'),
         readHistoryLimit(c.req.query('limit')),
+      ))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/teams/:teamId/work-items/:workItemId/agent-run-reports', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      return c.json(await listWebWorkItemAgentRunReports(
+        principal,
+        c.req.param('teamId'),
+        c.req.param('workItemId'),
+        readHistoryLimit(c.req.query('limit'), defaultReportPageSize),
       ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)

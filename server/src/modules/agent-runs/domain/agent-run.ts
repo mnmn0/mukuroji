@@ -12,6 +12,7 @@ import {
   type AgentRun,
   type AgentRunFinishOutcome,
   type AgentRunOutcome,
+  type AgentRunReportKind,
   type AgentRunRuntime,
   type AgentSettings,
   type StartAgentRunRequest,
@@ -63,6 +64,10 @@ export type StoredAgentRun = {
   finishedBy?: string
   /** Number of saved structured reports. */
   reportCount: number
+  /** Kind of the latest structured report, kept for the Factory board and never returned by the Public API. */
+  lastReportKind?: AgentRunReportKind
+  /** Time of the latest structured report, kept with its kind. */
+  lastReportAt?: string
 }
 
 /** Persisted claim that fences one Work Item to its single active run. */

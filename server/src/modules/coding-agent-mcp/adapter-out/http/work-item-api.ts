@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { AGENT_RUN_PROBLEM_REASONS } from '@mukuroji/contracts'
 import type {
-  AgentCatalog, AgentPage, AgentRunRecord, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
+  AgentCatalog, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
 } from '../../application/work-item-api'
 import { AgentTaskError } from '../../application/work-item-api'
 
@@ -45,6 +45,23 @@ const runSchema: z.ZodType<AgentRunRecord> = z.object({
   stalled: z.boolean(), finishedAt: z.iso.datetime().optional(), finishedBy: z.string().min(1).optional(),
   reportCount: z.number().int().nonnegative(),
 })
+const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
+  report: z.object({
+    schemaVersion: z.literal(1), runId: z.string().regex(/^run_[0-9a-f-]{36}$/u), teamId: identifier, workItemId: identifier,
+    sequence: z.number().int().positive(), kind: z.enum(['progress', 'blocker', 'verification', 'artifact', 'handoff']),
+    commentId: identifier,
+    verifications: z.array(z.object({
+      command: z.string().min(1), status: z.enum(['passed', 'failed', 'skipped']), summary: z.string().min(1).optional(),
+    })).max(20),
+    artifacts: z.array(z.object({
+      type: z.enum(['pull-request', 'branch', 'commit', 'url']), url: z.string().startsWith('https://'), label: z.string().min(1).optional(),
+    })).max(20),
+    changedFileCount: z.number().int().nonnegative().optional(),
+    createdAt: z.iso.datetime(),
+  }),
+  comment: commentSchema,
+  run: runSchema,
+})
 const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
@@ -61,6 +78,7 @@ const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string>
   agent_run_forbidden: 'Only the task assignee can start or operate an Agent Run with this credential. Check MUKUROJI_MCP_ASSIGNEE_ID and the credential owner.',
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
+  invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
 }
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */
@@ -88,7 +106,7 @@ async function readBody(response: Response, maximumBytes: number): Promise<strin
 
 /** Extracts only allowlisted codes and retry metadata; remote messages and malformed bodies remain private. */
 async function readProblem(response: Response) {
-  if (![403, 409].includes(response.status) || !response.headers.get('content-type')?.includes('application/problem+json')) {
+  if (![400, 403, 409].includes(response.status) || !response.headers.get('content-type')?.includes('application/problem+json')) {
     await response.body?.cancel()
     return undefined
   }
@@ -260,6 +278,16 @@ export function createAgentWorkItemApi(
         throw new AgentTaskError('invalid_response', 'The API returned a run of another assignee.')
       }
       return run
+    },
+    /** Saves a structured report with the original idempotency key. */
+    async reportRun(runId, instanceId, input, key, assignedProjectId) {
+      const saved = await request(
+        `agent-runs/${encodeURIComponent(runId)}/reports`, reportResultSchema, 'POST', { instanceId, ...input }, key, { assignedProjectId },
+      )
+      if (saved.report.runId !== runId || saved.report.teamId !== config.teamId) {
+        throw new AgentTaskError('invalid_response', 'The API returned a report for another run.')
+      }
+      return { ...saved, run: scopedRun(saved.run, runId) }
     },
     /** Reads one run. */
     async getRun(runId) { return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}`, runSchema), runId) },

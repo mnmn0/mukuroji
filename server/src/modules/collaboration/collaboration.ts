@@ -446,9 +446,18 @@ export type CreateCollaborationCommentInput = WorkItemCollaborationScope & {
   deepLink?: string
   /** Caller authorization rows guarded in the same transaction as the comment write. */
   authorizationConditionChecks?: readonly CollaborationAuthorizationConditionCheck[]
+  /**
+   * Writes of a trusted caller committed atomically with the comment, after its authorization
+   * checks. With co-writes, a conditional failure is never resolved as a replay of an existing
+   * comment; the caller owns replay and classifies the failure.
+   */
+  coWrites?: readonly CollaborationCoWrite[]
   /** State と同じ transaction に保存する audit context です。 */
   auditContext?: MutationAuditContext
 }
+
+/** One write of a trusted caller committed in the same transaction as a comment. */
+export type CollaborationCoWrite = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
 /** Comment 本文更新入力です。 */
 export type UpdateCollaborationCommentInput = WorkItemCollaborationScope & {
@@ -3903,6 +3912,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         },
       },
       ...(input.authorizationConditionChecks ?? []),
+      ...(input.coWrites ?? []),
       ...automaticWatchers.map(({ memberKey, reasons }) =>
         autoWatcherUpdate(this.tableName, input.entityKey, memberKey, reasons, occurredAt)
       ),
@@ -3913,7 +3923,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: items }))
       return comment
     } catch (error) {
-      if (isConditionalFailure(error) && input.auditContext) {
+      if (isConditionalFailure(error) && input.auditContext && !input.coWrites?.length) {
         const existing = await this.getStoredComment(input.entityKey, commentId)
         if (existing && isSameCreatedComment(existing, comment)) {
           return existing
@@ -6214,6 +6224,18 @@ function toStoredPresence(value: Record<string, unknown>) {
 
 function normalizeWatcherReasons(value: string[] | Set<string>) {
   return [...value].filter((reason): reason is string => typeof reason === 'string').sort()
+}
+
+/**
+ * Derives the identifier `createComment` assigns to a comment written with an audit context, so
+ * that a caller can reference the comment from writes committed in the same transaction.
+ *
+ * @param entityKey - Collaboration entity key of the comment.
+ * @param auditContext - Audit context the comment is written with.
+ * @returns Deterministic comment identifier.
+ */
+export function deriveAuditedCommentId(entityKey: string, auditContext: MutationAuditContext): string {
+  return createCommentId(auditContext.occurredAt, auditContext, entityKey)
 }
 
 function createCommentId(

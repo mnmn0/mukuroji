@@ -9,6 +9,7 @@ import {
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
+  readReportAgentRunRequest,
   readStartAgentRunRequest,
   type StoredAgentRun,
 } from '../modules/agent-runs'
@@ -21,7 +22,11 @@ import {
 } from './shared/agent-run-access'
 import { resolveDeveloperCredentialPrincipal } from './shared/developer-platform-access'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
-import type { CollaborationClient } from '../modules/collaboration/collaboration'
+import {
+  CollaborationError,
+  deriveAuditedCommentId,
+  type CollaborationClient,
+} from '../modules/collaboration/collaboration'
 
 const {
   app,
@@ -92,7 +97,8 @@ function configureUnstartedAssignedWorkItem(overrides: {
 } = {}) {
   const store = new InMemoryAgentRunStore()
   const observed: unknown[][] = []
-  configureFakeProjectClients(true, {
+  // The fake reads these options on every call, so a test can change the Work Item mid-request.
+  const projectOptions: NonNullable<Parameters<typeof configureFakeProjectClients>[1]> = {
     directoryId: workspaceId,
     role: overrides.role ?? 'member',
     workspaceRole: 'member',
@@ -110,9 +116,10 @@ function configureUnstartedAssignedWorkItem(overrides: {
         throw error
       }
     },
-  })
+  }
+  configureFakeProjectClients(true, projectOptions)
   setTestAppDependencies({ agentRuns: store })
-  return { store, observed }
+  return { store, observed, projectOptions }
 }
 
 describe('public Agent Run service', () => {
@@ -914,8 +921,267 @@ describe('public Agent Run service', () => {
   })
 })
 
+describe('Agent Run reports', () => {
+  /**
+   * Prepares a started Work Item held by a run, a receipt writer, and a comment writer that commits
+   * the report's co-writes against the in-memory store the way the real transaction does.
+   *
+   * @param beforeCommit - Runs before the co-writes apply, to simulate a concurrent write.
+   * @param assigneeUserId - Current assignee of the Work Item; the run's member by default.
+   * @returns Store, held run, recorded comment writes, and a report call.
+   */
+  function configureReport(beforeCommit?: () => void, assigneeUserId?: string) {
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', ...(assigneeUserId ? { assigneeUserId } : {}) })
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    const comments: Parameters<CollaborationClient['createComment']>[0][] = []
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+      collaboration: createCollaborationStub({
+        /**
+         * Commits the co-writes with the comment, failing like the real writer on a cancelled condition.
+         *
+         * @param input - Comment write.
+         * @returns The stored comment.
+         */
+        async createComment(input) {
+          if (!input.auditContext) throw new Error('A report comment must be audited.')
+          beforeCommit?.()
+          try {
+            store.applyTransactItems(input.coWrites ?? [])
+          } catch (error) {
+            if (error instanceof InMemoryTransactionCanceledError) {
+              throw new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+            }
+            throw error
+          }
+          comments.push(input)
+          const id = deriveAuditedCommentId(input.entityKey, input.auditContext)
+          return {
+            id, rootCommentId: id, authorMemberKey: input.actorMemberKey, bodyMarkdown: input.bodyMarkdown, version: 1,
+            mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+            createdAt: input.auditContext.occurredAt, updatedAt: input.auditContext.occurredAt,
+          }
+        },
+      }),
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Reports on the held run.
+     *
+     * @param body - Raw report body.
+     * @param key - Idempotency key.
+     * @returns The report response.
+     */
+    const report = (body: Record<string, unknown>, key: string) => runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', held.runId, readReportAgentRunRequest({ instanceId: 'laptop-1', ...body }),
+      { requestId: 'report', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    return { store, held, comments, report, service, projectOptions }
+  }
+
+  test('saves a numbered report with its labelled comment and renews the lease in one transaction', async () => {
+    const { store, held, comments, report } = configureReport()
+    const first = await report({
+      kind: 'verification', message: 'Tests passed',
+      verifications: [{ command: 'bun run server:test', status: 'passed' }],
+      artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/1', label: 'PR 1' }],
+      changedFileCount: 4,
+    }, 'report-1')
+    expect(first).toMatchObject({
+      report: {
+        runId: held.runId, workItemId: 'task-1', sequence: 1, kind: 'verification', changedFileCount: 4,
+        verifications: [{ command: 'bun run server:test', status: 'passed' }],
+        artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/1', label: 'PR 1' }],
+      },
+      comment: { body: '[Codex]\n\nTests passed', actorUserId: 'demo@example.com' },
+      run: { reportCount: 1, state: 'active' },
+    })
+    expect(first.report.commentId).toBe(first.comment.id)
+    expect(comments[0]?.bodyMarkdown).toBe('[Codex]\n\nTests passed')
+    expect(comments[0]?.coWrites?.some((item) => item.Put?.TableName === 'DeveloperPlatformTable')).toBe(true)
+    const stored = store.state.runs.get(`${workspaceId}|core-team|${held.runId}`)
+    expect(stored).toMatchObject({ reportCount: 1, lastReportKind: 'verification' })
+    expect(Date.parse(stored?.leaseExpiresAt ?? '')).toBeGreaterThan(Date.parse(held.leaseExpiresAt))
+    // The agent's instance ID never reaches the audit record of the request.
+    expect(JSON.stringify(comments[0]?.auditContext)).not.toContain('laptop-1')
+
+    const second = await report({ kind: 'blocker', message: 'Need a decision' }, 'report-2')
+    expect(second.report).toMatchObject({ sequence: 2, kind: 'blocker', verifications: [], artifacts: [] })
+    expect(store.state.reports.size).toBe(2)
+  })
+
+  test('refuses reports from another instance, after the run closed, or after a reassignment', async () => {
+    const { store, held, comments, service } = configureReport()
+    await expect(runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', held.runId, readReportAgentRunRequest({ instanceId: 'laptop-2', message: 'Not mine' }),
+      { requestId: 'report', idempotencyKey: 'other' },
+      { credentialId: 'agent-key', idempotencyKey: 'other', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'agent_run_conflict', pointer: '/instanceId' })
+    store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'released', 'sato@example.com', new Date())))
+    await expect(runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', held.runId, readReportAgentRunRequest({ instanceId: 'laptop-1', message: 'Late' }),
+      { requestId: 'report', idempotencyKey: 'late' },
+      { credentialId: 'agent-key', idempotencyKey: 'late', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+    expect(comments).toHaveLength(0)
+
+    const scoped = configureReport()
+    await expect(runWithTestAppDependencies(() => scoped.service.report(
+      credential, 'core-team', scoped.held.runId, readReportAgentRunRequest({ instanceId: 'laptop-1', message: 'Moved' }),
+      { requestId: 'report', idempotencyKey: 'moved' },
+      { credentialId: 'agent-key', idempotencyKey: 'moved', requestFingerprint: 'fp', reservationId: 'reservation' },
+      'another-project',
+    ))).rejects.toMatchObject({ category: 'forbidden' })
+    await expect(runWithTestAppDependencies(() => scoped.service.authorizeReport(
+      credential, 'core-team', scoped.held.runId, scoped.held.instanceIdHash, 'another-project',
+    ))).rejects.toMatchObject({ category: 'forbidden' })
+    expect(scoped.comments).toHaveLength(0)
+
+    const reassigned = configureReport(undefined, 'sato@example.com')
+    await expect(reassigned.report({ message: 'Still mine?' }, 'reassigned')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+  })
+
+  test('classifies a concurrent report or close that wins the transaction', async () => {
+    let interfere: (() => void) | undefined
+    const { store, held, report } = configureReport(() => interfere?.())
+    const runKey = `${workspaceId}|core-team|${held.runId}`
+    interfere = () => {
+      const current = store.state.runs.get(runKey)
+      if (current) store.state.runs.set(runKey, { ...current, reportCount: current.reportCount + 1 })
+    }
+    // Retrying with the same key renumbers the report after the one that won.
+    await expect(report({ message: 'Raced' }, 'raced')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    // A heartbeat that commits after the report read its time keeps its later lease; the retry reports from a later time.
+    interfere = () => {
+      const current = store.state.runs.get(runKey)
+      if (current) store.state.runs.set(runKey, { ...current, lastHeartbeatAt: new Date(Date.now() + 60_000).toISOString() })
+    }
+    await expect(report({ message: 'Behind a heartbeat' }, 'heartbeat')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    interfere = () => {
+      const current = store.state.runs.get(runKey)
+      if (current) store.applyTransactItems(store.createCloseItems(finishAgentRun(current, 'released', 'sato@example.com', new Date())))
+    }
+    await expect(report({ message: 'Closed' }, 'closed')).rejects.toMatchObject({ reason: 'agent_run_not_active' })
+  })
+
+  test('reports a reassignment that wins the transaction as forbidden', async () => {
+    let interfere: (() => void) | undefined
+    const { report, projectOptions } = configureReport(() => interfere?.())
+    interfere = () => {
+      projectOptions.detailAssigneeUserId = 'sato@example.com'
+      throw new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+    }
+    await expect(report({ message: 'Reassigned meanwhile' }, 'reassigned')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+  })
+
+  test('rebuilds a finish that a concurrent report overtakes so its response matches the closed row', async () => {
+    const { store, held, report, service } = configureReport()
+    let interfere: (() => Promise<unknown>) | undefined
+    const commit = store.commit.bind(store)
+    const attempts: unknown[][] = []
+    store.commit = async (items, fenceItemCount) => {
+      attempts.push([...items])
+      const pending = interfere
+      interfere = undefined
+      await pending?.()
+      return commit(items, fenceItemCount)
+    }
+    interfere = () => report({ message: 'Just before finishing' }, 'overtaking')
+    const finished = await runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-overtaken' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-overtaken', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    const stored = store.state.runs.get(`${workspaceId}|core-team|${held.runId}`)
+    expect(stored).toMatchObject({ state: 'finished', outcome: 'completed', reportCount: 1 })
+    expect(finished).toMatchObject({ state: 'finished', reportCount: 1, lastHeartbeatAt: stored?.lastHeartbeatAt, leaseExpiresAt: stored?.leaseExpiresAt })
+    expect(attempts).toHaveLength(2)
+    expect(JSON.stringify(attempts[0])).toContain('#reportCount = :reportCount AND #lastHeartbeatAt = :lastHeartbeatAt')
+  })
+
+  test('reports a finish that keeps losing to the run\'s progress as retryable and leaves the run active', async () => {
+    const { store, held, service } = configureReport()
+    const runKey = `${workspaceId}|core-team|${held.runId}`
+    const commit = store.commit.bind(store)
+    let beats = 0
+    store.commit = async (items, fenceItemCount) => {
+      const current = store.state.runs.get(runKey)
+      beats += 1
+      if (current) store.state.runs.set(runKey, { ...current, lastHeartbeatAt: new Date(Date.now() + beats * 1_000).toISOString() })
+      return commit(items, fenceItemCount)
+    }
+    await expect(runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'completed', instanceIdHash: held.instanceIdHash },
+      { requestId: 'finish', idempotencyKey: 'finish-starved' },
+      { credentialId: 'agent-key', idempotencyKey: 'finish-starved', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    expect(beats).toBe(3)
+    expect(store.state.runs.get(runKey)).toMatchObject({ state: 'active' })
+  })
+})
+
 describe('Web Agent Run routes', () => {
   const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  test('lists a Work Item\'s structured reports newest first for its viewers', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    for (const [sequence, createdAt] of [[1, '2026-10-22T00:00:00.000Z'], [2, '2026-10-22T00:05:00.000Z']] as const) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind: sequence === 1 ? 'verification' : 'handoff', commentId: `cmt_${sequence}`,
+        verifications: [], artifacts: [{ type: 'url', url: 'https://example.test/log' }], createdAt, createdBy: 'demo@example.com',
+      })
+    }
+    const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports?limit=1', { headers })
+    expect(listed.status).toBe(200)
+    expect(await listed.json()).toEqual({
+      items: [{
+        schemaVersion: 1, runId: held.runId, teamId: 'core-team', workItemId: 'task-1', sequence: 2, kind: 'handoff', commentId: 'cmt_2',
+        verifications: [], artifacts: [{ type: 'url', url: 'https://example.test/log' }], createdAt: '2026-10-22T00:05:00.000Z',
+      }],
+      hasMore: true,
+    })
+    const invalid = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports?limit=0', { headers })
+    expect(invalid.status).toBe(400)
+  })
+
+  test('stops a report page at its byte budget so the response stays within the Lambda limit', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const artifacts = Array.from({ length: 20 }, (_, index) => ({
+      type: 'url' as const, url: `https://example.test/${index}/${'a'.repeat(2_000)}`, label: 'l'.repeat(128),
+    }))
+    const verifications = Array.from({ length: 20 }, () => ({ command: 'c'.repeat(512), status: 'passed' as const, summary: 's'.repeat(512) }))
+    for (let sequence = 1; sequence <= 30; sequence += 1) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind: 'artifact', commentId: `cmt_${sequence}`, verifications, artifacts,
+        createdAt: new Date(Date.UTC(2026, 9, 22, 0, sequence)).toISOString(), createdBy: 'demo@example.com',
+      })
+    }
+    const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports', { headers })
+    expect(listed.status).toBe(200)
+    const text = await listed.text()
+    expect(JSON.parse(text)).toMatchObject({ hasMore: true })
+    // The newest report leads the page.
+    expect(text.match(/"sequence":(\d+)/)?.[1]).toBe('30')
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(1_000_100)
+    expect(text.match(/"commentId"/g)?.length ?? 0).toBeLessThan(30)
+  })
 
   test('lists a Work Item history with release permissions and releases an active run', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
@@ -939,6 +1205,33 @@ describe('Web Agent Run routes', () => {
     expect(store.state.claims.has(`${workspaceId}|core-team|task-1`)).toBe(false)
     const again = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
     expect(again.status).toBe(200)
+  })
+
+  test('rebuilds a release that a concurrent report overtakes so it returns the closed row', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    const runKey = `${workspaceId}|core-team|${held.runId}`
+    const commit = store.commit.bind(store)
+    let overtaken = false
+    store.commit = async (items, fenceItemCount) => {
+      const current = store.state.runs.get(runKey)
+      if (!overtaken && current) {
+        overtaken = true
+        const reportedAt = new Date(Date.now() + 1_000)
+        store.applyTransactItems(store.createReportItems(current, {
+          schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1',
+          sequence: current.reportCount + 1, kind: 'progress', commentId: 'cmt_overtaking', verifications: [], artifacts: [],
+          createdAt: reportedAt.toISOString(), createdBy: 'demo@example.com',
+        }, reportedAt))
+      }
+      return commit(items, fenceItemCount)
+    }
+    const released = await app.request(`http://localhost/api/teams/core-team/agent-runs/${held.runId}/release`, { method: 'POST', headers })
+    expect(released.status).toBe(200)
+    const stored = store.state.runs.get(runKey)
+    expect(stored).toMatchObject({ state: 'finished', outcome: 'released', reportCount: 1 })
+    expect(await released.json()).toMatchObject({ state: 'finished', reportCount: 1, leaseExpiresAt: stored?.leaseExpiresAt })
   })
 
   test('lets only the assignee or a Team manager release a run', async () => {

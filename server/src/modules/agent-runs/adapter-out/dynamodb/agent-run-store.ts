@@ -7,6 +7,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  AGENT_RUN_REPORT_KINDS,
   AGENT_RUN_RUNTIMES,
   AGENT_RUN_SCHEMA_VERSION,
   AGENT_SETTINGS_SCHEMA_VERSION,
@@ -22,6 +23,7 @@ import {
   type AgentRunRevocation,
   type StoredAgentRunClaim,
 } from '../../domain/agent-run'
+import { readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
@@ -184,9 +186,12 @@ export interface AgentRunStore {
    * revoke the run's instance on the Work Item.
    * @param run - Finished form of the run.
    * @param expectedInstanceIdHash - Instance that must still own the run, when an agent closes it.
+   * @param fenceProgress - Also require the report count and last heartbeat that were read, so a
+   *   response built from the read run describes the committed row; a concurrent report or
+   *   heartbeat then fails the close like a run that is no longer active.
    * @returns Run update and claim delete conditioned on the run still being active, then any revocation put.
    */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[]
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, fenceProgress?: boolean): AgentRunTransactItem[]
   /**
    * Builds the writes that hand a stalled run's Work Item to another instance: the stalled run is
    * superseded and its instance revoked, and the successor takes over the claim in place.
@@ -196,6 +201,25 @@ export interface AgentRunStore {
    * lease, then the revocation put, the successor run put, and the successor's revocation delete.
    */
   createTakeOverItems(superseded: StoredAgentRun, successor: StoredAgentRun): AgentRunTransactItem[]
+  /**
+   * Builds the writes that save a structured report of an active run and renew its lease.
+   * @param run - Active run as read; its `reportCount` is the sequence of its previous report.
+   * @param report - Report numbered `run.reportCount + 1`, created at `now`.
+   * @param now - Report time the lease is renewed from.
+   * @returns Run update conditioned on the run still being active for the same instance and report
+   * count with no newer heartbeat, the check that the run still holds its claim, and the report put.
+   */
+  createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
+  /**
+   * Lists one Work Item's structured reports, newest first, with strongly consistent reads.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param workItemId - Work Item ID.
+   * @param cursor - Continuation from a previous page of the same query.
+   * @param limit - Page size from 1 to 100.
+   * @returns One page of reports.
+   */
+  listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage>
   /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
@@ -218,6 +242,14 @@ export interface AgentRunStore {
    * @param now - Mutation time.
    */
   extendLeaseAfterMutation(run: StoredAgentRun, now: Date): Promise<void>
+}
+
+/** One page of structured reports. */
+export type AgentRunReportPage = {
+  /** Reports in page order. */
+  reports: StoredAgentRunReport[]
+  /** Opaque continuation, present when more reports may exist. */
+  nextCursor?: string
 }
 
 /** Input for building a mutation fence. */
@@ -421,7 +453,125 @@ function parseRun(
     ...(finishedAt === undefined ? {} : { finishedAt }),
     ...(optionalStoredString(item, 'finishedBy') === undefined ? {} : { finishedBy: storedString(item, 'finishedBy') }),
     reportCount: storedInteger(item, 'reportCount'),
+    ...readLastReport(item),
   }
+}
+
+/**
+ * Reads the latest report summary a run row carries.
+ *
+ * @param item - Stored run row.
+ * @returns Kind and time of the latest report, or nothing before the first report.
+ */
+function readLastReport(item: Record<string, unknown>): Pick<StoredAgentRun, 'lastReportKind' | 'lastReportAt'> {
+  if (item.lastReportKind === undefined && item.lastReportAt === undefined) return {}
+  const lastReportKind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === item.lastReportKind)
+  if (!lastReportKind) throw createAgentRunIntegrityError()
+  return { lastReportKind, lastReportAt: storedTimestamp(item, 'lastReportAt') }
+}
+
+/**
+ * Builds the sort-key prefix shared by one Work Item's reports from a digest of the Work Item ID.
+ *
+ * @param workItemId - Work Item ID.
+ * @returns Sort-key prefix ending with the separator.
+ */
+function reportRecordKeyPrefix(workItemId: string): string {
+  // A Work Item ID can hold many multi-byte letters; a fixed-length digest keeps the key far below
+  // DynamoDB's 1,024-byte sort key limit and free of the separator. Rows also store the ID itself.
+  return `agent-run-report#${createHash('sha256').update(workItemId).digest('base64url')}#`
+}
+
+/**
+ * Builds a report row key that sorts a Work Item's reports by creation time.
+ *
+ * @param report - Report.
+ * @returns Sort key.
+ */
+function reportRecordKey(report: Pick<StoredAgentRunReport, 'workItemId' | 'createdAt' | 'runId' | 'sequence'>): string {
+  return `${reportRecordKeyPrefix(report.workItemId)}${report.createdAt}#${report.runId}#${String(report.sequence).padStart(6, '0')}`
+}
+
+/**
+ * Serializes a report row.
+ *
+ * @param report - Report.
+ * @returns Stored item.
+ */
+function serializeReport(report: StoredAgentRunReport): Record<string, unknown> {
+  const { directoryId, ...fields } = report
+  return {
+    directoryTeamId: createAgentRunPartition(directoryId, report.teamId),
+    recordKey: reportRecordKey(report),
+    entityType: 'agent-run-report',
+    workspaceId: directoryId,
+    ...fields,
+  }
+}
+
+/**
+ * Re-applies the request rules to a stored row's structured fields, so a row written outside the
+ * validator never reaches viewers.
+ *
+ * @param item - Stored row.
+ * @returns The validated fields.
+ */
+function parseReportDetails(item: Record<string, unknown>): AgentRunReportDetails {
+  // A list is optional in a request but always written on a row.
+  if (!Array.isArray(item.verifications) || !Array.isArray(item.artifacts)) throw createAgentRunIntegrityError()
+  try {
+    return readAgentRunReportDetails(item)
+  } catch {
+    throw createAgentRunIntegrityError()
+  }
+}
+
+/**
+ * Parses a stored report row and fails closed on any unexpected shape.
+ *
+ * @param item - Stored row.
+ * @param expected - Workspace, Team, and Work Item the row must belong to.
+ * @returns The report.
+ */
+function parseReport(
+  item: Record<string, unknown>,
+  expected: {
+    /** Expected Workspace ID. */
+    directoryId: string
+    /** Expected Team ID. */
+    teamId: string
+    /** Expected Work Item ID. */
+    workItemId: string
+  },
+): StoredAgentRunReport {
+  if (item.schemaVersion !== AGENT_RUN_SCHEMA_VERSION || item.entityType !== 'agent-run-report') throw createAgentRunIntegrityError()
+  const kind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === item.kind)
+  const sequence = storedInteger(item, 'sequence')
+  const report: StoredAgentRunReport = {
+    schemaVersion: AGENT_RUN_SCHEMA_VERSION,
+    runId: storedString(item, 'runId'),
+    directoryId: expected.directoryId,
+    teamId: expected.teamId,
+    workItemId: storedString(item, 'workItemId'),
+    sequence,
+    kind: kind ?? 'progress',
+    commentId: storedString(item, 'commentId'),
+    ...parseReportDetails(item),
+    createdAt: storedTimestamp(item, 'createdAt'),
+    createdBy: storedString(item, 'createdBy'),
+  }
+  if (
+    !kind ||
+    sequence < 1 ||
+    item.directoryTeamId !== createAgentRunPartition(expected.directoryId, expected.teamId) ||
+    item.workspaceId !== expected.directoryId ||
+    item.teamId !== expected.teamId ||
+    report.workItemId !== expected.workItemId ||
+    item.recordKey !== reportRecordKey(report)
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  return report
 }
 
 /** Every outcome a stored run can carry. */
@@ -797,6 +947,106 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
+  async listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage> {
+    const partition = createAgentRunPartition(directoryId, teamId)
+    const prefix = reportRecordKeyPrefix(workItemId)
+    const start = decodeCursor(cursor, 'directoryTeamId', partition)
+    if (start !== undefined && (typeof start.recordKey !== 'string' || !start.recordKey.startsWith(prefix))) {
+      throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
+    }
+    const pageSize = readLimit(limit)
+    // A page can end at the item limit or at 1 MB with nothing left, so one more report is read to
+    // know whether older ones exist, and the cursor continues after the last returned report.
+    const items: Record<string, unknown>[] = []
+    let next = start
+    do {
+      const response = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: '#directoryTeamId = :partition AND begins_with(#recordKey, :prefix)',
+        ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId', '#recordKey': 'recordKey' },
+        ExpressionAttributeValues: { ':partition': partition, ':prefix': prefix },
+        ScanIndexForward: false,
+        ConsistentRead: true,
+        Limit: pageSize + 1 - items.length,
+        ExclusiveStartKey: next,
+      }))
+      items.push(...(response.Items ?? []))
+      next = response.LastEvaluatedKey
+    } while (items.length <= pageSize && next !== undefined)
+    const page = items.slice(0, pageSize)
+    const reports = page.map((item) => parseReport(item, { directoryId, teamId, workItemId }))
+    const last = page.at(-1)
+    const nextCursor = items.length > pageSize && last !== undefined
+      ? encodeCursor({ directoryTeamId: last.directoryTeamId, recordKey: last.recordKey })
+      : undefined
+    return { reports, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
+  createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[] {
+    if (
+      run.state !== 'active' ||
+      report.runId !== run.runId ||
+      report.workItemId !== run.workItemId ||
+      report.sequence !== run.reportCount + 1 ||
+      report.createdAt !== now.toISOString()
+    ) {
+      throw new TypeError('createReportItems requires the next report of an active run, created at the report time.')
+    }
+    const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const leaseExpiresAt = calculateLeaseExpiry(now, run.leaseMinutes)
+    return [
+      {
+        Update: {
+          TableName: this.#tableName,
+          Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
+          UpdateExpression: 'SET #reportCount = :sequence, #lastReportKind = :kind, #lastReportAt = :now, ' +
+            '#lastHeartbeatAt = :now, #leaseExpiresAt = :leaseExpiresAt, #activeRunSortKey = :activeRunSortKey',
+          // Reports are numbered by the run; a concurrent report or a closed run fails this write, and a
+          // heartbeat newer than the report keeps its later lease.
+          ConditionExpression: '#state = :active AND #instanceIdHash = :instanceIdHash AND #reportCount = :previous AND #lastHeartbeatAt <= :now',
+          ExpressionAttributeNames: {
+            '#reportCount': 'reportCount',
+            '#lastReportKind': 'lastReportKind',
+            '#lastReportAt': 'lastReportAt',
+            '#lastHeartbeatAt': 'lastHeartbeatAt',
+            '#leaseExpiresAt': 'leaseExpiresAt',
+            '#activeRunSortKey': 'activeRunSortKey',
+            '#state': 'state',
+            '#instanceIdHash': 'instanceIdHash',
+          },
+          ExpressionAttributeValues: {
+            ':sequence': report.sequence,
+            ':kind': report.kind,
+            ':now': report.createdAt,
+            ':leaseExpiresAt': leaseExpiresAt,
+            ':activeRunSortKey': `${leaseExpiresAt}#${run.runId}`,
+            ':active': 'active',
+            ':instanceIdHash': run.instanceIdHash,
+            ':previous': run.reportCount,
+          },
+        },
+      },
+      this.#claimCheck({
+        directoryId: run.directoryId,
+        teamId: run.teamId,
+        workItemId: run.workItemId,
+        instanceIdHash: run.instanceIdHash,
+        assigneeUserId: run.assigneeUserId,
+        run,
+        now,
+      }),
+      {
+        Put: {
+          TableName: this.#tableName,
+          Item: serializeReport(report),
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+        },
+      },
+    ]
+  }
+
+  /** @inheritdoc */
   createStartItems(run: StoredAgentRun): AgentRunTransactItem[] {
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
     return [
@@ -881,11 +1131,16 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   }
 
   /** @inheritdoc */
-  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string): AgentRunTransactItem[] {
+  createCloseItems(run: StoredAgentRun, expectedInstanceIdHash?: string, fenceProgress = false): AgentRunTransactItem[] {
     if (run.state !== 'finished' || !run.outcome || !run.finishedAt || !run.finishedBy) {
       throw new TypeError('createCloseItems requires the finished form of a run.')
     }
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const conditions = [
+      '#state = :active',
+      ...(expectedInstanceIdHash === undefined ? [] : ['#instanceIdHash = :instanceIdHash']),
+      ...(fenceProgress ? ['#reportCount = :reportCount', '#lastHeartbeatAt = :lastHeartbeatAt'] : []),
+    ]
     return [
       {
         Update: {
@@ -893,12 +1148,11 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
           UpdateExpression: 'SET #state = :finished, #outcome = :outcome, #finishedAt = :finishedAt, #finishedBy = :finishedBy ' +
             'REMOVE #activeRunPartition, #activeRunSortKey, #lastHeartbeatRequestAt',
-          ConditionExpression: expectedInstanceIdHash === undefined
-            ? '#state = :active'
-            : '#state = :active AND #instanceIdHash = :instanceIdHash',
+          ConditionExpression: conditions.join(' AND '),
           ExpressionAttributeNames: {
             '#state': 'state',
             ...(expectedInstanceIdHash === undefined ? {} : { '#instanceIdHash': 'instanceIdHash' }),
+            ...(fenceProgress ? { '#reportCount': 'reportCount', '#lastHeartbeatAt': 'lastHeartbeatAt' } : {}),
             '#outcome': 'outcome',
             '#finishedAt': 'finishedAt',
             '#finishedBy': 'finishedBy',
@@ -913,6 +1167,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             ':finishedBy': run.finishedBy,
             ':active': 'active',
             ...(expectedInstanceIdHash === undefined ? {} : { ':instanceIdHash': expectedInstanceIdHash }),
+            ...(fenceProgress ? { ':reportCount': run.reportCount, ':lastHeartbeatAt': run.lastHeartbeatAt } : {}),
           },
         },
       },
