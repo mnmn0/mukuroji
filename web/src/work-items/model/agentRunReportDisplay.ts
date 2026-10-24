@@ -3,6 +3,32 @@ import type { AgentRunArtifact, AgentRunReport, AgentRunReportKind } from '@muku
 /** Longest artifact text shown before it is shortened. */
 const maximumArtifactTextLength = 48
 
+/** Work Item and session the shown reports must belong to. */
+export type AgentRunReportScope = {
+  /** Session access token; no reports are shown without it. */
+  accessToken?: string
+  /** Team that owns the Work Item; no reports are shown without it. */
+  teamId?: string
+  /** Work Item ID. */
+  workItemId: string
+}
+
+/**
+ * Keeps only the reports of the Work Item on screen. The query keeps earlier data while a new read
+ * runs, so data read for another Work Item or before a sign-out must never be shown here.
+ *
+ * @param reports - Reports from the query, if any.
+ * @param scope - Session and Work Item on screen.
+ * @returns Reports of that Work Item, or none without a session.
+ */
+export function selectAgentRunReportsForWorkItem(
+  reports: readonly AgentRunReport[] | undefined,
+  { accessToken, teamId, workItemId }: AgentRunReportScope,
+): AgentRunReport[] {
+  if (!accessToken || !teamId || !reports) return []
+  return reports.filter((report) => report.teamId === teamId && report.workItemId === workItemId)
+}
+
 /**
  * Indexes reports by the comment they were saved with. Each comment carries at most one report;
  * the first one listed (the newest) wins if the server ever returned more.

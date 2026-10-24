@@ -6,6 +6,7 @@ import {
   indexAgentRunReportsByComment,
   isAgentRunReportAwaitingDecision,
   readAgentRunArtifactText,
+  selectAgentRunReportsForWorkItem,
 } from '../src/work-items/model/agentRunReportDisplay'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from '../src/work-items/ui/AgentRunReportChips'
 import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from '../src/work-items/ui/agentRunReportLabels'
@@ -62,6 +63,17 @@ describe('Agent Run report display', () => {
     const byComment = indexAgentRunReportsByComment([agentRunReportFixture, older, { ...agentRunHandoffReportFixture, commentId: 'comment-2' }])
     expect(byComment.get('comment-1')?.sequence).toBe(2)
     expect(byComment.get('comment-2')?.kind).toBe('handoff')
+  })
+
+  test('shows only reports of the Work Item on screen and none without a session', () => {
+    const scope = { accessToken: 'token', teamId: 'core', workItemId: 'onboarding-friction' }
+    const other = { ...agentRunReportFixture, workItemId: 'billing-copy', commentId: 'comment-9' }
+    const otherTeam = { ...agentRunReportFixture, teamId: 'design', commentId: 'comment-8' }
+    expect(selectAgentRunReportsForWorkItem([agentRunReportFixture, other, otherTeam], scope)).toEqual([agentRunReportFixture])
+    // Data kept from an earlier read never outlives the session or the Team.
+    expect(selectAgentRunReportsForWorkItem([agentRunReportFixture], { ...scope, accessToken: undefined })).toEqual([])
+    expect(selectAgentRunReportsForWorkItem([agentRunReportFixture], { ...scope, teamId: undefined })).toEqual([])
+    expect(selectAgentRunReportsForWorkItem(undefined, scope)).toEqual([])
   })
 
   test('marks blockers and hand-offs as awaiting a decision and shortens long link text', () => {

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import type { Locale } from '../../shared/i18n/i18n'
-import { indexAgentRunReportsByComment } from '../model/agentRunReportDisplay'
+import { indexAgentRunReportsByComment, selectAgentRunReportsForWorkItem } from '../model/agentRunReportDisplay'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
 import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from './agentRunReportLabels'
@@ -45,13 +45,16 @@ export function useAgentRunReportCommentDetails({
   const labels = useMemo(() => createAgentRunReportChipsLabels(locale), [locale])
   const noticeLabels = useMemo(() => createAgentRunReportsNoticeLabels(locale), [locale])
   const { data, error, mutate } = useWorkItemAgentRunReports(accessToken, teamId, workItemId, commentCount)
-  const byComment = useMemo(() => indexAgentRunReportsByComment(data?.items ?? []), [data])
+  const byComment = useMemo(
+    () => indexAgentRunReportsByComment(selectAgentRunReportsForWorkItem(data?.items, { accessToken, teamId, workItemId })),
+    [accessToken, data, teamId, workItemId],
+  )
   const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
     return report ? <AgentRunReportChips labels={labels} report={report} /> : null
   }, [byComment, labels])
   return {
     renderCommentDetails,
-    loadNotice: error ? <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} /> : null,
+    loadNotice: error && accessToken && teamId ? <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} /> : null,
   }
 }
