@@ -7,8 +7,8 @@ import {
   isAgentRunReportAwaitingDecision,
   readAgentRunArtifactText,
 } from '../src/work-items/model/agentRunReportDisplay'
-import { AgentRunReportChips } from '../src/work-items/ui/AgentRunReportChips'
-import { createAgentRunReportChipsLabels } from '../src/work-items/ui/agentRunReportLabels'
+import { AgentRunReportChips, AgentRunReportsLoadNotice } from '../src/work-items/ui/AgentRunReportChips'
+import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from '../src/work-items/ui/agentRunReportLabels'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
 import { collaborationWorkspaceMemberFixtures, issueCollaborationControllerFixture } from '../src/issues/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -116,5 +116,16 @@ describe('AgentRunReportChips', () => {
     const card = html.indexOf('id="comment-comment-1"')
     expect(card).toBeGreaterThanOrEqual(0)
     expect(html.indexOf('data-testid="agent-run-report-chips"')).toBeGreaterThan(card)
+  })
+})
+
+describe('AgentRunReportsLoadNotice', () => {
+  test('reports a failed read with a retry action instead of showing no reports', () => {
+    const noticeLabels = createAgentRunReportsNoticeLabels('en')
+    const html = renderToStaticMarkup(<AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => undefined} />)
+    expect(html).toContain('role="status"')
+    expect(html).toContain(noticeLabels.loadError)
+    expect(html).toContain(`>${noticeLabels.retry}</button>`)
+    expect(createAgentRunReportsNoticeLabels('ja').retry).toBe(createTranslator('ja')('workItems.agentRunReports.retry'))
   })
 })

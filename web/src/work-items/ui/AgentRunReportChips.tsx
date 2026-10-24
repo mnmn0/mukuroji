@@ -1,6 +1,6 @@
 import type { AgentRunReport, AgentRunVerificationStatus } from '@mukuroji/contracts'
 import { isAgentRunReportAwaitingDecision, readAgentRunArtifactText } from '../model/agentRunReportDisplay'
-import type { AgentRunReportChipsLabels } from './agentRunReportLabels'
+import type { AgentRunReportChipsLabels, AgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
 /** Props of the report chips shown under one comment. */
 export type AgentRunReportChipsProps = {
@@ -68,6 +68,36 @@ export function AgentRunReportChips({ labels, report }: AgentRunReportChipsProps
           {labels.changedFiles.replace('{count}', String(report.changedFileCount))}
         </span>
       )}
+    </div>
+  )
+}
+
+/** Props of the notice shown when a Work Item's reports could not be read. */
+export type AgentRunReportsLoadNoticeProps = {
+  /** Locale-aware text. */
+  labels: AgentRunReportsNoticeLabels
+  /** Reads the reports again. */
+  onRetry: () => void
+}
+
+/**
+ * Tells the viewer that report chips are missing because the reports could not be read, and offers
+ * to read them again. The conversation stays usable below it.
+ *
+ * @param props - Text and retry action.
+ * @returns Notice with a retry button.
+ */
+export function AgentRunReportsLoadNotice({ labels, onRetry }: AgentRunReportsLoadNoticeProps) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 text-sm text-[var(--workbench-muted)]"
+      data-testid="agent-run-reports-load-notice"
+      role="status"
+    >
+      <span>{labels.loadError}</span>
+      <button className="workbench-button-secondary h-8 px-3" onClick={onRetry} type="button">
+        {labels.retry}
+      </button>
     </div>
   )
 }

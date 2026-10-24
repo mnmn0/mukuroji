@@ -49,3 +49,25 @@ export function createAgentRunReportChipsLabels(locale: Locale): AgentRunReportC
     decisionNeeded: t('workItems.agentRunReports.decisionNeeded'),
   }
 }
+
+/** Locale-aware text of the notice shown when reports could not be read. */
+export type AgentRunReportsNoticeLabels = {
+  /** Loading failure text. */
+  loadError: string
+  /** Retry action. */
+  retry: string
+}
+
+/**
+ * Creates the report loading notice text for a locale.
+ *
+ * @param locale - Display locale.
+ * @returns Notice text.
+ */
+export function createAgentRunReportsNoticeLabels(locale: Locale): AgentRunReportsNoticeLabels {
+  const t = createTranslator(locale)
+  return {
+    loadError: t('workItems.agentRunReports.loadError'),
+    retry: t('workItems.agentRunReports.retry'),
+  }
+}

@@ -327,7 +327,7 @@ function IssueDetailContent({
     setIsCommentDraftDirty(isDirty)
     onCommentDraftDirtyChange?.(isDirty, issue.id)
   }, [issue.id, onCommentDraftDirtyChange])
-  const renderAgentRunReport = useAgentRunReportCommentDetails({
+  const agentRunReports = useAgentRunReportCommentDetails({
     accessToken,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
@@ -1015,6 +1015,8 @@ function IssueDetailContent({
         )
       case 'activity':
         return collaboration ? (
+          <>
+          {agentRunReports.loadNotice}
           <IssueCollaborationPanel
             aiAssistance={collaborationAiAssistance}
             route={collaborationRoute}
@@ -1036,8 +1038,9 @@ function IssueDetailContent({
             onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
-            renderCommentDetails={renderAgentRunReport}
+            renderCommentDetails={agentRunReports.renderCommentDetails}
           />
+          </>
         ) : null
       default:
         return null

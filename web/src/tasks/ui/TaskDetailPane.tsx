@@ -320,7 +320,7 @@ export function TaskDetailPane({
   const isAiSummaryOperationPendingRef = useRef(false)
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
-  const renderAgentRunReport = useAgentRunReportCommentDetails({
+  const agentRunReports = useAgentRunReportCommentDetails({
     accessToken,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
@@ -1309,6 +1309,7 @@ export function TaskDetailPane({
       case 'activity':
         return collaboration ? (
           <fieldset className="contents" disabled={isIssueSaving || isBulkOperationPending}>
+            {agentRunReports.loadNotice}
             <IssueCollaborationPanel
               aiAssistance={collaborationAiAssistance}
               route={collaborationRoute}
@@ -1325,7 +1326,7 @@ export function TaskDetailPane({
               onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
               readOnlyMessage={collaborationReadOnlyMessage}
-              renderCommentDetails={renderAgentRunReport}
+              renderCommentDetails={agentRunReports.renderCommentDetails}
             />
           </fieldset>
         ) : null

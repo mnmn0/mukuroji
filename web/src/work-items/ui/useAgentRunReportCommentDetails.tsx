@@ -2,8 +2,8 @@ import { useCallback, useMemo, type ReactNode } from 'react'
 import type { Locale } from '../../shared/i18n/i18n'
 import { indexAgentRunReportsByComment } from '../model/agentRunReportDisplay'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
-import { AgentRunReportChips } from './AgentRunReportChips'
-import { createAgentRunReportChipsLabels } from './agentRunReportLabels'
+import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
+import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from './agentRunReportLabels'
 
 /** Inputs of the hook that adds report chips to a Work Item's comments. */
 export type AgentRunReportCommentDetailsInput = {
@@ -19,13 +19,21 @@ export type AgentRunReportCommentDetailsInput = {
   locale: Locale
 }
 
+/** Report rendering for a Work Item's conversation. */
+export type AgentRunReportCommentDetails = {
+  /** Renders the chips of the report saved with a comment, or nothing. */
+  renderCommentDetails: (comment: { id: string }) => ReactNode
+  /** Notice with a retry action while the reports cannot be read, shown above the conversation. */
+  loadNotice: ReactNode
+}
+
 /**
  * Reads a Work Item's reports and returns a renderer that shows the chips of the report saved with
- * a comment. Comments without a report, and every comment while reports are loading or failed to
- * load, render nothing, so the conversation never waits on reports.
+ * a comment. Comments without a report render nothing, so the conversation never waits on reports;
+ * a failed read is shown as a separate notice with a retry action instead of as missing reports.
  *
  * @param input - Work Item, session, and locale.
- * @returns Renderer for one comment.
+ * @returns Comment renderer and loading notice.
  */
 export function useAgentRunReportCommentDetails({
   accessToken,
@@ -33,12 +41,17 @@ export function useAgentRunReportCommentDetails({
   locale,
   teamId,
   workItemId,
-}: AgentRunReportCommentDetailsInput): (comment: { id: string }) => ReactNode {
+}: AgentRunReportCommentDetailsInput): AgentRunReportCommentDetails {
   const labels = useMemo(() => createAgentRunReportChipsLabels(locale), [locale])
-  const { data } = useWorkItemAgentRunReports(accessToken, teamId, workItemId, commentCount)
+  const noticeLabels = useMemo(() => createAgentRunReportsNoticeLabels(locale), [locale])
+  const { data, error, mutate } = useWorkItemAgentRunReports(accessToken, teamId, workItemId, commentCount)
   const byComment = useMemo(() => indexAgentRunReportsByComment(data?.items ?? []), [data])
-  return useCallback((comment: { id: string }) => {
+  const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
     return report ? <AgentRunReportChips labels={labels} report={report} /> : null
   }, [byComment, labels])
+  return {
+    renderCommentDetails,
+    loadNotice: error ? <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} /> : null,
+  }
 }

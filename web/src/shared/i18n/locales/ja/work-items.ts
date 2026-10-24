@@ -669,4 +669,6 @@ export const workItemsMessages = {
   'workItems.agentRunReports.artifact.url': 'リンク',
   'workItems.agentRunReports.changedFiles': '変更ファイル {count} 件',
   'workItems.agentRunReports.decisionNeeded': '人の判断が必要です',
+  'workItems.agentRunReports.loadError': 'エージェントの報告の詳細を読み込めませんでした。コメントは詳細なしで表示しています。',
+  'workItems.agentRunReports.retry': 'エージェントの報告を再読み込み',
 } as const

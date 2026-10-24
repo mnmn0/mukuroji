@@ -669,4 +669,6 @@ export const workItemsMessages = {
   'workItems.agentRunReports.artifact.url': 'Link',
   'workItems.agentRunReports.changedFiles': '{count} files changed',
   'workItems.agentRunReports.decisionNeeded': 'A person needs to decide',
+  'workItems.agentRunReports.loadError': 'Agent report details could not be loaded. Comments are shown without them.',
+  'workItems.agentRunReports.retry': 'Reload agent reports',
 } as const
