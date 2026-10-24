@@ -34,11 +34,9 @@ export function AgentRunReportChips({ labels, report }: AgentRunReportChipsProps
       data-testid="agent-run-report-chips"
       role="group"
     >
-      <span
-        className={awaitingDecision ? 'workbench-badge-warning' : 'workbench-badge-primary'}
-        title={awaitingDecision ? labels.decisionNeeded : undefined}
-      >
-        {labels.kinds[report.kind]}
+      <span className={awaitingDecision ? 'workbench-badge-warning' : 'workbench-badge-primary'}>
+        <span className="font-semibold">{labels.kinds[report.kind]}</span>
+        {awaitingDecision ? <span>{labels.decisionNeeded}</span> : null}
       </span>
       {report.verifications.map((verification, index) => (
         <span

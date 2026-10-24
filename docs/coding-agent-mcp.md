@@ -140,6 +140,10 @@ Kiro（ワークスペースの `.kiro/settings/mcp.json`、または全体用�
 }
 ```
 
+Kiro IDEは、承認していない環境変数を `${VAR}` から展開しません。初回に表示される承認の確認で
+`MUKUROJI_MCP_TOKEN` を許可するか、設定の「Mcp Approved Env Vars」に追加してください。許可するまで、
+この接続はtokenを受け取れず起動に失敗します。
+
 設定の書式は各クライアントの更新で変わることがあります。登録後は `claude mcp get mukuroji-tasks`、
 `codex mcp list`、KiroのMCP一覧などで接続を確認し、`get_configuration` で `runtime` と担当者を確かめます。
 

@@ -93,7 +93,10 @@ describe('AgentRunReportChips', () => {
   test('flags a hand-off for a person and uses the shared locale dictionaries', () => {
     const html = renderToStaticMarkup(<AgentRunReportChips labels={labels} report={agentRunHandoffReportFixture} />)
     expect(html).toContain('workbench-badge-warning')
-    expect(html).toContain(`title="${labels.decisionNeeded}"`)
+    // The hint is visible text, so touch and keyboard users read it too.
+    expect(html).toContain(`<span>${labels.decisionNeeded}</span>`)
+    const verification = renderToStaticMarkup(<AgentRunReportChips labels={labels} report={agentRunReportFixture} />)
+    expect(verification).not.toContain(labels.decisionNeeded)
     const ja = createAgentRunReportChipsLabels('ja')
     expect(ja.kinds.handoff).toBe(createTranslator('ja')('workItems.agentRunReports.kind.handoff'))
     expect(ja.kinds.handoff).not.toBe(labels.kinds.handoff)

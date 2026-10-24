@@ -41,7 +41,8 @@ export const Handoff: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(canvas.getByTitle(labels.decisionNeeded)).toHaveTextContent(labels.kinds.handoff)
+    await expect(canvas.getByText(labels.decisionNeeded)).toBeVisible()
+    await expect(canvas.getByText(labels.kinds.handoff)).toBeVisible()
   },
 }
 
