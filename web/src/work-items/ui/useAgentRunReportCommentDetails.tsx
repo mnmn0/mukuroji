@@ -45,9 +45,12 @@ export function useAgentRunReportCommentDetails({
   const labels = useMemo(() => createAgentRunReportChipsLabels(locale), [locale])
   const noticeLabels = useMemo(() => createAgentRunReportsNoticeLabels(locale), [locale])
   const { data, error, mutate } = useWorkItemAgentRunReports(accessToken, teamId, workItemId, commentCount)
+  // SWR keeps the last successful reports after a failed read; while the load notice says the
+  // comments are shown without report details, no chips may claim otherwise.
+  const reports = error ? undefined : data?.items
   const byComment = useMemo(
-    () => indexAgentRunReportsByComment(selectAgentRunReportsForWorkItem(data?.items, { accessToken, teamId, workItemId })),
-    [accessToken, data, teamId, workItemId],
+    () => indexAgentRunReportsByComment(selectAgentRunReportsForWorkItem(reports, { accessToken, teamId, workItemId })),
+    [accessToken, reports, teamId, workItemId],
   )
   const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
