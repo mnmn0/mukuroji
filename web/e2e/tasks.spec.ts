@@ -1825,6 +1825,10 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ status: 200, json: { items: [], hasMore: false } })
   })
 
+  await page.route(/.*\/api\/teams\/[^/]+\/work-items\/[^/]+\/agent-run-reports(?:\?.*)?$/, async (route) => {
+    await route.fulfill({ status: 200, json: { items: [], hasMore: false } })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations$/, async (route) => {
     if (route.request().method() !== 'POST') {
       await route.fallback()

@@ -64,6 +64,7 @@ import {
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
+import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
@@ -319,6 +320,13 @@ export function TaskDetailPane({
   const isAiSummaryOperationPendingRef = useRef(false)
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
+  const agentRunReports = useAgentRunReportCommentDetails({
+    accessToken,
+    commentCount: collaboration?.comments.length ?? 0,
+    locale,
+    teamId: task?.teamId,
+    workItemId: task?.id ?? '',
+  })
   const isWorkItemMutationPending = isIssueSaving ||
     isAiPlanningOperationPending ||
     isAiSummaryOperationPending
@@ -1301,6 +1309,7 @@ export function TaskDetailPane({
       case 'activity':
         return collaboration ? (
           <fieldset className="contents" disabled={isIssueSaving || isBulkOperationPending}>
+            {agentRunReports.loadNotice}
             <IssueCollaborationPanel
               aiAssistance={collaborationAiAssistance}
               route={collaborationRoute}
@@ -1317,6 +1326,7 @@ export function TaskDetailPane({
               onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
               readOnlyMessage={collaborationReadOnlyMessage}
+              renderCommentDetails={agentRunReports.renderCommentDetails}
             />
           </fieldset>
         ) : null

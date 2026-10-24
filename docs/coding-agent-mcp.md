@@ -69,8 +69,83 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
 同じマシン・同じOSユーザーで同じruntimeを複数起動する場合は、プロセスごとに異なる `INSTANCE_ID` を指定してください。
 
-配布用には `bun run mcp:build` で `server/dist/mcp.mjs` を生成できます。
-このファイルはBunで起動します。設定変更・token更新時はMCPプロセスを再起動してください。
+### 配布版 `mcp.mjs`
+
+リポジトリを手元に置かずに使う場合は、GitHub Releaseに添付された `mcp.mjs`、`mcp.mjs.LICENSES.txt`、
+`mcp.mjs.sha256` を同じディレクトリに取得し、`sha256sum -c mcp.mjs.sha256` で照合してから使います。
+`mcp.mjs` は依存を同梱した単一ファイルで、Node.js 22以上またはBunで起動できます
+（`node /absolute/path/to/mcp.mjs`）。同梱した第三者パッケージのライセンスは `mcp.mjs.LICENSES.txt` に
+あります。リポジトリから作る場合は `bun run mcp:build` で `server/dist/` に両ファイルを生成します。
+Releaseへ添付するときは、build後に `server/dist` で
+`sha256sum mcp.mjs mcp.mjs.LICENSES.txt > mcp.mjs.sha256` を実行し、3ファイルを添付します。
+設定変更・token更新時はMCPプロセスを再起動してください。
+
+### クライアント別の設定例
+
+どの例も `/absolute/path/to/mcp.mjs` と各IDを実際の値に置き換えます。tokenは設定ファイルに書かず、
+クライアントを起動するシェルの `MUKUROJI_MCP_TOKEN` から渡します。`MUKUROJI_MCP_RUNTIME` は
+クライアントに合わせると、Agent Runの表示とWeb画面のruntimeが一致します。
+
+Claude Code（`--scope user` は全プロジェクト、`--scope project` はリポジトリの `.mcp.json` に保存します）:
+
+```sh
+claude mcp add --scope user --transport stdio \
+  --env MUKUROJI_MCP_URL=https://your-mukuroji.example.com \
+  --env MUKUROJI_MCP_TEAM_ID=your-team-id \
+  --env MUKUROJI_MCP_ASSIGNEE_ID=your-workspace-member-id \
+  --env MUKUROJI_MCP_AGENT_NAME=claude-code \
+  --env MUKUROJI_MCP_RUNTIME=claude-code \
+  --env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}' \
+  mukuroji-tasks -- node /absolute/path/to/mcp.mjs
+```
+
+Claude Codeは `command`、`args`、`env` の `${VAR}` を起動時の環境変数で展開します。
+共有する `.mcp.json` には `"MUKUROJI_MCP_TOKEN": "${MUKUROJI_MCP_TOKEN}"` の形だけを置きます。
+
+Codex（`~/.codex/config.toml`、またはプロジェクトの `.codex/config.toml`）:
+
+```toml
+[mcp_servers.mukuroji-tasks]
+command = "node"
+args = ["/absolute/path/to/mcp.mjs"]
+# tokenは値を書かず、Codexを起動した環境から引き継ぎます。
+env_vars = ["MUKUROJI_MCP_TOKEN"]
+
+[mcp_servers.mukuroji-tasks.env]
+MUKUROJI_MCP_URL = "https://your-mukuroji.example.com"
+MUKUROJI_MCP_TEAM_ID = "your-team-id"
+MUKUROJI_MCP_ASSIGNEE_ID = "your-workspace-member-id"
+MUKUROJI_MCP_AGENT_NAME = "codex"
+MUKUROJI_MCP_RUNTIME = "codex"
+```
+
+Kiro（ワークスペースの `.kiro/settings/mcp.json`、または全体用の `~/.kiro/settings/mcp.json`）:
+
+```json
+{
+  "mcpServers": {
+    "mukuroji-tasks": {
+      "command": "node",
+      "args": ["/absolute/path/to/mcp.mjs"],
+      "env": {
+        "MUKUROJI_MCP_URL": "https://your-mukuroji.example.com",
+        "MUKUROJI_MCP_TOKEN": "${MUKUROJI_MCP_TOKEN}",
+        "MUKUROJI_MCP_TEAM_ID": "your-team-id",
+        "MUKUROJI_MCP_ASSIGNEE_ID": "your-workspace-member-id",
+        "MUKUROJI_MCP_AGENT_NAME": "kiro",
+        "MUKUROJI_MCP_RUNTIME": "kiro"
+      }
+    }
+  }
+}
+```
+
+Kiro IDEは、承認していない環境変数を `${VAR}` から展開しません。初回に表示される承認の確認で
+`MUKUROJI_MCP_TOKEN` を許可するか、設定の「Mcp Approved Env Vars」に追加してください。許可するまで、
+この接続はtokenを受け取れず起動に失敗します。
+
+設定の書式は各クライアントの更新で変わることがあります。登録後は `claude mcp get mukuroji-tasks`、
+`codex mcp list`、KiroのMCP一覧などで接続を確認し、`get_configuration` で `runtime` と担当者を確かめます。
 
 ## 操作
 

@@ -29,6 +29,7 @@ import { type IssueCollaborationRoute } from '../model/collaborationTabs'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import {
   isCustomFieldApplicable,
@@ -326,6 +327,13 @@ function IssueDetailContent({
     setIsCommentDraftDirty(isDirty)
     onCommentDraftDirtyChange?.(isDirty, issue.id)
   }, [issue.id, onCommentDraftDirtyChange])
+  const agentRunReports = useAgentRunReportCommentDetails({
+    accessToken,
+    commentCount: collaboration?.comments.length ?? 0,
+    locale,
+    teamId: issue.teamId,
+    workItemId: issue.id,
+  })
   const aiSummarySource = {
     expectedRevision: issue.revision,
     teamId: issue.teamId,
@@ -1007,6 +1015,8 @@ function IssueDetailContent({
         )
       case 'activity':
         return collaboration ? (
+          <>
+          {agentRunReports.loadNotice}
           <IssueCollaborationPanel
             aiAssistance={collaborationAiAssistance}
             route={collaborationRoute}
@@ -1028,7 +1038,9 @@ function IssueDetailContent({
             onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
+            renderCommentDetails={agentRunReports.renderCommentDetails}
           />
+          </>
         ) : null
       default:
         return null

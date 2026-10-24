@@ -1,8 +1,16 @@
-import type {
-  AgentRunOutcome,
-  AgentRunRuntime,
-  AgentRunView,
-  WorkItemAgentRunsResponse,
+import {
+  AGENT_RUN_ARTIFACT_TYPES,
+  AGENT_RUN_REPORT_KINDS,
+  AGENT_RUN_VERIFICATION_STATUSES,
+  isAgentRunArtifactUrl,
+  type AgentRunArtifact,
+  type AgentRunOutcome,
+  type AgentRunReport,
+  type AgentRunRuntime,
+  type AgentRunVerification,
+  type AgentRunView,
+  type WorkItemAgentRunReportsResponse,
+  type WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
 import { isNonnegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
@@ -37,6 +45,34 @@ export async function listWorkItemAgentRuns(
     items: items.filter((item): item is AgentRunView => item !== undefined),
     hasMore: data.hasMore,
   }
+}
+
+/**
+ * Reads the newest structured reports saved with a Work Item's comments.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns Reports, newest first.
+ */
+export async function listWorkItemAgentRunReports(
+  accessToken: string,
+  teamId: string,
+  workItemId: string,
+): Promise<WorkItemAgentRunReportsResponse> {
+  const data = await requestJson(
+    `${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-items/${encodeURIComponent(workItemId)}/agent-run-reports`,
+    accessToken,
+  )
+  const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunReport) : undefined
+  if (!isRecord(data) || !items || typeof data.hasMore !== 'boolean') {
+    throw new WorkItemConfigurationApiError(502, 'Agent Run reports returned an unexpected response.')
+  }
+  const reports = items.filter((item): item is AgentRunReport => item !== undefined)
+  if (reports.length !== items.length) {
+    throw new WorkItemConfigurationApiError(502, 'Agent Run reports returned an unexpected response.')
+  }
+  return { items: reports, hasMore: data.hasMore }
 }
 
 /**
@@ -133,6 +169,72 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     reportCount: value.reportCount,
     canRelease: value.canRelease,
   }
+}
+
+/**
+ * Validates one structured report from an untrusted response. Artifact links must pass the shared
+ * URL check, so the page never links to a URL the server would have rejected.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The report, or undefined when the shape is not supported.
+ */
+function readAgentRunReport(value: unknown): AgentRunReport | undefined {
+  if (!isRecord(value) || value.schemaVersion !== 1) return undefined
+  const kind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === value.kind)
+  const verifications = Array.isArray(value.verifications) ? value.verifications.map(readVerification) : undefined
+  const artifacts = Array.isArray(value.artifacts) ? value.artifacts.map(readArtifact) : undefined
+  const { runId, teamId, workItemId, commentId, createdAt } = value
+  if (
+    typeof runId !== 'string' || runId === '' || typeof teamId !== 'string' || teamId === '' ||
+    typeof workItemId !== 'string' || workItemId === '' || typeof commentId !== 'string' || commentId === '' ||
+    typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt)) ||
+    !kind || !isPositiveSafeInteger(value.sequence) || !verifications || !artifacts ||
+    (value.changedFileCount !== undefined && !isNonnegativeSafeInteger(value.changedFileCount))
+  ) {
+    return undefined
+  }
+  const validVerifications = verifications.filter((item): item is AgentRunVerification => item !== undefined)
+  const validArtifacts = artifacts.filter((item): item is AgentRunArtifact => item !== undefined)
+  if (validVerifications.length !== verifications.length || validArtifacts.length !== artifacts.length) return undefined
+  return {
+    schemaVersion: 1,
+    runId,
+    teamId,
+    workItemId,
+    sequence: value.sequence,
+    kind,
+    commentId,
+    verifications: validVerifications,
+    artifacts: validArtifacts,
+    ...(value.changedFileCount === undefined ? {} : { changedFileCount: value.changedFileCount }),
+    createdAt,
+  }
+}
+
+/**
+ * Validates one verification result of a report.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The verification, or undefined when the shape is not supported.
+ */
+function readVerification(value: unknown): AgentRunVerification | undefined {
+  if (!isRecord(value) || typeof value.command !== 'string' || value.command === '') return undefined
+  const status = AGENT_RUN_VERIFICATION_STATUSES.find((candidate) => candidate === value.status)
+  if (!status || (value.summary !== undefined && (typeof value.summary !== 'string' || value.summary === ''))) return undefined
+  return { command: value.command, status, ...(value.summary === undefined ? {} : { summary: value.summary }) }
+}
+
+/**
+ * Validates one artifact link of a report.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The artifact, or undefined when the shape or URL is not supported.
+ */
+function readArtifact(value: unknown): AgentRunArtifact | undefined {
+  if (!isRecord(value) || !isAgentRunArtifactUrl(value.url)) return undefined
+  const type = AGENT_RUN_ARTIFACT_TYPES.find((candidate) => candidate === value.type)
+  if (!type || (value.label !== undefined && (typeof value.label !== 'string' || value.label === ''))) return undefined
+  return { type, url: value.url, ...(value.label === undefined ? {} : { label: value.label }) }
 }
 
 /**
