@@ -123,6 +123,8 @@ export type IssueCollaborationPanelProps = {
   onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Optional outer layout class name. */
   className?: string
+  /** Renders extra read-only details under a comment body, such as an agent report. */
+  renderCommentDetails?: (comment: TeamIssueComment) => ReactNode
 }
 
 /**
@@ -150,6 +152,7 @@ export function IssueCollaborationPanel({
   onAiSummaryOperationPendingChange,
   onCommentDraftDirtyChange,
   readOnlyMessage,
+  renderCommentDetails,
   route,
 }: IssueCollaborationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -493,6 +496,7 @@ export function IssueCollaborationPanel({
           >
           <IssueConversationTab
             artifacts={artifacts}
+            renderCommentDetails={renderCommentDetails}
             canAcceptResolution={
               !readOnlyMessage && controller.context.capabilities.canAcceptResolution
             }

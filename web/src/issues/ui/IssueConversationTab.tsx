@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import type { AcceptedResolution } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -90,6 +90,8 @@ export type IssueConversationTabProps = {
   resolutionErrorStatus?: number
   /** Reports whether one of the three local comment composer slots has input to retain. */
   onDraftDirtyChange?: (isDirty: boolean) => void
+  /** Renders extra read-only details under a comment body, such as an agent report. */
+  renderCommentDetails?: (comment: TeamIssueComment) => ReactNode
 }
 
 /** Values retained for one root, reply, or edit composer slot. */
@@ -165,6 +167,7 @@ export function IssueConversationTab({
   readOnlyMessage,
   resolutionErrorStatus,
   onDraftDirtyChange,
+  renderCommentDetails,
 }: IssueConversationTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | undefined>()
@@ -936,6 +939,7 @@ export function IssueConversationTab({
                 ) : null}
               <CommentCard
                 artifacts={artifacts}
+                renderDetails={renderCommentDetails}
                 comment={thread.root}
                 controller={controller}
                 editDraft={editDraft?.commentId === thread.root.id ? editDraft : undefined}
@@ -967,6 +971,7 @@ export function IssueConversationTab({
                   {thread.replies.map((reply) => (
                     <CommentCard
                       artifacts={artifacts}
+                      renderDetails={renderCommentDetails}
                       comment={reply}
                       controller={controller}
                       editDraft={editDraft?.commentId === reply.id ? editDraft : undefined}
@@ -1076,6 +1081,8 @@ type CommentCardProps = {
    * Comment file attachment を読み書きする controller です。
    */
   artifacts?: FileArtifactsController
+  /** Renders extra read-only details under the comment body. */
+  renderDetails?: (comment: TeamIssueComment) => ReactNode
   /** Controlled edit draft for this comment, when its editor is open. */
   editDraft?: TargetedCommentComposerDraft
   /** Current issue-level reason writes are unavailable. */
@@ -1189,6 +1196,7 @@ type CommentCardProps = {
  */
 function CommentCard({
   artifacts,
+  renderDetails,
   comment,
   controller,
   deleteConfirmationId,
@@ -1337,7 +1345,10 @@ function CommentCard({
               {t('collaboration.comment.deleted')}
             </p>
           ) : (
-            <SafeCommentBody bodyMarkdown={bodyMarkdown} className="mt-2" />
+            <>
+              <SafeCommentBody bodyMarkdown={bodyMarkdown} className="mt-2" />
+              {renderDetails?.(comment)}
+            </>
           )}
 
           {!comment.deletedAt && artifacts ? (
