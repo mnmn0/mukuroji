@@ -298,8 +298,10 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     const notices = await Bun.file(join(outdir, 'mcp.mjs.LICENSES.txt')).text()
     expect(notices).toContain('@modelcontextprotocol/server@')
     expect(notices).toContain('zod@')
-    // The bundle is published for Node, so it runs under Node wherever Node is installed.
-    client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), Bun.which('node') ?? process.execPath)
+    // The bundle is published for Node, so only a Node run proves it; Bun would hide Node regressions.
+    const node = Bun.which('node')
+    if (!node) throw new Error('Node.js is required to test the distributable MCP bundle.')
+    client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
     expect((await client.listTools()).tools).toHaveLength(17)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { runtime: 'codex' } })
   } finally {
