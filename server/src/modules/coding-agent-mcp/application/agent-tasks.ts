@@ -55,6 +55,8 @@ type ReportRoute =
   | {
       /** Run whose report endpoint received the report. */
       runId: string
+      /** Whether the run was chosen as the task's active run rather than named by the caller. */
+      implicit: boolean
     }
   | {
       /** Exact fence the plain comment was sent with. */
@@ -472,7 +474,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         if (!(await runInScope(run))) {
           throw new AgentTaskError('out_of_scope', 'This run belongs to a task outside the configured Project.')
         }
-        rememberReportRoute(rememberedKey, { runId })
+        rememberReportRoute(rememberedKey, { runId, implicit: false })
         return api.reportRun(runId, scope.instanceId, input, key, scope.assignedProjectId)
       }
       const structured = (input.kind !== undefined && input.kind !== 'progress') ||
@@ -482,28 +484,40 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         'agent_run_not_active',
         'Structured reports need your active run on this task, and you have none. This call saved nothing. When retrying a report sent during a run, pass that run\'s runId with the same key; otherwise stop and ask the user.',
       )
-      const remembered = reportRoutesByKey.get(rememberedKey)
-      if (remembered) {
-        if ('runId' in remembered) return api.reportRun(remembered.runId, scope.instanceId, input, key, scope.assignedProjectId)
-        if (structured) throw rejectStructured()
-        return { comment: await sendReportComment(id, input, key, remembered.fence) }
-      }
-      const active = (await claimedRun(id, true))?.runId
-      if (active) {
-        rememberReportRoute(rememberedKey, { runId: active })
+      /**
+       * Sends the report to a run the caller did not name. A non-retryable idempotency conflict there
+       * means a different request holds the key and this process no longer knows where it went. A
+       * plain message is sent to the comment endpoint whenever no run is active, so it then falls
+       * back there and replays if it was saved before this run started; otherwise the server rejects
+       * that request too. A retryable conflict is the same request still in progress.
+       * @param activeRunId - Run chosen as the task's active run.
+       * @returns The saved or replayed report.
+       */
+      const sendToActiveRun = async (activeRunId: string) => {
         try {
-          return await api.reportRun(active, scope.instanceId, input, key, scope.assignedProjectId)
+          return await api.reportRun(activeRunId, scope.instanceId, input, key, scope.assignedProjectId)
         } catch (error) {
-          // A retryable conflict is the same request still in progress, so it stays on this route.
           if (structured || !(error instanceof AgentTaskError) || error.code !== 'idempotency_conflict' || error.retryable) throw error
-          // A different request holds the key and this process no longer knows where it went. A plain
-          // message is sent to the comment endpoint whenever no run is active, so it replays there if
-          // it was saved before this run started; otherwise the server rejects this request too.
           // Remembered first, so a retry after a transient failure of this request comes back here.
           const fence = { agentInstanceId: scope.instanceId }
           rememberReportRoute(rememberedKey, { fence })
           return { comment: await sendReportComment(id, input, key, fence) }
         }
+      }
+      const remembered = reportRoutesByKey.get(rememberedKey)
+      if (remembered) {
+        if ('runId' in remembered) {
+          return remembered.implicit
+            ? sendToActiveRun(remembered.runId)
+            : api.reportRun(remembered.runId, scope.instanceId, input, key, scope.assignedProjectId)
+        }
+        if (structured) throw rejectStructured()
+        return { comment: await sendReportComment(id, input, key, remembered.fence) }
+      }
+      const active = (await claimedRun(id, true))?.runId
+      if (active) {
+        rememberReportRoute(rememberedKey, { runId: active, implicit: true })
+        return sendToActiveRun(active)
       }
       if (structured) throw rejectStructured()
       const fence = await fenceFor(id)

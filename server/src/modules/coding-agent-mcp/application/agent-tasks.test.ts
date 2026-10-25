@@ -542,6 +542,21 @@ describe('agent task lifecycle', () => {
     await expect(after.report('one', { message: 'Plan' }, 'plain')).rejects.toMatchObject({ code: 'unavailable' })
     expect(await after.report('one', { message: 'Plan' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
     expect(flaky.notes).toEqual(['[test-agent]\n\nPlan'])
+    // A transient failure of the first run probe still falls back to the comment on the next retry.
+    let failRun = false
+    const probing = fixture([task()])
+    const probingApi: typeof probing.api = { ...probing.api, async reportRun(...args) {
+      if (failRun) { failRun = false; throw new AgentTaskError('unavailable', 'Try again', true) }
+      return probing.api.reportRun(...args)
+    } }
+    const early = createAgentTasks(probingApi, baseScope)
+    await early.report('one', { message: 'Plan' }, 'plain')
+    await early.transition('one', 1, 'coding', 'start', 'claim')
+    const late = createAgentTasks(probingApi, baseScope)
+    failRun = true
+    await expect(late.report('one', { message: 'Plan' }, 'plain')).rejects.toMatchObject({ code: 'unavailable' })
+    expect(await late.report('one', { message: 'Plan' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(probing.notes).toEqual(['[test-agent]\n\nPlan'])
     // The same request still in progress is not redirected to the comment endpoint.
     const busy = fixture([task()], { async reportRun() { throw new AgentTaskError('idempotency_conflict', 'In progress', true) } })
     await busy.service.transition('one', 1, 'coding', 'start', 'claim')
