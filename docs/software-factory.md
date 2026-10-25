@@ -224,8 +224,16 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   endpoint とその fence）と一緒に覚える。応答が失われた後の再送は、間に Run が終了・開始しても同じ
   request を送り、server の receipt を再生する。別の Work Item に同じ key を使った場合はその Work Item の
   request として送るため、server が idempotency conflict として拒否する。この記憶は MCP の process 内だけに
-  あり、再起動後や 100 件を超えて追い出された後の再送は、Run が終了していれば `agent_run_not_active`、
-  新しい Run が始まっていれば idempotency conflict になる。どちらも 2 件目を保存することはない。
+  ある。再起動後や 100 件を超えて追い出された後でも再送が同じ endpoint に届くように、送り先は request
+  自体からも決まる。
+  - `report_progress` に `runId` を付けた report は、常にその Run の report endpoint に送る。Run が終了
+    した後でも、同じ `runId` と key の再送は server の receipt を再生する。agent は Run を持つ間、毎回
+    `runId` を付ける。
+  - Run がない間の通常メッセージは、comment endpoint に instance だけの fence で送る。再起動後の再送が
+    後から始まった Run の report endpoint で idempotency conflict になった場合は、同じ comment request を
+    1 回だけ送り直し、最初の comment を再生する。
+  - `runId` のない構造化 report の再送は、Run が終了していれば `agent_run_not_active`、新しい Run が
+    始まっていれば idempotency conflict になる。どの場合も 2 件目を保存することはない。
 
 ## 仕様と context
 
