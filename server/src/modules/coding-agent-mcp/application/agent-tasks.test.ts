@@ -525,6 +525,11 @@ describe('agent task lifecycle', () => {
     await expect(createAgentTasks(api, baseScope).report('one', structured, 'handoff')).rejects.toMatchObject({ code: 'idempotency_conflict' })
     expect(reports).toEqual([{ runId: firstRunId, ...structured }])
     expect(notes).toEqual(['[test-agent]\n\nPlan', '[test-agent]\n\nReady'])
+    // The same request still in progress is not redirected to the comment endpoint.
+    const busy = fixture([task()], { async reportRun() { throw new AgentTaskError('idempotency_conflict', 'In progress', true) } })
+    await busy.service.transition('one', 1, 'coding', 'start', 'claim')
+    await expect(busy.service.report('one', { message: 'Plan' }, 'busy')).rejects.toMatchObject({ code: 'idempotency_conflict', retryable: true })
+    expect(busy.notes).toEqual([])
     // A run of another task is refused before anything is sent.
     await expect(restarted.report('two', { message: 'Wrong' }, 'wrong', secondRunId)).rejects.toMatchObject({ code: 'run_task_mismatch' })
   })

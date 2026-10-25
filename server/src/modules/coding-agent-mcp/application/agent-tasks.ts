@@ -488,13 +488,15 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         try {
           return await api.reportRun(active, scope.instanceId, input, key, scope.assignedProjectId)
         } catch (error) {
-          if (structured || !(error instanceof AgentTaskError) || error.code !== 'idempotency_conflict') throw error
-          // The key is taken and this process no longer knows where it went. A plain message is sent
-          // to the comment endpoint whenever no run is active, so it replays there if it was saved
-          // before this run started; otherwise the server rejects this request too.
+          // A retryable conflict is the same request still in progress, so it stays on this route.
+          if (structured || !(error instanceof AgentTaskError) || error.code !== 'idempotency_conflict' || error.retryable) throw error
+          // A different request holds the key and this process no longer knows where it went. A plain
+          // message is sent to the comment endpoint whenever no run is active, so it replays there if
+          // it was saved before this run started; otherwise the server rejects this request too.
           const fence = { agentInstanceId: scope.instanceId }
+          const comment = await sendReportComment(id, input, key, fence)
           rememberReportRoute(rememberedKey, { fence })
-          return { comment: await sendReportComment(id, input, key, fence) }
+          return { comment }
         }
       }
       if (structured) {

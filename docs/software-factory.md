@@ -232,8 +232,10 @@ Run は Work Item の archive / delete に従う。Work Item を削除または 
   - Run がない間の通常メッセージは、comment endpoint に instance だけの fence で送る。再起動後の再送が
     後から始まった Run の report endpoint で idempotency conflict になった場合は、同じ comment request を
     1 回だけ送り直し、最初の comment を再生する。
-  - `runId` のない構造化 report の再送は、Run が終了していれば `agent_run_not_active`、新しい Run が
-    始まっていれば idempotency conflict になる。どの場合も 2 件目を保存することはない。
+  - Run の間に `runId` を付けずに送った report の再起動後の再送は、Run が終了していれば
+    `agent_run_not_active`（構造化 report の場合）、新しい Run が始まっていれば idempotency conflict に
+    なる。処理中の同じ request による retryable な conflict では comment endpoint へ送り直さない。どの
+    場合も 2 件目を保存することはない。
 
 ## 仕様と context
 
