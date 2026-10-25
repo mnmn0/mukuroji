@@ -525,6 +525,23 @@ describe('agent task lifecycle', () => {
     await expect(createAgentTasks(api, baseScope).report('one', structured, 'handoff')).rejects.toMatchObject({ code: 'idempotency_conflict' })
     expect(reports).toEqual([{ runId: firstRunId, ...structured }])
     expect(notes).toEqual(['[test-agent]\n\nPlan', '[test-agent]\n\nReady'])
+    // Structured fields added to a remembered plain message are rejected, not dropped.
+    await expect(restarted.report('one', { message: 'Plan', changedFileCount: 1 }, 'plain')).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    // A transient failure of the fallback keeps the comment route for the next retry.
+    let failComment = false
+    const flaky = fixture([task()])
+    const flakyApi: typeof flaky.api = { ...flaky.api, async comment(...args) {
+      if (failComment) { failComment = false; throw new AgentTaskError('unavailable', 'Try again', true) }
+      return flaky.api.comment(...args)
+    } }
+    const before = createAgentTasks(flakyApi, baseScope)
+    await before.report('one', { message: 'Plan' }, 'plain')
+    await before.transition('one', 1, 'coding', 'start', 'claim')
+    const after = createAgentTasks(flakyApi, baseScope)
+    failComment = true
+    await expect(after.report('one', { message: 'Plan' }, 'plain')).rejects.toMatchObject({ code: 'unavailable' })
+    expect(await after.report('one', { message: 'Plan' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(flaky.notes).toEqual(['[test-agent]\n\nPlan'])
     // The same request still in progress is not redirected to the comment endpoint.
     const busy = fixture([task()], { async reportRun() { throw new AgentTaskError('idempotency_conflict', 'In progress', true) } })
     await busy.service.transition('one', 1, 'coding', 'start', 'claim')

@@ -475,13 +475,19 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         rememberReportRoute(rememberedKey, { runId })
         return api.reportRun(runId, scope.instanceId, input, key, scope.assignedProjectId)
       }
+      const structured = (input.kind !== undefined && input.kind !== 'progress') ||
+        (input.verifications?.length ?? 0) > 0 || (input.artifacts?.length ?? 0) > 0 || input.changedFileCount !== undefined
+      /** Rejects structured fields that the comment endpoint would drop. */
+      const rejectStructured = () => new AgentTaskError(
+        'agent_run_not_active',
+        'Structured reports need your active run on this task, and you have none. This call saved nothing. When retrying a report sent during a run, pass that run\'s runId with the same key; otherwise stop and ask the user.',
+      )
       const remembered = reportRoutesByKey.get(rememberedKey)
       if (remembered) {
         if ('runId' in remembered) return api.reportRun(remembered.runId, scope.instanceId, input, key, scope.assignedProjectId)
+        if (structured) throw rejectStructured()
         return { comment: await sendReportComment(id, input, key, remembered.fence) }
       }
-      const structured = (input.kind !== undefined && input.kind !== 'progress') ||
-        (input.verifications?.length ?? 0) > 0 || (input.artifacts?.length ?? 0) > 0 || input.changedFileCount !== undefined
       const active = (await claimedRun(id, true))?.runId
       if (active) {
         rememberReportRoute(rememberedKey, { runId: active })
@@ -493,18 +499,13 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           // A different request holds the key and this process no longer knows where it went. A plain
           // message is sent to the comment endpoint whenever no run is active, so it replays there if
           // it was saved before this run started; otherwise the server rejects this request too.
+          // Remembered first, so a retry after a transient failure of this request comes back here.
           const fence = { agentInstanceId: scope.instanceId }
-          const comment = await sendReportComment(id, input, key, fence)
           rememberReportRoute(rememberedKey, { fence })
-          return { comment }
+          return { comment: await sendReportComment(id, input, key, fence) }
         }
       }
-      if (structured) {
-        throw new AgentTaskError(
-          'agent_run_not_active',
-          'Structured reports need your active run on this task, and you have none. This call saved nothing. When retrying a report sent during a run, pass that run\'s runId with the same key; otherwise stop and ask the user.',
-        )
-      }
+      if (structured) throw rejectStructured()
       const fence = await fenceFor(id)
       rememberReportRoute(rememberedKey, { fence })
       return { comment: await sendReportComment(id, input, key, fence) }
