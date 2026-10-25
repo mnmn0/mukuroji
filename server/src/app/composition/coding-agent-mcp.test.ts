@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test'
-import { resolve } from 'node:path'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { composeCodingAgentMcp, deriveAgentInstanceId } from './coding-agent-mcp'
@@ -11,6 +13,9 @@ type FakeRun = {
   /** Instance that started the run. */
   instanceId: string
 }
+
+/** Source entry point of the stdio server. */
+const handlerPath = resolve(import.meta.dir, '../../handlers/coding-agent-mcp.ts')
 
 /**
  * Starts a fake public API that enforces one active run per task, as Mukuroji does.
@@ -156,13 +161,21 @@ function startFakeApi() {
  * @param port - Fake API port assigned by Bun.
  * @param mode - Protocol negotiation mode.
  * @param extra - Additional environment variables.
+ * @param entry - Script the server process runs; the source handler by default.
+ * @param command - Runtime that runs the script; Bun by default.
  * @returns Connected client.
  */
-async function connect(port: number | undefined, mode: 'legacy' | 'auto', extra: Record<string, string>): Promise<Client> {
+async function connect(
+  port: number | undefined,
+  mode: 'legacy' | 'auto',
+  extra: Record<string, string>,
+  entry = handlerPath,
+  command = process.execPath,
+): Promise<Client> {
   const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' }, { versionNegotiation: { mode } })
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [resolve(import.meta.dir, '../../handlers/coding-agent-mcp.ts')],
+    command,
+    args: [entry],
     env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
       MUKUROJI_MCP_TEAM_ID: 'team', MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_AGENT_NAME: 'test-agent', ...extra },
     stderr: 'pipe',
@@ -268,6 +281,33 @@ test('two instances of one member never share a claim, and a release lets the ot
   } finally {
     for (const client of clients) await client.close()
     await fake.api.stop(true)
+  }
+}, 30_000)
+
+test('the distributable Node bundle serves the same tools over stdio', async () => {
+  // Runs the script behind `bun run mcp:build`, which produces the distributable bundle.
+  const outdir = await mkdtemp(join(tmpdir(), 'mukuroji-mcp-bundle-'))
+  const fake = startFakeApi()
+  let client: Client | undefined
+  try {
+    const build = Bun.spawn([process.execPath, resolve(import.meta.dir, '../../../../scripts/build-coding-agent-mcp.ts'), '--outdir', outdir], {
+      stdout: 'pipe', stderr: 'pipe',
+    })
+    expect(await build.exited).toBe(0)
+    // Every inlined package's license ships with the bundle.
+    const notices = await Bun.file(join(outdir, 'mcp.mjs.LICENSES.txt')).text()
+    expect(notices).toContain('@modelcontextprotocol/server@')
+    expect(notices).toContain('zod@')
+    // The bundle is published for Node, so only a Node run proves it; Bun would hide Node regressions.
+    const node = Bun.which('node')
+    if (!node) throw new Error('Node.js is required to test the distributable MCP bundle.')
+    client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
+    expect((await client.listTools()).tools).toHaveLength(17)
+    expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { runtime: 'codex' } })
+  } finally {
+    await client?.close()
+    await fake.api.stop(true)
+    await rm(outdir, { recursive: true, force: true })
   }
 }, 30_000)
 

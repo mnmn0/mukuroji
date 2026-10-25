@@ -1,4 +1,4 @@
-import type { AgentRunView } from '@mukuroji/contracts'
+import type { AgentRunReport, AgentRunView } from '@mukuroji/contracts'
 
 /** Base fields shared by Agent Run fixtures. */
 const baseRun: AgentRunView = {
@@ -49,3 +49,33 @@ export const agentRunFixtures: AgentRunView[] = [
 
 /** Active run whose lease has expired. */
 export const stalledAgentRunFixture: AgentRunView = { ...baseRun, stalled: true }
+
+/** Structured report saved with the `comment-1` fixture comment. */
+export const agentRunReportFixture: AgentRunReport = {
+  schemaVersion: 1,
+  runId: baseRun.runId,
+  teamId: baseRun.teamId,
+  workItemId: baseRun.workItemId,
+  sequence: 2,
+  kind: 'verification',
+  commentId: 'comment-1',
+  verifications: [
+    { command: 'bun run server:test', status: 'passed', summary: '3,890 tests passed' },
+    { command: 'bun run web:build', status: 'failed' },
+  ],
+  artifacts: [
+    { type: 'pull-request', url: 'https://github.com/example/repo/pull/12', label: 'PR #12' },
+    { type: 'commit', url: 'https://github.com/example/repo/commit/4746f37f339d66b46db70292caf750400cb61cb0' },
+  ],
+  changedFileCount: 7,
+  createdAt: '2026-10-22T01:20:00.000Z',
+}
+
+/** Hand-off report that asks a person to decide. */
+export const agentRunHandoffReportFixture: AgentRunReport = {
+  ...agentRunReportFixture,
+  sequence: 3,
+  kind: 'handoff',
+  verifications: [],
+  artifacts: [],
+}

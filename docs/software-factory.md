@@ -512,8 +512,12 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   `GET /api/teams/{teamId}/work-items/{workItemId}/agent-run-reports`、`report_progress` の構造化 field。
   Collaboration の comment 作成は、信頼できる呼び出し元の書き込み（co-write）を同じ transaction に
   含められる。co-write 付きの作成は既存 comment の replay で失敗を隠さず、呼び出し元が分類する。
-- 次の変更で入れる点: Web の comment chip 表示、Claude Code / Codex / Kiro の設定例、`mcp.mjs` の
-  配布 build。
+- 実装済み（Web と配布）: Work Item と task の詳細で、report を保存した comment の下に kind、検証結果、
+  成果物 link、変更ファイル数を chip で表示する（blocker と handoff は判断待ちとして強調）。chip は一覧
+  API が返す新しい report（既定 100 件、約 1 MB まで）に限り、それより古い comment は本文だけを表示する。
+  `docs/coding-agent-mcp.md` に Claude Code / Codex / Kiro の設定例を置き、`mcp.mjs` は Node.js でも
+  起動できる単一ファイルとして、同梱ライセンス一覧と一緒に build する。GitHub Release への自動添付は、
+  workflow の追加に別の権限が要るため次の変更で入れる。
 
 ## 後続 Phase
 
