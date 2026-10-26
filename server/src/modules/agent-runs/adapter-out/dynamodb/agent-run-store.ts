@@ -644,14 +644,18 @@ function decodeCursor(cursor: string | undefined, partitionAttribute: string, pa
  * @returns True when the save produced the current revision and values.
  */
 export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentSettingsUpdate): boolean {
-  const savedProjects = Object.keys(saved.projectBriefs)
+  // Briefs the editor could not see were copied from the settings, not sent, so a retry is matched
+  // on what the editor sent even if another save changed those briefs since.
+  const kept = new Set(update.keptProjectIds ?? [])
+  const savedProjects = Object.keys(saved.projectBriefs).filter((projectId) => !kept.has(projectId))
+  const updateProjects = Object.keys(update.projectBriefs).filter((projectId) => !kept.has(projectId))
   return saved.revision === update.expectedRevision + 1 &&
     saved.leaseMinutes === update.leaseMinutes &&
     saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry &&
     saved.readyStatusIds.length === update.readyStatusIds.length &&
     saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
     saved.brief === update.brief &&
-    savedProjects.length === Object.keys(update.projectBriefs).length &&
+    savedProjects.length === updateProjects.length &&
     savedProjects.every((projectId) => saved.projectBriefs[projectId] === update.projectBriefs[projectId])
 }
 
@@ -713,9 +717,9 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   const revision = storedInteger(item, 'revision')
   const leaseMinutes = storedInteger(item, 'leaseMinutes')
   if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
-  // Rows saved before Ready statuses and briefs existed carry none of them.
-  const readyStatusIds = item.readyStatusIds ?? []
-  const projectBriefs = item.projectBriefs ?? {}
+  // Rows saved before Ready statuses and briefs existed lack them; any other value, null included, is corrupt.
+  const readyStatusIds = item.readyStatusIds === undefined ? [] : item.readyStatusIds
+  const projectBriefs = item.projectBriefs === undefined ? {} : item.projectBriefs
   if (
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||

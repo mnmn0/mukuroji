@@ -1407,6 +1407,17 @@ describe('Web Agent Run routes', () => {
     expect((await saved.json()).projectBriefs).toEqual({ refero: 'Edited brief' })
     // The brief the manager cannot see is kept as saved, and they cannot set it.
     expect(store.state.settings.get(`${workspaceId}|core-team`)?.projectBriefs).toEqual({ refero: 'Edited brief', secret: 'Hidden brief' })
+    // A retry after a lost response still replays once someone else changed the hidden brief.
+    const current = store.state.settings.get(`${workspaceId}|core-team`)
+    if (current) store.state.settings.set(`${workspaceId}|core-team`, { ...current, revision: 3, projectBriefs: { ...current.projectBriefs, secret: 'Changed elsewhere' } })
+    const retried = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'settings-visible' },
+      body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, projectBriefs: { refero: 'Edited brief' } }),
+    })
+    expect(retried.status).toBe(200)
+    expect(await retried.json()).toMatchObject({ revision: 2, projectBriefs: { refero: 'Edited brief' } })
+    if (current) store.state.settings.set(`${workspaceId}|core-team`, current)
     const denied = await app.request('http://localhost/api/teams/core-team/agent-settings', {
       method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, projectBriefs: { secret: 'Overwrite' } }),
     })

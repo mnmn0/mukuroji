@@ -402,7 +402,8 @@ describe('DynamoDB Agent Run store', () => {
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
       .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], projectBriefs: {}, updatedAt: now.toISOString(), updatedBy: 'member-1' })
-    for (const corrupt of [{ readyStatusIds: [7] }, { brief: '' }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }]) {
+    // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
+    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
       await expect(new DynamoDbAgentRunStore(client.client, 'AgentRuns').getSettings('workspace-1', 'core'))
         .rejects.toMatchObject({ category: 'temporarily_unavailable' })

@@ -281,7 +281,11 @@ export async function updateWebAgentSettings(
   }
   const hiddenBriefs = Object.fromEntries(Object.entries(before.projectBriefs)
     .filter(([projectId]) => !canAccessAssignedProject(principal, permission, projectId, 'viewer')))
-  const update = { ...requested, projectBriefs: { ...requested.projectBriefs, ...hiddenBriefs } }
+  const update = {
+    ...requested,
+    projectBriefs: { ...requested.projectBriefs, ...hiddenBriefs },
+    keptProjectIds: Object.keys(hiddenBriefs),
+  }
   assertAgentSettingsBriefLimits(update)
   const now = new Date()
   const auditPut = createMutationAuditEventPut(getConfiguredAuditTableName(), auditContext, {

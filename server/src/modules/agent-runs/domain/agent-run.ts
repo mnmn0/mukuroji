@@ -726,6 +726,11 @@ export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   readyStatusIds: string[]
   /** Non-empty briefs per Project ID. */
   projectBriefs: Record<string, string>
+  /**
+   * Projects whose briefs were kept from the saved settings because the editor cannot see them;
+   * a retry is not compared on these briefs.
+   */
+  keptProjectIds?: string[]
 }
 
 /**
