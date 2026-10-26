@@ -55,6 +55,8 @@ type ReportRoute =
   | {
       /** Run whose report endpoint received the report. */
       runId: string
+      /** Whether the run was chosen as the task's active run rather than named by the caller. */
+      implicit: boolean
     }
   | {
       /** Exact fence the plain comment was sent with. */
@@ -80,9 +82,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   /**
    * Endpoint each recent report key was sent to, per task. A retry after a lost response must send
    * the same request to replay its receipt, even if a run closed or started in between; a key reused
-   * for another task is sent as that task's own request, so the server rejects the reuse. The routes
-   * live only in this process: after a restart, such a retry fails with an error instead of replaying,
-   * and never saves a second report.
+   * for another task is sent as that task's own request, so the server rejects the reuse. These routes
+   * only shortcut retries within this process. After a restart, a report that names its runId reaches
+   * that run again, and a plain message that meets a newer run falls back to the comment endpoint.
    */
   const reportRoutesByKey = new Map<string, ReportRoute>()
 
@@ -98,6 +100,18 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const oldest = reportRoutesByKey.keys().next().value
       if (oldest !== undefined) reportRoutesByKey.delete(oldest)
     }
+  }
+
+  /**
+   * Saves a plain report as a labelled task comment.
+   * @param id - Task ID.
+   * @param input - Report fields; only the message is saved.
+   * @param key - Idempotency key of the report.
+   * @param fence - Fence the comment is sent with; a retry must reuse the first one.
+   * @returns The saved or replayed comment.
+   */
+  function sendReportComment(id: string, input: AgentRunReportInput, key: string, fence: AgentRunMutationFence) {
+    return api.comment(id, `[${scope.agentName}]\n\n${input.message}`, key, scope.assignedProjectId, scope.assigneeUserId, fence)
   }
 
   /** Verifies the optional process-wide Project restriction. */
@@ -439,31 +453,76 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     /**
      * Adds a durable report to the task discussion. With this instance's active run on the task it is
-     * saved as a structured report of that run; without one, only a plain message is accepted.
+     * saved as a structured report of that run; without one, only a plain message is accepted. A
+     * report that names its run is always sent to that run, so a retry replays there even after this
+     * process restarted or the run closed.
+     *
+     * @param id - Task ID.
+     * @param input - Report fields.
+     * @param key - Idempotency key of the report.
+     * @param runId - Run the report belongs to, when the caller names it.
+     * @returns The saved or replayed report.
      */
-    async report(id: string, input: AgentRunReportInput, key: string) {
+    async report(id: string, input: AgentRunReportInput, key: string, runId?: string) {
       await owned(id)
       const rememberedKey = JSON.stringify([id, key])
-      const remembered = reportRoutesByKey.get(rememberedKey)
-      const runId = remembered ? ('runId' in remembered ? remembered.runId : undefined) : (await claimedRun(id, true))?.runId
-      if (runId) {
-        rememberReportRoute(rememberedKey, { runId })
+      if (runId !== undefined) {
+        const run = await api.getRun(runId)
+        if (run.workItemId !== id) {
+          throw new AgentTaskError('run_task_mismatch', 'This run belongs to another task. Pass the runId that start_task returned for this task.')
+        }
+        if (!(await runInScope(run))) {
+          throw new AgentTaskError('out_of_scope', 'This run belongs to a task outside the configured Project.')
+        }
+        rememberReportRoute(rememberedKey, { runId, implicit: false })
         return api.reportRun(runId, scope.instanceId, input, key, scope.assignedProjectId)
       }
       const structured = (input.kind !== undefined && input.kind !== 'progress') ||
         (input.verifications?.length ?? 0) > 0 || (input.artifacts?.length ?? 0) > 0 || input.changedFileCount !== undefined
-      if (structured) {
-        throw new AgentTaskError(
-          'agent_run_not_active',
-          'Structured reports need your active run on this task, and you have none. This call saved nothing, but a report sent earlier with the same key may already be on the task; check its discussion, then stop and ask the user.',
-        )
-      }
-      const fence = remembered && 'fence' in remembered ? remembered.fence : await fenceFor(id)
-      rememberReportRoute(rememberedKey, { fence })
-      const comment = await api.comment(
-        id, `[${scope.agentName}]\n\n${input.message}`, key, scope.assignedProjectId, scope.assigneeUserId, fence,
+      /** Rejects structured fields that the comment endpoint would drop. */
+      const rejectStructured = () => new AgentTaskError(
+        'agent_run_not_active',
+        'Structured reports need your active run on this task, and you have none. This call saved nothing. When retrying a report sent during a run, pass that run\'s runId with the same key; otherwise stop and ask the user.',
       )
-      return { comment }
+      /**
+       * Sends the report to a run the caller did not name. A non-retryable idempotency conflict there
+       * means a different request holds the key and this process no longer knows where it went. A
+       * plain message is sent to the comment endpoint whenever no run is active, so it then falls
+       * back there and replays if it was saved before this run started; otherwise the server rejects
+       * that request too. A retryable conflict is the same request still in progress.
+       * @param activeRunId - Run chosen as the task's active run.
+       * @returns The saved or replayed report.
+       */
+      const sendToActiveRun = async (activeRunId: string) => {
+        try {
+          return await api.reportRun(activeRunId, scope.instanceId, input, key, scope.assignedProjectId)
+        } catch (error) {
+          if (structured || !(error instanceof AgentTaskError) || error.code !== 'idempotency_conflict' || error.retryable) throw error
+          // Remembered first, so a retry after a transient failure of this request comes back here.
+          const fence = { agentInstanceId: scope.instanceId }
+          rememberReportRoute(rememberedKey, { fence })
+          return { comment: await sendReportComment(id, input, key, fence) }
+        }
+      }
+      const remembered = reportRoutesByKey.get(rememberedKey)
+      if (remembered) {
+        if ('runId' in remembered) {
+          return remembered.implicit
+            ? sendToActiveRun(remembered.runId)
+            : api.reportRun(remembered.runId, scope.instanceId, input, key, scope.assignedProjectId)
+        }
+        if (structured) throw rejectStructured()
+        return { comment: await sendReportComment(id, input, key, remembered.fence) }
+      }
+      const active = (await claimedRun(id, true))?.runId
+      if (active) {
+        rememberReportRoute(rememberedKey, { runId: active, implicit: true })
+        return sendToActiveRun(active)
+      }
+      if (structured) throw rejectStructured()
+      const fence = await fenceFor(id)
+      rememberReportRoute(rememberedKey, { fence })
+      return { comment: await sendReportComment(id, input, key, fence) }
     },
     /** Extends the lease of this instance's own run. */
     async heartbeat(runId: string) {

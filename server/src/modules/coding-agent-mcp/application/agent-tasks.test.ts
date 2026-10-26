@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createAgentTasks } from './agent-tasks'
-import type { AgentRunMutationFence } from '@mukuroji/contracts'
+import type { AgentRunMutationFence, TeamIssueCommentResponseItem } from '@mukuroji/contracts'
 import {
   AgentTaskError, type AgentCatalog, type AgentRunRecord, type AgentRunReportInput, type AgentRunReportResult, type AgentTask,
   type AgentWorkItemApi,
@@ -39,6 +39,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
   const notes: string[] = []
   const reports: (AgentRunReportInput & { runId: string })[] = []
   const reportReceipts = new Map<string, { runId: string; result: AgentRunReportResult }>()
+  const commentReceipts = new Map<string, { fingerprint: string; comment: TeamIssueCommentResponseItem }>()
   const fences: (AgentRunMutationFence | undefined)[] = []
   const runs = new Map<string, AgentRunRecord & { instanceId: string }>()
   let runSequence = 0
@@ -87,10 +88,17 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return structuredClone(after)
     },
     async comments() { return { items: [], hasMore: false } },
-    async comment(_id, body, _key, _project, _assignee, fence) {
+    async comment(id, body, key, _project, _assignee, fence) {
       fences.push(fence)
+      // Like the server, one key holds one receipt per credential whichever endpoint saved it.
+      const fingerprint = JSON.stringify({ id, body, fence })
+      const replay = commentReceipts.get(key)
+      if (reportReceipts.has(key) || (replay && replay.fingerprint !== fingerprint)) throw new AgentTaskError('idempotency_conflict', 'Different request')
+      if (replay) return structuredClone(replay.comment)
       notes.push(body)
-      return { id: 'comment', actorUserId: 'agent-member', body, createdAt: '2026-09-01T00:00:00.000Z' }
+      const comment = { id: 'comment', actorUserId: 'agent-member', body, createdAt: '2026-09-01T00:00:00.000Z' }
+      commentReceipts.set(key, { fingerprint, comment })
+      return structuredClone(comment)
     },
     async startRun(id, input, key) {
       const replay = startReceipts.get(key)
@@ -137,6 +145,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
      */
     async reportRun(runId, instanceId, input, key) {
       const replay = reportReceipts.get(key)
+      if (commentReceipts.has(key)) throw new AgentTaskError('idempotency_conflict', 'Different request')
       if (replay) {
         if (replay.runId !== runId) throw new AgentTaskError('idempotency_conflict', 'Different request')
         return structuredClone(replay.result)
@@ -491,6 +500,70 @@ describe('agent task lifecycle', () => {
     release(runId)
     expect(await service.report('one', structured, 'handoff')).toMatchObject({ report: { runId, sequence: 1 } })
     expect(reports).toHaveLength(1)
+  })
+
+  test('replays a lost report after a restart from its runId or, for a plain message, from the comment endpoint', async () => {
+    const { api, service, notes, reports, fences, release, runs } = fixture([task(), task('two')])
+    const structured = { message: 'Ready', kind: 'handoff' as const, verifications: [{ command: 'bun test', status: 'passed' as const }] }
+    // A plain message sent before any run, then the run is started and closed and another one started.
+    await service.report('one', { message: 'Plan' }, 'plain')
+    const first = await service.transition('one', 1, 'coding', 'start', 'claim')
+    const firstRunId = 'run' in first ? first.run.runId : ''
+    await service.report('one', structured, 'handoff', firstRunId)
+    release(firstRunId)
+    // The instance claims the task again, as after a person reopened and restarted it.
+    const firstRun = runs.get(firstRunId)
+    const secondRunId = 'run_00000000-0000-4000-8000-000000000099'
+    if (firstRun) runs.set(secondRunId, { ...firstRun, runId: secondRunId, state: 'active', reportCount: 0 })
+    await service.transition('two', 1, 'coding', 'start', 'claim-two')
+    // A new process has no remembered routes.
+    const restarted = createAgentTasks(api, baseScope)
+    expect(await restarted.report('one', structured, 'handoff', firstRunId)).toMatchObject({ report: { runId: firstRunId, sequence: 1 } })
+    expect(await restarted.report('one', { message: 'Plan' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(fences.at(-1)).toEqual({ agentInstanceId: 'instance-a' })
+    // Without its runId, a structured retry cannot be redirected and is rejected without saving.
+    await expect(createAgentTasks(api, baseScope).report('one', structured, 'handoff')).rejects.toMatchObject({ code: 'idempotency_conflict' })
+    expect(reports).toEqual([{ runId: firstRunId, ...structured }])
+    expect(notes).toEqual(['[test-agent]\n\nPlan', '[test-agent]\n\nReady'])
+    // Structured fields added to a remembered plain message are rejected, not dropped.
+    await expect(restarted.report('one', { message: 'Plan', changedFileCount: 1 }, 'plain')).rejects.toMatchObject({ code: 'agent_run_not_active' })
+    // A transient failure of the fallback keeps the comment route for the next retry.
+    let failComment = false
+    const flaky = fixture([task()])
+    const flakyApi: typeof flaky.api = { ...flaky.api, async comment(...args) {
+      if (failComment) { failComment = false; throw new AgentTaskError('unavailable', 'Try again', true) }
+      return flaky.api.comment(...args)
+    } }
+    const before = createAgentTasks(flakyApi, baseScope)
+    await before.report('one', { message: 'Plan' }, 'plain')
+    await before.transition('one', 1, 'coding', 'start', 'claim')
+    const after = createAgentTasks(flakyApi, baseScope)
+    failComment = true
+    await expect(after.report('one', { message: 'Plan' }, 'plain')).rejects.toMatchObject({ code: 'unavailable' })
+    expect(await after.report('one', { message: 'Plan' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(flaky.notes).toEqual(['[test-agent]\n\nPlan'])
+    // A transient failure of the first run probe still falls back to the comment on the next retry.
+    let failRun = false
+    const probing = fixture([task()])
+    const probingApi: typeof probing.api = { ...probing.api, async reportRun(...args) {
+      if (failRun) { failRun = false; throw new AgentTaskError('unavailable', 'Try again', true) }
+      return probing.api.reportRun(...args)
+    } }
+    const early = createAgentTasks(probingApi, baseScope)
+    await early.report('one', { message: 'Plan' }, 'plain')
+    await early.transition('one', 1, 'coding', 'start', 'claim')
+    const late = createAgentTasks(probingApi, baseScope)
+    failRun = true
+    await expect(late.report('one', { message: 'Plan' }, 'plain')).rejects.toMatchObject({ code: 'unavailable' })
+    expect(await late.report('one', { message: 'Plan' }, 'plain')).toMatchObject({ comment: { id: 'comment' } })
+    expect(probing.notes).toEqual(['[test-agent]\n\nPlan'])
+    // The same request still in progress is not redirected to the comment endpoint.
+    const busy = fixture([task()], { async reportRun() { throw new AgentTaskError('idempotency_conflict', 'In progress', true) } })
+    await busy.service.transition('one', 1, 'coding', 'start', 'claim')
+    await expect(busy.service.report('one', { message: 'Plan' }, 'busy')).rejects.toMatchObject({ code: 'idempotency_conflict', retryable: true })
+    expect(busy.notes).toEqual([])
+    // A run of another task is refused before anything is sent.
+    await expect(restarted.report('two', { message: 'Wrong' }, 'wrong', secondRunId)).rejects.toMatchObject({ code: 'run_task_mismatch' })
   })
 
   test('records progress separately, completes, reopens, and cancels using custom status IDs', async () => {
