@@ -227,6 +227,10 @@ describe('public Agent Run service', () => {
       { id: 'b'.repeat(32), text: 'Docs updated', satisfied: false },
     ]
     projectOptions.detailAcceptanceCriteria = criteria
+    const written: unknown[] = []
+    projectOptions.issueUpdateHook = (input) => {
+      written.push(input.acceptanceCriteria)
+    }
     const held = createHeldRun('task-1', 'laptop-1')
     store.seed(held)
     const workItems = createCanonicalPublicWorkItemService()
@@ -247,7 +251,11 @@ describe('public Agent Run service', () => {
         fenced ? { agentRunId: held.runId, instanceIdHash: held.instanceIdHash } : undefined,
       ))
     const marked = await update([{ ...criteria[0], satisfied: true }, criteria[1]], 'mark', true)
-    expect(marked.acceptanceCriteria).toEqual([{ ...criteria[0], satisfied: true }, criteria[1]])
+    expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, criteria[1]])
+    // The closed public Work Item schema omits the criteria; they have their own endpoint.
+    expect(marked).not.toHaveProperty('acceptanceCriteria')
+    expect(await runWithTestAppDependencies(() => workItems.getAcceptanceCriteria(credential, 'core-team', 'task-1')))
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 1, items: criteria })
     // Rewording, adding, removing, or reordering is left to people.
     for (const [changed, key] of [
       [[{ ...criteria[0], text: 'Tests mostly pass' }, criteria[1]], 'reword'],
@@ -257,9 +265,10 @@ describe('public Agent Run service', () => {
     ] as const) {
       await expect(update([...changed], key, true)).rejects.toMatchObject({ status: 403, code: 'AcceptanceCriteriaChangeForbidden' })
     }
-    const edited = await update([criteria[0], { text: '  New condition  ' }], 'human', false)
-    expect(edited.acceptanceCriteria).toMatchObject([criteria[0], { text: 'New condition', satisfied: false }])
-    expect(edited.acceptanceCriteria?.[1]?.id).toMatch(/^[0-9a-f]{32}$/u)
+    await update([criteria[0], { text: '  New condition  ' }], 'human', false)
+    expect(written.at(-1)).toMatchObject([criteria[0], { text: 'New condition', satisfied: false }])
+    // The new criterion receives a server-generated ID.
+    expect(JSON.stringify(written.at(-1))).toMatch(/"id":"[0-9a-f]{32}","text":"New condition"/u)
     await expect(update([{ id: 'c'.repeat(32), text: 'Invented' }], 'invented', false)).rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
     // Criterion IDs refer to the list the caller read, so a stale revision is a conflict.
     await expect(update([criteria[0]], 'stale', false, 2)).rejects.toMatchObject({ status: 409, code: 'WorkItemRevisionConflict' })
@@ -1451,7 +1460,7 @@ describe('Web Agent Run routes', () => {
     expect(saved.status).toBe(200)
     expect(await saved.json()).toMatchObject({ revision: 1, readyStatusIds: ['ready'], brief: body.brief, projectBriefs: body.projectBriefs })
     const service = createCanonicalPublicAgentRunService()
-    expect(await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team')))
+    expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))
       .toMatchObject({ readyStatusIds: ['ready'], brief: body.brief, projectBriefs: body.projectBriefs })
     // Omitting the optional fields clears them, since a save replaces the settings.
     const cleared = await app.request('http://localhost/api/teams/core-team/agent-settings', {
@@ -1479,7 +1488,14 @@ describe('Web Agent Run routes', () => {
     const read = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
     expect(await read.json()).toMatchObject({ brief: 'Team brief', projectBriefs: { refero: 'Visible brief' } })
     const service = createCanonicalPublicAgentRunService()
-    expect((await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team'))).projectBriefs).toEqual({ refero: 'Visible brief' })
+    expect((await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))).toEqual({
+      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], requireAcceptanceCriteria: false,
+      brief: 'Team brief', projectBriefs: { refero: 'Visible brief' },
+    })
+    // The closed run-settings schema keeps its original fields.
+    expect(Object.keys(await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team'))).sort()).toEqual([
+      'allowTakeoverAfterLeaseExpiry', 'leaseMinutes', 'revision', 'schemaVersion', 'teamId', 'updatedAt', 'updatedBy',
+    ])
     const saved = await app.request('http://localhost/api/teams/core-team/agent-settings', {
       method: 'PUT',
       headers: { ...headers, 'Idempotency-Key': 'settings-visible' },

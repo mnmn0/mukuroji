@@ -5,7 +5,9 @@ import {
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type AgentRun,
-  type AgentSettings,
+  type AgentContext,
+  type PublicAgentSettings,
+  type PublicWorkItemAcceptanceCriteria,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -221,6 +223,18 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
+  /**
+   * Reads the acceptance criteria of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The criteria with the Work Item revision they were read at.
+   */
+  getAcceptanceCriteria(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemAcceptanceCriteria>
   /**
    * Returns active Work Item Types and creation field schemas after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -534,12 +548,19 @@ export interface PublicAgentRunService {
     idempotency: IdempotencyMutationToken,
   ): Promise<TakeOverAgentRunResponse>
   /**
-   * Reads Team Agent settings.
+   * Reads the Team Agent settings that govern runs.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team ID.
    * @returns Current settings or the defaults.
    */
-  getSettings(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<AgentSettings>
+  getSettings(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<PublicAgentSettings>
+  /**
+   * Reads the Ready statuses and agent briefs of a Team.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @returns Current values or the defaults, with only Project briefs the caller can view.
+   */
+  getContext(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<AgentContext>
 }
 
 /** One page of runs from the Agent Run service. */
@@ -914,6 +935,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ))
   })
 
+  router.get('/v1/work-items/:workItemId/acceptance-criteria', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getAcceptanceCriteria(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
   router.get('/v1/work-items/:workItemId/comments', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
@@ -1194,6 +1224,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const agentRuns = requireAgentRunService(dependencies)
     return c.json(await agentRuns.getSettings(credential, readRequiredQuery(c.req.query('teamId'), 'teamId')))
+  })
+
+  router.get('/v1/agent-context', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    return c.json(await agentRuns.getContext(credential, readRequiredQuery(c.req.query('teamId'), 'teamId')))
   })
 
   router.get('/v1/work-items/:workItemId/external-links', async (c) => {

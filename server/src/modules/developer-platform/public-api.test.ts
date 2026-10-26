@@ -122,6 +122,9 @@ function createDefaultWorkItemService(
 ): PublicWorkItemService {
   const workItem = createWorkItem()
   return {
+    async getAcceptanceCriteria(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, items: [] }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -697,6 +700,9 @@ describe('public API router', () => {
     expect(paths['/api/v1/agent-runs/{runId}/heartbeat']).toHaveProperty('post')
     expect(paths['/api/v1/agent-runs/{runId}/finish']).toHaveProperty('post')
     expect(paths['/api/v1/agent-settings']).toHaveProperty('get')
+    expect(paths['/api/v1/agent-context']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/acceptance-criteria']).toHaveProperty('get')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')
     expect(components.schemas.UpdatePublicWorkItemRequest.properties).toHaveProperty('agentInstanceId')
     expect(components.schemas.CreatePublicWorkItemCommentRequest.properties).toHaveProperty('agentRunId')
     expect(
@@ -2695,6 +2701,7 @@ function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): 
     authorizeTakeOver: unexpected,
     takeOver: unexpected,
     getSettings: unexpected,
+    getContext: unexpected,
     ...overrides,
   }
 }
@@ -2918,6 +2925,7 @@ describe('public Agent Run routes', () => {
     expect((await finish({ outcome: 'completed' }, 'finish-2')).status).toBe(400)
 
     const unconfigured = createTestRouter({ platform })
+    expect((await unconfigured.router.request('/v1/agent-context?teamId=team-1', { headers })).status).toBe(503)
     expect((await unconfigured.router.request('/v1/agent-settings?teamId=team-1', { headers })).status).toBe(503)
   })
 

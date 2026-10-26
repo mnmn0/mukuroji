@@ -788,11 +788,39 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       return response
     },
 
-    /** Reads Team Agent settings for a Team the caller can see. */
+    /** Reads the run-governing Agent settings for a Team the caller can see. */
     async getSettings(credential, teamId) {
       const principal = await resolveReader(credential, teamId)
+      await requireTeamPermission(principal, teamId, 'viewer')
+      const settings = await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId)
+      return {
+        schemaVersion: settings.schemaVersion,
+        teamId: settings.teamId,
+        revision: settings.revision,
+        leaseMinutes: settings.leaseMinutes,
+        allowTakeoverAfterLeaseExpiry: settings.allowTakeoverAfterLeaseExpiry,
+        ...(settings.updatedAt === undefined ? {} : { updatedAt: settings.updatedAt }),
+        ...(settings.updatedBy === undefined ? {} : { updatedBy: settings.updatedBy }),
+      }
+    },
+
+    /** Reads the Ready statuses and briefs for a Team the caller can see, keeping only visible Project briefs. */
+    async getContext(credential, teamId) {
+      const principal = await resolveReader(credential, teamId)
       const permission = await requireTeamPermission(principal, teamId, 'viewer')
-      return withVisibleProjectBriefs(principal, permission, await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId))
+      const settings = withVisibleProjectBriefs(
+        principal, permission, await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId),
+      )
+      return {
+        schemaVersion: settings.schemaVersion,
+        teamId: settings.teamId,
+        revision: settings.revision,
+        readyStatusIds: settings.readyStatusIds,
+        requireAcceptanceCriteria: settings.requireAcceptanceCriteria,
+        ...(settings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: settings.acceptanceCriteriaFieldId }),
+        ...(settings.brief === undefined ? {} : { brief: settings.brief }),
+        projectBriefs: settings.projectBriefs,
+      }
     },
   }
 }

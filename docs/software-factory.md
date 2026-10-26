@@ -326,7 +326,8 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `GET /v1/work-items/{workItemId}/agent-runs` | Work Item の Run 履歴。cursor pagination。 |
 | `GET /v1/agent-runs/{runId}` | Run 1 件。 |
 | `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=&workItemId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。`workItemId` を指定すると index ではなく claim row を強整合で読み、その Work Item を claim している Run だけを返す（`state=active` のみ）。閲覧できない Work Item の Run は返さない。 |
-| `GET /v1/agent-settings?teamId=` | Team の Agent settings。MCP の `get_configuration` が使う。 |
+| `GET /v1/agent-settings?teamId=` | Team の Agent settings（lease と take over）。MCP の `get_configuration` が使う。 |
+| `GET /v1/agent-context?teamId=` | Ready status と agent brief。閉じた `AgentSettings` schema を広げないための別 path。MCP の `get_configuration` と `get_next_task` が使う。 |
 | `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body は Run 開始時と同じ `instanceId`。 |
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | 終了。body は `outcome` と Run 開始時と同じ `instanceId`。 |
@@ -541,6 +542,9 @@ Slice 3 は 3 つの変更に分けて入れる。
   限り、読み取り（Web と Public API）では呼び出し元が閲覧できる Project の brief だけを返す。Web の保存では、
   編集者が閲覧できない Project の brief を受け付けず（`403`）、保存済みの値をそのまま残す。Team に属さない
   Project の brief は `400` とし、Team から外れた Project の保存済み brief は次の保存で消える。
+  Public API の `AgentSettings` は閉じた response schema で property を追加できないため、Ready status と
+  brief は新しい `GET /api/v1/agent-context` で返す。`AgentContext` は以後の Agent settings を追加できるよう
+  閉じない object とし、client は知らない property を無視する。MCP はこの path がない古い server では既定値として動く。
   Run の start は `readyStatusIds` が空でなければ現在の status がその中にあることを確認し、なければ
   `409` と `not_ready` を返す。設定の revision は start の transaction で検査するため、並行した
   設定変更とも整合する。MCP の `get_next_task` は Ready でない候補を `skipped` の `not_ready` として除外し、
@@ -555,7 +559,9 @@ Slice 3 は 3 つの変更に分けて入れる。
   の audit の field change に残る。Agent settings に `requireAcceptanceCriteria` と `acceptanceCriteriaFieldId` を追加し、
   受け入れ条件がない（代替 custom field の値も空の）Work Item の start を `not_ready` とする。MCP の `get_next_task` は
   同じ判定で候補を除外し、`get_task` は受け入れ条件を返し、`update_task` は `acceptanceCriteria: [{ id, satisfied }]` を
-  task の一覧に重ねて送る。
+  task の一覧に重ねて送る。Public API の `WorkItem` は閉じた response schema のため条件を含めず、
+  `GET /api/v1/work-items/{workItemId}/acceptance-criteria` が一覧と読み取り時の Work Item `revision` を返す。
+  2 つの設定は `GET /api/v1/agent-context` に加える。MCP はこの path がない古い server では条件なしとして動く。
 - その次の変更: 受け入れ条件と Agent settings の Web 編集画面。
 
 ## 後続 Phase

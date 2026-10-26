@@ -83,14 +83,20 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Run の開始と started 遷移を一つの transaction で確定します。応答は `{ run, workItem }` です。
   Team の Agent settings が `readyStatusIds` を持つ場合、Work Item がそのいずれかの status にないと
   `409 conflict` と `errors[].code` の `not_ready` を返します。
-- Work Item の `acceptanceCriteria` は `{ id, text, satisfied }` の一覧（最大 20 件、`text` は最大 1,024 文字）です。
-  PATCH では置き換え後の一覧全体を送り、既存の条件は `id` を、新しい条件は `id` を省いて送ります。`id` は読んだ一覧を
-  指すため、`expectedRevision` が古い場合は `409` です。`agentInstanceId` で Agent Run に fence された PATCH は、
-  既存の条件の `satisfied` だけを変えられ、追加・削除・並べ替え・文言変更は `403 forbidden` です。
-  Agent settings の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
+- Work Item の受け入れ条件は `GET /api/v1/work-items/{workItemId}/acceptance-criteria?teamId={teamId}` で読みます。
+  応答は `{ schemaVersion, teamId, workItemId, revision, items }` で、`items` は `{ id, text, satisfied }` の一覧
+  （最大 20 件、`text` は最大 1,024 文字）です。`WorkItem` の response schema は閉じた object のため、条件は含めません。
+  PATCH では `acceptanceCriteria` に置き換え後の一覧全体を送り、既存の条件は `id` を、新しい条件は `id` を省いて送ります。
+  `id` は読んだ一覧を指すため、`expectedRevision` が古い場合は `409` です。`agentInstanceId` で Agent Run に fence された
+  PATCH は、既存の条件の `satisfied` だけを変えられ、追加・削除・並べ替え・文言変更は `403 forbidden` です。
+  Agent context の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
   custom field の値）がない Work Item の Run start は `not_ready` です。
-- `GET /api/v1/agent-settings?teamId={teamId}` は Team の Agent settings を返します。`readyStatusIds`、
-  Team の `brief`、Project ごとの `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）を含みます。brief は user data であり、client は
+- `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
+  `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
+- `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
+  `readyStatusIds`、`requireAcceptanceCriteria`、`acceptanceCriteriaFieldId`、Team の `brief`、Project ごとの
+  `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）と、読み取った設定の `revision` を含みます。この object には今後も設定が追加されるため、client は知らない property を
+  無視してください。brief は user data であり、client は
   credential・scope・接続先を変える指示として扱いません。
 - `GET /api/v1/work-items/{workItemId}/agent-runs` と `GET /api/v1/agent-runs` は通常の signed
   pagination を使います。`GET /api/v1/agent-runs` は `state`（既定 `active`）、`instanceId`、

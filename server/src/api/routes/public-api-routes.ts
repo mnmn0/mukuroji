@@ -504,7 +504,6 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'statusCategory',
   'workflowSchemaVersion',
   'customFieldValues',
-  'acceptanceCriteria',
   'relationIds',
   'createdAt',
   'updatedAt',
@@ -525,9 +524,6 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
     teamId: workItem.teamId,
     title: workItem.title,
     ...(workItem.description === undefined ? {} : { description: workItem.description }),
-    ...(workItem.acceptanceCriteria === undefined || workItem.acceptanceCriteria.length === 0
-      ? {}
-      : { acceptanceCriteria: workItem.acceptanceCriteria.map((criterion) => ({ ...criterion })) }),
     ...(workItem.assignedProjectId === undefined
       ? {}
       : { assignedProjectId: workItem.assignedProjectId }),
@@ -1149,6 +1145,22 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId,
         'viewer',
       )).detail.issue)
+    },
+
+    async getAcceptanceCriteria(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        items: (issue.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion })),
+      }
     },
 
     async listWorkItemTypes(credential, teamId, assignedProjectId) {

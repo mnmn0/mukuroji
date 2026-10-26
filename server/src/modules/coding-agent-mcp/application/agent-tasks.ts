@@ -51,6 +51,9 @@ export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready'
 /** Maximum number of skipped candidates reported by task selection. */
 const maximumSkippedReports = 5
 
+/** Explains the bound on per-candidate reads during task selection. */
+const selectionLimitMessage = 'Selection exceeded 100 dependency or acceptance criteria reads. Narrow the queue filter.'
+
 /** Maximum number of active-run pages read before reporting a limit. */
 const maximumRunPages = 10
 
@@ -422,7 +425,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      return { task, blockers: await blockers(task), activeRun }
+      return { task, acceptanceCriteria: await api.acceptanceCriteria(id), blockers: await blockers(task), activeRun }
     },
     /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
     async next(input: AgentTaskFilters) {
@@ -455,11 +458,13 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         // The server rejects a start from any other status, so such tasks are never offered.
         if (readyStatusIds.size > 0 && !readyStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_ready'); continue }
         if (settings.requireAcceptanceCriteria && !hasWorkItemAcceptanceCriteria(task, settings.acceptanceCriteriaFieldId)) {
-          skip(task.id, 'not_ready')
-          continue
+          // The custom field is checked first; only then are the canonical criteria read.
+          dependencyReads += 1
+          if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
+          if ((await api.acceptanceCriteria(task.id)).length === 0) { skip(task.id, 'not_ready'); continue }
         }
         dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
-        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', 'Selection exceeded 100 dependency reads. Narrow the queue filter.')
+        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
         if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
         return { action: 'start', task, blockedCount, skipped, ...runSummary }
       }
@@ -485,7 +490,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       if (marks === undefined) return api.update(id, fields, key, await fenceFor(id))
       // An agent only marks criteria met or unmet, so the full list is rebuilt from the task's own
       // criteria; a retry rebuilds the same body and replays, and the server rejects a stale revision.
-      const current = task.acceptanceCriteria ?? []
+      const current = await api.acceptanceCriteria(id)
       const marked = new Map(marks.map((mark) => [mark.id, mark.satisfied]))
       const unknown = marks.find((mark) => !current.some((criterion) => criterion.id === mark.id))
       if (unknown !== undefined) {

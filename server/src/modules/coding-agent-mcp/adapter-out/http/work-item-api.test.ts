@@ -92,8 +92,9 @@ test('restarts oversized queue scans with smaller cursor-bound pages and preserv
   const starts: number[] = []
   const api = createAgentWorkItemApi(config, async (url) => {
     if (url.pathname === '/api/v1/agent-runs') return Response.json({ items: [], hasMore: false })
-    // A server older than Ready statuses and briefs omits them.
     if (url.pathname === '/api/v1/agent-settings') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    // A server older than Ready statuses and briefs has no agent-context endpoint.
+    if (url.pathname === '/api/v1/agent-context') return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
     const limit = Number(url.searchParams.get('limit'))
     const cursor = url.searchParams.get('cursor')
     if (!cursor) starts.push(limit)
@@ -108,6 +109,49 @@ test('restarts oversized queue scans with smaller cursor-bound pages and preserv
   expect(await service.status({})).toMatchObject({ total: 71, counts: { unstarted: 71 } })
   expect(await service.next({})).toMatchObject({ action: 'start', task: { id: '70' } })
   expect(starts).toEqual([50, 10, 2, 50, 10, 2])
+})
+
+test('reads Ready statuses and briefs from agent-context alongside the run settings', async () => {
+  const api = createAgentWorkItemApi(config, async (url) => {
+    if (url.pathname === '/api/v1/agent-settings') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true })
+    }
+    if (url.pathname === '/api/v1/agent-context') {
+      return Response.json({
+        schemaVersion: 1, teamId: 'team', revision: 4, readyStatusIds: ['ready'], requireAcceptanceCriteria: true,
+        acceptanceCriteriaFieldId: 'criteria', brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
+      })
+    }
+    return Response.json({ status: 500, code: 'internal_error', retryable: false }, { status: 500 })
+  })
+  expect(await api.agentSettings()).toEqual({
+    schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true,
+    readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'criteria',
+    brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
+  })
+  const mismatched = createAgentWorkItemApi(config, async (url) => Response.json(url.pathname === '/api/v1/agent-settings'
+    ? { schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }
+    : { schemaVersion: 1, teamId: 'other', revision: 4, readyStatusIds: [], projectBriefs: {} }))
+  await expect(mismatched.agentSettings()).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads acceptance criteria from their endpoint and treats an older server as having none', async () => {
+  const criterion = { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    if (url.pathname === '/api/v1/work-items/task/acceptance-criteria') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3, items: [criterion] })
+    }
+    if (url.pathname === '/api/v1/work-items/other/acceptance-criteria') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3, items: [] })
+    }
+    return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+  })
+  expect(await api.acceptanceCriteria('task')).toEqual([criterion])
+  expect(paths[0]).toBe('/api/v1/work-items/task/acceptance-criteria?teamId=team')
+  expect(await api.acceptanceCriteria('legacy')).toEqual([])
+  await expect(api.acceptanceCriteria('other')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
 const validRun = {
@@ -128,6 +172,7 @@ test('starts, lists, heartbeats, and finishes runs on the versioned Agent Run en
     if (url.pathname === '/api/v1/agent-runs' || url.pathname.endsWith('/task/agent-runs')) return Response.json({ items: [validRun], hasMore: false })
     if (url.pathname.endsWith('/finish')) return Response.json({ ...validRun, state: 'finished', outcome: 'completed', finishedAt: validRun.startedAt, finishedBy: 'agent' })
     if (url.pathname === '/api/v1/agent-settings') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    if (url.pathname === '/api/v1/agent-context') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, readyStatusIds: [], projectBriefs: {} })
     if (init.method === 'PATCH') return Response.json({ ...validTask, revision: 3 })
     if (url.pathname.endsWith('/comments')) return Response.json({ id: 'note', actorUserId: 'agent', body: 'Progress', createdAt: validTask.createdAt })
     return Response.json(validRun)

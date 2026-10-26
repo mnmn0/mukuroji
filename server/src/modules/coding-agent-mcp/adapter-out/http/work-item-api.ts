@@ -20,11 +20,14 @@ const taskSchema: z.ZodType<AgentTask> = z.object({
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),
-  acceptanceCriteria: z.array(z.object({
+})
+const acceptanceCriteriaSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
+  items: z.array(z.object({
     id: z.string().regex(/^[0-9a-f]{32}$/u),
     text: z.string().min(1).max(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH),
     satisfied: z.boolean(),
-  })).min(1).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT).optional(),
+  })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
@@ -72,17 +75,19 @@ const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
 })
 /** Agent brief, bounded in UTF-8 bytes like the server. */
 const briefText = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= AGENT_SETTINGS_BRIEF_MAX_BYTES)
-const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
+const settingsSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
-  // Servers older than the Ready statuses and briefs omit them.
-  readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES).default([]),
+  updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
+})
+const contextSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
+  readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES),
+  // Servers older than acceptance criteria omit these.
   requireAcceptanceCriteria: z.boolean().default(false),
   acceptanceCriteriaFieldId: identifier.optional(),
   brief: briefText.optional(),
-  projectBriefs: z.record(identifier, briefText)
-    .refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS).default({}),
-  updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
+  projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
 })
 const problemSchema = z.object({
   status: z.number().int(), code: z.string(), retryable: z.boolean(),
@@ -317,11 +322,48 @@ export function createAgentWorkItemApi(
     async finishRun(runId, outcome, instanceId, key) {
       return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/finish`, runSchema, 'POST', { outcome, instanceId }, key), runId)
     },
-    /** Reads Team Agent settings. */
-    async agentSettings() {
-      const settings = await request('agent-settings', settingsSchema)
-      if (settings.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
-      return settings
+    /** Reads Team Agent settings together with the Ready statuses and briefs. */
+    async agentSettings(): Promise<AgentSettingsRecord> {
+      const [settings, context] = await Promise.all([request('agent-settings', settingsSchema), readAgentContext()])
+      if (settings.teamId !== config.teamId || (context !== undefined && context.teamId !== config.teamId)) {
+        throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
+      }
+      return {
+        ...settings,
+        readyStatusIds: context?.readyStatusIds ?? [],
+        requireAcceptanceCriteria: context?.requireAcceptanceCriteria ?? false,
+        ...(context?.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: context.acceptanceCriteriaFieldId }),
+        ...(context?.brief === undefined ? {} : { brief: context.brief }),
+        projectBriefs: context?.projectBriefs ?? {},
+      }
     },
+    /** Reads a task's acceptance criteria; a server older than the endpoint has none. */
+    async acceptanceCriteria(id) {
+      let criteria: z.infer<typeof acceptanceCriteriaSchema>
+      try {
+        criteria = await request(`work-items/${encodeURIComponent(id)}/acceptance-criteria`, acceptanceCriteriaSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return []
+        throw error
+      }
+      if (criteria.teamId !== config.teamId || criteria.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned acceptance criteria of another task.')
+      }
+      return criteria.items
+    },
+  }
+
+  /**
+   * Reads the Ready statuses and briefs.
+   *
+   * @returns The context, or undefined from a server older than the endpoint, which has neither.
+   */
+  async function readAgentContext() {
+    try {
+      return await request('agent-context', contextSchema)
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+      throw error
+    }
   }
 }

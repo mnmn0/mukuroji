@@ -60,9 +60,11 @@ function startFakeApi() {
       ] },
     }] })
     if (url.pathname === '/api/v1/agent-settings') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    }
+    if (url.pathname === '/api/v1/agent-context') {
       return Response.json({
-        schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-        readyStatusIds: [], brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
+        schemaVersion: 1, teamId: 'team', revision: 1, readyStatusIds: [], brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
       })
     }
     if (url.pathname === '/api/v1/agent-runs') {

@@ -220,6 +220,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async agentSettings() {
       return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
+    async acceptanceCriteria() { return [] },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -282,17 +283,25 @@ describe('agent task lifecycle', () => {
     const rows = [
       task('bare', { priority: 'high' }),
       task('field', { priority: 'medium', customFieldValues: { acceptance: 'Ship it' } }),
-      task('canonical', { priority: 'low', acceptanceCriteria: criteria }),
+      task('canonical', { priority: 'low' }),
     ]
     const sent: unknown[] = []
+    const criteriaReads: string[] = []
     const { service } = fixture(rows, {
       async agentSettings() { return settings },
+      async acceptanceCriteria(id) {
+        criteriaReads.push(id)
+        return id === 'canonical' ? structuredClone(criteria) : []
+      },
       async update(id, input) {
         sent.push(input)
         return task(id, { revision: 2 })
       },
     })
     expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
+    // The custom field is checked first, so only the bare task needed a criteria read.
+    expect(criteriaReads).toEqual(['bare'])
+    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria })
     expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
     // Marks are applied to the task's own list, so the text and order are always the stored ones.
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')

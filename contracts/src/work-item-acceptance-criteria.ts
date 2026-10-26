@@ -25,6 +25,23 @@ export type WorkItemAcceptanceCriterionInput = {
 }
 
 /**
+ * Acceptance criteria of one Work Item, returned by
+ * `GET /api/v1/work-items/{workItemId}/acceptance-criteria`; the closed public Work Item schema omits them.
+ */
+export type PublicWorkItemAcceptanceCriteria = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item the criteria belong to. */
+  workItemId: string
+  /** Work Item revision the list was read at; send it as `expectedRevision` when replacing the list. */
+  revision: number
+  /** Criteria in order; empty when none. */
+  items: WorkItemAcceptanceCriterion[]
+}
+
+/**
  * Tells whether a Work Item has acceptance criteria: canonical criteria, or else a non-empty value
  * in the custom field a Team uses for them.
  *
