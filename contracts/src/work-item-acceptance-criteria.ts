@@ -24,6 +24,14 @@ export type WorkItemAcceptanceCriterionInput = {
   satisfied?: boolean
 }
 
+/** Marks one existing acceptance criterion met or unmet without restating the rest of the list. */
+export type WorkItemAcceptanceCriterionMark = {
+  /** ID of an existing criterion. */
+  id: string
+  /** Whether the condition is met. */
+  satisfied: boolean
+}
+
 /**
  * Acceptance criteria of one Work Item, returned by
  * `GET /api/v1/work-items/{workItemId}/acceptance-criteria`; the closed public Work Item schema omits them.

@@ -7,6 +7,9 @@ import {
 /** Fields of one acceptance criterion on input. */
 const INPUT_FIELDS = new Set(['id', 'text', 'satisfied'])
 
+/** Fields of one acceptance criterion mark. */
+const MARK_FIELDS = new Set(['id', 'satisfied'])
+
 /** Shape of server-generated criterion identifiers. */
 const CRITERION_ID_PATTERN = /^[0-9a-f]{32}$/u
 
@@ -84,6 +87,48 @@ export function normalizeAcceptanceCriteria(
     }
     return { id, text: readCriterionText(Reflect.get(candidate, 'text')), satisfied: satisfied === true }
   })
+}
+
+/**
+ * Applies marks that set existing criteria met or unmet, keeping every other criterion as stored.
+ *
+ * @param value - Untrusted `acceptanceCriteriaMarks` request value.
+ * @param existing - Criteria currently stored on the Work Item.
+ * @returns The stored criteria with the marks applied.
+ * @throws WorkItemAcceptanceCriteriaError when a mark is malformed, repeated, or names no criterion.
+ */
+export function applyAcceptanceCriteriaMarks(
+  value: unknown,
+  existing: readonly WorkItemAcceptanceCriterion[],
+): WorkItemAcceptanceCriterion[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT) {
+    throw new WorkItemAcceptanceCriteriaError(
+      `Acceptance criteria marks must be an array of 1 to ${WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT} entries.`,
+    )
+  }
+  const marks = new Map<string, boolean>()
+  for (const candidate of value) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      throw new WorkItemAcceptanceCriteriaError('Each acceptance criterion mark must be an object.')
+    }
+    const unknownField = Object.keys(candidate).find((key) => !MARK_FIELDS.has(key))
+    if (unknownField !== undefined) {
+      throw new WorkItemAcceptanceCriteriaError(`Unsupported acceptance criterion mark field: ${unknownField}.`)
+    }
+    const id: unknown = Reflect.get(candidate, 'id')
+    const satisfied: unknown = Reflect.get(candidate, 'satisfied')
+    if (typeof id !== 'string' || !existing.some((criterion) => criterion.id === id)) {
+      throw new WorkItemAcceptanceCriteriaError('An acceptance criterion mark must name a criterion of this Work Item.')
+    }
+    if (typeof satisfied !== 'boolean') {
+      throw new WorkItemAcceptanceCriteriaError('An acceptance criterion mark needs a boolean `satisfied`.')
+    }
+    if (marks.has(id)) {
+      throw new WorkItemAcceptanceCriteriaError('Each acceptance criterion can be marked only once.')
+    }
+    marks.set(id, satisfied)
+  }
+  return existing.map((criterion) => ({ ...criterion, satisfied: marks.get(criterion.id) ?? criterion.satisfied }))
 }
 
 /**

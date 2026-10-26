@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { hasWorkItemAcceptanceCriteria } from '@mukuroji/contracts'
 import {
   WorkItemAcceptanceCriteriaError,
+  applyAcceptanceCriteriaMarks,
   changesOnlyCriterionSatisfaction,
   normalizeAcceptanceCriteria,
 } from './acceptance-criteria'
@@ -24,6 +25,22 @@ describe('acceptance criteria', () => {
     ])
     expect(() => normalizeAcceptanceCriteria([{ id: 'c'.repeat(32), text: 'Invented' }], { existing, createCriterionId: () => 'x' }))
       .toThrow(WorkItemAcceptanceCriteriaError)
+  })
+
+  test('applies marks to the stored list and rejects marks that name no single criterion', () => {
+    expect(applyAcceptanceCriteriaMarks([{ id: 'a'.repeat(32), satisfied: true }], existing)).toEqual([
+      { ...existing[0], satisfied: true }, existing[1],
+    ])
+    for (const marks of [
+      [],
+      [{ id: 'c'.repeat(32), satisfied: true }],
+      [{ id: 'a'.repeat(32), satisfied: true }, { id: 'a'.repeat(32), satisfied: false }],
+      [{ id: 'a'.repeat(32), satisfied: 'yes' }],
+      [{ id: 'a'.repeat(32), satisfied: true, text: 'Reworded' }],
+      'a',
+    ]) {
+      expect(() => applyAcceptanceCriteriaMarks(marks, existing)).toThrow(WorkItemAcceptanceCriteriaError)
+    }
   })
 
   test('tells a satisfaction-only change from an edit of the list', () => {

@@ -2986,4 +2986,31 @@ describe('public Agent Run routes', () => {
     })
     expect(orphan.status).toBe(400)
   })
+
+  test('passes acceptance criteria marks to the service and replays the same marks body', async () => {
+    const inputs: unknown[] = []
+    const workItems = createDefaultWorkItemService({
+      async update(_credential, _teamId, _workItemId, input) {
+        inputs.push(input)
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const patch = (body: unknown, key: string) => router.request('http://localhost/v1/work-items/work-item-1?teamId=team-1', {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${apiKey.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify(body),
+    })
+    const marks = { expectedRevision: 1, acceptanceCriteriaMarks: [{ id: 'a'.repeat(32), satisfied: true }] }
+    expect((await patch(marks, 'mark-criteria')).status).toBe(200)
+    const replay = await patch(marks, 'mark-criteria')
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(inputs).toEqual([marks])
+    for (const acceptanceCriteriaMarks of ['a', [{ id: 'a'.repeat(32) }], [{ id: 'a'.repeat(32), satisfied: true, text: 'x' }]]) {
+      const invalid = await patch({ expectedRevision: 1, acceptanceCriteriaMarks }, `invalid-${JSON.stringify(acceptanceCriteriaMarks)}`)
+      expect(invalid.status).toBe(400)
+    }
+    expect(inputs).toHaveLength(1)
+  })
 })

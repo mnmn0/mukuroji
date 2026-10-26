@@ -34,6 +34,7 @@ import {
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
   type WorkItemAcceptanceCriterionInput,
+  type WorkItemAcceptanceCriterionMark,
   type UpdateWebhookSubscriptionInput,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
@@ -3057,6 +3058,29 @@ function readPublicAcceptanceCriteria(value: unknown): WorkItemAcceptanceCriteri
   })
 }
 
+/**
+ * Reads the shape of acceptance criteria marks; the Work Item service checks the IDs against the
+ * stored criteria.
+ *
+ * @param value - Untrusted `acceptanceCriteriaMarks` value.
+ * @returns The marks.
+ */
+function readPublicAcceptanceCriteriaMarks(value: unknown): WorkItemAcceptanceCriterionMark[] {
+  if (!Array.isArray(value)) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'acceptanceCriteriaMarks must be an array.')
+  }
+  return value.map((entry, index) => {
+    const mark = requireRecord(entry, `acceptanceCriteriaMarks[${index}] must be an object.`)
+    assertAllowedFields(mark, ['id', 'satisfied'], `acceptanceCriteriaMarks[${index}]`)
+    if (typeof mark.id !== 'string' || typeof mark.satisfied !== 'boolean') {
+      throw new PublicApiServiceError(
+        400, 'validation_failed', `acceptanceCriteriaMarks[${index}] needs a string id and a boolean satisfied.`,
+      )
+    }
+    return { id: mark.id, satisfied: mark.satisfied }
+  })
+}
+
 function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRequest {
   const body = requireRecord(value, 'Work Item patch is required.')
   assertAllowedFields(body, [
@@ -3072,6 +3096,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'workItemTypeId',
     'typeChangeResolution',
     'acceptanceCriteria',
+    'acceptanceCriteriaMarks',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
@@ -3101,6 +3126,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   if ('schedule' in body) result.schedule = readPublicWorkItemSchedule(body.schedule)
   if ('priority' in body) result.priority = readPriority(body.priority)
   if ('acceptanceCriteria' in body) result.acceptanceCriteria = readPublicAcceptanceCriteria(body.acceptanceCriteria)
+  if ('acceptanceCriteriaMarks' in body) result.acceptanceCriteriaMarks = readPublicAcceptanceCriteriaMarks(body.acceptanceCriteriaMarks)
   if (Object.keys(result).length === 1) {
     throw new PublicApiServiceError(
       400,

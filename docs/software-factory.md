@@ -558,8 +558,9 @@ Slice 3 は 3 つの変更に分けて入れる。
   既存の条件の `satisfied` だけを変えられ、それ以外は `403`（`AcceptanceCriteriaChangeForbidden`）とする。変更は Work Item
   の audit の field change に残る。Agent settings に `requireAcceptanceCriteria` と `acceptanceCriteriaFieldId` を追加し、
   受け入れ条件がない（代替 custom field の値も空の）Work Item の start を `not_ready` とする。MCP の `get_next_task` は
-  同じ判定で候補を除外し、`get_task` は受け入れ条件を返し、`update_task` は `acceptanceCriteria: [{ id, satisfied }]` を
-  task の一覧に重ねて送る。Public API の `WorkItem` は閉じた response schema のため条件を含めず、
+  同じ判定で候補を除外し、`get_task` は受け入れ条件を返す。`update_task` の `acceptanceCriteria: [{ id, satisfied }]` は
+  Public PATCH の `acceptanceCriteriaMarks` として送り、server が保存済みの一覧に重ねる。印だけを idempotency の
+  範囲に入れるため、応答を失った後の再送は、その間に一覧が変わっても replay になる。Public API の `WorkItem` は閉じた response schema のため条件を含めず、
   `GET /api/v1/work-items/{workItemId}/acceptance-criteria` が一覧と読み取り時の Work Item `revision` を返す。
   2 つの設定は `GET /api/v1/agent-context` に加える。MCP はこの path がない古い server では条件なしとして動く。
 - その次の変更: 受け入れ条件と Agent settings の Web 編集画面。

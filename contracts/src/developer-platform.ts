@@ -3,6 +3,7 @@ import type {
   CreateWorkItemInput,
   WorkItemPatch,
 } from './work-items'
+import type { WorkItemAcceptanceCriterionMark } from './work-item-acceptance-criteria'
 import type {
   CustomFieldDefinition,
   WorkflowDefinition,
@@ -1348,6 +1349,12 @@ export type UpdatePublicWorkItemRequest = Omit<WorkItemPatch, 'contributorAssign
    * 読み込み時点の Work Item revision です。
    */
   expectedRevision: number
+  /**
+   * Marks existing acceptance criteria met or unmet; criteria not listed keep their state. The server
+   * applies the marks to the stored list, so a retry with the same body replays. Cannot be combined
+   * with `acceptanceCriteria`.
+   */
+  acceptanceCriteriaMarks?: WorkItemAcceptanceCriterionMark[]
 }
 
 /** Public Work Item Type change preview endpoint の request body です。 */

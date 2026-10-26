@@ -16,6 +16,7 @@ export {
 } from './domain/contributor-assignments'
 export {
   WorkItemAcceptanceCriteriaError,
+  applyAcceptanceCriteriaMarks,
   changesOnlyCriterionSatisfaction,
   isStoredAcceptanceCriterionList,
   normalizeAcceptanceCriteria,

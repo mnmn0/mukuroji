@@ -2756,6 +2756,15 @@
             "maxItems": 20,
             "type": "array"
           },
+          "acceptanceCriteriaMarks": {
+            "description": "Marks existing acceptance criteria met or unmet; criteria not listed keep their state. The server applies the marks to the stored list, so retrying the same body with the same `Idempotency-Key` replays even if the list changed meanwhile. Requires the current `expectedRevision`, is allowed for a request fenced by an Agent Run, and cannot be combined with `acceptanceCriteria`.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterionMark"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array"
+          },
           "agentInstanceId": {
             "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
             "maxLength": 256,
@@ -3258,6 +3267,26 @@
         },
         "required": [
           "text"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriterionMark": {
+        "additionalProperties": false,
+        "description": "Marks one existing acceptance criterion met or unmet.",
+        "properties": {
+          "id": {
+            "description": "ID of an existing criterion.",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the condition is met.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "satisfied"
         ],
         "type": "object"
       },

@@ -303,11 +303,10 @@ describe('agent task lifecycle', () => {
     expect(criteriaReads).toEqual(['bare'])
     expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria })
     expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
-    // Marks are applied to the task's own list, so the text and order are always the stored ones.
+    // Only the marks are sent; the server applies them to the stored list, so a retry has the same body.
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
-    expect(sent.at(-1)).toEqual({ expectedRevision: 1, acceptanceCriteria: [criteria[0], { ...criteria[1], satisfied: true }] })
-    await expect(service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: 'c'.repeat(32), satisfied: true }] }, 'unknown'))
-      .rejects.toMatchObject({ code: 'invalid_request' })
+    expect(sent.at(-1)).toEqual({ expectedRevision: 1, acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }] })
+    expect(criteriaReads).toEqual(['bare', 'canonical'])
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {

@@ -899,12 +899,19 @@ export async function updateCanonicalPublicWorkItem(
       readTeamIssueAssigneeUserId(configuredBody),
     )
   }
-  if ('acceptanceCriteria' in configuredBody && detail.issue.revision !== expectedRevision) {
+  // Marks are resolved into a replacement list here and never reach the adapter.
+  const bodyWithMarks: typeof configuredBody & { acceptanceCriteriaMarks?: unknown } = configuredBody
+  const { acceptanceCriteriaMarks: _marks, ...writableBody } = bodyWithMarks
+  const criteriaChange = {
+    ...('acceptanceCriteria' in writableBody ? { acceptanceCriteria: writableBody.acceptanceCriteria } : {}),
+    ...('acceptanceCriteriaMarks' in input ? { acceptanceCriteriaMarks: input.acceptanceCriteriaMarks } : {}),
+  }
+  if (Object.keys(criteriaChange).length > 0 && detail.issue.revision !== expectedRevision) {
     // Criterion IDs refer to the observed list, so a stale request is a revision conflict.
     throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
   }
   const acceptanceCriteria = readAcceptanceCriteriaChange(
-    configuredBody, detail.issue.acceptanceCriteria ?? [], options.agentFenced === true,
+    criteriaChange, detail.issue.acceptanceCriteria ?? [], options.agentFenced === true,
   )
   const auditContext = createPublicMutationAuditContext(
     principal,
@@ -931,7 +938,7 @@ export async function updateCanonicalPublicWorkItem(
       teamId,
       workItemId,
       {
-        ...configuredBody,
+        ...writableBody,
         ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
         expectedRevision,
         authorizationSnapshot,

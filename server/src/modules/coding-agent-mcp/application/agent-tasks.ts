@@ -487,20 +487,11 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
       const { acceptanceCriteria: marks, ...fields } = input
-      if (marks === undefined) return api.update(id, fields, key, await fenceFor(id))
-      // An agent only marks criteria met or unmet, so the full list is rebuilt from the task's own
-      // criteria; a retry rebuilds the same body and replays, and the server rejects a stale revision.
-      const current = await api.acceptanceCriteria(id)
-      const marked = new Map(marks.map((mark) => [mark.id, mark.satisfied]))
-      const unknown = marks.find((mark) => !current.some((criterion) => criterion.id === mark.id))
-      if (unknown !== undefined) {
-        throw new AgentTaskError('invalid_request', 'An acceptance criterion ID is not on this task. Read the task again with get_task.')
-      }
+      // The server applies the marks to the stored list inside the request's idempotency boundary, so a
+      // retry with the same arguments replays even if a person edited the criteria meanwhile.
       return api.update(id, {
         ...fields,
-        acceptanceCriteria: current.map((criterion) => ({
-          id: criterion.id, text: criterion.text, satisfied: marked.get(criterion.id) ?? criterion.satisfied,
-        })),
+        ...(marks === undefined ? {} : { acceptanceCriteriaMarks: marks }),
       }, key, await fenceFor(id))
     },
     /** Creates assigned work within the operator-selected Project boundary. */

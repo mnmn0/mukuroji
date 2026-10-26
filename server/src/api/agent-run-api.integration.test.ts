@@ -256,6 +256,20 @@ describe('public Agent Run service', () => {
     expect(marked).not.toHaveProperty('acceptanceCriteria')
     expect(await runWithTestAppDependencies(() => workItems.getAcceptanceCriteria(credential, 'core-team', 'task-1')))
       .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 1, items: criteria })
+    // Marks are applied to the stored list by the server, so an agent need not restate it.
+    const markOnly = (acceptanceCriteriaMarks: unknown[], key: string, extra: Record<string, unknown> = {}) =>
+      runWithTestAppDependencies(() => workItems.update(
+        credential, 'core-team', 'task-1',
+        { expectedRevision: 1, acceptanceCriteriaMarks: acceptanceCriteriaMarks as never, ...extra },
+        { requestId: key, idempotencyKey: key }, undefined,
+        { agentRunId: held.runId, instanceIdHash: held.instanceIdHash },
+      ))
+    await markOnly([{ id: criteria[1]?.id, satisfied: true }], 'mark-only')
+    expect(written.at(-1)).toEqual([criteria[0], { ...criteria[1], satisfied: true }])
+    await expect(markOnly([{ id: 'c'.repeat(32), satisfied: true }], 'mark-unknown'))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
+    await expect(markOnly([{ id: criteria[1]?.id, satisfied: true }], 'mark-both', { acceptanceCriteria: criteria }))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
     // Rewording, adding, removing, or reordering is left to people.
     for (const [changed, key] of [
       [[{ ...criteria[0], text: 'Tests mostly pass' }, criteria[1]], 'reword'],

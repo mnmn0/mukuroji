@@ -89,6 +89,9 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   PATCH では `acceptanceCriteria` に置き換え後の一覧全体を送り、既存の条件は `id` を、新しい条件は `id` を省いて送ります。
   `id` は読んだ一覧を指すため、`expectedRevision` が古い場合は `409` です。`agentInstanceId` で Agent Run に fence された
   PATCH は、既存の条件の `satisfied` だけを変えられ、追加・削除・並べ替え・文言変更は `403 forbidden` です。
+  一覧を送り直さずに条件を満たした・満たしていないにするには、`acceptanceCriteriaMarks: [{ id, satisfied }]` を送ります。
+  server は保存済みの一覧に印を重ねるため、応答を失った後に同じ body と `Idempotency-Key` で再送すると、その間に
+  一覧が変わっていても replay になります。`acceptanceCriteria` と同時には送れません。
   Agent context の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
   custom field の値）がない Work Item の Run start は `not_ready` です。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
