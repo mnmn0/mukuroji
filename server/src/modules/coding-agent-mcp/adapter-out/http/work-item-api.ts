@@ -66,15 +66,16 @@ const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
 })
 /** Agent brief, bounded in UTF-8 bytes like the server. */
 const briefText = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= AGENT_SETTINGS_BRIEF_MAX_BYTES)
-const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
+const settingsSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
-  // Servers older than the Ready statuses and briefs omit them.
-  readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES).default([]),
-  brief: briefText.optional(),
-  projectBriefs: z.record(identifier, briefText)
-    .refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS).default({}),
   updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
+})
+const contextSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
+  readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES),
+  brief: briefText.optional(),
+  projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
 })
 const problemSchema = z.object({
   status: z.number().int(), code: z.string(), retryable: z.boolean(),
@@ -309,11 +310,32 @@ export function createAgentWorkItemApi(
     async finishRun(runId, outcome, instanceId, key) {
       return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/finish`, runSchema, 'POST', { outcome, instanceId }, key), runId)
     },
-    /** Reads Team Agent settings. */
-    async agentSettings() {
-      const settings = await request('agent-settings', settingsSchema)
-      if (settings.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
-      return settings
+    /** Reads Team Agent settings together with the Ready statuses and briefs. */
+    async agentSettings(): Promise<AgentSettingsRecord> {
+      const [settings, context] = await Promise.all([request('agent-settings', settingsSchema), readAgentContext()])
+      if (settings.teamId !== config.teamId || (context !== undefined && context.teamId !== config.teamId)) {
+        throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
+      }
+      return {
+        ...settings,
+        readyStatusIds: context?.readyStatusIds ?? [],
+        ...(context?.brief === undefined ? {} : { brief: context.brief }),
+        projectBriefs: context?.projectBriefs ?? {},
+      }
     },
+  }
+
+  /**
+   * Reads the Ready statuses and briefs.
+   *
+   * @returns The context, or undefined from a server older than the endpoint, which has neither.
+   */
+  async function readAgentContext() {
+    try {
+      return await request('agent-context', contextSchema)
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+      throw error
+    }
   }
 }

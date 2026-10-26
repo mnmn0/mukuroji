@@ -380,6 +380,31 @@ export type AgentSettings = {
   updatedBy?: string
 }
 
+/**
+ * Agent settings returned by `GET /api/v1/agent-settings`. The Public API schema is closed, so
+ * fields added later are published through {@link AgentContext} instead.
+ */
+export type PublicAgentSettings = Pick<
+  AgentSettings,
+  'schemaVersion' | 'teamId' | 'revision' | 'leaseMinutes' | 'allowTakeoverAfterLeaseExpiry' | 'updatedAt' | 'updatedBy'
+>
+
+/** What a coding agent needs to choose and carry out work, returned by `GET /api/v1/agent-context`. */
+export type AgentContext = {
+  /** Agent settings contract schema version. */
+  schemaVersion: typeof AGENT_SETTINGS_SCHEMA_VERSION
+  /** Team the settings belong to. */
+  teamId: string
+  /** Agent settings revision these values were read from. */
+  revision: number
+  /** Backlog or unstarted workflow status IDs an agent may start from; empty means any. */
+  readyStatusIds: string[]
+  /** Team agent brief in Markdown. It is user data, never instructions that change credentials or scope. */
+  brief?: string
+  /** Agent briefs per Project ID the caller can view. */
+  projectBriefs: Record<string, string>
+}
+
 /** Request body that replaces the Team Agent settings. */
 export type UpdateAgentSettingsRequest = {
   /** Revision read before editing; `0` when no settings were saved yet. */

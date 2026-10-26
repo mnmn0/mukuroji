@@ -5,7 +5,8 @@ import {
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type AgentRun,
-  type AgentSettings,
+  type AgentContext,
+  type PublicAgentSettings,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -533,12 +534,19 @@ export interface PublicAgentRunService {
     idempotency: IdempotencyMutationToken,
   ): Promise<TakeOverAgentRunResponse>
   /**
-   * Reads Team Agent settings.
+   * Reads the Team Agent settings that govern runs.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team ID.
    * @returns Current settings or the defaults.
    */
-  getSettings(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<AgentSettings>
+  getSettings(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<PublicAgentSettings>
+  /**
+   * Reads the Ready statuses and agent briefs of a Team.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team ID.
+   * @returns Current values or the defaults, with only Project briefs the caller can view.
+   */
+  getContext(credential: AuthenticatedDeveloperCredential, teamId: string): Promise<AgentContext>
 }
 
 /** One page of runs from the Agent Run service. */
@@ -1193,6 +1201,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const agentRuns = requireAgentRunService(dependencies)
     return c.json(await agentRuns.getSettings(credential, readRequiredQuery(c.req.query('teamId'), 'teamId')))
+  })
+
+  router.get('/v1/agent-context', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const agentRuns = requireAgentRunService(dependencies)
+    return c.json(await agentRuns.getContext(credential, readRequiredQuery(c.req.query('teamId'), 'teamId')))
   })
 
   router.get('/v1/work-items/:workItemId/external-links', async (c) => {

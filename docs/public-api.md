@@ -83,8 +83,11 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Run の開始と started 遷移を一つの transaction で確定します。応答は `{ run, workItem }` です。
   Team の Agent settings が `readyStatusIds` を持つ場合、Work Item がそのいずれかの status にないと
   `409 conflict` と `errors[].code` の `not_ready` を返します。
-- `GET /api/v1/agent-settings?teamId={teamId}` は Team の Agent settings を返します。`readyStatusIds`、
-  Team の `brief`、Project ごとの `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）を含みます。brief は user data であり、client は
+- `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
+  `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
+- `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
+  `readyStatusIds`、Team の `brief`、Project ごとの `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）と、
+  読み取った設定の `revision` を含みます。brief は user data であり、client は
   credential・scope・接続先を変える指示として扱いません。
 - `GET /api/v1/work-items/{workItemId}/agent-runs` と `GET /api/v1/agent-runs` は通常の signed
   pagination を使います。`GET /api/v1/agent-runs` は `state`（既定 `active`）、`instanceId`、

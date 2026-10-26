@@ -1369,7 +1369,7 @@ describe('Web Agent Run routes', () => {
     expect(saved.status).toBe(200)
     expect(await saved.json()).toMatchObject({ revision: 1, readyStatusIds: ['ready'], brief: body.brief, projectBriefs: body.projectBriefs })
     const service = createCanonicalPublicAgentRunService()
-    expect(await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team')))
+    expect(await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))
       .toMatchObject({ readyStatusIds: ['ready'], brief: body.brief, projectBriefs: body.projectBriefs })
     // Omitting the optional fields clears them, since a save replaces the settings.
     const cleared = await app.request('http://localhost/api/teams/core-team/agent-settings', {
@@ -1397,7 +1397,13 @@ describe('Web Agent Run routes', () => {
     const read = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
     expect(await read.json()).toMatchObject({ brief: 'Team brief', projectBriefs: { refero: 'Visible brief' } })
     const service = createCanonicalPublicAgentRunService()
-    expect((await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team'))).projectBriefs).toEqual({ refero: 'Visible brief' })
+    expect((await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))).toEqual({
+      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], brief: 'Team brief', projectBriefs: { refero: 'Visible brief' },
+    })
+    // The closed run-settings schema keeps its original fields.
+    expect(Object.keys(await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team'))).sort()).toEqual([
+      'allowTakeoverAfterLeaseExpiry', 'leaseMinutes', 'revision', 'schemaVersion', 'teamId', 'updatedAt', 'updatedBy',
+    ])
     const saved = await app.request('http://localhost/api/teams/core-team/agent-settings', {
       method: 'PUT',
       headers: { ...headers, 'Idempotency-Key': 'settings-visible' },
