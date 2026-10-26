@@ -576,8 +576,11 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
  * @returns The brief, or null when neither brief exists.
  */
 function composeBrief(settings: AgentSettingsRecord, projectId: string | undefined): string | null {
-  const parts = [settings.brief, projectId === undefined ? undefined : settings.projectBriefs[projectId]]
-    .filter((part): part is string => part !== undefined)
+  // Only an own entry is a brief; an ID such as `__proto__` must not read inherited properties.
+  const projectBrief = projectId !== undefined && Object.hasOwn(settings.projectBriefs, projectId)
+    ? settings.projectBriefs[projectId]
+    : undefined
+  const parts = [settings.brief, projectBrief].filter((part): part is string => typeof part === 'string')
   return parts.length === 0 ? null : parts.join('\n\n')
 }
 

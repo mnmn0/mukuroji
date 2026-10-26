@@ -64,13 +64,15 @@ const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
   comment: commentSchema,
   run: runSchema,
 })
+/** Agent brief, bounded in UTF-8 bytes like the server. */
+const briefText = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= AGENT_SETTINGS_BRIEF_MAX_BYTES)
 const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
   // Servers older than the Ready statuses and briefs omit them.
   readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES).default([]),
-  brief: z.string().min(1).max(AGENT_SETTINGS_BRIEF_MAX_BYTES).optional(),
-  projectBriefs: z.record(identifier, z.string().min(1).max(AGENT_SETTINGS_BRIEF_MAX_BYTES))
+  brief: briefText.optional(),
+  projectBriefs: z.record(identifier, briefText)
     .refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS).default({}),
   updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
 })

@@ -258,6 +258,9 @@ describe('agent task lifecycle', () => {
     expect(await service.configuration()).toMatchObject({ agentSettings: { readyStatusIds: ['ready'] }, brief: 'Run bun test.' })
     expect(await service.brief('web')).toBe('Run bun test.\n\nAdd a story.')
     expect(await service.brief('cdk')).toBe('Run bun test.')
+    // Inherited properties are never briefs.
+    expect(await service.brief('__proto__')).toBe('Run bun test.')
+    expect(await service.brief('constructor')).toBe('Run bun test.')
     const scoped = createAgentTasks(api, { ...baseScope, assignedProjectId: 'web' })
     expect(await scoped.configuration()).toMatchObject({ brief: 'Run bun test.\n\nAdd a story.' })
     await expect(scoped.brief('cdk')).rejects.toMatchObject({ code: 'out_of_scope' })

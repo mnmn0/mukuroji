@@ -634,14 +634,15 @@ function readProjectBriefs(value: unknown): Record<string, string> {
       { pointer: '/projectBriefs' },
     )
   }
-  const briefs: Record<string, string> = {}
+  const briefs: [string, string][] = []
   for (const [projectId, brief] of Object.entries(value)) {
     const pointer = `/projectBriefs/${projectId.replaceAll('~', '~0').replaceAll('/', '~1')}`
     readSettingsIdentifier(projectId, pointer)
     const text = readBrief(brief, pointer)
-    if (text !== undefined) briefs[projectId] = text
+    if (text !== undefined) briefs.push([projectId, text])
   }
-  return briefs
+  // Built as own properties, so a key such as `__proto__` stays an ordinary entry.
+  return Object.fromEntries(briefs)
 }
 
 /**

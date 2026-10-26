@@ -275,12 +275,19 @@ export async function updateWebAgentSettings(
   const requested = readUpdateAgentSettingsRequest(body)
   const store = workItemDependencies.agentRuns
   const before = await store.getSettings(principal.directoryId, teamId)
-  // A manager sees and edits only the briefs of Projects they can view; the others are kept as saved.
+  // Briefs belong to the Team's Projects. A manager sees and edits only the briefs of Projects they
+  // can view; the others are kept as saved, and briefs of Projects no longer in the Team are dropped.
+  const teamProjectIds = new Set(permission.team.projects.map((project) => project.id))
   for (const projectId of Object.keys(requested.projectBriefs)) {
+    if (!teamProjectIds.has(projectId)) {
+      throw new AgentRunError('validation_failed', 'A Project brief must name a Project of the Team.', {
+        pointer: `/projectBriefs/${projectId.replaceAll('~', '~0').replaceAll('/', '~1')}`,
+      })
+    }
     requireAssignedProjectPermission(principal, permission, projectId, 'viewer')
   }
   const hiddenBriefs = Object.fromEntries(Object.entries(before.projectBriefs)
-    .filter(([projectId]) => !canAccessAssignedProject(principal, permission, projectId, 'viewer')))
+    .filter(([projectId]) => teamProjectIds.has(projectId) && !canAccessAssignedProject(principal, permission, projectId, 'viewer')))
   const update = {
     ...requested,
     projectBriefs: { ...requested.projectBriefs, ...hiddenBriefs },
@@ -308,8 +315,8 @@ export async function updateWebAgentSettings(
       { field: 'brief.bytes', before: briefBytes(before.brief), after: briefBytes(update.brief) },
       ...[...new Set([...Object.keys(before.projectBriefs), ...Object.keys(update.projectBriefs)])].map((projectId) => ({
         field: `projectBriefs.${projectId}.bytes`,
-        before: briefBytes(before.projectBriefs[projectId]),
-        after: briefBytes(update.projectBriefs[projectId]),
+        before: briefBytes(Object.hasOwn(before.projectBriefs, projectId) ? before.projectBriefs[projectId] : undefined),
+        after: briefBytes(Object.hasOwn(update.projectBriefs, projectId) ? update.projectBriefs[projectId] : undefined),
       })),
     ].filter((change) => change.before !== change.after),
     metadata: { adapter: 'agent-settings', teamId, beforeRevision: update.expectedRevision },

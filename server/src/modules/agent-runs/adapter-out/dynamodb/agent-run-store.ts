@@ -656,7 +656,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
-    savedProjects.every((projectId) => saved.projectBriefs[projectId] === update.projectBriefs[projectId])
+    savedProjects.every((projectId) =>
+      Object.hasOwn(update.projectBriefs, projectId) && saved.projectBriefs[projectId] === update.projectBriefs[projectId])
 }
 
 /**
@@ -728,11 +729,11 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   ) {
     throw createAgentRunIntegrityError()
   }
-  const briefs: Record<string, string> = {}
-  for (const [projectId, brief] of Object.entries(projectBriefs)) {
-    if (typeof brief !== 'string' || brief === '') throw createAgentRunIntegrityError()
-    briefs[projectId] = brief
-  }
+  const briefEntries = Object.entries(projectBriefs)
+  if (!briefEntries.every(([, brief]) => typeof brief === 'string' && brief !== '')) throw createAgentRunIntegrityError()
+  const briefs: Record<string, string> = Object.fromEntries(
+    briefEntries.flatMap(([projectId, brief]) => typeof brief === 'string' ? [[projectId, brief]] : []),
+  )
   return {
     schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
     teamId,

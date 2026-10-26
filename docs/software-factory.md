@@ -539,7 +539,8 @@ Slice 3 は 3 つの変更に分けて入れる。
   消える。保存前の row は新しい field を持たず、既定値（空の一覧と map）として読む。audit には
   `readyStatusIds` の変更と、brief の本文ではなく byte 数の変化を残す。Project brief は Team の Project に
   限り、読み取り（Web と Public API）では呼び出し元が閲覧できる Project の brief だけを返す。Web の保存では、
-  編集者が閲覧できない Project の brief を受け付けず（`403`）、保存済みの値をそのまま残す。
+  編集者が閲覧できない Project の brief を受け付けず（`403`）、保存済みの値をそのまま残す。Team に属さない
+  Project の brief は `400` とし、Team から外れた Project の保存済み brief は次の保存で消える。
   Run の start は `readyStatusIds` が空でなければ現在の status がその中にあることを確認し、なければ
   `409` と `not_ready` を返す。設定の revision は start の transaction で検査するため、並行した
   設定変更とも整合する。MCP の `get_next_task` は Ready でない候補を `skipped` の `not_ready` として除外し、

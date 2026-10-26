@@ -155,6 +155,10 @@ describe('Agent Run domain', () => {
       readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
     })
     const base = { expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
+    // A `__proto__` key stays an own entry instead of replacing the prototype.
+    const proto = readUpdateAgentSettingsRequest({ ...base, projectBriefs: JSON.parse('{"__proto__":"Brief"}') })
+    expect(Object.hasOwn(proto.projectBriefs, '__proto__')).toBe(true)
+    expect(Object.getPrototypeOf(proto.projectBriefs)).toBe(Object.prototype)
     for (const [invalid, pointer] of [
       [{ readyStatusIds: ['ready', 'ready'] }, '/readyStatusIds'],
       [{ readyStatusIds: [''] }, '/readyStatusIds/0'],

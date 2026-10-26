@@ -477,9 +477,7 @@ export function withVisibleProjectBriefs(
   permission: TeamPermissionContext,
   settings: AgentSettings,
 ): AgentSettings {
-  const projectBriefs: Record<string, string> = {}
-  for (const [projectId, brief] of Object.entries(settings.projectBriefs)) {
-    if (canAccessAssignedProject(principal, permission, projectId, 'viewer')) projectBriefs[projectId] = brief
-  }
+  const projectBriefs = Object.fromEntries(Object.entries(settings.projectBriefs)
+    .filter(([projectId]) => canAccessAssignedProject(principal, permission, projectId, 'viewer')))
   return { ...settings, projectBriefs }
 }

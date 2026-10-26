@@ -1423,6 +1423,20 @@ describe('Web Agent Run routes', () => {
     })
     expect(denied.status).toBe(403)
     expect(store.state.settings.get(`${workspaceId}|core-team`)?.projectBriefs.secret).toBe('Hidden brief')
+    // Briefs must name a Project of the Team, and briefs of Projects that left the Team are dropped.
+    const outside = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, projectBriefs: { elsewhere: 'Brief' } }),
+    })
+    expect(outside.status).toBe(400)
+    const stale = store.state.settings.get(`${workspaceId}|core-team`)
+    if (stale) store.state.settings.set(`${workspaceId}|core-team`, { ...stale, projectBriefs: { ...stale.projectBriefs, removed: 'Old brief' } })
+    const dropped = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'settings-drop' },
+      body: JSON.stringify({ expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, projectBriefs: { refero: 'Edited brief' } }),
+    })
+    expect(dropped.status).toBe(200)
+    expect(store.state.settings.get(`${workspaceId}|core-team`)?.projectBriefs).toEqual({ refero: 'Edited brief', secret: 'Hidden brief' })
   })
 
   test('rejects Agent settings changes from Team members', async () => {
