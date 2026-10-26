@@ -10,6 +10,7 @@ import {
   AgentTaskError,
   type AgentRunRecord,
   type AgentRunReportInput,
+  type AgentSettingsRecord,
   type AgentTask,
   type AgentTaskFilters,
   type AgentWorkItemApi,
@@ -33,7 +34,7 @@ export type AgentTaskScope = {
 export type OtherAgentRun = Pick<AgentRunRecord, 'runId' | 'workItemId' | 'runtime' | 'agentName' | 'startedAt' | 'leaseExpiresAt' | 'stalled'>
 
 /** Why a candidate task was not selected. */
-export type SkippedTaskReason = 'blocked' | 'active_run'
+export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready'
 
 /** Maximum number of skipped candidates reported by task selection. */
 const maximumSkippedReports = 5
@@ -366,7 +367,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   }
 
   return {
-    /** Returns configured ownership, Agent settings, and current workflow/field requirements. */
+    /** Returns configured ownership, Agent settings, the agent brief, and current workflow/field requirements. */
     async configuration() {
       const [catalog, agentSettings] = await Promise.all([api.catalog(scope.assignedProjectId), api.agentSettings()])
       return {
@@ -377,9 +378,23 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         agentSettings: {
           leaseMinutes: agentSettings.leaseMinutes,
           allowTakeoverAfterLeaseExpiry: agentSettings.allowTakeoverAfterLeaseExpiry,
+          readyStatusIds: agentSettings.readyStatusIds,
         },
+        brief: composeBrief(agentSettings, scope.assignedProjectId),
         catalog,
       }
+    },
+    /**
+     * Returns the agent brief for work in one Project: the Team brief followed by the Project brief.
+     *
+     * @param projectId - Project ID.
+     * @returns The brief, or null when neither brief exists.
+     */
+    async brief(projectId: string) {
+      if (scope.assignedProjectId !== undefined && projectId !== scope.assignedProjectId) {
+        throw new AgentTaskError('out_of_scope', 'The requested Project differs from the configured Project.')
+      }
+      return composeBrief(await api.agentSettings(), projectId)
     },
     /** Returns one page, preserving continuation even when no items are returned. */
     async list(input: AgentTaskFilters, cursor?: string, limit?: number) {
@@ -397,7 +412,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
     async next(input: AgentTaskFilters) {
-      const tasks = (await queue(input)).sort(compareTasks)
+      const [queued, settings] = await Promise.all([queue(input), api.agentSettings()])
+      const tasks = queued.sort(compareTasks)
+      const readyStatusIds = new Set(settings.readyStatusIds)
       const { own, others } = await runsByOwner(tasks.filter((task) => task.statusCategory === 'started'))
       const claimed = new Set([...own.map((run) => run.workItemId), ...others.map((run) => run.workItemId)])
       const runSummary = { ownRuns: own, otherRuns: others, selectionIsAdvisory: true }
@@ -421,6 +438,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       for (const task of tasks) {
         if (task.statusCategory !== 'unstarted' && task.statusCategory !== 'backlog') continue
         if (claimed.has(task.id)) { skip(task.id, 'active_run'); continue }
+        // The server rejects a start from any other status, so such tasks are never offered.
+        if (readyStatusIds.size > 0 && !readyStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_ready'); continue }
         dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
         if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', 'Selection exceeded 100 dependency reads. Narrow the queue filter.')
         if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
@@ -547,6 +566,19 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       return api.comments(id, cursor, limit, scope.assignedProjectId)
     },
   }
+}
+
+/**
+ * Joins the Team brief and one Project's brief, in that order.
+ *
+ * @param settings - Team Agent settings.
+ * @param projectId - Project the work belongs to, if any.
+ * @returns The brief, or null when neither brief exists.
+ */
+function composeBrief(settings: AgentSettingsRecord, projectId: string | undefined): string | null {
+  const parts = [settings.brief, projectId === undefined ? undefined : settings.projectBriefs[projectId]]
+    .filter((part): part is string => part !== undefined)
+  return parts.length === 0 ? null : parts.join('\n\n')
 }
 
 /** Orders ready work deterministically; undated work follows dated work at equal priority. */

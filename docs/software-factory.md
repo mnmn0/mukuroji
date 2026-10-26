@@ -529,6 +529,27 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   起動できる単一ファイルとして、同梱ライセンス一覧と一緒に build する。GitHub Release への自動添付は、
   workflow の追加に別の権限が要るため次の変更で入れる。
 
+### Slice 3 の実装状況
+
+Slice 3 は 3 つの変更に分けて入れる。
+
+- 実装済み（Agent settings、Ready、brief）: Agent settings に `readyStatusIds`（最大 50 件、重複不可）、
+  Team の `brief`、`projectBriefs`（最大 20 Project）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
+  合計 128 KiB までとし、空白だけの brief は保存しない。保存は全体の置き換えで、省略した field は
+  消える。保存前の row は新しい field を持たず、既定値（空の一覧と map）として読む。audit には
+  `readyStatusIds` の変更と、brief の本文ではなく byte 数の変化を残す。Project brief は Team の Project に
+  限り、読み取り（Web と Public API）では呼び出し元が閲覧できる Project の brief だけを返す。Web の保存では、
+  編集者が閲覧できない Project の brief を受け付けず（`403`）、保存済みの値をそのまま残す。
+  Run の start は `readyStatusIds` が空でなければ現在の status がその中にあることを確認し、なければ
+  `409` と `not_ready` を返す。設定の revision は start の transaction で検査するため、並行した
+  設定変更とも整合する。MCP の `get_next_task` は Ready でない候補を `skipped` の `not_ready` として除外し、
+  `get_configuration` は `agentSettings.readyStatusIds` と `brief`（Team brief の後に設定 Project の
+  brief を連結）を返す。`mukuroji://project/{projectId}/brief` resource も同じ内容を返し、
+  `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は別 Project の brief を `out_of_scope` で拒否する。
+- 次の変更: 受け入れ条件（`acceptanceCriteria`）、`requireAcceptanceCriteria`、
+  `acceptanceCriteriaFieldId`、`get_task` の受け入れ条件。
+- その次の変更: 受け入れ条件と Agent settings の Web 編集画面。
+
 ## 後続 Phase
 
 - GitHub adapter を `ConnectorAdapter` 境界の後ろに実装し、report の `pull-request` artifact を

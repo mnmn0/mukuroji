@@ -218,7 +218,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return api.getRun(runId)
     },
     async agentSettings() {
-      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
+      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], projectBriefs: {} }
     },
     ...overrides,
   }
@@ -243,6 +243,28 @@ describe('agent task lifecycle', () => {
     })
     expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'next' }, blockedCount: 1 })
     expect(pages).toBe(2)
+  })
+
+  test('offers only tasks in a ready status and returns the Team and Project briefs', async () => {
+    const settings = {
+      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+      readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
+    }
+    const rows = [task('todo-first', { priority: 'high' }), task('ready-later', { workflowStatusId: 'ready', priority: 'low' })]
+    const { api, service } = fixture(rows, { async agentSettings() { return settings } })
+    expect(await service.next({})).toMatchObject({
+      action: 'start', task: { id: 'ready-later' }, skipped: [{ taskId: 'todo-first', reason: 'not_ready' }],
+    })
+    expect(await service.configuration()).toMatchObject({ agentSettings: { readyStatusIds: ['ready'] }, brief: 'Run bun test.' })
+    expect(await service.brief('web')).toBe('Run bun test.\n\nAdd a story.')
+    expect(await service.brief('cdk')).toBe('Run bun test.')
+    const scoped = createAgentTasks(api, { ...baseScope, assignedProjectId: 'web' })
+    expect(await scoped.configuration()).toMatchObject({ brief: 'Run bun test.\n\nAdd a story.' })
+    await expect(scoped.brief('cdk')).rejects.toMatchObject({ code: 'out_of_scope' })
+    // Without any brief, both read as null; without ready statuses, every unstarted task is ready.
+    const plain = fixture(rows)
+    expect(await plain.service.configuration()).toMatchObject({ brief: null })
+    expect(await plain.service.next({})).toMatchObject({ action: 'start', task: { id: 'todo-first' } })
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {

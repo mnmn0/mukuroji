@@ -8,6 +8,10 @@ import {
   AGENT_RUN_MIN_LEASE_MINUTES,
   AGENT_RUN_RUNTIMES,
   AGENT_RUN_SCHEMA_VERSION,
+  AGENT_SETTINGS_BRIEF_MAX_BYTES,
+  AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
+  AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
+  AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_SCHEMA_VERSION,
   type AgentRun,
   type AgentRunFinishOutcome,
@@ -548,7 +552,96 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     revision: 0,
     leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
     allowTakeoverAfterLeaseExpiry: false,
+    readyStatusIds: [],
+    projectBriefs: {},
   }
+}
+
+/**
+ * Reads an identifier stored in a list or map of the settings, such as a status or Project ID.
+ *
+ * @param value - Untrusted value.
+ * @param pointer - JSON Pointer of the value.
+ * @returns The identifier.
+ */
+function readSettingsIdentifier(value: unknown, pointer: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > identifierMaxLength ||
+    value !== value.trim() ||
+    value === '.' ||
+    value === '..' ||
+    [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+  ) {
+    throw new AgentRunError('validation_failed', 'The value must be a non-empty identifier.', { pointer })
+  }
+  return value
+}
+
+/**
+ * Reads the workflow status IDs agents may start from.
+ *
+ * @param value - Untrusted value; undefined means none.
+ * @returns Distinct status IDs in the order given.
+ */
+function readReadyStatusIds(value: unknown): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > AGENT_SETTINGS_MAX_READY_STATUSES) {
+    throw new AgentRunError(
+      'validation_failed',
+      `readyStatusIds must be a list of at most ${AGENT_SETTINGS_MAX_READY_STATUSES} status IDs.`,
+      { pointer: '/readyStatusIds' },
+    )
+  }
+  const ids = value.map((id, index) => readSettingsIdentifier(id, `/readyStatusIds/${index}`))
+  if (new Set(ids).size !== ids.length) {
+    throw new AgentRunError('validation_failed', 'readyStatusIds must not repeat a status ID.', { pointer: '/readyStatusIds' })
+  }
+  return ids
+}
+
+/**
+ * Reads one agent brief and checks its size.
+ *
+ * @param value - Untrusted value; undefined means none.
+ * @param pointer - JSON Pointer of the brief.
+ * @returns The brief, or undefined when it is absent or empty.
+ */
+function readBrief(value: unknown, pointer: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || value.includes('\0')) {
+    throw new AgentRunError('validation_failed', 'A brief must be Markdown text.', { pointer })
+  }
+  if (Buffer.byteLength(value, 'utf8') > AGENT_SETTINGS_BRIEF_MAX_BYTES) {
+    throw new AgentRunError('validation_failed', `A brief must be at most ${AGENT_SETTINGS_BRIEF_MAX_BYTES} bytes.`, { pointer })
+  }
+  return value.trim() === '' ? undefined : value
+}
+
+/**
+ * Reads the agent briefs per Project.
+ *
+ * @param value - Untrusted value; undefined means none.
+ * @returns Non-empty briefs keyed by Project ID.
+ */
+function readProjectBriefs(value: unknown): Record<string, string> {
+  if (value === undefined) return {}
+  if (!isRecord(value) || Object.keys(value).length > AGENT_SETTINGS_MAX_PROJECT_BRIEFS) {
+    throw new AgentRunError(
+      'validation_failed',
+      `projectBriefs must map at most ${AGENT_SETTINGS_MAX_PROJECT_BRIEFS} Project IDs to briefs.`,
+      { pointer: '/projectBriefs' },
+    )
+  }
+  const briefs: Record<string, string> = {}
+  for (const [projectId, brief] of Object.entries(value)) {
+    const pointer = `/projectBriefs/${projectId.replaceAll('~', '~0').replaceAll('/', '~1')}`
+    readSettingsIdentifier(projectId, pointer)
+    const text = readBrief(brief, pointer)
+    if (text !== undefined) briefs[projectId] = text
+  }
+  return briefs
 }
 
 /**
@@ -557,9 +650,13 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
  * @param value - Untrusted JSON body.
  * @returns Validated update.
  */
-export function readUpdateAgentSettingsRequest(value: unknown): UpdateAgentSettingsRequest {
+export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSettingsUpdate {
   if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent settings body is required.')
-  assertKnownFields(value, ['expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry'], 'Agent settings')
+  assertKnownFields(
+    value,
+    ['expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'brief', 'projectBriefs'],
+    'Agent settings',
+  )
   const leaseMinutes = value.leaseMinutes
   if (
     typeof leaseMinutes !== 'number' ||
@@ -578,9 +675,84 @@ export function readUpdateAgentSettingsRequest(value: unknown): UpdateAgentSetti
       pointer: '/allowTakeoverAfterLeaseExpiry',
     })
   }
+  const brief = readBrief(value.brief, '/brief')
+  const projectBriefs = readProjectBriefs(value.projectBriefs)
+  assertAgentSettingsBriefLimits({ brief, projectBriefs })
   return {
     expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', true),
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: value.allowTakeoverAfterLeaseExpiry,
+    readyStatusIds: readReadyStatusIds(value.readyStatusIds),
+    ...(brief === undefined ? {} : { brief }),
+    projectBriefs,
+  }
+}
+
+/**
+ * Checks the limits that apply to all briefs together, which a save must meet again after it keeps
+ * briefs the editor could not see.
+ *
+ * @param settings - Team brief and Project briefs.
+ * @param settings.brief - Team brief, if any.
+ * @param settings.projectBriefs - Briefs per Project ID.
+ */
+export function assertAgentSettingsBriefLimits({ brief, projectBriefs }: {
+  /** Team brief, if any. */
+  brief?: string
+  /** Briefs per Project ID. */
+  projectBriefs: Record<string, string>
+}): void {
+  if (Object.keys(projectBriefs).length > AGENT_SETTINGS_MAX_PROJECT_BRIEFS) {
+    throw new AgentRunError(
+      'validation_failed',
+      `projectBriefs must map at most ${AGENT_SETTINGS_MAX_PROJECT_BRIEFS} Project IDs to briefs.`,
+      { pointer: '/projectBriefs' },
+    )
+  }
+  const totalBytes = [brief ?? '', ...Object.values(projectBriefs)]
+    .reduce((total, text) => total + Buffer.byteLength(text, 'utf8'), 0)
+  if (totalBytes > AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES) {
+    throw new AgentRunError(
+      'validation_failed',
+      `The Team brief and Project briefs together must be at most ${AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES} bytes.`,
+      { pointer: '/projectBriefs' },
+    )
+  }
+}
+
+/** Validated settings save: every optional field of the request resolved to its saved value. */
+export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
+  /** Status IDs agents may start from. */
+  readyStatusIds: string[]
+  /** Non-empty briefs per Project ID. */
+  projectBriefs: Record<string, string>
+}
+
+/**
+ * Builds the settings a save commits.
+ *
+ * @param teamId - Team ID.
+ * @param update - Validated save.
+ * @param actorMemberKey - Editor.
+ * @param now - Save time.
+ * @returns Settings at the next revision.
+ */
+export function createSavedAgentSettings(
+  teamId: string,
+  update: ValidatedAgentSettingsUpdate,
+  actorMemberKey: string,
+  now: Date,
+): AgentSettings {
+  return {
+    schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
+    teamId,
+    revision: update.expectedRevision + 1,
+    leaseMinutes: update.leaseMinutes,
+    allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
+    readyStatusIds: [...update.readyStatusIds],
+    ...(update.brief === undefined ? {} : { brief: update.brief }),
+    projectBriefs: { ...update.projectBriefs },
+    updatedAt: now.toISOString(),
+    updatedBy: actorMemberKey,
   }
 }

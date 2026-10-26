@@ -1,5 +1,7 @@
 import { z } from 'zod'
-import { AGENT_RUN_PROBLEM_REASONS } from '@mukuroji/contracts'
+import {
+  AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
+} from '@mukuroji/contracts'
 import type {
   AgentCatalog, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
 } from '../../application/work-item-api'
@@ -65,6 +67,11 @@ const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
 const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
+  // Servers older than the Ready statuses and briefs omit them.
+  readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES).default([]),
+  brief: z.string().min(1).max(AGENT_SETTINGS_BRIEF_MAX_BYTES).optional(),
+  projectBriefs: z.record(identifier, z.string().min(1).max(AGENT_SETTINGS_BRIEF_MAX_BYTES))
+    .refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS).default({}),
   updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
 })
 const problemSchema = z.object({
@@ -79,6 +86,7 @@ const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string>
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
   invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
+  not_ready: 'This task is not in a status the Team marks as ready for agents. Do not start it; pick another task with get_next_task or ask the user.',
 }
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */

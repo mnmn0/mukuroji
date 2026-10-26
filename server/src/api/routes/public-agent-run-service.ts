@@ -42,6 +42,7 @@ import {
   createAgentRunAuditPut,
   isAgentRunFenceConflict,
   retryProgressFencedClose,
+  withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import {
@@ -377,6 +378,14 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
               const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
               if (claim) throw await createHolderConflict(principal, teamId, claim.runId, now)
               const settings = await store.getSettings(principal.directoryId, teamId)
+              // The settings revision check below also fails the start if Ready statuses change meanwhile.
+              if (settings.readyStatusIds.length > 0 && !settings.readyStatusIds.includes(current.workflowStatusId ?? '')) {
+                throw new AgentRunError(
+                  'conflict',
+                  'The Work Item is not in a status the Team marks as ready for agents.',
+                  { reason: 'not_ready', pointer: '/workflowStatusId' },
+                )
+              }
               const run = createActiveAgentRun({
                 directoryId: principal.directoryId,
                 teamId,
@@ -774,8 +783,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
     /** Reads Team Agent settings for a Team the caller can see. */
     async getSettings(credential, teamId) {
       const principal = await resolveReader(credential, teamId)
-      await requireTeamPermission(principal, teamId, 'viewer')
-      return workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId)
+      const permission = await requireTeamPermission(principal, teamId, 'viewer')
+      return withVisibleProjectBriefs(principal, permission, await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId))
     },
   }
 }

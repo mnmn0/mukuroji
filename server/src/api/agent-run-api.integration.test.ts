@@ -604,6 +604,39 @@ describe('public Agent Run service', () => {
     expect(store.state.claims.size).toBe(0)
   })
 
+  test('starts only from a ready status when the Team lists ready statuses', async () => {
+    const { store } = configureUnstartedAssignedWorkItem()
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, readyStatusIds: ['ready'], updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const service = createCanonicalPublicAgentRunService()
+    const start = (key: string) => runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
+      { requestId: key, idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    // The fake Work Item is in the `todo` status, which the Team did not mark as ready.
+    await expect(start('start-not-ready')).rejects.toMatchObject({ category: 'conflict', reason: 'not_ready', pointer: '/workflowStatusId' })
+    expect(store.state.claims.size).toBe(0)
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 2, readyStatusIds: ['ready', 'todo'], updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    expect(await start('start-ready')).toMatchObject({ run: { state: 'active' } })
+  })
+
   test('takes over a stalled run of another instance only when the Team allows it', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
@@ -1322,6 +1355,63 @@ describe('Web Agent Run routes', () => {
     expect(olderKey.status).toBe(409)
     const current = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
     expect(await current.json()).toMatchObject({ revision: 2, leaseMinutes: 90, allowTakeoverAfterLeaseExpiry: false })
+  })
+
+  test('saves ready statuses and briefs and returns them to agents', async () => {
+    configureUnstartedAssignedWorkItem({ role: 'manager' })
+    const body = {
+      expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+      readyStatusIds: ['ready'], brief: 'Run bun test before a PR.', projectBriefs: { refero: 'Add a story for each UI change.' },
+    }
+    const saved = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers: { ...headers, 'Idempotency-Key': 'settings-briefs' }, body: JSON.stringify(body),
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ revision: 1, readyStatusIds: ['ready'], brief: body.brief, projectBriefs: body.projectBriefs })
+    const service = createCanonicalPublicAgentRunService()
+    expect(await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team')))
+      .toMatchObject({ readyStatusIds: ['ready'], brief: body.brief, projectBriefs: body.projectBriefs })
+    // Omitting the optional fields clears them, since a save replaces the settings.
+    const cleared = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'settings-clear' },
+      body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }),
+    })
+    const clearedBody = await cleared.json()
+    expect(clearedBody).toMatchObject({ revision: 2, readyStatusIds: [], projectBriefs: {} })
+    expect(clearedBody).not.toHaveProperty('brief')
+    const invalid = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers, body: JSON.stringify({ ...body, expectedRevision: 2, readyStatusIds: ['ready', 'ready'] }),
+    })
+    expect(invalid.status).toBe(400)
+  })
+
+  test('shows and edits only the briefs of Projects the caller can view', async () => {
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ role: 'manager' })
+    projectOptions.teamProjects = [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'secret', name: 'Secret', tone: 'green' }]
+    projectOptions.projectAccesses = [{ projectId: 'refero', role: 'manager' }]
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, brief: 'Team brief',
+      projectBriefs: { refero: 'Visible brief', secret: 'Hidden brief' }, updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const read = await app.request('http://localhost/api/teams/core-team/agent-settings', { headers })
+    expect(await read.json()).toMatchObject({ brief: 'Team brief', projectBriefs: { refero: 'Visible brief' } })
+    const service = createCanonicalPublicAgentRunService()
+    expect((await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team'))).projectBriefs).toEqual({ refero: 'Visible brief' })
+    const saved = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'settings-visible' },
+      body: JSON.stringify({ expectedRevision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, projectBriefs: { refero: 'Edited brief' } }),
+    })
+    expect(saved.status).toBe(200)
+    expect((await saved.json()).projectBriefs).toEqual({ refero: 'Edited brief' })
+    // The brief the manager cannot see is kept as saved, and they cannot set it.
+    expect(store.state.settings.get(`${workspaceId}|core-team`)?.projectBriefs).toEqual({ refero: 'Edited brief', secret: 'Hidden brief' })
+    const denied = await app.request('http://localhost/api/teams/core-team/agent-settings', {
+      method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, projectBriefs: { secret: 'Overwrite' } }),
+    })
+    expect(denied.status).toBe(403)
+    expect(store.state.settings.get(`${workspaceId}|core-team`)?.projectBriefs.secret).toBe('Hidden brief')
   })
 
   test('rejects Agent settings changes from Team members', async () => {

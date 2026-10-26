@@ -92,6 +92,8 @@ test('restarts oversized queue scans with smaller cursor-bound pages and preserv
   const starts: number[] = []
   const api = createAgentWorkItemApi(config, async (url) => {
     if (url.pathname === '/api/v1/agent-runs') return Response.json({ items: [], hasMore: false })
+    // A server older than Ready statuses and briefs omits them.
+    if (url.pathname === '/api/v1/agent-settings') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
     const limit = Number(url.searchParams.get('limit'))
     const cursor = url.searchParams.get('cursor')
     if (!cursor) starts.push(limit)

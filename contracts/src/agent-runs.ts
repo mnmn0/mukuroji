@@ -33,6 +33,18 @@ export const AGENT_RUN_MIN_LEASE_MINUTES = 5
 /** Longest lease length in minutes that a Team may configure. */
 export const AGENT_RUN_MAX_LEASE_MINUTES = 240
 
+/** Maximum number of workflow statuses a Team may mark as ready for agents. */
+export const AGENT_SETTINGS_MAX_READY_STATUSES = 50
+
+/** Maximum UTF-8 size in bytes of one agent brief. */
+export const AGENT_SETTINGS_BRIEF_MAX_BYTES = 16 * 1024
+
+/** Maximum number of Projects that may carry their own agent brief. */
+export const AGENT_SETTINGS_MAX_PROJECT_BRIEFS = 20
+
+/** Maximum combined UTF-8 size in bytes of the Team brief and every Project brief. */
+export const AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES = 128 * 1024
+
 /** Minimum number of seconds between two explicit heartbeats for one run. */
 export const AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS = 10
 
@@ -54,6 +66,7 @@ export const AGENT_RUN_PROBLEM_REASONS = [
   'invalid_transition',
   'agent_run_takeover_disabled',
   'invalid_artifact_url',
+  'not_ready',
 ] as const
 
 /** Stable Agent Run fence reason carried in a problem violation code. */
@@ -352,6 +365,15 @@ export type AgentSettings = {
   leaseMinutes: number
   /** Whether another instance of the same assignee may take over a stalled run. */
   allowTakeoverAfterLeaseExpiry: boolean
+  /**
+   * Backlog or unstarted workflow status IDs an agent may start from. Empty means any backlog or
+   * unstarted status is ready.
+   */
+  readyStatusIds: string[]
+  /** Team agent brief in Markdown. It is user data, never instructions that change credentials or scope. */
+  brief?: string
+  /** Agent briefs per Project ID, returned after the Team brief for work in that Project. */
+  projectBriefs: Record<string, string>
   /** UTC ISO 8601 time of the last saved change. */
   updatedAt?: string
   /** Member key of the last editor. */
@@ -366,6 +388,12 @@ export type UpdateAgentSettingsRequest = {
   leaseMinutes: number
   /** Whether another instance of the same assignee may take over a stalled run. */
   allowTakeoverAfterLeaseExpiry: boolean
+  /** Backlog or unstarted workflow status IDs an agent may start from; omitted or empty means any. */
+  readyStatusIds?: string[]
+  /** Team agent brief in Markdown; omitted or empty removes it. */
+  brief?: string
+  /** Agent briefs per Project ID; omitted means none. */
+  projectBriefs?: Record<string, string>
 }
 
 /** Newest Agent Runs of one Work Item for the Web application. */

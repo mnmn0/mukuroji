@@ -10,6 +10,7 @@ import {
   AgentRunError,
   createAgentRunNotActiveError,
   finishAgentRun,
+  assertAgentSettingsBriefLimits,
   readUpdateAgentSettingsRequest,
   toAgentRun,
   toAgentRunReport,
@@ -26,9 +27,11 @@ import {
   commitProgressFencedClose,
   createAgentRunAuditPut,
   retryProgressFencedClose,
+  withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import {
+  canAccessAssignedProject,
   canWorkspaceBusinessWrite,
   requireAssignedProjectPermission,
   requireTeamPermission,
@@ -230,6 +233,16 @@ export async function releaseWebAgentRun(
 }
 
 /**
+ * Measures a brief for the audit trail without recording its text.
+ *
+ * @param brief - Brief, if any.
+ * @returns UTF-8 size in bytes; `0` when there is none.
+ */
+function briefBytes(brief: string | undefined): number {
+  return brief === undefined ? 0 : Buffer.byteLength(brief, 'utf8')
+}
+
+/**
  * Reads Team Agent settings for a Team the viewer can see.
  *
  * @param principal - Viewer.
@@ -237,8 +250,8 @@ export async function releaseWebAgentRun(
  * @returns Current settings or the defaults.
  */
 export async function getWebAgentSettings(principal: WorkspacePrincipal, teamId: string): Promise<AgentSettings> {
-  await requireTeamPermission(principal, teamId, 'viewer')
-  return workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId)
+  const permission = await requireTeamPermission(principal, teamId, 'viewer')
+  return withVisibleProjectBriefs(principal, permission, await workItemDependencies.agentRuns.getSettings(principal.directoryId, teamId))
 }
 
 /**
@@ -258,10 +271,18 @@ export async function updateWebAgentSettings(
   auditContext: MutationAuditContext,
 ): Promise<AgentSettings> {
   requireWorkspaceBusinessWrite(principal)
-  await requireTeamPermission(principal, teamId, 'manager')
-  const update = readUpdateAgentSettingsRequest(body)
+  const permission = await requireTeamPermission(principal, teamId, 'manager')
+  const requested = readUpdateAgentSettingsRequest(body)
   const store = workItemDependencies.agentRuns
   const before = await store.getSettings(principal.directoryId, teamId)
+  // A manager sees and edits only the briefs of Projects they can view; the others are kept as saved.
+  for (const projectId of Object.keys(requested.projectBriefs)) {
+    requireAssignedProjectPermission(principal, permission, projectId, 'viewer')
+  }
+  const hiddenBriefs = Object.fromEntries(Object.entries(before.projectBriefs)
+    .filter(([projectId]) => !canAccessAssignedProject(principal, permission, projectId, 'viewer')))
+  const update = { ...requested, projectBriefs: { ...requested.projectBriefs, ...hiddenBriefs } }
+  assertAgentSettingsBriefLimits(update)
   const now = new Date()
   const auditPut = createMutationAuditEventPut(getConfiguredAuditTableName(), auditContext, {
     directoryId: principal.directoryId,
@@ -278,6 +299,14 @@ export async function updateWebAgentSettings(
         before: before.allowTakeoverAfterLeaseExpiry,
         after: update.allowTakeoverAfterLeaseExpiry,
       },
+      { field: 'readyStatusIds', before: before.readyStatusIds.join(','), after: update.readyStatusIds.join(',') },
+      // Briefs are long user text, so the audit records only their size.
+      { field: 'brief.bytes', before: briefBytes(before.brief), after: briefBytes(update.brief) },
+      ...[...new Set([...Object.keys(before.projectBriefs), ...Object.keys(update.projectBriefs)])].map((projectId) => ({
+        field: `projectBriefs.${projectId}.bytes`,
+        before: briefBytes(before.projectBriefs[projectId]),
+        after: briefBytes(update.projectBriefs[projectId]),
+      })),
     ].filter((change) => change.before !== change.after),
     metadata: { adapter: 'agent-settings', teamId, beforeRevision: update.expectedRevision },
   })
@@ -285,5 +314,6 @@ export async function updateWebAgentSettings(
   const mutationKey = createHash('sha256')
     .update(`agent-settings\0${principal.userKey}\0${auditContext.idempotencyKeyHash}`)
     .digest('hex')
-  return store.saveSettings(principal.directoryId, teamId, update, principal.userKey, now, mutationKey, auditPut ? [auditPut] : [])
+  const saved = await store.saveSettings(principal.directoryId, teamId, update, principal.userKey, now, mutationKey, auditPut ? [auditPut] : [])
+  return withVisibleProjectBriefs(principal, permission, saved)
 }

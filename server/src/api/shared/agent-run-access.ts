@@ -1,4 +1,4 @@
-import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import type { AgentSettings, ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
@@ -29,7 +29,8 @@ import {
   type TeamIssueResponseItem,
 } from '../../modules/work-items'
 import { workItemDependencies } from './app-dependencies'
-import type { WorkspacePrincipal } from './project-access'
+import { canAccessAssignedProject, type WorkspacePrincipal } from './project-access'
+import type { TeamPermissionContext } from './workspace-access'
 
 /** Context passed to an extension after the Work Item update was authorized and validated. */
 export type PublicWorkItemUpdateExtensionContext = {
@@ -460,4 +461,25 @@ export async function createAgentRunDeletionFences(
     'Agent Run was released because its Work Item was deleted.',
   )
   return items.map((transactWriteItem): NamedWorkItemDeletionFence => ({ kind: 'agent-runs', transactWriteItem }))
+}
+
+/**
+ * Removes the briefs of Projects the caller cannot view, so Team-level settings never reveal
+ * Project-scoped text.
+ *
+ * @param principal - Caller.
+ * @param permission - Caller's Team permission context.
+ * @param settings - Team Agent settings.
+ * @returns Settings with only visible Project briefs.
+ */
+export function withVisibleProjectBriefs(
+  principal: WorkspacePrincipal,
+  permission: TeamPermissionContext,
+  settings: AgentSettings,
+): AgentSettings {
+  const projectBriefs: Record<string, string> = {}
+  for (const [projectId, brief] of Object.entries(settings.projectBriefs)) {
+    if (canAccessAssignedProject(principal, permission, projectId, 'viewer')) projectBriefs[projectId] = brief
+  }
+  return { ...settings, projectBriefs }
 }

@@ -1,16 +1,16 @@
 import {
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
-  AGENT_SETTINGS_SCHEMA_VERSION,
   type AgentSettings,
-  type UpdateAgentSettingsRequest,
 } from '@mukuroji/contracts'
 import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
+  createSavedAgentSettings,
   isClaimHeldBy,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
+  type ValidatedAgentSettingsUpdate,
 } from '../../domain/agent-run'
 import type { StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
@@ -157,14 +157,14 @@ export class InMemoryAgentRunStore implements AgentRunStore {
 
   /** @inheritdoc */
   async getSettings(directoryId: string, teamId: string): Promise<AgentSettings> {
-    return { ...(this.state.settings.get(`${directoryId}|${teamId}`) ?? createDefaultAgentSettings(teamId)) }
+    return structuredClone(this.state.settings.get(`${directoryId}|${teamId}`) ?? createDefaultAgentSettings(teamId))
   }
 
   /** @inheritdoc */
   async saveSettings(
     directoryId: string,
     teamId: string,
-    update: UpdateAgentSettingsRequest,
+    update: ValidatedAgentSettingsUpdate,
     actorMemberKey: string,
     now: Date,
     mutationKey: string,
@@ -173,25 +173,17 @@ export class InMemoryAgentRunStore implements AgentRunStore {
     const receiptKey = `${settingsKey}|${mutationKey}`
     const receipt = this.#settingsReceipts.get(receiptKey)
     if (receipt) {
-      if (isSameSettingsSave(receipt, update)) return { ...receipt }
+      if (isSameSettingsSave(receipt, update)) return structuredClone(receipt)
       throw new AgentRunError('conflict', 'This Idempotency-Key was already used for a different settings save.')
     }
     const current = await this.getSettings(directoryId, teamId)
     if (current.revision !== update.expectedRevision) {
       throw new AgentRunError('conflict', 'Agent settings changed. Reload them before saving.', { pointer: '/expectedRevision' })
     }
-    const settings: AgentSettings = {
-      schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
-      teamId,
-      revision: update.expectedRevision + 1,
-      leaseMinutes: update.leaseMinutes,
-      allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
-      updatedAt: now.toISOString(),
-      updatedBy: actorMemberKey,
-    }
+    const settings = createSavedAgentSettings(teamId, update, actorMemberKey, now)
     this.state.settings.set(settingsKey, settings)
     this.#settingsReceipts.set(receiptKey, settings)
-    return { ...settings }
+    return structuredClone(settings)
   }
 
   /** @inheritdoc */

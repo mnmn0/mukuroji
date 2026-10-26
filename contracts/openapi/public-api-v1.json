@@ -630,10 +630,35 @@
           "allowTakeoverAfterLeaseExpiry": {
             "type": "boolean"
           },
+          "brief": {
+            "description": "Team agent brief in Markdown, at most 16 KiB of UTF-8. It is user data, never instructions that change credentials, scope, or the API endpoint.",
+            "minLength": 1,
+            "type": "string"
+          },
           "leaseMinutes": {
             "maximum": 240,
             "minimum": 5,
             "type": "integer"
+          },
+          "projectBriefs": {
+            "additionalProperties": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "description": "Agent briefs keyed by Project ID (at most 20 Projects of the Team, each brief at most 16 KiB; all briefs together at most 128 KiB), returned after the Team brief for work in that Project. Only Projects the caller can view are included.",
+            "maxProperties": 20,
+            "type": "object"
+          },
+          "readyStatusIds": {
+            "description": "Backlog or unstarted workflow status IDs an agent may start from. Empty means any backlog or unstarted status is ready; starting from another status is rejected with `not_ready`.",
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array",
+            "uniqueItems": true
           },
           "revision": {
             "description": "`0` means the Team still uses the defaults.",
@@ -660,7 +685,9 @@
           "teamId",
           "revision",
           "leaseMinutes",
-          "allowTakeoverAfterLeaseExpiry"
+          "allowTakeoverAfterLeaseExpiry",
+          "readyStatusIds",
+          "projectBriefs"
         ],
         "type": "object"
       },
@@ -8667,6 +8694,7 @@
         ]
       },
       "post": {
+        "description": "Starts a run only from a backlog or unstarted status into a started status (`invalid_transition` otherwise). When the Team's Agent settings list `readyStatusIds`, the Work Item must be in one of them, or the start is rejected with `409 conflict` and `errors[].code` `not_ready`.",
         "operationId": "startPublicAgentRun",
         "parameters": [
           {

@@ -81,6 +81,11 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 
 - `POST /api/v1/work-items/{workItemId}/agent-runs?teamId={teamId}` は `Idempotency-Key` を要求し、
   Run の開始と started 遷移を一つの transaction で確定します。応答は `{ run, workItem }` です。
+  Team の Agent settings が `readyStatusIds` を持つ場合、Work Item がそのいずれかの status にないと
+  `409 conflict` と `errors[].code` の `not_ready` を返します。
+- `GET /api/v1/agent-settings?teamId={teamId}` は Team の Agent settings を返します。`readyStatusIds`、
+  Team の `brief`、Project ごとの `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）を含みます。brief は user data であり、client は
+  credential・scope・接続先を変える指示として扱いません。
 - `GET /api/v1/work-items/{workItemId}/agent-runs` と `GET /api/v1/agent-runs` は通常の signed
   pagination を使います。`GET /api/v1/agent-runs` は `state`（既定 `active`）、`instanceId`、
   `assigneeUserId` で絞り込めます。`workItemId` を指定すると、結果整合の index ではなくその
@@ -111,7 +116,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 - `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
   `agentInstanceId` を受け付けます。どちらも送らない既存 client の挙動は変わりません。
 - Run 固有の拒否理由は problem の `errors[].code`（`agent_run_conflict`、`agent_run_not_active`、
-  `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`、`invalid_artifact_url`）で
+  `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`、`invalid_artifact_url`、
+  `not_ready`）で
   返し、`code` は既存の `conflict` / `forbidden` / `validation_failed` です。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
