@@ -145,14 +145,14 @@ describe('Agent Run domain', () => {
     expect(() => readHeartbeatAgentRunRequest({})).toThrow(AgentRunError)
     expect(() => readHeartbeatAgentRunRequest(undefined)).toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false }))
-      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], projectBriefs: {} })
+      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} })
     // Ready statuses and briefs are optional; empty briefs are dropped.
     expect(readUpdateAgentSettingsRequest({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
       readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.', cdk: '  ' },
     })).toEqual({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
+      readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
     })
     const base = { expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
     // A `__proto__` key stays an own entry instead of replacing the prototype.
@@ -405,9 +405,9 @@ describe('DynamoDB Agent Run store', () => {
     }
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
-      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], projectBriefs: {}, updatedAt: now.toISOString(), updatedBy: 'member-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, updatedAt: now.toISOString(), updatedBy: 'member-1' })
     // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
-    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
+    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
       await expect(new DynamoDbAgentRunStore(client.client, 'AgentRuns').getSettings('workspace-1', 'core'))
         .rejects.toMatchObject({ category: 'temporarily_unavailable' })
@@ -427,7 +427,7 @@ describe('DynamoDB Agent Run store', () => {
       })
     }
     const first = createClient([{}])
-    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], brief: 'Brief', projectBriefs: { web: 'Web brief' } }
+    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' } }
     const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', [])
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
     const command = first.commands[0]

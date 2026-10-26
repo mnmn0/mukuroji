@@ -1,5 +1,6 @@
 import {
   DEFAULT_WORK_ITEM_TYPE_ID,
+  hasWorkItemAcceptanceCriteria,
   type AgentRunFinishOutcome,
   type AgentRunMutationFence,
   type AgentRunRuntime,
@@ -15,6 +16,17 @@ import {
   type AgentTaskFilters,
   type AgentWorkItemApi,
 } from './work-item-api'
+
+/** Metadata changes an agent may make, including marking its task's acceptance criteria met or unmet. */
+export type AgentTaskUpdate = Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'> & {
+  /** Criteria to mark met or unmet by ID; criteria not listed keep their state. */
+  acceptanceCriteria?: {
+    /** ID of a criterion on the task. */
+    id: string
+    /** Whether the criterion is met. */
+    satisfied: boolean
+  }[]
+}
 
 /** Operator-selected assignment and optional project scope for agent mutations. */
 export type AgentTaskScope = {
@@ -379,6 +391,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           leaseMinutes: agentSettings.leaseMinutes,
           allowTakeoverAfterLeaseExpiry: agentSettings.allowTakeoverAfterLeaseExpiry,
           readyStatusIds: agentSettings.readyStatusIds,
+          requireAcceptanceCriteria: agentSettings.requireAcceptanceCriteria,
+          ...(agentSettings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: agentSettings.acceptanceCriteriaFieldId }),
         },
         brief: composeBrief(agentSettings, scope.assignedProjectId),
         catalog,
@@ -440,6 +454,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         if (claimed.has(task.id)) { skip(task.id, 'active_run'); continue }
         // The server rejects a start from any other status, so such tasks are never offered.
         if (readyStatusIds.size > 0 && !readyStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_ready'); continue }
+        if (settings.requireAcceptanceCriteria && !hasWorkItemAcceptanceCriteria(task, settings.acceptanceCriteriaFieldId)) {
+          skip(task.id, 'not_ready')
+          continue
+        }
         dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
         if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', 'Selection exceeded 100 dependency reads. Narrow the queue filter.')
         if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
@@ -458,12 +476,27 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     transition,
     /** Applies metadata changes using revision CAS; assignment and workflow changes have dedicated paths. */
-    async update(id: string, input: Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'>, key: string) {
+    async update(id: string, input: AgentTaskUpdate, key: string) {
       const task = await owned(id)
       if (input.expectedRevision > task.revision) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
-      return api.update(id, input, key, await fenceFor(id))
+      const { acceptanceCriteria: marks, ...fields } = input
+      if (marks === undefined) return api.update(id, fields, key, await fenceFor(id))
+      // An agent only marks criteria met or unmet, so the full list is rebuilt from the task's own
+      // criteria; a retry rebuilds the same body and replays, and the server rejects a stale revision.
+      const current = task.acceptanceCriteria ?? []
+      const marked = new Map(marks.map((mark) => [mark.id, mark.satisfied]))
+      const unknown = marks.find((mark) => !current.some((criterion) => criterion.id === mark.id))
+      if (unknown !== undefined) {
+        throw new AgentTaskError('invalid_request', 'An acceptance criterion ID is not on this task. Read the task again with get_task.')
+      }
+      return api.update(id, {
+        ...fields,
+        acceptanceCriteria: current.map((criterion) => ({
+          id: criterion.id, text: criterion.text, satisfied: marked.get(criterion.id) ?? criterion.satisfied,
+        })),
+      }, key, await fenceFor(id))
     },
     /** Creates assigned work within the operator-selected Project boundary. */
     async create(input: Parameters<AgentWorkItemApi['create']>[0], key: string) {

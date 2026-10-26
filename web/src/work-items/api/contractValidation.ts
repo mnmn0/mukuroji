@@ -1,5 +1,7 @@
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
+  WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
   WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
   WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEMA_VERSION,
@@ -9,6 +11,7 @@ import {
   type CustomFieldDefinition,
   type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
+  type WorkItemAcceptanceCriterion,
   type WorkItemContributorAssignment,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
@@ -473,6 +476,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.title === 'string' &&
     typeof value.assigneeUserId === 'string' &&
     (value.contributorAssignments === undefined || isContributorAssignmentList(value.contributorAssignments)) &&
+    (value.acceptanceCriteria === undefined || isAcceptanceCriterionList(value.acceptanceCriteria)) &&
     typeof value.creatorMemberKey === 'string' &&
     typeof value.workflowStatusId === 'string' &&
     isOptionalString(value.workItemTypeId) &&
@@ -509,7 +513,26 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isApprovalSummary(value.approvalSummary, value.createdAt)
 }
 
-/** Server-generated contributor assignment IDs: 32 lowercase hexadecimal digits. */
+/**
+ * Returns whether a value is a stored acceptance criteria list.
+ *
+ * @param value - Candidate `acceptanceCriteria` value.
+ * @returns Whether it is a non-empty bounded list of criteria with unique server-generated IDs.
+ */
+function isAcceptanceCriterionList(value: unknown): value is WorkItemAcceptanceCriterion[] {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT &&
+    new Set(value.map((entry) => isRecord(entry) ? entry.id : undefined)).size === value.length &&
+    value.every((entry) =>
+      isRecord(entry) &&
+      typeof entry.id === 'string' && CONTRIBUTOR_ASSIGNMENT_ID_PATTERN.test(entry.id) &&
+      typeof entry.text === 'string' && entry.text.length > 0 &&
+      entry.text.length <= WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH &&
+      typeof entry.satisfied === 'boolean')
+}
+
+/** Server-generated contributor assignment and acceptance criterion IDs: 32 lowercase hexadecimal digits. */
 const CONTRIBUTOR_ASSIGNMENT_ID_PATTERN = /^[0-9a-f]{32}$/u
 
 /** Work Item configuration ID grammar used for job roles. */

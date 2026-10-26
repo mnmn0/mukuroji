@@ -622,7 +622,7 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
-  if (error.code === 'InvalidContributorAssignments') {
+  if (error.code === 'InvalidContributorAssignments' || error.code === 'InvalidAcceptanceCriteria') {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 

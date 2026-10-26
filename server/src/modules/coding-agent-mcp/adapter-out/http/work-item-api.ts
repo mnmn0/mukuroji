@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
   AgentCatalog, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
@@ -19,6 +20,11 @@ const taskSchema: z.ZodType<AgentTask> = z.object({
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),
+  acceptanceCriteria: z.array(z.object({
+    id: z.string().regex(/^[0-9a-f]{32}$/u),
+    text: z.string().min(1).max(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH),
+    satisfied: z.boolean(),
+  })).min(1).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT).optional(),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
@@ -71,6 +77,8 @@ const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
   // Servers older than the Ready statuses and briefs omit them.
   readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES).default([]),
+  requireAcceptanceCriteria: z.boolean().default(false),
+  acceptanceCriteriaFieldId: identifier.optional(),
   brief: briefText.optional(),
   projectBriefs: z.record(identifier, briefText)
     .refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS).default({}),

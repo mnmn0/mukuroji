@@ -37,6 +37,7 @@ import {
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
 import { isStoredContributorAssignmentList } from '../../domain/contributor-assignments'
+import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteria'
 import { createResourceId } from '../../domain/resource-id'
 import {
   deriveWorkItemScheduleDueDate,
@@ -82,6 +83,7 @@ import type {
   TriageEntryEvent,
   WorkflowStatusCategory,
   WorkItemPriority,
+  WorkItemAcceptanceCriterion,
   WorkItemContributorAssignment,
   WorkItemRelation,
   WorkItemSchedule,
@@ -518,6 +520,8 @@ type TeamIssueItem = {
   assigneeUserId: string
   /** Contributors carrying out the work, separate from the accountable owner; absent when none. */
   contributorAssignments?: WorkItemContributorAssignment[]
+  /** Acceptance criteria; absent when none. */
+  acceptanceCriteria?: WorkItemAcceptanceCriterion[]
   /**
    * Issue 作成者の Workspace member key です。
    */
@@ -944,6 +948,8 @@ export type PublicUpdateTeamIssueRequestBody = {
   assigneeUserId?: unknown
   /** Complete replacement contributor list already normalized by the API handler. */
   contributorAssignments?: unknown
+  /** Complete replacement acceptance criteria list already normalized by the API handler. */
+  acceptanceCriteria?: unknown
   /** Complete replacement schedule shared by every task view. */
   schedule?: unknown
   /**
@@ -2414,6 +2420,17 @@ export class DynamoDbTeamIssuesClient {
       }
     }
 
+    if ('acceptanceCriteria' in input) {
+      // An empty list is stored as an absent attribute, like contributors.
+      expressionAttributeNames['#acceptanceCriteria'] = 'acceptanceCriteria'
+      if (Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length === 0) {
+        removeExpressions.push('#acceptanceCriteria')
+      } else {
+        expressionAttributeValues[':acceptanceCriteria'] = readNormalizedAcceptanceCriteria(input.acceptanceCriteria)
+        setExpressions.push('#acceptanceCriteria = :acceptanceCriteria')
+      }
+    }
+
     if ('workflowStatusId' in input) {
       expressionAttributeNames['#workflowStatusId'] = 'workflowStatusId'
       expressionAttributeValues[':workflowStatusId'] = readWorkflowStatusId(input.workflowStatusId)
@@ -2598,6 +2615,7 @@ export class DynamoDbTeamIssuesClient {
           'assignedProjectId',
           'assigneeUserId',
           'contributorAssignments',
+          'acceptanceCriteria',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -3667,6 +3685,10 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.contributorAssignments = item.contributorAssignments
   }
 
+  if (item.acceptanceCriteria && item.acceptanceCriteria.length > 0) {
+    issue.acceptanceCriteria = item.acceptanceCriteria
+  }
+
   if (item.archivedAt) {
     issue.archivedAt = item.archivedAt
     issue.archivedBy = item.archivedBy
@@ -4348,6 +4370,21 @@ export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | 
 function readNormalizedContributorAssignments(value: unknown): WorkItemContributorAssignment[] {
   if (!isStoredContributorAssignmentList(value)) {
     throw new ProjectDataError(400, 'InvalidContributorAssignments', 'Contributor assignments are invalid.')
+  }
+  return value
+}
+
+/**
+ * Reads a non-empty acceptance criteria list that the API handler has already normalized.
+ *
+ * The adapter re-checks the stored shape so an unvalidated caller cannot persist a malformed list.
+ *
+ * @param value - Normalized acceptance criteria list.
+ * @returns The list, unchanged.
+ */
+function readNormalizedAcceptanceCriteria(value: unknown): WorkItemAcceptanceCriterion[] {
+  if (!isStoredAcceptanceCriterionList(value)) {
+    throw new ProjectDataError(400, 'InvalidAcceptanceCriteria', 'Acceptance criteria are invalid.')
   }
   return value
 }

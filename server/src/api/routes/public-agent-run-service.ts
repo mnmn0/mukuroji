@@ -1,6 +1,7 @@
 import {
   AGENT_RUN_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  hasWorkItemAcceptanceCriteria,
   type AgentRun,
   type ReportAgentRunResponse,
 } from '@mukuroji/contracts'
@@ -384,6 +385,13 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                   'conflict',
                   'The Work Item is not in a status the Team marks as ready for agents.',
                   { reason: 'not_ready', pointer: '/workflowStatusId' },
+                )
+              }
+              if (settings.requireAcceptanceCriteria && !hasWorkItemAcceptanceCriteria(current, settings.acceptanceCriteriaFieldId)) {
+                throw new AgentRunError(
+                  'conflict',
+                  'The Team requires acceptance criteria before agents start, and this Work Item has none.',
+                  { reason: 'not_ready', pointer: '/acceptanceCriteria' },
                 )
               }
               const run = createActiveAgentRun({

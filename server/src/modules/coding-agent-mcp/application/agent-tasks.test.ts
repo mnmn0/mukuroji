@@ -218,7 +218,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return api.getRun(runId)
     },
     async agentSettings() {
-      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], projectBriefs: {} }
+      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
     ...overrides,
   }
@@ -248,7 +248,7 @@ describe('agent task lifecycle', () => {
   test('offers only tasks in a ready status and returns the Team and Project briefs', async () => {
     const settings = {
       schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
+      readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
     }
     const rows = [task('todo-first', { priority: 'high' }), task('ready-later', { workflowStatusId: 'ready', priority: 'low' })]
     const { api, service } = fixture(rows, { async agentSettings() { return settings } })
@@ -268,6 +268,37 @@ describe('agent task lifecycle', () => {
     const plain = fixture(rows)
     expect(await plain.service.configuration()).toMatchObject({ brief: null })
     expect(await plain.service.next({})).toMatchObject({ action: 'start', task: { id: 'todo-first' } })
+  })
+
+  test('skips tasks without acceptance criteria when the Team requires them and marks criteria by ID', async () => {
+    const settings = {
+      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+      readyStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', projectBriefs: {},
+    }
+    const criteria = [
+      { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false },
+      { id: 'b'.repeat(32), text: 'Docs updated', satisfied: false },
+    ]
+    const rows = [
+      task('bare', { priority: 'high' }),
+      task('field', { priority: 'medium', customFieldValues: { acceptance: 'Ship it' } }),
+      task('canonical', { priority: 'low', acceptanceCriteria: criteria }),
+    ]
+    const sent: unknown[] = []
+    const { service } = fixture(rows, {
+      async agentSettings() { return settings },
+      async update(id, input) {
+        sent.push(input)
+        return task(id, { revision: 2 })
+      },
+    })
+    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
+    expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
+    // Marks are applied to the task's own list, so the text and order are always the stored ones.
+    await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
+    expect(sent.at(-1)).toEqual({ expectedRevision: 1, acceptanceCriteria: [criteria[0], { ...criteria[1], satisfied: true }] })
+    await expect(service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: 'c'.repeat(32), satisfied: true }] }, 'unknown'))
+      .rejects.toMatchObject({ code: 'invalid_request' })
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {

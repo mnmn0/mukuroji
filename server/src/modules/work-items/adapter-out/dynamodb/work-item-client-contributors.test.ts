@@ -10,6 +10,8 @@ import { createMutationAuditContext } from '../../../audit/audit'
 import { ProjectDataError } from '../../../directory'
 import { DynamoDbTeamIssuesClient } from './work-item-client'
 
+const criterion = { id: 'c'.repeat(32), text: 'Tests pass', satisfied: true }
+
 const contributor: WorkItemContributorAssignment = {
   assignmentId: 'a'.repeat(32),
   memberUserId: 'suzuki@example.com',
@@ -171,4 +173,33 @@ test('rejects a malformed contributor list before writing', async () => {
     'demo@example.com',
   )).rejects.toBeInstanceOf(ProjectDataError)
   expect(transactions).toEqual([])
+})
+
+test('persists, returns, and audits acceptance criteria, and removes them with an empty list', async () => {
+  const set = createClient(storedIssue(), { ...storedIssue(), acceptanceCriteria: [criterion], revision: 2 })
+  const response = await set.client.updateTeamIssue(
+    'user#demo@example.com', 'core-team', 'wireframe',
+    { acceptanceCriteria: [criterion], expectedRevision: 1 }, 'demo@example.com', auditContext(),
+  )
+  expect(response.issue.acceptanceCriteria).toEqual([criterion])
+  const written = readUpdate(set.transactions[0])
+  expect(written.expression).toContain('#acceptanceCriteria = :acceptanceCriteria')
+  expect(written.values[':acceptanceCriteria']).toEqual([criterion])
+  expect(written.auditFields).toContain('acceptanceCriteria')
+
+  const cleared = createClient({ ...storedIssue(), acceptanceCriteria: [criterion] }, { ...storedIssue(), revision: 2 })
+  const clearedResponse = await cleared.client.updateTeamIssue(
+    'user#demo@example.com', 'core-team', 'wireframe',
+    { acceptanceCriteria: [], expectedRevision: 1 }, 'demo@example.com', auditContext(),
+  )
+  expect(clearedResponse.issue.acceptanceCriteria).toBeUndefined()
+  expect(readUpdate(cleared.transactions[0]).expression).toMatch(/REMOVE .*#acceptanceCriteria/u)
+
+  // The adapter re-checks the stored shape, so an unvalidated caller cannot persist a malformed list.
+  const malformed = createClient(storedIssue(), storedIssue())
+  await expect(malformed.client.updateTeamIssue(
+    'user#demo@example.com', 'core-team', 'wireframe',
+    { acceptanceCriteria: [{ text: 'No ID' }], expectedRevision: 1 }, 'demo@example.com',
+  )).rejects.toBeInstanceOf(ProjectDataError)
+  expect(malformed.transactions).toEqual([])
 })

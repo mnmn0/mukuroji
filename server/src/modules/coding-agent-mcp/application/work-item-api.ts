@@ -8,7 +8,7 @@ import type {
 export type AgentTask = Pick<CanonicalWorkItem,
   'id' | 'teamId' | 'revision' | 'title' | 'description' | 'assigneeUserId' |
   'assignedProjectId' | 'workflowStatusId' | 'statusCategory' | 'workItemTypeId' |
-  'priority' | 'dueDate' | 'createdAt' | 'updatedAt' | 'relationIds' | 'customFieldValues'>
+  'priority' | 'dueDate' | 'createdAt' | 'updatedAt' | 'relationIds' | 'customFieldValues' | 'acceptanceCriteria'>
 
 /** Bounded public API page; an empty page can still have a continuation. */
 export type AgentPage<T> = {

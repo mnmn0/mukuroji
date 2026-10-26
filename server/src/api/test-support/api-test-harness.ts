@@ -12,6 +12,7 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemAcceptanceCriterion,
   type WorkItemContributorAssignment,
   type WorkItemJobRoleDefinition,
   type WorkItemRelation,
@@ -71,6 +72,7 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import { isStoredContributorAssignmentList } from '../../modules/work-items/domain/contributor-assignments'
+import { isStoredAcceptanceCriterionList } from '../../modules/work-items/domain/acceptance-criteria'
 import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
@@ -1312,6 +1314,8 @@ function configureFakeProjectClients(
     guestWorkspaceMemberKeys?: string[]
     /** Job roles returned by the resolved Work Item configuration. */
     jobRoles?: WorkItemJobRoleDefinition[]
+    /** Custom fields returned by the resolved Work Item configuration. */
+    configurationCustomFields?: WorkItemConfiguration['customFields']
     /** Contributors stored on the first fake Team Work Item and on detail reads. */
     issueContributorAssignments?: WorkItemContributorAssignment[]
     inactiveWorkspaceMemberKeys?: string[]
@@ -1368,6 +1372,8 @@ function configureFakeProjectClients(
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Acceptance criteria the detail fake returns. */
+    detailAcceptanceCriteria?: WorkItemAcceptanceCriterion[]
     /** Detail fake が返す現在の canonical schedule です。 */
     detailSchedule?: WorkItemSchedule
     /** `${teamId}\0${workItemId}` key ごとに detail fake が返す canonical schedule です。 */
@@ -1415,6 +1421,8 @@ function configureFakeProjectClients(
       issueId: string
       /** Contributor list supplied to the adapter, when the update changes it. */
       contributorAssignments?: unknown
+      /** Acceptance criteria supplied to the adapter, when the update changes them. */
+      acceptanceCriteria?: unknown
       /** Caller authorization ConditionChecks supplied to the adapter. */
       authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
       /** Configuration guard ConditionChecks supplied to the adapter. */
@@ -1887,11 +1895,15 @@ function configureFakeProjectClients(
       },
     },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
-      ...(options.jobRoles
+      ...(options.jobRoles || options.configurationCustomFields
         ? {
             async getTeamConfiguration(_workspaceId: string, teamId: string) {
               return {
-                configuration: { ...createTestWorkItemConfiguration('team', teamId), jobRoles: options.jobRoles },
+                configuration: {
+                  ...createTestWorkItemConfiguration('team', teamId),
+                  ...(options.jobRoles ? { jobRoles: options.jobRoles } : {}),
+                  ...(options.configurationCustomFields ? { customFields: options.configurationCustomFields } : {}),
+                },
                 inheritedFrom: 'default' as const,
               }
             },
@@ -2543,6 +2555,7 @@ function configureFakeProjectClients(
             ...(options.issueContributorAssignments
               ? { contributorAssignments: options.issueContributorAssignments }
               : {}),
+            ...(options.detailAcceptanceCriteria ? { acceptanceCriteria: options.detailAcceptanceCriteria } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
@@ -2630,6 +2643,7 @@ function configureFakeProjectClients(
           planningRevisionFence: input.planningRevisionFence,
           issueId,
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
+          ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
@@ -2666,6 +2680,7 @@ function configureFakeProjectClients(
             ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
               ? { contributorAssignments: input.contributorAssignments }
               : {}),
+            ...(isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId: typeof input.workflowStatusId === 'string'

@@ -627,6 +627,12 @@
       "AgentSettings": {
         "additionalProperties": false,
         "properties": {
+          "acceptanceCriteriaFieldId": {
+            "description": "Custom field that holds acceptance criteria for Work Items without canonical `acceptanceCriteria`; a non-empty value counts as criteria.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
           "allowTakeoverAfterLeaseExpiry": {
             "type": "boolean"
           },
@@ -660,6 +666,10 @@
             "type": "array",
             "uniqueItems": true
           },
+          "requireAcceptanceCriteria": {
+            "description": "Whether only Work Items with at least one acceptance criterion are ready for agents; a start without one is rejected with `not_ready`.",
+            "type": "boolean"
+          },
           "revision": {
             "description": "`0` means the Team still uses the defaults.",
             "minimum": 0,
@@ -687,7 +697,8 @@
           "leaseMinutes",
           "allowTakeoverAfterLeaseExpiry",
           "readyStatusIds",
-          "projectBriefs"
+          "projectBriefs",
+          "requireAcceptanceCriteria"
         ],
         "type": "object"
       },
@@ -2713,6 +2724,14 @@
         "additionalProperties": false,
         "minProperties": 2,
         "properties": {
+          "acceptanceCriteria": {
+            "description": "Complete replacement list of acceptance criteria (at most 20); an empty list removes every criterion. Send `expectedRevision` of the Work Item you read, because IDs refer to that list. A request fenced by an Agent Run (`agentInstanceId`) may only change `satisfied` of the existing criteria, in the same order and with the same text; anything else is `403 forbidden`.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterionInput"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
           "agentInstanceId": {
             "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
             "maxLength": 256,
@@ -3007,6 +3026,15 @@
       "WorkItem": {
         "additionalProperties": false,
         "properties": {
+          "acceptanceCriteria": {
+            "description": "Conditions the Work Item must meet before it is accepted; absent when none.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterion"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array"
+          },
           "assignedProjectId": {
             "type": "string"
           },
@@ -3129,6 +3157,56 @@
           "createdAt",
           "updatedAt",
           "source"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriterion": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Stable server-assigned ID within the Work Item (32 lowercase hex digits).",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the condition is met.",
+            "type": "boolean"
+          },
+          "text": {
+            "description": "Condition text.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "satisfied"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriterionInput": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "ID of an existing criterion to keep; omit it for a new criterion.",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the condition is met; omitted means not met.",
+            "type": "boolean"
+          },
+          "text": {
+            "description": "Condition text; surrounding whitespace is trimmed.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
         ],
         "type": "object"
       },

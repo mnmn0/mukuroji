@@ -31,6 +31,7 @@ import {
   type PreviewPublicWorkItemTypeChangeRequest,
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
+  type WorkItemAcceptanceCriterionInput,
   type UpdateWebhookSubscriptionInput,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
@@ -2989,6 +2990,37 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
   }
 }
 
+/**
+ * Reads the shape of a replacement acceptance criteria list; the Work Item service validates the
+ * IDs and limits against the stored criteria.
+ *
+ * @param value - Untrusted `acceptanceCriteria` value.
+ * @returns The list.
+ */
+function readPublicAcceptanceCriteria(value: unknown): WorkItemAcceptanceCriterionInput[] {
+  if (!Array.isArray(value)) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'acceptanceCriteria must be an array.')
+  }
+  return value.map((entry, index) => {
+    const criterion = requireRecord(entry, `acceptanceCriteria[${index}] must be an object.`)
+    assertAllowedFields(criterion, ['id', 'text', 'satisfied'], `acceptanceCriteria[${index}]`)
+    if (typeof criterion.text !== 'string') {
+      throw new PublicApiServiceError(400, 'validation_failed', `acceptanceCriteria[${index}].text must be a string.`)
+    }
+    if (criterion.id !== undefined && typeof criterion.id !== 'string') {
+      throw new PublicApiServiceError(400, 'validation_failed', `acceptanceCriteria[${index}].id must be a string.`)
+    }
+    if (criterion.satisfied !== undefined && typeof criterion.satisfied !== 'boolean') {
+      throw new PublicApiServiceError(400, 'validation_failed', `acceptanceCriteria[${index}].satisfied must be a boolean.`)
+    }
+    return {
+      ...(criterion.id === undefined ? {} : { id: criterion.id }),
+      text: criterion.text,
+      ...(criterion.satisfied === undefined ? {} : { satisfied: criterion.satisfied }),
+    }
+  })
+}
+
 function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRequest {
   const body = requireRecord(value, 'Work Item patch is required.')
   assertAllowedFields(body, [
@@ -3003,6 +3035,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'priority',
     'workItemTypeId',
     'typeChangeResolution',
+    'acceptanceCriteria',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
@@ -3031,6 +3064,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   }
   if ('schedule' in body) result.schedule = readPublicWorkItemSchedule(body.schedule)
   if ('priority' in body) result.priority = readPriority(body.priority)
+  if ('acceptanceCriteria' in body) result.acceptanceCriteria = readPublicAcceptanceCriteria(body.acceptanceCriteria)
   if (Object.keys(result).length === 1) {
     throw new PublicApiServiceError(
       400,

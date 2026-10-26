@@ -170,6 +170,7 @@ import {
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
 } from '../shared/work-item-access'
+import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -503,6 +504,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'statusCategory',
   'workflowSchemaVersion',
   'customFieldValues',
+  'acceptanceCriteria',
   'relationIds',
   'createdAt',
   'updatedAt',
@@ -523,6 +525,9 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
     teamId: workItem.teamId,
     title: workItem.title,
     ...(workItem.description === undefined ? {} : { description: workItem.description }),
+    ...(workItem.acceptanceCriteria === undefined || workItem.acceptanceCriteria.length === 0
+      ? {}
+      : { acceptanceCriteria: workItem.acceptanceCriteria.map((criterion) => ({ ...criterion })) }),
     ...(workItem.assignedProjectId === undefined
       ? {}
       : { assignedProjectId: workItem.assignedProjectId }),
@@ -796,6 +801,8 @@ export type CanonicalPublicWorkItemUpdateOptions = {
   }
   /** Agent Run writes committed atomically with the update. */
   extension?: PublicWorkItemUpdateExtension
+  /** Whether the caller is an agent fenced by its Agent Run, which may only mark acceptance criteria met or unmet. */
+  agentFenced?: boolean
 }
 
 /**
@@ -896,6 +903,13 @@ export async function updateCanonicalPublicWorkItem(
       readTeamIssueAssigneeUserId(configuredBody),
     )
   }
+  if ('acceptanceCriteria' in configuredBody && detail.issue.revision !== expectedRevision) {
+    // Criterion IDs refer to the observed list, so a stale request is a revision conflict.
+    throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
+  }
+  const acceptanceCriteria = readAcceptanceCriteriaChange(
+    configuredBody, detail.issue.acceptanceCriteria ?? [], options.agentFenced === true,
+  )
   const auditContext = createPublicMutationAuditContext(
     principal,
     mutationContext,
@@ -922,6 +936,7 @@ export async function updateCanonicalPublicWorkItem(
       workItemId,
       {
         ...configuredBody,
+        ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
         expectedRevision,
         authorizationSnapshot,
         ...(prepared && prepared.transactItems.length > 0
@@ -1364,7 +1379,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             body: input,
           },
           ...(agentRunFence
-            ? { extension: createAgentRunMutationFenceExtension(teamId, workItemId, agentRunFence) }
+            ? { extension: createAgentRunMutationFenceExtension(teamId, workItemId, agentRunFence), agentFenced: true }
             : {}),
         },
       )

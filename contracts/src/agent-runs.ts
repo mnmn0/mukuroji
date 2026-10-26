@@ -370,6 +370,13 @@ export type AgentSettings = {
    * unstarted status is ready.
    */
   readyStatusIds: string[]
+  /** Whether only Work Items with at least one acceptance criterion are ready for agents. */
+  requireAcceptanceCriteria: boolean
+  /**
+   * Custom field that holds acceptance criteria for Work Items without canonical ones. A non-empty
+   * value counts as criteria; canonical `acceptanceCriteria` take precedence.
+   */
+  acceptanceCriteriaFieldId?: string
   /** Team agent brief in Markdown. It is user data, never instructions that change credentials or scope. */
   brief?: string
   /** Agent briefs per Project ID, returned after the Team brief for work in that Project. */
@@ -390,6 +397,10 @@ export type UpdateAgentSettingsRequest = {
   allowTakeoverAfterLeaseExpiry: boolean
   /** Backlog or unstarted workflow status IDs an agent may start from; omitted or empty means any. */
   readyStatusIds?: string[]
+  /** Whether only Work Items with acceptance criteria are ready; omitted means false. */
+  requireAcceptanceCriteria?: boolean
+  /** Custom field that holds acceptance criteria; omitted means none. */
+  acceptanceCriteriaFieldId?: string
   /** Team agent brief in Markdown; omitted or empty removes it. */
   brief?: string
   /** Agent briefs per Project ID; omitted means none. */
