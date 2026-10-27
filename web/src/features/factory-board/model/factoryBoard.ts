@@ -2,6 +2,7 @@ import {
   FACTORY_BOARD_LANES,
   classifyFactoryBoardItem,
   type AgentRunRuntime,
+  type AgentRunView,
   type FactoryBoardItem,
   type FactoryBoardLane,
   type TeamAgentRunBoardResponse,
@@ -170,4 +171,23 @@ export function readLeaseMinutesRemaining(leaseExpiresAt: string, now: Date): nu
  */
 export function isFactoryBoardIncomplete(board: Pick<TeamAgentRunBoardResponse, 'activeRunsHasMore' | 'finishedRunsHasMore' | 'startedWorkItemsHasMore'>): boolean {
   return board.activeRunsHasMore || board.finishedRunsHasMore || board.startedWorkItemsHasMore
+}
+
+/**
+ * Puts a run returned by a committed release in place of the same run on a loaded board, so the
+ * board shows the release even when reading it again fails.
+ *
+ * @param board - Loaded board, if any.
+ * @param released - Run returned by the release.
+ * @returns The board with the run replaced, or the board unchanged when it does not show that run.
+ */
+export function applyReleasedRunToBoard(
+  board: TeamAgentRunBoardResponse | undefined,
+  released: AgentRunView,
+): TeamAgentRunBoardResponse | undefined {
+  if (!board?.items.some((item) => item.run?.runId === released.runId)) return board
+  return {
+    ...board,
+    items: board.items.map((item) => item.run?.runId === released.runId ? { ...item, run: released } : item),
+  }
 }

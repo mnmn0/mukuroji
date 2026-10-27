@@ -9,6 +9,7 @@ import {
   factoryBoardFixtureProjectNames,
 } from '../src/features/factory-board/fixtures'
 import {
+  applyReleasedRunToBoard,
   defaultFactoryBoardFilters,
   filterFactoryBoardItems,
   groupFactoryBoardItems,
@@ -122,6 +123,19 @@ describe('Factory board lanes', () => {
     const groups = groupFactoryBoardItems(factoryBoardFixtureItems, now)
     expect(groups.map((group) => group.lane)).toEqual(['processing', 'no-run', 'decision', 'stalled', 'failed', 'completed'])
     expect(groups[0]?.items.map((item) => item.workItem.id)).toEqual(['auth-flow', 'release-notes'])
+  })
+
+  test('shows a committed release on the loaded board without reading it again', () => {
+    const active = fixtureItem('auth-flow')
+    if (!active.run) throw new Error('The fixture item has a run.')
+    const released = { ...active.run, state: 'finished' as const, outcome: 'released' as const, finishedAt: '2026-10-22T01:45:00.000Z', finishedBy: 'sato@example.com', canRelease: false }
+    const board = applyReleasedRunToBoard(factoryBoardFixture, released)
+    const item = board?.items.find((candidate) => candidate.workItem.id === 'auth-flow')
+    expect(item?.run).toEqual(released)
+    expect(item && classifyFactoryBoardItem(item, now)).toBe('no-run')
+    expect(board?.items.filter((candidate) => candidate.workItem.id !== 'auth-flow')).toEqual(factoryBoardFixture.items.filter((candidate) => candidate.workItem.id !== 'auth-flow'))
+    expect(applyReleasedRunToBoard(factoryBoardFixture, { ...released, runId: 'run_other' })).toBe(factoryBoardFixture)
+    expect(applyReleasedRunToBoard(undefined, released)).toBeUndefined()
   })
 
   test('keeps selected filter choices listed after a refresh removes their last item', () => {
