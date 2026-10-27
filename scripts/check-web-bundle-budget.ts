@@ -22,6 +22,11 @@ export interface BundleBudget {
   readonly rules: readonly BundleBudgetRule[]
   /** Maximum gzip size in KiB for all JavaScript and CSS files together. */
   readonly totalJavaScriptAndCssGzipKiB: number
+  /**
+   * Maximum gzip size in KiB for the JavaScript and CSS that `index.html` loads before the first
+   * render: its scripts, module preloads, and stylesheets. Route chunks load later.
+   */
+  readonly initialJavaScriptAndCssGzipKiB: number
 }
 
 /**
@@ -56,11 +61,15 @@ export function parseBundleBudget(value: unknown): BundleBudget {
   }
   const rules: unknown = Reflect.get(value, 'rules')
   const total: unknown = Reflect.get(value, 'totalJavaScriptAndCssGzipKiB')
+  const initial: unknown = Reflect.get(value, 'initialJavaScriptAndCssGzipKiB')
   if (!Array.isArray(rules) || rules.length === 0) {
     throw new Error('Bundle budget must define at least one rule.')
   }
   if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
     throw new Error('totalJavaScriptAndCssGzipKiB must be a positive number.')
+  }
+  if (typeof initial !== 'number' || !Number.isFinite(initial) || initial <= 0) {
+    throw new Error('initialJavaScriptAndCssGzipKiB must be a positive number.')
   }
   return {
     rules: rules.map((rule: unknown, index) => {
@@ -74,7 +83,30 @@ export function parseBundleBudget(value: unknown): BundleBudget {
       return { name, pattern, maxGzipKiB }
     }),
     totalJavaScriptAndCssGzipKiB: total,
+    initialJavaScriptAndCssGzipKiB: initial,
   }
+}
+
+/**
+ * Lists the built files that `index.html` loads before the first render.
+ *
+ * These are scripts with a `src` (the module entry and render-blocking scripts), module preloads,
+ * and stylesheets; chunks imported later by route `lazy` functions are not listed.
+ *
+ * @param html - Built `index.html` content.
+ * @returns Paths relative to the build directory, using `/` separators.
+ */
+export function readInitialAssetPaths(html: string): string[] {
+  const paths = new Set<string>()
+  for (const tag of html.match(/<(?:script|link)\b[^>]*>/giu) ?? []) {
+    const isScript = /^<script\b/iu.test(tag)
+    const isPreloadOrStyle = /^<link\b/iu.test(tag) && /\brel="(?:modulepreload|stylesheet)"/iu.test(tag)
+    if (!isScript && !isPreloadOrStyle) continue
+    const url = /\b(?:src|href)="([^"]+)"/iu.exec(tag)?.[1]
+    // External URLs, such as web fonts, are not part of the build output.
+    if (url && !/^[a-z][a-z\d+.-]*:|^\/\//iu.test(url)) paths.add(url.replace(/^\.?\//u, ''))
+  }
+  return [...paths]
 }
 
 /**
@@ -85,11 +117,13 @@ export function parseBundleBudget(value: unknown): BundleBudget {
  *
  * @param files - Measured built files.
  * @param budget - Committed budget.
+ * @param initialPaths - Files loaded before the first render, from {@link readInitialAssetPaths}.
  * @returns Report lines and violations.
  */
 export function checkBundleBudget(
   files: readonly BuiltFileSize[],
   budget: BundleBudget,
+  initialPaths: readonly string[],
 ): BundleBudgetReport {
   const lines: string[] = []
   const violations: string[] = []
@@ -112,6 +146,21 @@ export function checkBundleBudget(
   lines.push(`total JS and CSS: ${totalKiB.toFixed(1)} / ${budget.totalJavaScriptAndCssGzipKiB} KiB gzip`)
   if (totalKiB > budget.totalJavaScriptAndCssGzipKiB) {
     violations.push(`Total JS and CSS ${totalKiB.toFixed(1)} KiB gzip exceeds ${budget.totalJavaScriptAndCssGzipKiB} KiB.`)
+  }
+  const sizes = new Map(files.map((file) => [file.path, file.gzipBytes]))
+  let initialBytes = 0
+  for (const path of initialPaths) {
+    const gzipBytes = sizes.get(path)
+    if (gzipBytes === undefined) {
+      violations.push(`${path}: loaded by index.html but missing from the build output.`)
+    } else if (/\.(?:m?js|css)$/u.test(path)) {
+      initialBytes += gzipBytes
+    }
+  }
+  const initialKiB = initialBytes / 1024
+  lines.push(`initial JS and CSS: ${initialKiB.toFixed(1)} / ${budget.initialJavaScriptAndCssGzipKiB} KiB gzip`)
+  if (initialKiB > budget.initialJavaScriptAndCssGzipKiB) {
+    violations.push(`Initial JS and CSS ${initialKiB.toFixed(1)} KiB gzip exceeds ${budget.initialJavaScriptAndCssGzipKiB} KiB.`)
   }
   return { lines, violations }
 }
@@ -150,7 +199,8 @@ if (import.meta.main) {
   const buildDirectory = process.argv[2] ?? 'web/dist'
   const budgetPath = process.argv[3] ?? 'web/performance-budget.json'
   const budgetJson: unknown = JSON.parse(readFileSync(budgetPath, 'utf8'))
-  const report = checkBundleBudget(measureBuiltFiles(buildDirectory), parseBundleBudget(budgetJson))
+  const initialPaths = readInitialAssetPaths(readFileSync(join(buildDirectory, 'index.html'), 'utf8'))
+  const report = checkBundleBudget(measureBuiltFiles(buildDirectory), parseBundleBudget(budgetJson), initialPaths)
   for (const line of report.lines) console.log(line)
   if (report.violations.length > 0) {
     for (const violation of report.violations) console.error(`Budget exceeded: ${violation}`)
