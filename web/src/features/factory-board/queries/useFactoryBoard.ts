@@ -13,7 +13,8 @@ const factoryBoardReportsRefreshInterval = 30_000
 
 /**
  * Reads a Team's Factory board, again when the window regains focus and at a slow interval. There is
- * no realtime delivery.
+ * no realtime delivery. Previous data is kept while the access token rotates; callers mount one
+ * instance per Team so a board never stays visible under another Team.
  *
  * @param accessToken - Session access token; reading is skipped without it.
  * @param teamId - Team ID; reading is skipped without it.

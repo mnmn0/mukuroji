@@ -11,13 +11,33 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 /**
  * Renders one Team's Factory board inside the persistent Workspace shell.
  *
+ * The board is keyed by Team, so moving to another Team's board starts with no board, selection, or
+ * reports from the previous Team, even when its first read fails.
+ *
  * @returns Factory board content.
  */
 export function TeamFactoryBoardPage() {
+  const teamId = useParams().teamId
+  return <TeamFactoryBoardContent key={teamId} teamId={teamId} />
+}
+
+/**
+ * Props of one Team's board content.
+ */
+type TeamFactoryBoardContentProps = {
+  /** Team whose board is shown; every read and action uses it. */
+  teamId: string | undefined
+}
+
+/**
+ * Reads and shows one Team's board, its selected Work Item's reports, and the release action.
+ *
+ * @param props - Team of the board.
+ * @returns Factory board content.
+ */
+function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
-  const params = useParams()
-  const teamId = params.teamId
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string>()
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
@@ -47,7 +67,6 @@ export function TeamFactoryBoardPage() {
             : createTeamIssuesPath(teamId ?? '', item.workItem.id)}
           isLoading={board.isLoading}
           isRefreshing={board.isValidating}
-          key={teamId}
           labels={labels}
           onNavigate={(href) => { void navigate(href) }}
           onRefresh={() => { void board.mutate() }}
