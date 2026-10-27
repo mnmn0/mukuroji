@@ -112,4 +112,24 @@ describe('acceptance criteria editor', () => {
     expect(markup).toContain(`form="editor" type="hidden" name="${ACCEPTANCE_CRITERIA_DRAFT_FORM_FIELD}"`)
     expect(markup).toContain('Save changes to save the acceptance criteria as well.')
   })
+
+  test('marks the text field of the row at fault invalid and points it at the error message', () => {
+    const rows = [
+      { key: 'kept', text: 'Tests pass', satisfied: false },
+      { key: 'blank', text: '', satisfied: false },
+    ]
+    const markup = renderToStaticMarkup(
+      <WorkItemAcceptanceCriteriaEditor
+        criteria={[]}
+        draftState={{ draft: { nextRowNumber: 1, rows, submitError: { error: 'missing-text', rowKey: 'blank' } }, setDraft: () => undefined }}
+        formId="editor"
+        locale="en"
+      />,
+    )
+    const errorId = /<p[^>]*id="([^"]+)"[^>]*role="alert"/u.exec(markup)?.[1]
+    expect(errorId).toBeDefined()
+    expect(markup.match(/aria-invalid="true"/gu)).toHaveLength(1)
+    expect(markup).toContain(`aria-describedby="${errorId}" aria-invalid="true"`)
+    expect(markup).not.toContain('<fieldset aria-invalid')
+  })
 })

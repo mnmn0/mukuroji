@@ -49,6 +49,8 @@ export function WorkItemAcceptanceCriteriaEditor({
 }: WorkItemAcceptanceCriteriaEditorProps) {
   const t = createTranslator(locale)
   const headingId = useId()
+  // The row at fault points its text field at the error message.
+  const errorId = `${headingId}-error`
   const { draft, setDraft } = draftState
   const { rows, submitError } = draft
   const canEdit = !readOnly && formId !== undefined
@@ -163,7 +165,6 @@ export function WorkItemAcceptanceCriteriaEditor({
             const hasRowError = submitError?.rowKey === row.key
             return (
               <fieldset
-                aria-invalid={hasRowError || undefined}
                 className={`grid min-w-0 gap-2 rounded-md border p-2 ${
                   hasRowError ? 'border-[var(--workbench-danger)]' : 'border-[var(--workbench-border)]'
                 }`}
@@ -174,6 +175,8 @@ export function WorkItemAcceptanceCriteriaEditor({
                 <label className="grid min-w-0 gap-1 text-xs font-semibold text-[var(--workbench-text)]">
                   {rowLabel}
                   <textarea
+                    aria-describedby={hasRowError ? errorId : undefined}
+                    aria-invalid={hasRowError || undefined}
                     className="workbench-input min-h-16 w-full min-w-0 px-2 py-1.5 text-sm"
                     onChange={(event) => updateRow(row.key, { text: event.target.value })}
                     value={row.text}
@@ -227,7 +230,7 @@ export function WorkItemAcceptanceCriteriaEditor({
             />
           ) : null}
           {submitError ? (
-            <p className="text-sm font-semibold text-[var(--workbench-danger)]" role="alert">
+            <p className="text-sm font-semibold text-[var(--workbench-danger)]" id={errorId} role="alert">
               {t(`workItems.acceptanceCriteria.error.${submitError.error}`)}
             </p>
           ) : (
