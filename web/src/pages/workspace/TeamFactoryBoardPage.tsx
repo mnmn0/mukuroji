@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
+import { applyReleasedRunToBoard } from '../../features/factory-board/model/factoryBoard'
 import { useReleaseFactoryBoardRun } from '../../features/factory-board/mutations/useReleaseFactoryBoardRun'
 import { useFactoryBoardReports, useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
 import { FactoryBoard } from '../../features/factory-board/ui/FactoryBoard'
@@ -44,7 +45,11 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const accessToken = enabled ? workspace.accessToken : undefined
   const board = useTeamAgentRunBoard(accessToken, teamId)
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
-  const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, () => Promise.all([board.mutate(), reports.mutate()]))
+  const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
+    // Show the committed release from the response, so a failed refresh cannot bring back the active run.
+    await board.mutate((current) => applyReleasedRunToBoard(current, released), { revalidate: false })
+    void Promise.all([board.mutate(), reports.mutate()]).catch(() => undefined)
+  })
   const labels = useMemo(() => createFactoryBoardLabels(workspace.locale), [workspace.locale])
   const formatDateTime = useMemo(() => {
     const formatter = new Intl.DateTimeFormat(workspace.locale === 'ja' ? 'ja-JP' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' })

@@ -5,26 +5,26 @@ import { releaseAgentRun } from '../../../work-items/api/agentRuns'
 
 /**
  * Creates the board's release action. A retry of the same run reuses its idempotency context, and
- * the board is read again after the release commits.
+ * the released run from the response is handed to `onReleased` once the release commits.
  *
  * @param accessToken - Session access token; releasing is unavailable without it.
  * @param teamId - Team that owns the runs.
- * @param onReleased - Reads the board again after a committed release; its failure never reports the release as failed.
+ * @param onReleased - Shows the released run and reads the board again; its failure never reports the release as failed.
  * @returns Release action, or undefined when it cannot be sent.
  */
 export function useReleaseFactoryBoardRun(
   accessToken: string | undefined,
   teamId: string | undefined,
-  onReleased: () => Promise<unknown>,
+  onReleased: (released: AgentRunView) => Promise<unknown>,
 ): ((run: AgentRunView) => Promise<void>) | undefined {
   const mutationRunner = useMemo(() => createMutationRequestRunner(), [])
   if (!accessToken || !teamId) return undefined
   return async (run) => {
-    await mutationRunner.run(
+    const released = await mutationRunner.run(
       `agent-run:release:${teamId}:${run.runId}`,
       run.runId,
       (context) => releaseAgentRun(accessToken, teamId, run.runId, context),
     )
-    void onReleased().catch(() => undefined)
+    await onReleased(released).catch(() => undefined)
   }
 }
