@@ -600,7 +600,22 @@ Slice 3 は 3 つの変更に分けて入れる。
   - Run なし: 上のどれにも入らない `started` の Work Item（Run がない、または最新 Run が `released` など）。
 - filter（runtime、assignee、Project）は Web で行う。応答は上の上限で有界なため、query parameter は
   設けない。
-- 次の変更: Web の Factory board 画面。
+- 実装済み（Web）: Team の `/teams/{teamId}/factory` に Factory board を置き、サイドバーの Team view に
+  入口を足した。lane は応答の `generatedAt` を基準に `classifyFactoryBoardItem` で分け、lease 残り時間も
+  同じ時刻で表示する。端末の時計のずれで lane が server の判定と食い違わないためである。Run なしは
+  処理中 lane の末尾に区切って出す。tile は Work Item title、agent 名と runtime、最新 report の kind・
+  検証件数・本文の抜粋、lease 残り時間または終了時刻を表示し、進捗率は出さない。
+- 再取得は focus 時、60 秒ごと、再読み込み操作で行う。board の読み取りは Work Item の Run パネル
+  （30 秒）より重いため間隔を長くした。読み込み失敗は空の board ではなく error と再試行で示し、
+  取得済みの board がある場合はそれを残したまま error を出す。上限に達した場合は欠けうることを示す。
+- detail は既存の `GET .../agent-run-reports`（新しい 100 件）から選んだ Run の report を時系列で表示し、
+  検証結果と成果物 link は Work Item の comment と同じ chip を使う。report ごとの本文は comment にあるため
+  detail には最新 report の抜粋だけを出し、全文は「Work Item を開く」から読む。解放は Work Item 詳細と
+  同じ確認と API を使い、`canRelease` の `active` Run にだけ出す。
+- desktop は lane の横に detail を置き、phone は lane を縦に積み、tile を選ぶと detail に切り替わって
+  「一覧に戻る」で元の tile に戻る。Storybook で 1440×900 と 390×844 を確認し、横方向の overflow がない
+  ことを確かめた。
+- assignee filter は member の公開 ID（メールアドレス）で表示する。表示名の解決は後続の変更とする。
 
 ## 後続 Phase
 

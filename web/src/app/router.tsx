@@ -24,6 +24,7 @@ import { TeamIssuePage } from '../pages/workspace/TeamIssuePage'
 import { TeamMembersPage } from '../pages/workspace/TeamMembersPage'
 import { TeamOverviewPage } from '../pages/workspace/TeamOverviewPage'
 import { TeamTriagePage } from '../pages/workspace/TeamTriagePage'
+import { TeamFactoryBoardPage } from '../pages/workspace/TeamFactoryBoardPage'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
@@ -114,6 +115,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/teams/:teamId/triage',
                 element: <TeamTriagePage />,
+              },
+              {
+                path: '/teams/:teamId/factory',
+                element: <TeamFactoryBoardPage />,
               },
               {
                 path: '/teams/:teamId/projects',

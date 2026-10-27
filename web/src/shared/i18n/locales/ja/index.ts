@@ -21,6 +21,7 @@ import { customersMessages } from './customers'
 import { codingAgentMessages } from './coding-agent'
 import { codingAgentGuideMessages } from './coding-agent-guide'
 import { collectionsMessages } from './collections'
+import { factoryBoardMessages } from './factory-board'
 
 /**
  * Complete Japanese message dictionary assembled from domain modules.
@@ -50,6 +51,7 @@ export const jaMessages = {
   ...codingAgentMessages,
   ...codingAgentGuideMessages,
   ...collectionsMessages,
+  ...factoryBoardMessages,
 } as const
 
 /**

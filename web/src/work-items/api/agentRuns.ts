@@ -9,11 +9,16 @@ import {
   type AgentRunRuntime,
   type AgentRunVerification,
   type AgentRunView,
+  type FactoryBoardItem,
+  type FactoryBoardReportSummary,
+  type FactoryBoardWorkItem,
+  type TeamAgentRunBoardResponse,
   type WorkItemAgentRunReportsResponse,
   type WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
 import { isNonnegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import { isWorkItemStatusCategory } from './contractValidation'
 import { WorkItemConfigurationApiError } from './errors'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/+$/, '')
@@ -73,6 +78,128 @@ export async function listWorkItemAgentRunReports(
     throw new WorkItemConfigurationApiError(502, 'Agent Run reports returned an unexpected response.')
   }
   return { items: reports, hasMore: data.hasMore }
+}
+
+/**
+ * Reads the Factory board of a Team: Work Items with their active or newest run and that run's
+ * latest report summary. A malformed item fails the whole response instead of being dropped, so the
+ * board never looks emptier than it is.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team ID.
+ * @returns Board items and the read bounds the server reached.
+ */
+export async function getTeamAgentRunBoard(accessToken: string, teamId: string): Promise<TeamAgentRunBoardResponse> {
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs`, accessToken)
+  const board = readTeamAgentRunBoard(data)
+  if (!board) throw new WorkItemConfigurationApiError(502, 'The Factory board returned an unexpected response.')
+  return board
+}
+
+/**
+ * Validates a Factory board response.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The board, or undefined when any part of it is not supported.
+ */
+function readTeamAgentRunBoard(value: unknown): TeamAgentRunBoardResponse | undefined {
+  if (!isRecord(value) || !Array.isArray(value.items)) return undefined
+  const { generatedAt, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore } = value
+  if (
+    typeof generatedAt !== 'string' || !Number.isFinite(Date.parse(generatedAt)) ||
+    typeof activeRunsHasMore !== 'boolean' || typeof finishedRunsHasMore !== 'boolean' ||
+    typeof startedWorkItemsHasMore !== 'boolean'
+  ) {
+    return undefined
+  }
+  const items: FactoryBoardItem[] = []
+  for (const candidate of value.items) {
+    const item = readFactoryBoardItem(candidate)
+    if (!item) return undefined
+    items.push(item)
+  }
+  return { generatedAt, items, activeRunsHasMore, finishedRunsHasMore, startedWorkItemsHasMore }
+}
+
+/**
+ * Validates one Factory board item. Its run and report must describe its own Work Item.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The item, or undefined when the shape is not supported.
+ */
+function readFactoryBoardItem(value: unknown): FactoryBoardItem | undefined {
+  if (!isRecord(value)) return undefined
+  const workItem = readFactoryBoardWorkItem(value.workItem)
+  const run = value.run === undefined ? undefined : readAgentRunView(value.run)
+  const latestReport = value.latestReport === undefined ? undefined : readFactoryBoardReportSummary(value.latestReport)
+  if (
+    !workItem || (value.run !== undefined && !run) || (value.latestReport !== undefined && !latestReport) ||
+    (run !== undefined && run.workItemId !== workItem.id) ||
+    (latestReport !== undefined && latestReport.runId !== run?.runId)
+  ) {
+    return undefined
+  }
+  return { workItem, ...(run ? { run } : {}), ...(latestReport ? { latestReport } : {}) }
+}
+
+/**
+ * Validates the Work Item part of a Factory board item.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The Work Item facts, or undefined when the shape is not supported.
+ */
+function readFactoryBoardWorkItem(value: unknown): FactoryBoardWorkItem | undefined {
+  if (!isRecord(value)) return undefined
+  const { id, title, workflowStatusId, statusCategory, assignedProjectId, assigneeUserId } = value
+  if (
+    typeof id !== 'string' || id === '' || typeof title !== 'string' ||
+    typeof workflowStatusId !== 'string' || workflowStatusId === '' || !isWorkItemStatusCategory(statusCategory) ||
+    (assignedProjectId !== undefined && (typeof assignedProjectId !== 'string' || assignedProjectId === '')) ||
+    typeof assigneeUserId !== 'string'
+  ) {
+    return undefined
+  }
+  return {
+    id,
+    title,
+    workflowStatusId,
+    statusCategory,
+    ...(assignedProjectId === undefined ? {} : { assignedProjectId }),
+    assigneeUserId,
+  }
+}
+
+/**
+ * Validates the latest report summary of a Factory board item.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The summary, or undefined when the shape is not supported.
+ */
+function readFactoryBoardReportSummary(value: unknown): FactoryBoardReportSummary | undefined {
+  if (!isRecord(value) || !isRecord(value.verificationCounts)) return undefined
+  const { runId, sequence, createdAt, excerpt, artifactCount, changedFileCount } = value
+  const { passed, failed, skipped } = value.verificationCounts
+  const kind = AGENT_RUN_REPORT_KINDS.find((candidate) => candidate === value.kind)
+  if (
+    typeof runId !== 'string' || runId === '' || !isPositiveSafeInteger(sequence) || !kind ||
+    typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt)) ||
+    (excerpt !== undefined && (typeof excerpt !== 'string' || excerpt === '')) ||
+    !isNonnegativeSafeInteger(passed) || !isNonnegativeSafeInteger(failed) || !isNonnegativeSafeInteger(skipped) ||
+    !isNonnegativeSafeInteger(artifactCount) ||
+    (changedFileCount !== undefined && !isNonnegativeSafeInteger(changedFileCount))
+  ) {
+    return undefined
+  }
+  return {
+    runId,
+    sequence,
+    kind,
+    createdAt,
+    ...(excerpt === undefined ? {} : { excerpt }),
+    verificationCounts: { passed, failed, skipped },
+    artifactCount,
+    ...(changedFileCount === undefined ? {} : { changedFileCount }),
+  }
 }
 
 /**
