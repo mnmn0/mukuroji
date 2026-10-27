@@ -318,24 +318,30 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // Contributors are internal planning data and are documented as excluded from exports.
-    items: page.issues.map(omitWorkItemContributors),
+    // Contributors are internal planning data, and acceptance criteria have their own endpoint
+    // because the public Work Item schema is closed, so both are excluded from export rows.
+    items: page.issues.map(omitWorkItemExportExcludedFields),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
 }
 
 /**
- * Removes contributor assignments from a Work Item export row.
+ * Removes contributor assignments and acceptance criteria from a Work Item export row.
  *
  * @param workItem - Work Item read for the export page.
- * @returns The Work Item without its contributor assignments.
+ * @returns The Work Item without the fields excluded from exports.
  */
-function omitWorkItemContributors<T extends { readonly contributorAssignments?: unknown }>(
-  workItem: T,
-): Omit<T, 'contributorAssignments'> {
-  const { contributorAssignments: _contributorAssignments, ...exported } = workItem
+function omitWorkItemExportExcludedFields<
+  T extends { readonly contributorAssignments?: unknown; readonly acceptanceCriteria?: unknown },
+>(workItem: T): Omit<T, 'contributorAssignments' | 'acceptanceCriteria'> {
+  const {
+    contributorAssignments: _contributorAssignments,
+    acceptanceCriteria: _acceptanceCriteria,
+    ...exported
+  } = workItem
   void _contributorAssignments
+  void _acceptanceCriteria
   return exported
 }
 

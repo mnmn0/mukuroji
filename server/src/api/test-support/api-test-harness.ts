@@ -1372,7 +1372,7 @@ function configureFakeProjectClients(
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
-    /** Acceptance criteria the detail fake returns. */
+    /** Acceptance criteria the detail fake and the first listed Work Item return. */
     detailAcceptanceCriteria?: WorkItemAcceptanceCriterion[]
     /** Detail fake が返す現在の canonical schedule です。 */
     detailSchedule?: WorkItemSchedule
@@ -1649,6 +1649,9 @@ function configureFakeProjectClients(
       assigneeUserId: 'sato@example.com',
       ...(index === 0 && options.issueContributorAssignments
         ? { contributorAssignments: options.issueContributorAssignments }
+        : {}),
+      ...(index === 0 && options.detailAcceptanceCriteria
+        ? { acceptanceCriteria: options.detailAcceptanceCriteria }
         : {}),
       creatorMemberKey: 'demo@example.com',
       workflowSchemaVersion: 1 as const,
