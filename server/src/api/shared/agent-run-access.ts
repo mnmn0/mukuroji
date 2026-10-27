@@ -486,7 +486,8 @@ export function withVisibleProjectBriefs(
  * Maps values with at most a fixed number of concurrent calls, keeping the input order.
  *
  * Each worker takes the next value as soon as its call finishes, so one slow call delays only its
- * own worker instead of a whole batch.
+ * own worker instead of a whole batch. When a call rejects, calls already in flight finish but no
+ * new call starts, and the returned promise rejects with the first error.
  *
  * @param values - Values to map.
  * @param concurrency - Largest number of calls in flight.
@@ -501,9 +502,19 @@ export async function mapInOrderWithConcurrency<T, R>(
   // Boxed so a mapped value that is itself undefined stays distinguishable from a missing one.
   const results = new Map<number, { value: R }>()
   const entries = values.entries()
-  /** Maps values taken from the shared iterator until none remain. */
+  // After one call rejects, the result is already lost, so no worker starts another call.
+  let failed = false
+  /** Maps values taken from the shared iterator until none remain or a call rejects. */
   const work = async () => {
-    for (const [index, value] of entries) results.set(index, { value: await map(value) })
+    for (const [index, value] of entries) {
+      if (failed) return
+      try {
+        results.set(index, { value: await map(value) })
+      } catch (error) {
+        failed = true
+        throw error
+      }
+    }
   }
   await Promise.all(Array.from({ length: Math.min(Math.max(concurrency, 1), values.length) }, work))
   return values.map((_, index) => {
