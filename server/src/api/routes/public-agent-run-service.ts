@@ -42,6 +42,7 @@ import {
   commitProgressFencedClose,
   createAgentRunAuditPut,
   isAgentRunFenceConflict,
+  mapInOrderWithConcurrency,
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
@@ -268,26 +269,6 @@ async function createHolderConflict(principal: WorkspacePrincipal, teamId: strin
 
 /** Concurrent reads per run listing page. */
 const listReadConcurrency = 10
-
-/**
- * Maps values with at most a fixed number of concurrent calls, keeping the input order.
- *
- * @param values - Values to map.
- * @param concurrency - Largest number of calls in flight.
- * @param map - Asynchronous mapping.
- * @returns Mapped values in input order.
- */
-async function mapInOrderWithConcurrency<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  map: (value: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = []
-  for (let index = 0; index < values.length; index += concurrency) {
-    results.push(...await Promise.all(values.slice(index, index + concurrency).map(map)))
-  }
-  return results
-}
 
 /**
  * Reads the Project a Work Item is assigned to from the committed Work Item, so a move to another

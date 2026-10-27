@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { classifyFactoryBoardItem, type TeamAgentRunBoardResponse } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemService } from './api-router'
 import {
@@ -6,6 +7,7 @@ import {
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
   createAgentRunCommitConflictError,
+  createAgentRunIntegrityError,
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
@@ -32,6 +34,8 @@ const {
   app,
   configureFakeProjectClients,
   createCollaborationStub,
+  createTeamIssuesFake,
+  getTestAppDependencies,
   resetTestApp,
   runWithTestAppDependencies,
   setTestAppDependencies,
@@ -1574,5 +1578,306 @@ describe('Web Agent Run routes', () => {
       method: 'PUT', headers, body: JSON.stringify({ expectedRevision: 0, leaseMinutes: 60, allowTakeoverAfterLeaseExpiry: false }),
     })
     expect(response.status).toBe(403)
+  })
+})
+
+describe('Factory board route', () => {
+  const headers = { Authorization: 'Bearer test-token' }
+  const hourMs = 3_600_000
+
+  /** Work Item the board fakes return. */
+  type BoardWorkItem = {
+    /** Work Item ID. */
+    id: string
+    /** Status category. */
+    statusCategory: 'unstarted' | 'started' | 'completed'
+    /** Assigned Project, if any. */
+    assignedProjectId?: string
+  }
+
+  /**
+   * Configures a member who can see Project `refero` but not `secret`, the given Work Items for both
+   * the updated-at page and strong detail reads, and comments for report excerpts.
+   *
+   * @param workItems - Work Items of the Team.
+   * @param comments - Comment bodies by comment ID; a deleted comment keeps its body and a deletion time.
+   * @returns The Agent Run store and the recorded Work Item page reads.
+   */
+  function configureBoard(workItems: BoardWorkItem[], comments: Record<string, { body: string; deletedAt?: string }> = {}) {
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ role: 'member' })
+    projectOptions.teamProjects = [{ id: 'refero', name: 'Refero', tone: 'blue' }, { id: 'secret', name: 'Secret', tone: 'green' }]
+    projectOptions.projectAccesses = [{ projectId: 'refero', role: 'member' }]
+    const base = getTestAppDependencies().workItems.teamIssues
+    const pageReads: number[] = []
+    /**
+     * Builds the stored form of one fixture Work Item from the harness detail.
+     *
+     * @param workItem - Fixture Work Item.
+     * @returns Work Item response item.
+     */
+    const toIssue = async (workItem: BoardWorkItem) => {
+      const { issue } = await base.getTeamIssueDetail(workspaceId, 'core-team', workItem.id)
+      const { assignedProjectId: _assignedProjectId, ...rest } = issue
+      return {
+        ...rest,
+        title: `Title of ${workItem.id}`,
+        assigneeUserId: 'demo@example.com',
+        statusCategory: workItem.statusCategory,
+        workflowStatusId: workItem.statusCategory === 'started' ? 'in-progress' : workItem.statusCategory === 'completed' ? 'done' : 'todo',
+        ...(workItem.assignedProjectId === undefined ? {} : { assignedProjectId: workItem.assignedProjectId }),
+      }
+    }
+    setTestAppDependencies({
+      teamIssues: createTeamIssuesFake({
+        ...base,
+        async getPublicWorkItemPage(_directoryId, _teamId, options) {
+          pageReads.push(options.limit)
+          return { issues: await Promise.all(workItems.slice(0, options.limit).map(toIssue)) }
+        },
+        async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+          const workItem = workItems.find((candidate) => candidate.id === issueId)
+          if (!workItem) throw { status: 404, code: 'TeamIssueNotFound', message: 'Issue was not found.' }
+          const detail = await base.getTeamIssueDetail(directoryId, teamId, issueId, options)
+          return { ...detail, issue: await toIssue(workItem) }
+        },
+      }),
+      collaboration: createCollaborationStub({
+        /**
+         * Returns the fixture comment with the given ID.
+         *
+         * @param input - Comment lookup.
+         * @returns The comment, or undefined when the fixture has none.
+         */
+        async getCommentSnapshot(input) {
+          const comment = comments[input.commentId]
+          if (comment === undefined) return undefined
+          return {
+            id: input.commentId, rootCommentId: input.commentId, authorMemberKey: 'demo@example.com', bodyMarkdown: comment.body,
+            version: 1, mentionMemberKeys: [], createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z',
+            ...(comment.deletedAt === undefined ? {} : { deletedAt: comment.deletedAt }), reactions: [], acceptedResolutions: [],
+          }
+        },
+      }),
+    })
+    return { store, pageReads }
+  }
+
+  /**
+   * Creates a run of the fixture member on a Work Item, started at a given time.
+   *
+   * @param workItemId - Work Item ID.
+   * @param startedAt - Start time.
+   * @returns Active run.
+   */
+  function createRunAt(workItemId: string, startedAt: Date): StoredAgentRun {
+    return createActiveAgentRun({
+      directoryId: workspaceId,
+      teamId: 'core-team',
+      workItemId,
+      assigneeUserId: 'demo@example.com',
+      start: readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'claude-code', agentName: 'Claude Code', instanceId: 'laptop-1' }),
+      credentialId: 'agent-key',
+      startRevision: 2,
+      leaseMinutes: 30,
+      now: startedAt,
+    })
+  }
+
+  /**
+   * Reads the board and returns each Work Item's lane at the response time.
+   *
+   * @returns Parsed response and lanes by Work Item ID.
+   */
+  async function readBoard() {
+    const response = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })
+    expect(response.status).toBe(200)
+    const body: TeamAgentRunBoardResponse = await response.json()
+    const lanes = Object.fromEntries(body.items.map((item) => [item.workItem.id, classifyFactoryBoardItem(item, new Date(body.generatedAt))]))
+    return { body, lanes }
+  }
+
+  test('returns the facts of every lane in one bounded response', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-processing', statusCategory: 'started', assignedProjectId: 'refero' },
+      { id: 'task-stalled', statusCategory: 'started' },
+      { id: 'task-blocked', statusCategory: 'started' },
+      { id: 'task-paused', statusCategory: 'started' },
+      { id: 'task-failed', statusCategory: 'started' },
+      { id: 'task-old-failure', statusCategory: 'unstarted' },
+      { id: 'task-closed-failure', statusCategory: 'completed' },
+      { id: 'task-retried', statusCategory: 'started' },
+      { id: 'task-done', statusCategory: 'completed' },
+      { id: 'task-old-done', statusCategory: 'completed' },
+      { id: 'task-released', statusCategory: 'started' },
+      { id: 'task-runless', statusCategory: 'started' },
+      { id: 'task-waiting', statusCategory: 'unstarted' },
+    ], { cmt_blocker: { body: '[Claude Code]\n\nNeed a decision on the schema.' } })
+    const processing = createRunAt('task-processing', new Date(now - 60_000))
+    store.seed(processing)
+    store.seed({ ...createRunAt('task-stalled', new Date(now - 2 * hourMs)), leaseExpiresAt: new Date(now - hourMs).toISOString() })
+    const blocked = { ...createRunAt('task-blocked', new Date(now - 60_000)), reportCount: 1, lastReportKind: 'blocker' as const, lastReportAt: new Date(now).toISOString() }
+    store.seed(blocked)
+    store.state.reports.set(`${workspaceId}|core-team|${blocked.runId}|1`, {
+      schemaVersion: 1, runId: blocked.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-blocked', sequence: 1,
+      kind: 'blocker', commentId: 'cmt_blocker', verifications: [{ command: 'bun test', status: 'failed' }, { command: 'bun lint', status: 'passed' }],
+      artifacts: [{ type: 'branch', url: 'https://github.com/example/repo/tree/topic' }], changedFileCount: 3,
+      createdAt: new Date(now).toISOString(), createdBy: 'demo@example.com',
+    })
+    store.seed(finishAgentRun(createRunAt('task-paused', new Date(now - 3 * hourMs)), 'paused', 'agent', new Date(now - 2 * hourMs)))
+    // A failure stays on the board without a time limit while the Work Item is started.
+    store.seed(finishAgentRun(createRunAt('task-failed', new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
+    // An old failure stays on the board after the Work Item left the started category.
+    store.seed(finishAgentRun(createRunAt('task-old-failure', new Date(now - 60 * hourMs)), 'failed', 'agent', new Date(now - 59 * hourMs)))
+    // A completed Work Item shows its failure only within the completed-lane window.
+    store.seed(finishAgentRun(createRunAt('task-closed-failure', new Date(now - 60 * hourMs)), 'failed', 'agent', new Date(now - 59 * hourMs)))
+    // A failure followed by a newer run is not shown as failed.
+    store.seed(finishAgentRun(createRunAt('task-retried', new Date(now - 3 * hourMs)), 'failed', 'agent', new Date(now - 2 * hourMs)))
+    const retry = createRunAt('task-retried', new Date(now - 60_000))
+    store.seed(retry)
+    store.seed(finishAgentRun(createRunAt('task-done', new Date(now - 2 * hourMs)), 'completed', 'agent', new Date(now - hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-old-done', new Date(now - 31 * hourMs)), 'completed', 'agent', new Date(now - 30 * hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-released', new Date(now - 2 * hourMs)), 'released', 'demo@example.com', new Date(now - hourMs)))
+
+    const { body, lanes } = await readBoard()
+    expect(lanes).toEqual({
+      'task-processing': 'processing',
+      'task-stalled': 'stalled',
+      'task-blocked': 'decision',
+      'task-paused': 'decision',
+      'task-failed': 'failed',
+      'task-old-failure': 'failed',
+      'task-retried': 'processing',
+      'task-done': 'completed',
+      'task-released': 'no-run',
+      'task-runless': 'no-run',
+    })
+    expect(body).toMatchObject({ activeRunsHasMore: false, finishedRunsHasMore: false, startedWorkItemsHasMore: false })
+    const byId = new Map(body.items.map((item) => [item.workItem.id, item]))
+    expect(byId.get('task-processing')).toMatchObject({
+      workItem: { id: 'task-processing', title: 'Title of task-processing', statusCategory: 'started', workflowStatusId: 'in-progress', assignedProjectId: 'refero', assigneeUserId: 'demo@example.com' },
+      run: { runId: processing.runId, state: 'active', stalled: false, canRelease: true, runtime: 'claude-code', agentName: 'Claude Code' },
+    })
+    expect(byId.get('task-retried')?.run?.runId).toBe(retry.runId)
+    expect(byId.get('task-blocked')?.latestReport).toEqual({
+      runId: blocked.runId, sequence: 1, kind: 'blocker', createdAt: new Date(now).toISOString(),
+      excerpt: 'Need a decision on the schema.', verificationCounts: { passed: 1, failed: 1, skipped: 0 }, artifactCount: 1, changedFileCount: 3,
+    })
+    expect(byId.get('task-runless')).toEqual({
+      workItem: { id: 'task-runless', title: 'Title of task-runless', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'demo@example.com' },
+    })
+    // Finished runs are never offered for release, and no table key or cursor leaves the server.
+    expect(byId.get('task-released')?.run).toMatchObject({ outcome: 'released', canRelease: false })
+    const text = JSON.stringify(body)
+    expect(text).not.toContain('instanceIdHash')
+    expect(text).not.toContain('credentialId')
+    expect(text).not.toContain('cursor')
+  })
+
+  test('shows only Work Items in Projects the viewer can see and omits deleted comments', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-visible', statusCategory: 'started', assignedProjectId: 'refero' },
+      { id: 'task-hidden', statusCategory: 'started', assignedProjectId: 'secret' },
+      { id: 'task-hidden-runless', statusCategory: 'started', assignedProjectId: 'secret' },
+    ], { cmt_deleted: { body: '[Claude Code]\n\nRemoved text', deletedAt: '2026-10-22T00:10:00.000Z' } })
+    const visible = { ...createRunAt('task-visible', new Date(now - 60_000)), reportCount: 1, lastReportKind: 'handoff' as const, lastReportAt: new Date(now).toISOString() }
+    store.seed(visible)
+    store.state.reports.set(`${workspaceId}|core-team|${visible.runId}|1`, {
+      schemaVersion: 1, runId: visible.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-visible', sequence: 1,
+      kind: 'handoff', commentId: 'cmt_deleted', verifications: [], artifacts: [], createdAt: new Date(now).toISOString(), createdBy: 'demo@example.com',
+    })
+    store.seed(createRunAt('task-hidden', new Date(now - 60_000)))
+    const { body, lanes } = await readBoard()
+    expect(lanes).toEqual({ 'task-visible': 'decision' })
+    expect(body.items[0]?.latestReport).not.toHaveProperty('excerpt')
+    expect(JSON.stringify(body)).not.toContain('task-hidden')
+  })
+
+  test('bounds the finished runs and Work Items it evaluates and says so', async () => {
+    const now = Date.now()
+    const workItems: BoardWorkItem[] = Array.from({ length: 400 }, (_, index) => ({ id: `task-${index}`, statusCategory: 'unstarted' }))
+    const { store, pageReads } = configureBoard(workItems)
+    for (let index = 0; index < 600; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'completed', 'agent', new Date(now - 49 * hourMs)))
+    }
+    const listFinishedRuns = store.listFinishedRuns.bind(store)
+    const finishedLimits: number[] = []
+    store.listFinishedRuns = async (directoryId, teamId, cursor, limit) => {
+      finishedLimits.push(limit)
+      // The fake page never continues on its own, so the board must stop at its own bound.
+      return listFinishedRuns(directoryId, teamId, cursor, limit)
+    }
+    const { body } = await readBoard()
+    expect(body).toMatchObject({ items: [], finishedRunsHasMore: true, startedWorkItemsHasMore: false })
+    expect(finishedLimits.reduce((sum, limit) => sum + limit, 0)).toBe(500)
+    expect(pageReads).toEqual([100])
+  })
+
+  test('reads one page of active runs in lease order and reports the bound', async () => {
+    const now = Date.now()
+    const workItems: BoardWorkItem[] = Array.from({ length: 101 }, (_, index) => ({ id: `task-${index}`, statusCategory: 'started' }))
+    const { store } = configureBoard(workItems)
+    // A higher index starts earlier, so its lease expires earlier.
+    for (let index = 0; index < 101; index += 1) store.seed(createRunAt(`task-${index}`, new Date(now - index * 60_000)))
+    const listActiveRuns = store.listActiveRuns.bind(store)
+    const activeLimits: number[] = []
+    store.listActiveRuns = async (directoryId, teamId, cursor, limit) => {
+      activeLimits.push(limit)
+      return listActiveRuns(directoryId, teamId, cursor, limit)
+    }
+    const { body } = await readBoard()
+    expect(activeLimits).toEqual([100])
+    expect(body.activeRunsHasMore).toBe(true)
+    expect(body.items.slice(0, 3).map((item) => item.workItem.id)).toEqual(['task-100', 'task-99', 'task-98'])
+    // The run beyond the page is still shown through the started Work Items, with its newest run.
+    expect(body.items.find((item) => item.workItem.id === 'task-0')?.run?.state).toBe('active')
+  })
+
+  test('reports a Work Item page bound that was reached', async () => {
+    configureBoard([{ id: 'task-1', statusCategory: 'started' }])
+    const base = getTestAppDependencies().workItems.teamIssues
+    const pageLimits: number[] = []
+    setTestAppDependencies({
+      teamIssues: createTeamIssuesFake({
+        ...base,
+        async getPublicWorkItemPage(directoryId, teamId, options) {
+          pageLimits.push(options.limit)
+          const page = await base.getPublicWorkItemPage(directoryId, teamId, options)
+          return { ...page, nextCursor: 'next' }
+        },
+      }),
+    })
+    const { body } = await readBoard()
+    expect(body.startedWorkItemsHasMore).toBe(true)
+    expect(pageLimits).toEqual([100, 100, 100])
+  })
+
+  test('requires a session and a Team the caller can view', async () => {
+    configureBoard([])
+    expect((await app.request('http://localhost/api/teams/core-team/agent-runs')).status).toBe(401)
+    expect((await app.request('http://localhost/api/teams/unknown-team/agent-runs', { headers })).status).toBe(404)
+    resetTestApp()
+    const { projectOptions } = configureUnstartedAssignedWorkItem({ role: 'member' })
+    projectOptions.projectAccesses = []
+    expect((await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })).status).toBe(403)
+  })
+
+  test('fails closed instead of returning an empty board when stored runs are inconsistent', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([{ id: 'task-1', statusCategory: 'started' }])
+    store.seed(createRunAt('task-1', new Date(now - 60_000)))
+    store.seed(createRunAt('task-1', new Date(now - 30_000)))
+    const twoActive = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })
+    expect(twoActive.status).toBe(503)
+
+    resetTestApp()
+    const second = configureBoard([{ id: 'task-1', statusCategory: 'started' }])
+    second.store.listFinishedRuns = async () => {
+      throw createAgentRunIntegrityError()
+    }
+    const corrupt = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })
+    expect(corrupt.status).toBe(503)
+    expect(await corrupt.json()).not.toHaveProperty('items')
   })
 })
