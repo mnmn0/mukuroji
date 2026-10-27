@@ -6546,9 +6546,10 @@ test.describe('authenticated task page', () => {
     })
     await page.goto('/teams/core-team/issues?issueId=configuration-failure')
 
-    await expect(page.getByRole('alert')).toContainText(
-      'Work Item 設定を取得できませんでした。',
-    )
+    // The failed external link and related document reads raise their own alerts on the same page.
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Work Item 設定を取得できませんでした。' }),
+    ).toBeVisible()
     await expect(page.getByRole('button', { name: '新規 Issue' })).toHaveCount(0)
     await expect(page.getByRole('button', { name: '変更を保存' })).toBeDisabled()
   })
