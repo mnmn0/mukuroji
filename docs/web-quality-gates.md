@@ -41,8 +41,8 @@ image は tag と digest の両方で固定しています。`@playwright/test` 
   size を減らした場合は上限も下げ、余裕が広がり続けないようにします。
 
 `web/src/app/router.tsx` は、login と 404 以外の page を route の `lazy` で読み込みます。
-初期表示の JS と CSS は約 310 KiB gzip で、code splitting 前の約 830 KiB から減りました。
-page を分けたぶん、全体の合計は gzip の file ごとの overhead で約 1,320 KiB から約 1,375 KiB に増えています。
+初期表示の JS と CSS は約 318 KiB gzip（entry chunk と、`modulepreload` される共有 chunk を含む）で、code splitting 前の約 830 KiB から減りました。
+page を分けたぶん、全体の合計は gzip の file ごとの overhead で約 1,400 KiB になっています。
 新しい page を追加するときは、`lazyPage` で route に登録します。
 deploy で chunk が置き換わった後に、開いたままの tab が古い page chunk を読めなかった場合は、`lazyPage` が `web/src/app/staleChunkReload.ts` の `loadPageWithReload` で page を 1 回だけ再読み込みします。
 再読み込みを試したことは、page を読めるまで sessionStorage に残します。再読み込みしても読めない場合は、時間がかかっても再読み込みを繰り返さず、root route の `RouteErrorPage` が再読み込みの操作を表示します。
