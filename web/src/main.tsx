@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './app/App'
 import { startAppServiceWorker } from './app/pwa/appServiceWorker'
+import { startStaleChunkReload } from './app/staleChunkReload'
 import { startAppInstallPrompt } from './shared/lib/pwa/installPrompt'
 import {
   applyFontSizePreference,
@@ -15,6 +16,7 @@ import {
 
 applyFontSizePreference(getInitialFontSizePreference())
 applyThemePreference(getInitialThemePreference())
+startStaleChunkReload()
 startAppServiceWorker()
 startAppInstallPrompt()
 

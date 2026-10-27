@@ -2,6 +2,7 @@ import type { ComponentType } from 'react'
 import { Navigate, createBrowserRouter, type LazyRouteFunction, type RouteObject } from 'react-router'
 import { LoginPage } from '../pages/auth/LoginPage'
 import { NotFoundPage } from '../pages/public/NotFoundPage'
+import { RouteErrorPage } from '../pages/public/RouteErrorPage'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { WorkspaceRoute } from '../workspace/ui/WorkspaceRoute'
 import { WorkspaceRouteProvider } from '../workspace/ui/WorkspaceRouteProvider'
@@ -21,11 +22,13 @@ function lazyPage(load: () => Promise<ComponentType>): LazyRouteFunction<RouteOb
  * Route definitions for the complete application.
  *
  * The pathless root shows an empty busy page while the first page chunk loads; later navigations
- * keep the current page until the next one is ready.
+ * keep the current page until the next one is ready. A page that fails to load or render shows
+ * {@link RouteErrorPage}.
  */
 export const appRoutes: RouteObject[] = [
   {
     hydrateFallbackElement: <div aria-busy="true" className="min-h-svh" />,
+    errorElement: <RouteErrorPage />,
     children: [
       {
         path: '/',

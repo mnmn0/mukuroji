@@ -44,6 +44,8 @@ image は tag と digest の両方で固定しています。`@playwright/test` 
 初期表示の JS と CSS は約 310 KiB gzip で、code splitting 前の約 830 KiB から減りました。
 page を分けたぶん、全体の合計は gzip の file ごとの overhead で約 1,320 KiB から約 1,375 KiB に増えています。
 新しい page を追加するときは、`lazyPage` で route に登録します。
+deploy で chunk が置き換わった後に、開いたままの tab が古い chunk を読めなかった場合は、`web/src/app/staleChunkReload.ts` が page を 1 回だけ再読み込みします。
+再読み込みしても読めない場合は、root route の `RouteErrorPage` が再読み込みの操作を表示します。
 
 ## 付録: CI workflow
 
