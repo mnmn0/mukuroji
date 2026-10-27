@@ -1,221 +1,213 @@
-import { Navigate, createBrowserRouter, type RouteObject } from 'react-router'
-import { ForgotPasswordPage } from '../pages/auth/ForgotPasswordPage'
+import type { ComponentType } from 'react'
+import { Navigate, createBrowserRouter, type LazyRouteFunction, type RouteObject } from 'react-router'
 import { LoginPage } from '../pages/auth/LoginPage'
 import { NotFoundPage } from '../pages/public/NotFoundPage'
-import { PrivacyPage } from '../pages/public/PrivacyPage'
-import { SupportPage } from '../pages/public/SupportPage'
-import { TermsPage } from '../pages/public/TermsPage'
-import { DashboardPage } from '../pages/workspace/DashboardPage'
-import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPage'
-import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
-import { HelpPage } from '../pages/workspace/HelpPage'
-import { SharePage } from '../pages/workspace/SharePage'
-import { HomePage } from '../pages/workspace/HomePage'
-import { FocusPage } from '../pages/workspace/FocusPage'
-import { UpdateFeedPage } from '../pages/workspace/UpdateFeedPage'
-import { InboxPage } from '../pages/workspace/InboxPage'
-import { MyTasksPage } from '../pages/workspace/MyTasksPage'
-import { PlanningPage } from '../pages/workspace/PlanningPage'
-import { ProjectsPage } from '../pages/workspace/ProjectsPage'
-import { ReportsPage } from '../pages/workspace/ReportsPage'
-import { SettingsPage } from '../pages/workspace/SettingsPage'
-import { TaskPage } from '../pages/workspace/TaskPage'
-import { TeamIssuePage } from '../pages/workspace/TeamIssuePage'
-import { TeamMembersPage } from '../pages/workspace/TeamMembersPage'
-import { TeamOverviewPage } from '../pages/workspace/TeamOverviewPage'
-import { TeamTriagePage } from '../pages/workspace/TeamTriagePage'
+import { RouteErrorPage } from '../pages/public/RouteErrorPage'
+import { loadPageWithReload } from './staleChunkReload'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
-import { SearchPage } from '../search/SearchPage'
-import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
-import { RequestIntakePage } from '../requests/RequestIntakePage'
-import { CollectionsPage } from '../pages/workspace/CollectionsPage'
-import { CustomerPage } from '../pages/workspace/CustomerPage'
-import { EnterpriseSsoCallbackPage } from '../pages/auth/EnterpriseSsoCallbackPage'
-import { DocumentPage } from '../documents/DocumentPage'
-import { SharedDocumentPage } from '../documents/SharedDocumentPage'
-import { SecurityRecoveryPage } from '../pages/auth/SecurityRecoveryPage'
 import { WorkspaceRoute } from '../workspace/ui/WorkspaceRoute'
 import { WorkspaceRouteProvider } from '../workspace/ui/WorkspaceRouteProvider'
 
 /**
+ * Loads a page when its route first matches, so each page ships in its own chunk instead of the
+ * initial bundle. A failed load reloads the application once, see {@link loadPageWithReload}.
+ *
+ * @param load - Imports the page module and returns its component.
+ * @returns Route `lazy` function that resolves to the page component.
+ */
+function lazyPage(load: () => Promise<ComponentType>): LazyRouteFunction<RouteObject> {
+  return async () => ({ Component: await loadPageWithReload(load) })
+}
+
+/**
  * Route definitions for the complete application.
+ *
+ * The pathless root shows an empty busy page while the first page chunk loads; later navigations
+ * keep the current page until the next one is ready. A page that fails to load or render shows
+ * {@link RouteErrorPage}.
  */
 export const appRoutes: RouteObject[] = [
   {
-    path: '/',
-    element: <LoginPage />,
-  },
-  {
-    path: '/login',
-    element: <LoginPage />,
-  },
-  {
-    path: '/auth/sso/callback',
-    element: <EnterpriseSsoCallbackPage />,
-  },
-  {
-    path: '/security/recovery',
-    element: <SecurityRecoveryPage />,
-  },
-  {
-    element: <WorkspaceCommandMenuLayout />,
+    hydrateFallbackElement: <div aria-busy="true" className="min-h-svh" />,
+    errorElement: <RouteErrorPage />,
     children: [
       {
-        element: <WorkspaceRouteProvider />,
+        path: '/',
+        element: <LoginPage />,
+      },
+      {
+        path: '/login',
+        element: <LoginPage />,
+      },
+      {
+        path: '/auth/sso/callback',
+        lazy: lazyPage(async () => (await import('../pages/auth/EnterpriseSsoCallbackPage')).EnterpriseSsoCallbackPage),
+      },
+      {
+        path: '/security/recovery',
+        lazy: lazyPage(async () => (await import('../pages/auth/SecurityRecoveryPage')).SecurityRecoveryPage),
+      },
+      {
+        element: <WorkspaceCommandMenuLayout />,
         children: [
           {
-            element: <WorkspaceRoute />,
+            element: <WorkspaceRouteProvider />,
             children: [
               {
-                path: '/dashboard',
-                element: <DashboardPage />,
-              },
-              {
-                path: '/home',
-                element: <HomePage />,
-              },
-              {
-                path: '/focus',
-                element: <FocusPage />,
-              },
-              { path: '/updates', element: <UpdateFeedPage /> },
-              {
-                path: '/my-tasks',
-                element: <MyTasksPage />,
-              },
-              {
-                path: '/inbox',
-                element: <InboxPage />,
-              },
-              {
-                path: '/help',
-                element: <HelpPage />,
-              },
-              {
-                path: '/share',
-                element: <SharePage />,
-              },
-              {
-                path: '/settings',
-                element: <SettingsPage />,
-              },
-              {
-                path: '/settings/security',
-                element: <EnterpriseSecurityPage />,
-              },
-              {
-                path: '/teams/:teamId/overview',
-                element: <TeamOverviewPage />,
-              },
-              {
-                path: '/teams/:teamId/members',
-                element: <TeamMembersPage />,
-              },
-              {
-                path: '/teams/:teamId/triage',
-                element: <TeamTriagePage />,
-              },
-              {
-                path: '/teams/:teamId/projects',
-                element: <ProjectsPage />,
-              },
-              {
-                path: '/projects',
-                element: <ProjectsPage />,
-              },
-              {
-                path: '/requests',
-                element: <RequestIntakePage />,
-              },
-              {
-                path: '/customers',
-                element: <CustomerPage />,
-              },
-              {
-                path: '/customers/:customerId',
-                element: <CustomerPage />,
-              },
-              {
-                path: '/collections',
-                element: <CollectionsPage />,
-              },
-              {
-                path: '/search',
-                element: <SearchPage />,
-              },
-              {
-                path: '/planning',
-                element: <Navigate replace to="/planning/timeline" />,
-              },
-              {
-                path: '/planning/timeline',
-                element: <PlanningPage />,
-              },
-              {
-                path: '/planning/roadmap',
-                element: <PlanningPage />,
-              },
-              {
-                path: '/planning/portfolio',
-                element: <PlanningPage />,
-              },
-              {
-                path: '/documents',
-                element: <DocumentPage />,
-              },
-              {
-                path: '/documents/:documentId',
-                element: <DocumentPage />,
-              },
-              {
-                path: '/goals/:goalId/documents',
-                element: <GoalDocumentsPage />,
-              },
-              {
-                path: '/reports',
-                element: <ReportsPage />,
-              },
-              {
-                path: '/teams/:teamId/issues',
-                element: <TeamIssuePage />,
-              },
-              {
-                path: '/projects/:projectId/issues',
-                element: <TaskPage />,
+                element: <WorkspaceRoute />,
+                children: [
+                  {
+                    path: '/dashboard',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/DashboardPage')).DashboardPage),
+                  },
+                  {
+                    path: '/home',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/HomePage')).HomePage),
+                  },
+                  {
+                    path: '/focus',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/FocusPage')).FocusPage),
+                  },
+                  { path: '/updates', lazy: lazyPage(async () => (await import('../pages/workspace/UpdateFeedPage')).UpdateFeedPage) },
+                  {
+                    path: '/my-tasks',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/MyTasksPage')).MyTasksPage),
+                  },
+                  {
+                    path: '/inbox',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/InboxPage')).InboxPage),
+                  },
+                  {
+                    path: '/help',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/HelpPage')).HelpPage),
+                  },
+                  {
+                    path: '/share',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SharePage')).SharePage),
+                  },
+                  {
+                    path: '/settings',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
+                    path: '/settings/security',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/EnterpriseSecurityPage')).EnterpriseSecurityPage),
+                  },
+                  {
+                    path: '/teams/:teamId/overview',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/TeamOverviewPage')).TeamOverviewPage),
+                  },
+                  {
+                    path: '/teams/:teamId/members',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/TeamMembersPage')).TeamMembersPage),
+                  },
+                  {
+                    path: '/teams/:teamId/triage',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/TeamTriagePage')).TeamTriagePage),
+                  },
+                  {
+                    path: '/teams/:teamId/projects',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/ProjectsPage')).ProjectsPage),
+                  },
+                  {
+                    path: '/projects',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/ProjectsPage')).ProjectsPage),
+                  },
+                  {
+                    path: '/requests',
+                    lazy: lazyPage(async () => (await import('../requests/RequestIntakePage')).RequestIntakePage),
+                  },
+                  {
+                    path: '/customers',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/CustomerPage')).CustomerPage),
+                  },
+                  {
+                    path: '/customers/:customerId',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/CustomerPage')).CustomerPage),
+                  },
+                  {
+                    path: '/collections',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/CollectionsPage')).CollectionsPage),
+                  },
+                  {
+                    path: '/search',
+                    lazy: lazyPage(async () => (await import('../search/SearchPage')).SearchPage),
+                  },
+                  {
+                    path: '/planning',
+                    element: <Navigate replace to="/planning/timeline" />,
+                  },
+                  {
+                    path: '/planning/timeline',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/PlanningPage')).PlanningPage),
+                  },
+                  {
+                    path: '/planning/roadmap',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/PlanningPage')).PlanningPage),
+                  },
+                  {
+                    path: '/planning/portfolio',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/PlanningPage')).PlanningPage),
+                  },
+                  {
+                    path: '/documents',
+                    lazy: lazyPage(async () => (await import('../documents/DocumentPage')).DocumentPage),
+                  },
+                  {
+                    path: '/documents/:documentId',
+                    lazy: lazyPage(async () => (await import('../documents/DocumentPage')).DocumentPage),
+                  },
+                  {
+                    path: '/goals/:goalId/documents',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/GoalDocumentsPage')).GoalDocumentsPage),
+                  },
+                  {
+                    path: '/reports',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/ReportsPage')).ReportsPage),
+                  },
+                  {
+                    path: '/teams/:teamId/issues',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/TeamIssuePage')).TeamIssuePage),
+                  },
+                  {
+                    path: '/projects/:projectId/issues',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/TaskPage')).TaskPage),
+                  },
+                ],
               },
             ],
           },
         ],
       },
+      {
+        path: '/request/:linkToken',
+        lazy: lazyPage(async () => (await import('../requests/PublicRequestFormPage')).PublicRequestFormPage),
+      },
+      {
+        path: '/forgot-password',
+        lazy: lazyPage(async () => (await import('../pages/auth/ForgotPasswordPage')).ForgotPasswordPage),
+      },
+      {
+        path: '/privacy',
+        lazy: lazyPage(async () => (await import('../pages/public/PrivacyPage')).PrivacyPage),
+      },
+      {
+        path: '/terms',
+        lazy: lazyPage(async () => (await import('../pages/public/TermsPage')).TermsPage),
+      },
+      {
+        path: '/support',
+        lazy: lazyPage(async () => (await import('../pages/public/SupportPage')).SupportPage),
+      },
+      {
+        path: '/share/documents/:shareToken',
+        lazy: lazyPage(async () => (await import('../documents/SharedDocumentPage')).SharedDocumentPage),
+      },
+      {
+        path: '*',
+        element: <NotFoundPage />,
+      },
     ],
-  },
-  {
-    path: '/request/:linkToken',
-    element: <PublicRequestFormPage />,
-  },
-  {
-    path: '/forgot-password',
-    element: <ForgotPasswordPage />,
-  },
-  {
-    path: '/privacy',
-    element: <PrivacyPage />,
-  },
-  {
-    path: '/terms',
-    element: <TermsPage />,
-  },
-  {
-    path: '/support',
-    element: <SupportPage />,
-  },
-  {
-    path: '/share/documents/:shareToken',
-    element: <SharedDocumentPage />,
-  },
-  {
-    path: '*',
-    element: <NotFoundPage />,
   },
 ]
 
