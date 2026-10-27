@@ -590,8 +590,9 @@ Slice 3 は 3 つの変更に分けて入れる。
   Team manager で、Work Item を更新できる member）で、`active` Run にだけ付ける。解放は既存の
   `POST /api/teams/{teamId}/agent-runs/{runId}/release` を使う。
 - lane の判定は contracts の純関数 `classifyFactoryBoardItem` に置く。server はこれで lane に入らない
-  Work Item を応答から除き、Web は描画時に同じ関数を現在時刻で適用する。lease 切れや 24 時間の経過で
-  tile は再取得なしに lane を移る。server が lane を固定して返すと、応答後の時間経過を表せないためである。
+  Work Item を応答から除き、Web は応答の `generatedAt` を基準に同じ関数を適用する。lease 切れや 24 時間の
+  経過による lane の移動は、次の再取得（focus、60 秒ごと、再読み込み操作）で反映される。server は lane を
+  固定値として返さず、Web と同じ関数で判定するため、両者の判定は食い違わない。
   - 判断待ち: `active` Run の最新 report が `blocker` / `handoff`、または最新 Run が `paused` で終了し
     Work Item が `started`。`blocker` を出した後に lease が切れた Run は停滞より判断待ちを優先する。
   - 停滞 / 処理中: `active` Run の lease が切れているか。
