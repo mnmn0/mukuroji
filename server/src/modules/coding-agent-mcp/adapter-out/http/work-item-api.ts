@@ -1,5 +1,7 @@
 import { z } from 'zod'
-import { AGENT_RUN_PROBLEM_REASONS } from '@mukuroji/contracts'
+import {
+  AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
+} from '@mukuroji/contracts'
 import type {
   AgentCatalog, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
 } from '../../application/work-item-api'
@@ -62,10 +64,18 @@ const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
   comment: commentSchema,
   run: runSchema,
 })
-const settingsSchema: z.ZodType<AgentSettingsRecord> = z.object({
+/** Agent brief, bounded in UTF-8 bytes like the server. */
+const briefText = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= AGENT_SETTINGS_BRIEF_MAX_BYTES)
+const settingsSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   leaseMinutes: z.number().int().positive(), allowTakeoverAfterLeaseExpiry: z.boolean(),
   updatedAt: z.iso.datetime().optional(), updatedBy: z.string().min(1).optional(),
+})
+const contextSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
+  readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES),
+  brief: briefText.optional(),
+  projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
 })
 const problemSchema = z.object({
   status: z.number().int(), code: z.string(), retryable: z.boolean(),
@@ -79,6 +89,7 @@ const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string>
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
   invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
+  not_ready: 'This task is not in a status the Team marks as ready for agents. Do not start it; pick another task with get_next_task or ask the user.',
 }
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */
@@ -299,11 +310,32 @@ export function createAgentWorkItemApi(
     async finishRun(runId, outcome, instanceId, key) {
       return scopedRun(await request(`agent-runs/${encodeURIComponent(runId)}/finish`, runSchema, 'POST', { outcome, instanceId }, key), runId)
     },
-    /** Reads Team Agent settings. */
-    async agentSettings() {
-      const settings = await request('agent-settings', settingsSchema)
-      if (settings.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
-      return settings
+    /** Reads Team Agent settings together with the Ready statuses and briefs. */
+    async agentSettings(): Promise<AgentSettingsRecord> {
+      const [settings, context] = await Promise.all([request('agent-settings', settingsSchema), readAgentContext()])
+      if (settings.teamId !== config.teamId || (context !== undefined && context.teamId !== config.teamId)) {
+        throw new AgentTaskError('invalid_response', 'The API returned mismatched Agent settings.')
+      }
+      return {
+        ...settings,
+        readyStatusIds: context?.readyStatusIds ?? [],
+        ...(context?.brief === undefined ? {} : { brief: context.brief }),
+        projectBriefs: context?.projectBriefs ?? {},
+      }
     },
+  }
+
+  /**
+   * Reads the Ready statuses and briefs.
+   *
+   * @returns The context, or undefined from a server older than the endpoint, which has neither.
+   */
+  async function readAgentContext() {
+    try {
+      return await request('agent-context', contextSchema)
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+      throw error
+    }
   }
 }

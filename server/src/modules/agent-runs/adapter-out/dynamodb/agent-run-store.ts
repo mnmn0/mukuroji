@@ -14,14 +14,15 @@ import {
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
   type AgentRunOutcome,
   type AgentSettings,
-  type UpdateAgentSettingsRequest,
 } from '@mukuroji/contracts'
 import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
+  createSavedAgentSettings,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
+  type ValidatedAgentSettingsUpdate,
 } from '../../domain/agent-run'
 import { readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
@@ -116,7 +117,7 @@ export interface AgentRunStore {
   saveSettings(
     directoryId: string,
     teamId: string,
-    update: UpdateAgentSettingsRequest,
+    update: ValidatedAgentSettingsUpdate,
     actorMemberKey: string,
     now: Date,
     mutationKey: string,
@@ -642,10 +643,21 @@ function decodeCursor(cursor: string | undefined, partitionAttribute: string, pa
  * @param update - Values of the save.
  * @returns True when the save produced the current revision and values.
  */
-export function isSameSettingsSave(saved: AgentSettings, update: UpdateAgentSettingsRequest): boolean {
+export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentSettingsUpdate): boolean {
+  // Briefs the editor could not see were copied from the settings, not sent, so a retry is matched
+  // on what the editor sent even if another save changed those briefs since.
+  const kept = new Set(update.keptProjectIds ?? [])
+  const savedProjects = Object.keys(saved.projectBriefs).filter((projectId) => !kept.has(projectId))
+  const updateProjects = Object.keys(update.projectBriefs).filter((projectId) => !kept.has(projectId))
   return saved.revision === update.expectedRevision + 1 &&
     saved.leaseMinutes === update.leaseMinutes &&
-    saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry
+    saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry &&
+    saved.readyStatusIds.length === update.readyStatusIds.length &&
+    saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
+    saved.brief === update.brief &&
+    savedProjects.length === updateProjects.length &&
+    savedProjects.every((projectId) =>
+      Object.hasOwn(update.projectBriefs, projectId) && saved.projectBriefs[projectId] === update.projectBriefs[projectId])
 }
 
 /**
@@ -706,12 +718,31 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   const revision = storedInteger(item, 'revision')
   const leaseMinutes = storedInteger(item, 'leaseMinutes')
   if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
+  // Rows saved before Ready statuses and briefs existed lack them; any other value, null included, is corrupt.
+  const readyStatusIds = item.readyStatusIds === undefined ? [] : item.readyStatusIds
+  const projectBriefs = item.projectBriefs === undefined ? {} : item.projectBriefs
+  if (
+    !Array.isArray(readyStatusIds) ||
+    !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
+    (item.brief !== undefined && (typeof item.brief !== 'string' || item.brief === '')) ||
+    !isRecord(projectBriefs)
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  const briefEntries = Object.entries(projectBriefs)
+  if (!briefEntries.every(([, brief]) => typeof brief === 'string' && brief !== '')) throw createAgentRunIntegrityError()
+  const briefs: Record<string, string> = Object.fromEntries(
+    briefEntries.flatMap(([projectId, brief]) => typeof brief === 'string' ? [[projectId, brief]] : []),
+  )
   return {
     schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
     teamId,
     revision,
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
+    readyStatusIds,
+    ...(typeof item.brief === 'string' ? { brief: item.brief } : {}),
+    projectBriefs: briefs,
     updatedAt: storedTimestamp(item, 'updatedAt'),
     updatedBy: storedString(item, 'updatedBy'),
   }
@@ -803,21 +834,13 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
   async saveSettings(
     directoryId: string,
     teamId: string,
-    update: UpdateAgentSettingsRequest,
+    update: ValidatedAgentSettingsUpdate,
     actorMemberKey: string,
     now: Date,
     mutationKey: string,
     extraItems: readonly AgentRunTransactItem[],
   ): Promise<AgentSettings> {
-    const settings: AgentSettings = {
-      schemaVersion: AGENT_SETTINGS_SCHEMA_VERSION,
-      teamId,
-      revision: update.expectedRevision + 1,
-      leaseMinutes: update.leaseMinutes,
-      allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
-      updatedAt: now.toISOString(),
-      updatedBy: actorMemberKey,
-    }
+    const settings = createSavedAgentSettings(teamId, update, actorMemberKey, now)
     const partition = createAgentRunPartition(directoryId, teamId)
     try {
       await this.#client.send(new TransactWriteCommand({

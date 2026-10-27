@@ -60,7 +60,12 @@ function startFakeApi() {
       ] },
     }] })
     if (url.pathname === '/api/v1/agent-settings') {
-      return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+      return Response.json({ schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    }
+    if (url.pathname === '/api/v1/agent-context') {
+      return Response.json({
+        schemaVersion: 1, teamId: 'team', revision: 1, readyStatusIds: [], brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
+      })
     }
     if (url.pathname === '/api/v1/agent-runs') {
       const instanceId = url.searchParams.get('instanceId')
@@ -207,12 +212,18 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect(readTools).toContain('get_next_task')
     for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task']) expect(readTools).not.toContain(name)
     expect((await readOnly.readResource({ uri: 'mukuroji://agent/workflow' })).contents).toHaveLength(1)
+    expect((await readOnly.readResource({ uri: 'mukuroji://project/web/brief' })).contents)
+      .toMatchObject([{ mimeType: 'text/markdown', text: 'Run bun test.\n\nAdd a story.' }])
+    expect((await readOnly.listResourceTemplates()).resourceTemplates.map((template) => template.uriTemplate))
+      .toContain('mukuroji://project/{projectId}/brief')
     expect((await readOnly.getPrompt({ name: 'work-on-next-task', arguments: {} })).messages).toHaveLength(1)
 
     const client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
     clients.push(client)
     expect((await client.listTools()).tools).toHaveLength(17)
-    expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { runtime: 'claude-code', agentSettings: { leaseMinutes: 30 } } })
+    expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
+      runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
+    } })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
     const startKey = crypto.randomUUID()
     const started = await call(client, 'start_task', { taskId: 'task', expectedRevision: 1, workflowStatusId: 'coding', idempotencyKey: startKey })

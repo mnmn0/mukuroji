@@ -25,6 +25,7 @@ export {
   readStartAgentRunRequest,
   readTakeOverAgentRunRequest,
   readUpdateAgentSettingsRequest,
+  assertAgentSettingsBriefLimits,
   splitAgentRunMutationFence,
   toAgentRun,
   type StoredAgentRun,
@@ -33,6 +34,7 @@ export {
   type ValidatedAgentRunFinish,
   type ValidatedAgentRunStart,
   type ValidatedAgentRunTakeOver,
+  type ValidatedAgentSettingsUpdate,
 } from './domain/agent-run'
 export {
   createAgentRunReportCommentBody,

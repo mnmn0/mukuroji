@@ -326,7 +326,8 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `GET /v1/work-items/{workItemId}/agent-runs` | Work Item の Run 履歴。cursor pagination。 |
 | `GET /v1/agent-runs/{runId}` | Run 1 件。 |
 | `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=&workItemId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。`workItemId` を指定すると index ではなく claim row を強整合で読み、その Work Item を claim している Run だけを返す（`state=active` のみ）。閲覧できない Work Item の Run は返さない。 |
-| `GET /v1/agent-settings?teamId=` | Team の Agent settings。MCP の `get_configuration` が使う。 |
+| `GET /v1/agent-settings?teamId=` | Team の Agent settings（lease と take over）。MCP の `get_configuration` が使う。 |
+| `GET /v1/agent-context?teamId=` | Ready status と agent brief。閉じた `AgentSettings` schema を広げないための別 path。MCP の `get_configuration` と `get_next_task` が使う。 |
 | `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body は Run 開始時と同じ `instanceId`。 |
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | 終了。body は `outcome` と Run 開始時と同じ `instanceId`。 |
@@ -528,6 +529,31 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   `docs/coding-agent-mcp.md` に Claude Code / Codex / Kiro の設定例を置き、`mcp.mjs` は Node.js でも
   起動できる単一ファイルとして、同梱ライセンス一覧と一緒に build する。GitHub Release への自動添付は、
   workflow の追加に別の権限が要るため次の変更で入れる。
+
+### Slice 3 の実装状況
+
+Slice 3 は 3 つの変更に分けて入れる。
+
+- 実装済み（Agent settings、Ready、brief）: Agent settings に `readyStatusIds`（最大 50 件、重複不可）、
+  Team の `brief`、`projectBriefs`（最大 20 Project）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
+  合計 128 KiB までとし、空白だけの brief は保存しない。保存は全体の置き換えで、省略した field は
+  消える。保存前の row は新しい field を持たず、既定値（空の一覧と map）として読む。audit には
+  `readyStatusIds` の変更と、brief の本文ではなく byte 数の変化を残す。Project brief は Team の Project に
+  限り、読み取り（Web と Public API）では呼び出し元が閲覧できる Project の brief だけを返す。Web の保存では、
+  編集者が閲覧できない Project の brief を受け付けず（`403`）、保存済みの値をそのまま残す。Team に属さない
+  Project の brief は `400` とし、Team から外れた Project の保存済み brief は次の保存で消える。
+  Public API の `AgentSettings` は閉じた response schema で property を追加できないため、Ready status と
+  brief は新しい `GET /api/v1/agent-context` で返す。`AgentContext` は以後の Agent settings を追加できるよう
+  閉じない object とし、client は知らない property を無視する。MCP はこの path がない古い server では既定値として動く。
+  Run の start は `readyStatusIds` が空でなければ現在の status がその中にあることを確認し、なければ
+  `409` と `not_ready` を返す。設定の revision は start の transaction で検査するため、並行した
+  設定変更とも整合する。MCP の `get_next_task` は Ready でない候補を `skipped` の `not_ready` として除外し、
+  `get_configuration` は `agentSettings.readyStatusIds` と `brief`（Team brief の後に設定 Project の
+  brief を連結）を返す。`mukuroji://project/{projectId}/brief` resource も同じ内容を返し、
+  `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は別 Project の brief を `out_of_scope` で拒否する。
+- 次の変更: 受け入れ条件（`acceptanceCriteria`）、`requireAcceptanceCriteria`、
+  `acceptanceCriteriaFieldId`、`get_task` の受け入れ条件。
+- その次の変更: 受け入れ条件と Agent settings の Web 編集画面。
 
 ## 後続 Phase
 
