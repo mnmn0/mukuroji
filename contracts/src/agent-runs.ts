@@ -558,8 +558,9 @@ const millisecondsPerHour = 3_600_000
 
 /**
  * Places a Factory board item in its lane at a given time. The server uses it to drop Work Items that
- * belong to no lane, and the Web application applies it again at render time, so an expiring lease or
- * an aging completion moves the tile without another request.
+ * belong to no lane, and the Web application applies it again at the response's `generatedAt`, so both
+ * agree even when the client clock is off. An expiring lease or an aging completion moves the tile on
+ * the next board read.
  *
  * - `decision`: the active run's latest report is a `blocker` or `handoff`, or the newest run finished
  *   as `paused` while the Work Item is still `started`.
