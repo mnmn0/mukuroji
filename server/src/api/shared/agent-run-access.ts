@@ -481,3 +481,23 @@ export function withVisibleProjectBriefs(
     .filter(([projectId]) => canAccessAssignedProject(principal, permission, projectId, 'viewer')))
   return { ...settings, projectBriefs }
 }
+
+/**
+ * Maps values with at most a fixed number of concurrent calls, keeping the input order.
+ *
+ * @param values - Values to map.
+ * @param concurrency - Largest number of calls in flight.
+ * @param map - Asynchronous mapping.
+ * @returns Mapped values in input order.
+ */
+export async function mapInOrderWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  map: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = []
+  for (let index = 0; index < values.length; index += concurrency) {
+    results.push(...await Promise.all(values.slice(index, index + concurrency).map(map)))
+  }
+  return results
+}

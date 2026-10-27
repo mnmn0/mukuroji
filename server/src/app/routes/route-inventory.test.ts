@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(448)
-  expect(new Set(inventory).size).toBe(444)
+  expect(inventory).toHaveLength(449)
+  expect(new Set(inventory).size).toBe(445)
   expect(inventory).toContain('GET /api/planning/update-feed')
   expect(inventory).toContain('PUT /api/planning/update-feed/read-state')
   expect(inventory).toContain('GET /api/planning/update-feed/saved')
@@ -44,11 +44,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/acceptance-criteria')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
+  expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '40f57024e51801e3d610e425727d00e21eb37faa760dc36083b063ad7f50ed79',
+    '9693182340dbf90b92669fb57b456fa1e282811d9251f11139c0c19d154f5573',
   )
 })

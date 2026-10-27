@@ -334,11 +334,11 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` | 停滞 Run の引き継ぎ。設定で許可時のみ。 |
 | `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` と `agentInstanceId` を追加。 |
 
-内部 API は Web 画面だけが使い、Slice 1 では次を提供する。Team 全体の Run 一覧
-`GET /api/teams/{teamId}/agent-runs` は Factory board と同じ Slice 4 で追加する。
+内部 API は Web 画面だけが使い、Public OpenAPI document には含めない。次を提供する。
 
 | Method / Path | 用途 |
 | --- | --- |
+| `GET /api/teams/{teamId}/agent-runs` | Factory board の 1 回分の data（Slice 4）。Team を閲覧できる member に、lane に入る Work Item と、その `active` Run または最新の Run、Run の最新 report の要約を返す。読み取りはすべて上限付きで、上限に達した読み取り元ごとに `...HasMore` を返す。store cursor は返さない。 |
 | `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs?limit=` | Work Item 詳細に出す新しい順の Run（既定 20 件）と `hasMore`。table key を含む store cursor は返さない。各 Run に閲覧者が解放できるかどうか（`canRelease`）を付ける。 |
 | `POST /api/teams/{teamId}/agent-runs/{runId}/release` | `active` Run の解放。Run を開始した member、Work Item の現在の assignee、または Team manager に限る。解放済みへの再送は現在の Run を返す。 |
 | `GET /api/teams/{teamId}/agent-settings` / `PUT ...` | Agent settings の取得と、Team manager による `revision` CAS 付き更新。保存ごとに `Idempotency-Key` 由来の key の receipt row（`agent-settings-mutation#<key hash>`）を同じ transaction で書き、応答を失った同じ key と同じ値の再送は revision 不一致でも receipt の設定を返す。一度確定した key は、後で別の key の保存があっても、別の値や別の revision で再利用すると `409` にする。 |
@@ -564,6 +564,43 @@ Slice 3 は 3 つの変更に分けて入れる。
   `GET /api/v1/work-items/{workItemId}/acceptance-criteria` が一覧と読み取り時の Work Item `revision` を返す。
   2 つの設定は `GET /api/v1/agent-context` に加える。MCP はこの path がない古い server では条件なしとして動く。
 - その次の変更: 受け入れ条件と Agent settings の Web 編集画面。
+
+### Slice 4 の実装状況
+
+- 実装済み（server）: `GET /api/teams/{teamId}/agent-runs`。Team の閲覧権限を確認し、次の 3 つから
+  候補の Work Item を集める。どの読み取りも上限を持ち、上限で止まった場合は応答の
+  `activeRunsHasMore`、`finishedRunsHasMore`、`startedWorkItemsHasMore` で示す。黙って切り捨てない。
+  - `ActiveRunIndex` の lease の早い順に最大 100 件。index は結果整合のため、各 Run を強整合で
+    読み直し、`active` のものだけを使う。1 つの Work Item に `active` Run が 2 件あれば claim の
+    不変条件が壊れているため、`503` で fail-closed にする。
+  - 終了済み Run を最大 500 件評価し、直近 24 時間に終了した Run の Work Item を拾う。終了済み Run は
+    run ID 順に保存され終了時刻の index がないため、Team の終了済み Run が 500 件を超えると完了 lane が
+    欠けうる。その場合は `finishedRunsHasMore: true` を返す。
+  - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
+    index はない。
+- 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
+  （`canAccessAssignedProject`）。`active` Run がなければ Work Item の Run 履歴から最新の 1 件を読む。
+  「その後に新しい Run がない」はこの最新 1 件で判定する。読み取りは同時 10 件までとする。
+- Run に report があれば、Work Item の最新 report を 1 件と、その comment を読む。tile の要約は report の
+  kind、時刻、検証結果の件数、成果物の件数、変更ファイル数と、comment 本文から agent label を除いた
+  先頭 256 文字である。本文は読み取り時に comment から取るため、編集・削除された comment の古い本文は
+  board に残らない。削除済みなら本文の抜粋を返さない。
+- `canRelease` は Work Item 詳細の Run 履歴と同じ規則（Run の開始者、Work Item の現在の担当者、または
+  Team manager で、Work Item を更新できる member）で、`active` Run にだけ付ける。解放は既存の
+  `POST /api/teams/{teamId}/agent-runs/{runId}/release` を使う。
+- lane の判定は contracts の純関数 `classifyFactoryBoardItem` に置く。server はこれで lane に入らない
+  Work Item を応答から除き、Web は描画時に同じ関数を現在時刻で適用する。lease 切れや 24 時間の経過で
+  tile は再取得なしに lane を移る。server が lane を固定して返すと、応答後の時間経過を表せないためである。
+  - 判断待ち: `active` Run の最新 report が `blocker` / `handoff`、または最新 Run が `paused` で終了し
+    Work Item が `started`。`blocker` を出した後に lease が切れた Run は停滞より判断待ちを優先する。
+  - 停滞 / 処理中: `active` Run の lease が切れているか。
+  - 失敗: 最新 Run が `failed`。`started` の Work Item は上の 300 件に入る間は期限なく残り、それ以外は
+    終了から 24 時間だけ出る。
+  - 完了: 最新 Run が直近 24 時間に `completed`。
+  - Run なし: 上のどれにも入らない `started` の Work Item（Run がない、または最新 Run が `released` など）。
+- filter（runtime、assignee、Project）は Web で行う。応答は上の上限で有界なため、query parameter は
+  設けない。
+- 次の変更: Web の Factory board 画面。
 
 ## 後続 Phase
 

@@ -1,14 +1,25 @@
 import { createHash } from 'node:crypto'
-import type {
-  AgentRunReport,
-  AgentRunView,
-  AgentSettings,
-  WorkItemAgentRunReportsResponse,
-  WorkItemAgentRunsResponse,
+import {
+  FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
+  FACTORY_BOARD_MAX_ACTIVE_RUNS,
+  FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS,
+  FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS,
+  FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH,
+  classifyFactoryBoardItem,
+  type AgentRunReport,
+  type AgentRunView,
+  type AgentSettings,
+  type FactoryBoardItem,
+  type FactoryBoardReportSummary,
+  type TeamAgentRunBoardResponse,
+  type WorkItemAgentRunReportsResponse,
+  type WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  createAgentRunIntegrityError,
   createAgentRunNotActiveError,
+  createAgentRunReportCommentBody,
   finishAgentRun,
   assertAgentSettingsBriefLimits,
   readUpdateAgentSettingsRequest,
@@ -21,11 +32,14 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../../modules/audit/audit'
+import { createWorkItemCollaborationEntityKey } from '../../modules/collaboration'
 import { ProjectDataError } from '../../modules/directory'
+import { isTeamIssueNotFoundError, type TeamIssueResponseItem } from '../../modules/work-items'
 import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import {
   commitProgressFencedClose,
   createAgentRunAuditPut,
+  mapInOrderWithConcurrency,
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
@@ -39,6 +53,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
+import type { TeamPermissionContext } from '../shared/workspace-access'
 
 /**
  * Checks whether the principal manages the Team.
@@ -78,6 +93,24 @@ async function canWriteForRelease(
     return true
   } catch (error) {
     if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
+  }
+}
+
+/**
+ * Reads the Team write access a release requires once for a whole board. The Project part of
+ * {@link canWriteForRelease} is then checked per Work Item with the returned context.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @returns The viewer's member-level Team context, or undefined when the viewer cannot write.
+ */
+async function canWriteTeamForRelease(principal: WorkspacePrincipal, teamId: string): Promise<TeamPermissionContext | undefined> {
+  if (!canWorkspaceBusinessWrite(principal)) return undefined
+  try {
+    return await requireTeamPermission(principal, teamId, 'member')
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return undefined
     throw error
   }
 }
@@ -175,6 +208,246 @@ export async function listWebWorkItemAgentRunReports(
     items.push(report)
   }
   return { items, hasMore: page.nextCursor !== undefined }
+}
+
+/** Runs and Work Items the board reads per store request; the store and Work Item page maximum. */
+const boardPageSize = 100
+
+/** Concurrent per-Work Item reads while the board is assembled. */
+const boardReadConcurrency = 10
+
+/** Milliseconds in one hour. */
+const millisecondsPerHour = 3_600_000
+
+/**
+ * Reads one Work Item strongly for the board, so a move to another Project, an archive, or a deletion
+ * takes effect immediately.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @returns The Work Item, or undefined when it was deleted or archived.
+ */
+async function readBoardWorkItem(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+): Promise<TeamIssueResponseItem | undefined> {
+  try {
+    const { issue } = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      workItemId,
+      { consistentIssueRead: true, includeEvents: false },
+    )
+    return issue.archivedAt === undefined ? issue : undefined
+  } catch (error) {
+    if (isTeamIssueNotFoundError(error)) return undefined
+    throw error
+  }
+}
+
+/**
+ * Reads a Team's active runs again from the run rows, because the lease index can still show a run
+ * that just finished. Two active runs on one Work Item break the claim invariant and fail closed.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @returns Active runs by Work Item ID, in lease order, and whether more active runs exist.
+ */
+async function readBoardActiveRuns(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<{ runs: Map<string, StoredAgentRun>; hasMore: boolean }> {
+  const store = workItemDependencies.agentRuns
+  const page = await store.listActiveRuns(principal.directoryId, teamId, undefined, FACTORY_BOARD_MAX_ACTIVE_RUNS)
+  const current = await mapInOrderWithConcurrency(page.runs, boardReadConcurrency, async (indexed) => {
+    const run = await store.getRun(principal.directoryId, teamId, indexed.runId)
+    if (run && run.workItemId !== indexed.workItemId) throw createAgentRunIntegrityError()
+    return run?.state === 'active' ? run : undefined
+  })
+  const runs = new Map<string, StoredAgentRun>()
+  for (const run of current) {
+    if (!run) continue
+    if (runs.has(run.workItemId)) throw createAgentRunIntegrityError()
+    runs.set(run.workItemId, run)
+  }
+  return { runs, hasMore: page.nextCursor !== undefined }
+}
+
+/**
+ * Collects the Work Items of runs that finished within the completed-lane window. Finished runs are
+ * stored in run ID order, so at most {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} are evaluated.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param now - Board read time.
+ * @returns Work Item IDs and whether finished runs were left unread.
+ */
+async function readRecentlyFinishedWorkItemIds(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  now: Date,
+): Promise<{ workItemIds: string[]; hasMore: boolean }> {
+  const since = now.getTime() - FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
+  const workItemIds = new Set<string>()
+  let evaluated = 0
+  let cursor: string | undefined
+  do {
+    const limit = Math.min(boardPageSize, FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS - evaluated)
+    const page = await workItemDependencies.agentRuns.listFinishedRuns(principal.directoryId, teamId, cursor, limit)
+    evaluated += limit
+    for (const run of page.runs) {
+      if (run.finishedAt !== undefined && Date.parse(run.finishedAt) >= since) workItemIds.add(run.workItemId)
+    }
+    cursor = page.nextCursor
+  } while (cursor !== undefined && evaluated < FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS)
+  return { workItemIds: [...workItemIds], hasMore: cursor !== undefined }
+}
+
+/**
+ * Collects the `started` Work Items the viewer can see among the most recently updated ones. The
+ * board reads each of them again strongly before it shows them.
+ *
+ * @param principal - Viewer.
+ * @param permission - Viewer's Team permission context.
+ * @param teamId - Team ID.
+ * @returns Work Item IDs and whether Work Items were left unread.
+ */
+async function readStartedWorkItemIds(
+  principal: WorkspacePrincipal,
+  permission: TeamPermissionContext,
+  teamId: string,
+): Promise<{ workItemIds: string[]; hasMore: boolean }> {
+  const workItemIds: string[] = []
+  let evaluated = 0
+  let cursor: string | undefined
+  do {
+    const limit = Math.min(boardPageSize, FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS - evaluated)
+    const page = await workItemDependencies.teamIssues.getPublicWorkItemPage(principal.directoryId, teamId, {
+      limit,
+      ...(cursor === undefined ? {} : { cursor }),
+    })
+    evaluated += limit
+    for (const issue of page.issues) {
+      if (issue.statusCategory === 'started' && canAccessAssignedProject(principal, permission, issue.assignedProjectId, 'viewer')) {
+        workItemIds.push(issue.id)
+      }
+    }
+    cursor = page.nextCursor
+  } while (cursor !== undefined && evaluated < FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS)
+  return { workItemIds, hasMore: cursor !== undefined }
+}
+
+/**
+ * Removes the agent label the server put in front of a report message and shortens the rest.
+ *
+ * @param body - Current comment body.
+ * @param agentName - Agent name of the run.
+ * @returns Excerpt, or undefined when nothing remains.
+ */
+function toReportExcerpt(body: string, agentName: string): string | undefined {
+  const label = createAgentRunReportCommentBody(agentName, '')
+  const message = (body.startsWith(label) ? body.slice(label.length) : body).trim()
+  if (message === '') return undefined
+  return [...message].slice(0, FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH).join('')
+}
+
+/**
+ * Summarizes the latest report of a run with the start of its comment. The comment is read at request
+ * time, so an edited or deleted comment never shows its earlier text on the board.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param run - Run on the tile.
+ * @returns Report summary, or undefined when the run has no report.
+ */
+async function readBoardReportSummary(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  run: StoredAgentRun,
+): Promise<FactoryBoardReportSummary | undefined> {
+  if (run.reportCount === 0) return undefined
+  const page = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, run.workItemId, undefined, 1)
+  const latest = page.reports[0]
+  // The newest report of the Work Item belongs to its newest run whenever that run has reports.
+  if (!latest || latest.runId !== run.runId) return undefined
+  const report = toAgentRunReport(latest)
+  const comment = await workItemDependencies.collaboration.getCommentSnapshot({
+    entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, run.workItemId),
+    commentId: report.commentId,
+  })
+  const excerpt = comment && comment.deletedAt === undefined ? toReportExcerpt(comment.bodyMarkdown, run.agentName) : undefined
+  const verificationCounts = { passed: 0, failed: 0, skipped: 0 }
+  for (const verification of report.verifications) verificationCounts[verification.status] += 1
+  return {
+    runId: report.runId,
+    sequence: report.sequence,
+    kind: report.kind,
+    createdAt: report.createdAt,
+    ...(excerpt === undefined ? {} : { excerpt }),
+    verificationCounts,
+    artifactCount: report.artifacts.length,
+    ...(report.changedFileCount === undefined ? {} : { changedFileCount: report.changedFileCount }),
+  }
+}
+
+/**
+ * Lists the Factory board of a Team for anyone who can view the Team: the Work Items of active runs,
+ * of runs that finished within the completed-lane window, and the `started` Work Items among the most
+ * recently updated ones, each with its active or newest run and that run's latest report. Only Work
+ * Items the viewer can see and that belong to a lane are returned. Every source is read up to a fixed
+ * bound and reports whether it stopped early; store cursors never leave the server.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @returns Board items and the bounds that were reached.
+ */
+export async function listWebTeamAgentRunBoard(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<TeamAgentRunBoardResponse> {
+  const permission = await requireTeamPermission(principal, teamId, 'viewer')
+  const now = new Date()
+  const [active, finished, started, manager, writable] = await Promise.all([
+    readBoardActiveRuns(principal, teamId),
+    readRecentlyFinishedWorkItemIds(principal, teamId, now),
+    readStartedWorkItemIds(principal, permission, teamId),
+    isTeamManager(principal, teamId),
+    canWriteTeamForRelease(principal, teamId),
+  ])
+  const workItemIds = [...new Set([...active.runs.keys(), ...finished.workItemIds, ...started.workItemIds])]
+  const store = workItemDependencies.agentRuns
+  const items = await mapInOrderWithConcurrency(workItemIds, boardReadConcurrency, async (workItemId) => {
+    const workItem = await readBoardWorkItem(principal, teamId, workItemId)
+    if (!workItem || !canAccessAssignedProject(principal, permission, workItem.assignedProjectId, 'viewer')) return undefined
+    const run = active.runs.get(workItemId) ??
+      (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs[0]
+    const latestReport = run ? await readBoardReportSummary(principal, teamId, run) : undefined
+    const canRelease = run !== undefined && writable !== undefined &&
+      canAccessAssignedProject(principal, writable, workItem.assignedProjectId, 'member') &&
+      mayRelease(run, principal, manager, workItem.assigneeUserId)
+    const item: FactoryBoardItem = {
+      workItem: {
+        id: workItem.id,
+        title: workItem.title,
+        workflowStatusId: workItem.workflowStatusId,
+        statusCategory: workItem.statusCategory,
+        ...(workItem.assignedProjectId === undefined ? {} : { assignedProjectId: workItem.assignedProjectId }),
+        assigneeUserId: workItem.assigneeUserId,
+      },
+      ...(run === undefined ? {} : { run: toAgentRunView(run, canRelease, now) }),
+      ...(latestReport === undefined ? {} : { latestReport }),
+    }
+    return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
+  })
+  return {
+    generatedAt: now.toISOString(),
+    items: items.flatMap((item) => item ? [item] : []),
+    activeRunsHasMore: active.hasMore,
+    finishedRunsHasMore: finished.hasMore,
+    startedWorkItemsHasMore: started.hasMore,
+  }
 }
 
 /**

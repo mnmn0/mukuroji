@@ -1,4 +1,5 @@
 import type { PublicWorkItem, UpdatePublicWorkItemRequest } from './developer-platform'
+import type { WorkflowStatusCategory } from './work-item-configuration'
 
 /** Schema version of the Agent Run contract. */
 export const AGENT_RUN_SCHEMA_VERSION = 1
@@ -442,4 +443,152 @@ export type WorkItemAgentRunsResponse = {
   items: AgentRunView[]
   /** Whether older runs exist beyond the returned ones. */
   hasMore: boolean
+}
+
+/** Hours a run that finished as `completed` stays in the Factory board's completed lane. */
+export const FACTORY_BOARD_COMPLETED_WINDOW_HOURS = 24
+
+/** Largest number of active runs one Factory board response reads, soonest lease expiry first. */
+export const FACTORY_BOARD_MAX_ACTIVE_RUNS = 100
+
+/**
+ * Largest number of finished runs one Factory board response evaluates while it looks for runs that
+ * finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}. Finished runs are stored in run ID
+ * order, so the response says when the evaluation stopped before reading every finished run.
+ */
+export const FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS = 500
+
+/**
+ * Largest number of Work Items, most recently updated first, one Factory board response evaluates
+ * while it looks for `started` Work Items.
+ */
+export const FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS = 300
+
+/** Maximum length in characters of the report message excerpt shown on a Factory board tile. */
+export const FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH = 256
+
+/**
+ * Factory board lanes in display order. `no-run` holds `started` Work Items without an active run and
+ * is shown at the end of the processing lane.
+ */
+export const FACTORY_BOARD_LANES = ['processing', 'no-run', 'decision', 'stalled', 'failed', 'completed'] as const
+
+/** Lane of one Factory board tile. */
+export type FactoryBoardLane = (typeof FACTORY_BOARD_LANES)[number]
+
+/** Work Item facts a Factory board tile needs. */
+export type FactoryBoardWorkItem = {
+  /** Work Item ID within the Team. */
+  id: string
+  /** Work Item title. */
+  title: string
+  /** Current workflow status ID. */
+  workflowStatusId: string
+  /** Category of the current workflow status. */
+  statusCategory: WorkflowStatusCategory
+  /** Project the Work Item is assigned to, if any. */
+  assignedProjectId?: string
+  /** Member responsible for the Work Item. */
+  assigneeUserId: string
+}
+
+/** Number of verification commands per result in one report. */
+export type FactoryBoardVerificationCounts = {
+  /** Commands the agent reported as passed. */
+  passed: number
+  /** Commands the agent reported as failed. */
+  failed: number
+  /** Commands the agent reported as skipped. */
+  skipped: number
+}
+
+/** Latest structured report of the run on a Factory board tile. */
+export type FactoryBoardReportSummary = {
+  /** Run the report belongs to. */
+  runId: string
+  /** Position of the report within its run. */
+  sequence: number
+  /** Kind of report; `blocker` and `handoff` ask a person to decide. */
+  kind: AgentRunReportKind
+  /** UTC ISO 8601 time the report was saved. */
+  createdAt: string
+  /**
+   * Start of the report's comment without the agent label, at most
+   * {@link FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH} characters. Absent when the comment was deleted.
+   */
+  excerpt?: string
+  /** Verification commands per result. */
+  verificationCounts: FactoryBoardVerificationCounts
+  /** Number of artifact links. */
+  artifactCount: number
+  /** Number of files the agent reported as changed. */
+  changedFileCount?: number
+}
+
+/** One Work Item on the Factory board with the run that decides its lane. */
+export type FactoryBoardItem = {
+  /** Work Item the tile shows. */
+  workItem: FactoryBoardWorkItem
+  /** The Work Item's active run, otherwise its newest run; absent when it never had a run. */
+  run?: AgentRunView
+  /** Latest report of the item's run, when the run has reports. */
+  latestReport?: FactoryBoardReportSummary
+}
+
+/**
+ * Factory board data of one Team for the Web application, returned by
+ * `GET /api/teams/{teamId}/agent-runs`. Every read is bounded: a `...HasMore` flag is true when the
+ * server stopped before it saw every candidate of that source, so the board is never silently partial.
+ */
+export type TeamAgentRunBoardResponse = {
+  /** UTC ISO 8601 time the server read the board. */
+  generatedAt: string
+  /** Work Items that belonged to a lane when the board was read, Work Items with an active run first. */
+  items: FactoryBoardItem[]
+  /** Whether the Team has more active runs than {@link FACTORY_BOARD_MAX_ACTIVE_RUNS}. */
+  activeRunsHasMore: boolean
+  /** Whether finished runs beyond {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} were left unread. */
+  finishedRunsHasMore: boolean
+  /** Whether Work Items beyond {@link FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS} were left unread. */
+  startedWorkItemsHasMore: boolean
+}
+
+/** Milliseconds in one hour. */
+const millisecondsPerHour = 3_600_000
+
+/**
+ * Places a Factory board item in its lane at a given time. The server uses it to drop Work Items that
+ * belong to no lane, and the Web application applies it again at render time, so an expiring lease or
+ * an aging completion moves the tile without another request.
+ *
+ * - `decision`: the active run's latest report is a `blocker` or `handoff`, or the newest run finished
+ *   as `paused` while the Work Item is still `started`.
+ * - `stalled` / `processing`: the run is active and its lease has or has not expired.
+ * - `failed`: the newest run finished as `failed`, so no newer run exists.
+ * - `completed`: the newest run finished as `completed` within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}.
+ * - `no-run`: the Work Item is `started`, has no active run, and no other lane applies.
+ *
+ * @param item - Work Item, its active or newest run, and that run's latest report.
+ * @param now - Time the lane is evaluated at.
+ * @returns The lane, or undefined when the item belongs to none.
+ */
+export function classifyFactoryBoardItem(item: FactoryBoardItem, now: Date): FactoryBoardLane | undefined {
+  const { run, workItem, latestReport } = item
+  const started = workItem.statusCategory === 'started'
+  if (run === undefined) return started ? 'no-run' : undefined
+  if (run.state === 'active') {
+    const asksForDecision = latestReport !== undefined && latestReport.runId === run.runId &&
+      (latestReport.kind === 'blocker' || latestReport.kind === 'handoff')
+    if (asksForDecision) return 'decision'
+    return Date.parse(run.leaseExpiresAt) < now.getTime() ? 'stalled' : 'processing'
+  }
+  if (run.outcome === 'failed') return 'failed'
+  if (run.outcome === 'paused' && started) return 'decision'
+  if (
+    run.outcome === 'completed' && run.finishedAt !== undefined &&
+    now.getTime() - Date.parse(run.finishedAt) <= FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
+  ) {
+    return 'completed'
+  }
+  return started ? 'no-run' : undefined
 }

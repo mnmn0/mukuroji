@@ -11,6 +11,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 import {
   getWebAgentSettings,
+  listWebTeamAgentRunBoard,
   listWebWorkItemAgentRunReports,
   listWebWorkItemAgentRuns,
   releaseWebAgentRun,
@@ -95,6 +96,17 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
         c.req.param('workItemId'),
         readHistoryLimit(c.req.query('limit'), defaultReportPageSize),
       ))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/teams/:teamId/agent-runs', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      return c.json(await listWebTeamAgentRunBoard(principal, c.req.param('teamId')))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
