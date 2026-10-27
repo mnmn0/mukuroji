@@ -121,19 +121,32 @@ export function filterFactoryBoardItems(items: readonly FactoryBoardItem[], filt
 }
 
 /**
- * Lists the filter choices present in the loaded items.
+ * Lists the filter choices present in the loaded items, plus the choices currently selected.
+ *
+ * A refresh can remove the last item of a selected choice. Keeping that choice listed lets its select
+ * keep showing the filter that is still applied, instead of falling back to a different label.
  *
  * @param items - Board items.
+ * @param selected - Filters in effect; their concrete choices are always listed.
  * @returns Runtime, assignee, and Project choices.
  */
-export function readFactoryBoardFilterOptions(items: readonly FactoryBoardItem[]): FactoryBoardFilterOptions {
+export function readFactoryBoardFilterOptions(
+  items: readonly FactoryBoardItem[],
+  selected: FactoryBoardFilters = defaultFactoryBoardFilters,
+): FactoryBoardFilterOptions {
   const runtimes = new Set(items.flatMap((item) => item.run ? [item.run.runtime] : []))
+  if (selected.runtime !== FACTORY_BOARD_FILTER_ALL) runtimes.add(selected.runtime)
+  const assigneeUserIds = new Set(items.map((item) => item.workItem.assigneeUserId))
+  if (selected.assigneeUserId !== FACTORY_BOARD_FILTER_ALL) assigneeUserIds.add(selected.assigneeUserId)
   const projectIds = new Set(items.flatMap((item) => item.workItem.assignedProjectId === undefined ? [] : [item.workItem.assignedProjectId]))
+  const selectsProject = selected.projectId !== FACTORY_BOARD_FILTER_ALL && selected.projectId !== FACTORY_BOARD_FILTER_NO_PROJECT
+  if (selectsProject) projectIds.add(selected.projectId)
   return {
     runtimes: runtimeOrder.filter((runtime) => runtimes.has(runtime)),
-    assigneeUserIds: [...new Set(items.map((item) => item.workItem.assigneeUserId))].sort(),
+    assigneeUserIds: [...assigneeUserIds].sort(),
     projectIds: [...projectIds].sort(),
-    hasUnassignedProject: items.some((item) => item.workItem.assignedProjectId === undefined),
+    hasUnassignedProject: selected.projectId === FACTORY_BOARD_FILTER_NO_PROJECT ||
+      items.some((item) => item.workItem.assignedProjectId === undefined),
   }
 }
 

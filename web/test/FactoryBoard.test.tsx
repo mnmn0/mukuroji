@@ -124,6 +124,16 @@ describe('Factory board lanes', () => {
     expect(groups[0]?.items.map((item) => item.workItem.id)).toEqual(['auth-flow', 'release-notes'])
   })
 
+  test('keeps selected filter choices listed after a refresh removes their last item', () => {
+    const remaining = factoryBoardFixtureItems.filter((item) => item.workItem.assigneeUserId !== 'tanaka@example.com')
+    const selected = { runtime: 'kiro' as const, assigneeUserId: 'tanaka@example.com', projectId: 'gone-project' }
+    const options = readFactoryBoardFilterOptions(remaining, selected)
+    expect(options.assigneeUserIds).toContain('tanaka@example.com')
+    expect(options.projectIds).toContain('gone-project')
+    expect(options.runtimes).toContain('kiro')
+    expect(readFactoryBoardFilterOptions([], { ...defaultFactoryBoardFilters, projectId: 'none' }).hasUnassignedProject).toBe(true)
+  })
+
   test('filters by runtime, assignee, and Project', () => {
     const options = readFactoryBoardFilterOptions(factoryBoardFixtureItems)
     expect(options).toEqual({

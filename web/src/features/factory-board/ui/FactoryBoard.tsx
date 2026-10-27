@@ -147,7 +147,7 @@ export function FactoryBoard({
    */
   const countLane = (lane: FactoryBoardLane) => allGroups.find((group) => group.lane === lane)?.items.length ?? 0
   const selected = visible.find((item) => item.workItem.id === selectedWorkItemId)
-  const options = readFactoryBoardFilterOptions(items)
+  const options = readFactoryBoardFilterOptions(items, filters)
 
   /**
    * Opens a tile's detail and, on phone where the lanes give way to the detail, moves focus to it.
