@@ -1807,6 +1807,26 @@ describe('Factory board route', () => {
     expect(pageReads).toEqual([100])
   })
 
+  test('reads one page of active runs in lease order and reports the bound', async () => {
+    const now = Date.now()
+    const workItems: BoardWorkItem[] = Array.from({ length: 101 }, (_, index) => ({ id: `task-${index}`, statusCategory: 'started' }))
+    const { store } = configureBoard(workItems)
+    // A higher index starts earlier, so its lease expires earlier.
+    for (let index = 0; index < 101; index += 1) store.seed(createRunAt(`task-${index}`, new Date(now - index * 60_000)))
+    const listActiveRuns = store.listActiveRuns.bind(store)
+    const activeLimits: number[] = []
+    store.listActiveRuns = async (directoryId, teamId, cursor, limit) => {
+      activeLimits.push(limit)
+      return listActiveRuns(directoryId, teamId, cursor, limit)
+    }
+    const { body } = await readBoard()
+    expect(activeLimits).toEqual([100])
+    expect(body.activeRunsHasMore).toBe(true)
+    expect(body.items.slice(0, 3).map((item) => item.workItem.id)).toEqual(['task-100', 'task-99', 'task-98'])
+    // The run beyond the page is still shown through the started Work Items, with its newest run.
+    expect(body.items.find((item) => item.workItem.id === 'task-0')?.run?.state).toBe('active')
+  })
+
   test('reports a Work Item page bound that was reached', async () => {
     configureBoard([{ id: 'task-1', statusCategory: 'started' }])
     const base = getTestAppDependencies().workItems.teamIssues
