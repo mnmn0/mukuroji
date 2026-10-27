@@ -4,6 +4,7 @@ import {
   type AgentRunRuntime,
   type FactoryBoardItem,
   type FactoryBoardLane,
+  type FactoryBoardWorkItem,
   type TeamAgentRunBoardResponse,
 } from '@mukuroji/contracts'
 
@@ -38,12 +39,20 @@ export type FactoryBoardLaneGroup = {
   items: FactoryBoardItem[]
 }
 
+/** One assignee the filter can offer. */
+export type FactoryBoardAssigneeOption = {
+  /** Member ID the filter compares with. */
+  userId: string
+  /** Name to show for the member. */
+  label: string
+}
+
 /** Choices the filters can offer, taken from the loaded items. */
 export type FactoryBoardFilterOptions = {
   /** Runtimes of the loaded runs, in contract order. */
   runtimes: AgentRunRuntime[]
-  /** Assignees of the loaded Work Items, sorted. */
-  assigneeUserIds: string[]
+  /** Assignees of the loaded Work Items, sorted by label. */
+  assignees: FactoryBoardAssigneeOption[]
   /** Assigned Projects of the loaded Work Items, sorted. */
   projectIds: string[]
   /** Whether a loaded Work Item has no Project. */
@@ -121,6 +130,17 @@ export function filterFactoryBoardItems(items: readonly FactoryBoardItem[], filt
 }
 
 /**
+ * Reads the name to show for a Work Item's assignee: the profile name, then the email address, then
+ * the member ID when the server could not read the profile.
+ *
+ * @param workItem - Work Item facts of a board item.
+ * @returns Assignee label.
+ */
+export function readFactoryBoardAssigneeLabel(workItem: FactoryBoardWorkItem): string {
+  return workItem.assigneeName ?? workItem.assigneeEmail ?? workItem.assigneeUserId
+}
+
+/**
  * Lists the filter choices present in the loaded items, plus the choices currently selected.
  *
  * A refresh can remove the last item of a selected choice. Keeping that choice listed lets its select
@@ -136,14 +156,18 @@ export function readFactoryBoardFilterOptions(
 ): FactoryBoardFilterOptions {
   const runtimes = new Set(items.flatMap((item) => item.run ? [item.run.runtime] : []))
   if (selected.runtime !== FACTORY_BOARD_FILTER_ALL) runtimes.add(selected.runtime)
-  const assigneeUserIds = new Set(items.map((item) => item.workItem.assigneeUserId))
-  if (selected.assigneeUserId !== FACTORY_BOARD_FILTER_ALL) assigneeUserIds.add(selected.assigneeUserId)
+  const assignees = new Map(items.map((item) => [item.workItem.assigneeUserId, readFactoryBoardAssigneeLabel(item.workItem)]))
+  if (selected.assigneeUserId !== FACTORY_BOARD_FILTER_ALL && !assignees.has(selected.assigneeUserId)) {
+    assignees.set(selected.assigneeUserId, selected.assigneeUserId)
+  }
   const projectIds = new Set(items.flatMap((item) => item.workItem.assignedProjectId === undefined ? [] : [item.workItem.assignedProjectId]))
   const selectsProject = selected.projectId !== FACTORY_BOARD_FILTER_ALL && selected.projectId !== FACTORY_BOARD_FILTER_NO_PROJECT
   if (selectsProject) projectIds.add(selected.projectId)
   return {
     runtimes: runtimeOrder.filter((runtime) => runtimes.has(runtime)),
-    assigneeUserIds: [...assigneeUserIds].sort(),
+    assignees: [...assignees]
+      .map(([userId, label]) => ({ userId, label }))
+      .sort((left, right) => left.label.localeCompare(right.label) || left.userId.localeCompare(right.userId)),
     projectIds: [...projectIds].sort(),
     hasUnassignedProject: selected.projectId === FACTORY_BOARD_FILTER_NO_PROJECT ||
       items.some((item) => item.workItem.assignedProjectId === undefined),

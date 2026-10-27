@@ -1755,7 +1755,7 @@ describe('Factory board route', () => {
     expect(body).toMatchObject({ activeRunsHasMore: false, finishedRunsHasMore: false, startedWorkItemsHasMore: false })
     const byId = new Map(body.items.map((item) => [item.workItem.id, item]))
     expect(byId.get('task-processing')).toMatchObject({
-      workItem: { id: 'task-processing', title: 'Title of task-processing', statusCategory: 'started', workflowStatusId: 'in-progress', assignedProjectId: 'refero', assigneeUserId: 'demo@example.com' },
+      workItem: { id: 'task-processing', title: 'Title of task-processing', statusCategory: 'started', workflowStatusId: 'in-progress', assignedProjectId: 'refero', assigneeUserId: 'demo@example.com', assigneeName: 'Demo User', assigneeEmail: 'demo@example.com' },
       run: { runId: processing.runId, state: 'active', stalled: false, canRelease: true, runtime: 'claude-code', agentName: 'Claude Code' },
     })
     expect(byId.get('task-retried')?.run?.runId).toBe(retry.runId)
@@ -1764,7 +1764,7 @@ describe('Factory board route', () => {
       excerpt: 'Need a decision on the schema.', verificationCounts: { passed: 1, failed: 1, skipped: 0 }, artifactCount: 1, changedFileCount: 3,
     })
     expect(byId.get('task-runless')).toEqual({
-      workItem: { id: 'task-runless', title: 'Title of task-runless', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'demo@example.com' },
+      workItem: { id: 'task-runless', title: 'Title of task-runless', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'demo@example.com', assigneeName: 'Demo User', assigneeEmail: 'demo@example.com' },
     })
     // Finished runs are never offered for release, and no table key or cursor leaves the server.
     expect(byId.get('task-released')?.run).toMatchObject({ outcome: 'released', canRelease: false })
@@ -1861,6 +1861,31 @@ describe('Factory board route', () => {
     const { projectOptions } = configureUnstartedAssignedWorkItem({ role: 'member' })
     projectOptions.projectAccesses = []
     expect((await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })).status).toBe(403)
+  })
+
+  test('shows assignees by ID when their profiles cannot be read', async () => {
+    const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
+    store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
+    const cognito = getTestAppDependencies().authentication.cognito
+    setTestAppDependencies({
+      cognito: {
+        ...cognito,
+        /**
+         * Fails like an unavailable user pool.
+         *
+         * @returns Never; always rejects.
+         */
+        async getUserProfile() {
+          throw new Error('Cognito is unavailable.')
+        },
+      },
+    })
+
+    const { body, lanes } = await readBoard()
+    expect(lanes).toEqual({ 'task-processing': 'processing' })
+    expect(body.items[0]?.workItem.assigneeUserId).toBe('demo@example.com')
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeEmail')
   })
 
   test('fails closed instead of returning an empty board when stored runs are inconsistent', async () => {

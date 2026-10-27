@@ -27,6 +27,7 @@ import {
   toAgentRunReport,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
+import { isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
 import {
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
@@ -43,7 +44,7 @@ import {
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
-import { workItemDependencies } from '../shared/app-dependencies'
+import { authenticationDependencies, workItemDependencies } from '../shared/app-dependencies'
 import {
   canAccessAssignedProject,
   canWorkspaceBusinessWrite,
@@ -397,6 +398,32 @@ async function readBoardReportSummary(
 }
 
 /**
+ * Reads the profiles of the members assigned to board Work Items, so the board can show names
+ * instead of member IDs. A profile that is missing or fails to load is left out, and that member
+ * keeps showing by ID; a profile lookup never fails the board.
+ *
+ * @param userIds - Assignee member IDs.
+ * @returns Profiles by member ID.
+ */
+async function readBoardAssigneeProfiles(userIds: string[]): Promise<Map<string, CognitoUserProfile>> {
+  const unique = [...new Set(userIds)]
+  const profiles = await mapInOrderWithConcurrency(unique, boardReadConcurrency, async (userId) => {
+    try {
+      return await authenticationDependencies.cognito.getUserProfile(userId)
+    } catch (error) {
+      if (!isCognitoUserNotFoundError(error)) console.warn('Failed to read a Factory board assignee profile:', error)
+      return undefined
+    }
+  })
+  const byUserId = new Map<string, CognitoUserProfile>()
+  unique.forEach((userId, index) => {
+    const profile = profiles[index]
+    if (profile) byUserId.set(userId, profile)
+  })
+  return byUserId
+}
+
+/**
  * Lists the Factory board of a Team for anyone who can view the Team: the Work Items of active runs,
  * of runs that finished within the completed-lane window, and the `started` Work Items among the most
  * recently updated ones, each with its active or newest run and that run's latest report. Only Work
@@ -445,9 +472,22 @@ export async function listWebTeamAgentRunBoard(
     }
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
   })
+  const boardItems = items.flatMap((item) => item ? [item] : [])
+  const profiles = await readBoardAssigneeProfiles(boardItems.map((item) => item.workItem.assigneeUserId))
   return {
     generatedAt: now.toISOString(),
-    items: items.flatMap((item) => item ? [item] : []),
+    items: boardItems.map((item) => {
+      const profile = profiles.get(item.workItem.assigneeUserId)
+      if (!profile) return item
+      return {
+        ...item,
+        workItem: {
+          ...item.workItem,
+          ...(profile.name === undefined || profile.name === '' ? {} : { assigneeName: profile.name }),
+          assigneeEmail: profile.email,
+        },
+      }
+    }),
     activeRunsHasMore: active.hasMore,
     finishedRunsHasMore: finished.hasMore,
     startedWorkItemsHasMore: started.hasMore,

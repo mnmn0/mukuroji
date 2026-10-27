@@ -10,6 +10,7 @@ import {
   filterFactoryBoardItems,
   groupFactoryBoardItems,
   isFactoryBoardIncomplete,
+  readFactoryBoardAssigneeLabel,
   readFactoryBoardFilterOptions,
   readLeaseMinutesRemaining,
   type FactoryBoardFilters,
@@ -205,7 +206,7 @@ export function FactoryBoard({
           <FilterSelect
             label={labels.filterAssignee}
             onChange={(value) => changeFilters({ ...filters, assigneeUserId: value })}
-            options={[{ value: FACTORY_BOARD_FILTER_ALL, label: labels.filterAll }, ...options.assigneeUserIds.map((userId) => ({ value: userId, label: userId }))]}
+            options={[{ value: FACTORY_BOARD_FILTER_ALL, label: labels.filterAll }, ...options.assignees.map((assignee) => ({ value: assignee.userId, label: assignee.label }))]}
             value={filters.assigneeUserId}
           />
           <FilterSelect
@@ -560,7 +561,7 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
         ) : null}
         <h2 className="mt-2 break-words text-lg font-semibold leading-7 text-[var(--workbench-text)]">{workItem.title}</h2>
         <dl className="mt-2 grid gap-1 text-xs">
-          <DetailField label={labels.assignee} value={workItem.assigneeUserId} />
+          <DetailField label={labels.assignee} value={readFactoryBoardAssigneeLabel(workItem)} />
           {workItem.assignedProjectId ? (
             <DetailField label={labels.filterProject} value={projectNames[workItem.assignedProjectId] ?? workItem.assignedProjectId} />
           ) : null}

@@ -617,7 +617,9 @@ Slice 3 は 3 つの変更に分けて入れる。
 - desktop は lane の横に detail を置き、phone は lane を縦に積み、tile を選ぶと detail に切り替わって
   「一覧に戻る」で元の tile に戻る。Storybook で 1440×900 と 390×844 を確認し、横方向の overflow がない
   ことを確かめた。
-- assignee filter は member の公開 ID（メールアドレス）で表示する。表示名の解決は後続の変更とする。
+- 担当者は server が Cognito の profile から表示名とメールアドレスを読み、`assigneeName` と `assigneeEmail` として
+  返す。読み取りは担当者ごとに 1 回、同時 10 件までとする。profile がない、または読めない場合も board は失敗させず、
+  Web は表示名、メールアドレス、member ID の順に代わりを使う。filter の選択肢は表示名の順に並べる。
 
 ## 後続 Phase
 

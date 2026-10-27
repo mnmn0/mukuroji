@@ -66,6 +66,8 @@ describe('Factory board API', () => {
     const base = fixtureItem('auth-flow')
     const malformed = [
       { ...base, workItem: { ...base.workItem, statusCategory: 'unknown' } },
+      { ...base, workItem: { ...base.workItem, assigneeName: '' } },
+      { ...base, workItem: { ...base.workItem, assigneeEmail: 42 } },
       { ...base, run: { ...base.run, runtime: 'gpt' } },
       { ...base, run: { ...base.run, workItemId: 'another-item' } },
       { ...base, latestReport: { ...base.latestReport, runId: 'run_other' } },
@@ -128,7 +130,7 @@ describe('Factory board lanes', () => {
     const remaining = factoryBoardFixtureItems.filter((item) => item.workItem.assigneeUserId !== 'tanaka@example.com')
     const selected = { runtime: 'kiro' as const, assigneeUserId: 'tanaka@example.com', projectId: 'gone-project' }
     const options = readFactoryBoardFilterOptions(remaining, selected)
-    expect(options.assigneeUserIds).toContain('tanaka@example.com')
+    expect(options.assignees).toContainEqual({ userId: 'tanaka@example.com', label: 'tanaka@example.com' })
     expect(options.projectIds).toContain('gone-project')
     expect(options.runtimes).toContain('kiro')
     expect(readFactoryBoardFilterOptions([], { ...defaultFactoryBoardFilters, projectId: 'none' }).hasUnassignedProject).toBe(true)
@@ -138,7 +140,10 @@ describe('Factory board lanes', () => {
     const options = readFactoryBoardFilterOptions(factoryBoardFixtureItems)
     expect(options).toEqual({
       runtimes: ['claude-code', 'codex', 'kiro'],
-      assigneeUserIds: ['sato@example.com', 'tanaka@example.com'],
+      assignees: [
+        { userId: 'tanaka@example.com', label: 'tanaka@example.com' },
+        { userId: 'sato@example.com', label: '佐藤 花子' },
+      ],
       projectIds: ['refero'],
       hasUnassignedProject: true,
     })
