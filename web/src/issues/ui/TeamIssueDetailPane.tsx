@@ -71,6 +71,9 @@ import {
   WorkItemContributorsEditor,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
+import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import {
   type CanManageWorkItemDependencyEndpoint,
   type TeamIssueScreenProps,
@@ -550,6 +553,7 @@ function IssueDetailContent({
   const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
+  const acceptanceCriteriaDraftState = useAcceptanceCriteriaDraft(editorIdentity)
 
   /** Submits the visible Team Issue controls through the external editor form. */
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
@@ -600,6 +604,12 @@ function IssueDetailContent({
     }
     contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
     const contributorDraft = contributorSubmission
+    const acceptanceCriteriaSubmission = readAcceptanceCriteriaDraftSubmission(formData)
+    if (acceptanceCriteriaSubmission && 'error' in acceptanceCriteriaSubmission) {
+      acceptanceCriteriaDraftState.setDraft((current) => ({ ...current, submitError: acceptanceCriteriaSubmission }))
+      return
+    }
+    acceptanceCriteriaDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -652,6 +662,9 @@ function IssueDetailContent({
     }
     if (contributorDraft) {
       nextIssueInput.contributorAssignments = contributorDraft.assignments
+    }
+    if (acceptanceCriteriaSubmission) {
+      nextIssueInput.acceptanceCriteria = acceptanceCriteriaSubmission.criteria
     }
 
     setIssueUpdatePending(true)
@@ -771,20 +784,33 @@ function IssueDetailContent({
     </section>
   ) : null
 
-  /** Renders the Work Item-wide contributor editor; shown even when a type omits the overview section. */
+  /**
+   * Renders the Work Item-wide contributor and acceptance criteria editors; shown even when a type
+   * omits the overview section.
+   */
   const renderContributorsEditor = (): ReactNode => (
-    <WorkItemContributorsEditor
-      assignments={issue.contributorAssignments}
-      formId={editorFormId}
-      jobRoles={configuration?.jobRoles ?? []}
-      draftState={contributorDraftState}
-      key={editorIdentity + ':contributors'}
-      locale={locale}
-      memberDirectory={contributorDirectory}
-      memberOptions={contributorOptions}
-      ownerUserId={issue.assigneeUserId}
-      readOnly={isIssueReadOnly}
-    />
+    <>
+      <WorkItemContributorsEditor
+        assignments={issue.contributorAssignments}
+        formId={editorFormId}
+        jobRoles={configuration?.jobRoles ?? []}
+        draftState={contributorDraftState}
+        key={editorIdentity + ':contributors'}
+        locale={locale}
+        memberDirectory={contributorDirectory}
+        memberOptions={contributorOptions}
+        ownerUserId={issue.assigneeUserId}
+        readOnly={isIssueReadOnly}
+      />
+      <WorkItemAcceptanceCriteriaEditor
+        criteria={issue.acceptanceCriteria}
+        draftState={acceptanceCriteriaDraftState}
+        formId={editorFormId}
+        key={`acceptance-criteria:${editorIdentity}`}
+        locale={locale}
+        readOnly={isIssueReadOnly}
+      />
+    </>
   )
 
   /** Renders one configured Team Issue detail section in its persisted order. */
