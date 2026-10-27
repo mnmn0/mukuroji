@@ -399,14 +399,14 @@ async function readBoardReportSummary(
 
 /**
  * Reads the profiles of the members assigned to board Work Items, so the board can show names
- * instead of member IDs. A profile that is missing or fails to load is left out, and that member
- * keeps showing by ID; a profile lookup never fails the board.
+ * instead of member IDs. An empty member ID is not looked up. A profile that is missing or fails to
+ * load is left out, and that member keeps showing by ID; a profile lookup never fails the board.
  *
  * @param userIds - Assignee member IDs.
  * @returns Profiles by member ID.
  */
 async function readBoardAssigneeProfiles(userIds: string[]): Promise<Map<string, CognitoUserProfile>> {
-  const unique = [...new Set(userIds)]
+  const unique = [...new Set(userIds)].filter((userId) => userId !== '')
   const profiles = await mapInOrderWithConcurrency(unique, boardReadConcurrency, async (userId) => {
     try {
       return await authenticationDependencies.cognito.getUserProfile(userId)
@@ -484,7 +484,7 @@ export async function listWebTeamAgentRunBoard(
         workItem: {
           ...item.workItem,
           ...(profile.name === undefined || profile.name === '' ? {} : { assigneeName: profile.name }),
-          assigneeEmail: profile.email,
+          ...(profile.email === '' ? {} : { assigneeEmail: profile.email }),
         },
       }
     }),

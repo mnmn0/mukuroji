@@ -1863,6 +1863,30 @@ describe('Factory board route', () => {
     expect((await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })).status).toBe(403)
   })
 
+  test('leaves out empty profile fields instead of returning a board the Web application rejects', async () => {
+    const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
+    store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
+    const cognito = getTestAppDependencies().authentication.cognito
+    setTestAppDependencies({
+      cognito: {
+        ...cognito,
+        /**
+         * Returns a profile without a name or an email address.
+         *
+         * @param userId - Member ID.
+         * @returns Profile with empty fields.
+         */
+        async getUserProfile(userId) {
+          return { id: userId, username: userId, email: '', name: '' }
+        },
+      },
+    })
+
+    const { body } = await readBoard()
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeEmail')
+  })
+
   test('shows assignees by ID when their profiles cannot be read', async () => {
     const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
     store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
