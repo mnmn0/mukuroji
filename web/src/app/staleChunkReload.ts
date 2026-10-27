@@ -1,47 +1,67 @@
-/** Session storage key holding when a failed chunk load last reloaded the page. */
-const reloadedAtStorageKey = 'mukuroji.staleChunkReloadAt'
+import type { ComponentType } from 'react'
 
-/** Minimum time between reloads, so a chunk that keeps failing, such as while offline, cannot loop. */
-export const STALE_CHUNK_RELOAD_INTERVAL_MS = 10_000
+/** Session storage key set while a reload to recover a failed page load is in progress. */
+const reloadAttemptedStorageKey = 'mukuroji.pageChunkReloadAttempted'
 
 /**
- * Decides whether a failed chunk load should reload the page.
- *
- * @param lastReloadAt - Stored time of the previous reload in milliseconds, or null when none is stored.
- * @param now - Current time in milliseconds.
- * @returns True when no reload happened within {@link STALE_CHUNK_RELOAD_INTERVAL_MS}.
+ * Browser facilities a page load needs to recover by reloading.
  */
-export function shouldReloadForFailedChunk(lastReloadAt: string | null, now: number): boolean {
-  const last = lastReloadAt === null ? Number.NaN : Number(lastReloadAt)
-  return !Number.isFinite(last) || now - last >= STALE_CHUNK_RELOAD_INTERVAL_MS || now < last
+export type PageReloadEnvironment = {
+  /** Session storage that remembers a reload across it; reading or writing may throw. */
+  storage: Pick<Storage, 'getItem' | 'removeItem' | 'setItem'>
+  /** Reloads the application. */
+  reload: () => void
 }
 
 /**
- * Reloads the page when a lazily loaded page chunk fails to load.
+ * Returns the browser's session storage and full page reload.
+ *
+ * @returns The environment of the current window.
+ */
+function getWindowReloadEnvironment(): PageReloadEnvironment {
+  return { storage: window.sessionStorage, reload: () => window.location.reload() }
+}
+
+/**
+ * Loads a route's page component and reloads the application once when the load fails.
  *
  * A deploy replaces the content-hashed chunks that an open tab still references, so the next page
- * it opens can fail to load. Reloading fetches the current `index.html` and its chunks. When a
- * reload already happened moments ago, the error is left to the route instead of reloading again.
+ * it opens can fail to load; reloading fetches the current `index.html` and its chunks. The attempt
+ * is remembered until a page loads, so a load that fails again after the reload, however long it
+ * takes, reaches the route error page instead of reloading in a loop. Only route page loads use
+ * this; other lazy imports, such as the PDF runtime, keep handling their own failures.
  *
- * @param target - Window to watch; the global window by default.
+ * @param load - Imports the page module and returns its component.
+ * @param environment - Storage and reload; the current window when omitted, read only when needed.
+ * @returns The page component, or a promise that stays pending while the page reloads.
  */
-export function startStaleChunkReload(target: Window = window): void {
-  target.addEventListener('vite:preloadError', (event) => {
-    const now = Date.now()
-    let lastReloadAt: string | null
+export async function loadPageWithReload(
+  load: () => Promise<ComponentType>,
+  environment?: PageReloadEnvironment,
+): Promise<ComponentType> {
+  try {
+    const component = await load()
     try {
-      lastReloadAt = target.sessionStorage.getItem(reloadedAtStorageKey)
+      (environment ?? getWindowReloadEnvironment()).storage.removeItem(reloadAttemptedStorageKey)
     } catch {
-      // Without storage there is no loop guard, so leave the error to the route.
-      return
+      // Without storage a later failure simply reaches the route error page.
     }
-    if (!shouldReloadForFailedChunk(lastReloadAt, now)) return
+    return component
+  } catch (error) {
+    let attempted: boolean
+    let reload: () => void
     try {
-      target.sessionStorage.setItem(reloadedAtStorageKey, String(now))
+      const current = environment ?? getWindowReloadEnvironment()
+      reload = current.reload
+      attempted = current.storage.getItem(reloadAttemptedStorageKey) !== null
+      if (!attempted) current.storage.setItem(reloadAttemptedStorageKey, '1')
     } catch {
-      return
+      // Without storage nothing would stop a reload loop.
+      throw error
     }
-    event.preventDefault()
-    target.location.reload()
-  })
+    // A reload already failed to help.
+    if (attempted) throw error
+    reload()
+    return new Promise<never>(() => undefined)
+  }
 }

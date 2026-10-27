@@ -3,19 +3,20 @@ import { Navigate, createBrowserRouter, type LazyRouteFunction, type RouteObject
 import { LoginPage } from '../pages/auth/LoginPage'
 import { NotFoundPage } from '../pages/public/NotFoundPage'
 import { RouteErrorPage } from '../pages/public/RouteErrorPage'
+import { loadPageWithReload } from './staleChunkReload'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { WorkspaceRoute } from '../workspace/ui/WorkspaceRoute'
 import { WorkspaceRouteProvider } from '../workspace/ui/WorkspaceRouteProvider'
 
 /**
  * Loads a page when its route first matches, so each page ships in its own chunk instead of the
- * initial bundle.
+ * initial bundle. A failed load reloads the application once, see {@link loadPageWithReload}.
  *
  * @param load - Imports the page module and returns its component.
  * @returns Route `lazy` function that resolves to the page component.
  */
 function lazyPage(load: () => Promise<ComponentType>): LazyRouteFunction<RouteObject> {
-  return async () => ({ Component: await load() })
+  return async () => ({ Component: await loadPageWithReload(load) })
 }
 
 /**
