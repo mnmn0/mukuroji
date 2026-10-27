@@ -63,6 +63,9 @@ import {
   WorkItemContributorsEditor,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
+import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
@@ -422,6 +425,7 @@ export function TaskDetailPane({
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   // The identity matches the editor's, so a new Work Item or revision starts a fresh draft.
   const contributorDraftState = useContributorDraft(scheduleSelectionIdentity)
+  const acceptanceCriteriaDraftState = useAcceptanceCriteriaDraft(scheduleSelectionIdentity)
   if (!task) {
     const statusMessage = isLoading
       ? t('tasks.detail.loading')
@@ -817,6 +821,12 @@ export function TaskDetailPane({
     }
     contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
     const contributorDraft = contributorSubmission
+    const acceptanceCriteriaSubmission = readAcceptanceCriteriaDraftSubmission(formData)
+    if (acceptanceCriteriaSubmission && 'error' in acceptanceCriteriaSubmission) {
+      acceptanceCriteriaDraftState.setDraft((current) => ({ ...current, submitError: acceptanceCriteriaSubmission }))
+      return
+    }
+    acceptanceCriteriaDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -869,6 +879,9 @@ export function TaskDetailPane({
     }
     if (contributorDraft) {
       nextIssueInput.contributorAssignments = contributorDraft.assignments
+    }
+    if (acceptanceCriteriaSubmission) {
+      nextIssueInput.acceptanceCriteria = acceptanceCriteriaSubmission.criteria
     }
 
     void submitIssueUpdate(nextIssueInput)
@@ -985,20 +998,33 @@ export function TaskDetailPane({
     </section>
   ) : null
 
-  /** Renders the Work Item-wide contributor editor; shown even when a type omits the overview section. */
+  /**
+   * Renders the Work Item-wide contributor and acceptance criteria editors; shown even when a type
+   * omits the overview section.
+   */
   const renderContributorsEditor = (): ReactNode => (
-    <WorkItemContributorsEditor
-      assignments={(issue ?? currentTask).contributorAssignments}
-      formId={editorFormId}
-      jobRoles={resolvedConfiguration?.jobRoles ?? []}
-      draftState={contributorDraftState}
-      key={`contributors:${editorIdentity}`}
-      locale={locale}
-      memberDirectory={contributorDirectory}
-      memberOptions={contributorOptions}
-      ownerUserId={(issue ?? currentTask).assigneeUserId}
-      readOnly={isReadOnly}
-    />
+    <>
+      <WorkItemContributorsEditor
+        assignments={(issue ?? currentTask).contributorAssignments}
+        formId={editorFormId}
+        jobRoles={resolvedConfiguration?.jobRoles ?? []}
+        draftState={contributorDraftState}
+        key={`contributors:${editorIdentity}`}
+        locale={locale}
+        memberDirectory={contributorDirectory}
+        memberOptions={contributorOptions}
+        ownerUserId={(issue ?? currentTask).assigneeUserId}
+        readOnly={isReadOnly}
+      />
+      <WorkItemAcceptanceCriteriaEditor
+        criteria={(issue ?? currentTask).acceptanceCriteria}
+        draftState={acceptanceCriteriaDraftState}
+        formId={editorFormId}
+        key={`acceptance-criteria:${editorIdentity}`}
+        locale={locale}
+        readOnly={isReadOnly}
+      />
+    </>
   )
 
   /** Renders one configured Work Item detail section in its persisted order. */
