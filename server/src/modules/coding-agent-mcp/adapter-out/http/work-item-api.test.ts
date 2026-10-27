@@ -117,18 +117,41 @@ test('reads Ready statuses and briefs from agent-context alongside the run setti
       return Response.json({ schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true })
     }
     if (url.pathname === '/api/v1/agent-context') {
-      return Response.json({ schemaVersion: 1, teamId: 'team', revision: 4, readyStatusIds: ['ready'], brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' } })
+      return Response.json({
+        schemaVersion: 1, teamId: 'team', revision: 4, readyStatusIds: ['ready'], requireAcceptanceCriteria: true,
+        acceptanceCriteriaFieldId: 'criteria', brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
+      })
     }
     return Response.json({ status: 500, code: 'internal_error', retryable: false }, { status: 500 })
   })
   expect(await api.agentSettings()).toEqual({
     schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true,
-    readyStatusIds: ['ready'], brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
+    readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'criteria',
+    brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
   })
   const mismatched = createAgentWorkItemApi(config, async (url) => Response.json(url.pathname === '/api/v1/agent-settings'
     ? { schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }
     : { schemaVersion: 1, teamId: 'other', revision: 4, readyStatusIds: [], projectBriefs: {} }))
   await expect(mismatched.agentSettings()).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads acceptance criteria from their endpoint and treats an older server as having none', async () => {
+  const criterion = { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    if (url.pathname === '/api/v1/work-items/task/acceptance-criteria') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3, items: [criterion] })
+    }
+    if (url.pathname === '/api/v1/work-items/other/acceptance-criteria') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3, items: [] })
+    }
+    return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+  })
+  expect(await api.acceptanceCriteria('task')).toEqual([criterion])
+  expect(paths[0]).toBe('/api/v1/work-items/task/acceptance-criteria?teamId=team')
+  expect(await api.acceptanceCriteria('legacy')).toEqual([])
+  await expect(api.acceptanceCriteria('other')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
 const validRun = {

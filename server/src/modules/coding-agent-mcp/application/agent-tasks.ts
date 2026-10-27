@@ -1,5 +1,6 @@
 import {
   DEFAULT_WORK_ITEM_TYPE_ID,
+  hasWorkItemAcceptanceCriteria,
   type AgentRunFinishOutcome,
   type AgentRunMutationFence,
   type AgentRunRuntime,
@@ -15,6 +16,17 @@ import {
   type AgentTaskFilters,
   type AgentWorkItemApi,
 } from './work-item-api'
+
+/** Metadata changes an agent may make, including marking its task's acceptance criteria met or unmet. */
+export type AgentTaskUpdate = Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'> & {
+  /** Criteria to mark met or unmet by ID; criteria not listed keep their state. */
+  acceptanceCriteria?: {
+    /** ID of a criterion on the task. */
+    id: string
+    /** Whether the criterion is met. */
+    satisfied: boolean
+  }[]
+}
 
 /** Operator-selected assignment and optional project scope for agent mutations. */
 export type AgentTaskScope = {
@@ -38,6 +50,9 @@ export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready'
 
 /** Maximum number of skipped candidates reported by task selection. */
 const maximumSkippedReports = 5
+
+/** Explains the bound on per-candidate reads during task selection. */
+const selectionLimitMessage = 'Selection exceeded 100 dependency or acceptance criteria reads. Narrow the queue filter.'
 
 /** Maximum number of active-run pages read before reporting a limit. */
 const maximumRunPages = 10
@@ -379,6 +394,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           leaseMinutes: agentSettings.leaseMinutes,
           allowTakeoverAfterLeaseExpiry: agentSettings.allowTakeoverAfterLeaseExpiry,
           readyStatusIds: agentSettings.readyStatusIds,
+          requireAcceptanceCriteria: agentSettings.requireAcceptanceCriteria,
+          ...(agentSettings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: agentSettings.acceptanceCriteriaFieldId }),
         },
         brief: composeBrief(agentSettings, scope.assignedProjectId),
         catalog,
@@ -408,7 +425,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      return { task, blockers: await blockers(task), activeRun }
+      return { task, acceptanceCriteria: await api.acceptanceCriteria(id), blockers: await blockers(task), activeRun }
     },
     /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
     async next(input: AgentTaskFilters) {
@@ -440,8 +457,14 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         if (claimed.has(task.id)) { skip(task.id, 'active_run'); continue }
         // The server rejects a start from any other status, so such tasks are never offered.
         if (readyStatusIds.size > 0 && !readyStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_ready'); continue }
+        if (settings.requireAcceptanceCriteria && !hasWorkItemAcceptanceCriteria(task, settings.acceptanceCriteriaFieldId)) {
+          // The custom field is checked first; only then are the canonical criteria read.
+          dependencyReads += 1
+          if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
+          if ((await api.acceptanceCriteria(task.id)).length === 0) { skip(task.id, 'not_ready'); continue }
+        }
         dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
-        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', 'Selection exceeded 100 dependency reads. Narrow the queue filter.')
+        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
         if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
         return { action: 'start', task, blockedCount, skipped, ...runSummary }
       }
@@ -458,12 +481,18 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     transition,
     /** Applies metadata changes using revision CAS; assignment and workflow changes have dedicated paths. */
-    async update(id: string, input: Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'>, key: string) {
+    async update(id: string, input: AgentTaskUpdate, key: string) {
       const task = await owned(id)
       if (input.expectedRevision > task.revision) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
-      return api.update(id, input, key, await fenceFor(id))
+      const { acceptanceCriteria: marks, ...fields } = input
+      // The server applies the marks to the stored list inside the request's idempotency boundary, so a
+      // retry with the same arguments replays even if a person edited the criteria meanwhile.
+      return api.update(id, {
+        ...fields,
+        ...(marks === undefined ? {} : { acceptanceCriteriaMarks: marks }),
+      }, key, await fenceFor(id))
     },
     /** Creates assigned work within the operator-selected Project boundary. */
     async create(input: Parameters<AgentWorkItemApi['create']>[0], key: string) {

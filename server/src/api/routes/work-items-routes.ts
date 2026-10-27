@@ -276,6 +276,7 @@ import {
   readContributorAssignmentChange,
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
+import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 
 /** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
 const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
@@ -4717,8 +4718,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           readTeamIssueAssigneeUserId(configuredBody),
         )
       }
-      if ('contributorAssignments' in configuredBody && detail.issue.revision !== expectedRevision) {
-        // Assignment IDs refer to the observed list, so a stale request is a revision conflict.
+      if (
+        ('contributorAssignments' in configuredBody || 'acceptanceCriteria' in configuredBody) &&
+        detail.issue.revision !== expectedRevision
+      ) {
+        // Assignment and criterion IDs refer to the observed list, so a stale request is a revision conflict.
         throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
       }
       const contributorChange = await readContributorAssignmentChange(
@@ -4727,6 +4731,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         resolvedConfiguration,
         detail.issue.contributorAssignments ?? [],
       )
+      const acceptanceCriteria = readAcceptanceCriteriaChange(configuredBody, detail.issue.acceptanceCriteria ?? [], false)
 
       const response = await hydrateUpdateTeamIssueResponse(
         await workItemDependencies.teamIssues.updateTeamIssue(
@@ -4736,6 +4741,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           {
             ...configuredBody,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
             expectedRevision,
             ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
           },

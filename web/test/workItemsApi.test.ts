@@ -77,6 +77,23 @@ describe('canonical Work Item API', () => {
     }
   })
 
+  test('validates acceptance criteria at the response boundary', () => {
+    const criterion = { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }
+    const valid = createWorkItem({ dueDate: '2026-07-12', schedule: createDefaultTestSchedule('2026-07-12') })
+    expect(isCanonicalWorkItem({ ...valid, acceptanceCriteria: [criterion] })).toBeTrue()
+    for (const acceptanceCriteria of [
+      [],
+      [{ ...criterion, id: 'not-hex' }],
+      [{ ...criterion, text: '' }],
+      [{ ...criterion, text: 'x'.repeat(1025) }],
+      [{ ...criterion, satisfied: 'no' }],
+      [criterion, criterion],
+      Array.from({ length: 21 }, (_, index) => ({ ...criterion, id: index.toString(16).padStart(32, '0') })),
+    ]) {
+      expect(isCanonicalWorkItem({ ...valid, acceptanceCriteria })).toBeFalse()
+    }
+  })
+
   test('validates contributor assignments at the response boundary', () => {
     const contributor = {
       assignmentId: 'a'.repeat(32),

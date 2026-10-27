@@ -12,6 +12,7 @@ import type {
   WorkItemContributorAssignmentCreateInput,
   WorkItemContributorAssignmentInput,
 } from './work-item-contributors'
+import type { WorkItemAcceptanceCriterion, WorkItemAcceptanceCriterionInput } from './work-item-acceptance-criteria'
 import type {
   TriageEntryEvent,
   TriagePermissionVisibility,
@@ -442,6 +443,8 @@ export type CanonicalWorkItem = {
   assigneeUserId: string
   /** Contributors carrying out the work, separate from the accountable owner; absent when none. */
   contributorAssignments?: WorkItemContributorAssignment[]
+  /** Conditions the Work Item must meet before it is accepted; absent when none. */
+  acceptanceCriteria?: WorkItemAcceptanceCriterion[]
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
@@ -595,6 +598,11 @@ export type WorkItemPatch = {
   assigneeUserId?: string
   /** Complete replacement list of contributors; an empty list removes every contributor. */
   contributorAssignments?: WorkItemContributorAssignmentInput[]
+  /**
+   * Complete replacement list of acceptance criteria; an empty list removes every criterion. An agent
+   * fenced by its Agent Run may only change `satisfied` of the existing criteria.
+   */
+  acceptanceCriteria?: WorkItemAcceptanceCriterionInput[]
   /** Stable Work Item Type that should replace the current type. */
   workItemTypeId?: string
   /** Explicit acknowledgement for fields or status affected by a type change. */

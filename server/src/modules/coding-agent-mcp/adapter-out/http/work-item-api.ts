@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
   AgentCatalog, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
@@ -19,6 +20,14 @@ const taskSchema: z.ZodType<AgentTask> = z.object({
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),
+})
+const acceptanceCriteriaSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
+  items: z.array(z.object({
+    id: z.string().regex(/^[0-9a-f]{32}$/u),
+    text: z.string().min(1).max(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH),
+    satisfied: z.boolean(),
+  })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
@@ -74,6 +83,9 @@ const settingsSchema = z.object({
 const contextSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES),
+  // Servers older than acceptance criteria omit these.
+  requireAcceptanceCriteria: z.boolean().default(false),
+  acceptanceCriteriaFieldId: identifier.optional(),
   brief: briefText.optional(),
   projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
 })
@@ -89,7 +101,7 @@ const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string>
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
   invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
-  not_ready: 'This task is not in a status the Team marks as ready for agents. Do not start it; pick another task with get_next_task or ask the user.',
+  not_ready: 'This task is not ready for agents: it is not in a Ready status, or the Team requires acceptance criteria and the task has none (check get_task and the agentSettings acceptance criteria field in get_configuration). Do not start it; pick another task with get_next_task or ask the user.',
 }
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */
@@ -319,9 +331,25 @@ export function createAgentWorkItemApi(
       return {
         ...settings,
         readyStatusIds: context?.readyStatusIds ?? [],
+        requireAcceptanceCriteria: context?.requireAcceptanceCriteria ?? false,
+        ...(context?.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: context.acceptanceCriteriaFieldId }),
         ...(context?.brief === undefined ? {} : { brief: context.brief }),
         projectBriefs: context?.projectBriefs ?? {},
       }
+    },
+    /** Reads a task's acceptance criteria; a server older than the endpoint has none. */
+    async acceptanceCriteria(id) {
+      let criteria: z.infer<typeof acceptanceCriteriaSchema>
+      try {
+        criteria = await request(`work-items/${encodeURIComponent(id)}/acceptance-criteria`, acceptanceCriteriaSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return []
+        throw error
+      }
+      if (criteria.teamId !== config.teamId || criteria.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned acceptance criteria of another task.')
+      }
+      return criteria.items
     },
   }
 

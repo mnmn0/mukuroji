@@ -218,8 +218,9 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return api.getRun(runId)
     },
     async agentSettings() {
-      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], projectBriefs: {} }
+      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
+    async acceptanceCriteria() { return [] },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -248,7 +249,7 @@ describe('agent task lifecycle', () => {
   test('offers only tasks in a ready status and returns the Team and Project briefs', async () => {
     const settings = {
       schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
+      readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
     }
     const rows = [task('todo-first', { priority: 'high' }), task('ready-later', { workflowStatusId: 'ready', priority: 'low' })]
     const { api, service } = fixture(rows, { async agentSettings() { return settings } })
@@ -268,6 +269,44 @@ describe('agent task lifecycle', () => {
     const plain = fixture(rows)
     expect(await plain.service.configuration()).toMatchObject({ brief: null })
     expect(await plain.service.next({})).toMatchObject({ action: 'start', task: { id: 'todo-first' } })
+  })
+
+  test('skips tasks without acceptance criteria when the Team requires them and marks criteria by ID', async () => {
+    const settings = {
+      schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+      readyStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', projectBriefs: {},
+    }
+    const criteria = [
+      { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false },
+      { id: 'b'.repeat(32), text: 'Docs updated', satisfied: false },
+    ]
+    const rows = [
+      task('bare', { priority: 'high' }),
+      task('field', { priority: 'medium', customFieldValues: { acceptance: 'Ship it' } }),
+      task('canonical', { priority: 'low' }),
+    ]
+    const sent: unknown[] = []
+    const criteriaReads: string[] = []
+    const { service } = fixture(rows, {
+      async agentSettings() { return settings },
+      async acceptanceCriteria(id) {
+        criteriaReads.push(id)
+        return id === 'canonical' ? structuredClone(criteria) : []
+      },
+      async update(id, input) {
+        sent.push(input)
+        return task(id, { revision: 2 })
+      },
+    })
+    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
+    // The custom field is checked first, so only the bare task needed a criteria read.
+    expect(criteriaReads).toEqual(['bare'])
+    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria })
+    expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
+    // Only the marks are sent; the server applies them to the stored list, so a retry has the same body.
+    await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
+    expect(sent.at(-1)).toEqual({ expectedRevision: 1, acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }] })
+    expect(criteriaReads).toEqual(['bare', 'canonical'])
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {

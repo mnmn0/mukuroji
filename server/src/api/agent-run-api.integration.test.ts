@@ -220,6 +220,91 @@ describe('public Agent Run service', () => {
     expect(after > before).toBe(true)
   })
 
+  test('lets an agent only mark acceptance criteria met or unmet while people may edit them', async () => {
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const criteria = [
+      { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false },
+      { id: 'b'.repeat(32), text: 'Docs updated', satisfied: false },
+    ]
+    projectOptions.detailAcceptanceCriteria = criteria
+    // Opting in makes each update raise the stored revision, so stale writes are real conflicts.
+    projectOptions.detailRevisions = {}
+    const written: unknown[] = []
+    projectOptions.issueUpdateHook = (input) => {
+      written.push(input.acceptanceCriteria)
+    }
+    const held = createHeldRun('task-1', 'laptop-1')
+    store.seed(held)
+    const workItems = createCanonicalPublicWorkItemService()
+    /**
+     * Reads the fixture task's stored acceptance criteria through the public endpoint's service.
+     *
+     * @returns The criteria response.
+     */
+    const read = () => runWithTestAppDependencies(() => workItems.getAcceptanceCriteria(credential, 'core-team', 'task-1'))
+    /**
+     * Updates the fixture task's acceptance criteria at the revision last read.
+     *
+     * @param change - Replacement list or marks, plus any other patch fields.
+     * @param key - Idempotency key.
+     * @param fenced - Whether the agent's run fences the update.
+     * @param expectedRevision - Revision the caller read; defaults to the current stored revision.
+     * @returns The updated Work Item.
+     */
+    const update = async (change: Record<string, unknown>, key: string, fenced: boolean, expectedRevision?: number) => {
+      const revision = expectedRevision ?? (await read()).revision
+      return runWithTestAppDependencies(() => workItems.update(
+        credential, 'core-team', 'task-1',
+        { expectedRevision: revision, ...change },
+        { requestId: key, idempotencyKey: key }, undefined,
+        fenced ? { agentRunId: held.runId, instanceIdHash: held.instanceIdHash } : undefined,
+      ))
+    }
+    const marked = await update({ acceptanceCriteria: [{ ...criteria[0], satisfied: true }, criteria[1]] }, 'mark', true)
+    expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, criteria[1]])
+    // The closed public Work Item schema omits the criteria; they have their own endpoint.
+    expect(marked).not.toHaveProperty('acceptanceCriteria')
+    expect(await read()).toEqual({
+      schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 2, items: [{ ...criteria[0], satisfied: true }, criteria[1]],
+    })
+    // Marks are applied to the stored list by the server, so an agent need not restate it.
+    await update({ acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }] }, 'mark-only', true)
+    // The marks apply to the list stored by the previous update, so the first mark is kept.
+    expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }])
+    expect(await read()).toMatchObject({ revision: 3, items: [{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }] })
+    await expect(update({ acceptanceCriteriaMarks: [{ id: 'c'.repeat(32), satisfied: true }] }, 'mark-unknown', true))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
+    await expect(update({ acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }], acceptanceCriteria: criteria }, 'mark-both', true))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
+    // Rewording, adding, removing, or reordering is left to people.
+    for (const [changed, key] of [
+      [[{ ...criteria[0], text: 'Tests mostly pass' }, criteria[1]], 'reword'],
+      [[...criteria, { text: 'New condition' }], 'add'],
+      [[criteria[0]], 'remove'],
+      [[criteria[1], criteria[0]], 'reorder'],
+    ] as const) {
+      await expect(update({ acceptanceCriteria: [...changed] }, key, true)).rejects.toMatchObject({ status: 403, code: 'AcceptanceCriteriaChangeForbidden' })
+    }
+    // Rejected changes write nothing, so the revision is unchanged.
+    expect((await read()).revision).toBe(3)
+    await update({ acceptanceCriteria: [criteria[0], { text: '  New condition  ' }] }, 'human', false)
+    expect(written.at(-1)).toMatchObject([criteria[0], { text: 'New condition', satisfied: false }])
+    // The new criterion receives a server-generated ID.
+    expect(JSON.stringify(written.at(-1))).toMatch(/"id":"[0-9a-f]{32}","text":"New condition"/u)
+    await expect(update({ acceptanceCriteria: [{ id: 'c'.repeat(32), text: 'Invented' }] }, 'invented', false))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
+    // Criterion IDs refer to the list the caller read, so a write at an older revision is a conflict.
+    const current = await read()
+    expect(current.revision).toBe(4)
+    for (const [change, key] of [
+      [{ acceptanceCriteria: current.items }, 'stale-replace'],
+      [{ acceptanceCriteriaMarks: [{ id: criteria[0]?.id, satisfied: false }] }, 'stale-mark'],
+    ] as const) {
+      await expect(update(change, key, false, current.revision - 1)).rejects.toMatchObject({ status: 409, code: 'WorkItemRevisionConflict' })
+    }
+    expect(await read()).toEqual(current)
+  })
+
   test('does not let another member reuse the holder instance ID to pass the fence', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const foreign = { ...createHeldRun('task-1', 'laptop-1'), assigneeUserId: 'sato@example.com' }
@@ -635,6 +720,43 @@ describe('public Agent Run service', () => {
       ...createDefaultAgentSettings('core-team'), revision: 2, readyStatusIds: ['ready', 'todo'], updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
     })
     expect(await start('start-ready')).toMatchObject({ run: { state: 'active' } })
+  })
+
+  test('starts only a Work Item with acceptance criteria when the Team requires them', async () => {
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem()
+    projectOptions.configurationCustomFields = [{ id: 'acceptance', name: 'Acceptance', type: 'text', required: false, sortOrder: 0 }]
+    configureFakeProjectClients(true, projectOptions)
+    setTestAppDependencies({
+      agentRuns: store,
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance',
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const service = createCanonicalPublicAgentRunService()
+    const start = (key: string) => runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
+      { requestId: key, idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    await expect(start('start-no-criteria')).rejects.toMatchObject({ reason: 'not_ready', pointer: '/acceptanceCriteria' })
+    projectOptions.detailCustomFieldValues = { acceptance: '   ' }
+    await expect(start('start-blank-field')).rejects.toMatchObject({ reason: 'not_ready' })
+    expect(store.state.claims.size).toBe(0)
+    // The Team's custom field counts when the Work Item has no canonical criteria.
+    projectOptions.detailCustomFieldValues = { acceptance: 'Signup works on mobile' }
+    expect(await start('start-field')).toMatchObject({ run: { state: 'active' } })
   })
 
   test('takes over a stalled run of another instance only when the Team allows it', async () => {
@@ -1398,7 +1520,8 @@ describe('Web Agent Run routes', () => {
     expect(await read.json()).toMatchObject({ brief: 'Team brief', projectBriefs: { refero: 'Visible brief' } })
     const service = createCanonicalPublicAgentRunService()
     expect((await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))).toEqual({
-      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], brief: 'Team brief', projectBriefs: { refero: 'Visible brief' },
+      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], requireAcceptanceCriteria: false,
+      brief: 'Team brief', projectBriefs: { refero: 'Visible brief' },
     })
     // The closed run-settings schema keeps its original fields.
     expect(Object.keys(await runWithTestAppDependencies(() => service.getSettings(credential, 'core-team'))).sort()).toEqual([

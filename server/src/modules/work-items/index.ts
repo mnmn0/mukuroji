@@ -15,6 +15,13 @@ export {
   type ContributorAssignmentNormalizationContext,
 } from './domain/contributor-assignments'
 export {
+  WorkItemAcceptanceCriteriaError,
+  applyAcceptanceCriteriaMarks,
+  changesOnlyCriterionSatisfaction,
+  isStoredAcceptanceCriterionList,
+  normalizeAcceptanceCriteria,
+} from './domain/acceptance-criteria'
+export {
   createResourceId,
 } from './domain/resource-id'
 export {

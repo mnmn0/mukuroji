@@ -170,6 +170,7 @@ import {
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
 } from '../shared/work-item-access'
+import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -317,24 +318,30 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // Contributors are internal planning data and are documented as excluded from exports.
-    items: page.issues.map(omitWorkItemContributors),
+    // Contributors are internal planning data, and acceptance criteria have their own endpoint
+    // because the public Work Item schema is closed, so both are excluded from export rows.
+    items: page.issues.map(omitWorkItemExportExcludedFields),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
 }
 
 /**
- * Removes contributor assignments from a Work Item export row.
+ * Removes contributor assignments and acceptance criteria from a Work Item export row.
  *
  * @param workItem - Work Item read for the export page.
- * @returns The Work Item without its contributor assignments.
+ * @returns The Work Item without the fields excluded from exports.
  */
-function omitWorkItemContributors<T extends { readonly contributorAssignments?: unknown }>(
-  workItem: T,
-): Omit<T, 'contributorAssignments'> {
-  const { contributorAssignments: _contributorAssignments, ...exported } = workItem
+function omitWorkItemExportExcludedFields<
+  T extends { readonly contributorAssignments?: unknown; readonly acceptanceCriteria?: unknown },
+>(workItem: T): Omit<T, 'contributorAssignments' | 'acceptanceCriteria'> {
+  const {
+    contributorAssignments: _contributorAssignments,
+    acceptanceCriteria: _acceptanceCriteria,
+    ...exported
+  } = workItem
   void _contributorAssignments
+  void _acceptanceCriteria
   return exported
 }
 
@@ -796,6 +803,8 @@ export type CanonicalPublicWorkItemUpdateOptions = {
   }
   /** Agent Run writes committed atomically with the update. */
   extension?: PublicWorkItemUpdateExtension
+  /** Whether the caller is an agent fenced by its Agent Run, which may only mark acceptance criteria met or unmet. */
+  agentFenced?: boolean
 }
 
 /**
@@ -896,6 +905,20 @@ export async function updateCanonicalPublicWorkItem(
       readTeamIssueAssigneeUserId(configuredBody),
     )
   }
+  // Marks are resolved into a replacement list here and never reach the adapter.
+  const bodyWithMarks: typeof configuredBody & { acceptanceCriteriaMarks?: unknown } = configuredBody
+  const { acceptanceCriteriaMarks: _marks, ...writableBody } = bodyWithMarks
+  const criteriaChange = {
+    ...('acceptanceCriteria' in writableBody ? { acceptanceCriteria: writableBody.acceptanceCriteria } : {}),
+    ...('acceptanceCriteriaMarks' in input ? { acceptanceCriteriaMarks: input.acceptanceCriteriaMarks } : {}),
+  }
+  if (Object.keys(criteriaChange).length > 0 && detail.issue.revision !== expectedRevision) {
+    // Criterion IDs refer to the observed list, so a stale request is a revision conflict.
+    throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
+  }
+  const acceptanceCriteria = readAcceptanceCriteriaChange(
+    criteriaChange, detail.issue.acceptanceCriteria ?? [], options.agentFenced === true,
+  )
   const auditContext = createPublicMutationAuditContext(
     principal,
     mutationContext,
@@ -921,7 +944,8 @@ export async function updateCanonicalPublicWorkItem(
       teamId,
       workItemId,
       {
-        ...configuredBody,
+        ...writableBody,
+        ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
         expectedRevision,
         authorizationSnapshot,
         ...(prepared && prepared.transactItems.length > 0
@@ -1134,6 +1158,31 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId,
         'viewer',
       )).detail.issue)
+    },
+
+    /**
+     * Reads the acceptance criteria of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The schema version, Team ID, Work Item ID, the Work Item revision the list was read at,
+     * and the criteria in order (empty when none).
+     */
+    async getAcceptanceCriteria(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        items: (issue.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion })),
+      }
     },
 
     async listWorkItemTypes(credential, teamId, assignedProjectId) {
@@ -1364,7 +1413,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             body: input,
           },
           ...(agentRunFence
-            ? { extension: createAgentRunMutationFenceExtension(teamId, workItemId, agentRunFence) }
+            ? { extension: createAgentRunMutationFenceExtension(teamId, workItemId, agentRunFence), agentFenced: true }
             : {}),
         },
       )

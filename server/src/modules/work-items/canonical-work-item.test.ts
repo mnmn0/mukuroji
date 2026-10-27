@@ -50,6 +50,21 @@ function createCanonicalWorkItem(
 }
 
 describe('canonical Work Item validation', () => {
+  test('accepts rows without acceptance criteria and rejects malformed ones', () => {
+    const criterion = { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ acceptanceCriteria: [criterion] }))).toBe(true)
+    for (const acceptanceCriteria of [
+      [],
+      [{ ...criterion, id: 'not-hex' }],
+      [{ ...criterion, text: '' }],
+      [{ ...criterion, satisfied: 'yes' }],
+      [criterion, criterion],
+      'Tests pass',
+    ]) {
+      expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ acceptanceCriteria: acceptanceCriteria as never }))).toBe(false)
+    }
+  })
+
   test('accepts assigned and unassigned strict canonical rows', () => {
     const unassigned = createCanonicalWorkItem()
     delete unassigned.assignedProjectId

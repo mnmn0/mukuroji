@@ -311,6 +311,8 @@ export async function updateWebAgentSettings(
         after: update.allowTakeoverAfterLeaseExpiry,
       },
       { field: 'readyStatusIds', before: before.readyStatusIds.join(','), after: update.readyStatusIds.join(',') },
+      { field: 'requireAcceptanceCriteria', before: before.requireAcceptanceCriteria, after: update.requireAcceptanceCriteria },
+      { field: 'acceptanceCriteriaFieldId', before: before.acceptanceCriteriaFieldId ?? '', after: update.acceptanceCriteriaFieldId ?? '' },
       // Briefs are long user text, so the audit records only their size.
       { field: 'brief.bytes', before: briefBytes(before.brief), after: briefBytes(update.brief) },
       ...[...new Set([...Object.keys(before.projectBriefs), ...Object.keys(update.projectBriefs)])].map((projectId) => ({

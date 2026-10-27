@@ -553,6 +553,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
     allowTakeoverAfterLeaseExpiry: false,
     readyStatusIds: [],
+    requireAcceptanceCriteria: false,
     projectBriefs: {},
   }
 }
@@ -655,7 +656,10 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
   if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent settings body is required.')
   assertKnownFields(
     value,
-    ['expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'brief', 'projectBriefs'],
+    [
+      'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds',
+      'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
+    ],
     'Agent settings',
   )
   const leaseMinutes = value.leaseMinutes
@@ -676,6 +680,14 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
       pointer: '/allowTakeoverAfterLeaseExpiry',
     })
   }
+  if (value.requireAcceptanceCriteria !== undefined && typeof value.requireAcceptanceCriteria !== 'boolean') {
+    throw new AgentRunError('validation_failed', 'requireAcceptanceCriteria must be a boolean.', {
+      pointer: '/requireAcceptanceCriteria',
+    })
+  }
+  const acceptanceCriteriaFieldId = value.acceptanceCriteriaFieldId === undefined
+    ? undefined
+    : readSettingsIdentifier(value.acceptanceCriteriaFieldId, '/acceptanceCriteriaFieldId')
   const brief = readBrief(value.brief, '/brief')
   const projectBriefs = readProjectBriefs(value.projectBriefs)
   assertAgentSettingsBriefLimits({ brief, projectBriefs })
@@ -684,6 +696,8 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: value.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: readReadyStatusIds(value.readyStatusIds),
+    requireAcceptanceCriteria: value.requireAcceptanceCriteria === true,
+    ...(acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId }),
     ...(brief === undefined ? {} : { brief }),
     projectBriefs,
   }
@@ -725,6 +739,8 @@ export function assertAgentSettingsBriefLimits({ brief, projectBriefs }: {
 export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   /** Status IDs agents may start from. */
   readyStatusIds: string[]
+  /** Whether only Work Items with acceptance criteria are ready. */
+  requireAcceptanceCriteria: boolean
   /** Non-empty briefs per Project ID. */
   projectBriefs: Record<string, string>
   /**
@@ -756,6 +772,8 @@ export function createSavedAgentSettings(
     leaseMinutes: update.leaseMinutes,
     allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...update.readyStatusIds],
+    requireAcceptanceCriteria: update.requireAcceptanceCriteria,
+    ...(update.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: update.acceptanceCriteriaFieldId }),
     ...(update.brief === undefined ? {} : { brief: update.brief }),
     projectBriefs: { ...update.projectBriefs },
     updatedAt: now.toISOString(),

@@ -7,6 +7,7 @@ import {
   type AgentRun,
   type AgentContext,
   type PublicAgentSettings,
+  type PublicWorkItemAcceptanceCriteria,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -32,6 +33,8 @@ import {
   type PreviewPublicWorkItemTypeChangeRequest,
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
+  type WorkItemAcceptanceCriterionInput,
+  type WorkItemAcceptanceCriterionMark,
   type UpdateWebhookSubscriptionInput,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
@@ -221,6 +224,18 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
+  /**
+   * Reads the acceptance criteria of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The criteria with the Work Item revision they were read at.
+   */
+  getAcceptanceCriteria(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemAcceptanceCriteria>
   /**
    * Returns active Work Item Types and creation field schemas after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -915,6 +930,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items/:workItemId', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.get(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/acceptance-criteria', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getAcceptanceCriteria(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
@@ -3003,6 +3027,60 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
   }
 }
 
+/**
+ * Reads the shape of a replacement acceptance criteria list; the Work Item service validates the
+ * IDs and limits against the stored criteria.
+ *
+ * @param value - Untrusted `acceptanceCriteria` value.
+ * @returns The list.
+ */
+function readPublicAcceptanceCriteria(value: unknown): WorkItemAcceptanceCriterionInput[] {
+  if (!Array.isArray(value)) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'acceptanceCriteria must be an array.')
+  }
+  return value.map((entry, index) => {
+    const criterion = requireRecord(entry, `acceptanceCriteria[${index}] must be an object.`)
+    assertAllowedFields(criterion, ['id', 'text', 'satisfied'], `acceptanceCriteria[${index}]`)
+    if (typeof criterion.text !== 'string') {
+      throw new PublicApiServiceError(400, 'validation_failed', `acceptanceCriteria[${index}].text must be a string.`)
+    }
+    if (criterion.id !== undefined && typeof criterion.id !== 'string') {
+      throw new PublicApiServiceError(400, 'validation_failed', `acceptanceCriteria[${index}].id must be a string.`)
+    }
+    if (criterion.satisfied !== undefined && typeof criterion.satisfied !== 'boolean') {
+      throw new PublicApiServiceError(400, 'validation_failed', `acceptanceCriteria[${index}].satisfied must be a boolean.`)
+    }
+    return {
+      ...(criterion.id === undefined ? {} : { id: criterion.id }),
+      text: criterion.text,
+      ...(criterion.satisfied === undefined ? {} : { satisfied: criterion.satisfied }),
+    }
+  })
+}
+
+/**
+ * Reads the shape of acceptance criteria marks; the Work Item service checks the IDs against the
+ * stored criteria.
+ *
+ * @param value - Untrusted `acceptanceCriteriaMarks` value.
+ * @returns The marks.
+ */
+function readPublicAcceptanceCriteriaMarks(value: unknown): WorkItemAcceptanceCriterionMark[] {
+  if (!Array.isArray(value)) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'acceptanceCriteriaMarks must be an array.')
+  }
+  return value.map((entry, index) => {
+    const mark = requireRecord(entry, `acceptanceCriteriaMarks[${index}] must be an object.`)
+    assertAllowedFields(mark, ['id', 'satisfied'], `acceptanceCriteriaMarks[${index}]`)
+    if (typeof mark.id !== 'string' || typeof mark.satisfied !== 'boolean') {
+      throw new PublicApiServiceError(
+        400, 'validation_failed', `acceptanceCriteriaMarks[${index}] needs a string id and a boolean satisfied.`,
+      )
+    }
+    return { id: mark.id, satisfied: mark.satisfied }
+  })
+}
+
 function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRequest {
   const body = requireRecord(value, 'Work Item patch is required.')
   assertAllowedFields(body, [
@@ -3017,6 +3095,8 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'priority',
     'workItemTypeId',
     'typeChangeResolution',
+    'acceptanceCriteria',
+    'acceptanceCriteriaMarks',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
@@ -3045,6 +3125,8 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   }
   if ('schedule' in body) result.schedule = readPublicWorkItemSchedule(body.schedule)
   if ('priority' in body) result.priority = readPriority(body.priority)
+  if ('acceptanceCriteria' in body) result.acceptanceCriteria = readPublicAcceptanceCriteria(body.acceptanceCriteria)
+  if ('acceptanceCriteriaMarks' in body) result.acceptanceCriteriaMarks = readPublicAcceptanceCriteriaMarks(body.acceptanceCriteriaMarks)
   if (Object.keys(result).length === 1) {
     throw new PublicApiServiceError(
       400,

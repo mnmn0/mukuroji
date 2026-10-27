@@ -551,8 +551,18 @@ Slice 3 は 3 つの変更に分けて入れる。
   `get_configuration` は `agentSettings.readyStatusIds` と `brief`（Team brief の後に設定 Project の
   brief を連結）を返す。`mukuroji://project/{projectId}/brief` resource も同じ内容を返し、
   `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は別 Project の brief を `out_of_scope` で拒否する。
-- 次の変更: 受け入れ条件（`acceptanceCriteria`）、`requireAcceptanceCriteria`、
-  `acceptanceCriteriaFieldId`、`get_task` の受け入れ条件。
+- 実装済み（受け入れ条件）: canonical Work Item の任意 field `acceptanceCriteria`（`{ id, text, satisfied }`、最大 20 件、
+  `text` は前後の空白を除いて 1〜1,024 文字）。`id` は server が 32 桁の 16 進数で採番し、PATCH は一覧全体の置き換えで
+  既存の条件を `id` で指す。空の一覧は属性を消し、保存前の row は属性を持たない。Web と Public API の PATCH で
+  編集でき、`id` は読んだ一覧を指すため revision が古い PATCH は `409` とする。Agent Run に fence された Public PATCH は
+  既存の条件の `satisfied` だけを変えられ、それ以外は `403`（`AcceptanceCriteriaChangeForbidden`）とする。変更は Work Item
+  の audit の field change に残る。Agent settings に `requireAcceptanceCriteria` と `acceptanceCriteriaFieldId` を追加し、
+  受け入れ条件がない（代替 custom field の値も空の）Work Item の start を `not_ready` とする。MCP の `get_next_task` は
+  同じ判定で候補を除外し、`get_task` は受け入れ条件を返す。`update_task` の `acceptanceCriteria: [{ id, satisfied }]` は
+  Public PATCH の `acceptanceCriteriaMarks` として送り、server が保存済みの一覧に重ねる。印だけを idempotency の
+  範囲に入れるため、応答を失った後の再送は、その間に一覧が変わっても replay になる。Public API の `WorkItem` は閉じた response schema のため条件を含めず、
+  `GET /api/v1/work-items/{workItemId}/acceptance-criteria` が一覧と読み取り時の Work Item `revision` を返す。
+  2 つの設定は `GET /api/v1/agent-context` に加える。MCP はこの path がない古い server では条件なしとして動く。
 - その次の変更: 受け入れ条件と Agent settings の Web 編集画面。
 
 ## 後続 Phase

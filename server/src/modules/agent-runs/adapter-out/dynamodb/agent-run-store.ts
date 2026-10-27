@@ -654,6 +654,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry &&
     saved.readyStatusIds.length === update.readyStatusIds.length &&
     saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
+    saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
+    saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
     savedProjects.every((projectId) =>
@@ -725,6 +727,9 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     (item.brief !== undefined && (typeof item.brief !== 'string' || item.brief === '')) ||
+    (item.requireAcceptanceCriteria !== undefined && typeof item.requireAcceptanceCriteria !== 'boolean') ||
+    (item.acceptanceCriteriaFieldId !== undefined &&
+      (typeof item.acceptanceCriteriaFieldId !== 'string' || item.acceptanceCriteriaFieldId === '')) ||
     !isRecord(projectBriefs)
   ) {
     throw createAgentRunIntegrityError()
@@ -741,6 +746,8 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
+    requireAcceptanceCriteria: item.requireAcceptanceCriteria === true,
+    ...(typeof item.acceptanceCriteriaFieldId === 'string' ? { acceptanceCriteriaFieldId: item.acceptanceCriteriaFieldId } : {}),
     ...(typeof item.brief === 'string' ? { brief: item.brief } : {}),
     projectBriefs: briefs,
     updatedAt: storedTimestamp(item, 'updatedAt'),

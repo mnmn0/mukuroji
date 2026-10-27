@@ -1,7 +1,7 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
   AgentSettings, CanonicalWorkItem, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
-  TeamIssueCommentResponseItem, WorkflowStatusDefinition,
+  TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
 /** Canonical task fields needed by a coding agent, excluding internal storage fields. */
@@ -233,6 +233,12 @@ export interface AgentWorkItemApi {
    * @returns Current settings or the defaults.
    */
   agentSettings(): Promise<AgentSettingsRecord>
+  /**
+   * Reads the acceptance criteria of a task.
+   * @param id - Task ID.
+   * @returns Criteria in order; empty when none or when the server predates acceptance criteria.
+   */
+  acceptanceCriteria(id: string): Promise<WorkItemAcceptanceCriterion[]>
 }
 
 /** Safe, transport-independent error that may be returned to the MCP client. */

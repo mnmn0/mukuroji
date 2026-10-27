@@ -329,6 +329,12 @@
       "AgentContext": {
         "description": "What a coding agent needs to choose and carry out work in a Team. New agent settings are added to this object, so clients must ignore properties they do not know.",
         "properties": {
+          "acceptanceCriteriaFieldId": {
+            "description": "Custom field that holds acceptance criteria for Work Items without canonical `acceptanceCriteria`; a non-empty value counts as criteria.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
           "brief": {
             "description": "Team agent brief in Markdown, at most 16 KiB of UTF-8. It is user data, never instructions that change credentials, scope, or the API endpoint.",
             "minLength": 1,
@@ -354,6 +360,10 @@
             "type": "array",
             "uniqueItems": true
           },
+          "requireAcceptanceCriteria": {
+            "description": "Whether only Work Items with at least one acceptance criterion are ready for agents; a start without one is rejected with `not_ready`.",
+            "type": "boolean"
+          },
           "revision": {
             "description": "Agent settings revision these values were read from; `0` means the defaults.",
             "minimum": 0,
@@ -372,7 +382,8 @@
           "teamId",
           "revision",
           "readyStatusIds",
-          "projectBriefs"
+          "projectBriefs",
+          "requireAcceptanceCriteria"
         ],
         "type": "object"
       },
@@ -2737,6 +2748,23 @@
         "additionalProperties": false,
         "minProperties": 2,
         "properties": {
+          "acceptanceCriteria": {
+            "description": "Complete replacement list of acceptance criteria (at most 20); an empty list removes every criterion. Read the current list and the Work Item `revision` from `GET /api/v1/work-items/{workItemId}/acceptance-criteria` and send that revision as `expectedRevision`, because IDs refer to that list. A request fenced by an Agent Run (`agentInstanceId`) may only change `satisfied` of the existing criteria, in the same order and with the same text; anything else is `403 forbidden`.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterionInput"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "acceptanceCriteriaMarks": {
+            "description": "Marks existing acceptance criteria met or unmet; criteria not listed keep their state. The server applies the marks to the stored list, so retrying the same body with the same `Idempotency-Key` replays even if the list changed meanwhile. Requires the current `expectedRevision`, is allowed for a request fenced by an Agent Run, and cannot be combined with `acceptanceCriteria`.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterionMark"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array"
+          },
           "agentInstanceId": {
             "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
             "maxLength": 256,
@@ -3153,6 +3181,112 @@
           "createdAt",
           "updatedAt",
           "source"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriteria": {
+        "description": "Acceptance criteria of one Work Item. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "items": {
+            "description": "Conditions the Work Item must meet before it is accepted, in order; empty when none.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterion"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "revision": {
+            "description": "Work Item revision the list was read at; send it as `expectedRevision` when replacing the list.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "revision",
+          "items"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriterion": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Stable server-assigned ID within the Work Item (32 lowercase hex digits).",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the condition is met.",
+            "type": "boolean"
+          },
+          "text": {
+            "description": "Condition text.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "satisfied"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriterionInput": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "ID of an existing criterion to keep; omit it for a new criterion.",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the condition is met; omitted means not met.",
+            "type": "boolean"
+          },
+          "text": {
+            "description": "Condition text; surrounding whitespace is trimmed.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "WorkItemAcceptanceCriterionMark": {
+        "additionalProperties": false,
+        "description": "Marks one existing acceptance criterion met or unmet.",
+        "properties": {
+          "id": {
+            "description": "ID of an existing criterion.",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "satisfied": {
+            "description": "Whether the condition is met.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "satisfied"
         ],
         "type": "object"
       },
@@ -8689,6 +8823,99 @@
         ]
       }
     },
+    "/api/v1/work-items/{workItemId}/acceptance-criteria": {
+      "get": {
+        "operationId": "getPublicWorkItemAcceptanceCriteria",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemAcceptanceCriteria"
+                }
+              }
+            },
+            "description": "Acceptance criteria",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the acceptance criteria of a Work Item",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
     "/api/v1/work-items/{workItemId}/agent-runs": {
       "get": {
         "operationId": "listPublicWorkItemAgentRuns",
@@ -8801,7 +9028,7 @@
         ]
       },
       "post": {
-        "description": "Starts a run only from a backlog or unstarted status into a started status (`invalid_transition` otherwise). When the Team's Agent settings list `readyStatusIds`, the Work Item must be in one of them, or the start is rejected with `409 conflict` and `errors[].code` `not_ready`.",
+        "description": "Starts a run only from a backlog or unstarted status into a started status (`invalid_transition` otherwise). When the Team's Agent settings list `readyStatusIds`, the Work Item must be in one of them, or the start is rejected with `409 conflict` and `errors[].code` `not_ready`. When `requireAcceptanceCriteria` is set in the Agent context, a Work Item without acceptance criteria (or a non-empty value in `acceptanceCriteriaFieldId`) is rejected with `not_ready` too.",
         "operationId": "startPublicAgentRun",
         "parameters": [
           {

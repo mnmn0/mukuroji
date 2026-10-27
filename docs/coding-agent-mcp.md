@@ -153,12 +153,12 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 | --- | --- |
 | `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status）、agent brief、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
-| `get_task` | タスク本文・revision・現在状態、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうかを取得 |
+| `get_task` | タスク本文・revision・現在状態・受け入れ条件、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうかを取得 |
 | `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`）も返す |
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール |
-| `update_task` | タイトル・説明・優先度・custom fieldをrevision付きで更新 |
+| `update_task` | タイトル・説明・優先度・custom fieldをrevision付きで更新。受け入れ条件はIDごとに満たした・満たしていないを付けられる（条件の追加・削除・文言変更は人だけ） |
 | `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
 | `move_task` | 作業中から同じstartedカテゴリーの「レビュー中」「ブロック中」などへ移動 |
 | `report_progress` | 進捗・問題・テスト結果・PRリンクを、エージェント名付きコメントとして保存。自インスタンスのAgent Runがあれば、`kind`・`verifications`・`artifacts`・`changedFileCount` をRunの構造化reportとして同じtransactionで保存 |

@@ -12,6 +12,7 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemAcceptanceCriterion,
   type WorkItemContributorAssignment,
   type WorkItemJobRoleDefinition,
   type WorkItemRelation,
@@ -71,6 +72,7 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import { isStoredContributorAssignmentList } from '../../modules/work-items/domain/contributor-assignments'
+import { isStoredAcceptanceCriterionList } from '../../modules/work-items/domain/acceptance-criteria'
 import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
@@ -1312,6 +1314,8 @@ function configureFakeProjectClients(
     guestWorkspaceMemberKeys?: string[]
     /** Job roles returned by the resolved Work Item configuration. */
     jobRoles?: WorkItemJobRoleDefinition[]
+    /** Custom fields returned by the resolved Work Item configuration. */
+    configurationCustomFields?: WorkItemConfiguration['customFields']
     /** Contributors stored on the first fake Team Work Item and on detail reads. */
     issueContributorAssignments?: WorkItemContributorAssignment[]
     inactiveWorkspaceMemberKeys?: string[]
@@ -1362,12 +1366,17 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
     detailAssignedProjectIds?: Record<string, string>
-    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。 */
+    /**
+     * `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。
+     * When set, an update increments the stored revision so later reads observe it.
+     */
     detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Initial acceptance criteria of the detail fake and the first listed Work Item; updates replace them. */
+    detailAcceptanceCriteria?: WorkItemAcceptanceCriterion[]
     /** Detail fake が返す現在の canonical schedule です。 */
     detailSchedule?: WorkItemSchedule
     /** `${teamId}\0${workItemId}` key ごとに detail fake が返す canonical schedule です。 */
@@ -1415,6 +1424,8 @@ function configureFakeProjectClients(
       issueId: string
       /** Contributor list supplied to the adapter, when the update changes it. */
       contributorAssignments?: unknown
+      /** Acceptance criteria supplied to the adapter, when the update changes them. */
+      acceptanceCriteria?: unknown
       /** Caller authorization ConditionChecks supplied to the adapter. */
       authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
       /** Configuration guard ConditionChecks supplied to the adapter. */
@@ -1604,6 +1615,16 @@ function configureFakeProjectClients(
     role: WorkspaceRole
   }>()
   const deletedIssueIds = new Set<string>()
+  // Criteria saved by an update; until then reads use the configured initial criteria.
+  let savedAcceptanceCriteria: { value: WorkItemAcceptanceCriterion[] | undefined } | undefined
+  /**
+   * Reads the criteria the fake currently stores.
+   *
+   * @returns The saved criteria, or the configured initial criteria before any update.
+   */
+  const currentAcceptanceCriteria = () => savedAcceptanceCriteria
+    ? savedAcceptanceCriteria.value
+    : options.detailAcceptanceCriteria
   const createWorkspaceMember = (memberKey: string) => ({
     id: memberKey,
     memberKey,
@@ -1641,6 +1662,9 @@ function configureFakeProjectClients(
       assigneeUserId: 'sato@example.com',
       ...(index === 0 && options.issueContributorAssignments
         ? { contributorAssignments: options.issueContributorAssignments }
+        : {}),
+      ...(index === 0 && currentAcceptanceCriteria()
+        ? { acceptanceCriteria: currentAcceptanceCriteria() }
         : {}),
       creatorMemberKey: 'demo@example.com',
       workflowSchemaVersion: 1 as const,
@@ -1887,11 +1911,15 @@ function configureFakeProjectClients(
       },
     },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
-      ...(options.jobRoles
+      ...(options.jobRoles || options.configurationCustomFields
         ? {
             async getTeamConfiguration(_workspaceId: string, teamId: string) {
               return {
-                configuration: { ...createTestWorkItemConfiguration('team', teamId), jobRoles: options.jobRoles },
+                configuration: {
+                  ...createTestWorkItemConfiguration('team', teamId),
+                  ...(options.jobRoles ? { jobRoles: options.jobRoles } : {}),
+                  ...(options.configurationCustomFields ? { customFields: options.configurationCustomFields } : {}),
+                },
                 inheritedFrom: 'default' as const,
               }
             },
@@ -2543,6 +2571,7 @@ function configureFakeProjectClients(
             ...(options.issueContributorAssignments
               ? { contributorAssignments: options.issueContributorAssignments }
               : {}),
+            ...(currentAcceptanceCriteria() ? { acceptanceCriteria: currentAcceptanceCriteria() } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
@@ -2630,10 +2659,17 @@ function configureFakeProjectClients(
           planningRevisionFence: input.planningRevisionFence,
           issueId,
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
+          ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
         })
+        if ('acceptanceCriteria' in input) {
+          // An empty list removes the criteria, like the DynamoDB adapter.
+          savedAcceptanceCriteria = {
+            value: isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? structuredClone(input.acceptanceCriteria) : undefined,
+          }
+        }
         calls.issueUpdates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
@@ -2652,10 +2688,14 @@ function configureFakeProjectClients(
           input.schedule,
           createDefaultDueDateWorkItemSchedule('2026-06-18'),
         )
+        const revisionKey: `${string}\0${string}` = `${teamId}\0${issueId}`
+        const nextRevision = (options.detailRevisions?.[revisionKey] ?? 1) + 1
+        // Tests that track revisions opt in through detailRevisions; others keep the fixed revision.
+        if (options.detailRevisions) options.detailRevisions[revisionKey] = nextRevision
         const updated: UpdateTeamIssueResponse = {
           issue: {
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-            revision: 2,
+            revision: nextRevision,
             id: issueId,
             teamId,
             assignedProjectId: typeof input.assignedProjectId === 'string'
@@ -2666,6 +2706,7 @@ function configureFakeProjectClients(
             ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
               ? { contributorAssignments: input.contributorAssignments }
               : {}),
+            ...(isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId: typeof input.workflowStatusId === 'string'

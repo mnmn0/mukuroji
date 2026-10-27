@@ -122,6 +122,9 @@ function createDefaultWorkItemService(
 ): PublicWorkItemService {
   const workItem = createWorkItem()
   return {
+    async getAcceptanceCriteria(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, items: [] }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -698,6 +701,8 @@ describe('public API router', () => {
     expect(paths['/api/v1/agent-runs/{runId}/finish']).toHaveProperty('post')
     expect(paths['/api/v1/agent-settings']).toHaveProperty('get')
     expect(paths['/api/v1/agent-context']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/acceptance-criteria']).toHaveProperty('get')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')
     expect(components.schemas.UpdatePublicWorkItemRequest.properties).toHaveProperty('agentInstanceId')
     expect(components.schemas.CreatePublicWorkItemCommentRequest.properties).toHaveProperty('agentRunId')
     expect(
@@ -2980,5 +2985,32 @@ describe('public Agent Run routes', () => {
       body: JSON.stringify({ expectedRevision: 1, title: 'Renamed', agentRunId: agentRunFixture.runId }),
     })
     expect(orphan.status).toBe(400)
+  })
+
+  test('passes acceptance criteria marks to the service and replays the same marks body', async () => {
+    const inputs: unknown[] = []
+    const workItems = createDefaultWorkItemService({
+      async update(_credential, _teamId, _workItemId, input) {
+        inputs.push(input)
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const patch = (body: unknown, key: string) => router.request('http://localhost/v1/work-items/work-item-1?teamId=team-1', {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${apiKey.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify(body),
+    })
+    const marks = { expectedRevision: 1, acceptanceCriteriaMarks: [{ id: 'a'.repeat(32), satisfied: true }] }
+    expect((await patch(marks, 'mark-criteria')).status).toBe(200)
+    const replay = await patch(marks, 'mark-criteria')
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(inputs).toEqual([marks])
+    for (const acceptanceCriteriaMarks of ['a', [{ id: 'a'.repeat(32) }], [{ id: 'a'.repeat(32), satisfied: true, text: 'x' }]]) {
+      const invalid = await patch({ expectedRevision: 1, acceptanceCriteriaMarks }, `invalid-${JSON.stringify(acceptanceCriteriaMarks)}`)
+      expect(invalid.status).toBe(400)
+    }
+    expect(inputs).toHaveLength(1)
   })
 })

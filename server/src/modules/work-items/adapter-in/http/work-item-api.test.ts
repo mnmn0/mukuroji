@@ -810,7 +810,7 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
   expect(calls.issueReads).toEqual([])
 })
 
-test('omits contributors from developer Work Item exports', async () => {
+test('omits contributors and acceptance criteria from developer Work Item exports', async () => {
   configureFakeProjectClients(true, {
     issueContributorAssignments: [{
       assignmentId: 'a'.repeat(32),
@@ -818,6 +818,7 @@ test('omits contributors from developer Work Item exports', async () => {
       jobRoleId: 'designer',
       status: 'planned',
     }],
+    detailAcceptanceCriteria: [{ id: 'b'.repeat(32), text: 'Tests pass', satisfied: false }],
   })
   setTestAppDependencies({
     rateLimits: {
@@ -835,6 +836,8 @@ test('omits contributors from developer Work Item exports', async () => {
   const body: { items: Record<string, unknown>[] } = await response.json()
   expect(body.items.length).toBeGreaterThan(0)
   expect(body.items.some((item) => 'contributorAssignments' in item)).toBe(false)
+  // The closed public Work Item schema omits acceptance criteria; they have their own endpoint.
+  expect(body.items.some((item) => 'acceptanceCriteria' in item)).toBe(false)
 })
 
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
