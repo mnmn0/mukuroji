@@ -30,13 +30,20 @@ image は tag と digest の両方で固定しています。`@playwright/test` 
 `scripts/check-web-bundle-budget.ts` は `web/dist` の各 file を gzip level 9 で計測し、`web/performance-budget.json` と照合します。
 
 - JS と CSS は、必ずいずれかの rule に一致する必要があります。
-  rule のない chunk が増えた場合も失敗するため、新しい lazy chunk を作ったときは rule を追加します。
+  rule は上から順に照合し、最初に一致した rule で検査します。
+  route の page chunk と共有 chunk は、末尾の `route and shared chunk` rule で 1 file ごとに検査します。
+  それ以外の新しい種類の file、たとえば lazy な CSS を作ったときは rule を追加します。
+- 初期表示の JS と CSS にも上限があります（`initialJavaScriptAndCssGzipKiB`）。
+  対象は build 後の `index.html` が最初の描画前に読む file で、`src` を持つ script、`modulepreload`、stylesheet です。
+  page を開いたときに route の `lazy` が読む chunk は含みません。
 - JS と CSS の合計にも上限があります。
 - 上限は現在の size に約 5% の余裕を足した値です。
   size を減らした場合は上限も下げ、余裕が広がり続けないようにします。
 
-2026-10 時点で `main` chunk は約 760 KiB gzip あり、route ごとの code splitting はまだありません。
-budget はこれ以上増えないことを保証する ratchet で、初期表示の最適化は別の変更で行います。
+`web/src/app/router.tsx` は、login と 404 以外の page を route の `lazy` で読み込みます。
+初期表示の JS と CSS は約 310 KiB gzip で、code splitting 前の約 830 KiB から減りました。
+page を分けたぶん、全体の合計は gzip の file ごとの overhead で約 1,320 KiB から約 1,375 KiB に増えています。
+新しい page を追加するときは、`lazyPage` で route に登録します。
 
 ## 付録: CI workflow
 
