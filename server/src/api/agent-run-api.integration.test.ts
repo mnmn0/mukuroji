@@ -1704,6 +1704,8 @@ describe('Factory board route', () => {
       { id: 'task-blocked', statusCategory: 'started' },
       { id: 'task-paused', statusCategory: 'started' },
       { id: 'task-failed', statusCategory: 'started' },
+      { id: 'task-old-failure', statusCategory: 'unstarted' },
+      { id: 'task-closed-failure', statusCategory: 'completed' },
       { id: 'task-retried', statusCategory: 'started' },
       { id: 'task-done', statusCategory: 'completed' },
       { id: 'task-old-done', statusCategory: 'completed' },
@@ -1725,6 +1727,10 @@ describe('Factory board route', () => {
     store.seed(finishAgentRun(createRunAt('task-paused', new Date(now - 3 * hourMs)), 'paused', 'agent', new Date(now - 2 * hourMs)))
     // A failure stays on the board without a time limit while the Work Item is started.
     store.seed(finishAgentRun(createRunAt('task-failed', new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
+    // An old failure stays on the board after the Work Item left the started category.
+    store.seed(finishAgentRun(createRunAt('task-old-failure', new Date(now - 60 * hourMs)), 'failed', 'agent', new Date(now - 59 * hourMs)))
+    // A completed Work Item shows its failure only within the completed-lane window.
+    store.seed(finishAgentRun(createRunAt('task-closed-failure', new Date(now - 60 * hourMs)), 'failed', 'agent', new Date(now - 59 * hourMs)))
     // A failure followed by a newer run is not shown as failed.
     store.seed(finishAgentRun(createRunAt('task-retried', new Date(now - 3 * hourMs)), 'failed', 'agent', new Date(now - 2 * hourMs)))
     const retry = createRunAt('task-retried', new Date(now - 60_000))
@@ -1740,6 +1746,7 @@ describe('Factory board route', () => {
       'task-blocked': 'decision',
       'task-paused': 'decision',
       'task-failed': 'failed',
+      'task-old-failure': 'failed',
       'task-retried': 'processing',
       'task-done': 'completed',
       'task-released': 'no-run',
@@ -1805,6 +1812,26 @@ describe('Factory board route', () => {
     expect(body).toMatchObject({ items: [], finishedRunsHasMore: true, startedWorkItemsHasMore: false })
     expect(finishedLimits.reduce((sum, limit) => sum + limit, 0)).toBe(500)
     expect(pageReads).toEqual([100])
+  })
+
+  test('reads one page of active runs in lease order and reports the bound', async () => {
+    const now = Date.now()
+    const workItems: BoardWorkItem[] = Array.from({ length: 101 }, (_, index) => ({ id: `task-${index}`, statusCategory: 'started' }))
+    const { store } = configureBoard(workItems)
+    // A higher index starts earlier, so its lease expires earlier.
+    for (let index = 0; index < 101; index += 1) store.seed(createRunAt(`task-${index}`, new Date(now - index * 60_000)))
+    const listActiveRuns = store.listActiveRuns.bind(store)
+    const activeLimits: number[] = []
+    store.listActiveRuns = async (directoryId, teamId, cursor, limit) => {
+      activeLimits.push(limit)
+      return listActiveRuns(directoryId, teamId, cursor, limit)
+    }
+    const { body } = await readBoard()
+    expect(activeLimits).toEqual([100])
+    expect(body.activeRunsHasMore).toBe(true)
+    expect(body.items.slice(0, 3).map((item) => item.workItem.id)).toEqual(['task-100', 'task-99', 'task-98'])
+    // The run beyond the page is still shown through the started Work Items, with its newest run.
+    expect(body.items.find((item) => item.workItem.id === 'task-0')?.run?.state).toBe('active')
   })
 
   test('reports a Work Item page bound that was reached', async () => {

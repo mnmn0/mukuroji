@@ -299,16 +299,18 @@ type TaskUpdateResult = {
  * Determines whether a task update can be represented by the generic inverse patch.
  *
  * Work Item Type changes require a type-specific reverse resolution, and contributor
- * assignments are not restored by the generic inverse patch, so neither enters the generic
- * task undo/redo history.
+ * assignments and acceptance criteria are not restored by the generic inverse patch (removed
+ * criteria cannot be recreated with their IDs), so none of them enters the generic task
+ * undo/redo history.
  *
  * @param input - Update patch to classify.
  * @returns Whether the update is safe for generic undo and redo.
  */
 function isReversibleTaskUpdate(
-  input: Pick<UpdateTeamIssueInput, 'workItemTypeId' | 'contributorAssignments'>,
+  input: Pick<UpdateTeamIssueInput, 'workItemTypeId' | 'contributorAssignments' | 'acceptanceCriteria'>,
 ): boolean {
-  return input.workItemTypeId === undefined && input.contributorAssignments === undefined
+  return input.workItemTypeId === undefined && input.contributorAssignments === undefined &&
+    input.acceptanceCriteria === undefined
 }
 
 /** Persisted Project Create outcome returned by the route-level mutation. */

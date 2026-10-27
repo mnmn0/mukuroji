@@ -564,7 +564,9 @@ const millisecondsPerHour = 3_600_000
  * - `decision`: the active run's latest report is a `blocker` or `handoff`, or the newest run finished
  *   as `paused` while the Work Item is still `started`.
  * - `stalled` / `processing`: the run is active and its lease has or has not expired.
- * - `failed`: the newest run finished as `failed`, so no newer run exists.
+ * - `failed`: the newest run finished as `failed`, so no newer run exists. The tile stays without a
+ *   time limit until the Work Item is completed or canceled, and then for
+ *   {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS} after the failure.
  * - `completed`: the newest run finished as `completed` within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}.
  * - `no-run`: the Work Item is `started`, has no active run, and no other lane applies.
  *
@@ -575,20 +577,18 @@ const millisecondsPerHour = 3_600_000
 export function classifyFactoryBoardItem(item: FactoryBoardItem, now: Date): FactoryBoardLane | undefined {
   const { run, workItem, latestReport } = item
   const started = workItem.statusCategory === 'started'
+  const closed = workItem.statusCategory === 'completed' || workItem.statusCategory === 'canceled'
   if (run === undefined) return started ? 'no-run' : undefined
+  const finishedRecently = run.finishedAt !== undefined &&
+    now.getTime() - Date.parse(run.finishedAt) <= FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
   if (run.state === 'active') {
     const asksForDecision = latestReport !== undefined && latestReport.runId === run.runId &&
       (latestReport.kind === 'blocker' || latestReport.kind === 'handoff')
     if (asksForDecision) return 'decision'
     return Date.parse(run.leaseExpiresAt) < now.getTime() ? 'stalled' : 'processing'
   }
-  if (run.outcome === 'failed') return 'failed'
+  if (run.outcome === 'failed') return !closed || finishedRecently ? 'failed' : undefined
   if (run.outcome === 'paused' && started) return 'decision'
-  if (
-    run.outcome === 'completed' && run.finishedAt !== undefined &&
-    now.getTime() - Date.parse(run.finishedAt) <= FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
-  ) {
-    return 'completed'
-  }
+  if (run.outcome === 'completed' && finishedRecently) return 'completed'
   return started ? 'no-run' : undefined
 }

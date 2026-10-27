@@ -276,8 +276,10 @@ async function readBoardActiveRuns(
 }
 
 /**
- * Collects the Work Items of runs that finished within the completed-lane window. Finished runs are
- * stored in run ID order, so at most {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} are evaluated.
+ * Collects the Work Items of runs that finished within the completed-lane window, and of every failed
+ * run, which stays on the board without a time limit. The board then shows each Work Item by its
+ * newest run. Finished runs are stored in run ID order, so at most
+ * {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} are evaluated.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
@@ -298,7 +300,9 @@ async function readRecentlyFinishedWorkItemIds(
     const page = await workItemDependencies.agentRuns.listFinishedRuns(principal.directoryId, teamId, cursor, limit)
     evaluated += limit
     for (const run of page.runs) {
-      if (run.finishedAt !== undefined && Date.parse(run.finishedAt) >= since) workItemIds.add(run.workItemId)
+      // A failure stays on the board without a time limit, so only other outcomes use the window.
+      const recent = run.finishedAt !== undefined && Date.parse(run.finishedAt) >= since
+      if (recent || run.outcome === 'failed') workItemIds.add(run.workItemId)
     }
     cursor = page.nextCursor
   } while (cursor !== undefined && evaluated < FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS)

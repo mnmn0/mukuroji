@@ -21,6 +21,7 @@ import { customersMessages } from './customers'
 import { codingAgentMessages } from './coding-agent'
 import { codingAgentGuideMessages } from './coding-agent-guide'
 import { collectionsMessages } from './collections'
+import { agentSettingsMessages } from './agent-settings'
 import { factoryBoardMessages } from './factory-board'
 
 /**
@@ -51,6 +52,7 @@ export const jaMessages = {
   ...codingAgentMessages,
   ...codingAgentGuideMessages,
   ...collectionsMessages,
+  ...agentSettingsMessages,
   ...factoryBoardMessages,
 } as const
 
