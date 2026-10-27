@@ -573,7 +573,8 @@ Slice 3 は 3 つの変更に分けて入れる。
   - `ActiveRunIndex` の lease の早い順に最大 100 件。index は結果整合のため、各 Run を強整合で
     読み直し、`active` のものだけを使う。1 つの Work Item に `active` Run が 2 件あれば claim の
     不変条件が壊れているため、`503` で fail-closed にする。
-  - 終了済み Run を最大 500 件評価し、直近 24 時間に終了した Run の Work Item を拾う。終了済み Run は
+  - 終了済み Run を最大 500 件評価し、直近 24 時間に終了した Run と、時期を問わず `failed` で終了した Run の
+    Work Item を拾う。終了済み Run は
     run ID 順に保存され終了時刻の index がないため、Team の終了済み Run が 500 件を超えると完了 lane が
     欠けうる。その場合は `finishedRunsHasMore: true` を返す。
   - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
@@ -594,8 +595,8 @@ Slice 3 は 3 つの変更に分けて入れる。
   - 判断待ち: `active` Run の最新 report が `blocker` / `handoff`、または最新 Run が `paused` で終了し
     Work Item が `started`。`blocker` を出した後に lease が切れた Run は停滞より判断待ちを優先する。
   - 停滞 / 処理中: `active` Run の lease が切れているか。
-  - 失敗: 最新 Run が `failed`。`started` の Work Item は上の 300 件に入る間は期限なく残り、それ以外は
-    終了から 24 時間だけ出る。
+  - 失敗: 最新 Run が `failed`。Work Item が完了・中止（`completed` / `canceled`）になるまでは期限なく残り、
+    完了・中止の後は終了から 24 時間だけ出る。差し戻して `started` から外れた Work Item も残る。
   - 完了: 最新 Run が直近 24 時間に `completed`。
   - Run なし: 上のどれにも入らない `started` の Work Item（Run がない、または最新 Run が `released` など）。
 - filter（runtime、assignee、Project）は Web で行う。応答は上の上限で有界なため、query parameter は
