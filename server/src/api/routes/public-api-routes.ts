@@ -1160,6 +1160,15 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       )).detail.issue)
     },
 
+    /**
+     * Reads the acceptance criteria of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The schema version, Team ID, Work Item ID, the Work Item revision the list was read at,
+     * and the criteria in order (empty when none).
+     */
     async getAcceptanceCriteria(credential, teamId, workItemId) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.read',

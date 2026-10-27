@@ -1372,7 +1372,7 @@ function configureFakeProjectClients(
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
-    /** Acceptance criteria the detail fake and the first listed Work Item return. */
+    /** Initial acceptance criteria of the detail fake and the first listed Work Item; updates replace them. */
     detailAcceptanceCriteria?: WorkItemAcceptanceCriterion[]
     /** Detail fake が返す現在の canonical schedule です。 */
     detailSchedule?: WorkItemSchedule
@@ -1612,6 +1612,16 @@ function configureFakeProjectClients(
     role: WorkspaceRole
   }>()
   const deletedIssueIds = new Set<string>()
+  // Criteria saved by an update; until then reads use the configured initial criteria.
+  let savedAcceptanceCriteria: { value: WorkItemAcceptanceCriterion[] | undefined } | undefined
+  /**
+   * Reads the criteria the fake currently stores.
+   *
+   * @returns The saved criteria, or the configured initial criteria before any update.
+   */
+  const currentAcceptanceCriteria = () => savedAcceptanceCriteria
+    ? savedAcceptanceCriteria.value
+    : options.detailAcceptanceCriteria
   const createWorkspaceMember = (memberKey: string) => ({
     id: memberKey,
     memberKey,
@@ -1650,8 +1660,8 @@ function configureFakeProjectClients(
       ...(index === 0 && options.issueContributorAssignments
         ? { contributorAssignments: options.issueContributorAssignments }
         : {}),
-      ...(index === 0 && options.detailAcceptanceCriteria
-        ? { acceptanceCriteria: options.detailAcceptanceCriteria }
+      ...(index === 0 && currentAcceptanceCriteria()
+        ? { acceptanceCriteria: currentAcceptanceCriteria() }
         : {}),
       creatorMemberKey: 'demo@example.com',
       workflowSchemaVersion: 1 as const,
@@ -2558,7 +2568,7 @@ function configureFakeProjectClients(
             ...(options.issueContributorAssignments
               ? { contributorAssignments: options.issueContributorAssignments }
               : {}),
-            ...(options.detailAcceptanceCriteria ? { acceptanceCriteria: options.detailAcceptanceCriteria } : {}),
+            ...(currentAcceptanceCriteria() ? { acceptanceCriteria: currentAcceptanceCriteria() } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
@@ -2651,6 +2661,12 @@ function configureFakeProjectClients(
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
         })
+        if ('acceptanceCriteria' in input) {
+          // An empty list removes the criteria, like the DynamoDB adapter.
+          savedAcceptanceCriteria = {
+            value: isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? structuredClone(input.acceptanceCriteria) : undefined,
+          }
+        }
         calls.issueUpdates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,

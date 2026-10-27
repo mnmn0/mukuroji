@@ -254,8 +254,15 @@ describe('public Agent Run service', () => {
     expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, criteria[1]])
     // The closed public Work Item schema omits the criteria; they have their own endpoint.
     expect(marked).not.toHaveProperty('acceptanceCriteria')
-    expect(await runWithTestAppDependencies(() => workItems.getAcceptanceCriteria(credential, 'core-team', 'task-1')))
-      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 1, items: criteria })
+    /**
+     * Reads the fixture task's stored acceptance criteria through the public endpoint's service.
+     *
+     * @returns The criteria response.
+     */
+    const read = () => runWithTestAppDependencies(() => workItems.getAcceptanceCriteria(credential, 'core-team', 'task-1'))
+    expect(await read()).toEqual({
+      schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 1, items: [{ ...criteria[0], satisfied: true }, criteria[1]],
+    })
     // Marks are applied to the stored list by the server, so an agent need not restate it.
     const markOnly = (acceptanceCriteriaMarks: unknown[], key: string, extra: Record<string, unknown> = {}) =>
       runWithTestAppDependencies(() => workItems.update(
@@ -265,7 +272,9 @@ describe('public Agent Run service', () => {
         { agentRunId: held.runId, instanceIdHash: held.instanceIdHash },
       ))
     await markOnly([{ id: criteria[1]?.id, satisfied: true }], 'mark-only')
-    expect(written.at(-1)).toEqual([criteria[0], { ...criteria[1], satisfied: true }])
+    // The marks apply to the list stored by the previous update, so the first mark is kept.
+    expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }])
+    expect((await read()).items).toEqual([{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }])
     await expect(markOnly([{ id: 'c'.repeat(32), satisfied: true }], 'mark-unknown'))
       .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
     await expect(markOnly([{ id: criteria[1]?.id, satisfied: true }], 'mark-both', { acceptanceCriteria: criteria }))
