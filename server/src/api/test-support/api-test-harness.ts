@@ -1366,7 +1366,10 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
     detailAssignedProjectIds?: Record<string, string>
-    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。 */
+    /**
+     * `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。
+     * When set, an update increments the stored revision so later reads observe it.
+     */
     detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
@@ -2685,10 +2688,14 @@ function configureFakeProjectClients(
           input.schedule,
           createDefaultDueDateWorkItemSchedule('2026-06-18'),
         )
+        const revisionKey: `${string}\0${string}` = `${teamId}\0${issueId}`
+        const nextRevision = (options.detailRevisions?.[revisionKey] ?? 1) + 1
+        // Tests that track revisions opt in through detailRevisions; others keep the fixed revision.
+        if (options.detailRevisions) options.detailRevisions[revisionKey] = nextRevision
         const updated: UpdateTeamIssueResponse = {
           issue: {
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-            revision: 2,
+            revision: nextRevision,
             id: issueId,
             teamId,
             assignedProjectId: typeof input.assignedProjectId === 'string'

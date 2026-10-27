@@ -227,6 +227,8 @@ describe('public Agent Run service', () => {
       { id: 'b'.repeat(32), text: 'Docs updated', satisfied: false },
     ]
     projectOptions.detailAcceptanceCriteria = criteria
+    // Opting in makes each update raise the stored revision, so stale writes are real conflicts.
+    projectOptions.detailRevisions = {}
     const written: unknown[] = []
     projectOptions.issueUpdateHook = (input) => {
       written.push(input.acceptanceCriteria)
@@ -235,49 +237,44 @@ describe('public Agent Run service', () => {
     store.seed(held)
     const workItems = createCanonicalPublicWorkItemService()
     /**
-     * Replaces the fixture task's acceptance criteria.
-     *
-     * @param acceptanceCriteria - Replacement list.
-     * @param key - Idempotency key.
-     * @param fenced - Whether the agent's run fences the update.
-     * @param expectedRevision - Revision the caller read.
-     * @returns The updated Work Item.
-     */
-    const update = (acceptanceCriteria: unknown[], key: string, fenced: boolean, expectedRevision = 1) =>
-      runWithTestAppDependencies(() => workItems.update(
-        credential, 'core-team', 'task-1',
-        { expectedRevision, acceptanceCriteria: acceptanceCriteria as never },
-        { requestId: key, idempotencyKey: key }, undefined,
-        fenced ? { agentRunId: held.runId, instanceIdHash: held.instanceIdHash } : undefined,
-      ))
-    const marked = await update([{ ...criteria[0], satisfied: true }, criteria[1]], 'mark', true)
-    expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, criteria[1]])
-    // The closed public Work Item schema omits the criteria; they have their own endpoint.
-    expect(marked).not.toHaveProperty('acceptanceCriteria')
-    /**
      * Reads the fixture task's stored acceptance criteria through the public endpoint's service.
      *
      * @returns The criteria response.
      */
     const read = () => runWithTestAppDependencies(() => workItems.getAcceptanceCriteria(credential, 'core-team', 'task-1'))
+    /**
+     * Updates the fixture task's acceptance criteria at the revision last read.
+     *
+     * @param change - Replacement list or marks, plus any other patch fields.
+     * @param key - Idempotency key.
+     * @param fenced - Whether the agent's run fences the update.
+     * @param expectedRevision - Revision the caller read; defaults to the current stored revision.
+     * @returns The updated Work Item.
+     */
+    const update = async (change: Record<string, unknown>, key: string, fenced: boolean, expectedRevision?: number) => {
+      const revision = expectedRevision ?? (await read()).revision
+      return runWithTestAppDependencies(() => workItems.update(
+        credential, 'core-team', 'task-1',
+        { expectedRevision: revision, ...change },
+        { requestId: key, idempotencyKey: key }, undefined,
+        fenced ? { agentRunId: held.runId, instanceIdHash: held.instanceIdHash } : undefined,
+      ))
+    }
+    const marked = await update({ acceptanceCriteria: [{ ...criteria[0], satisfied: true }, criteria[1]] }, 'mark', true)
+    expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, criteria[1]])
+    // The closed public Work Item schema omits the criteria; they have their own endpoint.
+    expect(marked).not.toHaveProperty('acceptanceCriteria')
     expect(await read()).toEqual({
-      schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 1, items: [{ ...criteria[0], satisfied: true }, criteria[1]],
+      schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: 2, items: [{ ...criteria[0], satisfied: true }, criteria[1]],
     })
     // Marks are applied to the stored list by the server, so an agent need not restate it.
-    const markOnly = (acceptanceCriteriaMarks: unknown[], key: string, extra: Record<string, unknown> = {}) =>
-      runWithTestAppDependencies(() => workItems.update(
-        credential, 'core-team', 'task-1',
-        { expectedRevision: 1, acceptanceCriteriaMarks: acceptanceCriteriaMarks as never, ...extra },
-        { requestId: key, idempotencyKey: key }, undefined,
-        { agentRunId: held.runId, instanceIdHash: held.instanceIdHash },
-      ))
-    await markOnly([{ id: criteria[1]?.id, satisfied: true }], 'mark-only')
+    await update({ acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }] }, 'mark-only', true)
     // The marks apply to the list stored by the previous update, so the first mark is kept.
     expect(written.at(-1)).toEqual([{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }])
-    expect((await read()).items).toEqual([{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }])
-    await expect(markOnly([{ id: 'c'.repeat(32), satisfied: true }], 'mark-unknown'))
+    expect(await read()).toMatchObject({ revision: 3, items: [{ ...criteria[0], satisfied: true }, { ...criteria[1], satisfied: true }] })
+    await expect(update({ acceptanceCriteriaMarks: [{ id: 'c'.repeat(32), satisfied: true }] }, 'mark-unknown', true))
       .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
-    await expect(markOnly([{ id: criteria[1]?.id, satisfied: true }], 'mark-both', { acceptanceCriteria: criteria }))
+    await expect(update({ acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }], acceptanceCriteria: criteria }, 'mark-both', true))
       .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
     // Rewording, adding, removing, or reordering is left to people.
     for (const [changed, key] of [
@@ -286,15 +283,26 @@ describe('public Agent Run service', () => {
       [[criteria[0]], 'remove'],
       [[criteria[1], criteria[0]], 'reorder'],
     ] as const) {
-      await expect(update([...changed], key, true)).rejects.toMatchObject({ status: 403, code: 'AcceptanceCriteriaChangeForbidden' })
+      await expect(update({ acceptanceCriteria: [...changed] }, key, true)).rejects.toMatchObject({ status: 403, code: 'AcceptanceCriteriaChangeForbidden' })
     }
-    await update([criteria[0], { text: '  New condition  ' }], 'human', false)
+    // Rejected changes write nothing, so the revision is unchanged.
+    expect((await read()).revision).toBe(3)
+    await update({ acceptanceCriteria: [criteria[0], { text: '  New condition  ' }] }, 'human', false)
     expect(written.at(-1)).toMatchObject([criteria[0], { text: 'New condition', satisfied: false }])
     // The new criterion receives a server-generated ID.
     expect(JSON.stringify(written.at(-1))).toMatch(/"id":"[0-9a-f]{32}","text":"New condition"/u)
-    await expect(update([{ id: 'c'.repeat(32), text: 'Invented' }], 'invented', false)).rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
-    // Criterion IDs refer to the list the caller read, so a stale revision is a conflict.
-    await expect(update([criteria[0]], 'stale', false, 2)).rejects.toMatchObject({ status: 409, code: 'WorkItemRevisionConflict' })
+    await expect(update({ acceptanceCriteria: [{ id: 'c'.repeat(32), text: 'Invented' }] }, 'invented', false))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidAcceptanceCriteria' })
+    // Criterion IDs refer to the list the caller read, so a write at an older revision is a conflict.
+    const current = await read()
+    expect(current.revision).toBe(4)
+    for (const [change, key] of [
+      [{ acceptanceCriteria: current.items }, 'stale-replace'],
+      [{ acceptanceCriteriaMarks: [{ id: criteria[0]?.id, satisfied: false }] }, 'stale-mark'],
+    ] as const) {
+      await expect(update(change, key, false, current.revision - 1)).rejects.toMatchObject({ status: 409, code: 'WorkItemRevisionConflict' })
+    }
+    expect(await read()).toEqual(current)
   })
 
   test('does not let another member reuse the holder instance ID to pass the fence', async () => {
