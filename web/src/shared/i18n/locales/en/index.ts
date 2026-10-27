@@ -22,6 +22,7 @@ import { customersMessages } from './customers'
 import { codingAgentMessages } from './coding-agent'
 import { codingAgentGuideMessages } from './coding-agent-guide'
 import { collectionsMessages } from './collections'
+import { agentSettingsMessages } from './agent-settings'
 
 /**
  * Verifies that a locale dictionary contains exactly the canonical message keys.
@@ -63,5 +64,6 @@ export const enMessages = defineMessages({
   ...codingAgentMessages,
   ...codingAgentGuideMessages,
   ...collectionsMessages,
+  ...agentSettingsMessages,
 })
 import { updatesMessages } from './updates'

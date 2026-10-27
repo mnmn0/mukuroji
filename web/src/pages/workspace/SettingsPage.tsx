@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
+import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -105,6 +106,12 @@ export function SettingsPage() {
                 canManageWorkspaceConfiguration={
                   workspace.canManageWorkspaceConfiguration
                 }
+                canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+              <AgentSettingsPanelContainer
+                accessToken={workspace.accessToken}
                 canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
                 locale={workspace.locale}
                 teams={workspace.teams}
