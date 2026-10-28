@@ -16,6 +16,7 @@ import {
   type StoredAgentRun,
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
+import { CognitoServiceError } from '../modules/authentication'
 import { createAuditEventId, createMutationAuditContext } from '../modules/audit/audit'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
@@ -1895,21 +1896,55 @@ describe('Factory board route', () => {
       cognito: {
         ...cognito,
         /**
-         * Fails like an unavailable user pool.
+         * Fails like a throttled user pool, with the member's address in the message.
          *
+         * @param userId - Member ID.
          * @returns Never; always rejects.
          */
-        async getUserProfile() {
-          throw new Error('Cognito is unavailable.')
+        async getUserProfile(userId) {
+          throw new CognitoServiceError(429, 'TooManyRequestsException', `Rate exceeded for "${userId}".`)
+        },
+      },
+    })
+    const warnings: unknown[][] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(args) }
+    try {
+      const { body, lanes } = await readBoard()
+      expect(lanes).toEqual({ 'task-processing': 'processing' })
+      expect(body.items[0]?.workItem.assigneeUserId).toBe('demo@example.com')
+      expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
+      expect(body.items[0]?.workItem).not.toHaveProperty('assigneeEmail')
+    } finally {
+      console.warn = originalWarn
+    }
+    // The failure is logged by its code, never with the message that names the member.
+    expect(warnings).toEqual([['Failed to read a Factory board assignee profile:', { teamId: 'core-team', code: 'TooManyRequestsException' }]])
+  })
+
+  test('shows assignees by ID instead of waiting for a profile lookup that does not answer', async () => {
+    const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
+    store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
+    const cognito = getTestAppDependencies().authentication.cognito
+    setTestAppDependencies({
+      cognito: {
+        ...cognito,
+        /**
+         * Never answers, like a user pool request that hangs.
+         *
+         * @returns A promise that never settles.
+         */
+        getUserProfile() {
+          return new Promise(() => undefined)
         },
       },
     })
 
+    const startedAt = Date.now()
     const { body, lanes } = await readBoard()
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
     expect(lanes).toEqual({ 'task-processing': 'processing' })
-    expect(body.items[0]?.workItem.assigneeUserId).toBe('demo@example.com')
     expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
-    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeEmail')
   })
 
   test('fails closed instead of returning an empty board when stored runs are inconsistent', async () => {

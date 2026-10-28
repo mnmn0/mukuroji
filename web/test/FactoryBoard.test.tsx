@@ -150,6 +150,21 @@ describe('Factory board lanes', () => {
     expect(readFactoryBoardFilterOptions([], { ...defaultFactoryBoardFilters, projectId: 'none' }).hasUnassignedProject).toBe(true)
   })
 
+  test('tells assignees who share a name apart by their member ID', () => {
+    const base = fixtureItem('auth-flow')
+    const unnamed = { id: base.workItem.id, title: base.workItem.title, workflowStatusId: base.workItem.workflowStatusId, statusCategory: base.workItem.statusCategory }
+    const items = [
+      base,
+      { ...base, workItem: { ...base.workItem, id: 'other', assigneeUserId: 'sato2@example.com', assigneeEmail: 'sato2@example.com' } },
+      { ...base, workItem: { ...unnamed, id: 'unnamed', assigneeUserId: 'kato@example.com' } },
+    ]
+    expect(readFactoryBoardFilterOptions(items).assignees).toEqual([
+      { userId: 'kato@example.com', label: 'kato@example.com' },
+      { userId: 'sato@example.com', label: '佐藤 花子 (sato@example.com)' },
+      { userId: 'sato2@example.com', label: '佐藤 花子 (sato2@example.com)' },
+    ])
+  })
+
   test('filters by runtime, assignee, and Project', () => {
     const options = readFactoryBoardFilterOptions(factoryBoardFixtureItems)
     expect(options).toEqual({

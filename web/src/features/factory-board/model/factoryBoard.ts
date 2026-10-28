@@ -161,13 +161,16 @@ export function readFactoryBoardFilterOptions(
   if (selected.assigneeUserId !== FACTORY_BOARD_FILTER_ALL && !assignees.has(selected.assigneeUserId)) {
     assignees.set(selected.assigneeUserId, selected.assigneeUserId)
   }
+  const labelCounts = new Map<string, number>()
+  for (const label of assignees.values()) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1)
   const projectIds = new Set(items.flatMap((item) => item.workItem.assignedProjectId === undefined ? [] : [item.workItem.assignedProjectId]))
   const selectsProject = selected.projectId !== FACTORY_BOARD_FILTER_ALL && selected.projectId !== FACTORY_BOARD_FILTER_NO_PROJECT
   if (selectsProject) projectIds.add(selected.projectId)
   return {
     runtimes: runtimeOrder.filter((runtime) => runtimes.has(runtime)),
     assignees: [...assignees]
-      .map(([userId, label]) => ({ userId, label }))
+      // Members who share a name are told apart by their ID, which the filter compares anyway.
+      .map(([userId, label]) => ({ userId, label: labelCounts.get(label) === 1 || label === userId ? label : `${label} (${userId})` }))
       .sort((left, right) => left.label.localeCompare(right.label) || left.userId.localeCompare(right.userId)),
     projectIds: [...projectIds].sort(),
     hasUnassignedProject: selected.projectId === FACTORY_BOARD_FILTER_NO_PROJECT ||

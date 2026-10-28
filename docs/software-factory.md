@@ -624,8 +624,10 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
   「一覧に戻る」で元の tile に戻る。Storybook で 1440×900 と 390×844 を確認し、横方向の overflow がない
   ことを確かめた。
 - 担当者は server が Cognito の profile から表示名とメールアドレスを読み、`assigneeName` と `assigneeEmail` として
-  返す。読み取りは担当者ごとに 1 回、同時 10 件までとする。profile がない、または読めない場合も board は失敗させず、
-  Web は表示名、メールアドレス、member ID の順に代わりを使う。filter の選択肢は表示名の順に並べる。
+  返す。読み取りは担当者ごとに 1 回、同時 10 件までとし、全体で 2 秒を超えたら残りを待たない。profile がない、
+  読めない、または期限までに読めなかった場合も board は失敗させず、Web は表示名、メールアドレス、member ID の順に
+  代わりを使う。読み取りの失敗は error code だけを記録し、member を含みうる message は記録しない。filter の選択肢は
+  表示名の順に並べ、同じ表示名の担当者には member ID を添える。
 
 ## 後続 Phase
 

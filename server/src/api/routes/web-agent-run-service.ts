@@ -27,7 +27,7 @@ import {
   toAgentRunReport,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
-import { isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
+import { CognitoServiceError, isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
 import {
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
@@ -397,30 +397,45 @@ async function readBoardReportSummary(
   }
 }
 
+/** Longest time the board waits for assignee profiles before it shows the rest by member ID. */
+const boardProfileDeadlineMs = 2_000
+
 /**
  * Reads the profiles of the members assigned to board Work Items, so the board can show names
- * instead of member IDs. An empty member ID is not looked up. A profile that is missing or fails to
- * load is left out, and that member keeps showing by ID; a profile lookup never fails the board.
+ * instead of member IDs. An empty member ID is not looked up. A profile that is missing, fails to
+ * load, or is not read within the deadline is left out, and that member keeps showing by ID; a
+ * profile lookup never fails or stalls the board. Lookups already sent when the deadline passes are
+ * left to finish, since the user directory port takes no abort signal, but no new one starts.
  *
+ * @param teamId - Team of the board, logged with a failed lookup.
  * @param userIds - Assignee member IDs.
- * @returns Profiles by member ID.
+ * @returns Profiles read by the deadline, by member ID.
  */
-async function readBoardAssigneeProfiles(userIds: string[]): Promise<Map<string, CognitoUserProfile>> {
+async function readBoardAssigneeProfiles(teamId: string, userIds: string[]): Promise<Map<string, CognitoUserProfile>> {
   const unique = [...new Set(userIds)].filter((userId) => userId !== '')
-  const profiles = await mapInOrderWithConcurrency(unique, boardReadConcurrency, async (userId) => {
+  const byUserId = new Map<string, CognitoUserProfile>()
+  let expired = false
+  const lookups = mapInOrderWithConcurrency(unique, boardReadConcurrency, async (userId) => {
+    if (expired) return
     try {
-      return await authenticationDependencies.cognito.getUserProfile(userId)
+      const profile = await authenticationDependencies.cognito.getUserProfile(userId)
+      if (!expired) byUserId.set(userId, profile)
     } catch (error) {
-      if (!isCognitoUserNotFoundError(error)) console.warn('Failed to read a Factory board assignee profile:', error)
-      return undefined
+      if (!isCognitoUserNotFoundError(error)) {
+        // The error message can carry the member's address, so only its code is logged.
+        const code = error instanceof CognitoServiceError ? error.code : error instanceof Error ? error.name : 'Unknown'
+        console.warn('Failed to read a Factory board assignee profile:', { teamId, code })
+      }
     }
   })
-  const byUserId = new Map<string, CognitoUserProfile>()
-  unique.forEach((userId, index) => {
-    const profile = profiles[index]
-    if (profile) byUserId.set(userId, profile)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, boardProfileDeadlineMs)
   })
-  return byUserId
+  await Promise.race([lookups, deadline])
+  clearTimeout(timer)
+  expired = true
+  return new Map(byUserId)
 }
 
 /**
@@ -473,7 +488,7 @@ export async function listWebTeamAgentRunBoard(
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
   })
   const boardItems = items.flatMap((item) => item ? [item] : [])
-  const profiles = await readBoardAssigneeProfiles(boardItems.map((item) => item.workItem.assigneeUserId))
+  const profiles = await readBoardAssigneeProfiles(teamId, boardItems.map((item) => item.workItem.assigneeUserId))
   return {
     generatedAt: now.toISOString(),
     items: boardItems.map((item) => {
