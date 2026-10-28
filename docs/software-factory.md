@@ -532,7 +532,7 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
 
 ### Slice 3 の実装状況
 
-Slice 3 は 3 つの変更に分けて入れる。
+Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 
 - 実装済み（Agent settings、Ready、brief）: Agent settings に `readyStatusIds`（最大 50 件、重複不可）、
   Team の `brief`、`projectBriefs`（最大 20 Project）を追加した。brief はそれぞれ UTF-8 で 16 KiB まで、
@@ -563,7 +563,13 @@ Slice 3 は 3 つの変更に分けて入れる。
   範囲に入れるため、応答を失った後の再送は、その間に一覧が変わっても replay になる。Public API の `WorkItem` は閉じた response schema のため条件を含めず、
   `GET /api/v1/work-items/{workItemId}/acceptance-criteria` が一覧と読み取り時の Work Item `revision` を返す。
   2 つの設定は `GET /api/v1/agent-context` に加える。MCP はこの path がない古い server では条件なしとして動く。
-- その次の変更: 受け入れ条件と Agent settings の Web 編集画面。
+- 実装済み（Web 編集画面）: Task と Team Issue の詳細に受け入れ条件の section を置き、進捗（達成数 / 全体）と各条件の
+  状態を表示する。編集では条件の追加、削除、上下の並べ替え、文言と達成状態の変更ができる。draft は詳細 form の hidden field
+  で送るため、他の項目と同じ PATCH、同じ revision で保存する。空欄、1,024 文字超、21 件以上は保存前に該当行へ error を出す。
+  受け入れ条件を含む Task の更新は undo の対象にしない。revision が変わった（保存の成功や `409` の後に読み直した）ときは、
+  form の他の項目と同じく draft を捨てて最新の一覧を表示する。設定画面には Team ごとの Agent settings panel を置き、
+  Ready status、受け入れ条件の必須化と代替 custom field、Team brief、Project brief を編集する。編集できるのは Team の設定を
+  変更できる member に限り、`403` の場合は読み取り専用で表示する。読み込みに失敗したときは、空の設定ではなく再試行を出す。
 
 ### Slice 4 の実装状況
 
