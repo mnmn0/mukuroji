@@ -101,7 +101,7 @@ export function createAgentRunTriageWorkItemReader(
 /** Triage write the sweep needs, which the Triage client provides. */
 export interface AgentRunTriageEntryWriter {
   /**
-   * Creates or replays the entry of one run and reason.
+   * Creates or replays the entry of one run.
    * @param workspaceId - Workspace ID.
    * @param teamId - Team ID.
    * @param input - Entry content.
@@ -117,8 +117,8 @@ export interface AgentRunTriageEntryWriter {
 }
 
 /**
- * Creates the Triage writer of the sweep. One idempotency key and fingerprint per run and reason
- * make every repeat a replay of the first filing. A Workspace that is closing receives no entries.
+ * Creates the Triage writer of the sweep. One idempotency key and fingerprint per run make every
+ * repeat, including a failed finish after a stall was filed, a replay of the first filing. A Workspace that is closing receives no entries.
  *
  * @param triage - Triage client.
  * @param isTenantActive - Whether the Workspace accepts new writes.
@@ -129,13 +129,14 @@ export function createAgentRunTriageFiler(
   isTenantActive: (workspaceId: string) => Promise<boolean>,
 ): AgentRunTriageFiler {
   return {
-    /** Files one entry, replaying an earlier filing of the same run and reason. */
+    /** Files one entry, replaying an earlier filing of the same run. */
     async file(directoryId, teamId, filing) {
       if (!await isTenantActive(directoryId)) return 'rejected'
       try {
         await triage.createAgentRunEntry(directoryId, teamId, filing, {
-          key: `agent-run:${filing.runId}:${filing.reason}`,
-          fingerprint: createTriageInputFingerprint({ runId: filing.runId, reason: filing.reason }),
+          // One entry per run: filing a run again for another reason replays its first entry.
+          key: `agent-run:${filing.runId}`,
+          fingerprint: createTriageInputFingerprint({ runId: filing.runId }),
         })
         return 'filed'
       } catch (error) {

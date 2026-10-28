@@ -2437,7 +2437,7 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
-  test('admits one agent-run entry per run and reason, with the agent as a non-guest requester', async () => {
+  test('admits one agent-run entry per run, with the agent as a non-guest requester', async () => {
     const harness = createHarness([{}, {}, {}])
     try {
       const receipt = await harness.client.createAgentRunEntry(
@@ -2452,14 +2452,14 @@ describe('DynamoDbTriageClient source admission', () => {
           assigneeUserId: 'demo@example.com',
           projectId: 'checkout',
         },
-        { key: 'agent-run:run_1:failed', fingerprint: createTriageInputFingerprint({ runId: 'run_1', reason: 'failed' }) },
+        { key: 'agent-run:run_1', fingerprint: createTriageInputFingerprint({ runId: 'run_1' }) },
       )
 
       expect(receipt.replayed).toBe(false)
       const transactItems = harness.commands[2]?.input.TransactItems
       const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
       expect(stored).toMatchObject({
-        source: { kind: 'agent-run', sourceId: 'run_1:failed' },
+        source: { kind: 'agent-run', sourceId: 'run_1' },
         sourcePreview: { title: 'Agent run failed: Fix checkout' },
         requester: { displayName: 'Claude Code', externalId: 'demo@example.com', guest: false },
         permission: { canReply: false },
@@ -2512,7 +2512,7 @@ describe('DynamoDbTriageClient source admission', () => {
           assigneeUserId: 'demo@example.com',
           projectId: 'checkout',
         },
-        { key: 'agent-run:run_1:stalled', fingerprint: createTriageInputFingerprint({ runId: 'run_1', reason: 'stalled' }) },
+        { key: 'agent-run:run_1', fingerprint: createTriageInputFingerprint({ runId: 'run_1' }) },
       )).rejects.toMatchObject({ status: 409, code: 'TriageAdmissionProjectChanged' })
       // Nothing is written, so readers of the billing Project never see the checkout Work Item.
       expect(harness.commands.map(({ name }) => name)).toEqual(['GetCommand', 'GetCommand'])

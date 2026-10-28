@@ -43,10 +43,13 @@ function createTriage(result?: Error) {
 }
 
 describe('Agent Run triage composition', () => {
-  test('files with one key per run and reason, and treats refused input as rejected', async () => {
+  test('files with one key per run, and treats refused input as rejected', async () => {
     const ok = createTriage()
     expect(await createAgentRunTriageFiler(ok.client, async () => true).file('workspace-1', 'core', filing)).toBe('filed')
-    expect(ok.keys).toEqual(['agent-run:run_1:failed'])
+    expect(ok.keys).toEqual(['agent-run:run_1'])
+    // A run that stalled and then failed replays its first entry instead of opening another.
+    expect(await createAgentRunTriageFiler(ok.client, async () => true).file('workspace-1', 'core', { ...filing, reason: 'stalled' })).toBe('filed')
+    expect(ok.keys).toEqual(['agent-run:run_1', 'agent-run:run_1'])
 
     const refused = createTriage(new TriageError(400, 'InvalidTriageInput', 'Agent name is invalid.'))
     expect(await createAgentRunTriageFiler(refused.client, async () => true).file('workspace-1', 'core', filing)).toBe('rejected')

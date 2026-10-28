@@ -93,7 +93,7 @@ export type AgentRunTriageReason = 'failed' | 'stalled'
 
 /** Validated content of a Triage entry filed for a failed or stalled Agent Run. */
 export type CreateAgentRunTriageEntryInput = {
-  /** Run the entry is about; one entry per run and reason. */
+  /** Run the entry is about; one entry per run, whichever reason is filed first. */
   runId: string
   /** Whether the run failed or stalled. */
   reason: AgentRunTriageReason

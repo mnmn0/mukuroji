@@ -332,8 +332,9 @@ pane を流用する。
   Project を限定された閲覧者には、その Project を見られる場合だけ entry を見せる。routing rule が
   entry を別の Project へ移す場合は、Work Item の title と path が別 Project の閲覧者に見えないよう
   起票を拒否する。
-- entry は Run ごとに 1 件とし、source ID は `<runId>:failed` または `<runId>:stalled` にする。
-  Triage の source claim で重複を防ぎ、同じ Run を何度処理しても 2 件目は作らない。停滞 Run が
+- entry は Run ごとに 1 件とし、source ID は Run ID にする。Triage の source claim で重複を防ぎ、
+  同じ Run を何度処理しても 2 件目は作らない。停滞として起票した Run が後で `failed` で終わっても、
+  最初の entry の replay になる。停滞 Run が
   heartbeat で回復しても entry はそのまま残し、判断は Triage の担当者に任せる。
 - 本文は agent 名と runtime、Work Item の title と画面への path、Run ID、終了時刻または lease の
   期限、最新 report の kind を書く。report の本文と成果物 link は含めない。Work Item への link は

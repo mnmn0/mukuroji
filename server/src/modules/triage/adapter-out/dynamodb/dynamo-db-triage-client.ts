@@ -1548,7 +1548,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param workspaceId - Owning Workspace ID.
    * @param teamId - Team of the run.
    * @param input - Validated entry content.
-   * @param idempotency - Replay protection bound to the run and reason.
+   * @param idempotency - Replay protection bound to the run.
    * @returns The created or replayed entry receipt.
    */
   async createAgentRunEntry(
@@ -2199,16 +2199,17 @@ function createWebhookTriageSourceId(endpointId: string, eventId: string): strin
 }
 
 /**
- * Builds the source ID of an Agent Run entry, one per run and reason.
+ * Builds the source ID of an Agent Run entry. It is the run ID alone, so a run that stalled and
+ * later failed keeps its first entry instead of opening a second one.
  *
  * @param input - Agent Run entry content.
- * @returns Source ID such as `<runId>:failed`.
+ * @returns The run ID.
  */
 function createAgentRunTriageSourceId(input: Pick<CreateAgentRunTriageEntryInput, 'runId' | 'reason'>): string {
   if (input.reason !== 'failed' && input.reason !== 'stalled') {
     throw new TriageError(400, 'InvalidTriageInput', 'Agent Run triage reason is invalid.')
   }
-  return `${requireText(input.runId, 'Agent Run ID', 200)}:${input.reason}`
+  return requireText(input.runId, 'Agent Run ID', 200)
 }
 
 /**
