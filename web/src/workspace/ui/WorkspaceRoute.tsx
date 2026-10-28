@@ -214,6 +214,12 @@ const teamTriageRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'triage.title',
   descriptionKey: 'triage.description',
 }
+const teamFactoryBoardRouteMetadata: WorkspaceRouteMetadata = {
+  activeTeamViewId: 'factory',
+  eyebrowKey: 'factoryBoard.eyebrow',
+  titleKey: 'factoryBoard.title',
+  descriptionKey: 'factoryBoard.description',
+}
 const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -779,6 +785,15 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...teamTriageRouteMetadata,
       activeTeamId: decodeWorkspaceRouteParameter(teamTriageMatch.params.teamId),
+    }
+  }
+
+  const teamFactoryBoardMatch = matchPath('/teams/:teamId/factory', pathname)
+
+  if (teamFactoryBoardMatch?.params.teamId) {
+    return {
+      ...teamFactoryBoardRouteMetadata,
+      activeTeamId: decodeWorkspaceRouteParameter(teamFactoryBoardMatch.params.teamId),
     }
   }
 

@@ -185,6 +185,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
     },
     teamOverview: t('sidebar.teamOverview'),
     triage: t('sidebar.triage'),
+    factoryBoard: t('sidebar.factoryBoard'),
     issues: t('sidebar.issues'),
     members: t('sidebar.members'),
     projectCount: (count) =>
