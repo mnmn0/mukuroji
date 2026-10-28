@@ -16,6 +16,7 @@ import {
   type StoredAgentRun,
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
+import { CognitoServiceError } from '../modules/authentication'
 import { createAuditEventId, createMutationAuditContext } from '../modules/audit/audit'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
@@ -1755,7 +1756,7 @@ describe('Factory board route', () => {
     expect(body).toMatchObject({ activeRunsHasMore: false, finishedRunsHasMore: false, startedWorkItemsHasMore: false })
     const byId = new Map(body.items.map((item) => [item.workItem.id, item]))
     expect(byId.get('task-processing')).toMatchObject({
-      workItem: { id: 'task-processing', title: 'Title of task-processing', statusCategory: 'started', workflowStatusId: 'in-progress', assignedProjectId: 'refero', assigneeUserId: 'demo@example.com' },
+      workItem: { id: 'task-processing', title: 'Title of task-processing', statusCategory: 'started', workflowStatusId: 'in-progress', assignedProjectId: 'refero', assigneeUserId: 'demo@example.com', assigneeName: 'Demo User', assigneeEmail: 'demo@example.com' },
       run: { runId: processing.runId, state: 'active', stalled: false, canRelease: true, runtime: 'claude-code', agentName: 'Claude Code' },
     })
     expect(byId.get('task-retried')?.run?.runId).toBe(retry.runId)
@@ -1764,7 +1765,7 @@ describe('Factory board route', () => {
       excerpt: 'Need a decision on the schema.', verificationCounts: { passed: 1, failed: 1, skipped: 0 }, artifactCount: 1, changedFileCount: 3,
     })
     expect(byId.get('task-runless')).toEqual({
-      workItem: { id: 'task-runless', title: 'Title of task-runless', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'demo@example.com' },
+      workItem: { id: 'task-runless', title: 'Title of task-runless', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'demo@example.com', assigneeName: 'Demo User', assigneeEmail: 'demo@example.com' },
     })
     // Finished runs are never offered for release, and no table key or cursor leaves the server.
     expect(byId.get('task-released')?.run).toMatchObject({ outcome: 'released', canRelease: false })
@@ -1861,6 +1862,90 @@ describe('Factory board route', () => {
     const { projectOptions } = configureUnstartedAssignedWorkItem({ role: 'member' })
     projectOptions.projectAccesses = []
     expect((await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })).status).toBe(403)
+  })
+
+  test('leaves out empty profile fields instead of returning a board the Web application rejects', async () => {
+    const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
+    store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
+    const cognito = getTestAppDependencies().authentication.cognito
+    setTestAppDependencies({
+      cognito: {
+        ...cognito,
+        /**
+         * Returns a profile without a name or an email address.
+         *
+         * @param userId - Member ID.
+         * @returns Profile with empty fields.
+         */
+        async getUserProfile(userId) {
+          return { id: userId, username: userId, email: '', name: '' }
+        },
+      },
+    })
+
+    const { body } = await readBoard()
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeEmail')
+  })
+
+  test('shows assignees by ID when their profiles cannot be read', async () => {
+    const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
+    store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
+    const cognito = getTestAppDependencies().authentication.cognito
+    setTestAppDependencies({
+      cognito: {
+        ...cognito,
+        /**
+         * Fails like a throttled user pool, with the member's address in the message.
+         *
+         * @param userId - Member ID.
+         * @returns Never; always rejects.
+         */
+        async getUserProfile(userId) {
+          throw new CognitoServiceError(429, 'TooManyRequestsException', `Rate exceeded for "${userId}".`)
+        },
+      },
+    })
+    const warnings: unknown[][] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(args) }
+    try {
+      const { body, lanes } = await readBoard()
+      expect(lanes).toEqual({ 'task-processing': 'processing' })
+      expect(body.items[0]?.workItem.assigneeUserId).toBe('demo@example.com')
+      expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
+      expect(body.items[0]?.workItem).not.toHaveProperty('assigneeEmail')
+    } finally {
+      console.warn = originalWarn
+    }
+    // The failure is logged by its code and the request's correlation ID, never with the message that names the member.
+    expect(warnings).toEqual([['Failed to read a Factory board assignee profile:', { correlationId: expect.any(String), teamId: 'core-team', code: 'TooManyRequestsException' }]])
+    expect(JSON.stringify(warnings)).not.toContain('demo@example.com')
+  })
+
+  test('shows assignees by ID instead of waiting for a profile lookup that does not answer', async () => {
+    const { store } = configureBoard([{ id: 'task-processing', statusCategory: 'started' }])
+    store.seed(createRunAt('task-processing', new Date(Date.now() - 60_000)))
+    const cognito = getTestAppDependencies().authentication.cognito
+    setTestAppDependencies({
+      cognito: {
+        ...cognito,
+        /**
+         * Never answers, like a user pool request that hangs.
+         *
+         * @returns A promise that never settles.
+         */
+        getUserProfile() {
+          return new Promise(() => undefined)
+        },
+      },
+    })
+
+    const startedAt = Date.now()
+    const { body, lanes } = await readBoard()
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+    expect(lanes).toEqual({ 'task-processing': 'processing' })
+    expect(body.items[0]?.workItem).not.toHaveProperty('assigneeName')
   })
 
   test('fails closed instead of returning an empty board when stored runs are inconsistent', async () => {

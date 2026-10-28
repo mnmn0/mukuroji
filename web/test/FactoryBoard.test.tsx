@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { classifyFactoryBoardItem, type FactoryBoardItem } from '@mukuroji/contracts'
+import { classifyFactoryBoardItem, type AgentRunView, type FactoryBoardItem } from '@mukuroji/contracts'
 import { getTeamAgentRunBoard } from '../src/work-items/api/agentRuns'
 import {
   factoryBoardFixture,
@@ -67,6 +67,8 @@ describe('Factory board API', () => {
     const base = fixtureItem('auth-flow')
     const malformed = [
       { ...base, workItem: { ...base.workItem, statusCategory: 'unknown' } },
+      { ...base, workItem: { ...base.workItem, assigneeName: '' } },
+      { ...base, workItem: { ...base.workItem, assigneeEmail: 42 } },
       { ...base, run: { ...base.run, runtime: 'gpt' } },
       { ...base, run: { ...base.run, workItemId: 'another-item' } },
       { ...base, latestReport: { ...base.latestReport, runId: 'run_other' } },
@@ -128,7 +130,7 @@ describe('Factory board lanes', () => {
   test('shows a committed release on the loaded board without reading it again', () => {
     const active = fixtureItem('auth-flow')
     if (!active.run) throw new Error('The fixture item has a run.')
-    const released = { ...active.run, state: 'finished' as const, outcome: 'released' as const, finishedAt: '2026-10-22T01:45:00.000Z', finishedBy: 'sato@example.com', canRelease: false }
+    const released: AgentRunView = { ...active.run, state: 'finished', outcome: 'released', finishedAt: '2026-10-22T01:45:00.000Z', finishedBy: 'sato@example.com', canRelease: false }
     const board = applyReleasedRunToBoard(factoryBoardFixture, released)
     const item = board?.items.find((candidate) => candidate.workItem.id === 'auth-flow')
     expect(item?.run).toEqual(released)
@@ -142,17 +144,35 @@ describe('Factory board lanes', () => {
     const remaining = factoryBoardFixtureItems.filter((item) => item.workItem.assigneeUserId !== 'tanaka@example.com')
     const selected = { runtime: 'kiro' as const, assigneeUserId: 'tanaka@example.com', projectId: 'gone-project' }
     const options = readFactoryBoardFilterOptions(remaining, selected)
-    expect(options.assigneeUserIds).toContain('tanaka@example.com')
+    expect(options.assignees).toContainEqual({ userId: 'tanaka@example.com', label: 'tanaka@example.com' })
     expect(options.projectIds).toContain('gone-project')
     expect(options.runtimes).toContain('kiro')
     expect(readFactoryBoardFilterOptions([], { ...defaultFactoryBoardFilters, projectId: 'none' }).hasUnassignedProject).toBe(true)
+  })
+
+  test('tells assignees who share a name apart by their member ID', () => {
+    const base = fixtureItem('auth-flow')
+    const unnamed = { id: base.workItem.id, title: base.workItem.title, workflowStatusId: base.workItem.workflowStatusId, statusCategory: base.workItem.statusCategory }
+    const items = [
+      base,
+      { ...base, workItem: { ...base.workItem, id: 'other', assigneeUserId: 'sato2@example.com', assigneeEmail: 'sato2@example.com' } },
+      { ...base, workItem: { ...unnamed, id: 'unnamed', assigneeUserId: 'kato@example.com' } },
+    ]
+    expect(readFactoryBoardFilterOptions(items).assignees).toEqual([
+      { userId: 'kato@example.com', label: 'kato@example.com' },
+      { userId: 'sato@example.com', label: '佐藤 花子 (sato@example.com)' },
+      { userId: 'sato2@example.com', label: '佐藤 花子 (sato2@example.com)' },
+    ])
   })
 
   test('filters by runtime, assignee, and Project', () => {
     const options = readFactoryBoardFilterOptions(factoryBoardFixtureItems)
     expect(options).toEqual({
       runtimes: ['claude-code', 'codex', 'kiro'],
-      assigneeUserIds: ['sato@example.com', 'tanaka@example.com'],
+      assignees: [
+        { userId: 'tanaka@example.com', label: 'tanaka@example.com' },
+        { userId: 'sato@example.com', label: '佐藤 花子' },
+      ],
       projectIds: ['refero'],
       hasUnassignedProject: true,
     })

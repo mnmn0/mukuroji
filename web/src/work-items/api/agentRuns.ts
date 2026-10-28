@@ -150,12 +150,14 @@ function readFactoryBoardItem(value: unknown): FactoryBoardItem | undefined {
  */
 function readFactoryBoardWorkItem(value: unknown): FactoryBoardWorkItem | undefined {
   if (!isRecord(value)) return undefined
-  const { id, title, workflowStatusId, statusCategory, assignedProjectId, assigneeUserId } = value
+  const { id, title, workflowStatusId, statusCategory, assignedProjectId, assigneeUserId, assigneeName, assigneeEmail } = value
   if (
     typeof id !== 'string' || id === '' || typeof title !== 'string' ||
     typeof workflowStatusId !== 'string' || workflowStatusId === '' || !isWorkItemStatusCategory(statusCategory) ||
     (assignedProjectId !== undefined && (typeof assignedProjectId !== 'string' || assignedProjectId === '')) ||
-    typeof assigneeUserId !== 'string'
+    typeof assigneeUserId !== 'string' ||
+    (assigneeName !== undefined && (typeof assigneeName !== 'string' || assigneeName === '')) ||
+    (assigneeEmail !== undefined && (typeof assigneeEmail !== 'string' || assigneeEmail === ''))
   ) {
     return undefined
   }
@@ -166,6 +168,8 @@ function readFactoryBoardWorkItem(value: unknown): FactoryBoardWorkItem | undefi
     statusCategory,
     ...(assignedProjectId === undefined ? {} : { assignedProjectId }),
     assigneeUserId,
+    ...(assigneeName === undefined ? {} : { assigneeName }),
+    ...(assigneeEmail === undefined ? {} : { assigneeEmail }),
   }
 }
 

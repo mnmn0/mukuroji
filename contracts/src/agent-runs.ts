@@ -490,6 +490,10 @@ export type FactoryBoardWorkItem = {
   assignedProjectId?: string
   /** Member responsible for the Work Item. */
   assigneeUserId: string
+  /** Display name from the assignee's profile; absent when the profile has none or could not be read. */
+  assigneeName?: string
+  /** Email address from the assignee's profile; absent when the profile could not be read. */
+  assigneeEmail?: string
 }
 
 /** Number of verification commands per result in one report. */

@@ -27,6 +27,7 @@ import {
   toAgentRunReport,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
+import { CognitoServiceError, isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
 import {
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
@@ -43,7 +44,7 @@ import {
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
-import { workItemDependencies } from '../shared/app-dependencies'
+import { authenticationDependencies, workItemDependencies } from '../shared/app-dependencies'
 import {
   canAccessAssignedProject,
   canWorkspaceBusinessWrite,
@@ -396,6 +397,50 @@ async function readBoardReportSummary(
   }
 }
 
+/** Longest time the board waits for assignee profiles before it shows the rest by member ID. */
+const boardProfileDeadlineMs = 2_000
+
+/**
+ * Reads the profiles of the members assigned to board Work Items, so the board can show names
+ * instead of member IDs. An empty member ID is not looked up. A profile that is missing, fails to
+ * load, or is not read within the deadline is left out, and that member keeps showing by ID; a
+ * profile lookup never fails or stalls the board. Lookups already sent when the deadline passes are
+ * left to finish, since the user directory port takes no abort signal, but no new one starts.
+ *
+ * @param log - Request correlation ID and Team, logged with a failed lookup.
+ * @param userIds - Assignee member IDs.
+ * @returns Profiles read by the deadline, by member ID.
+ */
+async function readBoardAssigneeProfiles(
+  log: { correlationId: string | undefined; teamId: string },
+  userIds: string[],
+): Promise<Map<string, CognitoUserProfile>> {
+  const unique = [...new Set(userIds)].filter((userId) => userId !== '')
+  const byUserId = new Map<string, CognitoUserProfile>()
+  let expired = false
+  const lookups = mapInOrderWithConcurrency(unique, boardReadConcurrency, async (userId) => {
+    if (expired) return
+    try {
+      const profile = await authenticationDependencies.cognito.getUserProfile(userId)
+      if (!expired) byUserId.set(userId, profile)
+    } catch (error) {
+      if (!isCognitoUserNotFoundError(error)) {
+        // The error message can carry the member's address, so only its code is logged.
+        const code = error instanceof CognitoServiceError ? error.code : error instanceof Error ? error.name : 'Unknown'
+        console.warn('Failed to read a Factory board assignee profile:', { ...log, code })
+      }
+    }
+  })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, boardProfileDeadlineMs)
+  })
+  await Promise.race([lookups, deadline])
+  clearTimeout(timer)
+  expired = true
+  return new Map(byUserId)
+}
+
 /**
  * Lists the Factory board of a Team for anyone who can view the Team: the Work Items of active runs,
  * of runs that finished within the completed-lane window, and the `started` Work Items among the most
@@ -405,11 +450,13 @@ async function readBoardReportSummary(
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
+ * @param correlationId - Correlation ID of the request, logged with a failed profile lookup.
  * @returns Board items and the bounds that were reached.
  */
 export async function listWebTeamAgentRunBoard(
   principal: WorkspacePrincipal,
   teamId: string,
+  correlationId?: string,
 ): Promise<TeamAgentRunBoardResponse> {
   const permission = await requireTeamPermission(principal, teamId, 'viewer')
   const now = new Date()
@@ -445,9 +492,22 @@ export async function listWebTeamAgentRunBoard(
     }
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
   })
+  const boardItems = items.flatMap((item) => item ? [item] : [])
+  const profiles = await readBoardAssigneeProfiles({ correlationId, teamId }, boardItems.map((item) => item.workItem.assigneeUserId))
   return {
     generatedAt: now.toISOString(),
-    items: items.flatMap((item) => item ? [item] : []),
+    items: boardItems.map((item) => {
+      const profile = profiles.get(item.workItem.assigneeUserId)
+      if (!profile) return item
+      return {
+        ...item,
+        workItem: {
+          ...item.workItem,
+          ...(profile.name === undefined || profile.name === '' ? {} : { assigneeName: profile.name }),
+          ...(profile.email === '' ? {} : { assigneeEmail: profile.email }),
+        },
+      }
+    }),
     activeRunsHasMore: active.hasMore,
     finishedRunsHasMore: finished.hasMore,
     startedWorkItemsHasMore: started.hasMore,

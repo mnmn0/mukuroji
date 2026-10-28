@@ -106,7 +106,7 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      return c.json(await listWebTeamAgentRunBoard(principal, c.req.param('teamId')))
+      return c.json(await listWebTeamAgentRunBoard(principal, c.req.param('teamId'), c.req.header('X-Correlation-Id')?.trim() || undefined))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
