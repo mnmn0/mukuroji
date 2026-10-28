@@ -1,4 +1,5 @@
 import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbAgentRunStore,
@@ -155,7 +156,7 @@ export function createAgentRunTriageFiler(
  * @returns Scheduled handler.
  */
 export function createProductionAgentRunTriageHandler(): () => Promise<AgentRunTriageSweepResult> {
-  const tableName = process.env.AGENT_RUNS_TABLE_NAME?.trim()
+  const tableName = loadServerConfig().environment.AGENT_RUNS_TABLE_NAME?.trim()
   if (!tableName) throw new Error('Agent Run triage runtime is not configured.')
   const store = new DynamoDbAgentRunStore(createDynamoDbDocumentClient(createDynamoDbClient()), tableName)
   const workItems = createAgentRunTriageWorkItemReader(new DynamoDbTeamIssuesClient())
