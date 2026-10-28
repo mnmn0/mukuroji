@@ -407,11 +407,14 @@ const boardProfileDeadlineMs = 2_000
  * profile lookup never fails or stalls the board. Lookups already sent when the deadline passes are
  * left to finish, since the user directory port takes no abort signal, but no new one starts.
  *
- * @param teamId - Team of the board, logged with a failed lookup.
+ * @param log - Request correlation ID and Team, logged with a failed lookup.
  * @param userIds - Assignee member IDs.
  * @returns Profiles read by the deadline, by member ID.
  */
-async function readBoardAssigneeProfiles(teamId: string, userIds: string[]): Promise<Map<string, CognitoUserProfile>> {
+async function readBoardAssigneeProfiles(
+  log: { correlationId: string | undefined; teamId: string },
+  userIds: string[],
+): Promise<Map<string, CognitoUserProfile>> {
   const unique = [...new Set(userIds)].filter((userId) => userId !== '')
   const byUserId = new Map<string, CognitoUserProfile>()
   let expired = false
@@ -424,7 +427,7 @@ async function readBoardAssigneeProfiles(teamId: string, userIds: string[]): Pro
       if (!isCognitoUserNotFoundError(error)) {
         // The error message can carry the member's address, so only its code is logged.
         const code = error instanceof CognitoServiceError ? error.code : error instanceof Error ? error.name : 'Unknown'
-        console.warn('Failed to read a Factory board assignee profile:', { teamId, code })
+        console.warn('Failed to read a Factory board assignee profile:', { ...log, code })
       }
     }
   })
@@ -447,11 +450,13 @@ async function readBoardAssigneeProfiles(teamId: string, userIds: string[]): Pro
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
+ * @param correlationId - Correlation ID of the request, logged with a failed profile lookup.
  * @returns Board items and the bounds that were reached.
  */
 export async function listWebTeamAgentRunBoard(
   principal: WorkspacePrincipal,
   teamId: string,
+  correlationId?: string,
 ): Promise<TeamAgentRunBoardResponse> {
   const permission = await requireTeamPermission(principal, teamId, 'viewer')
   const now = new Date()
@@ -488,7 +493,7 @@ export async function listWebTeamAgentRunBoard(
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
   })
   const boardItems = items.flatMap((item) => item ? [item] : [])
-  const profiles = await readBoardAssigneeProfiles(teamId, boardItems.map((item) => item.workItem.assigneeUserId))
+  const profiles = await readBoardAssigneeProfiles({ correlationId, teamId }, boardItems.map((item) => item.workItem.assigneeUserId))
   return {
     generatedAt: now.toISOString(),
     items: boardItems.map((item) => {

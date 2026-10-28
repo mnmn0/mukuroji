@@ -1918,8 +1918,9 @@ describe('Factory board route', () => {
     } finally {
       console.warn = originalWarn
     }
-    // The failure is logged by its code, never with the message that names the member.
-    expect(warnings).toEqual([['Failed to read a Factory board assignee profile:', { teamId: 'core-team', code: 'TooManyRequestsException' }]])
+    // The failure is logged by its code and the request's correlation ID, never with the message that names the member.
+    expect(warnings).toEqual([['Failed to read a Factory board assignee profile:', { correlationId: expect.any(String), teamId: 'core-team', code: 'TooManyRequestsException' }]])
+    expect(JSON.stringify(warnings)).not.toContain('demo@example.com')
   })
 
   test('shows assignees by ID instead of waiting for a profile lookup that does not answer', async () => {
