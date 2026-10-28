@@ -92,7 +92,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'triage' | 'issues' | 'projects' | 'members'
+export type SidebarTeamViewId = 'overview' | 'triage' | 'factory' | 'issues' | 'projects' | 'members'
 
 /**
  * 新規作成モーダルで選択できる作成対象です。
@@ -311,6 +311,10 @@ export type SidebarLabels = {
    * Team triage queue view label.
    */
   triage: string
+  /**
+   * Team Factory board view label.
+   */
+  factoryBoard: string
   /**
    * Issue ビューの文言です。
    */
@@ -625,6 +629,7 @@ const defaultLabels: SidebarLabels = {
   },
   teamOverview: 'チーム概要',
   triage: 'Triage',
+  factoryBoard: 'Factory board',
   issues: 'Issues',
   members: 'メンバー',
   projectCount: (count) => `プロジェクト ${count}`,
@@ -2223,6 +2228,13 @@ function CurrentTeamNavigation({
         onClick={() => onSelectTeamView(team.id, 'triage')}
       />
       <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'factory'}
+        collapsed={collapsed}
+        icon={LanesIcon}
+        label={labels.factoryBoard}
+        onClick={() => onSelectTeamView(team.id, 'factory')}
+      />
+      <SubNavButton
         active={isTeamActive && activeTeamViewId === 'issues'}
         collapsed={collapsed}
         icon={CheckCircleIcon}
@@ -2541,6 +2553,22 @@ function UsersIcon({ className }: SidebarIconProps) {
       <circle cx="9.5" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </SvgBase>
+  )
+}
+
+/**
+ * Renders the stacked-lanes icon used for the Factory board.
+ *
+ * @param props - Icon class name.
+ * @returns Icon.
+ */
+function LanesIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <rect x="4" y="4" width="16" height="4" rx="1" />
+      <rect x="4" y="10" width="11" height="4" rx="1" />
+      <rect x="4" y="16" width="7" height="4" rx="1" />
     </SvgBase>
   )
 }

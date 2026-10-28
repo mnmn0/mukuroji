@@ -17,6 +17,7 @@ import { SettingsPage } from '../src/pages/workspace/SettingsPage'
 import { TaskPage } from '../src/pages/workspace/TaskPage'
 import { TeamMembersPage } from '../src/pages/workspace/TeamMembersPage'
 import { TeamTriagePage } from '../src/pages/workspace/TeamTriagePage'
+import { TeamFactoryBoardPage } from '../src/pages/workspace/TeamFactoryBoardPage'
 import { TeamIssuePage } from '../src/pages/workspace/TeamIssuePage'
 import { TeamOverviewPage } from '../src/pages/workspace/TeamOverviewPage'
 import { DocumentPage } from '../src/documents/DocumentPage'
@@ -280,6 +281,7 @@ describe('Workspace route pages', () => {
       { component: TeamOverviewPage, path: '/teams/core-team/overview' },
       { component: TeamMembersPage, path: '/teams/core-team/members' },
       { component: TeamTriagePage, path: '/teams/core-team/triage' },
+      { component: TeamFactoryBoardPage, path: '/teams/core-team/factory' },
     ])
   })
 
