@@ -82,6 +82,10 @@ export const StationChosen: Story = {
     await userEvent.click(canvas.getByRole('button', { name: '工程に戻る' }))
     // Returning puts focus back on the task that opened the detail.
     await waitFor(() => expect(canvas.getByRole('button', { name: /返金一覧に取引 ID/u })).toHaveFocus())
+    // Choosing another station while a task is open shows that station's tasks.
+    await userEvent.click(canvas.getByRole('button', { name: /返金一覧に取引 ID/u }))
+    await userEvent.click(canvas.getByRole('button', { name: /03\s*検証/u }))
+    await expect(canvas.getByRole('complementary')).toHaveTextContent('エージェントがテストや確認コマンドを実行しました。')
   },
 }
 

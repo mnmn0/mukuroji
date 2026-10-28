@@ -1,5 +1,5 @@
 import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardLane, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
-import { useId, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useId, useRef, useState, type MouseEvent } from 'react'
 import { ChevronIcon, ClockIcon, ExternalLinkIcon } from '../../../shared/ui/icons'
 import { readAgentRunDisplayState, type AgentRunDisplayState } from '../../../work-items/model/agentRunDisplay'
 import { AgentRunReportChips } from '../../../work-items/ui/AgentRunReportChips'
@@ -193,6 +193,17 @@ export function FactoryBoard({
   }
 
   /**
+   * Moves the line's camera to a station and closes an open task, so the panel always lists the
+   * station the camera shows.
+   *
+   * @param station - Station, or undefined for the whole line.
+   */
+  const focusStation = useCallback((station: FactoryLineStation | undefined) => {
+    setFocusedStation(station)
+    if (selectedWorkItemId !== undefined) onSelect(undefined)
+  }, [onSelect, selectedWorkItemId])
+
+  /**
    * Opens a task's detail from the station panel, which the detail replaces, so focus moves into it.
    *
    * @param workItemId - Selected Work Item.
@@ -310,7 +321,7 @@ export function FactoryBoard({
             groups={lineGroups}
             idPrefix={`${detailId}-line`}
             labels={labels.line}
-            onFocusStation={setFocusedStation}
+            onFocusStation={focusStation}
             {...(selected ? { selectedWorkItemId: selected.workItem.id } : {})}
           />
           <aside
