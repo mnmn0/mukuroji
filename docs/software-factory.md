@@ -343,7 +343,7 @@ pane を流用する。
   consumer があり、DynamoDB stream の reader をこれ以上増やさない。
   - `failed` の finish は、Run の行に outbox key を同じ transaction で書く。worker はこの key を
     古い順に読み、Team の設定が有効なら起票し、無効なら起票せずに key を消す。起票に成功するか
-    既に起票済みなら key を消す。一時的な失敗は key を残して次の実行で再試行し、入力が Triage に
+    既に起票済みなら key を消す。一時的な失敗は key を残したまま outbox の末尾に回して後の実行で再試行し、失敗し続ける Run が後ろの Run を妨げないようにする。入力が Triage に
     拒否された場合は key を消して記録する。
   - 停滞は、どちらかの設定を有効にした Team を index から列挙し、`ActiveRunIndex` を lease の
     古い順に lease 切れの範囲だけ読む。起票した Run には印を付ける。放置された Run は `active` の
@@ -355,7 +355,7 @@ pane を流用する。
     最後に処理した Run の位置（resume）も保存し、次の実行はその後ろから続ける。最後まで読んだら
     resume を消し、次の実行は watermark から読み直す。watermark を進めるのは watermark から
     読み始めた実行だけとし、遅れて index に現れた Run を飛び越えない。
-    起票に一時的に失敗した Run の手前で watermark を止め、次の実行で再試行する。
+    起票に一時的に失敗した Run の手前で watermark と resume を止め、次の実行で再試行する。後続の Run の起票は続ける。
   - 処理する Team 数や起票件数の上限で止まった場合は、止まった Team を保存し、次の実行はその Team
     から再開する。最後の Team まで処理したら保存を消し、次は先頭の Team から読む。
   - 両方とも `AgentRunsTable` の sparse GSI `AgentRunTriageIndex` を使う。partition は

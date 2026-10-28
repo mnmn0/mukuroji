@@ -227,7 +227,8 @@ export async function runAgentRunTriageSweep(dependencies: AgentRunTriageSweepDe
 }
 
 /**
- * Files the oldest failed runs of the outbox.
+ * Files the oldest failed runs of the outbox. A run whose filing fails stays in the outbox, moved
+ * behind the others, and is retried on a later sweep.
  *
  * @param dependencies - Sweep dependencies.
  * @param readSettings - Cached settings read.
@@ -251,6 +252,12 @@ async function fileFailedRuns(
     } catch (error) {
       result.errors += 1
       dependencies.onError?.({ ...entry, code: readErrorCode(error) })
+      try {
+        // A run that keeps failing goes to the back, so it never holds back the runs behind it.
+        await store.deferFailedRunTriage(entry, dependencies.now)
+      } catch (deferError) {
+        dependencies.onError?.({ ...entry, code: readErrorCode(deferError) })
+      }
     }
   }
 }
@@ -332,7 +339,8 @@ function isStalledBatchFull(result: AgentRunTriageSweepResult): boolean {
 /**
  * Files a Team's stalled runs after its watermark, soonest lease expiry first, and moves the
  * watermark past each run it is done with. Reading stops at the first run whose lease has not
- * expired, and a failed run stays after the watermark for the next sweep.
+ * expired. A failed run stays after the watermark for the next sweep, and the runs after it are
+ * still filed.
  *
  * @param dependencies - Sweep dependencies.
  * @param team - Team that files stalled runs.
@@ -355,6 +363,8 @@ async function fileTeamStalledRuns(
   let complete = true
   // Set when the pass stops before its last stalled run: a failure, or the filing or read bound.
   let stopped = false
+  // Set after a failed run: later runs are still filed, but no position moves past the failed one.
+  let blocked = false
   let cursor: string | undefined
   let read = 0
   reading: do {
@@ -374,12 +384,14 @@ async function fileTeamStalledRuns(
           result.errors += 1
           dependencies.onError?.({ ...team, runId: run.runId, code: readErrorCode(error) })
           stopped = true
-          break reading
+          blocked = true
         }
       }
-      // Runs come soonest lease first, so once one is too recent to settle, none after it does.
-      if (Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) settled = run
-      passed = run
+      if (!blocked) {
+        // Runs come soonest lease first, so once one is too recent to settle, none after it does.
+        if (Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) settled = run
+        passed = run
+      }
       read += 1
     }
     if (read >= activeRunsPerTeam && cursor !== undefined) {

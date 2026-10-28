@@ -257,6 +257,12 @@ describe('DynamoDB Agent Run store', () => {
       Key: { directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run#run_1' },
       ConditionExpression: 'attribute_exists(#recordKey)',
     })
+    const deferred = createClient()
+    await new DynamoDbAgentRunStore(deferred.client, 'AgentRuns').deferFailedRunTriage({ directoryId: 'workspace-1', teamId: 'core', runId: 'run_1' }, now)
+    expect(deferred.commands[0]?.input).toMatchObject({
+      ConditionExpression: '#triageIndexPartition = :triageIndexPartition',
+      ExpressionAttributeValues: { ':triageIndexPartition': 'triage-failed-run', ':triageIndexSortKey': `${now.toISOString()}#workspace-1#team#core#run_1` },
+    })
     // The outbox lists failed runs oldest first and rejects a row whose keys disagree with its IDs.
     const listed = createClient([{ Items: [{ directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run#run_1', workspaceId: 'workspace-1', teamId: 'core', runId: 'run_1' }] }])
     expect(await new DynamoDbAgentRunStore(listed.client, 'AgentRuns').listFailedRunsToTriage(50))

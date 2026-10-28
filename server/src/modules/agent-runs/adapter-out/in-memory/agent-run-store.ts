@@ -48,6 +48,8 @@ type InMemoryAgentRunState = {
   reports: Map<string, StoredAgentRunReport>
   /** Failed runs waiting to be filed to Triage, by `<directoryId>|<teamId>|<runId>`. */
   triageOutbox: Set<string>
+  /** Outbox order of failed runs whose filing failed, by `<directoryId>|<teamId>|<runId>`. */
+  triageOutboxDeferrals: Map<string, string>
   /** Stall sweep watermarks by `<directoryId>|<teamId>`. */
   stallWatermarks: Map<string, string>
   /** Stall sweep resume positions by `<directoryId>|<teamId>`. */
@@ -120,7 +122,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   /** Current state. */
   readonly state: InMemoryAgentRunState = {
     runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
-    triageOutbox: new Set(), stallWatermarks: new Map(), stallResumes: new Map(),
+    triageOutbox: new Set(), triageOutboxDeferrals: new Map(), stallWatermarks: new Map(), stallResumes: new Map(),
   }
   /** Builder that produces DynamoDB-shaped items. */
   readonly #builder = new DynamoDbAgentRunStore({
@@ -262,15 +264,22 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
     return [...this.state.triageOutbox]
       .flatMap((runKey) => {
         const run = this.state.runs.get(runKey)
-        return run ? [run] : []
+        return run ? [{ run, order: `${this.state.triageOutboxDeferrals.get(runKey) ?? run.finishedAt ?? ''}#${run.runId}` }] : []
       })
-      .sort((left, right) => `${left.finishedAt ?? ''}#${left.runId}`.localeCompare(`${right.finishedAt ?? ''}#${right.runId}`))
+      .sort((left, right) => left.order.localeCompare(right.order))
       .slice(0, limit)
-      .map((run) => ({ directoryId: run.directoryId, teamId: run.teamId, runId: run.runId }))
+      .map(({ run }) => ({ directoryId: run.directoryId, teamId: run.teamId, runId: run.runId }))
+  }
+
+  /** @inheritdoc */
+  async deferFailedRunTriage(entry: AgentRunTriageOutboxEntry, now: Date): Promise<void> {
+    const runKey = key(entry.directoryId, entry.teamId, entry.runId)
+    if (this.state.triageOutbox.has(runKey)) this.state.triageOutboxDeferrals.set(runKey, now.toISOString())
   }
 
   /** @inheritdoc */
   async clearFailedRunTriage(entry: AgentRunTriageOutboxEntry): Promise<void> {
+    this.state.triageOutboxDeferrals.delete(key(entry.directoryId, entry.teamId, entry.runId))
     this.state.triageOutbox.delete(key(entry.directoryId, entry.teamId, entry.runId))
   }
 

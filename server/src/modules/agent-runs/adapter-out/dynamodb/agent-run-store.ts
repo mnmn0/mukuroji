@@ -180,6 +180,13 @@ export interface AgentRunTriageStore {
    */
   clearFailedRunTriage(entry: AgentRunTriageOutboxEntry): Promise<void>
   /**
+   * Moves a run whose filing failed to the back of the Triage outbox, so it is retried after the
+   * runs behind it instead of holding them back.
+   * @param entry - Outbox entry.
+   * @param now - Failure time; later than the finish of every run already in the outbox.
+   */
+  deferFailedRunTriage(entry: AgentRunTriageOutboxEntry, now: Date): Promise<void>
+  /**
    * Records that a stalled run was filed, while it is still active with the lease that was read.
    * @param run - Stalled run as read.
    * @param now - Filing time.
@@ -1256,6 +1263,27 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       }
       return entry
     })
+  }
+
+  /** @inheritdoc */
+  async deferFailedRunTriage(entry: AgentRunTriageOutboxEntry, now: Date): Promise<void> {
+    const partition = createAgentRunPartition(entry.directoryId, entry.teamId)
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName,
+        Key: { directoryTeamId: partition, recordKey: runRecordKey(entry.runId) },
+        UpdateExpression: 'SET #triageIndexSortKey = :triageIndexSortKey',
+        // Never puts back an entry another sweep already cleared.
+        ConditionExpression: '#triageIndexPartition = :triageIndexPartition',
+        ExpressionAttributeNames: { '#triageIndexPartition': 'triageIndexPartition', '#triageIndexSortKey': 'triageIndexSortKey' },
+        ExpressionAttributeValues: {
+          ':triageIndexPartition': triageFailedRunPartition,
+          ':triageIndexSortKey': `${now.toISOString()}#${partition}#${entry.runId}`,
+        },
+      }))
+    } catch (error) {
+      if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+    }
   }
 
   /** @inheritdoc */

@@ -193,6 +193,30 @@ describe('Agent Run triage sweep', () => {
     expect(await store.listFailedRunsToTriage(10)).toEqual([])
   })
 
+  test('moves failed runs whose filing keeps failing behind newer ones', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: true, stalled: false })
+    for (let runNumber = 1; runNumber <= 51; runNumber += 1) {
+      seedFailed(store, createRun(runNumber, new Date(now.getTime() - 120 * minute)), new Date(now.getTime() - (100 - runNumber) * minute))
+    }
+    const newest = 'run_00000000-0000-4000-8000-000000000051'
+    /**
+     * Fails every run but the newest, like Work Items whose reads keep failing.
+     * @param filing - Entry content.
+     * @returns The filed outcome for the newest run.
+     */
+    const file = async (filing: AgentRunTriageFiling): Promise<'filed'> => {
+      if (filing.runId !== newest) throw Object.assign(new Error('Service unavailable'), { name: 'InternalServerError' })
+      return 'filed'
+    }
+    expect(await runAgentRunTriageSweep(createDependencies(store, { file }).dependencies)).toMatchObject({ failedFiled: 0, errors: 50 })
+    const second = createDependencies(store, { file })
+    expect(await runAgentRunTriageSweep(second.dependencies)).toMatchObject({ failedFiled: 1 })
+    expect(second.filings[0]?.runId).toBe(newest)
+    // The failing runs stay in the outbox for later sweeps.
+    expect(await store.listFailedRunsToTriage(100)).toHaveLength(50)
+  })
+
   test('files each stalled run once and leaves runs within their lease alone', async () => {
     const store = new InMemoryAgentRunStore()
     await saveFlags(store, { failed: false, stalled: true })
@@ -243,6 +267,21 @@ describe('Agent Run triage sweep', () => {
       },
     })
     expect(await runAgentRunTriageSweep(failing.dependencies)).toMatchObject({ stalledFiled: 1, errors: 1 })
+    store.seed(createRun(3, new Date(now.getTime() - 40 * minute)))
+    // A run that keeps failing does not hold back the runs after it.
+    const stillFailing = createDependencies(store, {
+      /**
+       * Fails the second run again.
+       * @param filing - Entry content.
+       * @returns The filed outcome for other runs.
+       */
+      file: async (filing) => {
+        if (filing.runId.endsWith('2')) throw Object.assign(new Error('Service unavailable'), { name: 'InternalServerError' })
+        return 'filed'
+      },
+    })
+    expect(await runAgentRunTriageSweep(stillFailing.dependencies)).toMatchObject({ stalledFiled: 1, errors: 1 })
+    expect(stillFailing.filings.map((filing) => filing.runId)).toContain('run_00000000-0000-4000-8000-000000000003')
 
     const retry = createDependencies(store)
     expect(await runAgentRunTriageSweep(retry.dependencies)).toMatchObject({ stalledFiled: 1, errors: 0 })
