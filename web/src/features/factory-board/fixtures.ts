@@ -1,4 +1,4 @@
-import type { AgentRunReport, AgentRunView, FactoryBoardItem, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
+import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardReportSummary, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
 
 /** Read time of the fixture board. */
 export const factoryBoardFixtureNow = '2026-10-22T02:00:00.000Z'
@@ -83,6 +83,50 @@ export const factoryBoardFixture: TeamAgentRunBoardResponse = {
   activeRunsHasMore: false,
   finishedRunsHasMore: false,
   startedWorkItemsHasMore: false,
+}
+
+/**
+ * Creates a fixture report summary of a run.
+ *
+ * @param runIndex - Index of the run the report belongs to.
+ * @param workItemId - Work Item of the run.
+ * @param kind - Report kind.
+ * @param excerpt - Start of the report comment.
+ * @returns Report summary.
+ */
+function createReport(runIndex: number, workItemId: string, kind: FactoryBoardReportSummary['kind'], excerpt: string): FactoryBoardReportSummary {
+  return {
+    runId: createRun(workItemId, runIndex).runId, sequence: 1, kind, createdAt: '2026-10-22T01:45:00.000Z',
+    excerpt, verificationCounts: kind === 'verification' ? { passed: 3, failed: 0, skipped: 0 } : { passed: 0, failed: 0, skipped: 0 }, artifactCount: kind === 'artifact' ? 1 : 0,
+  }
+}
+
+/** Extra Work Items that fill every station of the line view, beside the lane fixtures. */
+const factoryLineExtraItems: FactoryBoardItem[] = [
+  {
+    workItem: { id: 'refund-ids', title: '返金一覧に取引 ID の検索を足す', workflowStatusId: 'in-progress', statusCategory: 'started', assignedProjectId: 'refero', assigneeUserId: 'suzuki@example.com', assigneeName: '鈴木 一郎' },
+    run: createRun('refund-ids', 8, { assigneeUserId: 'suzuki@example.com', reportCount: 1 }),
+    latestReport: createReport(8, 'refund-ids', 'progress', 'specs/T-128.md に受け入れ条件 3 件を書き、actions/list-refunds.ts を変更しています。'),
+  },
+  {
+    workItem: { id: 'audit-export', title: '監査ログの CSV 出力を足す', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'tanaka@example.com' },
+    run: createRun('audit-export', 9, { runtime: 'kiro', agentName: 'Kiro', assigneeUserId: 'tanaka@example.com', reportCount: 1 }),
+    latestReport: createReport(9, 'audit-export', 'verification', 'bun run server:test と dry-run で受け入れ条件 3/3 を確認しました。'),
+  },
+  {
+    workItem: { id: 'onboarding-copy', title: 'オンボーディングの文言を直す', workflowStatusId: 'in-progress', statusCategory: 'started', assignedProjectId: 'refero', assigneeUserId: 'sato@example.com', assigneeName: '佐藤 花子', assigneeEmail: 'sato@example.com' },
+    run: createRun('onboarding-copy', 10, { runtime: 'codex', agentName: 'Codex', reportCount: 2 }),
+    latestReport: createReport(10, 'onboarding-copy', 'artifact', 'Pull Request #42 を作りました。レビューをお願いします。'),
+  },
+  {
+    workItem: { id: 'intake-search', title: '検索結果の並び順を選べるようにする', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'suzuki@example.com', assigneeName: '鈴木 一郎' },
+  },
+]
+
+/** Fixture board that fills every station of the line view. */
+export const factoryLineFixture: TeamAgentRunBoardResponse = {
+  ...factoryBoardFixture,
+  items: [...factoryBoardFixtureItems, ...factoryLineExtraItems],
 }
 
 /** Reports of the `auth-flow` fixture Work Item, newest first. */

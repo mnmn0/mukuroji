@@ -833,6 +833,54 @@ textarea {
   min-height: 100svh;
 }
 
+/* Factory board line view: the conveyor runs, workers move, and the camera eases between stations.
+   The global reduced-motion rule below stops every animation and transition here. */
+.factory-line-camera {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  transition: transform 900ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.factory-line-belt {
+  animation: factory-line-belt 0.9s linear infinite;
+}
+
+.factory-line-worker {
+  animation: factory-line-worker 1.4s ease-in-out infinite;
+}
+
+.factory-line-person {
+  animation: factory-line-worker 2.6s ease-in-out infinite;
+}
+
+.factory-line-blink {
+  animation: factory-line-blink 1.8s ease-in-out infinite;
+}
+
+.factory-line-focus {
+  animation: factory-line-focus 1.2s linear infinite;
+}
+
+/* One roller step is 0.6 world units along the line: (cos 30° × 22 px, sin 30° × 22 px) × 0.6. */
+@keyframes factory-line-belt {
+  from { transform: translate(0, 0); }
+  to { transform: translate(11.43px, 6.6px); }
+}
+
+@keyframes factory-line-worker {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+@keyframes factory-line-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@keyframes factory-line-focus {
+  to { stroke-dashoffset: -22; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --duration-fast: 0ms;

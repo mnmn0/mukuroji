@@ -315,6 +315,34 @@ pane を流用する。
   画面と同じ再取得に従う。realtime 配信は後続 Phase で検討する。
 - 既存の AI activity board は AI draft の session 内状態を扱う別物であり、Phase 1 では統合しない。
 
+### ライン表示
+
+Factory board には、同じ data を工場のラインとして見せる「ライン」表示を加える。lane 表示が
+「次に誰が何を判断するか」を並べるのに対し、ライン表示は「いま Team の誰とどの agent が、どの
+工程にいるか」を一目で見るための画面とする。新しい API は足さず、`GET /api/teams/{teamId}/agent-runs`
+の応答から Web で組み立てる。
+
+| 工程 | 入る item |
+| --- | --- |
+| 01 受付 | Run なし（`started` だが agent が着手していない） |
+| 02 実装 | 処理中または停滞で、最新 report がない、または `progress` |
+| 03 検証 | 処理中または停滞で、最新 report が `verification` |
+| 04 成果物 | 処理中または停滞で、最新 report が `artifact` |
+| 05 判断 | 判断待ち（`blocker` / `handoff` / `paused`）。人の判断を待つ工程として人の作業者を置く |
+| 06 完了 | 直近 24 時間の `completed` |
+| 修理 | 失敗。ラインの横の修理場に置く |
+
+- 工程の判定は lane と同じく応答の `generatedAt` で行う。停滞はその工程に留めたまま、作業者を止めて
+  警告を付ける。進捗率は表示しない。
+- 画面はアイソメトリックの工場で、工程ごとの機械をベルトコンベアでつなぎ、item は箱、Run は
+  runtime ごとのロボット、判断待ちは人として描く。画像 asset は使わず SVG で描く。
+- 下部の工程バーで工程を選ぶと、その工程にカメラが寄り、右の panel に工程の説明と item の一覧
+  （title、担当者、agent、lease 残り時間、最新 report の抜粋）を出す。「全体」でライン全体に戻る。
+  「再生」は工程を数秒ごとに順に巡る。item から Work Item を開ける。
+- filter は lane 表示と共有する。表示の切り替えは URL の `view=line` で保持し、既定は lane 表示とする。
+- `prefers-reduced-motion` ではコンベア、作業者、カメラの動きと自動再生を止める。工程と item は
+  SVG の外の工程バーと panel から keyboard で操作でき、SVG には工程ごとの件数を含む説明を付ける。
+
 ## Triage への自動起票
 
 `failed` で終わった Run と停滞した Run を、Team の Triage に `agent-run` source の entry として

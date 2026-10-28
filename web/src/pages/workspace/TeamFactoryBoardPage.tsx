@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { applyReleasedRunToBoard } from '../../features/factory-board/model/factoryBoard'
 import { useReleaseFactoryBoardRun } from '../../features/factory-board/mutations/useReleaseFactoryBoardRun'
 import { useFactoryBoardReports, useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
-import { FactoryBoard } from '../../features/factory-board/ui/FactoryBoard'
+import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
 import { createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -39,6 +39,9 @@ type TeamFactoryBoardContentProps = {
 function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  // The line view is kept in the URL so a shared link or a reload opens the same view.
+  const view: FactoryBoardView = searchParams.get('view') === 'line' ? 'line' : 'lanes'
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string>()
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
@@ -77,6 +80,14 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           onRefresh={() => { void board.mutate() }}
           onRelease={onRelease}
           onSelect={setSelectedWorkItemId}
+          onViewChange={(next) => {
+            setSearchParams((current) => {
+              const params = new URLSearchParams(current)
+              if (next === 'line') params.set('view', 'line')
+              else params.delete('view')
+              return params
+            }, { replace: true })
+          }}
           projectNames={projectNames}
           reports={{
             ...(reports.data ? { items: reports.data.items, hasMore: reports.data.hasMore } : {}),
@@ -85,6 +96,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
             onRetry: () => { void reports.mutate() },
           }}
           selectedWorkItemId={selectedWorkItemId}
+          view={view}
         />
       </div>
     </WorkspaceRouteContent>
