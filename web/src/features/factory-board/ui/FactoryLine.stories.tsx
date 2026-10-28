@@ -78,7 +78,8 @@ export const StationChosen: Story = {
     await expect(panel).toHaveTextContent('停滞中')
     await userEvent.click(within(panel).getByRole('button', { name: /返金一覧に取引 ID/u }))
     await expect(args.onSelect).toHaveBeenCalledWith('refund-ids')
-    await expect(canvas.getByRole('complementary')).toHaveFocus()
+    // Focus moves into the detail on the next frame.
+    await waitFor(() => expect(canvas.getByRole('complementary')).toHaveFocus())
     await userEvent.click(canvas.getByRole('button', { name: '工程に戻る' }))
     // Returning puts focus back on the task that opened the detail.
     await waitFor(() => expect(canvas.getByRole('button', { name: /返金一覧に取引 ID/u })).toHaveFocus())
