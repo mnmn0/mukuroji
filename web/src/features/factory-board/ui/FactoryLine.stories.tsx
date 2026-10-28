@@ -90,6 +90,18 @@ export const StationChosen: Story = {
   },
 }
 
+/** Opening a task while the line plays stops playing, so the task stays open. */
+export const OpeningTaskStopsPlaying: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '工程を再生' }))
+    await expect(canvas.getByRole('button', { name: '再生を止める' })).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(within(canvas.getByRole('complementary')).getByRole('button', { name: /人が開始した調査タスク/u }))
+    await expect(canvas.getByRole('button', { name: '工程を再生' })).toHaveAttribute('aria-pressed', 'false')
+    await expect(canvas.getByRole('complementary')).toHaveTextContent('工程に戻る')
+  },
+}
+
 /** The decision station, where people act. */
 export const DecisionStation: Story = { args: { initialFocusedStation: 'decision' } }
 

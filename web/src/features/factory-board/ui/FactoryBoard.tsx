@@ -143,6 +143,7 @@ export function FactoryBoard({
 }: FactoryBoardProps) {
   const [filters, setFilters] = useState(initialFilters)
   const [focusedStation, setFocusedStation] = useState(initialFocusedStation)
+  const [linePlaying, setLinePlaying] = useState(false)
   const detailId = useId()
   const lanesRef = useRef<HTMLDivElement>(null)
   const detailRef = useRef<HTMLElement>(null)
@@ -205,10 +206,13 @@ export function FactoryBoard({
 
   /**
    * Opens a task's detail from the station panel, which the detail replaces, so focus moves into it.
+   * It stops playing, which would otherwise move on and close the task.
    *
    * @param workItemId - Selected Work Item.
    */
   const selectFromStation = (workItemId: string) => {
+    // Playing would move to the next station and close the task the person just opened.
+    setLinePlaying(false)
     onSelect(workItemId)
     requestAnimationFrame(() => detailRef.current?.focus())
   }
@@ -322,6 +326,8 @@ export function FactoryBoard({
             idPrefix={`${detailId}-line`}
             labels={labels.line}
             onFocusStation={focusStation}
+            onPlayingChange={setLinePlaying}
+            playing={linePlaying}
             {...(selected ? { selectedWorkItemId: selected.workItem.id } : {})}
           />
           <aside

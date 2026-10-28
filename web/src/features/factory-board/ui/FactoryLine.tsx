@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { readNextFactoryLineStation, type FactoryLineStation, type FactoryLineStationGroup } from '../model/factoryLine'
 import type { FactoryLineLabels } from './factoryBoardLabels'
 import { FactoryLineScene } from './FactoryLineScene'
@@ -41,6 +41,10 @@ export type FactoryLineProps = {
   onFocusStation: (station: FactoryLineStation | undefined) => void
   /** Selected task, highlighted on the line. */
   selectedWorkItemId?: string
+  /** Whether the line goes through the stations; owned by the board so opening a task can stop it. */
+  playing: boolean
+  /** Starts or stops going through the stations. */
+  onPlayingChange: (playing: boolean) => void
   /** Locale-aware text. */
   labels: FactoryLineLabels
   /** Unique prefix for SVG IDs. */
@@ -55,9 +59,8 @@ export type FactoryLineProps = {
  * @param props - Stations, focus, selection, and text.
  * @returns Line view.
  */
-export function FactoryLine({ groups, focusedStation, onFocusStation, selectedWorkItemId, labels, idPrefix }: FactoryLineProps) {
+export function FactoryLine({ groups, focusedStation, onFocusStation, selectedWorkItemId, playing, onPlayingChange, labels, idPrefix }: FactoryLineProps) {
   const reducedMotion = useSyncExternalStore(subscribeReducedMotion, readReducedMotion, () => false)
-  const [playing, setPlaying] = useState(false)
   const isPlaying = playing && !reducedMotion
 
   useEffect(() => {
@@ -72,7 +75,7 @@ export function FactoryLine({ groups, focusedStation, onFocusStation, selectedWo
    * @param station - Station, or undefined for the whole line.
    */
   const choose = (station: FactoryLineStation | undefined) => {
-    setPlaying(false)
+    onPlayingChange(false)
     onFocusStation(station)
   }
 
@@ -95,10 +98,10 @@ export function FactoryLine({ groups, focusedStation, onFocusStation, selectedWo
             className="workbench-button-primary min-h-[44px] px-3 text-xs"
             onClick={() => {
               if (isPlaying) {
-                setPlaying(false)
+                onPlayingChange(false)
                 return
               }
-              setPlaying(true)
+              onPlayingChange(true)
               onFocusStation(readNextFactoryLineStation(focusedStation))
             }}
             type="button"
