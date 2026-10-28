@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { classifyFactoryBoardItem, type FactoryBoardItem } from '@mukuroji/contracts'
+import { classifyFactoryBoardItem, type AgentRunView, type FactoryBoardItem } from '@mukuroji/contracts'
 import { getTeamAgentRunBoard } from '../src/work-items/api/agentRuns'
 import {
   factoryBoardFixture,
@@ -130,7 +130,7 @@ describe('Factory board lanes', () => {
   test('shows a committed release on the loaded board without reading it again', () => {
     const active = fixtureItem('auth-flow')
     if (!active.run) throw new Error('The fixture item has a run.')
-    const released = { ...active.run, state: 'finished' as const, outcome: 'released' as const, finishedAt: '2026-10-22T01:45:00.000Z', finishedBy: 'sato@example.com', canRelease: false }
+    const released: AgentRunView = { ...active.run, state: 'finished', outcome: 'released', finishedAt: '2026-10-22T01:45:00.000Z', finishedBy: 'sato@example.com', canRelease: false }
     const board = applyReleasedRunToBoard(factoryBoardFixture, released)
     const item = board?.items.find((candidate) => candidate.workItem.id === 'auth-flow')
     expect(item?.run).toEqual(released)
