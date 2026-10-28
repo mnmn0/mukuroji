@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { factoryBoardFixtureProjectNames, factoryBoardFixtureReports, factoryLineFixture } from '../fixtures'
 import { FactoryBoard, type FactoryBoardProps } from './FactoryBoard'
 import { createFactoryBoardLabels } from './factoryBoardLabels'
@@ -78,7 +78,10 @@ export const StationChosen: Story = {
     await expect(panel).toHaveTextContent('停滞中')
     await userEvent.click(within(panel).getByRole('button', { name: /返金一覧に取引 ID/u }))
     await expect(args.onSelect).toHaveBeenCalledWith('refund-ids')
-    await expect(canvas.getByRole('complementary')).toHaveTextContent('工程に戻る')
+    await expect(canvas.getByRole('complementary')).toHaveFocus()
+    await userEvent.click(canvas.getByRole('button', { name: '工程に戻る' }))
+    // Returning puts focus back on the task that opened the detail.
+    await waitFor(() => expect(canvas.getByRole('button', { name: /返金一覧に取引 ID/u })).toHaveFocus())
   },
 }
 

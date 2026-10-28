@@ -193,6 +193,27 @@ export function FactoryBoard({
   }
 
   /**
+   * Opens a task's detail from the station panel, which the detail replaces, so focus moves into it.
+   *
+   * @param workItemId - Selected Work Item.
+   */
+  const selectFromStation = (workItemId: string) => {
+    onSelect(workItemId)
+    requestAnimationFrame(() => detailRef.current?.focus())
+  }
+
+  /** Returns from a task's detail to its station and focuses the task that opened it. */
+  const backToStation = () => {
+    const previous = selectedWorkItemId
+    onSelect(undefined)
+    requestAnimationFrame(() => {
+      const task = Array.from(detailRef.current?.querySelectorAll<HTMLButtonElement>('[data-factory-line-item]') ?? [])
+        .find((candidate) => candidate.dataset.factoryLineItem === previous)
+      ;(task ?? detailRef.current)?.focus()
+    })
+  }
+
+  /**
    * Updates one filter and closes a detail the new filters would hide.
    *
    * @param next - New filters.
@@ -301,7 +322,7 @@ export function FactoryBoard({
           >
             {selected ? (
               <>
-                <button className="mb-3 flex min-h-[44px] items-center gap-1 text-sm font-medium text-fg-teal-700" onClick={() => onSelect(undefined)} type="button">
+                <button className="mb-3 flex min-h-[44px] items-center gap-1 text-sm font-medium text-fg-teal-700" onClick={backToStation} type="button">
                   <ChevronIcon className="size-4 rotate-90 fill-none stroke-current stroke-2" />{labels.line.backToStation}
                 </button>
                 <FactoryBoardDetail
@@ -325,7 +346,7 @@ export function FactoryBoard({
                 formatDateTime={formatDateTime}
                 labels={labels}
                 now={now}
-                onSelect={(workItemId) => onSelect(workItemId)}
+                onSelect={selectFromStation}
                 station={focusedStation}
               />
             )}
