@@ -34,6 +34,8 @@ describe('Agent settings draft', () => {
       acceptanceCriteriaFieldId: 'definition-of-done',
       brief: agentSettingsFixture.brief,
       projectBriefs: agentSettingsFixture.projectBriefs,
+      fileFailedRunsToTriage: true,
+      fileStalledRunsToTriage: false,
     })
   })
 
@@ -51,8 +53,11 @@ describe('Agent settings draft', () => {
       readyStatusIds: ['ready'],
       requireAcceptanceCriteria: true,
       projectBriefs: { 'project-console': 'Use the design system.' },
+      fileFailedRunsToTriage: true,
+      fileStalledRunsToTriage: false,
     })
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, cleared)).toBeTrue()
+    expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, fileStalledRunsToTriage: true })).toBeTrue()
   })
 
   test('treats a reordered selection and a blank brief edit as unchanged', () => {

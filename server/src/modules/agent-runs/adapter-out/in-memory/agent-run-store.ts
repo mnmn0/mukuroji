@@ -27,6 +27,9 @@ import {
   type AgentRunReportPage,
   type AgentRunStore,
   type AgentRunTransactItem,
+  type AgentRunTriageOutboxEntry,
+  type AgentRunTriageStore,
+  type AgentRunTriageTeamPage,
 } from '../dynamodb/agent-run-store'
 
 /** In-memory state of one store. */
@@ -41,6 +44,8 @@ type InMemoryAgentRunState = {
   settings: Map<string, AgentSettings>
   /** Structured reports by `<directoryId>|<teamId>|<runId>|<sequence>`. */
   reports: Map<string, StoredAgentRunReport>
+  /** Failed runs waiting to be filed to Triage, by `<directoryId>|<teamId>|<runId>`. */
+  triageOutbox: Set<string>
 }
 
 /** Condition and effect of one transaction item, evaluated against in-memory state. */
@@ -103,10 +108,11 @@ function revocationKey(directoryId: string, teamId: string, revocation: AgentRun
  * transaction items as the DynamoDB store and evaluates their conditions in memory, so code that
  * commits Agent Run items with another writer can call {@link InMemoryAgentRunStore.applyTransactItems}.
  */
-export class InMemoryAgentRunStore implements AgentRunStore {
+export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore {
   /** Current state. */
   readonly state: InMemoryAgentRunState = {
     runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
+    triageOutbox: new Set(),
   }
   /** Builder that produces DynamoDB-shaped items. */
   readonly #builder = new DynamoDbAgentRunStore({
@@ -184,6 +190,44 @@ export class InMemoryAgentRunStore implements AgentRunStore {
     this.state.settings.set(settingsKey, settings)
     this.#settingsReceipts.set(receiptKey, settings)
     return structuredClone(settings)
+  }
+
+  /** @inheritdoc */
+  async listTriageTeams(cursor: string | undefined, limit: number): Promise<AgentRunTriageTeamPage> {
+    const teams = [...this.state.settings.entries()]
+      .filter(([, settings]) => settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage)
+      .map(([settingsKey, settings]) => ({ directoryId: settingsKey.slice(0, settingsKey.lastIndexOf('|')), teamId: settings.teamId }))
+      .sort((left, right) => `${left.directoryId}|${left.teamId}`.localeCompare(`${right.directoryId}|${right.teamId}`))
+    const start = cursor === undefined ? 0 : Number(cursor)
+    const page = teams.slice(start, start + limit)
+    const next = start + limit
+    return { teams: page, ...(next < teams.length ? { nextCursor: String(next) } : {}) }
+  }
+
+  /** @inheritdoc */
+  async listFailedRunsToTriage(limit: number): Promise<AgentRunTriageOutboxEntry[]> {
+    return [...this.state.triageOutbox]
+      .flatMap((runKey) => {
+        const run = this.state.runs.get(runKey)
+        return run ? [run] : []
+      })
+      .sort((left, right) => `${left.finishedAt ?? ''}#${left.runId}`.localeCompare(`${right.finishedAt ?? ''}#${right.runId}`))
+      .slice(0, limit)
+      .map((run) => ({ directoryId: run.directoryId, teamId: run.teamId, runId: run.runId }))
+  }
+
+  /** @inheritdoc */
+  async clearFailedRunTriage(entry: AgentRunTriageOutboxEntry): Promise<void> {
+    this.state.triageOutbox.delete(key(entry.directoryId, entry.teamId, entry.runId))
+  }
+
+  /** @inheritdoc */
+  async markStallTriaged(run: StoredAgentRun, now: Date): Promise<boolean> {
+    const runKey = key(run.directoryId, run.teamId, run.runId)
+    const current = this.state.runs.get(runKey)
+    if (current?.state !== 'active' || current.leaseExpiresAt !== run.leaseExpiresAt) return false
+    this.state.runs.set(runKey, { ...current, stallTriagedAt: now.toISOString() })
+    return true
   }
 
   /** @inheritdoc */
@@ -351,6 +395,7 @@ export class InMemoryAgentRunStore implements AgentRunStore {
             ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
             ...(run.finishedBy ? { finishedBy: run.finishedBy } : {}),
           })
+          if (run.outcome === 'failed') state.triageOutbox.add(runKey)
         },
       }),
       this.#register(claimDelete, {

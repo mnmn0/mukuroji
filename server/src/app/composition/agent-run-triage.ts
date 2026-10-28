@@ -1,0 +1,152 @@
+import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
+import {
+  DynamoDbAgentRunStore,
+  runAgentRunTriageSweep,
+  type AgentRunTriageFiler,
+  type AgentRunTriageSweepResult,
+  type AgentRunTriageWorkItemReader,
+} from '../../modules/agent-runs'
+import {
+  DynamoDbTriageClient,
+  TriageError,
+  createTriageInputFingerprint,
+  type CreateAgentRunTriageEntryInput,
+  type TriageIdempotency,
+} from '../../modules/triage'
+import { DynamoDbTeamIssuesClient, createTeamIssueDeepLink, isTeamIssueNotFoundError } from '../../modules/work-items'
+import { createProductionTenantAvailability } from './tenant-administration'
+
+/** Triage statuses that mean the entry input was refused, so filing it again cannot succeed. */
+const refusedTriageStatuses = new Set([400, 403, 404, 422])
+
+/** Work Item read the sweep needs, which the Work Item client provides. */
+export interface AgentRunTriageWorkItemSource {
+  /**
+   * Strongly reads one Work Item.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param workItemId - Work Item ID.
+   * @param options - Read options.
+   * @returns The Work Item.
+   */
+  getTeamIssueDetail(
+    directoryId: string,
+    teamId: string,
+    workItemId: string,
+    options: {
+      /** Whether the Work Item is read with strong consistency. */
+      consistentIssueRead: boolean
+      /** Whether activity events are read. */
+      includeEvents: boolean
+    },
+  ): Promise<{
+    /** Work Item fields the entry shows. */
+    issue: {
+      /** Work Item title. */
+      title: string
+      /** Archive time; set for an archived Work Item. */
+      archivedAt?: string
+    }
+  }>
+}
+
+/**
+ * Creates the Work Item reader of the sweep: archived and deleted Work Items read as missing.
+ *
+ * @param teamIssues - Work Item client.
+ * @returns Reader of title and Web path.
+ */
+export function createAgentRunTriageWorkItemReader(
+  teamIssues: AgentRunTriageWorkItemSource,
+): AgentRunTriageWorkItemReader {
+  return {
+    /** Strongly reads a Work Item's title. */
+    async read(directoryId, teamId, workItemId) {
+      try {
+        const { issue } = await teamIssues.getTeamIssueDetail(directoryId, teamId, workItemId, {
+          consistentIssueRead: true,
+          includeEvents: false,
+        })
+        return issue.archivedAt === undefined ? { title: issue.title, path: createTeamIssueDeepLink(teamId, workItemId) } : undefined
+      } catch (error) {
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      }
+    },
+  }
+}
+
+/** Triage write the sweep needs, which the Triage client provides. */
+export interface AgentRunTriageEntryWriter {
+  /**
+   * Creates or replays the entry of one run and reason.
+   * @param workspaceId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param input - Entry content.
+   * @param idempotency - Replay protection.
+   * @returns Resolves once the entry exists.
+   */
+  createAgentRunEntry(
+    workspaceId: string,
+    teamId: string,
+    input: CreateAgentRunTriageEntryInput,
+    idempotency: TriageIdempotency,
+  ): Promise<unknown>
+}
+
+/**
+ * Creates the Triage writer of the sweep. One idempotency key and fingerprint per run and reason
+ * make every repeat a replay of the first filing. A Workspace that is closing receives no entries.
+ *
+ * @param triage - Triage client.
+ * @param isTenantActive - Whether the Workspace accepts new writes.
+ * @returns Triage writer.
+ */
+export function createAgentRunTriageFiler(
+  triage: AgentRunTriageEntryWriter,
+  isTenantActive: (workspaceId: string) => Promise<boolean>,
+): AgentRunTriageFiler {
+  return {
+    /** Files one entry, replaying an earlier filing of the same run and reason. */
+    async file(directoryId, teamId, filing) {
+      if (!await isTenantActive(directoryId)) return 'rejected'
+      try {
+        await triage.createAgentRunEntry(directoryId, teamId, filing, {
+          key: `agent-run:${filing.runId}:${filing.reason}`,
+          fingerprint: createTriageInputFingerprint({ runId: filing.runId, reason: filing.reason }),
+        })
+        return 'filed'
+      } catch (error) {
+        if (error instanceof TriageError && refusedTriageStatuses.has(error.status)) return 'rejected'
+        throw error
+      }
+    },
+  }
+}
+
+/**
+ * Creates the scheduled handler that files failed and stalled Agent Runs to Triage. It throws after
+ * a sweep that left items for the next run, so the failure reaches the Lambda error alarm.
+ *
+ * @returns Scheduled handler.
+ */
+export function createProductionAgentRunTriageHandler(): () => Promise<AgentRunTriageSweepResult> {
+  const tableName = process.env.AGENT_RUNS_TABLE_NAME?.trim()
+  if (!tableName) throw new Error('Agent Run triage runtime is not configured.')
+  const store = new DynamoDbAgentRunStore(createDynamoDbDocumentClient(createDynamoDbClient()), tableName)
+  const workItems = createAgentRunTriageWorkItemReader(new DynamoDbTeamIssuesClient())
+  const tenant = createProductionTenantAvailability()
+  const triage = createAgentRunTriageFiler(new DynamoDbTriageClient(), (workspaceId) => tenant.isActive(workspaceId))
+  return async () => {
+    const result = await runAgentRunTriageSweep({
+      store,
+      workItems,
+      triage,
+      now: new Date(),
+      onError: (failure) => console.warn('Agent Run triage filing failed:', failure),
+    })
+    console.info('Agent Run triage sweep finished:', result)
+    if (result.errors > 0) throw new Error(`Agent Run triage left ${result.errors} item(s) for the next sweep.`)
+    return result
+  }
+}

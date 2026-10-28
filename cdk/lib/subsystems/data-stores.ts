@@ -520,6 +520,15 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  // Teams that file runs to Triage and failed runs waiting to be filed; both partitions stay small.
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'AgentRunTriageIndex',
+    partitionKey: { name: 'triageIndexPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageIndexSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.INCLUDE,
+    nonKeyAttributes: ['workspaceId', 'teamId', 'runId'],
+  });
+
   notificationsTable.addGlobalSecondaryIndex({
     indexName: 'RecipientStatusIndex',
     partitionKey: { name: 'recipientStatusKey', type: dynamodb.AttributeType.STRING },

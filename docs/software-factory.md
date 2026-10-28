@@ -315,6 +315,39 @@ pane を流用する。
   画面と同じ再取得に従う。realtime 配信は後続 Phase で検討する。
 - 既存の AI activity board は AI draft の session 内状態を扱う別物であり、Phase 1 では統合しない。
 
+## Triage への自動起票
+
+`failed` で終わった Run と停滞した Run を、Team の Triage に `agent-run` source の entry として
+自動で起票する。判断待ちの作業を人が拾う場所を Triage に一本化し、Factory board を開かなくても
+見落とさないようにする。既定では無効とし、Team が Agent settings で有効にする。
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `fileFailedRunsToTriage` | `false` | `true` なら `failed` で終わった Run ごとに Triage entry を 1 件起票する。 |
+| `fileStalledRunsToTriage` | `false` | `true` なら停滞（`active` のまま lease 切れ）した Run ごとに Triage entry を 1 件起票する。 |
+
+- source kind に `agent-run` を追加する。routing rule と SLA policy は他の source と同じく
+  source kind で対象を選べる。entry の requester は Run の agent 名で、guest ではない。
+  返信先がないため `canReply` は `false` とする。
+- entry は Run ごとに 1 件とし、source ID は `<runId>:failed` または `<runId>:stalled` にする。
+  Triage の source claim で重複を防ぎ、同じ Run を何度処理しても 2 件目は作らない。停滞 Run が
+  heartbeat で回復しても entry はそのまま残し、判断は Triage の担当者に任せる。
+- 本文は agent 名と runtime、Work Item の title と画面への path、Run ID、終了時刻または lease の
+  期限、最新 report の kind を書く。report の本文と成果物 link は含めない。Work Item への link は
+  Triage の accept / link 操作で人が行う。
+- 起票は API request とは別の定期 worker（1 分ごと）が行う。audit stream にはすでに 3 つの
+  consumer があり、DynamoDB stream の reader をこれ以上増やさない。
+  - `failed` の finish は、Run の行に outbox key を同じ transaction で書く。worker はこの key を
+    古い順に読み、Team の設定が有効なら起票し、無効なら起票せずに key を消す。起票に成功するか
+    既に起票済みなら key を消す。一時的な失敗は key を残して次の実行で再試行し、入力が Triage に
+    拒否された場合は key を消して記録する。
+  - 停滞は、どちらかの設定を有効にした Team を index から列挙し、`ActiveRunIndex` を lease の
+    古い順に lease 切れの範囲だけ読む。起票した Run には印を付け、次の実行では読み飛ばす。
+  - 両方とも `AgentRunsTable` の sparse GSI `AgentRunTriageIndex` を使う。partition は
+    `triage-filing-team`（設定の行）と `triage-failed-run`（outbox）の 2 つで、どちらも件数が
+    少ないため shard しない。GSI は table 更新ごとに 1 つしか追加できないため 1 つにまとめる。
+- worker の 1 回の処理件数には上限を設け、上限に達した場合は記録して次の実行に続ける。
+
 ## Public API
 
 Run は Work Item の sub-resource とし、新しい scope は追加しない。読み取りは `work-items:read`、
@@ -444,6 +477,7 @@ tool は次のとおり変更・追加する。
 | 2 | 構造化 report、artifact 検証、comment chip 表示、3 client の設定例、配布 build | `bun run server:test`、`bun run web:test`、`bun run mcp:build`、`bun run knip:check` |
 | 3 | 受け入れ条件、Ready 判定、brief と resource、`not_ready` | `bun run server:test`、`bun run typecheck:contracts`、`bun run dependencies:check`、`bun run api:contract:check` |
 | 4 | Factory board、内部 Run 一覧 API、解放 | `bun run web:lint`、`bun run web:test`、`bun run web:build`、`bun run web:build-storybook`、Storybook での desktop / phone 確認 |
+| 5 | `failed` / 停滞 Run の Triage 自動起票、`agent-run` source、起票 worker | `bun run server:test`、`bun run web:test`、`bun run typecheck:contracts`、`bun run cdk:build`、`bun run cdk:test` |
 
 Slice 1 の MCP 結合 test は、同じ assignee の 2 つの MCP process を異なる `instanceId` で起動し、
 一方の `start_task` 成功後に他方の `start_task` が `agent_run_conflict` になること、他方の
@@ -636,7 +670,6 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 - Work Item に Gate（CI、bot review、人の承認）を持たせ、`complete` 遷移の server 検証に
   組み込む。既存の approval action を再利用する。
 - stage 別 lead time、Run の成功 / 手戻り率、token 費用を analytics に追加する。
-- `failed` Run と停滞を Triage entry として自動起票する automation trigger を追加する。
 - hooks による heartbeat、planner / implementer / reviewer の多段 Run を Work Item relation と
   Run の親子で表現する。
 

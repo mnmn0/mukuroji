@@ -35,6 +35,10 @@ export type AgentSettingsDraft = {
   brief: string
   /** Project briefs in Markdown keyed by Project ID; blank entries are not saved. */
   projectBriefs: Record<string, string>
+  /** Whether failed runs are filed to Triage. */
+  fileFailedRunsToTriage: boolean
+  /** Whether stalled runs are filed to Triage. */
+  fileStalledRunsToTriage: boolean
 }
 
 /** Result of checking a draft against the limits the server enforces. */
@@ -114,6 +118,8 @@ export function createAgentSettingsDraft(settings: AgentSettings): AgentSettings
     acceptanceCriteriaFieldId: settings.acceptanceCriteriaFieldId ?? '',
     brief: settings.brief ?? '',
     projectBriefs: { ...settings.projectBriefs },
+    fileFailedRunsToTriage: settings.fileFailedRunsToTriage,
+    fileStalledRunsToTriage: settings.fileStalledRunsToTriage,
   }
 }
 
@@ -191,6 +197,8 @@ export function createUpdateAgentSettingsRequest(
     ...(draft.acceptanceCriteriaFieldId === '' ? {} : { acceptanceCriteriaFieldId: draft.acceptanceCriteriaFieldId }),
     ...(isBlank(draft.brief) ? {} : { brief: draft.brief }),
     projectBriefs,
+    fileFailedRunsToTriage: draft.fileFailedRunsToTriage,
+    fileStalledRunsToTriage: draft.fileStalledRunsToTriage,
   }
 }
 
@@ -353,6 +361,8 @@ function createDraftComparisonKey(draft: AgentSettingsDraft): string {
     draft.allowTakeoverAfterLeaseExpiry,
     [...new Set(draft.readyStatusIds)].sort(),
     draft.requireAcceptanceCriteria,
+    draft.fileFailedRunsToTriage,
+    draft.fileStalledRunsToTriage,
     draft.acceptanceCriteriaFieldId,
     isBlank(draft.brief) ? '' : draft.brief,
     Object.entries(draft.projectBriefs)

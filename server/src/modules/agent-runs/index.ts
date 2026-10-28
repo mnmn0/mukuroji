@@ -46,6 +46,7 @@ export {
 } from './domain/agent-run-report'
 export {
   AGENT_RUN_ACTIVE_INDEX_NAME,
+  AGENT_RUN_TRIAGE_INDEX_NAME,
   AGENT_RUN_WORK_ITEM_INDEX_NAME,
   DynamoDbAgentRunStore,
   createAgentRunPartition,
@@ -54,9 +55,28 @@ export {
   type AgentRunPage,
   type AgentRunReportPage,
   type AgentRunStore,
+  type AgentRunTriageOutboxEntry,
+  type AgentRunTriageStore,
+  type AgentRunTriageTeam,
+  type AgentRunTriageTeamPage,
   type AgentRunTransactItem,
 } from './adapter-out/dynamodb/agent-run-store'
 export {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,
 } from './adapter-out/in-memory/agent-run-store'
+export {
+  AGENT_RUN_TRIAGE_FAILED_BATCH,
+  AGENT_RUN_TRIAGE_MAX_TEAMS,
+  AGENT_RUN_TRIAGE_STALLED_BATCH,
+  createAgentRunTriageFiling,
+  runAgentRunTriageSweep,
+  type AgentRunTriageFiler,
+  type AgentRunTriageFiling,
+  type AgentRunTriageReason,
+  type AgentRunTriageSweepDependencies,
+  type AgentRunTriageSweepFailure,
+  type AgentRunTriageSweepResult,
+  type AgentRunTriageWorkItem,
+  type AgentRunTriageWorkItemReader,
+} from './adapter-in/schedules/agent-run-triage-sweep'

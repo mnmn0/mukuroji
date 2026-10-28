@@ -145,7 +145,7 @@ describe('Agent Run domain', () => {
     expect(() => readHeartbeatAgentRunRequest({})).toThrow(AgentRunError)
     expect(() => readHeartbeatAgentRunRequest(undefined)).toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false }))
-      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} })
+      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
     // Ready statuses and briefs are optional; empty briefs are dropped.
     expect(readUpdateAgentSettingsRequest({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
@@ -153,6 +153,7 @@ describe('Agent Run domain', () => {
     })).toEqual({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
       readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
+      fileFailedRunsToTriage: false, fileStalledRunsToTriage: false,
     })
     const base = { expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
     // A `__proto__` key stays an own entry instead of replacing the prototype.
@@ -236,6 +237,14 @@ describe('DynamoDB Agent Run store', () => {
       ExpressionAttributeValues: { ':instanceIdHash': finished.instanceIdHash },
     })
     expect(() => store.createCloseItems(createRun())).toThrow(TypeError)
+    // Only a failed finish joins the Triage outbox, in the same write that closes the run.
+    expect(update?.Update?.UpdateExpression).not.toContain('#triageIndexPartition')
+    const [failedUpdate] = store.createCloseItems(finishAgentRun(createRun(), 'failed', 'agent', now))
+    expect(failedUpdate?.Update?.UpdateExpression).toContain('#triageIndexPartition = :triageIndexPartition')
+    expect(failedUpdate?.Update?.ExpressionAttributeValues).toMatchObject({
+      ':triageIndexPartition': 'triage-failed-run',
+      ':triageIndexSortKey': `${now.toISOString()}#workspace-1#team#core#run_00000000-0000-4000-8000-000000000001`,
+    })
   })
 
   test('takes over only a stalled run and replaces its claim in place', () => {
@@ -405,7 +414,7 @@ describe('DynamoDB Agent Run store', () => {
     }
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
-      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, updatedAt: now.toISOString(), updatedBy: 'member-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, updatedAt: now.toISOString(), updatedBy: 'member-1' })
     // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
     for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
@@ -427,13 +436,14 @@ describe('DynamoDB Agent Run store', () => {
       })
     }
     const first = createClient([{}])
-    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' } }
+    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false }
     const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', [])
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
     const command = first.commands[0]
     if (!(command instanceof TransactWriteCommand)) throw new Error('The save must be a transaction.')
     expect(command.input).toMatchObject({ TransactItems: [
-      { Put: { Item: { recordKey: 'agent-settings' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+      // A Team that files runs to Triage is listed for the worker.
+      { Put: { Item: { recordKey: 'agent-settings', triageIndexPartition: 'triage-filing-team', triageIndexSortKey: 'workspace-1#team#core' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       { Put: { Item: { recordKey: 'agent-settings-mutation#key-1', entityType: 'agent-settings-mutation', revision: 1 }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
     ] })
     const receipt = command.input.TransactItems?.[1]?.Put?.Item

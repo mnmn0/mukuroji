@@ -382,6 +382,10 @@ export type AgentSettings = {
   brief?: string
   /** Agent briefs per Project ID, returned after the Team brief for work in that Project. */
   projectBriefs: Record<string, string>
+  /** Whether each run that finishes as `failed` is filed to the Team's Triage as an `agent-run` entry. */
+  fileFailedRunsToTriage: boolean
+  /** Whether each run that stalls (active past its lease) is filed to the Team's Triage as an `agent-run` entry. */
+  fileStalledRunsToTriage: boolean
   /** UTC ISO 8601 time of the last saved change. */
   updatedAt?: string
   /** Member key of the last editor. */
@@ -435,6 +439,10 @@ export type UpdateAgentSettingsRequest = {
   brief?: string
   /** Agent briefs per Project ID; omitted means none. */
   projectBriefs?: Record<string, string>
+  /** Whether failed runs are filed to Triage; omitted means false. */
+  fileFailedRunsToTriage?: boolean
+  /** Whether stalled runs are filed to Triage; omitted means false. */
+  fileStalledRunsToTriage?: boolean
 }
 
 /** Newest Agent Runs of one Work Item for the Web application. */

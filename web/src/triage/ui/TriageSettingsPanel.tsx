@@ -653,7 +653,7 @@ function parseSourceKinds(value: string): TriageSourceKind[] {
 /** Checks whether a string is a supported source kind. */
 function isSourceKind(value: string): value is TriageSourceKind {
   return value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
 }
 
 /** Formats an owner strategy as an editable compact value. */

@@ -22,6 +22,8 @@ export {
   createTriageBulkTargetIdempotencyKey,
   createTriageActionAuditIdempotencyKey,
   createTriageInputFingerprint,
+  type AgentRunTriageReason,
+  type CreateAgentRunTriageEntryInput,
   type ResolveTriageWorkItemAction,
   type TriageActor,
   type TriageWebhookEndpointReference,

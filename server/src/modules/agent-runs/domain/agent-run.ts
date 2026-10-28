@@ -72,6 +72,8 @@ export type StoredAgentRun = {
   lastReportKind?: AgentRunReportKind
   /** Time of the latest structured report, kept with its kind. */
   lastReportAt?: string
+  /** Time the run was filed to Triage as stalled; a stalled run is filed once. */
+  stallTriagedAt?: string
 }
 
 /** Persisted claim that fences one Work Item to its single active run. */
@@ -555,6 +557,8 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     readyStatusIds: [],
     requireAcceptanceCriteria: false,
     projectBriefs: {},
+    fileFailedRunsToTriage: false,
+    fileStalledRunsToTriage: false,
   }
 }
 
@@ -659,6 +663,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     [
       'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds',
       'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
+      'fileFailedRunsToTriage', 'fileStalledRunsToTriage',
     ],
     'Agent settings',
   )
@@ -685,6 +690,11 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
       pointer: '/requireAcceptanceCriteria',
     })
   }
+  for (const field of ['fileFailedRunsToTriage', 'fileStalledRunsToTriage'] as const) {
+    if (value[field] !== undefined && typeof value[field] !== 'boolean') {
+      throw new AgentRunError('validation_failed', `${field} must be a boolean.`, { pointer: `/${field}` })
+    }
+  }
   const acceptanceCriteriaFieldId = value.acceptanceCriteriaFieldId === undefined
     ? undefined
     : readSettingsIdentifier(value.acceptanceCriteriaFieldId, '/acceptanceCriteriaFieldId')
@@ -700,6 +710,8 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     ...(acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId }),
     ...(brief === undefined ? {} : { brief }),
     projectBriefs,
+    fileFailedRunsToTriage: value.fileFailedRunsToTriage === true,
+    fileStalledRunsToTriage: value.fileStalledRunsToTriage === true,
   }
 }
 
@@ -743,6 +755,10 @@ export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   requireAcceptanceCriteria: boolean
   /** Non-empty briefs per Project ID. */
   projectBriefs: Record<string, string>
+  /** Whether failed runs are filed to Triage. */
+  fileFailedRunsToTriage: boolean
+  /** Whether stalled runs are filed to Triage. */
+  fileStalledRunsToTriage: boolean
   /**
    * Projects whose briefs were kept from the saved settings because the editor cannot see them;
    * a retry is not compared on these briefs.
@@ -776,6 +792,8 @@ export function createSavedAgentSettings(
     ...(update.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: update.acceptanceCriteriaFieldId }),
     ...(update.brief === undefined ? {} : { brief: update.brief }),
     projectBriefs: { ...update.projectBriefs },
+    fileFailedRunsToTriage: update.fileFailedRunsToTriage,
+    fileStalledRunsToTriage: update.fileStalledRunsToTriage,
     updatedAt: now.toISOString(),
     updatedBy: actorMemberKey,
   }

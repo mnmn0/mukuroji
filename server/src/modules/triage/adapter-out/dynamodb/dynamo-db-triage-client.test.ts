@@ -2437,6 +2437,40 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('admits one agent-run entry per run and reason, with the agent as a non-guest requester', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      const receipt = await harness.client.createAgentRunEntry(
+        'workspace-1',
+        'support',
+        {
+          runId: 'run_1',
+          reason: 'failed',
+          title: 'Agent run failed: Fix checkout',
+          body: 'Claude Code (claude-code) finished the run as failed.',
+          agentName: 'Claude Code',
+          assigneeUserId: 'demo@example.com',
+        },
+        { key: 'agent-run:run_1:failed', fingerprint: createTriageInputFingerprint({ runId: 'run_1', reason: 'failed' }) },
+      )
+
+      expect(receipt.replayed).toBe(false)
+      const transactItems = harness.commands[2]?.input.TransactItems
+      const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
+      expect(stored).toMatchObject({
+        source: { kind: 'agent-run', sourceId: 'run_1:failed' },
+        sourcePreview: { title: 'Agent run failed: Fix checkout' },
+        requester: { displayName: 'Claude Code', externalId: 'demo@example.com', guest: false },
+        permission: { canReply: false },
+        teamId: 'support',
+        state: 'pending',
+      })
+      expect(JSON.stringify(transactItems)).toContain('agent-run-ingest')
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('stores a webhook entry admitted after its retention ended only in redacted form', async () => {
     const harness = createHarness([{}, {}, {}])
     try {

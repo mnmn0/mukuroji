@@ -76,6 +76,7 @@ const sourceKinds: readonly TriageSourceKind[] = [
   'email',
   'webhook',
   'manual-handoff',
+  'agent-run',
 ]
 const slaFilters: readonly TriageQueueSlaFilter[] = [
   'breached',
@@ -92,6 +93,7 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
   snoozed: 'triage.state.snoozed',
 }
 const sourceLabelKeys: Record<TriageSourceKind, MessageKey> = {
+  'agent-run': 'triage.source.agentRun',
   chat: 'triage.source.chat',
   email: 'triage.source.email',
   form: 'triage.source.form',

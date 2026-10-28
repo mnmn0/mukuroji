@@ -458,7 +458,7 @@ function requireEntryState(value: unknown): TriageEntryState {
 function requireSourceKind(value: unknown): TriageSourceKind {
   if (
     value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
   ) return value
   throw invalidContractError()
 }

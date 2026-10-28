@@ -34,6 +34,7 @@ import { buildTriageScheduleWorker } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
+import { buildAgentRunTriageWorker } from '../subsystems/workers/agent-run-triage';
 
 /**
  * Composes the Mukuroji application infrastructure from subsystem builders.
@@ -191,6 +192,12 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
     });
     const triageScheduleWorker = buildTriageScheduleWorker(this, {
+      dataStores,
+      lambdaBuildPaths,
+      parameters,
+      runtimeControls,
+    });
+    buildAgentRunTriageWorker(this, {
       dataStores,
       lambdaBuildPaths,
       parameters,

@@ -2,6 +2,7 @@ import type {
   AiPlanningDraft,
   AiWorkItemSource,
   PlanningSnapshot,
+  TriageSourceKind,
   WorkItemTypeChangePreview,
   WorkItemDetailSectionId,
   WorkItemDependencyEndpoint,
@@ -1768,9 +1769,10 @@ function formatProjectMemberOption(member: ProjectMember) {
  * @returns The message key for the source label.
  */
 function resolveTriageSourceMessageKey(
-  sourceKind: 'form' | 'chat' | 'email' | 'webhook' | 'manual-handoff',
+  sourceKind: TriageSourceKind,
 ): MessageKey {
   if (sourceKind === 'manual-handoff') return 'triage.source.manualHandoff'
+  if (sourceKind === 'agent-run') return 'triage.source.agentRun'
   return `triage.source.${sourceKind}`
 }
 

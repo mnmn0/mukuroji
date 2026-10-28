@@ -62,6 +62,7 @@ import {
   type TriageCustomerAssociationOperation,
 } from '../../triage'
 import type {
+  CreateAgentRunTriageEntryInput,
   ResolveTriageWorkItemAction,
   TriageActor,
   TriageWebhookEndpointReference,
@@ -1542,6 +1543,32 @@ export class DynamoDbTriageClient implements TriageClient {
   }
 
   /**
+   * Creates a replay-safe entry for a failed or stalled coding-agent run.
+   *
+   * @param workspaceId - Owning Workspace ID.
+   * @param teamId - Team of the run.
+   * @param input - Validated entry content.
+   * @param idempotency - Replay protection bound to the run and reason.
+   * @returns The created or replayed entry receipt.
+   */
+  async createAgentRunEntry(
+    workspaceId: string,
+    teamId: string,
+    input: CreateAgentRunTriageEntryInput,
+    idempotency: TriageIdempotency,
+  ): Promise<TriageMutationReceipt> {
+    return this.admitSourceEntry({
+      workspaceId,
+      teamId,
+      sourceKind: 'agent-run',
+      sourceId: createAgentRunTriageSourceId(input),
+      createEntry: (entryId, now) => createAgentRunEntry(workspaceId, teamId, input, entryId, now),
+      idempotency,
+      operation: 'agent-run-ingest',
+    })
+  }
+
+  /**
    * Admits a new source entry with Team routing, a source claim, and an operation receipt.
    *
    * @param request - Source identity, entry factory, replay protection, and optional checks.
@@ -2168,6 +2195,91 @@ async function readCanonicalQueueEntries(
  */
 function createWebhookTriageSourceId(endpointId: string, eventId: string): string {
   return `${requireText(endpointId, 'Webhook endpoint ID', 200)}:${requireText(eventId, 'Webhook event ID', 200)}`
+}
+
+/**
+ * Builds the source ID of an Agent Run entry, one per run and reason.
+ *
+ * @param input - Agent Run entry content.
+ * @returns Source ID such as `<runId>:failed`.
+ */
+function createAgentRunTriageSourceId(input: Pick<CreateAgentRunTriageEntryInput, 'runId' | 'reason'>): string {
+  if (input.reason !== 'failed' && input.reason !== 'stalled') {
+    throw new TriageError(400, 'InvalidTriageInput', 'Agent Run triage reason is invalid.')
+  }
+  return `${requireText(input.runId, 'Agent Run ID', 200)}:${input.reason}`
+}
+
+/**
+ * Creates an initial entry for a failed or stalled coding-agent run.
+ *
+ * The requester is the agent, not a guest, and there is no channel to reply on, so
+ * request-information keeps failing closed like a webhook entry.
+ *
+ * @param workspaceId - Owning Workspace ID.
+ * @param teamId - Team of the run.
+ * @param input - Validated entry content.
+ * @param entryId - New entry ID.
+ * @param now - Admission time.
+ * @returns The normalized entry before Team configuration is applied.
+ */
+function createAgentRunEntry(
+  workspaceId: string,
+  teamId: string,
+  input: CreateAgentRunTriageEntryInput,
+  entryId: string,
+  now: string,
+): TriageEntry {
+  const permission: TriagePermission = {
+    visibility: 'full',
+    canReply: false,
+    guestVisible: false,
+    checkedAt: now,
+  }
+  const routingReason = input.reason === 'failed'
+    ? 'Filed because a coding-agent run failed.'
+    : 'Filed because a coding-agent run stalled.'
+  return {
+    schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
+    id: requireIdentifier(entryId, 'Triage entry ID'),
+    workspaceId: requireWorkspaceId(workspaceId),
+    source: { kind: 'agent-run', sourceId: createAgentRunTriageSourceId(input) },
+    sourcePreview: {
+      title: requireText(input.title, 'Agent Run entry title', 500),
+      body: requireText(input.body, 'Agent Run entry body', 8_000, true),
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: requireText(input.agentName, 'Agent name', 300),
+      externalId: requireText(input.assigneeUserId, 'Agent Run assignee', 300),
+      guest: false,
+    },
+    receivedAt: now,
+    lastActivityAt: now,
+    state: 'pending',
+    routing: {
+      reason: routingReason,
+      candidates: [{ teamId, reason: routingReason, permitted: true }],
+    },
+    teamId,
+    permission,
+    retention: { expiresAt: now },
+    capabilities: createTriageCapabilities({ state: 'pending', permission }),
+    events: [{
+      id: `created:1:${now}`,
+      type: 'created',
+      actorId: requireUserId('agent-run-triage', 'Triage actor ID'),
+      summary: input.reason === 'failed' ? 'A failed coding-agent run entered triage.' : 'A stalled coding-agent run entered triage.',
+      createdAt: now,
+    }],
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
 }
 
 /**
@@ -2945,7 +3057,7 @@ function invalidStoredConfiguration(): TriageError {
  */
 function isTriageSourceKind(value: unknown): value is TriageSourceKind {
   return value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
 }
 
 /** Returns whether a persisted value is a bounded non-empty string.

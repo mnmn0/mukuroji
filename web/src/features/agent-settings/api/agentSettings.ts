@@ -70,6 +70,8 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     acceptanceCriteriaFieldId,
     allowTakeoverAfterLeaseExpiry,
     brief,
+    fileFailedRunsToTriage,
+    fileStalledRunsToTriage,
     leaseMinutes,
     readyStatusIds,
     requireAcceptanceCriteria,
@@ -87,6 +89,9 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every(isNonEmptyString) ||
     typeof requireAcceptanceCriteria !== 'boolean' ||
+    // Servers older than Triage filing omit the flags, which then read as off.
+    (fileFailedRunsToTriage !== undefined && typeof fileFailedRunsToTriage !== 'boolean') ||
+    (fileStalledRunsToTriage !== undefined && typeof fileStalledRunsToTriage !== 'boolean') ||
     (acceptanceCriteriaFieldId !== undefined && !isNonEmptyString(acceptanceCriteriaFieldId)) ||
     (brief !== undefined && typeof brief !== 'string') ||
     !projectBriefs ||
@@ -106,6 +111,8 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     ...(acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId }),
     ...(brief === undefined ? {} : { brief }),
     projectBriefs,
+    fileFailedRunsToTriage: fileFailedRunsToTriage === true,
+    fileStalledRunsToTriage: fileStalledRunsToTriage === true,
     ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(updatedBy === undefined ? {} : { updatedBy }),
   }

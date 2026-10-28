@@ -261,6 +261,22 @@ export function HandoffIcon({ className = iconClass }: IconProps) {
 }
 
 /**
+ * Renders the shared coding-agent icon: a terminal window with a prompt.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative agent icon.
+ */
+export function AgentIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <path d="m7.5 10 2.5 2-2.5 2" />
+      <path d="M12.5 14.5h4" />
+    </svg>
+  )
+}
+
+/**
  * Renders the shared pin outline icon, optionally filled.
  *
  * @param props - Icon presentation and fill state.

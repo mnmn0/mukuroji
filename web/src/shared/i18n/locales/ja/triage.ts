@@ -33,6 +33,7 @@ export const triageMessages = {
   'triage.source.email': 'メール',
   'triage.source.webhook': 'Webhook',
   'triage.source.manualHandoff': '手動引き継ぎ',
+  'triage.source.agentRun': 'Agent Run',
   'triage.sla.onTrack': 'SLA 内',
   'triage.sla.dueSoon': '期限間近',
   'triage.sla.breached': 'SLA 超過',

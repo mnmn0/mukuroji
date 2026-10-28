@@ -41,6 +41,18 @@ export const AGENT_RUN_WORK_ITEM_INDEX_NAME = 'WorkItemRunIndex'
 /** Sparse index that lists a Team's active runs by lease expiry. */
 export const AGENT_RUN_ACTIVE_INDEX_NAME = 'ActiveRunIndex'
 
+/**
+ * Sparse index of the Teams that file runs to Triage and of failed runs waiting to be filed. Both
+ * partitions stay small, so neither is sharded.
+ */
+export const AGENT_RUN_TRIAGE_INDEX_NAME = 'AgentRunTriageIndex'
+
+/** Triage index partition of the settings rows of Teams that file failed or stalled runs. */
+const triageTeamPartition = 'triage-filing-team'
+
+/** Triage index partition of failed runs not yet filed, oldest finish first. */
+const triageFailedRunPartition = 'triage-failed-run'
+
 /** Largest page a list query returns. */
 const maximumPageSize = 100
 
@@ -66,6 +78,62 @@ export type AgentRunPage = {
   runs: StoredAgentRun[]
   /** Continuation for the next page; absent on the last page. */
   nextCursor?: string
+}
+
+/** A Team whose Agent settings file failed or stalled runs to Triage. */
+export type AgentRunTriageTeam = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+}
+
+/** A failed run waiting in the Triage outbox. */
+export type AgentRunTriageOutboxEntry = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Run ID. */
+  runId: string
+}
+
+/** One page of Teams that file runs to Triage. */
+export type AgentRunTriageTeamPage = {
+  /** Teams in index order. */
+  teams: AgentRunTriageTeam[]
+  /** Continuation for the next page; absent on the last page. */
+  nextCursor?: string
+}
+
+/** Persistence port of the worker that files failed and stalled runs to Triage. */
+export interface AgentRunTriageStore {
+  /**
+   * Lists the Teams whose settings file failed or stalled runs. The index is eventually
+   * consistent, so the worker reads each Team's settings again before acting.
+   * @param cursor - Continuation from a previous page.
+   * @param limit - Page size from 1 to 100.
+   * @returns One page of Teams.
+   */
+  listTriageTeams(cursor: string | undefined, limit: number): Promise<AgentRunTriageTeamPage>
+  /**
+   * Lists failed runs not yet filed, oldest finish first.
+   * @param limit - Largest number of entries, from 1 to 100.
+   * @returns Outbox entries; the worker reads each run again before acting.
+   */
+  listFailedRunsToTriage(limit: number): Promise<AgentRunTriageOutboxEntry[]>
+  /**
+   * Removes a run from the Triage outbox after it was filed or deliberately skipped.
+   * @param entry - Outbox entry.
+   */
+  clearFailedRunTriage(entry: AgentRunTriageOutboxEntry): Promise<void>
+  /**
+   * Records that a stalled run was filed, while it is still active with the lease that was read.
+   * @param run - Stalled run as read.
+   * @param now - Filing time.
+   * @returns False when the run changed since it was read, such as a heartbeat or a finish.
+   */
+  markStallTriaged(run: StoredAgentRun, now: Date): Promise<boolean>
 }
 
 /** Persistence port for Agent Runs, claims, and Team Agent settings. */
@@ -455,6 +523,7 @@ function parseRun(
     ...(optionalStoredString(item, 'finishedBy') === undefined ? {} : { finishedBy: storedString(item, 'finishedBy') }),
     reportCount: storedInteger(item, 'reportCount'),
     ...readLastReport(item),
+    ...(item.stallTriagedAt === undefined ? {} : { stallTriagedAt: storedTimestamp(item, 'stallTriagedAt') }),
   }
 }
 
@@ -655,6 +724,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.readyStatusIds.length === update.readyStatusIds.length &&
     saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
     saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
+    saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
+    saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
     saved.acceptanceCriteriaFieldId === update.acceptanceCriteriaFieldId &&
     saved.brief === update.brief &&
     savedProjects.length === updateProjects.length &&
@@ -728,6 +799,8 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     (item.brief !== undefined && (typeof item.brief !== 'string' || item.brief === '')) ||
     (item.requireAcceptanceCriteria !== undefined && typeof item.requireAcceptanceCriteria !== 'boolean') ||
+    (item.fileFailedRunsToTriage !== undefined && typeof item.fileFailedRunsToTriage !== 'boolean') ||
+    (item.fileStalledRunsToTriage !== undefined && typeof item.fileStalledRunsToTriage !== 'boolean') ||
     (item.acceptanceCriteriaFieldId !== undefined &&
       (typeof item.acceptanceCriteriaFieldId !== 'string' || item.acceptanceCriteriaFieldId === '')) ||
     !isRecord(projectBriefs)
@@ -750,13 +823,15 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     ...(typeof item.acceptanceCriteriaFieldId === 'string' ? { acceptanceCriteriaFieldId: item.acceptanceCriteriaFieldId } : {}),
     ...(typeof item.brief === 'string' ? { brief: item.brief } : {}),
     projectBriefs: briefs,
+    fileFailedRunsToTriage: item.fileFailedRunsToTriage === true,
+    fileStalledRunsToTriage: item.fileStalledRunsToTriage === true,
     updatedAt: storedTimestamp(item, 'updatedAt'),
     updatedBy: storedString(item, 'updatedBy'),
   }
 }
 
 /** DynamoDB-backed Agent Run store. */
-export class DynamoDbAgentRunStore implements AgentRunStore {
+export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore {
   /** Document client configured by the composition root. */
   readonly #client: AgentRunDocumentClient
   /** Agent Runs table name. */
@@ -855,7 +930,17 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
           {
             Put: {
               TableName: this.#tableName,
-              Item: { directoryTeamId: partition, recordKey: settingsRecordKey, entityType: 'agent-settings', workspaceId: directoryId, ...settings },
+              Item: {
+                directoryTeamId: partition,
+                recordKey: settingsRecordKey,
+                entityType: 'agent-settings',
+                workspaceId: directoryId,
+                ...settings,
+                // Lists the Team for the Triage worker only while it files runs.
+                ...(settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage
+                  ? { triageIndexPartition: triageTeamPartition, triageIndexSortKey: partition }
+                  : {}),
+              },
               ConditionExpression: update.expectedRevision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :expectedRevision',
               ...(update.expectedRevision === 0
                 ? {}
@@ -959,6 +1044,77 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       .map((item) => parseRun(item, { directoryId, teamId }))
       .filter((run) => run.state === 'active')
     return this.#page(runs, response.LastEvaluatedKey)
+  }
+
+  /** @inheritdoc */
+  async listTriageTeams(cursor: string | undefined, limit: number): Promise<AgentRunTriageTeamPage> {
+    const response = await this.#client.send(new QueryCommand({
+      TableName: this.#tableName,
+      IndexName: AGENT_RUN_TRIAGE_INDEX_NAME,
+      KeyConditionExpression: '#triageIndexPartition = :partition',
+      ExpressionAttributeNames: { '#triageIndexPartition': 'triageIndexPartition' },
+      ExpressionAttributeValues: { ':partition': triageTeamPartition },
+      Limit: readLimit(limit),
+      ExclusiveStartKey: decodeCursor(cursor, 'triageIndexPartition', triageTeamPartition),
+    }))
+    const teams = (response.Items ?? []).map((item) => {
+      const team = { directoryId: storedString(item, 'workspaceId'), teamId: storedString(item, 'teamId') }
+      if (item.directoryTeamId !== createAgentRunPartition(team.directoryId, team.teamId)) throw createAgentRunIntegrityError()
+      return team
+    })
+    const nextCursor = encodeCursor(response.LastEvaluatedKey)
+    return { teams, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
+  async listFailedRunsToTriage(limit: number): Promise<AgentRunTriageOutboxEntry[]> {
+    const response = await this.#client.send(new QueryCommand({
+      TableName: this.#tableName,
+      IndexName: AGENT_RUN_TRIAGE_INDEX_NAME,
+      KeyConditionExpression: '#triageIndexPartition = :partition',
+      ExpressionAttributeNames: { '#triageIndexPartition': 'triageIndexPartition' },
+      ExpressionAttributeValues: { ':partition': triageFailedRunPartition },
+      Limit: readLimit(limit),
+    }))
+    return (response.Items ?? []).map((item) => {
+      const entry = {
+        directoryId: storedString(item, 'workspaceId'),
+        teamId: storedString(item, 'teamId'),
+        runId: storedString(item, 'runId'),
+      }
+      if (item.directoryTeamId !== createAgentRunPartition(entry.directoryId, entry.teamId) || item.recordKey !== runRecordKey(entry.runId)) {
+        throw createAgentRunIntegrityError()
+      }
+      return entry
+    })
+  }
+
+  /** @inheritdoc */
+  async clearFailedRunTriage(entry: AgentRunTriageOutboxEntry): Promise<void> {
+    await this.#client.send(new UpdateCommand({
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createAgentRunPartition(entry.directoryId, entry.teamId), recordKey: runRecordKey(entry.runId) },
+      UpdateExpression: 'REMOVE #triageIndexPartition, #triageIndexSortKey',
+      ExpressionAttributeNames: { '#triageIndexPartition': 'triageIndexPartition', '#triageIndexSortKey': 'triageIndexSortKey' },
+    }))
+  }
+
+  /** @inheritdoc */
+  async markStallTriaged(run: StoredAgentRun, now: Date): Promise<boolean> {
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(run.directoryId, run.teamId), recordKey: runRecordKey(run.runId) },
+        UpdateExpression: 'SET #stallTriagedAt = :now',
+        ConditionExpression: '#state = :active AND #leaseExpiresAt = :leaseExpiresAt',
+        ExpressionAttributeNames: { '#stallTriagedAt': 'stallTriagedAt', '#state': 'state', '#leaseExpiresAt': 'leaseExpiresAt' },
+        ExpressionAttributeValues: { ':now': now.toISOString(), ':active': 'active', ':leaseExpiresAt': run.leaseExpiresAt },
+      }))
+      return true
+    } catch (error) {
+      if (isAwsNamedError(error, 'ConditionalCheckFailedException')) return false
+      throw error
+    }
   }
 
   /** @inheritdoc */
@@ -1166,6 +1322,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
       throw new TypeError('createCloseItems requires the finished form of a run.')
     }
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const failed = run.outcome === 'failed'
     const conditions = [
       '#state = :active',
       ...(expectedInstanceIdHash === undefined ? [] : ['#instanceIdHash = :instanceIdHash']),
@@ -1176,8 +1333,10 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
         Update: {
           TableName: this.#tableName,
           Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
-          UpdateExpression: 'SET #state = :finished, #outcome = :outcome, #finishedAt = :finishedAt, #finishedBy = :finishedBy ' +
-            'REMOVE #activeRunPartition, #activeRunSortKey, #lastHeartbeatRequestAt',
+          // A failed run joins the Triage outbox in the same write, so the worker never misses it.
+          UpdateExpression: 'SET #state = :finished, #outcome = :outcome, #finishedAt = :finishedAt, #finishedBy = :finishedBy' +
+            (failed ? ', #triageIndexPartition = :triageIndexPartition, #triageIndexSortKey = :triageIndexSortKey' : '') +
+            ' REMOVE #activeRunPartition, #activeRunSortKey, #lastHeartbeatRequestAt',
           ConditionExpression: conditions.join(' AND '),
           ExpressionAttributeNames: {
             '#state': 'state',
@@ -1189,9 +1348,13 @@ export class DynamoDbAgentRunStore implements AgentRunStore {
             '#activeRunPartition': 'activeRunPartition',
             '#activeRunSortKey': 'activeRunSortKey',
             '#lastHeartbeatRequestAt': 'lastHeartbeatRequestAt',
+            ...(failed ? { '#triageIndexPartition': 'triageIndexPartition', '#triageIndexSortKey': 'triageIndexSortKey' } : {}),
           },
           ExpressionAttributeValues: {
             ':finished': 'finished',
+            ...(failed
+              ? { ':triageIndexPartition': triageFailedRunPartition, ':triageIndexSortKey': `${run.finishedAt}#${partition}#${run.runId}` }
+              : {}),
             ':outcome': run.outcome,
             ':finishedAt': run.finishedAt,
             ':finishedBy': run.finishedBy,
