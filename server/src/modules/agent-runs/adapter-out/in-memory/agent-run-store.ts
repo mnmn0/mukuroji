@@ -29,6 +29,7 @@ import {
   type AgentRunTransactItem,
   type AgentRunTriageOutboxEntry,
   type AgentRunTriageStore,
+  type AgentRunTriageTeam,
   type AgentRunTriageTeamPage,
 } from '../dynamodb/agent-run-store'
 
@@ -46,6 +47,10 @@ type InMemoryAgentRunState = {
   reports: Map<string, StoredAgentRunReport>
   /** Failed runs waiting to be filed to Triage, by `<directoryId>|<teamId>|<runId>`. */
   triageOutbox: Set<string>
+  /** Stall sweep watermarks by `<directoryId>|<teamId>`. */
+  stallWatermarks: Map<string, string>
+  /** Team the next stall sweep resumes from. */
+  triageSweepResumeTeam?: AgentRunTriageTeam
 }
 
 /** Condition and effect of one transaction item, evaluated against in-memory state. */
@@ -112,7 +117,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   /** Current state. */
   readonly state: InMemoryAgentRunState = {
     runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
-    triageOutbox: new Set(),
+    triageOutbox: new Set(), stallWatermarks: new Map(),
   }
   /** Builder that produces DynamoDB-shaped items. */
   readonly #builder = new DynamoDbAgentRunStore({
@@ -193,15 +198,50 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async listTriageTeams(cursor: string | undefined, limit: number): Promise<AgentRunTriageTeamPage> {
+  async listTriageTeams(cursor: string | undefined, limit: number, from?: AgentRunTriageTeam): Promise<AgentRunTriageTeamPage> {
+    const fromKey = cursor === undefined && from !== undefined ? `${from.directoryId}|${from.teamId}` : undefined
     const teams = [...this.state.settings.entries()]
       .filter(([, settings]) => settings.fileFailedRunsToTriage || settings.fileStalledRunsToTriage)
       .map(([settingsKey, settings]) => ({ directoryId: settingsKey.slice(0, settingsKey.lastIndexOf('|')), teamId: settings.teamId }))
       .sort((left, right) => `${left.directoryId}|${left.teamId}`.localeCompare(`${right.directoryId}|${right.teamId}`))
+      .filter((team) => fromKey === undefined || `${team.directoryId}|${team.teamId}` >= fromKey)
     const start = cursor === undefined ? 0 : Number(cursor)
     const page = teams.slice(start, start + limit)
     const next = start + limit
     return { teams: page, ...(next < teams.length ? { nextCursor: String(next) } : {}) }
+  }
+
+  /** @inheritdoc */
+  async readTriageSweepResumeTeam(): Promise<AgentRunTriageTeam | undefined> {
+    return this.state.triageSweepResumeTeam
+  }
+
+  /** @inheritdoc */
+  async saveTriageSweepResumeTeam(team: AgentRunTriageTeam | undefined): Promise<void> {
+    if (team === undefined) delete this.state.triageSweepResumeTeam
+    else this.state.triageSweepResumeTeam = { ...team }
+  }
+
+  /** @inheritdoc */
+  async readStallWatermark(team: AgentRunTriageTeam): Promise<string | undefined> {
+    return this.state.stallWatermarks.get(`${team.directoryId}|${team.teamId}`)
+  }
+
+  /** @inheritdoc */
+  async listStallCandidates(team: AgentRunTriageTeam, after: string | undefined, cursor: string | undefined, limit: number): Promise<AgentRunPage> {
+    const runs = [...this.state.runs.values()]
+      .filter((run) => run.directoryId === team.directoryId && run.teamId === team.teamId && run.state === 'active')
+      .filter((run) => after === undefined || `${run.leaseExpiresAt}#${run.runId}` > after)
+      .sort((left, right) => `${left.leaseExpiresAt}#${left.runId}`.localeCompare(`${right.leaseExpiresAt}#${right.runId}`))
+    return this.#page(runs, cursor, limit)
+  }
+
+  /** @inheritdoc */
+  async saveStallWatermark(run: StoredAgentRun): Promise<void> {
+    const teamKey = `${run.directoryId}|${run.teamId}`
+    const watermark = `${run.leaseExpiresAt}#${run.runId}`
+    const current = this.state.stallWatermarks.get(teamKey)
+    if (current === undefined || current < watermark) this.state.stallWatermarks.set(teamKey, watermark)
   }
 
   /** @inheritdoc */

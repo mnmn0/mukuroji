@@ -266,6 +266,40 @@ describe('DynamoDB Agent Run store', () => {
     await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').listFailedRunsToTriage(50)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
+  test('keeps the stall sweep checkpoints monotonic and removable with the Workspace', async () => {
+    const run = createRun()
+    const passed = createClient([() => {
+      throw Object.assign(new Error('behind'), { name: 'ConditionalCheckFailedException' })
+    }])
+    // An overlapping sweep that already passed a later run keeps its watermark.
+    await new DynamoDbAgentRunStore(passed.client, 'AgentRuns').saveStallWatermark(run)
+    expect(passed.commands[0]?.input).toMatchObject({
+      Key: { directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run-triage-stall-watermark' },
+      ConditionExpression: 'attribute_not_exists(#watermark) OR #watermark < :watermark',
+      ExpressionAttributeValues: { ':workspaceId': 'workspace-1', ':teamId': 'core', ':watermark': `${run.leaseExpiresAt}#${run.runId}` },
+    })
+    const listed = createClient()
+    await new DynamoDbAgentRunStore(listed.client, 'AgentRuns').listStallCandidates({ directoryId: 'workspace-1', teamId: 'core' }, 'mark', undefined, 100)
+    expect(listed.commands[0]?.input).toMatchObject({
+      IndexName: 'ActiveRunIndex',
+      KeyConditionExpression: '#activeRunPartition = :partition AND #activeRunSortKey > :after',
+      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core', ':after': 'mark' },
+    })
+    const forged = createClient([{ Item: { workspaceId: 'workspace-2', teamId: 'core', watermark: 'mark' } }])
+    await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').readStallWatermark({ directoryId: 'workspace-1', teamId: 'core' }))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+
+    const resume = createClient([{}, { Item: { directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' } }])
+    const resumeStore = new DynamoDbAgentRunStore(resume.client, 'AgentRuns')
+    await resumeStore.listTriageTeams(undefined, 100, { directoryId: 'workspace-1', teamId: 'core' })
+    expect(resume.commands[0]?.input).toMatchObject({
+      KeyConditionExpression: '#triageIndexPartition = :partition AND #triageIndexSortKey >= :start',
+      ExpressionAttributeValues: { ':partition': 'triage-filing-team', ':start': 'workspace-1#team#core' },
+    })
+    // A cleared resume row keeps no Workspace ID, so it reads as starting from the first Team.
+    expect(await resumeStore.readTriageSweepResumeTeam()).toBeUndefined()
+  })
+
   test('takes over only a stalled run and replaces its claim in place', () => {
     const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
     const later = new Date(now.getTime() + 31 * 60_000)

@@ -86,7 +86,7 @@ export interface AgentRunTriageFiler {
 /** Dependencies of one sweep. */
 export type AgentRunTriageSweepDependencies = {
   /** Agent Run reads and the Triage outbox. */
-  store: Pick<AgentRunStore, 'getRun' | 'getSettings' | 'listActiveRuns'> & AgentRunTriageStore
+  store: Pick<AgentRunStore, 'getRun' | 'getSettings'> & AgentRunTriageStore
   /** Work Item reader. */
   workItems: AgentRunTriageWorkItemReader
   /** Triage writer. */
@@ -256,7 +256,8 @@ async function fileFailedRun(
 }
 
 /**
- * Files the stalled runs of the Teams that file them, each run once.
+ * Files the stalled runs of the Teams that file them, each run once. A sweep that reaches its bound
+ * saves the Team it stopped at, so the next sweep continues there instead of at the first Team.
  *
  * @param dependencies - Sweep dependencies.
  * @param readSettings - Cached settings read.
@@ -267,81 +268,120 @@ async function fileStalledRuns(
   readSettings: (team: AgentRunTriageTeam) => Promise<AgentSettings>,
   result: AgentRunTriageSweepResult,
 ): Promise<void> {
-  const { store, now } = dependencies
+  const { store } = dependencies
+  const resumeTeam = await store.readTriageSweepResumeTeam()
   let cursor: string | undefined
   let teamsSeen = 0
   do {
-    const page = await store.listTriageTeams(cursor, pageSize)
+    const page = await store.listTriageTeams(cursor, pageSize, cursor === undefined ? resumeTeam : undefined)
     cursor = page.nextCursor
     for (const team of page.teams) {
-      if (teamsSeen >= AGENT_RUN_TRIAGE_MAX_TEAMS || result.stalledFiled + result.errors >= AGENT_RUN_TRIAGE_STALLED_BATCH) {
-        result.truncated = true
-        return
-      }
-      teamsSeen += 1
-      try {
-        const settings = await readSettings(team)
-        if (!settings.fileStalledRunsToTriage) continue
-        for (const run of await readStalledRuns(store, team, now, result)) {
-          if (result.stalledFiled + result.errors >= AGENT_RUN_TRIAGE_STALLED_BATCH) {
-            result.truncated = true
-            return
-          }
-          try {
-            // The index is eventually consistent; a heartbeat it has not seen yet means the run is not stalled.
-            const current = await store.getRun(team.directoryId, team.teamId, run.runId)
-            if (!current || !isAgentRunStalled(current, now) || current.stallTriagedAt !== undefined) continue
-            const workItem = await dependencies.workItems.read(team.directoryId, team.teamId, current.workItemId)
-            if (!workItem) continue
-            const outcome = await dependencies.triage.file(team.directoryId, team.teamId, createAgentRunTriageFiling(current, 'stalled', workItem))
-            if (outcome === 'filed') result.stalledFiled += 1
-            else result.rejected += 1
-            // A run that recovered or finished since it was read keeps no mark; its entry stays.
-            await store.markStallTriaged(current, now)
-          } catch (error) {
-            result.errors += 1
-            dependencies.onError?.({ ...team, runId: run.runId, code: readErrorCode(error) })
-          }
+      let complete = teamsSeen < AGENT_RUN_TRIAGE_MAX_TEAMS && !isStalledBatchFull(result)
+      if (complete) {
+        teamsSeen += 1
+        try {
+          const settings = await readSettings(team)
+          if (settings.fileStalledRunsToTriage) complete = await fileTeamStalledRuns(dependencies, team, result)
+        } catch (error) {
+          result.errors += 1
+          dependencies.onError?.({ ...team, code: readErrorCode(error) })
         }
-      } catch (error) {
-        result.errors += 1
-        dependencies.onError?.({ ...team, code: readErrorCode(error) })
+      }
+      if (!complete) {
+        result.truncated = true
+        await store.saveTriageSweepResumeTeam(team)
+        return
       }
     }
   } while (cursor !== undefined)
+  if (resumeTeam !== undefined) await store.saveTriageSweepResumeTeam(undefined)
 }
 
 /**
- * Reads a Team's stalled runs that were not filed yet. Active runs come soonest lease expiry
- * first, so reading stops at the first run whose lease has not expired.
+ * Checks whether the sweep filed or failed as many stalled runs as it may.
  *
- * @param store - Agent Run store.
- * @param team - Team.
- * @param now - Sweep time.
- * @param result - Counts to update when the bound is reached.
- * @returns Stalled runs without a filing mark.
+ * @param result - Counts so far.
+ * @returns True when no further stalled run may be filed.
  */
-async function readStalledRuns(
-  store: Pick<AgentRunStore, 'listActiveRuns'>,
+function isStalledBatchFull(result: AgentRunTriageSweepResult): boolean {
+  return result.stalledFiled + result.errors >= AGENT_RUN_TRIAGE_STALLED_BATCH
+}
+
+/**
+ * Files a Team's stalled runs after its watermark, soonest lease expiry first, and moves the
+ * watermark past each run it is done with. Reading stops at the first run whose lease has not
+ * expired, and a failed run stays after the watermark for the next sweep.
+ *
+ * @param dependencies - Sweep dependencies.
+ * @param team - Team that files stalled runs.
+ * @param result - Counts to update.
+ * @returns False when the sweep bound stopped the Team before its last stalled run.
+ */
+async function fileTeamStalledRuns(
+  dependencies: AgentRunTriageSweepDependencies,
   team: AgentRunTriageTeam,
-  now: Date,
   result: AgentRunTriageSweepResult,
-): Promise<StoredAgentRun[]> {
-  const stalled: StoredAgentRun[] = []
+): Promise<boolean> {
+  const { store, now } = dependencies
+  const after = await store.readStallWatermark(team)
+  let passed: StoredAgentRun | undefined
+  let complete = true
   let cursor: string | undefined
   let read = 0
-  do {
-    const page = await store.listActiveRuns(team.directoryId, team.teamId, cursor, pageSize)
+  reading: do {
+    const page = await store.listStallCandidates(team, after, cursor, pageSize)
     cursor = page.nextCursor
     for (const run of page.runs) {
+      if (!isAgentRunStalled(run, now)) break reading
+      if (run.stallTriagedAt === undefined) {
+        if (isStalledBatchFull(result)) {
+          complete = false
+          break reading
+        }
+        try {
+          await fileStalledRun(dependencies, team, run, result)
+        } catch (error) {
+          result.errors += 1
+          dependencies.onError?.({ ...team, runId: run.runId, code: readErrorCode(error) })
+          break reading
+        }
+      }
+      passed = run
       read += 1
-      if (!isAgentRunStalled(run, now)) return stalled
-      if (run.stallTriagedAt === undefined) stalled.push(run)
     }
     if (read >= activeRunsPerTeam && cursor !== undefined) {
+      // The watermark has moved past these runs, so the next sweep reads the ones after them.
       result.truncated = true
-      return stalled
+      break
     }
   } while (cursor !== undefined)
-  return stalled
+  if (passed !== undefined) await store.saveStallWatermark(passed)
+  return complete
+}
+
+/**
+ * Files one run the index lists as stalled, after reading it again strongly.
+ *
+ * @param dependencies - Sweep dependencies.
+ * @param team - Team of the run.
+ * @param run - Run as listed.
+ * @param result - Counts to update.
+ */
+async function fileStalledRun(
+  dependencies: AgentRunTriageSweepDependencies,
+  team: AgentRunTriageTeam,
+  run: StoredAgentRun,
+  result: AgentRunTriageSweepResult,
+): Promise<void> {
+  const { store, now } = dependencies
+  // The index is eventually consistent; a heartbeat it has not seen yet means the run is not stalled.
+  const current = await store.getRun(team.directoryId, team.teamId, run.runId)
+  if (!current || !isAgentRunStalled(current, now) || current.stallTriagedAt !== undefined) return
+  const workItem = await dependencies.workItems.read(team.directoryId, team.teamId, current.workItemId)
+  if (!workItem) return
+  const outcome = await dependencies.triage.file(team.directoryId, team.teamId, createAgentRunTriageFiling(current, 'stalled', workItem))
+  if (outcome === 'filed') result.stalledFiled += 1
+  else result.rejected += 1
+  // A run that recovered or finished since it was read keeps no mark; its entry stays.
+  await store.markStallTriaged(current, now)
 }

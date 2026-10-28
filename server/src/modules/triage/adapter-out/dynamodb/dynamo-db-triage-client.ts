@@ -1565,6 +1565,7 @@ export class DynamoDbTriageClient implements TriageClient {
       createEntry: (entryId, now) => createAgentRunEntry(workspaceId, teamId, input, entryId, now),
       idempotency,
       operation: 'agent-run-ingest',
+      validateAdmission: (admission) => requireAgentRunProject(input, admission.entry),
     })
   }
 
@@ -2690,6 +2691,26 @@ function requireSamePreparedManualProject(
       409,
       'TriageConfigurationConflict',
       'Triage routing changed while the handoff was created. Retry the request.',
+    )
+  }
+}
+
+/**
+ * Keeps an Agent Run entry inside its Work Item's Project. Readers of another Project must not see
+ * the Work Item's title and path, so a routing rule that moves the entry is refused.
+ *
+ * @param input - Agent Run entry input.
+ * @param entry - Entry after routing.
+ */
+function requireAgentRunProject(
+  input: CreateAgentRunTriageEntryInput,
+  entry: TriageEntry,
+): void {
+  if (input.projectId !== entry.projectId) {
+    throw new TriageError(
+      409,
+      'TriageAdmissionProjectChanged',
+      'A Triage routing rule moves this Agent Run entry to another Project.',
     )
   }
 }

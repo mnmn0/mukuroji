@@ -329,7 +329,9 @@ pane を流用する。
 - source kind に `agent-run` を追加する。routing rule と SLA policy は他の source と同じく
   source kind で対象を選べる。entry の requester は Run の agent 名で、guest ではない。
   返信先がないため `canReply` は `false` とする。entry の Project は Run の Work Item の Project とし、
-  Project を限定された閲覧者には、その Project を見られる場合だけ entry を見せる。
+  Project を限定された閲覧者には、その Project を見られる場合だけ entry を見せる。routing rule が
+  entry を別の Project へ移す場合は、Work Item の title と path が別 Project の閲覧者に見えないよう
+  起票を拒否する。
 - entry は Run ごとに 1 件とし、source ID は `<runId>:failed` または `<runId>:stalled` にする。
   Triage の source claim で重複を防ぎ、同じ Run を何度処理しても 2 件目は作らない。停滞 Run が
   heartbeat で回復しても entry はそのまま残し、判断は Triage の担当者に任せる。
@@ -343,7 +345,12 @@ pane を流用する。
     既に起票済みなら key を消す。一時的な失敗は key を残して次の実行で再試行し、入力が Triage に
     拒否された場合は key を消して記録する。
   - 停滞は、どちらかの設定を有効にした Team を index から列挙し、`ActiveRunIndex` を lease の
-    古い順に lease 切れの範囲だけ読む。起票した Run には印を付け、次の実行では読み飛ばす。
+    古い順に lease 切れの範囲だけ読む。起票した Run には印を付ける。放置された Run は `active` の
+    まま index に残るため、Team ごとに最後に処理した Run の位置（watermark）を保存し、次の実行は
+    その後ろから読む。lease は後ろにしか動かないため、watermark より前の Run は処理済みである。
+    起票に一時的に失敗した Run の手前で watermark を止め、次の実行で再試行する。
+  - 処理する Team 数や起票件数の上限で止まった場合は、止まった Team を保存し、次の実行はその Team
+    から再開する。最後の Team まで処理したら保存を消し、次は先頭の Team から読む。
   - 両方とも `AgentRunsTable` の sparse GSI `AgentRunTriageIndex` を使う。partition は
     `triage-filing-team`（設定の行）と `triage-failed-run`（outbox）の 2 つで、どちらも件数が
     少ないため shard しない。GSI は table 更新ごとに 1 つしか追加できないため 1 つにまとめる。

@@ -22,12 +22,13 @@ const minute = 60_000
  *
  * @param runNumber - Distinguishes the run and its Work Item.
  * @param startedAt - Start time; the lease is 30 minutes.
+ * @param teamId - Team of the run.
  * @returns Active run.
  */
-function createRun(runNumber: number, startedAt: Date): StoredAgentRun {
+function createRun(runNumber: number, startedAt: Date, teamId = 'core'): StoredAgentRun {
   return createActiveAgentRun({
     directoryId: 'workspace-1',
-    teamId: 'core',
+    teamId,
     workItemId: `task-${runNumber}`,
     assigneeUserId: 'member-1',
     start: readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-1' }),
@@ -35,7 +36,7 @@ function createRun(runNumber: number, startedAt: Date): StoredAgentRun {
     startRevision: 2,
     leaseMinutes: 30,
     now: startedAt,
-    runId: `run_00000000-0000-4000-8000-00000000000${runNumber}`,
+    runId: `run_00000000-0000-4000-8000-${String(runNumber).padStart(12, '0')}`,
   })
 }
 
@@ -46,10 +47,11 @@ function createRun(runNumber: number, startedAt: Date): StoredAgentRun {
  * @param flags - Which runs the Team files.
  * @param flags.failed - Whether failed runs are filed.
  * @param flags.stalled - Whether stalled runs are filed.
+ * @param teamId - Team whose settings are saved.
  */
-async function saveFlags(store: InMemoryAgentRunStore, flags: { failed: boolean; stalled: boolean }): Promise<void> {
-  const current = await store.getSettings('workspace-1', 'core')
-  await store.saveSettings('workspace-1', 'core', readUpdateAgentSettingsRequest({
+async function saveFlags(store: InMemoryAgentRunStore, flags: { failed: boolean; stalled: boolean }, teamId = 'core'): Promise<void> {
+  const current = await store.getSettings('workspace-1', teamId)
+  await store.saveSettings('workspace-1', teamId, readUpdateAgentSettingsRequest({
     expectedRevision: current.revision,
     leaseMinutes: 30,
     allowTakeoverAfterLeaseExpiry: false,
@@ -206,6 +208,61 @@ describe('Agent Run triage sweep', () => {
     const second = createDependencies(store)
     expect(await runAgentRunTriageSweep(second.dependencies)).toMatchObject({ stalledFiled: 0 })
     expect(second.filings).toEqual([])
+  })
+
+  test('moves past filed stalled runs, so a Team with more than one read bound of them keeps progressing', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: true })
+    // Abandoned runs stay active, so filed ones would otherwise fill every read of the Team.
+    for (let runNumber = 1; runNumber <= 250; runNumber += 1) {
+      store.seed(createRun(runNumber, new Date(now.getTime() - (300 - runNumber) * minute)))
+    }
+    const filed: string[] = []
+    for (const expected of [100, 100, 50, 0]) {
+      const sweep = createDependencies(store)
+      expect(await runAgentRunTriageSweep(sweep.dependencies)).toMatchObject({ stalledFiled: expected, errors: 0 })
+      filed.push(...sweep.filings.map((filing) => filing.runId))
+    }
+    expect(new Set(filed).size).toBe(250)
+  })
+
+  test('keeps a stalled run whose filing failed after the watermark for the next sweep', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: true })
+    store.seed(createRun(1, new Date(now.getTime() - 50 * minute)))
+    store.seed(createRun(2, new Date(now.getTime() - 45 * minute)))
+    const failing = createDependencies(store, {
+      /**
+       * Fails the second run like an unavailable table.
+       * @param filing - Entry content.
+       * @returns The filed outcome for other runs.
+       */
+      file: async (filing) => {
+        if (filing.runId.endsWith('2')) throw Object.assign(new Error('Service unavailable'), { name: 'InternalServerError' })
+        return 'filed'
+      },
+    })
+    expect(await runAgentRunTriageSweep(failing.dependencies)).toMatchObject({ stalledFiled: 1, errors: 1 })
+
+    const retry = createDependencies(store)
+    expect(await runAgentRunTriageSweep(retry.dependencies)).toMatchObject({ stalledFiled: 1, errors: 0 })
+    expect(retry.filings.map((filing) => filing.runId)).toEqual(['run_00000000-0000-4000-8000-000000000002'])
+  })
+
+  test('resumes at the Team where the previous sweep reached its Team bound', async () => {
+    const store = new InMemoryAgentRunStore()
+    for (let teamNumber = 0; teamNumber <= 500; teamNumber += 1) {
+      await saveFlags(store, { failed: false, stalled: true }, `team-${String(teamNumber).padStart(3, '0')}`)
+    }
+    store.seed(createRun(1, new Date(now.getTime() - 45 * minute), 'team-500'))
+
+    const first = createDependencies(store)
+    expect(await runAgentRunTriageSweep(first.dependencies)).toMatchObject({ stalledFiled: 0, truncated: true })
+    const second = createDependencies(store)
+    expect(await runAgentRunTriageSweep(second.dependencies)).toMatchObject({ stalledFiled: 1, truncated: false })
+    expect(second.filings).toEqual([expect.objectContaining({ runId: 'run_00000000-0000-4000-8000-000000000001' })])
+    // Having reached the last Team, the next sweep starts from the first one again.
+    expect(await store.readTriageSweepResumeTeam()).toBeUndefined()
   })
 
   test('does not file stalled runs of a Team that only files failed runs', async () => {

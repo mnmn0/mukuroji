@@ -2475,6 +2475,52 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('refuses an agent-run entry that a routing rule moves to another Project', async () => {
+    const harness = createHarness([
+      {},
+      {
+        Item: {
+          entryType: 'triage-configuration',
+          configuration: {
+            ...createConfigurationSnapshot(5),
+            rules: [{
+              id: 'agent-runs',
+              name: 'Agent runs',
+              enabled: true,
+              order: 1,
+              sourceKinds: ['agent-run'],
+              keywords: [],
+              teamId: 'support',
+              projectId: 'billing',
+              owner: { type: 'unowned' },
+            }],
+          },
+          revision: 5,
+        },
+      },
+    ])
+    try {
+      await expect(harness.client.createAgentRunEntry(
+        'workspace-1',
+        'support',
+        {
+          runId: 'run_1',
+          reason: 'stalled',
+          title: 'Agent run stalled: Fix checkout',
+          body: 'Claude Code (claude-code) stopped sending heartbeats.',
+          agentName: 'Claude Code',
+          assigneeUserId: 'demo@example.com',
+          projectId: 'checkout',
+        },
+        { key: 'agent-run:run_1:stalled', fingerprint: createTriageInputFingerprint({ runId: 'run_1', reason: 'stalled' }) },
+      )).rejects.toMatchObject({ status: 409, code: 'TriageAdmissionProjectChanged' })
+      // Nothing is written, so readers of the billing Project never see the checkout Work Item.
+      expect(harness.commands.map(({ name }) => name)).toEqual(['GetCommand', 'GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('stores a webhook entry admitted after its retention ended only in redacted form', async () => {
     const harness = createHarness([{}, {}, {}])
     try {
