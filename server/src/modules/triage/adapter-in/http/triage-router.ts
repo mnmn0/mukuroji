@@ -1165,7 +1165,7 @@ function readState(value: unknown): TriageEntryListInput['state'] {
 /** Reads a supported source kind. */
 function readSourceKind(value: unknown): TriageSourceKind {
   if (value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff') return value
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run') return value
   throw invalidInput('Triage source kind is invalid.')
 }
 

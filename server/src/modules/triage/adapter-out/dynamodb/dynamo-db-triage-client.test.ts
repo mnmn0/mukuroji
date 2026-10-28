@@ -2437,6 +2437,90 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('admits one agent-run entry per run, with the agent as a non-guest requester', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      const receipt = await harness.client.createAgentRunEntry(
+        'workspace-1',
+        'support',
+        {
+          runId: 'run_1',
+          reason: 'failed',
+          title: 'Agent run failed: Fix checkout',
+          body: 'Claude Code (claude-code) finished the run as failed.',
+          agentName: 'Claude Code',
+          assigneeUserId: 'demo@example.com',
+          projectId: 'checkout',
+        },
+        { key: 'agent-run:run_1', fingerprint: createTriageInputFingerprint({ runId: 'run_1' }) },
+      )
+
+      expect(receipt.replayed).toBe(false)
+      const transactItems = harness.commands[2]?.input.TransactItems
+      const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
+      expect(stored).toMatchObject({
+        source: { kind: 'agent-run', sourceId: 'run_1' },
+        sourcePreview: { title: 'Agent run failed: Fix checkout' },
+        requester: { displayName: 'Claude Code', externalId: 'demo@example.com', guest: false },
+        permission: { canReply: false },
+        teamId: 'support',
+        // Only people who can see the Work Item's Project see the entry.
+        projectId: 'checkout',
+        routing: { candidates: [{ teamId: 'support', projectId: 'checkout', permitted: true }] },
+        state: 'pending',
+      })
+      expect(JSON.stringify(transactItems)).toContain('agent-run-ingest')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('refuses an agent-run entry that a routing rule moves to another Project', async () => {
+    const harness = createHarness([
+      {},
+      {
+        Item: {
+          entryType: 'triage-configuration',
+          configuration: {
+            ...createConfigurationSnapshot(5),
+            rules: [{
+              id: 'agent-runs',
+              name: 'Agent runs',
+              enabled: true,
+              order: 1,
+              sourceKinds: ['agent-run'],
+              keywords: [],
+              teamId: 'support',
+              projectId: 'billing',
+              owner: { type: 'unowned' },
+            }],
+          },
+          revision: 5,
+        },
+      },
+    ])
+    try {
+      await expect(harness.client.createAgentRunEntry(
+        'workspace-1',
+        'support',
+        {
+          runId: 'run_1',
+          reason: 'stalled',
+          title: 'Agent run stalled: Fix checkout',
+          body: 'Claude Code (claude-code) stopped sending heartbeats.',
+          agentName: 'Claude Code',
+          assigneeUserId: 'demo@example.com',
+          projectId: 'checkout',
+        },
+        { key: 'agent-run:run_1', fingerprint: createTriageInputFingerprint({ runId: 'run_1' }) },
+      )).rejects.toMatchObject({ status: 409, code: 'TriageAdmissionProjectChanged' })
+      // Nothing is written, so readers of the billing Project never see the checkout Work Item.
+      expect(harness.commands.map(({ name }) => name)).toEqual(['GetCommand', 'GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('stores a webhook entry admitted after its retention ended only in redacted form', async () => {
     const harness = createHarness([{}, {}, {}])
     try {

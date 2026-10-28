@@ -332,6 +332,29 @@ export function AgentSettingsPanel({
                     {t('agentSettings.criteria.fieldHelp')}
                   </p>
                 </fieldset>
+
+                <fieldset className="grid gap-3" disabled={disabled}>
+                  <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.triage.title')}</legend>
+                  <p className="text-sm text-[var(--workbench-muted)]">{t('agentSettings.triage.description')}</p>
+                  <label className="flex min-h-[44px] items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+                    <input
+                      checked={draft.fileFailedRunsToTriage}
+                      className="h-5 w-5 accent-[var(--workbench-primary)]"
+                      type="checkbox"
+                      onChange={(event) => onDraftChange({ ...draft, fileFailedRunsToTriage: event.target.checked })}
+                    />
+                    {t('agentSettings.triage.failed')}
+                  </label>
+                  <label className="flex min-h-[44px] items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+                    <input
+                      checked={draft.fileStalledRunsToTriage}
+                      className="h-5 w-5 accent-[var(--workbench-primary)]"
+                      type="checkbox"
+                      onChange={(event) => onDraftChange({ ...draft, fileStalledRunsToTriage: event.target.checked })}
+                    />
+                    {t('agentSettings.triage.stalled')}
+                  </label>
+                </fieldset>
               </div>
             ) : null}
           </div>

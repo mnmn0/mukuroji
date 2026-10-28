@@ -56,7 +56,9 @@ describe('Agent settings response validation', () => {
       requireAcceptanceCriteria: false,
       projectBriefs: {},
     }
-    expect(readAgentSettings(defaults)).toEqual(defaults)
+    // A server older than Triage filing omits the flags, which read as off.
+    expect(readAgentSettings(defaults)).toEqual({ ...defaults, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
+    expect(readAgentSettings({ ...defaults, fileFailedRunsToTriage: 'yes' })).toBeUndefined()
   })
 
   test('rejects responses with an unsupported shape', () => {

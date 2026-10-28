@@ -1934,7 +1934,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 28);
+  template.resourceCountIs('AWS::SQS::Queue', 29);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -2034,7 +2034,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 30);
+  }, 31);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
@@ -2044,6 +2044,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
     'AnalyticsScheduleDlq',
     'NotificationScheduleDlq',
     'TriageScheduleDlq',
+    'AgentRunTriageDlq',
     'EnterpriseScimGroupJobDlq',
     'EnterpriseIdentityMaintenanceDlq',
     'TenantOperationDlq',
@@ -3166,4 +3167,52 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     .toContain('mukuroji/automation-inbound-webhooks/');
   expect(JSON.stringify(inboundCleanupStatement?.Resource))
     .not.toContain('mukuroji/automation-webhooks/');
+});
+
+test('agent run triage files failed and stalled runs through a narrow scheduled worker', () => {
+  const template = synthesizedTemplate;
+
+  // Teams that file runs and failed runs waiting to be filed share one sparse index.
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    GlobalSecondaryIndexes: Match.arrayWith([
+      Match.objectLike({
+        IndexName: 'AgentRunTriageIndex',
+        KeySchema: [
+          { AttributeName: 'triageIndexPartition', KeyType: 'HASH' },
+          { AttributeName: 'triageIndexSortKey', KeyType: 'RANGE' },
+        ],
+        Projection: {
+          NonKeyAttributes: ['workspaceId', 'teamId', 'runId'],
+          ProjectionType: 'INCLUDE',
+        },
+      }),
+    ]),
+  });
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Files failed and stalled Agent Runs of opted-in Teams to Triage, one entry per run.',
+    Timeout: 300,
+    Environment: {
+      Variables: Match.objectLike({
+        MUKUROJI_RUNTIME_ROLE: 'agent-run-triage-worker',
+        MUKUROJI_RUNTIME_CONTROL_SCOPE: 'agent-run-triage',
+        TRIAGE_WAKE_SHARD_COUNT: '8',
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    Description: 'Files failed and stalled Agent Runs to Triage every minute.',
+    ScheduleExpression: 'rate(1 minute)',
+  });
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Action: 'dynamodb:Query',
+          Resource: Match.arrayWith([
+            Match.objectLike({ 'Fn::Join': Match.arrayWith([Match.arrayWith(['/index/AgentRunTriageIndex'])]) }),
+          ]),
+        }),
+      ]),
+    },
+  });
 });

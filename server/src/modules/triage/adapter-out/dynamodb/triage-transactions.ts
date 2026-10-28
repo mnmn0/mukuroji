@@ -1084,7 +1084,7 @@ function isSource(value: unknown): value is TriageEntry['source'] {
     'connectorId',
   ]) &&
     (value.kind === 'form' || value.kind === 'chat' || value.kind === 'email' ||
-      value.kind === 'webhook' || value.kind === 'manual-handoff') &&
+      value.kind === 'webhook' || value.kind === 'manual-handoff' || value.kind === 'agent-run') &&
     isBoundedText(value.sourceId, 500) &&
     isOptionalBoundedText(value.provider, 100) &&
     isOptionalBoundedText(value.containerId, 500) &&

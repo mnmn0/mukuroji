@@ -88,6 +88,27 @@ export type TriageWebhookEndpointReference = {
   name: string
 }
 
+/** Why a coding-agent run is filed to Triage. */
+export type AgentRunTriageReason = 'failed' | 'stalled'
+
+/** Validated content of a Triage entry filed for a failed or stalled Agent Run. */
+export type CreateAgentRunTriageEntryInput = {
+  /** Run the entry is about; one entry per run, whichever reason is filed first. */
+  runId: string
+  /** Whether the run failed or stalled. */
+  reason: AgentRunTriageReason
+  /** Entry title shown in the queue. */
+  title: string
+  /** Plain-text summary of the run and its Work Item. */
+  body: string
+  /** Agent name shown as the requester. */
+  agentName: string
+  /** Member responsible for the run, kept as the requester's external ID. */
+  assigneeUserId: string
+  /** Project of the run's Work Item, so the entry is visible only to people who can see that Project. */
+  projectId?: string
+}
+
 /** Replay protection supplied by an HTTP or event adapter. */
 export type TriageIdempotency = {
   /** Caller-selected idempotency key scoped to the operation. */

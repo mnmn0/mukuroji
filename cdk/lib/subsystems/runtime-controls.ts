@@ -16,6 +16,7 @@ import {
  * Stable application surfaces that consume dynamic runtime controls.
  */
 export type RuntimeControlScope =
+  | 'agent-run-triage'
   | 'analytics-schedule'
   | 'api'
   | 'audit-export'

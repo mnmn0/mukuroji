@@ -3897,7 +3897,7 @@ function readCanonicalContextInstant(value: unknown): string | undefined {
 /** Returns whether an unknown value is a supported Triage source kind. */
 function isTriageContextSourceKind(value: unknown): boolean {
   return value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
 }
 
 /** Returns whether an unknown value is a source visibility state. */

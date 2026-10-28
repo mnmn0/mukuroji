@@ -16,6 +16,8 @@ export type TriageSourceKind =
   | 'email'
   | 'webhook'
   | 'manual-handoff'
+  /** A coding-agent run that failed or stalled, filed by the Agent Run triage worker. */
+  | 'agent-run'
 
 /** The complete lifecycle state of a triage entry. */
 export type TriageEntryState =

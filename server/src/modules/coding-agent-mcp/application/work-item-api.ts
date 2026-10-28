@@ -60,7 +60,7 @@ export type AgentTaskFilters = {
 export type AgentRunRecord = AgentRun
 
 /** Team Agent settings as returned by the public API. */
-export type AgentSettingsRecord = AgentSettings
+export type AgentSettingsRecord = Omit<AgentSettings, 'fileFailedRunsToTriage' | 'fileStalledRunsToTriage'>
 
 /** Input that claims a task for this agent instance. */
 export type AgentRunStartInput = {

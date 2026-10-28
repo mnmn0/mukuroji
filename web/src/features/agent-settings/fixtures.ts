@@ -33,6 +33,8 @@ export const agentSettingsFixture: AgentSettings = {
   projectBriefs: {
     'project-api': 'Keep the Public API schema closed; publish new fields through the agent context.',
   },
+  fileFailedRunsToTriage: true,
+  fileStalledRunsToTriage: false,
   updatedAt: '2026-10-20T03:15:00.000Z',
   updatedBy: 'member-avery',
 }

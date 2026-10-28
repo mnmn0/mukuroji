@@ -31,6 +31,8 @@ const defaultSettings: AgentSettings = {
   readyStatusIds: [],
   requireAcceptanceCriteria: false,
   projectBriefs: {},
+  fileFailedRunsToTriage: false,
+  fileStalledRunsToTriage: false,
 }
 
 /** Storybook metadata for the Team Agent settings panel. */

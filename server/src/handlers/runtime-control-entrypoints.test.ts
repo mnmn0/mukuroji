@@ -17,6 +17,11 @@ interface RuntimeControlledEntrypoint {
 
 const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
   {
+    filename: 'agent-run-triage-handler.ts',
+    exportName: 'handler',
+    surface: 'agent-run-triage',
+  },
+  {
     filename: 'analytics-schedule-handler.ts',
     exportName: 'handler',
     surface: 'analytics-schedule',

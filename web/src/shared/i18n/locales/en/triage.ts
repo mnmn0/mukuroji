@@ -33,6 +33,7 @@ export const triageMessages = {
   'triage.source.email': 'Email',
   'triage.source.webhook': 'Webhook',
   'triage.source.manualHandoff': 'Manual handoff',
+  'triage.source.agentRun': 'Agent run',
   'triage.sla.onTrack': 'On track',
   'triage.sla.dueSoon': 'Due soon',
   'triage.sla.breached': 'SLA breached',

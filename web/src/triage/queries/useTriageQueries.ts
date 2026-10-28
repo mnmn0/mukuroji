@@ -69,7 +69,7 @@ export function useTriageQueue(
         ownerUserId: owner === 'mine'
           ? ownerKey || undefined
           : owner === 'unowned' ? 'unowned' : undefined,
-        sourceKind: source === 'form' || source === 'chat' || source === 'email' || source === 'webhook' || source === 'manual-handoff'
+        sourceKind: source === 'form' || source === 'chat' || source === 'email' || source === 'webhook' || source === 'manual-handoff' || source === 'agent-run'
           ? source
           : undefined,
         workItemTypeId: workItemTypeId || undefined,
