@@ -286,8 +286,15 @@ describe('DynamoDB Agent Run store', () => {
       ExpressionAttributeValues: { ':partition': 'workspace-1#team#core', ':after': 'mark' },
     })
     const forged = createClient([{ Item: { workspaceId: 'workspace-2', teamId: 'core', watermark: 'mark' } }])
-    await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').readStallWatermark({ directoryId: 'workspace-1', teamId: 'core' }))
+    await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').readStallPosition({ directoryId: 'workspace-1', teamId: 'core' }))
       .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+
+    const cleared = createClient([() => {
+      throw Object.assign(new Error('no resume'), { name: 'ConditionalCheckFailedException' })
+    }])
+    // Clearing a resume position that is already gone never creates a row.
+    await new DynamoDbAgentRunStore(cleared.client, 'AgentRuns').saveStallResume({ directoryId: 'workspace-1', teamId: 'core' }, undefined)
+    expect(cleared.commands[0]?.input).toMatchObject({ UpdateExpression: 'REMOVE #resume', ConditionExpression: 'attribute_exists(#resume)' })
 
     const resume = createClient([{}, { Item: { directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' } }])
     const resumeStore = new DynamoDbAgentRunStore(resume.client, 'AgentRuns')

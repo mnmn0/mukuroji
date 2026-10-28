@@ -345,9 +345,16 @@ async function fileTeamStalledRuns(
   result: AgentRunTriageSweepResult,
 ): Promise<boolean> {
   const { store, now } = dependencies
-  const after = await store.readStallWatermark(team)
+  const position = await store.readStallPosition(team)
+  // A pass the read bound stopped continues where it stopped; a new pass starts at the watermark.
+  const after = position.resume !== undefined && (position.watermark === undefined || position.resume > position.watermark)
+    ? position.resume
+    : position.watermark
+  let settled: StoredAgentRun | undefined
   let passed: StoredAgentRun | undefined
   let complete = true
+  // Set when the pass stops before its last stalled run: a failure, or the filing or read bound.
+  let stopped = false
   let cursor: string | undefined
   let read = 0
   reading: do {
@@ -358,6 +365,7 @@ async function fileTeamStalledRuns(
       if (run.stallTriagedAt === undefined) {
         if (isStalledBatchFull(result)) {
           complete = false
+          stopped = true
           break reading
         }
         try {
@@ -365,20 +373,31 @@ async function fileTeamStalledRuns(
         } catch (error) {
           result.errors += 1
           dependencies.onError?.({ ...team, runId: run.runId, code: readErrorCode(error) })
+          stopped = true
           break reading
         }
       }
-      // Runs come soonest lease first, so once one is too recent to pass, none after it is passed.
-      if (Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) passed = run
+      // Runs come soonest lease first, so once one is too recent to settle, none after it does.
+      if (Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) settled = run
+      passed = run
       read += 1
     }
     if (read >= activeRunsPerTeam && cursor !== undefined) {
-      // The watermark has moved past these runs, so the next sweep reads the ones after them.
       result.truncated = true
+      stopped = true
       break
     }
   } while (cursor !== undefined)
-  if (passed !== undefined) await store.saveStallWatermark(passed)
+  // Only a pass that read every run from the watermark may move it: a continuing pass did not see
+  // runs the index listed late behind its start.
+  if (settled !== undefined && after === position.watermark) await store.saveStallWatermark(settled)
+  // A pass that read every stalled run ends; the next one starts at the watermark again and so
+  // reads any run the index listed late. A pass that stopped early continues after its last run.
+  if (!stopped) {
+    if (position.resume !== undefined) await store.saveStallResume(team, undefined)
+  } else if (passed !== undefined) {
+    await store.saveStallResume(team, passed)
+  }
   return complete
 }
 

@@ -28,6 +28,7 @@ import {
   type AgentRunStore,
   type AgentRunTransactItem,
   type AgentRunTriageOutboxEntry,
+  type AgentRunStallPosition,
   type AgentRunTriageStore,
   type AgentRunTriageTeam,
   type AgentRunTriageTeamPage,
@@ -49,6 +50,8 @@ type InMemoryAgentRunState = {
   triageOutbox: Set<string>
   /** Stall sweep watermarks by `<directoryId>|<teamId>`. */
   stallWatermarks: Map<string, string>
+  /** Stall sweep resume positions by `<directoryId>|<teamId>`. */
+  stallResumes: Map<string, string>
   /** Team the next stall sweep resumes from. */
   triageSweepResumeTeam?: AgentRunTriageTeam
 }
@@ -117,7 +120,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   /** Current state. */
   readonly state: InMemoryAgentRunState = {
     runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
-    triageOutbox: new Set(), stallWatermarks: new Map(),
+    triageOutbox: new Set(), stallWatermarks: new Map(), stallResumes: new Map(),
   }
   /** Builder that produces DynamoDB-shaped items. */
   readonly #builder = new DynamoDbAgentRunStore({
@@ -223,8 +226,18 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async readStallWatermark(team: AgentRunTriageTeam): Promise<string | undefined> {
-    return this.state.stallWatermarks.get(`${team.directoryId}|${team.teamId}`)
+  async readStallPosition(team: AgentRunTriageTeam): Promise<AgentRunStallPosition> {
+    const teamKey = `${team.directoryId}|${team.teamId}`
+    const watermark = this.state.stallWatermarks.get(teamKey)
+    const resume = this.state.stallResumes.get(teamKey)
+    return { ...(watermark === undefined ? {} : { watermark }), ...(resume === undefined ? {} : { resume }) }
+  }
+
+  /** @inheritdoc */
+  async saveStallResume(team: AgentRunTriageTeam, run: StoredAgentRun | undefined): Promise<void> {
+    const teamKey = `${team.directoryId}|${team.teamId}`
+    if (run === undefined) this.state.stallResumes.delete(teamKey)
+    else this.state.stallResumes.set(teamKey, `${run.leaseExpiresAt}#${run.runId}`)
   }
 
   /** @inheritdoc */

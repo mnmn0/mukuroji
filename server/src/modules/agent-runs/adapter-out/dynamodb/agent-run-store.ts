@@ -104,6 +104,14 @@ export type AgentRunTriageOutboxEntry = {
   runId: string
 }
 
+/** Where the stall sweep of a Team continues. */
+export type AgentRunStallPosition = {
+  /** Last run every later sweep may skip: passed, and long enough past its lease for the index to have settled. */
+  watermark?: string
+  /** Last run a pass that stopped at its read bound passed; the next sweep continues after it. */
+  resume?: string
+}
+
 /** One page of Teams that file runs to Triage. */
 export type AgentRunTriageTeamPage = {
   /** Teams in index order. */
@@ -134,16 +142,16 @@ export interface AgentRunTriageStore {
    */
   saveTriageSweepResumeTeam(team: AgentRunTriageTeam | undefined): Promise<void>
   /**
-   * Reads the position after the last active run the stall sweep passed in a Team.
+   * Reads where the stall sweep continues in a Team.
    * @param team - Team.
-   * @returns Opaque watermark, or undefined before the first pass.
+   * @returns Opaque watermark and resume positions; both are absent before the first pass.
    */
-  readStallWatermark(team: AgentRunTriageTeam): Promise<string | undefined>
+  readStallPosition(team: AgentRunTriageTeam): Promise<AgentRunStallPosition>
   /**
    * Lists a Team's active runs after a watermark, soonest lease expiry first. A lease only moves
    * later, so a run before the watermark was already passed.
    * @param team - Team.
-   * @param after - Watermark from {@link AgentRunTriageStore.readStallWatermark}.
+   * @param after - Position from {@link AgentRunTriageStore.readStallPosition}.
    * @param cursor - Continuation from a previous page.
    * @param limit - Page size from 1 to 100.
    * @returns One page of runs.
@@ -154,6 +162,12 @@ export interface AgentRunTriageStore {
    * @param run - Last run the sweep passed, as listed.
    */
   saveStallWatermark(run: StoredAgentRun): Promise<void>
+  /**
+   * Saves the run a pass stopped after at its read bound, or clears it once a pass read to the end.
+   * @param team - Team.
+   * @param run - Last run the pass passed, as listed, or undefined to clear.
+   */
+  saveStallResume(team: AgentRunTriageTeam, run: StoredAgentRun | undefined): Promise<void>
   /**
    * Lists failed runs not yet filed, oldest finish first.
    * @param limit - Largest number of entries, from 1 to 100.
@@ -1140,18 +1154,21 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  async readStallWatermark(team: AgentRunTriageTeam): Promise<string | undefined> {
+  async readStallPosition(team: AgentRunTriageTeam): Promise<AgentRunStallPosition> {
     const response = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
       Key: { directoryTeamId: createAgentRunPartition(team.directoryId, team.teamId), recordKey: stallWatermarkRecordKey },
       ConsistentRead: true,
     }))
     const item = response.Item
-    if (item === undefined) return undefined
+    if (item === undefined) return {}
     if (storedString(item, 'workspaceId') !== team.directoryId || storedString(item, 'teamId') !== team.teamId) {
       throw createAgentRunIntegrityError()
     }
-    return storedString(item, 'watermark')
+    return {
+      ...(item.watermark === undefined ? {} : { watermark: storedString(item, 'watermark') }),
+      ...(item.resume === undefined ? {} : { resume: storedString(item, 'resume') }),
+    }
   }
 
   /** @inheritdoc */
@@ -1188,6 +1205,31 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
         ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#teamId': 'teamId', '#watermark': 'watermark' },
         ExpressionAttributeValues: { ':workspaceId': run.directoryId, ':teamId': run.teamId, ':watermark': watermark },
       }))
+    } catch (error) {
+      if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+    }
+  }
+
+  /** @inheritdoc */
+  async saveStallResume(team: AgentRunTriageTeam, run: StoredAgentRun | undefined): Promise<void> {
+    const key = { directoryTeamId: createAgentRunPartition(team.directoryId, team.teamId), recordKey: stallWatermarkRecordKey }
+    try {
+      await this.#client.send(new UpdateCommand(run === undefined
+        ? {
+            TableName: this.#tableName,
+            Key: key,
+            UpdateExpression: 'REMOVE #resume',
+            // Clearing never creates a row.
+            ConditionExpression: 'attribute_exists(#resume)',
+            ExpressionAttributeNames: { '#resume': 'resume' },
+          }
+        : {
+            TableName: this.#tableName,
+            Key: key,
+            UpdateExpression: 'SET #workspaceId = :workspaceId, #teamId = :teamId, #resume = :resume',
+            ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#teamId': 'teamId', '#resume': 'resume' },
+            ExpressionAttributeValues: { ':workspaceId': team.directoryId, ':teamId': team.teamId, ':resume': `${run.leaseExpiresAt}#${run.runId}` },
+          }))
     } catch (error) {
       if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
     }

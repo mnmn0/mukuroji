@@ -265,6 +265,24 @@ describe('Agent Run triage sweep', () => {
     expect(await store.readTriageSweepResumeTeam()).toBeUndefined()
   })
 
+  test('continues a pass past filed runs while a mass stall is too recent to move the watermark', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: true })
+    // 450 runs whose leases all expired within the last 14 minutes, like agents that stopped together.
+    for (let runNumber = 1; runNumber <= 450; runNumber += 1) {
+      store.seed(createRun(runNumber, new Date(now.getTime() - 44 * minute + runNumber * 1_500)))
+    }
+    const filed: string[] = []
+    for (const expected of [100, 100, 100, 100, 50]) {
+      const sweep = createDependencies(store)
+      expect(await runAgentRunTriageSweep(sweep.dependencies)).toMatchObject({ stalledFiled: expected, errors: 0 })
+      filed.push(...sweep.filings.map((filing) => filing.runId))
+    }
+    expect(new Set(filed).size).toBe(450)
+    // The pass read to the end, so the next one starts at the watermark again.
+    expect(await store.readStallPosition({ directoryId: 'workspace-1', teamId: 'core' })).toEqual({})
+  })
+
   test('keeps the watermark before runs whose lease expired too recently for the index to have settled', async () => {
     const store = new InMemoryAgentRunStore()
     await saveFlags(store, { failed: false, stalled: true })
@@ -274,7 +292,7 @@ describe('Agent Run triage sweep', () => {
     expect(await runAgentRunTriageSweep(sweep.dependencies)).toMatchObject({ stalledFiled: 2 })
     // The second run stalled 5 minutes ago, so an earlier run the index has not shown yet can still be read.
     const first = await store.getRun('workspace-1', 'core', 'run_00000000-0000-4000-8000-000000000001')
-    expect(await store.readStallWatermark({ directoryId: 'workspace-1', teamId: 'core' })).toBe(`${first?.leaseExpiresAt}#${first?.runId}`)
+    expect(await store.readStallPosition({ directoryId: 'workspace-1', teamId: 'core' })).toEqual({ watermark: `${first?.leaseExpiresAt}#${first?.runId}` })
   })
 
   test('does not file stalled runs of a Team that only files failed runs', async () => {
