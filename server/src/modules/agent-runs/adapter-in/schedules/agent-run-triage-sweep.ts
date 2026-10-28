@@ -25,6 +25,16 @@ const pageSize = 100
 /** Longest title of an entry, matching the Triage limit. */
 const titleMaxLength = 500
 
+/** Longest body of an entry, matching the Triage limit. */
+const bodyMaxLength = 8000
+
+/**
+ * Stall age after which the eventually consistent index is trusted to list every earlier run.
+ * The watermark only passes runs this long past their lease, so a run the index has not shown
+ * yet stays ahead of it unless the index lags by more than the lease plus this margin.
+ */
+const watermarkSettleMs = 15 * 60_000
+
 /** Why a run is filed. */
 export type AgentRunTriageReason = 'failed' | 'stalled'
 
@@ -139,27 +149,39 @@ export function createAgentRunTriageFiling(
   reason: AgentRunTriageReason,
   workItem: AgentRunTriageWorkItem,
 ): AgentRunTriageFiling {
-  const title = `${reason === 'failed' ? 'Agent run failed' : 'Agent run stalled'}: ${workItem.title}`
+  const title = truncate(`${reason === 'failed' ? 'Agent run failed' : 'Agent run stalled'}: ${workItem.title}`, titleMaxLength)
   const summary = reason === 'failed'
     ? `${run.agentName} (${run.runtime}) finished its run on this Work Item as failed at ${run.finishedAt ?? run.lastHeartbeatAt}.`
     : `${run.agentName} (${run.runtime}) has not reported on this Work Item since ${run.lastHeartbeatAt}; its lease expired at ${run.leaseExpiresAt}.`
   return {
     runId: run.runId,
     reason,
-    title: title.length > titleMaxLength ? `${title.slice(0, titleMaxLength - 1)}…` : title,
-    body: [
+    title,
+    // A Work Item title may be longer than an entry allows, so the body never repeats it in full.
+    body: truncate([
       summary,
       '',
-      `Work Item: ${workItem.title}`,
+      `Work Item: ${truncate(workItem.title, titleMaxLength)}`,
       `Path: ${workItem.path}`,
       `Run: ${run.runId}`,
       `Assignee: ${run.assigneeUserId}`,
       ...(run.lastReportKind === undefined ? [] : [`Latest report: ${run.lastReportKind} at ${run.lastReportAt ?? 'unknown time'}`]),
-    ].join('\n'),
+    ].join('\n'), bodyMaxLength),
     agentName: run.agentName,
     assigneeUserId: run.assigneeUserId,
     ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
   }
+}
+
+/**
+ * Shortens text to a length, ending it with an ellipsis when it was cut.
+ *
+ * @param text - Text.
+ * @param maxLength - Largest length.
+ * @returns Text of at most `maxLength` characters.
+ */
+function truncate(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text
 }
 
 /**
@@ -346,7 +368,8 @@ async function fileTeamStalledRuns(
           break reading
         }
       }
-      passed = run
+      // Runs come soonest lease first, so once one is too recent to pass, none after it is passed.
+      if (Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) passed = run
       read += 1
     }
     if (read >= activeRunsPerTeam && cursor !== undefined) {

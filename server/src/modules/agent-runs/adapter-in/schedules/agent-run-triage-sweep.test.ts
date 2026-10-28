@@ -265,6 +265,18 @@ describe('Agent Run triage sweep', () => {
     expect(await store.readTriageSweepResumeTeam()).toBeUndefined()
   })
 
+  test('keeps the watermark before runs whose lease expired too recently for the index to have settled', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: true })
+    store.seed(createRun(1, new Date(now.getTime() - 50 * minute)))
+    store.seed(createRun(2, new Date(now.getTime() - 35 * minute)))
+    const sweep = createDependencies(store)
+    expect(await runAgentRunTriageSweep(sweep.dependencies)).toMatchObject({ stalledFiled: 2 })
+    // The second run stalled 5 minutes ago, so an earlier run the index has not shown yet can still be read.
+    const first = await store.getRun('workspace-1', 'core', 'run_00000000-0000-4000-8000-000000000001')
+    expect(await store.readStallWatermark({ directoryId: 'workspace-1', teamId: 'core' })).toBe(`${first?.leaseExpiresAt}#${first?.runId}`)
+  })
+
   test('does not file stalled runs of a Team that only files failed runs', async () => {
     const store = new InMemoryAgentRunStore()
     await saveFlags(store, { failed: true, stalled: false })
@@ -276,8 +288,10 @@ describe('Agent Run triage sweep', () => {
 
   test('keeps report text out of the entry and shows the latest report kind', () => {
     const run: StoredAgentRun = { ...createRun(1, now), lastReportKind: 'blocker', lastReportAt: now.toISOString() }
-    const filing = createAgentRunTriageFiling(run, 'stalled', { title: 'x'.repeat(600), path: '/teams/core/issues?issueId=task-1' })
+    const filing = createAgentRunTriageFiling(run, 'stalled', { title: 'x'.repeat(8000), path: '/teams/core/issues?issueId=task-1' })
     expect(filing.title).toHaveLength(500)
+    // A Work Item title Triage could not hold in full never makes the body exceed the Triage limit.
+    expect(filing.body.length).toBeLessThan(1000)
     expect(filing.body).toContain(`Latest report: blocker at ${now.toISOString()}`)
   })
 })

@@ -338,7 +338,7 @@ pane を流用する。
   heartbeat で回復しても entry はそのまま残し、判断は Triage の担当者に任せる。
 - 本文は agent 名と runtime、Work Item の title と画面への path、Run ID、終了時刻または lease の
   期限、最新 report の kind を書く。report の本文と成果物 link は含めない。Work Item への link は
-  Triage の accept / link 操作で人が行う。
+  Triage の accept / link 操作で人が行う。title と本文は Triage の上限（500 文字と 8,000 文字）に収まるよう切り詰める。
 - 起票は API request とは別の定期 worker（1 分ごと）が行う。audit stream にはすでに 3 つの
   consumer があり、DynamoDB stream の reader をこれ以上増やさない。
   - `failed` の finish は、Run の行に outbox key を同じ transaction で書く。worker はこの key を
@@ -349,6 +349,9 @@ pane を流用する。
     古い順に lease 切れの範囲だけ読む。起票した Run には印を付ける。放置された Run は `active` の
     まま index に残るため、Team ごとに最後に処理した Run の位置（watermark）を保存し、次の実行は
     その後ろから読む。lease は後ろにしか動かないため、watermark より前の Run は処理済みである。
+    index は結果整合なので、watermark は lease 切れから 15 分以上経った Run までしか進めない。
+    まだ index に現れていない Run を飛び越えるのは、index の遅れが lease と 15 分の和を超えた
+    場合だけになる。
     起票に一時的に失敗した Run の手前で watermark を止め、次の実行で再試行する。
   - 処理する Team 数や起票件数の上限で止まった場合は、止まった Team を保存し、次の実行はその Team
     から再開する。最後の Team まで処理したら保存を消し、次は先頭の Team から読む。
