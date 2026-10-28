@@ -328,7 +328,8 @@ pane を流用する。
 
 - source kind に `agent-run` を追加する。routing rule と SLA policy は他の source と同じく
   source kind で対象を選べる。entry の requester は Run の agent 名で、guest ではない。
-  返信先がないため `canReply` は `false` とする。
+  返信先がないため `canReply` は `false` とする。entry の Project は Run の Work Item の Project とし、
+  Project を限定された閲覧者には、その Project を見られる場合だけ entry を見せる。
 - entry は Run ごとに 1 件とし、source ID は `<runId>:failed` または `<runId>:stalled` にする。
   Triage の source claim で重複を防ぎ、同じ Run を何度処理しても 2 件目は作らない。停滞 Run が
   heartbeat で回復しても entry はそのまま残し、判断は Triage の担当者に任せる。

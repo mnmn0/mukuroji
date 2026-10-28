@@ -247,6 +247,25 @@ describe('DynamoDB Agent Run store', () => {
     })
   })
 
+  test('clears the Triage outbox without ever creating a row for a run deleted since it was listed', async () => {
+    const missing = createClient([() => {
+      throw Object.assign(new Error('missing'), { name: 'ConditionalCheckFailedException' })
+    }])
+    const store = new DynamoDbAgentRunStore(missing.client, 'AgentRuns')
+    await store.clearFailedRunTriage({ directoryId: 'workspace-1', teamId: 'core', runId: 'run_1' })
+    expect(missing.commands[0]?.input).toMatchObject({
+      Key: { directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run#run_1' },
+      ConditionExpression: 'attribute_exists(#recordKey)',
+    })
+    // The outbox lists failed runs oldest first and rejects a row whose keys disagree with its IDs.
+    const listed = createClient([{ Items: [{ directoryTeamId: 'workspace-1#team#core', recordKey: 'agent-run#run_1', workspaceId: 'workspace-1', teamId: 'core', runId: 'run_1' }] }])
+    expect(await new DynamoDbAgentRunStore(listed.client, 'AgentRuns').listFailedRunsToTriage(50))
+      .toEqual([{ directoryId: 'workspace-1', teamId: 'core', runId: 'run_1' }])
+    expect(listed.commands[0]?.input).toMatchObject({ IndexName: 'AgentRunTriageIndex', ExpressionAttributeValues: { ':partition': 'triage-failed-run' } })
+    const forged = createClient([{ Items: [{ directoryTeamId: 'workspace-2#team#core', recordKey: 'agent-run#run_1', workspaceId: 'workspace-1', teamId: 'core', runId: 'run_1' }] }])
+    await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').listFailedRunsToTriage(50)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
   test('takes over only a stalled run and replaces its claim in place', () => {
     const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
     const later = new Date(now.getTime() + 31 * 60_000)

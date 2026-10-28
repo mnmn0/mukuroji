@@ -2263,9 +2263,15 @@ function createAgentRunEntry(
     state: 'pending',
     routing: {
       reason: routingReason,
-      candidates: [{ teamId, reason: routingReason, permitted: true }],
+      candidates: [{
+        teamId,
+        ...(input.projectId ? { projectId: requireIdentifier(input.projectId, 'Project ID') } : {}),
+        reason: routingReason,
+        permitted: true,
+      }],
     },
     teamId,
+    ...(input.projectId ? { projectId: requireIdentifier(input.projectId, 'Project ID') } : {}),
     permission,
     retention: { expiresAt: now },
     capabilities: createTriageCapabilities({ state: 'pending', permission }),

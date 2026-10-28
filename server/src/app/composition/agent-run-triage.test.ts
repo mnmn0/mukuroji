@@ -50,6 +50,9 @@ describe('Agent Run triage composition', () => {
 
     const refused = createTriage(new TriageError(400, 'InvalidTriageInput', 'Agent name is invalid.'))
     expect(await createAgentRunTriageFiler(refused.client, async () => true).file('workspace-1', 'core', filing)).toBe('rejected')
+    // A routed owner who left the Workspace needs an administrator, not another attempt.
+    const ownerGone = createTriage(new TriageError(409, 'TriageAdmissionOwnerUnavailable', 'A configured Triage owner is not an active Workspace member.'))
+    expect(await createAgentRunTriageFiler(ownerGone.client, async () => true).file('workspace-1', 'core', filing)).toBe('rejected')
   })
 
   test('leaves a transient failure to the next sweep and files nothing for a closing Workspace', async () => {
@@ -72,10 +75,16 @@ describe('Agent Run triage composition', () => {
      */
     const getTeamIssueDetail = async (_directoryId: string, _teamId: string, workItemId: string) => {
       if (workItemId === 'deleted') throw Object.assign(new Error('Not found'), { status: 404, code: 'TeamIssueNotFound' })
-      return { issue: { title: `Title of ${workItemId}`, ...(workItemId === 'archived' ? { archivedAt: '2026-10-27T00:00:00.000Z' } : {}) } }
+      return {
+        issue: {
+          title: `Title of ${workItemId}`,
+          assignedProjectId: 'checkout',
+          ...(workItemId === 'archived' ? { archivedAt: '2026-10-27T00:00:00.000Z' } : {}),
+        },
+      }
     }
     const reader = createAgentRunTriageWorkItemReader({ getTeamIssueDetail })
-    expect(await reader.read('workspace-1', 'core', 'task-1')).toEqual({ title: 'Title of task-1', path: '/teams/core/issues?issueId=task-1' })
+    expect(await reader.read('workspace-1', 'core', 'task-1')).toEqual({ title: 'Title of task-1', path: '/teams/core/issues?issueId=task-1', projectId: 'checkout' })
     expect(await reader.read('workspace-1', 'core', 'archived')).toBeUndefined()
     expect(await reader.read('workspace-1', 'core', 'deleted')).toBeUndefined()
   })

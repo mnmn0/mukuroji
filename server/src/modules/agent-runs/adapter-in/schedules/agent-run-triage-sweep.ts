@@ -34,6 +34,8 @@ export type AgentRunTriageWorkItem = {
   title: string
   /** Path of the Work Item in the Web application. */
   path: string
+  /** Project the Work Item is assigned to, if any. */
+  projectId?: string
 }
 
 /** Reads the Work Item a run belongs to. */
@@ -62,6 +64,8 @@ export type AgentRunTriageFiling = {
   agentName: string
   /** Member responsible for the run. */
   assigneeUserId: string
+  /** Project of the Work Item; the entry is then visible only to people who can see it. */
+  projectId?: string
 }
 
 /**
@@ -154,6 +158,7 @@ export function createAgentRunTriageFiling(
     ].join('\n'),
     agentName: run.agentName,
     assigneeUserId: run.assigneeUserId,
+    ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
   }
 }
 

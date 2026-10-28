@@ -105,6 +105,8 @@ export type CreateAgentRunTriageEntryInput = {
   agentName: string
   /** Member responsible for the run, kept as the requester's external ID. */
   assigneeUserId: string
+  /** Project of the run's Work Item, so the entry is visible only to people who can see that Project. */
+  projectId?: string
 }
 
 /** Replay protection supplied by an HTTP or event adapter. */

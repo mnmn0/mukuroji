@@ -2450,6 +2450,7 @@ describe('DynamoDbTriageClient source admission', () => {
           body: 'Claude Code (claude-code) finished the run as failed.',
           agentName: 'Claude Code',
           assigneeUserId: 'demo@example.com',
+          projectId: 'checkout',
         },
         { key: 'agent-run:run_1:failed', fingerprint: createTriageInputFingerprint({ runId: 'run_1', reason: 'failed' }) },
       )
@@ -2463,6 +2464,9 @@ describe('DynamoDbTriageClient source admission', () => {
         requester: { displayName: 'Claude Code', externalId: 'demo@example.com', guest: false },
         permission: { canReply: false },
         teamId: 'support',
+        // Only people who can see the Work Item's Project see the entry.
+        projectId: 'checkout',
+        routing: { candidates: [{ teamId: 'support', projectId: 'checkout', permitted: true }] },
         state: 'pending',
       })
       expect(JSON.stringify(transactItems)).toContain('agent-run-ingest')

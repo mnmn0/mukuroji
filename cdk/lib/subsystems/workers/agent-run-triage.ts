@@ -58,6 +58,7 @@ export function buildAgentRunTriageWorker(
   const {
     agentRunsTable,
     auditEventsTable,
+    projectDirectoryTable,
     requestIntakeTable,
     tenantAdministrationTable,
     workItemsTable,
@@ -99,9 +100,11 @@ export function buildAgentRunTriageWorker(
         AGENT_RUNS_TABLE_NAME: agentRunsTable.tableName,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'agent-run-triage-worker',
         REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
         TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
+        PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         TRIAGE_WAKE_SHARD_COUNT: String(triageWakeShardCount),
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
@@ -132,6 +135,20 @@ export function buildAgentRunTriageWorker(
       tenantAdministrationTable.tableArn,
       workspaceAccessTable.tableArn,
     ],
+  }));
+  // Admission fences the Team, Project, and routed owners with the same checks as the API.
+  agentRunTriageFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+    resources: [projectDirectoryTable.tableArn],
+  }));
+  agentRunTriageFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:ConditionCheckItem'],
+    resources: [projectDirectoryTable.tableArn, workspaceAccessTable.tableArn],
+    conditions: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
   }));
   // Triage admission reads the source claim and Team configuration, then writes the entry,
   // claim, receipt, and audit event in one transaction.

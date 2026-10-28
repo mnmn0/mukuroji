@@ -104,7 +104,7 @@ function createDependencies(
          */
         async read(_directoryId: string, teamId: string, workItemId: string) {
           if (options.missingWorkItems?.includes(workItemId)) return undefined
-          return { title: `Title of ${workItemId}`, path: `/teams/${teamId}/issues?issueId=${workItemId}` }
+          return { title: `Title of ${workItemId}`, path: `/teams/${teamId}/issues?issueId=${workItemId}`, projectId: 'checkout' }
         },
       },
       triage: {
@@ -139,7 +139,7 @@ describe('Agent Run triage sweep', () => {
     const first = createDependencies(store)
 
     expect(await runAgentRunTriageSweep(first.dependencies)).toMatchObject({ failedFiled: 1, failedSkipped: 0, errors: 0, truncated: false })
-    expect(first.filings).toEqual([expect.objectContaining({ reason: 'failed', title: 'Agent run failed: Title of task-1', agentName: 'Codex', assigneeUserId: 'member-1' })])
+    expect(first.filings).toEqual([expect.objectContaining({ reason: 'failed', title: 'Agent run failed: Title of task-1', agentName: 'Codex', assigneeUserId: 'member-1', projectId: 'checkout' })])
     expect(first.filings[0]?.body).toContain('Path: /teams/core/issues?issueId=task-1')
     expect(await store.listFailedRunsToTriage(10)).toEqual([])
 

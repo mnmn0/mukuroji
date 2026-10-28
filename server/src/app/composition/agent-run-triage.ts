@@ -1,4 +1,5 @@
 import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
+import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbAgentRunStore,
   runAgentRunTriageSweep,
@@ -14,10 +15,24 @@ import {
   type TriageIdempotency,
 } from '../../modules/triage'
 import { DynamoDbTeamIssuesClient, createTeamIssueDeepLink, isTeamIssueNotFoundError } from '../../modules/work-items'
+import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
 import { createProductionTenantAvailability } from './tenant-administration'
+import { createTriageAdmissionValidator } from './triage-admission'
 
 /** Triage statuses that mean the entry input was refused, so filing it again cannot succeed. */
 const refusedTriageStatuses = new Set([400, 403, 404, 422])
+
+/**
+ * Checks whether Triage refused an entry: its input is invalid, or the Team, Project, or a
+ * configured owner it routes to is no longer active, which only an administrator can change.
+ *
+ * @param error - Error from the Triage client.
+ * @returns True when filing again cannot succeed by itself.
+ */
+function isRefusedTriageEntry(error: unknown): error is TriageError {
+  return error instanceof TriageError &&
+    (refusedTriageStatuses.has(error.status) || (error.status === 409 && error.code.startsWith('TriageAdmission')))
+}
 
 /** Work Item read the sweep needs, which the Work Item client provides. */
 export interface AgentRunTriageWorkItemSource {
@@ -46,6 +61,8 @@ export interface AgentRunTriageWorkItemSource {
       title: string
       /** Archive time; set for an archived Work Item. */
       archivedAt?: string
+      /** Project the Work Item is assigned to, if any. */
+      assignedProjectId?: string
     }
   }>
 }
@@ -67,7 +84,12 @@ export function createAgentRunTriageWorkItemReader(
           consistentIssueRead: true,
           includeEvents: false,
         })
-        return issue.archivedAt === undefined ? { title: issue.title, path: createTeamIssueDeepLink(teamId, workItemId) } : undefined
+        if (issue.archivedAt !== undefined) return undefined
+        return {
+          title: issue.title,
+          path: createTeamIssueDeepLink(teamId, workItemId),
+          ...(issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId }),
+        }
       } catch (error) {
         if (isTeamIssueNotFoundError(error)) return undefined
         throw error
@@ -117,8 +139,9 @@ export function createAgentRunTriageFiler(
         })
         return 'filed'
       } catch (error) {
-        if (error instanceof TriageError && refusedTriageStatuses.has(error.status)) return 'rejected'
-        throw error
+        if (!isRefusedTriageEntry(error)) throw error
+        console.warn('Agent Run triage entry was refused:', { directoryId, teamId, runId: filing.runId, code: error.code })
+        return 'rejected'
       }
     },
   }
@@ -136,7 +159,11 @@ export function createProductionAgentRunTriageHandler(): () => Promise<AgentRunT
   const store = new DynamoDbAgentRunStore(createDynamoDbDocumentClient(createDynamoDbClient()), tableName)
   const workItems = createAgentRunTriageWorkItemReader(new DynamoDbTeamIssuesClient())
   const tenant = createProductionTenantAvailability()
-  const triage = createAgentRunTriageFiler(new DynamoDbTriageClient(), (workspaceId) => tenant.isActive(workspaceId))
+  // The same live Team, Project, and owner checks as entries admitted through the API.
+  const triageClient = new DynamoDbTriageClient({
+    validateAdmission: createTriageAdmissionValidator(new DynamoDbProjectDirectoryClient(), new DynamoDbWorkspaceAccessClient()),
+  })
+  const triage = createAgentRunTriageFiler(triageClient, (workspaceId) => tenant.isActive(workspaceId))
   return async () => {
     const result = await runAgentRunTriageSweep({
       store,

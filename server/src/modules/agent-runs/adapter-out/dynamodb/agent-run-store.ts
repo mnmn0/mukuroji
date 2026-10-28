@@ -1091,12 +1091,22 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
 
   /** @inheritdoc */
   async clearFailedRunTriage(entry: AgentRunTriageOutboxEntry): Promise<void> {
-    await this.#client.send(new UpdateCommand({
-      TableName: this.#tableName,
-      Key: { directoryTeamId: createAgentRunPartition(entry.directoryId, entry.teamId), recordKey: runRecordKey(entry.runId) },
-      UpdateExpression: 'REMOVE #triageIndexPartition, #triageIndexSortKey',
-      ExpressionAttributeNames: { '#triageIndexPartition': 'triageIndexPartition', '#triageIndexSortKey': 'triageIndexSortKey' },
-    }))
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(entry.directoryId, entry.teamId), recordKey: runRecordKey(entry.runId) },
+        UpdateExpression: 'REMOVE #triageIndexPartition, #triageIndexSortKey',
+        // Never creates a row: a run deleted since it was listed has nothing left to clear.
+        ConditionExpression: 'attribute_exists(#recordKey)',
+        ExpressionAttributeNames: {
+          '#triageIndexPartition': 'triageIndexPartition',
+          '#triageIndexSortKey': 'triageIndexSortKey',
+          '#recordKey': 'recordKey',
+        },
+      }))
+    } catch (error) {
+      if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+    }
   }
 
   /** @inheritdoc */
