@@ -13,6 +13,30 @@ const filing: AgentRunTriageFiling = {
 }
 
 /**
+ * Creates a Workspace lifecycle double.
+ *
+ * @param active - Whether the Workspace accepts writes.
+ * @returns Lifecycle double.
+ */
+function createTenant(active: boolean) {
+  return {
+    /**
+     * Answers with the fixed lifecycle.
+     * @returns Whether the Workspace accepts writes.
+     */
+    isActive: async () => active,
+    /**
+     * Creates a recognizable condition.
+     * @param workspaceId - Workspace ID.
+     * @returns Condition check.
+     */
+    createActiveWriteCondition: (workspaceId: string) => ({
+      ConditionCheck: { TableName: 'Tenants', Key: { workspaceId }, ConditionExpression: 'lifecycleStatus = :active' },
+    }),
+  }
+}
+
+/**
  * Creates a Triage client double that records idempotency and answers with a fixed result.
  *
  * @param result - Error to throw, or nothing to succeed.
@@ -20,8 +44,10 @@ const filing: AgentRunTriageFiling = {
  */
 function createTriage(result?: Error) {
   const keys: string[] = []
+  const conditions: unknown[] = []
   return {
     keys,
+    conditions,
     client: {
       /**
        * Records the idempotency key, then succeeds or throws.
@@ -31,10 +57,12 @@ function createTriage(result?: Error) {
        * @param idempotency - Replay protection.
        * @param idempotency.key - Idempotency key.
        * @param idempotency.fingerprint - Input fingerprint.
+       * @param checks - Conditions committed with the entry.
        * @returns A receipt.
        */
-      async createAgentRunEntry(_workspaceId: string, _teamId: string, _input: unknown, idempotency: { key: string; fingerprint: string }) {
+      async createAgentRunEntry(_workspaceId: string, _teamId: string, _input: unknown, idempotency: { key: string; fingerprint: string }, checks: unknown[]) {
         keys.push(idempotency.key)
+        conditions.push(...checks)
         if (result) throw result
         return { replayed: false, entry: {} }
       },
@@ -45,26 +73,28 @@ function createTriage(result?: Error) {
 describe('Agent Run triage composition', () => {
   test('files with one key per run, and treats refused input as rejected', async () => {
     const ok = createTriage()
-    expect(await createAgentRunTriageFiler(ok.client, async () => true).file('workspace-1', 'core', filing)).toBe('filed')
+    expect(await createAgentRunTriageFiler(ok.client, createTenant(true)).file('workspace-1', 'core', filing)).toBe('filed')
     expect(ok.keys).toEqual(['agent-run:run_1'])
+    // The entry commits only while the Workspace is still active.
+    expect(ok.conditions).toEqual([{ ConditionCheck: { TableName: 'Tenants', Key: { workspaceId: 'workspace-1' }, ConditionExpression: 'lifecycleStatus = :active' } }])
     // A run that stalled and then failed replays its first entry instead of opening another.
-    expect(await createAgentRunTriageFiler(ok.client, async () => true).file('workspace-1', 'core', { ...filing, reason: 'stalled' })).toBe('filed')
+    expect(await createAgentRunTriageFiler(ok.client, createTenant(true)).file('workspace-1', 'core', { ...filing, reason: 'stalled' })).toBe('filed')
     expect(ok.keys).toEqual(['agent-run:run_1', 'agent-run:run_1'])
 
     const refused = createTriage(new TriageError(400, 'InvalidTriageInput', 'Agent name is invalid.'))
-    expect(await createAgentRunTriageFiler(refused.client, async () => true).file('workspace-1', 'core', filing)).toBe('rejected')
+    expect(await createAgentRunTriageFiler(refused.client, createTenant(true)).file('workspace-1', 'core', filing)).toBe('rejected')
     // A routed owner who left the Workspace needs an administrator, not another attempt.
     const ownerGone = createTriage(new TriageError(409, 'TriageAdmissionOwnerUnavailable', 'A configured Triage owner is not an active Workspace member.'))
-    expect(await createAgentRunTriageFiler(ownerGone.client, async () => true).file('workspace-1', 'core', filing)).toBe('rejected')
+    expect(await createAgentRunTriageFiler(ownerGone.client, createTenant(true)).file('workspace-1', 'core', filing)).toBe('rejected')
   })
 
   test('leaves a transient failure to the next sweep and files nothing for a closing Workspace', async () => {
     const conflict = createTriage(new TriageError(409, 'TriageConfigurationConflict', 'Triage settings changed.'))
-    await expect(createAgentRunTriageFiler(conflict.client, async () => true).file('workspace-1', 'core', filing))
+    await expect(createAgentRunTriageFiler(conflict.client, createTenant(true)).file('workspace-1', 'core', filing))
       .rejects.toMatchObject({ code: 'TriageConfigurationConflict' })
 
     const closing = createTriage()
-    expect(await createAgentRunTriageFiler(closing.client, async () => false).file('workspace-1', 'core', filing)).toBe('rejected')
+    expect(await createAgentRunTriageFiler(closing.client, createTenant(false)).file('workspace-1', 'core', filing)).toBe('rejected')
     expect(closing.keys).toEqual([])
   })
 

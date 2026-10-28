@@ -136,14 +136,14 @@ export function buildAgentRunTriageWorker(
       workspaceAccessTable.tableArn,
     ],
   }));
-  // Admission fences the Team, Project, and routed owners with the same checks as the API.
+  // Admission fences the Team, Project, routed owners, and the Workspace lifecycle at commit.
   agentRunTriageFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:Query'],
     resources: [projectDirectoryTable.tableArn],
   }));
   agentRunTriageFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:ConditionCheckItem'],
-    resources: [projectDirectoryTable.tableArn, workspaceAccessTable.tableArn],
+    resources: [projectDirectoryTable.tableArn, workspaceAccessTable.tableArn, tenantAdministrationTable.tableArn],
     conditions: {
       'ForAnyValue:StringEquals': {
         'dynamodb:EnclosingOperation': ['TransactWriteItems'],

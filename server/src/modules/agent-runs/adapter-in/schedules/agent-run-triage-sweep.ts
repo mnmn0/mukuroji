@@ -339,8 +339,8 @@ function isStalledBatchFull(result: AgentRunTriageSweepResult): boolean {
 /**
  * Files a Team's stalled runs after its watermark, soonest lease expiry first, and moves the
  * watermark past each run it is done with. Reading stops at the first run whose lease has not
- * expired. A failed run stays after the watermark for the next sweep, and the runs after it are
- * still filed.
+ * expired. A failed run stays after the watermark, so the next pass from the watermark retries it,
+ * and the runs after it are still filed.
  *
  * @param dependencies - Sweep dependencies.
  * @param team - Team that files stalled runs.
@@ -361,9 +361,10 @@ async function fileTeamStalledRuns(
   let settled: StoredAgentRun | undefined
   let passed: StoredAgentRun | undefined
   let complete = true
-  // Set when the pass stops before its last stalled run: a failure, or the filing or read bound.
+  // Set when the pass stops before its last stalled run at the filing or read bound.
   let stopped = false
-  // Set after a failed run: later runs are still filed, but no position moves past the failed one.
+  // Set after a failed run: later runs are still filed and the pass continues past it, but the
+  // watermark stays before it, so the next pass from the watermark retries it.
   let blocked = false
   let cursor: string | undefined
   let read = 0
@@ -383,15 +384,12 @@ async function fileTeamStalledRuns(
         } catch (error) {
           result.errors += 1
           dependencies.onError?.({ ...team, runId: run.runId, code: readErrorCode(error) })
-          stopped = true
           blocked = true
         }
       }
-      if (!blocked) {
-        // Runs come soonest lease first, so once one is too recent to settle, none after it does.
-        if (Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) settled = run
-        passed = run
-      }
+      // Runs come soonest lease first, so once one is too recent to settle, none after it does.
+      if (!blocked && Date.parse(run.leaseExpiresAt) <= now.getTime() - watermarkSettleMs) settled = run
+      passed = run
       read += 1
     }
     if (read >= activeRunsPerTeam && cursor !== undefined) {

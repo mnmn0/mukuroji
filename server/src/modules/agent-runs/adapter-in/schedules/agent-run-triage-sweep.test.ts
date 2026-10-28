@@ -322,6 +322,31 @@ describe('Agent Run triage sweep', () => {
     expect(await store.readStallPosition({ directoryId: 'workspace-1', teamId: 'core' })).toEqual({})
   })
 
+  test('reaches the runs behind a stalled run whose filing keeps failing, even past the read bound', async () => {
+    const store = new InMemoryAgentRunStore()
+    await saveFlags(store, { failed: false, stalled: true })
+    for (let runNumber = 1; runNumber <= 250; runNumber += 1) {
+      store.seed(createRun(runNumber, new Date(now.getTime() - (300 - runNumber) * minute)))
+    }
+    const failing = 'run_00000000-0000-4000-8000-000000000001'
+    /**
+     * Fails the oldest run like a Work Item whose read keeps failing.
+     * @param filing - Entry content.
+     * @returns The filed outcome for other runs.
+     */
+    const file = async (filing: AgentRunTriageFiling): Promise<'filed'> => {
+      if (filing.runId === failing) throw Object.assign(new Error('Service unavailable'), { name: 'InternalServerError' })
+      return 'filed'
+    }
+    const filed = new Set<string>()
+    for (let sweep = 0; sweep < 6; sweep += 1) {
+      const dependencies = createDependencies(store, { file })
+      await runAgentRunTriageSweep(dependencies.dependencies)
+      for (const filing of dependencies.filings) if (filing.runId !== failing) filed.add(filing.runId)
+    }
+    expect(filed.size).toBe(249)
+  })
+
   test('keeps the watermark before runs whose lease expired too recently for the index to have settled', async () => {
     const store = new InMemoryAgentRunStore()
     await saveFlags(store, { failed: false, stalled: true })

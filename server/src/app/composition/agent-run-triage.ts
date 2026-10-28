@@ -13,6 +13,7 @@ import {
   TriageError,
   createTriageInputFingerprint,
   type CreateAgentRunTriageEntryInput,
+  type TriageAuthorizationConditionChecks,
   type TriageIdempotency,
 } from '../../modules/triage'
 import { DynamoDbTeamIssuesClient, createTeamIssueDeepLink, isTeamIssueNotFoundError } from '../../modules/work-items'
@@ -107,6 +108,7 @@ export interface AgentRunTriageEntryWriter {
    * @param teamId - Team ID.
    * @param input - Entry content.
    * @param idempotency - Replay protection.
+   * @param authorizationConditionChecks - Checks committed with the entry.
    * @returns Resolves once the entry exists.
    */
   createAgentRunEntry(
@@ -114,31 +116,50 @@ export interface AgentRunTriageEntryWriter {
     teamId: string,
     input: CreateAgentRunTriageEntryInput,
     idempotency: TriageIdempotency,
+    authorizationConditionChecks: TriageAuthorizationConditionChecks,
   ): Promise<unknown>
+}
+
+/** Workspace lifecycle the sweep checks before and while it files an entry. */
+export interface AgentRunTriageTenant {
+  /**
+   * Checks whether the Workspace accepts new writes.
+   * @param workspaceId - Workspace ID.
+   * @returns True while the Workspace is active.
+   */
+  isActive(workspaceId: string): Promise<boolean>
+  /**
+   * Creates the condition that fails the entry's transaction when the Workspace started closing.
+   * @param workspaceId - Workspace ID.
+   * @returns Transaction condition check.
+   */
+  createActiveWriteCondition(workspaceId: string): TriageAuthorizationConditionChecks[number]
 }
 
 /**
  * Creates the Triage writer of the sweep. One idempotency key and fingerprint per run make every
- * repeat, including a failed finish after a stall was filed, a replay of the first filing. A Workspace that is closing receives no entries.
+ * repeat, including a failed finish after a stall was filed, a replay of the first filing. A
+ * Workspace that is closing receives no entries, and an entry commits only while its Workspace is
+ * still active.
  *
  * @param triage - Triage client.
- * @param isTenantActive - Whether the Workspace accepts new writes.
+ * @param tenant - Workspace lifecycle checks.
  * @returns Triage writer.
  */
 export function createAgentRunTriageFiler(
   triage: AgentRunTriageEntryWriter,
-  isTenantActive: (workspaceId: string) => Promise<boolean>,
+  tenant: AgentRunTriageTenant,
 ): AgentRunTriageFiler {
   return {
     /** Files one entry, replaying an earlier filing of the same run. */
     async file(directoryId, teamId, filing) {
-      if (!await isTenantActive(directoryId)) return 'rejected'
+      if (!await tenant.isActive(directoryId)) return 'rejected'
       try {
         await triage.createAgentRunEntry(directoryId, teamId, filing, {
           // One entry per run: filing a run again for another reason replays its first entry.
           key: `agent-run:${filing.runId}`,
           fingerprint: createTriageInputFingerprint({ runId: filing.runId }),
-        })
+        }, [tenant.createActiveWriteCondition(directoryId)])
         return 'filed'
       } catch (error) {
         if (!isRefusedTriageEntry(error)) throw error
@@ -165,7 +186,7 @@ export function createProductionAgentRunTriageHandler(): () => Promise<AgentRunT
   const triageClient = new DynamoDbTriageClient({
     validateAdmission: createTriageAdmissionValidator(new DynamoDbProjectDirectoryClient(), new DynamoDbWorkspaceAccessClient()),
   })
-  const triage = createAgentRunTriageFiler(triageClient, (workspaceId) => tenant.isActive(workspaceId))
+  const triage = createAgentRunTriageFiler(triageClient, tenant)
   return async () => {
     const result = await runAgentRunTriageSweep({
       store,

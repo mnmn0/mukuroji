@@ -1549,6 +1549,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param teamId - Team of the run.
    * @param input - Validated entry content.
    * @param idempotency - Replay protection bound to the run.
+   * @param authorizationConditionChecks - Checks committed with the entry, such as the Workspace still being active.
    * @returns The created or replayed entry receipt.
    */
   async createAgentRunEntry(
@@ -1556,6 +1557,7 @@ export class DynamoDbTriageClient implements TriageClient {
     teamId: string,
     input: CreateAgentRunTriageEntryInput,
     idempotency: TriageIdempotency,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt> {
     return this.admitSourceEntry({
       workspaceId,
@@ -1565,6 +1567,7 @@ export class DynamoDbTriageClient implements TriageClient {
       createEntry: (entryId, now) => createAgentRunEntry(workspaceId, teamId, input, entryId, now),
       idempotency,
       operation: 'agent-run-ingest',
+      ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
       validateAdmission: (admission) => requireAgentRunProject(input, admission.entry),
     })
   }

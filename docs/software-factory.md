@@ -355,12 +355,14 @@ pane を流用する。
     最後に処理した Run の位置（resume）も保存し、次の実行はその後ろから続ける。最後まで読んだら
     resume を消し、次の実行は watermark から読み直す。watermark を進めるのは watermark から
     読み始めた実行だけとし、遅れて index に現れた Run を飛び越えない。
-    起票に一時的に失敗した Run の手前で watermark と resume を止め、次の実行で再試行する。後続の Run の起票は続ける。
+    起票に一時的に失敗した Run の手前で watermark を止め、watermark から読み直す次の走査で再試行する。後続の Run の起票と resume は先へ進める。
   - 処理する Team 数や起票件数の上限で止まった場合は、止まった Team を保存し、次の実行はその Team
     から再開する。最後の Team まで処理したら保存を消し、次は先頭の Team から読む。
   - 両方とも `AgentRunsTable` の sparse GSI `AgentRunTriageIndex` を使う。partition は
     `triage-filing-team`（設定の行）と `triage-failed-run`（outbox）の 2 つで、どちらも件数が
     少ないため shard しない。GSI は table 更新ごとに 1 つしか追加できないため 1 つにまとめる。
+- 閉鎖中の Workspace には起票しない。起票の transaction に Workspace が active である条件を含め、
+  確認の後に閉鎖が始まっても entry を作らない。
 - worker の 1 回の処理件数には上限を設け、上限に達した場合は記録して次の実行に続ける。
 
 ## Public API
