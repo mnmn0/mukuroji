@@ -166,6 +166,18 @@ describe('Factory line scene', () => {
     expect(readTags()).toEqual([])
   })
 
+  test('keeps the name tags of several finished tasks apart', () => {
+    const finished = item('docs-link')
+    const many = Array.from({ length: 3 }, (_, index): FactoryBoardItem => ({ ...finished, workItem: { ...finished.workItem, id: `done-${index}` } }))
+    const markup = renderToStaticMarkup(
+      <FactoryLineScene focusedStation="done" groups={groupFactoryLineItems(many, now)} idPrefix="test" labels={labels} onFocusStation={() => undefined} />,
+    )
+    const tops = [...markup.matchAll(/data-factory-line-tag="" transform="translate\(([-\d.]+) ([-\d.]+)\)"/gu)].map((match) => Number(match[2]))
+    expect(tops).toHaveLength(3)
+    // Each tag is 15 px tall, so a later tag must start at least that far below the one before it.
+    for (let index = 1; index < tops.length; index += 1) expect((tops[index] ?? 0) - (tops[index - 1] ?? 0)).toBeGreaterThanOrEqual(15)
+  })
+
   test('counts the tasks a station does not draw', () => {
     const building = item('refund-ids')
     const many = Array.from({ length: 5 }, (_, index): FactoryBoardItem => ({ ...building, workItem: { ...building.workItem, id: `many-${index}` } }))

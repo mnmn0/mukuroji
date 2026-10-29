@@ -160,7 +160,27 @@ export const BusyStation: Story = {
     },
   },
   play: async ({ canvasElement }) => {
-    await expect(within(canvasElement).getByRole('complementary')).toHaveTextContent('実装 5 件')
+    await expect(within(canvasElement).getByRole('complementary')).toHaveTextContent(/実装\s*5 件/u)
+  },
+}
+
+/** A done station with several finished tasks keeps each parcel's name tag apart from the next. */
+export const FinishedStation: Story = {
+  args: {
+    initialFocusedStation: 'done',
+    board: {
+      ...factoryLineFixture,
+      items: [
+        ...factoryLineFixture.items,
+        ...['done-2', 'done-3'].flatMap((id) => {
+          const finished = factoryLineFixture.items.find((entry) => entry.workItem.id === 'docs-link')
+          return finished ? [{ ...finished, workItem: { ...finished.workItem, id, title: `${finished.workItem.title} (${id})` } }] : []
+        }),
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('complementary')).toHaveTextContent(/完了\s*3 件/u)
   },
 }
 

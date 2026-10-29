@@ -355,6 +355,15 @@ function MachineDetail({ station }: { station: FactoryLineStation }) {
   }
 }
 
+/** Height of a worker's head above its feet, in screen pixels; the warning marker sits just below it. */
+const workerHeadHeight = 44
+
+/** How far above a worker's feet its name tag ends, in screen pixels. */
+const workerTagRise = 70
+
+/** Extra downward step of each later tag on the done station, in screen pixels. */
+const doneTagStep = 5
+
 /**
  * Estimates the drawn width of sign text, counting full-width characters wider than ASCII.
  *
@@ -375,12 +384,14 @@ function estimateTextWidth(text: string, asciiWidth: number, wideWidth: number):
  * @param props.y - Screen y of the tag's bottom.
  * @param props.text - Text to show.
  * @param props.tone - Edge color.
+ * @param props.leader - Length of a line from the tag's bottom down to what it names; none when absent.
  * @returns Tag.
  */
-function SceneTag({ x, y, text, tone }: { x: number; y: number; text: string; tone: string }) {
+function SceneTag({ x, y, text, tone, leader }: { x: number; y: number; text: string; tone: string; leader?: number }) {
   const width = estimateTextWidth(text, 5.4, 9.5) + 10
   return (
     <g data-factory-line-tag="" transform={`translate(${x - width / 2} ${y - 15})`}>
+      {leader === undefined ? null : <line strokeWidth={1} style={{ stroke: tone }} x1={width / 2} x2={width / 2} y1={15} y2={15 + leader} />}
       <rect height={15} rx={4} style={{ fill: 'var(--workbench-surface)', stroke: tone }} strokeWidth={1} width={width} />
       <text fontSize={9} fontWeight={700} style={{ fill: colors.text }} textAnchor="middle" x={width / 2} y={11}>{text}</text>
     </g>
@@ -475,16 +486,19 @@ function StationWork({ station, entries, selectedWorkItemId, focused, moreLabel 
       })}
       {focused ? drawn.map((entry, index) => {
         const name = readFactoryLineNameTag(entry.item.workItem)
-        // Finished tasks have no worker, so their name sits on the parcel instead.
+        // Finished tasks have no worker, so their name sits on the parcel instead. Parcels are closer
+        // together than tags are tall, so each later tag steps further down to keep them apart.
         if (station === 'done') {
           const { px, py } = parcelAt(index)
           const [sx, sy] = project(px + 0.35, py + 0.35, 1.1)
-          return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={colors.muted} x={sx} y={sy - 4} />
+          return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={colors.muted} x={sx} y={sy - 4 + index * doneTagStep} />
         }
+        // A worker's tag floats high enough that the next worker's tag clears this worker's warning
+        // marker, with a line down to the head it names.
         const { wx, wy } = workerAt(index)
         const [sx, sy] = project(wx, wy)
         const tone = station === 'intake' || station === 'decision' ? colors.muted : runtimeColors[entry.item.run?.runtime ?? 'other']
-        return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={tone} x={sx} y={sy - 48} />
+        return <SceneTag key={`name-${entry.item.workItem.id}`} leader={workerTagRise - workerHeadHeight} text={name} tone={tone} x={sx} y={sy - workerTagRise} />
       }) : null}
       {focused && hidden > 0 ? (() => {
         // The count sits on the floor past the last worker, below the name tags over the workers' heads.
