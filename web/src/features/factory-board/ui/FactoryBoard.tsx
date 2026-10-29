@@ -1,5 +1,5 @@
 import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardLane, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
-import { useId, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useId, useRef, useState, type MouseEvent } from 'react'
 import { ChevronIcon, ClockIcon, ExternalLinkIcon } from '../../../shared/ui/icons'
 import { readAgentRunDisplayState, type AgentRunDisplayState } from '../../../work-items/model/agentRunDisplay'
 import { AgentRunReportChips } from '../../../work-items/ui/AgentRunReportChips'
@@ -15,7 +15,9 @@ import {
   readLeaseMinutesRemaining,
   type FactoryBoardFilters,
 } from '../model/factoryBoard'
+import { groupFactoryLineItems, type FactoryLineEntry, type FactoryLineStation } from '../model/factoryLine'
 import type { FactoryBoardLabels } from './factoryBoardLabels'
+import { FactoryLine } from './FactoryLine'
 
 /** State of the selected Work Item's reports, read separately from the board. */
 export type FactoryBoardReportsState = {
@@ -31,8 +33,18 @@ export type FactoryBoardReportsState = {
   onRetry?: () => void
 }
 
+/** How the board shows its items: lanes by the decision they need, or a factory line by station. */
+export type FactoryBoardView = 'lanes' | 'line'
+
+/** Views in the order the switch offers them. */
+const factoryBoardViews: readonly FactoryBoardView[] = ['lanes', 'line']
+
 /** Props of the pure Factory board view. */
 export type FactoryBoardProps = {
+  /** View to show; lanes when absent. */
+  view?: FactoryBoardView
+  /** Switches the view; the switch is hidden when absent. */
+  onViewChange?: (view: FactoryBoardView) => void
   /** Board data, once loaded. */
   board?: TeamAgentRunBoardResponse
   /** Whether the first read is in progress. */
@@ -63,6 +75,8 @@ export type FactoryBoardProps = {
   onNavigate: (href: string) => void
   /** Filters applied on first render, for stories and deep links. */
   initialFilters?: FactoryBoardFilters
+  /** Station the line view follows on first render, for stories. */
+  initialFocusedStation?: FactoryLineStation
 }
 
 /** Color treatments of each lane; state names always accompany the color. */
@@ -113,6 +127,7 @@ export function FactoryBoard({
   formatDateTime,
   getWorkItemHref,
   initialFilters = defaultFactoryBoardFilters,
+  initialFocusedStation,
   isLoading,
   isRefreshing = false,
   labels,
@@ -123,14 +138,26 @@ export function FactoryBoard({
   projectNames,
   reports,
   selectedWorkItemId,
+  view = 'lanes',
+  onViewChange,
 }: FactoryBoardProps) {
   const [filters, setFilters] = useState(initialFilters)
+  const [focusedStation, setFocusedStation] = useState(initialFocusedStation)
+  const [linePlaying, setLinePlaying] = useState(false)
   const detailId = useId()
   const lanesRef = useRef<HTMLDivElement>(null)
   const detailRef = useRef<HTMLElement>(null)
   const items = board?.items ?? []
   const now = new Date(board?.generatedAt ?? 0)
   const visible = filterFactoryBoardItems(items, filters)
+  const lineShown = view === 'line' && visible.length > 0
+  const [wasLineShown, setWasLineShown] = useState(lineShown)
+  // Hiding the line, by the view switch, the URL, or filters that leave no task, stops playing, so it
+  // does not resume on its own and close a task opened meanwhile.
+  if (wasLineShown !== lineShown) {
+    setWasLineShown(lineShown)
+    setLinePlaying(false)
+  }
   const groups = groupFactoryBoardItems(visible, now)
   const allGroups = groupFactoryBoardItems(items, now)
   /**
@@ -148,6 +175,7 @@ export function FactoryBoard({
    */
   const countLane = (lane: FactoryBoardLane) => allGroups.find((group) => group.lane === lane)?.items.length ?? 0
   const selected = visible.find((item) => item.workItem.id === selectedWorkItemId)
+  const lineGroups = view === 'line' ? groupFactoryLineItems(visible, now) : []
   const options = readFactoryBoardFilterOptions(items, filters)
 
   /**
@@ -170,6 +198,41 @@ export function FactoryBoard({
       const tile = Array.from(lanesRef.current?.querySelectorAll<HTMLButtonElement>('[data-factory-board-item]') ?? [])
         .find((candidate) => candidate.dataset.factoryBoardItem === previous)
       tile?.focus()
+    })
+  }
+
+  /**
+   * Moves the line's camera to a station and closes an open task, so the panel always lists the
+   * station the camera shows.
+   *
+   * @param station - Station, or undefined for the whole line.
+   */
+  const focusStation = useCallback((station: FactoryLineStation | undefined) => {
+    setFocusedStation(station)
+    if (selectedWorkItemId !== undefined) onSelect(undefined)
+  }, [onSelect, selectedWorkItemId])
+
+  /**
+   * Opens a task's detail from the station panel, which the detail replaces, so focus moves into it.
+   * It stops playing, which would otherwise move on and close the task.
+   *
+   * @param workItemId - Selected Work Item.
+   */
+  const selectFromStation = (workItemId: string) => {
+    // Playing would move to the next station and close the task the person just opened.
+    setLinePlaying(false)
+    onSelect(workItemId)
+    requestAnimationFrame(() => detailRef.current?.focus())
+  }
+
+  /** Returns from a task's detail to its station and focuses the task that opened it. */
+  const backToStation = () => {
+    const previous = selectedWorkItemId
+    onSelect(undefined)
+    requestAnimationFrame(() => {
+      const task = Array.from(detailRef.current?.querySelectorAll<HTMLButtonElement>('[data-factory-line-item]') ?? [])
+        .find((candidate) => candidate.dataset.factoryLineItem === previous)
+      ;(task ?? detailRef.current)?.focus()
     })
   }
 
@@ -220,6 +283,21 @@ export function FactoryBoard({
             value={filters.projectId}
           />
         </fieldset>
+        {onViewChange ? (
+          <div aria-label={labels.viewLabel} className="flex rounded-md border border-[var(--workbench-border)] p-0.5" role="group">
+            {factoryBoardViews.map((option) => (
+              <button
+                aria-pressed={view === option}
+                className={`min-h-[40px] rounded px-3 text-sm font-semibold ${view === option ? 'bg-[var(--workbench-primary-surface)] text-[var(--workbench-primary-text)]' : 'text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'}`}
+                key={option}
+                onClick={() => onViewChange(option)}
+                type="button"
+              >
+                {option === 'lanes' ? labels.viewLanes : labels.viewLine}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <button
           className="workbench-button-secondary min-h-[44px] px-3"
           disabled={isRefreshing}
@@ -247,6 +325,59 @@ export function FactoryBoard({
         <div className="grid place-content-center gap-2 px-4 py-12 text-center">
           <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{labels.empty}</h2>
           <p className="max-w-sm text-sm leading-6 text-[var(--workbench-muted)]">{labels.emptyDescription}</p>
+        </div>
+      ) : view === 'line' && visible.length === 0 ? (
+        <p className="py-8 text-sm text-[var(--workbench-muted)]" role="status">{labels.noResults}</p>
+      ) : view === 'line' ? (
+        <div className="grid min-h-0 min-w-0 gap-4 min-[1000px]:grid-cols-[minmax(0,1fr)_340px] min-[1280px]:grid-cols-[minmax(0,1fr)_380px]">
+          <FactoryLine
+            focusedStation={focusedStation}
+            groups={lineGroups}
+            idPrefix={`${detailId}-line`}
+            labels={labels.line}
+            onFocusStation={focusStation}
+            onPlayingChange={setLinePlaying}
+            playing={linePlaying}
+            {...(selected ? { selectedWorkItemId: selected.workItem.id } : {})}
+          />
+          <aside
+            aria-label={labels.detailLabel}
+            className="min-w-0 rounded-lg border border-[var(--workbench-border)] bg-surface p-4 min-[1000px]:sticky min-[1000px]:top-0 min-[1000px]:max-h-[calc(100svh-12rem)] min-[1000px]:overflow-y-auto"
+            id={detailId}
+            ref={detailRef}
+            tabIndex={-1}
+          >
+            {selected ? (
+              <>
+                <button className="mb-3 flex min-h-[44px] items-center gap-1 text-sm font-medium text-fg-teal-700" onClick={backToStation} type="button">
+                  <ChevronIcon className="size-4 rotate-90 fill-none stroke-current stroke-2" />{labels.line.backToStation}
+                </button>
+                <FactoryBoardDetail
+                  formatDateTime={formatDateTime}
+                  item={selected}
+                  key={selected.workItem.id}
+                  labels={labels}
+                  lane={groups.find((group) => group.items.includes(selected))?.lane}
+                  now={now}
+                  onNavigate={onNavigate}
+                  onRelease={onRelease}
+                  projectNames={projectNames}
+                  reports={reports}
+                  workItemHref={getWorkItemHref(selected)}
+                />
+              </>
+            ) : (
+              <StationPanel
+                detailId={detailId}
+                entries={focusedStation === undefined ? undefined : lineGroups.find((group) => group.station === focusedStation)?.entries ?? []}
+                formatDateTime={formatDateTime}
+                labels={labels}
+                now={now}
+                onSelect={selectFromStation}
+                station={focusedStation}
+              />
+            )}
+          </aside>
         </div>
       ) : (
         <div className="grid min-h-0 min-w-0 gap-4 min-[1000px]:grid-cols-[minmax(0,1fr)_340px] min-[1280px]:grid-cols-[minmax(0,1fr)_380px]">
@@ -324,6 +455,81 @@ export function FactoryBoard({
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * Shows what one station of the line holds: its name and purpose, then each task with its assignee,
+ * agent, latest report, and time. Without a chosen station it explains the line.
+ *
+ * @param props - Station, its tasks, and text.
+ * @returns Station panel.
+ */
+function StationPanel({ detailId, entries, formatDateTime, labels, now, onSelect, station }: {
+  /** ID of the detail pane the tasks control. */
+  detailId: string
+  /** Tasks at the station; absent when no station is chosen. */
+  entries: readonly FactoryLineEntry[] | undefined
+  /** Formats an ISO 8601 timestamp. */
+  formatDateTime: (value: string) => string
+  /** Board text. */
+  labels: FactoryBoardLabels
+  /** Board read time. */
+  now: Date
+  /** Opens a task's detail. */
+  onSelect: (workItemId: string) => void
+  /** Station the camera follows. */
+  station: FactoryLineStation | undefined
+}) {
+  if (station === undefined || entries === undefined) {
+    return (
+      <div className="grid gap-2">
+        <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.line.overviewTitle}</h2>
+        <p className="text-sm leading-6 text-[var(--workbench-muted)]">{labels.line.overviewDescription}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="grid gap-3">
+      <div className="grid gap-1">
+        <h2 className="text-base font-semibold text-[var(--workbench-text)]">
+          {labels.line.stations[station]}
+          <span className="ml-2 text-xs font-medium tabular-nums text-[var(--workbench-muted)]">{labels.line.count.replace('{count}', String(entries.length))}</span>
+        </h2>
+        <p className="text-sm leading-6 text-[var(--workbench-muted)]">{labels.line.stationDescriptions[station]}</p>
+      </div>
+      {entries.length === 0 ? <p className="text-sm text-[var(--workbench-muted)]">{labels.line.empty}</p> : (
+        <ul className="grid gap-2">
+          {entries.map(({ item, stalled }) => (
+            <li key={item.workItem.id}>
+              <button
+                aria-controls={detailId}
+                className="flex w-full min-w-0 flex-col rounded-lg border border-[var(--workbench-border)] bg-surface p-3 text-left hover:border-[var(--workbench-border-strong)]"
+                data-factory-line-item={item.workItem.id}
+                onClick={() => onSelect(item.workItem.id)}
+                type="button"
+              >
+                <span className="break-words text-sm font-semibold leading-6 text-[var(--workbench-text)]">{item.workItem.title}</span>
+                <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-[var(--workbench-muted)]">
+                  <span>{readFactoryBoardAssigneeLabel(item.workItem)}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-semibold text-[var(--workbench-text)]">{item.run ? item.run.agentName : labels.line.noAgent}</span>
+                  {item.run && item.run.agentName !== labels.runs.runtimes[item.run.runtime] ? <span className="workbench-badge">{labels.runs.runtimes[item.run.runtime]}</span> : null}
+                  {stalled ? <span className="workbench-badge-warning">{labels.line.stalled}</span> : null}
+                </span>
+                {item.run ? <ReportSummary item={item} labels={labels} /> : null}
+                {item.run ? (
+                  <span className="mt-2 flex items-center gap-1 text-xs tabular-nums text-[var(--workbench-muted)]">
+                    <ClockIcon className="size-3.5 shrink-0 fill-none stroke-current stroke-2" />
+                    <RunTime formatDateTime={formatDateTime} labels={labels} now={now} run={item.run} />
+                  </span>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 
