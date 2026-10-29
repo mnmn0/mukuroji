@@ -10,6 +10,9 @@ export type FactoryLineMainStation = (typeof FACTORY_LINE_STATIONS)[number]
 /** Station of one item: a main-line station, or the repair bay beside the line for failed runs. */
 export type FactoryLineStation = FactoryLineMainStation | 'repair'
 
+/** Longest name a worker tag shows before it is shortened. */
+const nameTagLength = 10
+
 /** Every station the line shows, main line first and the repair bay last. */
 export const FACTORY_LINE_ALL_STATIONS: readonly FactoryLineStation[] = [...FACTORY_LINE_STATIONS, 'repair']
 
@@ -88,4 +91,18 @@ export function groupFactoryLineItems(items: readonly FactoryBoardItem[], now: D
 export function readNextFactoryLineStation(station: FactoryLineStation | undefined): FactoryLineStation {
   const index = station === undefined ? -1 : FACTORY_LINE_ALL_STATIONS.indexOf(station)
   return FACTORY_LINE_ALL_STATIONS[(index + 1) % FACTORY_LINE_ALL_STATIONS.length] ?? 'intake'
+}
+
+/**
+ * Reads the short name a worker's tag shows on the line: the part of an email before the @, shortened
+ * with an ellipsis when it is long, so tags stay small enough to sit above one worker.
+ *
+ * @param label - Assignee label: display name, email, or member ID.
+ * @returns Name for the tag.
+ */
+export function readFactoryLineNameTag(label: string): string {
+  const at = label.indexOf('@')
+  const name = at > 0 ? label.slice(0, at) : label
+  const characters = Array.from(name)
+  return characters.length > nameTagLength ? `${characters.slice(0, nameTagLength - 1).join('')}…` : name
 }

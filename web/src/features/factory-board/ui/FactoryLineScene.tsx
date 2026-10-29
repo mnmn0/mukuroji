@@ -1,6 +1,7 @@
 import type { AgentRunRuntime } from '@mukuroji/contracts'
 import type { ReactNode } from 'react'
-import type { FactoryLineEntry, FactoryLineStation, FactoryLineStationGroup } from '../model/factoryLine'
+import { readFactoryBoardAssigneeLabel } from '../model/factoryBoard'
+import { readFactoryLineNameTag, type FactoryLineEntry, type FactoryLineStation, type FactoryLineStationGroup } from '../model/factoryLine'
 import type { FactoryLineLabels } from './factoryBoardLabels'
 
 /** Screen pixels of one world unit. */
@@ -356,6 +357,38 @@ function MachineDetail({ station }: { station: FactoryLineStation }) {
 }
 
 /**
+ * Estimates the drawn width of sign text, counting full-width characters wider than ASCII.
+ *
+ * @param text - Text to draw.
+ * @param asciiWidth - Width of one ASCII character.
+ * @param wideWidth - Width of one full-width character.
+ * @returns Approximate width in screen pixels.
+ */
+function estimateTextWidth(text: string, asciiWidth: number, wideWidth: number): number {
+  return Array.from(text).reduce((width, character) => width + ((character.codePointAt(0) ?? 0) > 0x7f ? wideWidth : asciiWidth), 0)
+}
+
+/**
+ * Draws a small tag above a worker or at the end of a station's parcels.
+ *
+ * @param props - Screen position, text, and edge color.
+ * @param props.x - Screen x of the tag's center.
+ * @param props.y - Screen y of the tag's bottom.
+ * @param props.text - Text to show.
+ * @param props.tone - Edge color.
+ * @returns Tag.
+ */
+function SceneTag({ x, y, text, tone }: { x: number; y: number; text: string; tone: string }) {
+  const width = estimateTextWidth(text, 5.4, 9.5) + 10
+  return (
+    <g data-factory-line-tag="" transform={`translate(${x - width / 2} ${y - 15})`}>
+      <rect height={15} rx={4} style={{ fill: 'var(--workbench-surface)', stroke: tone }} strokeWidth={1} width={width} />
+      <text fontSize={9} fontWeight={700} style={{ fill: colors.text }} textAnchor="middle" x={width / 2} y={11}>{text}</text>
+    </g>
+  )
+}
+
+/**
  * Draws the sign above one station with its number, name, and task count.
  *
  * @param props - Station, sign text, and count.
@@ -370,8 +403,7 @@ function StationSign({ station, index, name, count, focused }: { station: Factor
   const { x, y } = stationPositions[station]
   const [sx, sy] = project(x, y - 1.6, 3.6)
   const number = index === undefined ? '!' : String(index + 1).padStart(2, '0')
-  const wide = Array.from(name).some((character) => (character.codePointAt(0) ?? 0) > 0x7f)
-  const width = 34 + name.length * (wide ? 12 : 7) + 22
+  const width = 34 + estimateTextWidth(name, 7, 12) + 22
   return (
     <g transform={`translate(${sx - width / 2} ${sy - 26})`}>
       <line strokeWidth={1.5} style={{ stroke: colors.muted }} x1={width / 2} x2={width / 2} y1={24} y2={34} />
@@ -385,33 +417,55 @@ function StationSign({ station, index, name, count, focused }: { station: Factor
 }
 
 /**
- * Draws the parcels and workers of one station, at most {@link drawnPerStation} of each.
+ * Draws the parcels and workers of one station, at most {@link drawnPerStation} of each. When the
+ * camera follows the station, each worker carries its assignee's name and a tag counts the tasks
+ * that are not drawn.
  *
- * @param props - Station, its tasks, and the selected task.
+ * @param props - Station, its tasks, the selected task, and whether the camera follows it.
  * @param props.station - Station.
  * @param props.entries - Tasks at the station.
  * @param props.selectedWorkItemId - Selected task, highlighted when drawn.
+ * @param props.focused - Whether the camera follows the station; names are drawn only then.
+ * @param props.moreLabel - Text of the tag for tasks that are not drawn, with a `{count}` placeholder.
  * @returns Parcels and workers.
  */
-function StationWork({ station, entries, selectedWorkItemId }: { station: FactoryLineStation; entries: readonly FactoryLineEntry[]; selectedWorkItemId?: string }) {
+function StationWork({ station, entries, selectedWorkItemId, focused, moreLabel }: {
+  station: FactoryLineStation
+  entries: readonly FactoryLineEntry[]
+  selectedWorkItemId?: string
+  focused: boolean
+  moreLabel: string
+}) {
   const { x, y } = stationPositions[station]
   const drawn = entries.slice(0, drawnPerStation)
   const onLine = station !== 'repair'
+  const hidden = entries.length - drawn.length
+  /**
+   * Places the parcel of one drawn task. Points in front of a machine sit further along x by their
+   * distance across the line, so they appear in front of it rather than in front of the previous station.
+   *
+   * @param index - Position among the drawn tasks.
+   * @returns World point of the parcel.
+   */
+  const parcelAt = (index: number) => onLine ? { px: x + 1.0 + index * 1.05, py: 2.45 } : { px: x + 0.2 + index * 0.9, py: y + 1.4 }
+  /**
+   * Places the worker of one drawn task.
+   *
+   * @param index - Position among the drawn tasks.
+   * @returns World point of the worker.
+   */
+  const workerAt = (index: number) => {
+    const wy = onLine ? 4.6 : y + 3.2
+    return { wx: x + (wy - y) - 1.4 + index * 1.4, wy }
+  }
   return (
     <g>
-      {drawn.map((entry, index) => (
-        <Parcel
-          key={`parcel-${entry.item.workItem.id}`}
-          selected={entry.item.workItem.id === selectedWorkItemId}
-          // Points in front of a machine sit further along x by their distance across the line, so
-          // they appear in front of it rather than in front of the previous station.
-          x={onLine ? x + 1.0 + index * 1.05 : x + 0.2 + index * 0.9}
-          y={onLine ? 2.45 : y + 1.4}
-        />
-      ))}
       {drawn.map((entry, index) => {
-        const wy = onLine ? 4.6 : y + 3.2
-        const wx = x + (wy - y) - 1.4 + index * 1.4
+        const { px, py } = parcelAt(index)
+        return <Parcel key={`parcel-${entry.item.workItem.id}`} selected={entry.item.workItem.id === selectedWorkItemId} x={px} y={py} />
+      })}
+      {drawn.map((entry, index) => {
+        const { wx, wy } = workerAt(index)
         const delay = index * 0.35
         if (station === 'intake' || station === 'decision') {
           return <Person color={station === 'decision' ? colors.person : '#0f766e'} delay={delay} key={`worker-${entry.item.workItem.id}`} x={wx} y={wy} />
@@ -420,6 +474,24 @@ function StationWork({ station, entries, selectedWorkItemId }: { station: Factor
         const runtime = entry.item.run?.runtime ?? 'other'
         return <Robot color={runtimeColors[runtime]} delay={delay} key={`worker-${entry.item.workItem.id}`} stalled={entry.stalled || station === 'repair'} x={wx} y={wy} />
       })}
+      {focused ? drawn.map((entry, index) => {
+        const name = readFactoryLineNameTag(readFactoryBoardAssigneeLabel(entry.item.workItem))
+        // Finished tasks have no worker, so their name sits on the parcel instead.
+        if (station === 'done') {
+          const { px, py } = parcelAt(index)
+          const [sx, sy] = project(px + 0.35, py + 0.35, 1.1)
+          return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={colors.muted} x={sx} y={sy - 4} />
+        }
+        const { wx, wy } = workerAt(index)
+        const [sx, sy] = project(wx, wy)
+        const tone = station === 'intake' || station === 'decision' ? colors.muted : runtimeColors[entry.item.run?.runtime ?? 'other']
+        return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={tone} x={sx} y={sy - 48} />
+      }) : null}
+      {focused && hidden > 0 ? (() => {
+        const { px, py } = parcelAt(drawn.length)
+        const [sx, sy] = project(px + 0.35, py + 0.35, 0.6)
+        return <SceneTag text={moreLabel.replace('{count}', String(hidden))} tone={colors.accent} x={sx} y={sy} />
+      })() : null}
     </g>
   )
 }
@@ -482,7 +554,13 @@ export function FactoryLineScene({ groups, focusedStation, selectedWorkItemId, o
         {groups.map((group, index) => (
           <g className="cursor-pointer" key={group.station} onClick={() => onFocusStation(group.station)}>
             <Machine busy={group.entries.length > 0} focused={group.station === focusedStation} station={group.station} />
-            <StationWork entries={group.entries} selectedWorkItemId={selectedWorkItemId} station={group.station} />
+            <StationWork
+              entries={group.entries}
+              focused={group.station === focusedStation}
+              moreLabel={labels.more}
+              station={group.station}
+              {...(selectedWorkItemId === undefined ? {} : { selectedWorkItemId })}
+            />
             <StationSign
               count={group.entries.length}
               focused={group.station === focusedStation}

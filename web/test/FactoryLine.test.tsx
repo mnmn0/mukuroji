@@ -7,8 +7,10 @@ import {
   FACTORY_LINE_ALL_STATIONS,
   classifyFactoryLineStation,
   groupFactoryLineItems,
+  readFactoryLineNameTag,
   readNextFactoryLineStation,
 } from '../src/features/factory-board/model/factoryLine'
+import { FactoryLineScene } from '../src/features/factory-board/ui/FactoryLineScene'
 import { FactoryBoard } from '../src/features/factory-board/ui/FactoryBoard'
 import { createFactoryBoardLabels } from '../src/features/factory-board/ui/factoryBoardLabels'
 
@@ -59,6 +61,14 @@ describe('Factory line stations', () => {
     expect(build?.entries.find((entry) => entry.item.workItem.id === 'stalled-import')?.stalled).toBe(true)
     expect(build?.entries.find((entry) => entry.item.workItem.id === 'refund-ids')?.stalled).toBe(false)
     expect(groups.flatMap((group) => group.entries).some((entry) => entry.item.workItem.id === 'closed')).toBe(false)
+  })
+
+  test('shortens worker names to fit a tag', () => {
+    expect(readFactoryLineNameTag('鈴木 一郎')).toBe('鈴木 一郎')
+    expect(readFactoryLineNameTag('tanaka@example.com')).toBe('tanaka')
+    expect(readFactoryLineNameTag('Alexandria Ocasio')).toBe('Alexandri…')
+    // A label that only starts with @ is not an email, so it is kept as a name.
+    expect(readFactoryLineNameTag('@handle')).toBe('@handle')
   })
 
   test('plays through every station and wraps around', () => {
@@ -119,5 +129,45 @@ describe('Factory line view', () => {
     )
     expect(markup).toContain(labels.noResults)
     expect(markup).not.toContain(labels.line.sceneLabel)
+  })
+})
+
+describe('Factory line scene', () => {
+  const labels = createFactoryBoardLabels('ja').line
+
+  /**
+   * Draws the scene and returns its tags' text.
+   *
+   * @param focusedStation - Station the camera follows, or undefined for the whole line.
+   * @param items - Items to place; the line fixture by default.
+   * @returns Text of every tag drawn above workers or parcels.
+   */
+  function readTags(focusedStation?: 'build' | 'done', items: readonly FactoryBoardItem[] = factoryLineFixture.items): string[] {
+    const markup = renderToStaticMarkup(
+      <FactoryLineScene
+        groups={groupFactoryLineItems(items, now)}
+        idPrefix="test"
+        labels={labels}
+        onFocusStation={() => undefined}
+        {...(focusedStation === undefined ? {} : { focusedStation })}
+      />,
+    )
+    return [...markup.matchAll(/data-factory-line-tag=""[^>]*>.*?<text[^>]*>([^<]*)<\/text>/gu)].map((match) => match[1] ?? '')
+  }
+
+  test('names the workers of the station the camera follows', () => {
+    expect(readTags('build')).toEqual(['鈴木 一郎', 'tanaka', 'tanaka'])
+    // Finished tasks have no worker; their names sit on the parcels.
+    expect(readTags('done')).toEqual(['佐藤 花子'])
+  })
+
+  test('draws no tags on the whole line', () => {
+    expect(readTags()).toEqual([])
+  })
+
+  test('counts the tasks a station does not draw', () => {
+    const building = item('refund-ids')
+    const many = Array.from({ length: 5 }, (_, index): FactoryBoardItem => ({ ...building, workItem: { ...building.workItem, id: `many-${index}` } }))
+    expect(readTags('build', many)).toEqual(['鈴木 一郎', '鈴木 一郎', '鈴木 一郎', 'ほか 2 件'])
   })
 })
