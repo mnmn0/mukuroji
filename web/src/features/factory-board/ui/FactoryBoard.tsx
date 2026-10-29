@@ -324,6 +324,8 @@ export function FactoryBoard({
           <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{labels.empty}</h2>
           <p className="max-w-sm text-sm leading-6 text-[var(--workbench-muted)]">{labels.emptyDescription}</p>
         </div>
+      ) : view === 'line' && visible.length === 0 ? (
+        <p className="py-8 text-sm text-[var(--workbench-muted)]" role="status">{labels.noResults}</p>
       ) : view === 'line' ? (
         <div className="grid min-h-0 min-w-0 gap-4 min-[1000px]:grid-cols-[minmax(0,1fr)_340px] min-[1280px]:grid-cols-[minmax(0,1fr)_380px]">
           <FactoryLine

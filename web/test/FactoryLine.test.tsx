@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { FactoryBoardItem } from '@mukuroji/contracts'
 import { factoryBoardFixtureNow, factoryBoardFixtureProjectNames, factoryLineFixture } from '../src/features/factory-board/fixtures'
+import { defaultFactoryBoardFilters } from '../src/features/factory-board/model/factoryBoard'
 import {
   FACTORY_LINE_ALL_STATIONS,
   classifyFactoryLineStation,
@@ -95,5 +96,28 @@ describe('Factory line view', () => {
     expect(markup).toContain(labels.line.stalled)
     // The lanes are not drawn in the line view.
     expect(markup).not.toContain('data-factory-board-item')
+  })
+
+  test('says nothing matches instead of drawing an empty line when the filters leave no task', () => {
+    const labels = createFactoryBoardLabels('ja')
+    const markup = renderToStaticMarkup(
+      <FactoryBoard
+        board={factoryLineFixture}
+        formatDateTime={(value) => value}
+        getWorkItemHref={(entry) => `/teams/core/issues?issueId=${entry.workItem.id}`}
+        initialFilters={{ ...defaultFactoryBoardFilters, assigneeUserId: 'nobody' }}
+        isLoading={false}
+        labels={labels}
+        onNavigate={() => undefined}
+        onRefresh={() => undefined}
+        onSelect={() => undefined}
+        onViewChange={() => undefined}
+        projectNames={factoryBoardFixtureProjectNames}
+        reports={{ isLoading: false }}
+        view="line"
+      />,
+    )
+    expect(markup).toContain(labels.noResults)
+    expect(markup).not.toContain(labels.line.sceneLabel)
   })
 })
