@@ -144,18 +144,20 @@ export function FactoryBoard({
   const [filters, setFilters] = useState(initialFilters)
   const [focusedStation, setFocusedStation] = useState(initialFocusedStation)
   const [linePlaying, setLinePlaying] = useState(false)
-  const [playingView, setPlayingView] = useState(view)
-  // Leaving the line, by the switch or the URL, stops playing so it does not resume and close a task opened meanwhile.
-  if (playingView !== view) {
-    setPlayingView(view)
-    setLinePlaying(false)
-  }
   const detailId = useId()
   const lanesRef = useRef<HTMLDivElement>(null)
   const detailRef = useRef<HTMLElement>(null)
   const items = board?.items ?? []
   const now = new Date(board?.generatedAt ?? 0)
   const visible = filterFactoryBoardItems(items, filters)
+  const lineShown = view === 'line' && visible.length > 0
+  const [wasLineShown, setWasLineShown] = useState(lineShown)
+  // Hiding the line, by the view switch, the URL, or filters that leave no task, stops playing, so it
+  // does not resume on its own and close a task opened meanwhile.
+  if (wasLineShown !== lineShown) {
+    setWasLineShown(lineShown)
+    setLinePlaying(false)
+  }
   const groups = groupFactoryBoardItems(visible, now)
   const allGroups = groupFactoryBoardItems(items, now)
   /**

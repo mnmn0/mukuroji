@@ -129,6 +129,21 @@ export const LeavingLineStopsPlaying: Story = {
   },
 }
 
+/** Filters that leave no task hide the line and stop playing, so clearing them does not resume it. */
+export const FilteringOutLineStopsPlaying: Story = {
+  beforeEach: allowMotion,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '工程を再生' }))
+    const assignee = canvas.getByRole('combobox', { name: '担当者' })
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'ランタイム' }), 'kiro')
+    await userEvent.selectOptions(assignee, 'suzuki@example.com')
+    await expect(canvas.getByText('絞り込み条件に一致するタスクはありません。')).toBeInTheDocument()
+    await userEvent.selectOptions(assignee, 'all')
+    await expect(canvas.getByRole('button', { name: '工程を再生' })).toHaveAttribute('aria-pressed', 'false')
+  },
+}
+
 /** The decision station, where people act. */
 export const DecisionStation: Story = { args: { initialFocusedStation: 'decision' } }
 
