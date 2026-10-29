@@ -6,6 +6,20 @@ import { FactoryBoard, type FactoryBoardProps } from './FactoryBoard'
 import { createFactoryBoardLabels } from './factoryBoardLabels'
 
 /**
+ * Makes the reduced-motion query never match, so stories that play the line run even when the
+ * browser asks for less motion.
+ *
+ * @returns Restores the original `matchMedia`.
+ */
+function allowMotion(): () => void {
+  const original = window.matchMedia
+  window.matchMedia = (query) => original.call(window, query === '(prefers-reduced-motion: reduce)' ? 'not all' : query)
+  return () => {
+    window.matchMedia = original
+  }
+}
+
+/**
  * Keeps the view and selection in story state, as the page does.
  *
  * @param props - Board props; `view` and `selectedWorkItemId` are the initial values.
@@ -92,6 +106,7 @@ export const StationChosen: Story = {
 
 /** Opening a task while the line plays stops playing, so the task stays open. */
 export const OpeningTaskStopsPlaying: Story = {
+  beforeEach: allowMotion,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: '工程を再生' }))
@@ -104,6 +119,7 @@ export const OpeningTaskStopsPlaying: Story = {
 
 /** Leaving the line stops playing, so coming back does not resume it. */
 export const LeavingLineStopsPlaying: Story = {
+  beforeEach: allowMotion,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: '工程を再生' }))
