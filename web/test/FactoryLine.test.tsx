@@ -64,11 +64,12 @@ describe('Factory line stations', () => {
   })
 
   test('shortens worker names to fit a tag', () => {
-    expect(readFactoryLineNameTag('鈴木 一郎')).toBe('鈴木 一郎')
-    expect(readFactoryLineNameTag('tanaka@example.com')).toBe('tanaka')
-    expect(readFactoryLineNameTag('Alexandria Ocasio')).toBe('Alexandri…')
-    // A label that only starts with @ is not an email, so it is kept as a name.
-    expect(readFactoryLineNameTag('@handle')).toBe('@handle')
+    expect(readFactoryLineNameTag({ assigneeUserId: 'u1', assigneeName: '鈴木 一郎', assigneeEmail: 'suzuki@example.com' })).toBe('鈴木 一郎')
+    expect(readFactoryLineNameTag({ assigneeUserId: 'u1', assigneeEmail: 'tanaka@example.com' })).toBe('tanaka')
+    expect(readFactoryLineNameTag({ assigneeUserId: 'u1', assigneeName: 'Alexandria Ocasio' })).toBe('Alexandri…')
+    // Only an email is cut at the @; a display name or member ID keeps it.
+    expect(readFactoryLineNameTag({ assigneeUserId: 'u1', assigneeName: 'Agent@Ops' })).toBe('Agent@Ops')
+    expect(readFactoryLineNameTag({ assigneeUserId: 'member@local' })).toBe('member@lo…')
   })
 
   test('plays through every station and wraps around', () => {
@@ -156,7 +157,7 @@ describe('Factory line scene', () => {
   }
 
   test('names the workers of the station the camera follows', () => {
-    expect(readTags('build')).toEqual(['鈴木 一郎', 'tanaka', 'tanaka'])
+    expect(readTags('build')).toEqual(['鈴木 一郎', 'tanaka@ex…', 'tanaka@ex…'])
     // Finished tasks have no worker; their names sit on the parcels.
     expect(readTags('done')).toEqual(['佐藤 花子'])
   })

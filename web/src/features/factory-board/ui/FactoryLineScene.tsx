@@ -1,6 +1,5 @@
 import type { AgentRunRuntime } from '@mukuroji/contracts'
 import type { ReactNode } from 'react'
-import { readFactoryBoardAssigneeLabel } from '../model/factoryBoard'
 import { readFactoryLineNameTag, type FactoryLineEntry, type FactoryLineStation, type FactoryLineStationGroup } from '../model/factoryLine'
 import type { FactoryLineLabels } from './factoryBoardLabels'
 
@@ -475,7 +474,7 @@ function StationWork({ station, entries, selectedWorkItemId, focused, moreLabel 
         return <Robot color={runtimeColors[runtime]} delay={delay} key={`worker-${entry.item.workItem.id}`} stalled={entry.stalled || station === 'repair'} x={wx} y={wy} />
       })}
       {focused ? drawn.map((entry, index) => {
-        const name = readFactoryLineNameTag(readFactoryBoardAssigneeLabel(entry.item.workItem))
+        const name = readFactoryLineNameTag(entry.item.workItem)
         // Finished tasks have no worker, so their name sits on the parcel instead.
         if (station === 'done') {
           const { px, py } = parcelAt(index)
@@ -488,9 +487,10 @@ function StationWork({ station, entries, selectedWorkItemId, focused, moreLabel 
         return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={tone} x={sx} y={sy - 48} />
       }) : null}
       {focused && hidden > 0 ? (() => {
-        const { px, py } = parcelAt(drawn.length)
-        const [sx, sy] = project(px + 0.35, py + 0.35, 0.6)
-        return <SceneTag text={moreLabel.replace('{count}', String(hidden))} tone={colors.accent} x={sx} y={sy} />
+        // The count sits on the floor past the last worker, below the name tags over the workers' heads.
+        const { wx, wy } = workerAt(drawn.length)
+        const [sx, sy] = project(wx, wy)
+        return <SceneTag text={moreLabel.replace('{count}', String(hidden))} tone={colors.accent} x={sx} y={sy + 6} />
       })() : null}
     </g>
   )

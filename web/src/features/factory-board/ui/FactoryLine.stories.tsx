@@ -144,6 +144,26 @@ export const FilteringOutLineStopsPlaying: Story = {
   },
 }
 
+/** A station holding more tasks than it draws names three workers and counts the rest. */
+export const BusyStation: Story = {
+  args: {
+    initialFocusedStation: 'build',
+    board: {
+      ...factoryLineFixture,
+      items: [
+        ...factoryLineFixture.items,
+        ...['busy-1', 'busy-2'].flatMap((id) => {
+          const building = factoryLineFixture.items.find((entry) => entry.workItem.id === 'refund-ids')
+          return building ? [{ ...building, workItem: { ...building.workItem, id, title: `${building.workItem.title} (${id})` } }] : []
+        }),
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('complementary')).toHaveTextContent('実装 5 件')
+  },
+}
+
 /** The decision station, where people act. */
 export const DecisionStation: Story = { args: { initialFocusedStation: 'decision' } }
 

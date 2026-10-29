@@ -1,4 +1,4 @@
-import { classifyFactoryBoardItem, type FactoryBoardItem } from '@mukuroji/contracts'
+import { classifyFactoryBoardItem, type FactoryBoardItem, type FactoryBoardWorkItem } from '@mukuroji/contracts'
 import { groupFactoryBoardItems } from './factoryBoard'
 
 /** Stations of the line in the order work moves through them. */
@@ -94,15 +94,17 @@ export function readNextFactoryLineStation(station: FactoryLineStation | undefin
 }
 
 /**
- * Reads the short name a worker's tag shows on the line: the part of an email before the @, shortened
- * with an ellipsis when it is long, so tags stay small enough to sit above one worker.
+ * Reads the short name a worker's tag shows on the line: the display name, else the part of the email
+ * before the @, else the member ID, shortened with an ellipsis when it is long so tags stay small
+ * enough to sit above one worker. Only an email is cut at the @; a display name keeps any @ it has.
  *
- * @param label - Assignee label: display name, email, or member ID.
+ * @param workItem - Work Item whose assignee the tag names.
  * @returns Name for the tag.
  */
-export function readFactoryLineNameTag(label: string): string {
-  const at = label.indexOf('@')
-  const name = at > 0 ? label.slice(0, at) : label
+export function readFactoryLineNameTag(workItem: Pick<FactoryBoardWorkItem, 'assigneeName' | 'assigneeEmail' | 'assigneeUserId'>): string {
+  const email = workItem.assigneeEmail
+  const at = email?.indexOf('@') ?? -1
+  const name = workItem.assigneeName ?? (email !== undefined && at > 0 ? email.slice(0, at) : email) ?? workItem.assigneeUserId
   const characters = Array.from(name)
   return characters.length > nameTagLength ? `${characters.slice(0, nameTagLength - 1).join('')}…` : name
 }
