@@ -144,6 +144,12 @@ export function FactoryBoard({
   const [filters, setFilters] = useState(initialFilters)
   const [focusedStation, setFocusedStation] = useState(initialFocusedStation)
   const [linePlaying, setLinePlaying] = useState(false)
+  const [playingView, setPlayingView] = useState(view)
+  // Leaving the line, by the switch or the URL, stops playing so it does not resume and close a task opened meanwhile.
+  if (playingView !== view) {
+    setPlayingView(view)
+    setLinePlaying(false)
+  }
   const detailId = useId()
   const lanesRef = useRef<HTMLDivElement>(null)
   const detailRef = useRef<HTMLElement>(null)

@@ -102,6 +102,17 @@ export const OpeningTaskStopsPlaying: Story = {
   },
 }
 
+/** Leaving the line stops playing, so coming back does not resume it. */
+export const LeavingLineStopsPlaying: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '工程を再生' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'レーン' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'ライン' }))
+    await expect(canvas.getByRole('button', { name: '工程を再生' })).toHaveAttribute('aria-pressed', 'false')
+  },
+}
+
 /** The decision station, where people act. */
 export const DecisionStation: Story = { args: { initialFocusedStation: 'decision' } }
 
