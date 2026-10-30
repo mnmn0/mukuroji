@@ -184,6 +184,21 @@ export const FinishedStation: Story = {
   },
 }
 
+/** Wide and long names keep their text inside their tags. */
+export const LongNames: Story = {
+  args: {
+    initialFocusedStation: 'build',
+    board: {
+      ...factoryLineFixture,
+      items: factoryLineFixture.items.map((entry, index) => {
+        const names = ['WWWWWWWWWWWW', 'Mmmmmmmmmmmmm', '@@@@@@@@@@@@']
+        const name = names[index % names.length]
+        return name === undefined ? entry : { ...entry, workItem: { ...entry.workItem, assigneeName: name } }
+      }),
+    },
+  },
+}
+
 /** The decision station, where people act. */
 export const DecisionStation: Story = { args: { initialFocusedStation: 'decision' } }
 

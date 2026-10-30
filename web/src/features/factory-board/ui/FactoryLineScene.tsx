@@ -386,7 +386,22 @@ function estimateTextWidth(text: string, asciiWidth: number, wideWidth: number):
  * @returns Width in screen pixels.
  */
 function readSceneTagWidth(text: string): number {
-  return estimateTextWidth(text, 5.4, 9.5) + 10
+  return Array.from(text).reduce((width, character) => width + readTagCharacterWidth(character), 0) + 10
+}
+
+/**
+ * Bounds the width one character takes in a tag's 9 px bold text, from above, so the tag box and the
+ * row spacing never fall short of what the browser draws. Measured in Chromium with the app's font
+ * stack: full-width characters and the widest Latin letters stay under 9.6 px, other capitals and
+ * digits under 7 px, and the rest under 6 px.
+ *
+ * @param character - One character of the tag's text.
+ * @returns Upper bound of its width in screen pixels.
+ */
+function readTagCharacterWidth(character: string): number {
+  if ((character.codePointAt(0) ?? 0) > 0x7f || /[mwMW@%]/u.test(character)) return 9.6
+  if (/[A-Z0-9]/u.test(character)) return 7
+  return 6
 }
 
 /**
