@@ -166,16 +166,27 @@ describe('Factory line scene', () => {
     expect(readTags()).toEqual([])
   })
 
-  test('keeps the name tags of several finished tasks apart', () => {
+  test('lays the name tags of a station out in one row without overlaps', () => {
     const finished = item('docs-link')
     const many = Array.from({ length: 3 }, (_, index): FactoryBoardItem => ({ ...finished, workItem: { ...finished.workItem, id: `done-${index}` } }))
-    const markup = renderToStaticMarkup(
-      <FactoryLineScene focusedStation="done" groups={groupFactoryLineItems(many, now)} idPrefix="test" labels={labels} onFocusStation={() => undefined} />,
-    )
-    const tops = [...markup.matchAll(/data-factory-line-tag="" transform="translate\(([-\d.]+) ([-\d.]+)\)"/gu)].map((match) => Number(match[2]))
-    expect(tops).toHaveLength(3)
-    // Each tag is 15 px tall, so a later tag must start at least that far below the one before it.
-    for (let index = 1; index < tops.length; index += 1) expect((tops[index] ?? 0) - (tops[index - 1] ?? 0)).toBeGreaterThanOrEqual(15)
+    const cases: Array<{ /** Station the camera follows. */ station: 'done' | 'build'; /** Items to place. */ items: readonly FactoryBoardItem[] }> = [
+      { station: 'done', items: many },
+      { station: 'build', items: factoryLineFixture.items },
+    ]
+    for (const { station, items } of cases) {
+      const markup = renderToStaticMarkup(
+        <FactoryLineScene focusedStation={station} groups={groupFactoryLineItems(items, now)} idPrefix="test" labels={labels} onFocusStation={() => undefined} />,
+      )
+      const tags = [...markup.matchAll(/data-factory-line-tag="" transform="translate\(([-\d.]+) ([-\d.]+)\)"><rect height="15" rx="4" style="[^"]*" stroke-width="1" width="([\d.]+)"/gu)]
+        .map((match) => ({ left: Number(match[1]), top: Number(match[2]), width: Number(match[3]) }))
+      expect(tags).toHaveLength(3)
+      // Every tag sits in the same row, and each starts past the right edge of the one before it.
+      expect(new Set(tags.map((tag) => tag.top)).size).toBe(1)
+      for (let index = 1; index < tags.length; index += 1) {
+        const previous = tags[index - 1]
+        expect(tags[index]?.left ?? 0).toBeGreaterThanOrEqual((previous?.left ?? 0) + (previous?.width ?? 0))
+      }
+    }
   })
 
   test('counts the tasks a station does not draw', () => {

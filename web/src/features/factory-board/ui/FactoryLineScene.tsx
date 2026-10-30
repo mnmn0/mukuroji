@@ -355,14 +355,17 @@ function MachineDetail({ station }: { station: FactoryLineStation }) {
   }
 }
 
-/** Height of a worker's head above its feet, in screen pixels; the warning marker sits just below it. */
-const workerHeadHeight = 44
+/** Height of a worker's head above its feet, in screen pixels, where its name line ends. */
+const workerHeadHeight = 46
 
-/** How far above a worker's feet its name tag ends, in screen pixels. */
-const workerTagRise = 70
+/** Gap between the highest named point and the bottom of the tag row, in screen pixels. */
+const tagRowGap = 20
 
-/** Extra downward step of each later tag on the done station, in screen pixels. */
-const doneTagStep = 5
+/** Length of the straight drop at the end of a name line, in screen pixels; it keeps the line clear of the warning marker beside a head. */
+const tagLineDrop = 12
+
+/** Horizontal gap between neighbouring tags in the row, in screen pixels. */
+const tagGap = 4
 
 /**
  * Estimates the drawn width of sign text, counting full-width characters wider than ASCII.
@@ -377,6 +380,16 @@ function estimateTextWidth(text: string, asciiWidth: number, wideWidth: number):
 }
 
 /**
+ * Measures the width of a scene tag holding some text.
+ *
+ * @param text - Text of the tag.
+ * @returns Width in screen pixels.
+ */
+function readSceneTagWidth(text: string): number {
+  return estimateTextWidth(text, 5.4, 9.5) + 10
+}
+
+/**
  * Draws a small tag above a worker or at the end of a station's parcels.
  *
  * @param props - Screen position, text, and edge color.
@@ -384,16 +397,71 @@ function estimateTextWidth(text: string, asciiWidth: number, wideWidth: number):
  * @param props.y - Screen y of the tag's bottom.
  * @param props.text - Text to show.
  * @param props.tone - Edge color.
- * @param props.leader - Length of a line from the tag's bottom down to what it names; none when absent.
  * @returns Tag.
  */
-function SceneTag({ x, y, text, tone, leader }: { x: number; y: number; text: string; tone: string; leader?: number }) {
-  const width = estimateTextWidth(text, 5.4, 9.5) + 10
+function SceneTag({ x, y, text, tone }: { x: number; y: number; text: string; tone: string }) {
+  const width = readSceneTagWidth(text)
   return (
     <g data-factory-line-tag="" transform={`translate(${x - width / 2} ${y - 15})`}>
-      {leader === undefined ? null : <line strokeWidth={1} style={{ stroke: tone }} x1={width / 2} x2={width / 2} y1={15} y2={15 + leader} />}
       <rect height={15} rx={4} style={{ fill: 'var(--workbench-surface)', stroke: tone }} strokeWidth={1} width={width} />
       <text fontSize={9} fontWeight={700} style={{ fill: colors.text }} textAnchor="middle" x={width / 2} y={11}>{text}</text>
+    </g>
+  )
+}
+
+/** One name to place in a station's tag row. */
+type NameTagAnchor = {
+  /** Work Item the name belongs to. */
+  id: string
+  /** Name to show. */
+  text: string
+  /** Edge and line color. */
+  tone: string
+  /** Screen x of the head or parcel the name belongs to. */
+  x: number
+  /** Screen y of the head or parcel the name belongs to. */
+  y: number
+}
+
+/**
+ * Places tags left to right in drawing order: each is centered over what it names unless that would
+ * overlap the previous tag, in which case it starts just past it.
+ *
+ * @param anchors - Names with the points they belong to, in drawing order.
+ * @returns The anchors with the screen x of each tag's center.
+ */
+function placeNameTags(anchors: readonly NameTagAnchor[]): Array<NameTagAnchor & { /** Screen x of the tag's center. */ center: number }> {
+  return anchors.reduce<{ right: number; placed: Array<NameTagAnchor & { center: number }> }>((row, anchor) => {
+    const width = readSceneTagWidth(anchor.text)
+    const left = Math.max(anchor.x - width / 2, row.right + tagGap)
+    return { right: left + width, placed: [...row.placed, { ...anchor, center: left + width / 2 }] }
+  }, { right: Number.NEGATIVE_INFINITY, placed: [] }).placed
+}
+
+/**
+ * Draws a station's names as one row of tags above everything they name, each joined by a line to
+ * its worker or parcel. The row keeps the drawing order, and each tag starts past the previous one,
+ * so tags never overlap one another or what they name, and no line crosses a tag or another line.
+ *
+ * @param props - Names with the points they belong to, in drawing order.
+ * @param props.anchors - Names with the points they belong to, in drawing order.
+ * @returns Tag row.
+ */
+function NameTagRow({ anchors }: { anchors: readonly NameTagAnchor[] }) {
+  const rowBottom = Math.min(...anchors.map((anchor) => anchor.y)) - tagRowGap
+  const placed = placeNameTags(anchors)
+  return (
+    <g>
+      {placed.map((tag) => (
+        <polyline
+          fill="none"
+          key={`line-${tag.id}`}
+          points={`${tag.center},${rowBottom} ${tag.x},${tag.y - tagLineDrop} ${tag.x},${tag.y}`}
+          strokeWidth={1}
+          style={{ stroke: tag.tone }}
+        />
+      ))}
+      {placed.map((tag) => <SceneTag key={`name-${tag.id}`} text={tag.text} tone={tag.tone} x={tag.center} y={rowBottom} />)}
     </g>
   )
 }
@@ -427,55 +495,50 @@ function StationSign({ station, index, name, count, focused }: { station: Factor
 }
 
 /**
- * Draws the parcels and workers of one station, at most {@link drawnPerStation} of each. When the
- * camera follows the station, each worker carries its assignee's name and a tag counts the tasks
- * that are not drawn.
+ * Places the parcel of one drawn task. Points in front of a machine sit further along x by their
+ * distance across the line, so they appear in front of it rather than in front of the previous station.
  *
- * @param props - Station, its tasks, the selected task, and whether the camera follows it.
+ * @param station - Station.
+ * @param index - Position among the station's drawn tasks.
+ * @returns World point of the parcel.
+ */
+function readParcelPoint(station: FactoryLineStation, index: number): { /** World x. */ px: number; /** World y. */ py: number } {
+  const { x, y } = stationPositions[station]
+  return station === 'repair' ? { px: x + 0.2 + index * 0.9, py: y + 1.4 } : { px: x + 1.0 + index * 1.05, py: 2.45 }
+}
+
+/**
+ * Places the worker of one drawn task.
+ *
+ * @param station - Station.
+ * @param index - Position among the station's drawn tasks.
+ * @returns World point of the worker.
+ */
+function readWorkerPoint(station: FactoryLineStation, index: number): { /** World x. */ wx: number; /** World y. */ wy: number } {
+  const { x, y } = stationPositions[station]
+  const wy = station === 'repair' ? y + 3.2 : 4.6
+  return { wx: x + (wy - y) - 1.4 + index * 1.4, wy }
+}
+
+/**
+ * Draws the parcels and workers of one station, at most {@link drawnPerStation} of each.
+ *
+ * @param props - Station, its tasks, and the selected task.
  * @param props.station - Station.
  * @param props.entries - Tasks at the station.
  * @param props.selectedWorkItemId - Selected task, highlighted when drawn.
- * @param props.focused - Whether the camera follows the station; names are drawn only then.
- * @param props.moreLabel - Text of the tag for tasks that are not drawn, with a `{count}` placeholder.
  * @returns Parcels and workers.
  */
-function StationWork({ station, entries, selectedWorkItemId, focused, moreLabel }: {
-  station: FactoryLineStation
-  entries: readonly FactoryLineEntry[]
-  selectedWorkItemId?: string
-  focused: boolean
-  moreLabel: string
-}) {
-  const { x, y } = stationPositions[station]
+function StationWork({ station, entries, selectedWorkItemId }: { station: FactoryLineStation; entries: readonly FactoryLineEntry[]; selectedWorkItemId?: string }) {
   const drawn = entries.slice(0, drawnPerStation)
-  const onLine = station !== 'repair'
-  const hidden = entries.length - drawn.length
-  /**
-   * Places the parcel of one drawn task. Points in front of a machine sit further along x by their
-   * distance across the line, so they appear in front of it rather than in front of the previous station.
-   *
-   * @param index - Position among the drawn tasks.
-   * @returns World point of the parcel.
-   */
-  const parcelAt = (index: number) => onLine ? { px: x + 1.0 + index * 1.05, py: 2.45 } : { px: x + 0.2 + index * 0.9, py: y + 1.4 }
-  /**
-   * Places the worker of one drawn task.
-   *
-   * @param index - Position among the drawn tasks.
-   * @returns World point of the worker.
-   */
-  const workerAt = (index: number) => {
-    const wy = onLine ? 4.6 : y + 3.2
-    return { wx: x + (wy - y) - 1.4 + index * 1.4, wy }
-  }
   return (
     <g>
       {drawn.map((entry, index) => {
-        const { px, py } = parcelAt(index)
+        const { px, py } = readParcelPoint(station, index)
         return <Parcel key={`parcel-${entry.item.workItem.id}`} selected={entry.item.workItem.id === selectedWorkItemId} x={px} y={py} />
       })}
       {drawn.map((entry, index) => {
-        const { wx, wy } = workerAt(index)
+        const { wx, wy } = readWorkerPoint(station, index)
         const delay = index * 0.35
         if (station === 'intake' || station === 'decision') {
           return <Person color={station === 'decision' ? colors.person : '#0f766e'} delay={delay} key={`worker-${entry.item.workItem.id}`} x={wx} y={wy} />
@@ -484,28 +547,46 @@ function StationWork({ station, entries, selectedWorkItemId, focused, moreLabel 
         const runtime = entry.item.run?.runtime ?? 'other'
         return <Robot color={runtimeColors[runtime]} delay={delay} key={`worker-${entry.item.workItem.id}`} stalled={entry.stalled || station === 'repair'} x={wx} y={wy} />
       })}
-      {focused ? drawn.map((entry, index) => {
-        const name = readFactoryLineNameTag(entry.item.workItem)
-        // Finished tasks have no worker, so their name sits on the parcel instead. Parcels are closer
-        // together than tags are tall, so each later tag steps further down to keep them apart.
-        if (station === 'done') {
-          const { px, py } = parcelAt(index)
-          const [sx, sy] = project(px + 0.35, py + 0.35, 1.1)
-          return <SceneTag key={`name-${entry.item.workItem.id}`} text={name} tone={colors.muted} x={sx} y={sy - 4 + index * doneTagStep} />
-        }
-        // A worker's tag floats high enough that the next worker's tag clears this worker's warning
-        // marker, with a line down to the head it names.
-        const { wx, wy } = workerAt(index)
-        const [sx, sy] = project(wx, wy)
-        const tone = station === 'intake' || station === 'decision' ? colors.muted : runtimeColors[entry.item.run?.runtime ?? 'other']
-        return <SceneTag key={`name-${entry.item.workItem.id}`} leader={workerTagRise - workerHeadHeight} text={name} tone={tone} x={sx} y={sy - workerTagRise} />
-      }) : null}
-      {focused && hidden > 0 ? (() => {
-        // The count sits on the floor past the last worker, below the name tags over the workers' heads.
-        const { wx, wy } = workerAt(drawn.length)
-        const [sx, sy] = project(wx, wy)
-        return <SceneTag text={moreLabel.replace('{count}', String(hidden))} tone={colors.accent} x={sx} y={sy + 6} />
-      })() : null}
+    </g>
+  )
+}
+
+/**
+ * Draws the tags of the station the camera follows: each drawn task's assignee in one row, and a tag
+ * counting the tasks that are not drawn. The scene draws them after every station, so a later
+ * station's machine never covers them.
+ *
+ * @param props - Station, its tasks, and the count text.
+ * @param props.station - Station the camera follows.
+ * @param props.entries - Tasks at the station.
+ * @param props.moreLabel - Text of the tag for tasks that are not drawn, with a `{count}` placeholder.
+ * @returns Tags, or nothing when the station holds no task.
+ */
+function StationTags({ station, entries, moreLabel }: { station: FactoryLineStation; entries: readonly FactoryLineEntry[]; moreLabel: string }) {
+  const drawn = entries.slice(0, drawnPerStation)
+  if (drawn.length === 0) return null
+  const hidden = entries.length - drawn.length
+  const anchors = drawn.map((entry, index): NameTagAnchor => {
+    const id = entry.item.workItem.id
+    const text = readFactoryLineNameTag(entry.item.workItem)
+    // Finished tasks have no worker, so their name points at the parcel instead.
+    if (station === 'done') {
+      const { px, py } = readParcelPoint(station, index)
+      const [sx, sy] = project(px + 0.35, py + 0.35, 1.05)
+      return { id, text, tone: colors.muted, x: sx, y: sy }
+    }
+    const { wx, wy } = readWorkerPoint(station, index)
+    const [sx, sy] = project(wx, wy)
+    const tone = station === 'intake' || station === 'decision' ? colors.muted : runtimeColors[entry.item.run?.runtime ?? 'other']
+    return { id, text, tone, x: sx, y: sy - workerHeadHeight }
+  })
+  // The count sits on the floor past the last worker, below everything the row names.
+  const { wx, wy } = readWorkerPoint(station, drawn.length)
+  const [countX, countY] = project(wx, wy)
+  return (
+    <g>
+      <NameTagRow anchors={anchors} />
+      {hidden > 0 ? <SceneTag text={moreLabel.replace('{count}', String(hidden))} tone={colors.accent} x={countX} y={countY + 6} /> : null}
     </g>
   )
 }
@@ -568,13 +649,7 @@ export function FactoryLineScene({ groups, focusedStation, selectedWorkItemId, o
         {groups.map((group, index) => (
           <g className="cursor-pointer" key={group.station} onClick={() => onFocusStation(group.station)}>
             <Machine busy={group.entries.length > 0} focused={group.station === focusedStation} station={group.station} />
-            <StationWork
-              entries={group.entries}
-              focused={group.station === focusedStation}
-              moreLabel={labels.more}
-              station={group.station}
-              {...(selectedWorkItemId === undefined ? {} : { selectedWorkItemId })}
-            />
+            <StationWork entries={group.entries} selectedWorkItemId={selectedWorkItemId} station={group.station} />
             <StationSign
               count={group.entries.length}
               focused={group.station === focusedStation}
@@ -584,6 +659,13 @@ export function FactoryLineScene({ groups, focusedStation, selectedWorkItemId, o
             />
           </g>
         ))}
+        {focusedStation === undefined ? null : (
+          <StationTags
+            entries={groups.find((group) => group.station === focusedStation)?.entries ?? []}
+            moreLabel={labels.more}
+            station={focusedStation}
+          />
+        )}
       </g>
     </svg>
   )
