@@ -144,6 +144,61 @@ export const FilteringOutLineStopsPlaying: Story = {
   },
 }
 
+/** A station holding more tasks than it draws names three workers and counts the rest. */
+export const BusyStation: Story = {
+  args: {
+    initialFocusedStation: 'build',
+    board: {
+      ...factoryLineFixture,
+      items: [
+        ...factoryLineFixture.items,
+        ...['busy-1', 'busy-2'].flatMap((id) => {
+          const building = factoryLineFixture.items.find((entry) => entry.workItem.id === 'refund-ids')
+          return building ? [{ ...building, workItem: { ...building.workItem, id, title: `${building.workItem.title} (${id})` } }] : []
+        }),
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('complementary')).toHaveTextContent(/実装\s*5 件/u)
+  },
+}
+
+/** A done station with several finished tasks keeps each parcel's name tag apart from the next. */
+export const FinishedStation: Story = {
+  args: {
+    initialFocusedStation: 'done',
+    board: {
+      ...factoryLineFixture,
+      items: [
+        ...factoryLineFixture.items,
+        ...['done-2', 'done-3'].flatMap((id) => {
+          const finished = factoryLineFixture.items.find((entry) => entry.workItem.id === 'docs-link')
+          return finished ? [{ ...finished, workItem: { ...finished.workItem, id, title: `${finished.workItem.title} (${id})` } }] : []
+        }),
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('complementary')).toHaveTextContent(/完了\s*3 件/u)
+  },
+}
+
+/** Wide and long names keep their text inside their tags. */
+export const LongNames: Story = {
+  args: {
+    initialFocusedStation: 'build',
+    board: {
+      ...factoryLineFixture,
+      items: factoryLineFixture.items.map((entry, index) => {
+        const names = ['WWWWWWWWWWWW', 'Mmmmmmmmmmmmm', '@@@@@@@@@@@@']
+        const name = names[index % names.length]
+        return name === undefined ? entry : { ...entry, workItem: { ...entry.workItem, assigneeName: name } }
+      }),
+    },
+  },
+}
+
 /** The decision station, where people act. */
 export const DecisionStation: Story = { args: { initialFocusedStation: 'decision' } }
 

@@ -1,4 +1,4 @@
-import { classifyFactoryBoardItem, type FactoryBoardItem } from '@mukuroji/contracts'
+import { classifyFactoryBoardItem, type FactoryBoardItem, type FactoryBoardWorkItem } from '@mukuroji/contracts'
 import { groupFactoryBoardItems } from './factoryBoard'
 
 /** Stations of the line in the order work moves through them. */
@@ -9,6 +9,9 @@ export type FactoryLineMainStation = (typeof FACTORY_LINE_STATIONS)[number]
 
 /** Station of one item: a main-line station, or the repair bay beside the line for failed runs. */
 export type FactoryLineStation = FactoryLineMainStation | 'repair'
+
+/** Longest name a worker tag shows before it is shortened. */
+const nameTagLength = 10
 
 /** Every station the line shows, main line first and the repair bay last. */
 export const FACTORY_LINE_ALL_STATIONS: readonly FactoryLineStation[] = [...FACTORY_LINE_STATIONS, 'repair']
@@ -88,4 +91,20 @@ export function groupFactoryLineItems(items: readonly FactoryBoardItem[], now: D
 export function readNextFactoryLineStation(station: FactoryLineStation | undefined): FactoryLineStation {
   const index = station === undefined ? -1 : FACTORY_LINE_ALL_STATIONS.indexOf(station)
   return FACTORY_LINE_ALL_STATIONS[(index + 1) % FACTORY_LINE_ALL_STATIONS.length] ?? 'intake'
+}
+
+/**
+ * Reads the short name a worker's tag shows on the line: the display name, else the part of the email
+ * before the @, else the member ID, shortened with an ellipsis when it is long so tags stay small
+ * enough to sit above one worker. Only an email is cut at the @; a display name keeps any @ it has.
+ *
+ * @param workItem - Work Item whose assignee the tag names.
+ * @returns Name for the tag.
+ */
+export function readFactoryLineNameTag(workItem: Pick<FactoryBoardWorkItem, 'assigneeName' | 'assigneeEmail' | 'assigneeUserId'>): string {
+  const email = workItem.assigneeEmail
+  const at = email?.indexOf('@') ?? -1
+  const name = workItem.assigneeName ?? (email !== undefined && at > 0 ? email.slice(0, at) : email) ?? workItem.assigneeUserId
+  const characters = Array.from(name)
+  return characters.length > nameTagLength ? `${characters.slice(0, nameTagLength - 1).join('')}…` : name
 }
