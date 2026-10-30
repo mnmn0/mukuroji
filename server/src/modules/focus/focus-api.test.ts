@@ -85,7 +85,9 @@ function createFocusMention(
     projectId: 'refero',
     issueId: 'onboarding-friction',
     deepLink: '/teams/core-team/issues/onboarding-friction?comment=mention',
-    occurredAt: '2026-08-01T00:00:00.000Z',
+    // Relative to now: Focus reads only notifications inside its lookback window, so a fixed date
+    // eventually falls out of it and the mention disappears from the queue.
+    occurredAt: new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString(),
     state,
   })
 }
