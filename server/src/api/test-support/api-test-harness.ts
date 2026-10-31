@@ -106,6 +106,9 @@ const enterpriseScimGroupJobProcessors = new WeakMap<
 
 const HEADLESS_DEVELOPER_WORKSPACE_ID = 'workspace-headless'
 
+/** API key expiry one year after the real clock, because key creation rejects an expiry in the past. */
+const HEADLESS_API_KEY_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
+
 /** Mutable state owned by one domain test suite. */
 type ApiTestHarnessState = {
   /** Dependency graph currently bound to the suite application. */
@@ -1209,7 +1212,7 @@ async function configureHeadlessDeveloperCredential(
     input: {
       name: 'Headless Enterprise RBAC test key',
       scopes,
-      expiresAt: '2027-07-20T00:00:00.000Z',
+      expiresAt: HEADLESS_API_KEY_EXPIRES_AT,
     },
   })
   setTestAppDependencies(state, {

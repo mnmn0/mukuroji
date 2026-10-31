@@ -51,6 +51,9 @@ import type {
   ExternalWorkItemLink,
 } from '@mukuroji/contracts'
 
+/** API key expiry one year after the real clock, because key creation rejects an expiry in the past. */
+const API_KEY_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
+
 /**
  * Creates a complete External Link test double whose unconfigured methods fail immediately.
  *
@@ -329,7 +332,7 @@ test('uses current Cognito groups for direct Enterprise group assignments', asyn
       input: {
         name: 'Direct Cognito group assignment key',
         scopes: ['work-items:read'],
-        expiresAt: '2027-07-20T00:00:00.000Z',
+        expiresAt: API_KEY_EXPIRES_AT,
       },
     })
     setTestAppDependencies({
