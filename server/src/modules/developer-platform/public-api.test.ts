@@ -50,6 +50,8 @@ import {
 import { AgentRunError, createAgentRunConflictError, hashAgentInstanceId } from '../agent-runs'
 
 const NOW = new Date('2026-07-18T00:00:00.000Z')
+/** API key expiry one year after the real clock, because key creation rejects an expiry in the past. */
+const API_KEY_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
 const managementPrincipal: DeveloperManagementPrincipal = {
   workspaceId: 'workspace-1',
   userId: 'user-1',
@@ -267,7 +269,7 @@ async function createApiKey(
     input: {
       name: 'Test key',
       scopes,
-      expiresAt: '2027-07-18T00:00:00.000Z',
+      expiresAt: API_KEY_EXPIRES_AT,
     },
   })
 }
@@ -1198,7 +1200,7 @@ describe('public API router', () => {
       body: JSON.stringify({
         name: 'Automation key',
         scopes: ['work-items:read'],
-        expiresAt: '2027-07-18T00:00:00.000Z',
+        expiresAt: API_KEY_EXPIRES_AT,
       }),
     })
 
@@ -1232,7 +1234,7 @@ describe('public API router', () => {
       body: JSON.stringify({
         name: 'In-progress key',
         scopes: ['work-items:read'],
-        expiresAt: '2027-07-18T00:00:00.000Z',
+        expiresAt: API_KEY_EXPIRES_AT,
       }),
     })
 
@@ -1272,7 +1274,7 @@ describe('public API router', () => {
       body: JSON.stringify({
         name: 'Crash-safe key',
         scopes: ['work-items:read'],
-        expiresAt: '2027-07-18T00:00:00.000Z',
+        expiresAt: API_KEY_EXPIRES_AT,
       }),
     })
 

@@ -45,6 +45,8 @@ const {
 
 /** Stable fixture instant used by AI source projections. */
 const NOW = '2026-08-25T00:00:00.000Z'
+/** Triage retention deadline one year after the real clock, because entries past it are no longer readable. */
+const RETENTION_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
 
 /** Returns authenticated JSON headers for an AI generation request. */
 function createAiHeaders(): Record<string, string> {
@@ -376,7 +378,7 @@ function createTriageEntry(
     teamId: 'core-team',
     projectId: 'refero',
     permission,
-    retention: { expiresAt: '2027-08-25T00:00:00.000Z' },
+    retention: { expiresAt: RETENTION_EXPIRES_AT },
     capabilities: {
       canAssign: visibility === 'full',
       canAcceptCreate: visibility === 'full',

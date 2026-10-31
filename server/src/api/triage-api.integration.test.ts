@@ -42,6 +42,8 @@ const {
 
 /** Stable instant used by API integration fixtures. */
 const NOW = '2026-08-09T00:00:00.000Z'
+/** Triage retention deadline one year after the real clock, because entries past it are no longer readable. */
+const RETENTION_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
 
 /** Creates a complete pending entry owned by the harness Team.
  *
@@ -100,7 +102,7 @@ function createEntry(overrides: Partial<TriageEntry> = {}): TriageEntry {
     projectId: 'refero',
     ownerUserId: 'demo@example.com',
     permission,
-    retention: { expiresAt: '2027-08-09T00:00:00.000Z' },
+    retention: { expiresAt: RETENTION_EXPIRES_AT },
     capabilities: createTriageCapabilities({ state: 'pending', permission }),
     events: [{
       id: 'event-created-1',
