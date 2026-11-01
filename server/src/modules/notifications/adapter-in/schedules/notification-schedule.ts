@@ -1449,10 +1449,17 @@ function requireEnvironment(...names: string[]) {
   throw new Error(`${names.join(' or ')} is required.`)
 }
 
+/**
+ * Reads a positive integer environment value, treating unset or blank values as unset.
+ *
+ * @param name - Environment variable name.
+ * @param fallback - Value used when the variable is unset or blank.
+ * @returns The configured positive integer or the fallback.
+ */
 function readPositiveIntegerEnvironment(name: string, fallback: number) {
-  const configured = process.env[name]
+  const configured = process.env[name]?.trim()
 
-  if (configured === undefined) {
+  if (!configured) {
     return fallback
   }
 

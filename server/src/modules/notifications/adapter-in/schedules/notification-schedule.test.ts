@@ -5,6 +5,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import {
+  createNotificationScheduleHandler,
   createPlanningScheduledNotificationCandidates,
   parseUtcDateOnly,
   parsePlanningUpdateTargetScheduleRow,
@@ -1101,4 +1102,40 @@ describe('notification schedule handler', () => {
         },
       })
   })
+})
+
+test('notification schedule handler treats blank numeric environment values as unset', async () => {
+  const names = [
+    'WORK_ITEMS_TABLE_NAME',
+    'PLANNING_TABLE_NAME',
+    'PLANNING_UPDATE_SCHEDULE_INDEX_NAME',
+    'PROJECT_DIRECTORY_TABLE_NAME',
+    'AUDIT_EVENTS_TABLE_NAME',
+    'NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE',
+    'NOTIFICATION_SCHEDULE_MAX_PAGES',
+    'AUDIT_RETENTION_DAYS',
+  ]
+  const previous = new Map(names.map((name) => [name, process.env[name]]))
+  Object.assign(process.env, {
+    WORK_ITEMS_TABLE_NAME: 'WorkItemsTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+    PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
+    PROJECT_DIRECTORY_TABLE_NAME: 'ProjectDirectoryTable',
+    AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable',
+    NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '',
+    NOTIFICATION_SCHEDULE_MAX_PAGES: '  ',
+    AUDIT_RETENTION_DAYS: ' ',
+  })
+  const { client } = createRecordingDocumentClient(() => ({ Items: [], Count: 0, ScannedCount: 0 }))
+
+  try {
+    await expect(
+      createNotificationScheduleHandler(client)({ id: 'schedule-event-1', time: '2026-07-12T09:00:00.000Z' }),
+    ).resolves.toMatchObject({ emittedEvents: 0 })
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
 })
