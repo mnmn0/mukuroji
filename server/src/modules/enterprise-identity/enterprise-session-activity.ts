@@ -258,8 +258,7 @@ implements EnterpriseSessionActivityClient {
  * Environment に応じた session activity client を作成します。
  */
 export function createEnterpriseSessionActivityClient() {
-  const tableName = process.env.REALTIME_SESSIONS_TABLE_NAME?.trim() ??
-    process.env.MUKUROJI_REALTIME_SESSIONS_TABLE?.trim()
+  const tableName = process.env.REALTIME_SESSIONS_TABLE_NAME?.trim()
   return tableName
     ? new DynamoDbEnterpriseSessionActivityClient(tableName)
     : new InMemoryEnterpriseSessionActivityClient()

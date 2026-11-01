@@ -1457,10 +1457,8 @@ export function calculateAuditExpiresAt(occurredAt: string, retentionDays: numbe
  * Environment で構成した共通 audit retention 日数を返します。
  */
 export function getConfiguredAuditRetentionDays() {
-  const configuredRetentionDays = [
-    process.env.MUKUROJI_AUDIT_RETENTION_DAYS,
-    process.env.AUDIT_RETENTION_DAYS,
-  ].find((value) => value !== undefined && value.trim() !== '')
+  const configuredRetentionDays = process.env.AUDIT_RETENTION_DAYS?.trim() ||
+    undefined
   const retentionDays = Number(configuredRetentionDays ?? 2555)
   if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
     throw new RangeError('Audit retention days must be a positive number.')
@@ -1522,7 +1520,7 @@ export function getConfiguredAuditTableName(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ) {
   const configuredName = (
-    environment.MUKUROJI_AUDIT_EVENTS_TABLE ?? environment.AUDIT_EVENTS_TABLE_NAME
+    environment.AUDIT_EVENTS_TABLE_NAME
   )?.trim()
 
   if (configuredName) {

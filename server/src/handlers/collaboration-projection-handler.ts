@@ -23,8 +23,7 @@ import {
 } from '../modules/workspace-search/workspace-search'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
-const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME') ??
-  readOptionalEnvironment('MUKUROJI_WORKSPACE_SEARCH_TABLE')
+const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
 const collaboration = workspaceSearchTableName
   ? new DynamoDbCollaborationClient()
   : undefined

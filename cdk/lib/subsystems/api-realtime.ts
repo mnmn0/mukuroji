@@ -435,7 +435,7 @@ function bindApiRuntimeConfiguration(
       COGNITO_SSO_CLIENT_ID: cognitoSsoUserPoolClientId.valueAsString,
       COGNITO_SSO_REDIRECT_URI: cognitoSsoRedirectUri.valueAsString,
       COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
-      MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+      SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
       MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
     },
   );
@@ -470,7 +470,7 @@ function bindApiRuntimeConfiguration(
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
-      MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+      TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
       WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,

@@ -420,7 +420,7 @@ IdP secret、bearer credential、HMAC key/digest は event payload に含めま�
 | `COGNITO_ENTERPRISE_IDP_NAME` | Cognito に登録した SAML/OIDC provider 名 |
 | `MUKUROJI_WORKSPACE_DIRECTORY_ID` | Cognito claim と DynamoDB が共有する Workspace ID |
 | `AUDIT_EVENTS_TABLE_NAME` | Immutable audit/outbox table |
-| `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` | Enterprise mutation と audit view/export event の保持日数。既定値2555日 |
+| `AUDIT_RETENTION_DAYS` | Enterprise mutation と audit view/export event の保持日数。既定値2555日 |
 | `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` | PII を公開 audit ID へ変換する HMAC key |
 
 CDK parameter `CognitoUserPoolClientId` と `CognitoSsoUserPoolClientId` は、それぞれ

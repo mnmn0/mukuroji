@@ -941,7 +941,6 @@ function createAiAssistancePrincipalAuthorizationConditions(
   principal: WorkspacePrincipal,
 ): AiAssistanceAuthorizationCondition[] {
   const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
-    getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     'mukuroji-workspace-access-local'
   const principalKind = principal.principalKind ?? 'member'
   const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
@@ -1491,7 +1490,6 @@ function createAiAssistanceWorkspaceMemberAuthorizationCondition(
 ): AiAssistanceAuthorizationCondition {
   const memberKey = normalizeProjectMemberKey(member.id)
   const tableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
-    getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     'mukuroji-workspace-access-local'
   return {
     kind: 'workspace-member',
@@ -1517,8 +1515,7 @@ function createAiAssistanceProjectMembershipAuthorizationCondition(
   member: AiAssistanceProjectMembership,
 ): AiAssistanceAuthorizationCondition {
   const memberKey = normalizeProjectMemberKey(member.memberId)
-  const tableName = getEnv('MUKUROJI_PROJECT_DIRECTORY_TABLE') ??
-    getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
+  const tableName = getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
     'mukuroji-project-directory-local'
   return {
     kind: 'project-membership',

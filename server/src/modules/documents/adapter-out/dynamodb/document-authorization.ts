@@ -110,6 +110,5 @@ export class DynamoDbDocumentAuthorizationRevisionMutationAdapter implements
 function configuredDocumentsTableName(): string {
   const environment = loadServerConfig().environment
   return environment.DOCUMENTS_TABLE_NAME ??
-    environment.MUKUROJI_DOCUMENTS_TABLE ??
     'mukuroji-documents-local'
 }

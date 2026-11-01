@@ -2245,7 +2245,7 @@ test('DynamoDB Work Item client classifies configuration conflicts from the actu
 
 test('DynamoDB Work Item client compiles authorization snapshots inside the adapter', async () => {
   await withTestEnvironment({
-    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
     PLANNING_TABLE_NAME: 'PlanningTable',
     ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
   }, async () => {
@@ -2344,7 +2344,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
 
 test('DynamoDB Work Item client keeps the snapshot membership version when the actor adds themselves', async () => {
   await withTestEnvironment({
-    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
     PLANNING_TABLE_NAME: 'PlanningTable',
   }, async () => {
     let transactItems: TransactWriteCommandInput['TransactItems']
@@ -2499,7 +2499,7 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
 
 test('DynamoDB Work Item create and update classify snapshot Planning races', async () => {
   await withTestEnvironment({
-    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
     PLANNING_TABLE_NAME: 'PlanningTable',
   }, async () => {
     const currentIssue = createScheduleCascadeIssue('core-team', 'snapshot-race')
@@ -3011,7 +3011,7 @@ test('DynamoDB Work Item delete prioritizes authorization failure over deletion 
 
 test('DynamoDB Work Item schedule cascade writes one bounded transaction with unique events', async () => {
   await withTestEnvironment({
-    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
     PLANNING_TABLE_NAME: 'PlanningTable',
     ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
   }, async () => {
@@ -3281,7 +3281,7 @@ test('DynamoDB Work Item schedule cascade preserves classified receipt preparati
 
 test('DynamoDB Work Item schedule cascade classifies cancellation indexes by safe priority', async () => {
   await withTestEnvironment({
-    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
     PLANNING_TABLE_NAME: 'PlanningTable',
     ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
   }, async () => {

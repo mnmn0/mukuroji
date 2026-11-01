@@ -371,7 +371,6 @@ implements WebhookSubscriptionAuthorizer {
     const documentClient = options.documentClient ?? createDocumentClient()
     const projectDirectoryTableName = options.projectDirectoryTableName ??
       process.env.PROJECT_DIRECTORY_TABLE_NAME ??
-      process.env.MUKUROJI_PROJECT_DIRECTORY_TABLE ??
       'mukuroji-project-directory-local'
     const cognitoGroups = options.cognitoGroups ??
       new AwsWebhookCognitoGroupsProvider()
@@ -922,7 +921,6 @@ function createCognitoClient() {
 
 function readConfiguredSystemAdminGroups() {
   const configured = (
-    process.env.MUKUROJI_SYSTEM_ADMIN_GROUPS ??
     process.env.SYSTEM_ADMIN_GROUPS ??
     ''
   )

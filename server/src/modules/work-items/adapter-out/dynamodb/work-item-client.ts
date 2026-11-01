@@ -296,7 +296,6 @@ function createAuthorizationSnapshotConditionEntries(
     {
       kind: 'workspace-member',
       tableName:
-        environment.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
         environment.WORKSPACE_ACCESS_TABLE_NAME ??
         'mukuroji-workspace-access-local',
       key: {
@@ -1352,7 +1351,6 @@ export class DynamoDbTeamIssuesClient {
       getEnv('WORK_ITEMS_TABLE_NAME') ??
       'mukuroji-team-issues-local',
     eventTableName =
-      getEnv('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ??
       getEnv('TEAM_ISSUE_EVENTS_TABLE_NAME') ??
       'mukuroji-team-issue-events-local',
     documentClient = createDynamoDbDocumentClient(),

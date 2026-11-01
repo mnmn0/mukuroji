@@ -248,7 +248,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     auditExportBucketName: requireEnvironment('AUDIT_EXPORT_BUCKET_NAME'),
     cognitoUserPoolId: requireEnvironment('COGNITO_USER_POOL_ID'),
     workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),
-    workItemEventsTableName: requireEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE'),
+    workItemEventsTableName: requireEnvironment('TEAM_ISSUE_EVENTS_TABLE_NAME'),
     workItemConfigurationTableName: requireEnvironment('WORK_ITEM_CONFIGURATION_TABLE_NAME'),
     automationTableName: requireEnvironment('AUTOMATION_TABLE_NAME'),
     automationWebhookSecretPrefix: requireEnvironment('AUTOMATION_WEBHOOK_SECRET_PREFIX'),

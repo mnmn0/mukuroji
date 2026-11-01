@@ -100,7 +100,6 @@ export function buildAgentRunTriageWorker(
         AGENT_RUNS_TABLE_NAME: agentRunsTable.tableName,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
-        MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'agent-run-triage-worker',
         REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
         TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,

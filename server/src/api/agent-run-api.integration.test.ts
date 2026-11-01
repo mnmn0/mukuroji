@@ -598,8 +598,8 @@ describe('public Agent Run service', () => {
   })
 
   test('keeps Agent Run audit events apart from the Work Item event in the same transaction', () => {
-    const previous = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-    process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditEvents'
+    const previous = process.env.AUDIT_EVENTS_TABLE_NAME
+    process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEvents'
     try {
       const context = createMutationAuditContext({
         workspaceId, actor: { id: 'demo@example.com', kind: 'user' }, idempotencyKey: 'start-1',
@@ -614,8 +614,8 @@ describe('public Agent Run service', () => {
       expect(shared?.Put?.Item?.eventId).not.toBe(workItemEventId)
       expect(standalone?.Put?.Item?.eventId).toBe(workItemEventId)
     } finally {
-      if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-      else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
+      if (previous === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+      else process.env.AUDIT_EVENTS_TABLE_NAME = previous
     }
   })
 
@@ -824,8 +824,8 @@ describe('public Agent Run service', () => {
   })
 
   test('audits a take over with stable event types and points conflicts at instanceId', async () => {
-    const previous = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-    process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditEvents'
+    const previous = process.env.AUDIT_EVENTS_TABLE_NAME
+    process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEvents'
     try {
       const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
       store.state.settings.set(`${workspaceId}|core-team`, {
@@ -876,8 +876,8 @@ describe('public Agent Run service', () => {
       })
       expect(auditTypes).toEqual(['agent-run.taken-over', 'agent-run.started'])
     } finally {
-      if (previous === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-      else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previous
+      if (previous === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+      else process.env.AUDIT_EVENTS_TABLE_NAME = previous
     }
   })
 

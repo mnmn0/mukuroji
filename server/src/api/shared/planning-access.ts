@@ -976,7 +976,6 @@ export function createPlanningCallerAuthorizationConditionChecks(
   const workspaceMemberChecks = [...members.values()].map((member) => ({
     ConditionCheck: {
       TableName:
-        getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
         getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
         'mukuroji-workspace-access-local',
       Key: {

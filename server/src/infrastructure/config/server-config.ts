@@ -132,8 +132,7 @@ export function loadServerConfig(
     ),
     port: Number(environment.PORT ?? 3000),
     workspaceSearchProjectionEnabled: environment.NODE_ENV !== 'test' || Boolean(
-      environment.WORKSPACE_SEARCH_TABLE_NAME ??
-        environment.MUKUROJI_WORKSPACE_SEARCH_TABLE,
+      environment.WORKSPACE_SEARCH_TABLE_NAME,
     ),
     runtimeRole: environment.MUKUROJI_RUNTIME_ROLE,
     production,

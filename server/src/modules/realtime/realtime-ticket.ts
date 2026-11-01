@@ -85,8 +85,7 @@ export class DynamoDbRealtimeTicketsClient implements RealtimeTicketsClient {
   private readonly clock: () => Date
 
   constructor(
-    tableName = readEnvironment('MUKUROJI_REALTIME_SESSIONS_TABLE') ??
-      readEnvironment('REALTIME_SESSIONS_TABLE_NAME') ??
+    tableName = readEnvironment('REALTIME_SESSIONS_TABLE_NAME') ??
       'mukuroji-realtime-sessions-local',
     documentClient = createRealtimeDocumentClient(),
     websocketUrl = readEnvironment('REALTIME_WEBSOCKET_URL'),

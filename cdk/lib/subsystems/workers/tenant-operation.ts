@@ -421,7 +421,7 @@ function buildTenantOperationCapabilityFunction(
       FILE_BUCKET_NAME: input.fileStorage.fileBucket.bucketName,
       FILE_PROOFING_TABLE_NAME: input.dataStores.fileProofingTable.tableName,
       FOCUS_TABLE_NAME: input.dataStores.focusTable.tableName,
-      MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:
+      TEAM_ISSUE_EVENTS_TABLE_NAME:
         input.dataStores.teamIssueEventsTable.tableName,
       NOTIFICATIONS_TABLE_NAME: input.dataStores.notificationsTable.tableName,
       PLANNING_TABLE_NAME: input.dataStores.planningTable.tableName,

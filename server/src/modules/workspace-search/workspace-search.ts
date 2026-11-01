@@ -1457,7 +1457,6 @@ export class DynamoDbWorkspaceSearchClient {
 
   constructor(
     tableName = readEnvironment('WORKSPACE_SEARCH_TABLE_NAME') ??
-      readEnvironment('MUKUROJI_WORKSPACE_SEARCH_TABLE') ??
       'mukuroji-workspace-search-local',
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createDynamoDbClient(),
