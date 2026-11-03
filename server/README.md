@@ -245,14 +245,14 @@ The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNA
 Default local table names are:
 
 - `MUKUROJI_DASHBOARD_TABLE=mukuroji-dashboard-local`
-- `MUKUROJI_PROJECT_DIRECTORY_TABLE=mukuroji-project-directory-local`
-- `MUKUROJI_COLLABORATION_TABLE=mukuroji-collaboration-local`
-- `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）
+- `PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local`
+- `COLLABORATION_TABLE_NAME=mukuroji-collaboration-local`
+- `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）
 - `DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET`（public link の冪等再送用 HMAC key。本番 CDK は 64 文字の secret を自動生成）
-- `MUKUROJI_NOTIFICATIONS_TABLE=mukuroji-notifications-local`
+- `NOTIFICATIONS_TABLE_NAME=mukuroji-notifications-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME=RecipientStatusIndex`
-- `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
-- `MUKUROJI_AUDIT_EVENTS_TABLE=mukuroji-audit-events`
+- `REALTIME_SESSIONS_TABLE_NAME=mukuroji-realtime-sessions-local`
+- `AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events`
 - `ENTERPRISE_IDENTITY_TABLE_NAME=mukuroji-enterprise-identity-local`（Workspace generation/`CONTROL`
   checkpoint と global domain claim を保存。Enterprise Identity 専用 GSI はありません）
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<32–256文字の安定したsecret>`（credential
@@ -266,12 +266,12 @@ Default local table names are:
 - `PLANNING_TABLE_NAME=mukuroji-planning-local`
 - `ANALYTICS_TABLE_NAME=mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME=ScheduleDueIndex`
-- `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
-- `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
+- `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
+- `AUDIT_RETENTION_DAYS=2555`
 - `TENANT_ADMINISTRATION_TABLE_NAME=mukuroji-tenant-administration-local`
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
-- `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
+- `WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local`
 - `REQUEST_INTAKE_TABLE_NAME=mukuroji-request-intake-local`
 - `REQUEST_QUEUE_INDEX_NAME=RequestQueueIndex`
 - `REQUEST_RATE_LIMIT_PER_HOUR=10`

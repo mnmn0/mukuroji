@@ -281,13 +281,13 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
-- `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
-- `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
+- `PROJECT_DIRECTORY_TABLE_NAME`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
+- `WORKSPACE_ACCESS_TABLE_NAME`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
-- `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue の活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
-- `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
-- `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
-- `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
+- `TEAM_ISSUE_EVENTS_TABLE_NAME`: チーム Issue の活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
+- `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
+- `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
+- `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
 - `AI_ASSISTANCE_BEDROCK_REGION`: AI assistanceが呼ぶBedrock Runtime region。本番はLambdaの`AWS_REGION`、localのJP既定は`ap-northeast-1`
 - `AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD` / `AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD`: exact model/profile用にdeploy時レビューしたstandard token単価。両方を設定した場合だけgeneration auditへ推定costを保存します。
 - `AI_ASSISTANCE_DEFAULT_MODEL_ID` / `AI_ASSISTANCE_ALLOWED_MODEL_IDS`: defaultとcomma-separated allowlist。本番CDKは両方を同じexact `AiBedrockModelId`（有効化時は `jp.anthropic.claude-sonnet-4-6`、未設定時はAI無効）へ固定します。
@@ -296,22 +296,22 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION`: 同じatomic reservationで管理するworst-case token budget（既定32,000,000 / 4,000,000 / 1,000,000）。
 - `ANALYTICS_TABLE_NAME`: 保存済みレポート、immutable snapshot、定期配信 receipt を保存する DynamoDB table 名。未指定時は `mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME`: 定期配信対象の取得に使う `scheduleShard` / `nextDeliveryAtRecordKey` GSI 名。未指定時は `ScheduleDueIndex`
-- `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
+- `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
 - `PLANNING_TABLE_NAME`: Cycle、Milestone、Release、Phase、Goal/OKR、Initiative、Roadmap、Portfolio の Planning entity、entity dependency、qualified Work Item schedule dependency、Work Item link を保存する DynamoDB table 名。未指定時は `mukuroji-planning-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME`: unread/read/archive/snooze ごとの timeline query に使う GSI 名。未指定時は `RecipientStatusIndex`
-- `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
+- `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
-- `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
 - `TENANT_ADMINISTRATION_TABLE_NAME`: tenant profile、governance、lifecycle を保存する DynamoDB table 名。ローカル既定値は `mukuroji-tenant-administration-local`
 - `ENTERPRISE_IDENTITY_TABLE_NAME`: Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/domain/policy/role、SCIM identity/group、provisioning run、service account、break-glass metadata を保存する DynamoDB table 名。Enterprise Identity 専用 GSI はなく、ローカル既定値は `mukuroji-enterprise-identity-local`
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET`: SCIM bearer token と service account credential を HMAC-SHA-256 する32–256文字の安定した secret。DynamoDB には credential kind・Workspace・credential ID で domain-separated な digest だけを保存します。作成・rotate response の raw credential は通常一回だけ表示し、同じ idempotency request の応答消失時に限り10分以内は同じ値を回復できます。
-- `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
+- `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
 - `AUTOMATION_WEBHOOK_SECRET_PREFIX`: outbound webhook の workspace-scoped signing secret を置く Secrets Manager prefix。未指定時は `mukuroji/automation-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX`: server-issued inbound webhook signing secret を outbound secret から分離して置く Secrets Manager prefix。未指定時は `mukuroji/automation-inbound-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_BASE_URL`: Sender に渡す inbound webhook URL の public API base URL。Server はこの値へ `/api/automation/inbound-webhooks/{opaqueEndpointId}` を追加します。HTTPS が必須で、HTTP は `localhost`、`127.0.0.1`、`[::1]` の loopback development host だけに許可します。Floci deploy では作成済み REST API ID と stage から自動設定します。
 - `SECRETS_MANAGER_ENDPOINT` / `AWS_ENDPOINT_URL_SECRETS_MANAGER` / `AWS_ENDPOINT_URL_SECRETSMANAGER` / `AWS_ENDPOINT_URL`: API Lambda から見る Secrets Manager endpoint（左から優先）。AWS 接続では `AWS_REGION` と一致する standard/FIPS の HTTPS hostname だけを許可します。ローカル Lambda では Floci 内部 endpoint の `http://floci:4566` を使います。
 - `MUKUROJI_LOCAL_AWS_RUNTIME`: `floci` のときだけ loopback、`localhost`、`floci`、`localstack` の HTTP Secrets Manager endpoint を許可する明示的な local marker。`floci:deploy-backend` が自動設定し、`NODE_ENV=production` では常に無効です。本番環境へ設定しないでください。
-- `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
+- `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、環境ごとに固定します。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username

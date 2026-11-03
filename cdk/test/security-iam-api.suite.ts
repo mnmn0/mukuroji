@@ -70,6 +70,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
   for (const removedAlias of [
     'MUKUROJI_DOCUMENTS_TABLE',
     'MUKUROJI_PROJECT_DIRECTORY_TABLE',
+    'MUKUROJI_SYSTEM_ADMIN_GROUPS',
+    'MUKUROJI_TEAM_ISSUE_EVENTS_TABLE',
     'WORK_ITEMS_TABLE_NAME',
     'SYSTEM_ADMIN_GROUPS',
     'TEAM_ISSUE_EVENTS_TABLE_NAME',

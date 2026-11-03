@@ -1390,8 +1390,8 @@ test('recovers Bulk apply and undo response loss only from their matching audit 
 })
 
 test('accepts an unauthenticated signed inbound webhook without exposing secret material', async () => {
-  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  const previousAuditTable = process.env.AUDIT_EVENTS_TABLE_NAME
+  process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditTable'
   try {
     let resolvedEndpoint = createInboundWebhookEndpointRecord()
     let deliveryInput:
@@ -1471,14 +1471,14 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
     resolvedEndpoint = { ...resolvedEndpoint, status: 'provisioning' }
     expect((await request()).status).toBe(404)
   } finally {
-    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+    if (previousAuditTable === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+    else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
   }
 })
 
 test('reads Triage recovery markers only for Triage endpoints or unresolved IDs', async () => {
-  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  const previousAuditTable = process.env.AUDIT_EVENTS_TABLE_NAME
+  process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditTable'
   try {
     let resolvedEndpoint: ReturnType<typeof createInboundWebhookEndpointRecord> | undefined =
       createInboundWebhookEndpointRecord()
@@ -1571,8 +1571,8 @@ test('reads Triage recovery markers only for Triage endpoints or unresolved IDs'
     expect((await request()).status).toBe(404)
     expect(recoveryReads).toEqual(['A'.repeat(43)])
   } finally {
-    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+    if (previousAuditTable === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+    else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
   }
 })
 
@@ -3022,8 +3022,8 @@ test('rejects inactive automation approval reviewers before creating durable sta
 })
 
 test('turns a signed Triage-purpose delivery into a Triage entry without an Automation event', async () => {
-  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  const previousAuditTable = process.env.AUDIT_EVENTS_TABLE_NAME
+  process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditTable'
   try {
     configureFakeProjectClients(true)
     const endpoint = createInboundWebhookEndpointRecord({
@@ -3209,8 +3209,8 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     expect(throttled.status).toBe(503)
     expect(await throttled.json()).toMatchObject({ code: 'TriageUnavailable' })
   } finally {
-    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+    if (previousAuditTable === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+    else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
   }
 })
 
@@ -3577,8 +3577,8 @@ test('finishes an accepted Triage delivery after the endpoint secret is rotated'
     })
   }
 
-  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  const previousAuditTable = process.env.AUDIT_EVENTS_TABLE_NAME
+  process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditTable'
   try {
     // The accepted delivery's retry is still signed with the secret from before the rotation.
     const completed = await deliver(previousSecret, 'accepted-key', body)
@@ -3596,7 +3596,7 @@ test('finishes an accepted Triage delivery after the endpoint secret is rotated'
     expect(recordedBodies).toEqual([createHash('sha256').update(altered).digest('hex')])
     expect(admissions).toHaveLength(1)
   } finally {
-    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
-    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+    if (previousAuditTable === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+    else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
   }
 })

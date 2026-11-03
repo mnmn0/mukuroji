@@ -2662,8 +2662,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   private readonly bootstrapLocalTable: boolean
 
   constructor(
-    tableName = readEnvironment('MUKUROJI_COLLABORATION_TABLE') ??
-      readEnvironment('COLLABORATION_TABLE_NAME') ??
+    tableName = readEnvironment('COLLABORATION_TABLE_NAME') ??
       'mukuroji-collaboration-local',
     parentIssueTableName = readEnvironment('WORK_ITEMS_TABLE_NAME') ??
       'mukuroji-team-issues-local',
@@ -5528,7 +5527,6 @@ function curatedContextAuthorizationConditions(
   const snapshot = input.authorizationSnapshot
   if (!snapshot) return []
   const tableName =
-    readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
     'mukuroji-workspace-access-local'
   const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
@@ -5596,7 +5594,6 @@ function curatedContextDocumentSourceConditions(
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
   const documentsTableName =
     readEnvironment('DOCUMENTS_TABLE_NAME') ??
-    readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
     'mukuroji-documents-local'
   const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
     {
@@ -5648,7 +5645,6 @@ function curatedContextDocumentSourceConditions(
     conditions.push({
       ConditionCheck: {
         TableName:
-          readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
           readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
           'mukuroji-workspace-access-local',
         Key: {
@@ -5737,7 +5733,6 @@ function curatedContextActivitySourceConditions(
   snapshot: CuratedContextActivitySourceAuthorizationSnapshot,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
   const auditTableName =
-    readEnvironment('MUKUROJI_AUDIT_EVENTS_TABLE') ??
     readEnvironment('AUDIT_EVENTS_TABLE_NAME') ??
     'mukuroji-audit-events'
   const hasRetentionDeadline = snapshot.expiresAt !== undefined

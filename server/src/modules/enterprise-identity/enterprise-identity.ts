@@ -2958,8 +2958,7 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     tableName: string,
     tokenHashSecret: string,
     documentClient = createEnterpriseDocumentClient(),
-    auditTableName = process.env.AUDIT_EVENTS_TABLE_NAME ??
-      process.env.MUKUROJI_AUDIT_EVENTS_TABLE,
+    auditTableName = process.env.AUDIT_EVENTS_TABLE_NAME,
     clock: () => Date = () => new Date(),
     scimResourceLimits: EnterpriseScimResourceLimits =
       ENTERPRISE_SCIM_RESOURCE_LIMITS,

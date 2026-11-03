@@ -193,7 +193,7 @@ const expectedIdentityConfiguration = {
   COGNITO_SSO_CLIENT_ID: base64(ref('CognitoSsoUserPoolClientId')),
   COGNITO_SSO_REDIRECT_URI: base64(ref('CognitoSsoRedirectUri')),
   COGNITO_USER_POOL_ID: base64(ref('CognitoUserPoolId')),
-  MUKUROJI_SYSTEM_ADMIN_GROUPS: base64(ref('SystemAdminGroups')),
+  SYSTEM_ADMIN_GROUPS: base64(ref('SystemAdminGroups')),
   MUKUROJI_WORKSPACE_DIRECTORY_ID: base64(ref('WorkspaceDirectoryId')),
 };
 
@@ -233,7 +233,7 @@ const expectedDataConfiguration = {
   ENTERPRISE_IDENTITY_TABLE_NAME: base64(
     ref('EnterpriseIdentityTable7491FB7A'),
   ),
-  MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: base64(
+  TEAM_ISSUE_EVENTS_TABLE_NAME: base64(
     ref('TeamIssueEventsTableDD2B0F96'),
   ),
   PROJECT_DIRECTORY_TABLE_NAME: base64(

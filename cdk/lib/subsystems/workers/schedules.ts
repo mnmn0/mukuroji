@@ -104,7 +104,7 @@ export function buildScheduleWorkers(
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
-        MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
+        PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,

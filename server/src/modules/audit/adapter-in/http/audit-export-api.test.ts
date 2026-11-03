@@ -103,8 +103,8 @@ const adminHeaders = () => ({
 })
 
 test('keeps the export request receipt past every artifact even with a short audit retention', async () => {
-  const previous = process.env.MUKUROJI_AUDIT_RETENTION_DAYS
-  process.env.MUKUROJI_AUDIT_RETENTION_DAYS = '1'
+  const previous = process.env.AUDIT_RETENTION_DAYS
+  process.env.AUDIT_RETENTION_DAYS = '1'
   try {
     const { accessEvents } = configureExports()
     const created = await app.request('/api/audit/exports', {
@@ -118,8 +118,8 @@ test('keeps the export request receipt past every artifact even with a short aud
     const retainedSeconds = requested.expiresAt - Math.floor(Date.parse(requested.occurredAt) / 1000)
     expect(retainedSeconds).toBeGreaterThanOrEqual(17 * 86_400)
   } finally {
-    if (previous === undefined) delete process.env.MUKUROJI_AUDIT_RETENTION_DAYS
-    else process.env.MUKUROJI_AUDIT_RETENTION_DAYS = previous
+    if (previous === undefined) delete process.env.AUDIT_RETENTION_DAYS
+    else process.env.AUDIT_RETENTION_DAYS = previous
   }
 })
 

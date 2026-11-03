@@ -150,10 +150,7 @@ export function buildConnectorWorkers(
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
           enterpriseIdentityTokenHashSecret.valueAsString,
-        MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'connector-queue-worker',
-        MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
-        MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         PLANNING_TABLE_NAME: planningTable.tableName,

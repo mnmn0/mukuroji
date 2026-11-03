@@ -797,8 +797,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
 export function getConfiguredNotificationsTableName(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ) {
-  return environment.MUKUROJI_NOTIFICATIONS_TABLE?.trim() ||
-    environment.NOTIFICATIONS_TABLE_NAME?.trim() ||
+  return environment.NOTIFICATIONS_TABLE_NAME?.trim() ||
     'mukuroji-notifications-local'
 }
 

@@ -253,7 +253,6 @@ export function createAutomationRepository(): DynamoDbAutomationRepository {
 
   return new DynamoDbAutomationRepository(
     config.environment.AUTOMATION_TABLE_NAME ??
-      config.environment.MUKUROJI_AUTOMATION_TABLE ??
       'mukuroji-automation-local',
     createDynamoDbDocumentClient(dynamoDbClient),
     dynamoDbClient,
@@ -336,7 +335,7 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
     throw new Error('ANALYTICS_TABLE_NAME must be set for durable time tracking storage.')
   }
   if (config.production && !auditTableName) {
-    throw new Error('MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for time tracking audit writes.')
+    throw new Error('AUDIT_EVENTS_TABLE_NAME must be set for time tracking audit writes.')
   }
   return new TimeTrackingService(
     new DynamoDbTimeTrackingRepository(
@@ -912,8 +911,7 @@ function createProductionAiAssistanceService(
     )
   }
   const tableName = environment.AI_ASSISTANCE_TABLE_NAME?.trim() ||
-    environment.WORKSPACE_SEARCH_TABLE_NAME?.trim() ||
-    environment.MUKUROJI_WORKSPACE_SEARCH_TABLE?.trim()
+    environment.WORKSPACE_SEARCH_TABLE_NAME?.trim()
   if (config.production && !tableName) {
     throw new TypeError(
       'AI_ASSISTANCE_TABLE_NAME must be set for durable AI assistance storage.',
@@ -922,15 +920,14 @@ function createProductionAiAssistanceService(
   const auditTableName = getConfiguredAuditTableName()
   if (config.production && !auditTableName) {
     throw new TypeError(
-      'MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for AI policy audit writes.',
+      'AUDIT_EVENTS_TABLE_NAME must be set for AI policy audit writes.',
     )
   }
   const configuredWorkspaceAccessTableName =
-    environment.WORKSPACE_ACCESS_TABLE_NAME?.trim() ||
-    environment.MUKUROJI_WORKSPACE_ACCESS_TABLE?.trim()
+    environment.WORKSPACE_ACCESS_TABLE_NAME?.trim()
   if (config.production && !configuredWorkspaceAccessTableName) {
     throw new TypeError(
-      'WORKSPACE_ACCESS_TABLE_NAME or MUKUROJI_WORKSPACE_ACCESS_TABLE must be set for production AI policy authorization.',
+      'WORKSPACE_ACCESS_TABLE_NAME must be set for production AI policy authorization.',
     )
   }
   const workspaceAccessTableName = configuredWorkspaceAccessTableName ||

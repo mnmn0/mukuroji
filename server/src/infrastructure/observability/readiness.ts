@@ -271,14 +271,12 @@ function resolveCriticalTables(
     {
       name: 'workspace-access',
       tableName: firstNonBlank(
-        environment.MUKUROJI_WORKSPACE_ACCESS_TABLE,
         environment.WORKSPACE_ACCESS_TABLE_NAME,
       ) ?? (production ? undefined : 'mukuroji-workspace-access-local'),
     },
     {
       name: 'audit-events',
       tableName: firstNonBlank(
-        environment.MUKUROJI_AUDIT_EVENTS_TABLE,
         environment.AUDIT_EVENTS_TABLE_NAME,
       ) ?? (production ? undefined : 'mukuroji-audit-events'),
     },

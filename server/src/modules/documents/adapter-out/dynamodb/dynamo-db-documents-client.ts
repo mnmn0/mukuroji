@@ -811,7 +811,6 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     this.tableName =
       options.tableName ??
       process.env.DOCUMENTS_TABLE_NAME ??
-      process.env.MUKUROJI_DOCUMENTS_TABLE ??
       'mukuroji-documents-local'
     this.dynamoClient = options.dynamoClient ?? (
       options.documentClient === undefined
@@ -6552,7 +6551,6 @@ function authorizationSnapshotGuards(
     ) {
       guards.push({
         tableName:
-          environment.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
           environment.WORKSPACE_ACCESS_TABLE_NAME ??
           'mukuroji-workspace-access-local',
         key: {

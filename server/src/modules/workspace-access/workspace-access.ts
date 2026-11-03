@@ -577,7 +577,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   )
   constructor(
     tableNameOrOptions: string | DynamoDbWorkspaceAccessClientOptions =
-      readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
       readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
     documentClient?: DynamoDBDocumentClient,
@@ -605,9 +604,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       typeof tableNameOrOptions === 'string'
         ? tableNameOrOptions
         : readEnvironment(
-            'MUKUROJI_WORKSPACE_ACCESS_TABLE',
-          ) ??
-          readEnvironment(
             'WORKSPACE_ACCESS_TABLE_NAME',
           ) ??
           'mukuroji-workspace-access-local'
