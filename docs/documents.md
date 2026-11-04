@@ -1,8 +1,10 @@
 # Document・Wiki・Whiteboard
 
 Document 機能は page、folder、template、whiteboard を同じ tree と権限モデルで扱います。
-Canonical schema は `@mukuroji/contracts`、永続化と認可は
-`server/src/documents.ts`、HTTP route は `server/src/document-api.ts` にあります。
+Canonical schema は `@mukuroji/contracts`、access policy は
+`server/src/modules/documents/domain/document-access.ts`、永続化と認可は
+`server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.ts`、
+HTTP route は `server/src/modules/documents/adapter-in/http/document-api.ts` にあります。
 
 ## データモデル
 
