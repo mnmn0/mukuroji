@@ -52,10 +52,22 @@ type ApiRuntimeSecretLoader = (
 
 /** One parsed configuration envelope before it is applied. */
 type ParsedApiRuntimeConfiguration = {
+  /** Deploy revision decoded from the envelope's revision record. */
   readonly revision: string
+  /** Direct values keyed by canonical environment name. */
   readonly values: ReadonlyMap<string, string>
+  /** Canonical names of nested secret records, positionally aligned with `nestedSecretArns`. */
   readonly nestedSecretNames: readonly string[]
+  /** Complete nested secret ARNs, positionally aligned with `nestedSecretNames`. */
   readonly nestedSecretArns: readonly string[]
+}
+
+/** One envelope split into its revision and its not yet validated records. */
+type SplitApiRuntimeConfiguration = {
+  /** Deploy revision decoded from the envelope's revision record. */
+  readonly revision: string
+  /** Record lines after the revision record, in envelope order. */
+  readonly lines: readonly string[]
 }
 
 /**
@@ -177,7 +189,7 @@ async function loadSingleSecret(
  */
 function splitApiRuntimeConfiguration(
   secretString: string,
-): { readonly revision: string; readonly lines: readonly string[] } {
+): SplitApiRuntimeConfiguration {
   if (
     typeof secretString !== 'string' ||
     !secretString.startsWith(API_RUNTIME_CONFIGURATION_HEADER) ||
