@@ -210,7 +210,7 @@ manual invoke、cleanup、deployを行う場合は、対象account/region、chan
 
 ## API path contract
 
-Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は Function URL / API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
+Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
 
 - `<base-url>/teams/projects`
 - `<base-url>/api/teams/projects`

@@ -36,6 +36,7 @@
     "web:test": "bun --filter web test",
     "web:build": "bun --filter web build",
     "web:preview": "bun --filter web preview",
+    "web:deploy": "bash scripts/deploy-web.sh",
     "pwa:icons": "bun scripts/generate-pwa-icons.ts",
     "web:e2e": "playwright test && bun run web:e2e:pwa",
     "web:e2e:desktop": "playwright test",

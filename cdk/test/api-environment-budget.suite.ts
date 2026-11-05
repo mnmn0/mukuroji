@@ -875,14 +875,6 @@ describe('API runtime configuration externalization', () => {
     const functionUrls = Object.values(resources)
       .filter((resource) =>
         isRecord(resource) && resource.Type === 'AWS::Lambda::Url');
-    expect(functionUrls).toEqual([
-      expect.objectContaining({
-        DependsOn: expect.arrayContaining([aliasLogicalId]),
-        Properties: expect.objectContaining({
-          Qualifier: 'live',
-          TargetFunctionArn: getAtt(API_FUNCTION_LOGICAL_ID, 'Arn'),
-        }),
-      }),
-    ]);
+    expect(functionUrls).toEqual([]);
   });
 });

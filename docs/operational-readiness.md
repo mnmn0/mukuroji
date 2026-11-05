@@ -77,7 +77,7 @@ Production load test を client-controlled header で
 除外することは禁止します。承認済みwindowをoffline reportから除外する場合もraw/eligible
 telemetryを保持し、fast-burn alarmは抑制しません。
 
-Application completion record は Function URL と HTTP API の両経路を同じ形式で数えます。
+Application completion record は CloudFront 経由と HTTP API 直接の両経路を同じ形式で数えます。
 一方、Lambda throttle や integration 前の API Gateway failure は EMF completion record を
 持ちません。`AWS/Lambda` の Errors/Throttles と API Gateway の `5xx` を補助 evidence とし、
 同じ request を二重加算しない集計 pipeline または外形 probe ができるまでは availability
@@ -85,7 +85,7 @@ report を **provisional** と表示します。`treatMissingData=notBreaching` 
 成功 evidence ではなく `no-data` です。
 
 Hono が catch して `500` response に変換した request は Lambda `Errors` を増やさないため、
-Function URL と HTTP API の両経路を数える EMF `ServerErrorCount` alarm で補完します。Eligible
+CloudFront 経由と HTTP API 直接の両経路を数える EMF `ServerErrorCount` alarm で補完します。Eligible
 completionには5分・1時間の multi-window fast-burn alertがあります。Middleware到達前failureを
 同じSLIへ重複なく統合する外形probeは未実装です。
 
@@ -260,7 +260,7 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `ApiFunctionErrorAlarm` | Lambda `Errors Sum >= 1` / 5分 | SEV2 | Lambda function、UTC window、invocation failure。Hono error log があれば request/correlation ID |
 | `ApiFunctionThrottleAlarm` | Lambda `Throttles Sum >= 1` / 5分 | SEV2 | Function concurrency、UTC window、transport metric。Middleware 未到達 request は request/user/tenant が unknown |
 | `ApiFunctionLatencyAlarm` | Lambda duration p95 `>= 12,000 ms`、5分 period の2/3 | SEV2 | `api.request.completed` の `durationMs`、request/correlation ID、route group |
-| `ApiApplicationServerErrorAlarm` | `Mukuroji/API` `ServerErrorCount Sum >= 1` / 5分 | SEV2 | Function URL / HTTP API の completion log、trusted request/correlation ID、route group |
+| `ApiApplicationServerErrorAlarm` | `Mukuroji/API` `ServerErrorCount Sum >= 1` / 5分 | SEV2 | HTTP API の completion log、trusted request/correlation ID、route group |
 | `ApiAvailabilityFastBurnFiveMinuteAlarm` | eligible error ratio `>= 0.0144`（burn rate 14.4）/ 5分 | component、notification無効 | 5分windowのeligible bad/totalとcompletion log |
 | `ApiAvailabilityFastBurnOneHourAlarm` | eligible error ratio `>= 0.0144`（burn rate 14.4）/ 1時間 | component、notification無効 | 1時間windowのeligible bad/totalとcompletion log |
 | `ApiAvailabilityFastBurnAlarm` | 5分・1時間componentが同時に`ALARM` | SEV1 | 両componentのstate history、eligible bad/total、直前deploy/migration |
@@ -452,7 +452,7 @@ revisionが一致しなければ`AWSPREVIOUS`を読み、revision、全canonical
 CloudFormation rollbackでは値も前のrevisionへ戻ります。旧secretのinventoryやretirement作業は
 不要です。
 
-HTTP APIのdefault routeとLambda Function URLはどちらも`live` Aliasに紐づきます。Deployでは
+HTTP APIのdefault routeは`live` Aliasに紐づき、CloudFrontの`/api/*`もこのHTTP APIを通ります。Deployでは
 configuration secretとLambda Versionを準備してからAliasを更新し、API trafficを
 code/configurationの揃ったversionへ切り替えます。
 
@@ -690,7 +690,7 @@ production では先に別 environment で同一 artifact を検証し、変更 
 
 1. CloudFormation が `UPDATE_COMPLETE` で、unexpected replacement がない。
 2. `/api/health` が `200 alive`、`/api/ready` が全 check `ready` を返す。
-3. Function URL と HTTP API の認証済み read、代表 mutation/read-after-write が成功する。
+3. CloudFront の `/api` と HTTP API 直接の認証済み read、代表 mutation/read-after-write が成功する。
 4. Response の request/correlation ID と JSON completion log が一致し、EMF metric が到着する。
 5. API alarm、DLQ、queue age、destination failure が `OK` で、telemetry に no-data がない。
 6. Migration marker/checkpoint/integrity check が成功し、新旧 client の contract test が通る。

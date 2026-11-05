@@ -230,17 +230,8 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     Name: 'live',
   });
 
-  template.hasResourceProperties('AWS::Lambda::Url', {
-    AuthType: 'NONE',
-    Qualifier: 'live',
-    TargetFunctionArn: {
-      'Fn::GetAtt': [functionLogicalId, 'Arn'],
-    },
-  });
-  const functionUrl = Object.values(
-    template.findResources('AWS::Lambda::Url'),
-  )[0];
-  expect(functionUrl.DependsOn).toEqual([aliasLogicalId]);
+  // The HTTP API is the only HTTP entry; CloudFront forwards /api/* to it.
+  template.resourceCountIs('AWS::Lambda::Url', 0);
   template.hasResourceProperties('AWS::ApiGatewayV2::Integration', {
     IntegrationType: 'AWS_PROXY',
     IntegrationUri: { Ref: aliasLogicalId },
@@ -260,7 +251,7 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     Principal: 'apigateway.amazonaws.com',
     SourceArn: Match.anyValue(),
   });
-  template.hasOutput('ApiFunctionUrl', {});
+  template.hasOutput('WebUrl', {});
   template.hasOutput('ApiGatewayUrl', {});
   template.hasOutput('WorkspaceDirectoryId', {
     Value: {
@@ -320,7 +311,7 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   );
 });
 
-test('Function URL and API Gateway expose the same restricted CORS contract', () => {
+test('the HTTP API keeps the restricted CORS contract for direct callers', () => {
   const template = synthesizedTemplate;
   const allowedOrigins = {
     'Fn::Split': [
@@ -344,20 +335,6 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
     'x-request-id',
   ];
 
-  template.hasResourceProperties('AWS::Lambda::Url', {
-    Cors: {
-      AllowHeaders: [
-        'authorization',
-        'content-type',
-        'idempotency-key',
-        'x-correlation-id',
-        'x-request-id',
-      ],
-      AllowMethods: Match.arrayWith(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
-      AllowOrigins: allowedOrigins,
-      ExposeHeaders: exposedHeaders,
-    },
-  });
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
       AllowHeaders: [

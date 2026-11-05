@@ -268,7 +268,7 @@ bun run web:dev
 Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送します。必要に応じて以下の環境変数を上書きできます。
 
 - `VITE_API_BASE_URL`: ブラウザから呼ぶ API の base URL。未指定時は `/api`
-- `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する API の base URL。未指定時は `VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。Developer Platform と tenant 管理 API は `VITE_PROJECTS_API_BASE_URL` を参照せず、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_ENTERPRISE_IDENTITY_API_BASE_URL`: Enterprise identity/security 管理 API を呼ぶ base URL。未指定時は `VITE_WORKSPACE_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 
@@ -379,9 +379,9 @@ owner-only の root `.env` から読み込みます。
 
 CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
-DynamoDB に idempotent に seed し、Lambda Function URL 経由で取得できます。
-AWS 環境で確認する場合は以下の順に実行し、出力された `ApiFunctionUrl` を
-Web の環境変数へ渡してください。
+DynamoDB に idempotent に seed し、CloudFront の `/api` 経由で取得できます。
+AWS 環境で確認する場合は以下の順に実行し、最後に `bun run web:deploy` で Web を
+出力された `WebUrl` へ配信してください。
 
 ```sh
 export COGNITO_USER_POOL_ID=<user-pool-id>
@@ -476,7 +476,8 @@ code、またはruntime configuration secretへ入るparameter/resource値を変
 新しい値へ進め、同じrevisionを異なる内容へ再利用しません。
 `MUKUROJI_APPLICATION_COMMIT_SHA` はreview済みcheckoutのfull SHAに固定し、deploy後の
 `GET /api/health`とproduction-like AI evaluationで同じ値を照合します。
-Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。runtime
+API Gatewayのdefault routeは`live` Aliasを呼び出し、CloudFrontの`/api/*`はこのHTTP APIへ
+転送します。runtime
 configurationは1つの安定したsecretにまとめ、deployごとに同じsecretの値をin-placeで更新します。
 deployを重ねてもsecretは増えません。各Lambda Versionは自分のrevisionを環境変数に持ち、loaderは
 `AWSCURRENT`のrevisionが一致しなければ`AWSPREVIOUS`を読むため、Alias切り替え中の旧Versionも
@@ -493,15 +494,16 @@ scope は `openid email profile` のみ、callback は `COGNITO_SSO_REDIRECT_URI
 `COGNITO` を含めないでください。通常の password client に federation を同居させると、password login
 で得た code を SSO exchange へ持ち込めるため、この構成は fail-closed で拒否されます。
 
-Lambda Function URL の CORS 許可 origin は CDK parameter
-`ApiAllowedOrigins` で指定します。未指定時は
-`http://localhost:5173,http://127.0.0.1:5173` です。
+Web と API は同じ CloudFront domain から配信するため、本番の Web は CORS を使いません。
+CDK parameter `ApiAllowedOrigins` は HTTP API を直接呼ぶ別 origin（local の Vite など）だけに
+使い、未指定時は `http://localhost:5173,http://127.0.0.1:5173` です。File bucket は
+`ApiAllowedOrigins` に加えて CloudFront の origin からの presigned upload を自動で受け付けます。
 認証に使う Cognito user pool は CDK parameter `CognitoUserPoolId` で固定し、
 Lambda は access token の issuer がその user pool と一致する場合だけ処理します。
 Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メールアドレスは
 `InitialOwnerEmail` で指定します。Cognito の
 `custom:directory_id` / `custom:workspace_id` は `WorkspaceDirectoryId` と一致させてください。
-同じ Function URL から `/teams/projects`, `/teams/{teamId}/issues`,
+同じ `/api` から `/teams/projects`, `/teams/{teamId}/issues`,
 `/projects/{projectId}/issues`,
 `/api/workspace/access` などの Workspace invitation API も取得できます。
 
@@ -512,7 +514,7 @@ Workspace access table の member が `active` でなければ、Lambda はす�
 `403` で拒否します。`deactivated` member や、`pending` / `revoked` invitation だけが残る
 user は Project、Work Item、Issue API を利用できません。
 
-招待 API は以下です。Lambda Function URL では `/api` prefix の有無をどちらも受け付けます。
+招待 API は以下です。HTTP API を直接呼ぶ場合は `/api` prefix の有無をどちらも受け付けます。
 
 - `GET /api/workspace/access`: current member、member/invitation 一覧、操作 capability
 - `POST /api/workspace/invitations`: invitation 作成
@@ -534,10 +536,14 @@ membership 確定失敗は通常ログイン時にも再照合されるため、
 復旧できます。owner の降格・利用停止は metadata の active owner count と member version を
 同じ DynamoDB transaction で更新し、最後の active owner と自己停止を拒否します。
 
-deploy 後は Function URL または API Gateway URL の output を Web に設定します。どちらも base URL の直下パスと `/api` prefix を受け付けます。
+deploy 後は `bun run web:deploy` で Web を build し、stack の Web bucket へ配信します。Web は
+同じ CloudFront domain の `/api` を呼ぶため、API の URL を設定する必要はありません。
+local の Web から AWS の API を呼ぶときだけ、`ApiGatewayUrl` output を設定します。
 
 ```sh
-VITE_API_BASE_URL=<ApiFunctionUrl>
+AWS_REGION=ap-northeast-1 bun run web:deploy
+# local の Web から AWS の API を呼ぶ場合
+VITE_API_BASE_URL=<ApiGatewayUrl> bun run web:dev
 ```
 
 fresh deploy、bootstrap 検証、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。

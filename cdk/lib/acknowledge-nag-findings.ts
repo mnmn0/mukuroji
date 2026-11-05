@@ -75,6 +75,9 @@ const apiStagePaths = [
   'HttpApi/DefaultStage/Resource',
   'RealtimeWebSocketStage/Resource',
 ] as const;
+const webDistributionPaths = [
+  'WebDistribution/Resource',
+] as const;
 const waiterStateMachinePath = [
   'RuntimeControlAlarmReadinessProvider/waiter-state-machine/Resource',
 ] as const;
@@ -390,6 +393,31 @@ const acknowledgedFindings = [
     id: 'AwsSolutions-APIG1',
     reason: 'API request and realtime event auditing is handled by application and CloudWatch logs; API Gateway access-log delivery is intentionally not enabled for these stages.',
     scopePaths: apiStagePaths,
+  },
+  {
+    id: 'AwsSolutions-CFR1',
+    reason: 'mukuroji is an internal single-Workspace tool. Every API call is authenticated by Cognito in the application, so a geo restriction would only block legitimate travelling users.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-CFR2',
+    reason: 'AWS WAF adds a fixed monthly cost that the internal-tool deployment does not justify. The API authenticates every request and applies its own rate limits.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-CFR3',
+    reason: 'Standard CloudFront logs need a separate ACL-enabled log bucket. API requests are already logged by the API Lambda and audited in AuditEventsTable, and static asset requests carry no user data.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-CFR4',
+    reason: 'The distribution uses the default cloudfront.net certificate, whose viewer TLS policy CloudFront fixes. A custom domain certificate with TLSv1.2_2021 can be added later without changing the origins.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-S1',
+    reason: 'The Web bucket only holds the public build output of the SPA and is read through CloudFront origin access control, so S3 server access logs would add no audit value.',
+    scopePaths: ['WebBucket/Resource'],
   },
   {
     id: 'AwsSolutions-SF1',

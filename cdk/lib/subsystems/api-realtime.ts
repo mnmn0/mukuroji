@@ -73,8 +73,6 @@ export interface ApiTransportsAndRealtimeInput {
 export type ApiTransportsAndRealtimeResources = Readonly<{
   /** Live alias receiving all public API traffic. */
   readonly apiLiveAlias: lambda.Alias;
-  /** Public Lambda Function URL for the shared API handler. */
-  readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway backed by the shared API handler. */
   readonly httpApi: apigatewayv2.HttpApi;
   /** Auto-deployed production WebSocket stage. */
@@ -1335,31 +1333,9 @@ export function buildApiTransportsAndRealtime(
     ),
     routeKey: apigatewayv2.HttpRouteKey.DEFAULT,
   });
-  const functionUrl = apiLiveAlias.addFunctionUrl({
-    authType: lambda.FunctionUrlAuthType.NONE,
-    cors: {
-      allowedOrigins: apiAllowedOriginList,
-      allowedMethods: [
-        lambda.HttpMethod.GET,
-        lambda.HttpMethod.POST,
-        lambda.HttpMethod.PUT,
-        lambda.HttpMethod.PATCH,
-        lambda.HttpMethod.DELETE,
-      ],
-      allowedHeaders: [
-        'authorization',
-        'content-type',
-        'idempotency-key',
-        'x-correlation-id',
-        'x-request-id',
-      ],
-      exposedHeaders: apiExposedHeaders,
-    },
-  });
 
   return {
     apiLiveAlias,
-    functionUrl,
     httpApi,
     realtimeWebSocketStage,
     workspaceAuditPseudonymSecret,

@@ -67,6 +67,32 @@ export type FileStorageResources = {
 };
 
 /**
+ * Builds the CORS rule that lets browsers use presigned file URLs.
+ *
+ * @param allowedOrigins Browser origins allowed to upload and download.
+ * @returns One file bucket CORS rule.
+ */
+export function createFileBucketBrowserCorsRule(
+  allowedOrigins: string[],
+): s3.CorsRule {
+  return {
+    allowedHeaders: [
+      'content-length',
+      'content-type',
+      'if-none-match',
+      'x-amz-checksum-*',
+      'x-amz-meta-*',
+      'x-amz-server-side-encryption',
+      'x-amz-tagging',
+    ],
+    allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD, s3.HttpMethods.PUT],
+    allowedOrigins,
+    exposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
+    maxAge: 600,
+  };
+}
+
+/**
  * Builds durable file storage, import storage, and malware scanning resources.
  *
  * @param scope Stack scope used directly to preserve existing construct paths.
@@ -79,21 +105,7 @@ export function buildFileStorage(
 ): FileStorageResources {
   const fileBucket = new s3.Bucket(scope, 'FileBucket', {
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-    cors: [{
-      allowedHeaders: [
-        'content-length',
-        'content-type',
-        'if-none-match',
-        'x-amz-checksum-*',
-        'x-amz-meta-*',
-        'x-amz-server-side-encryption',
-        'x-amz-tagging',
-      ],
-      allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD, s3.HttpMethods.PUT],
-      allowedOrigins: configuration.allowedOrigins,
-      exposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
-      maxAge: 600,
-    }],
+    cors: [createFileBucketBrowserCorsRule(configuration.allowedOrigins)],
     encryption: s3.BucketEncryption.S3_MANAGED,
     enforceSSL: true,
     eventBridgeEnabled: true,
