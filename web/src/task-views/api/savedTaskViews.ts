@@ -28,10 +28,9 @@ import {
   createMutationHeaders,
   type MutationRequestContext,
 } from '../../shared/api/mutationHeaders'
-import { WorkspaceSearchApiError } from '../../search/api/errors'
-import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
+import { WorkspaceSearchApiError, resolveSearchApiBaseUrl } from '../../search/api/errors'
 
-const taskViewApiBaseUrl = resolveApiBaseUrl('workspace')
+const taskViewApiBaseUrl = resolveSearchApiBaseUrl(import.meta.env)
 const savedViewVisibilities = ['personal', 'team', 'shared']
 const taskViewLayoutModes = ['table', 'board', 'list', 'gantt', 'calendar', 'timeline']
 const taskViewDensities = ['compact', 'comfortable', 'spacious']

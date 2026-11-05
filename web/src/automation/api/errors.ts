@@ -1,4 +1,4 @@
-
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /** Automation API の失敗を表す error です。 */
 export class AutomationApiError extends Error {
@@ -21,4 +21,16 @@ export class AutomationApiError extends Error {
     this.status = status
     this.code = code
   }
+}
+
+/**
+ * Automation API の base URL を既存 Workspace API と同じ優先順で解決します。
+ *
+ * @param environment - Vite から渡される環境変数です。
+ * @returns 末尾の slash を除いた API base URL です。
+ */
+export function resolveAutomationApiBaseUrl(
+  environment: Record<string, string | boolean | undefined>,
+) {
+  return resolveApiBaseUrl('workspace', environment)
 }

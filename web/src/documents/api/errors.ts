@@ -1,4 +1,5 @@
 import type { DocumentDetail } from '@mukuroji/contracts'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Documents API が失敗したときの例外です。
@@ -52,4 +53,16 @@ export class DocumentRevisionConflictError extends DocumentsApiError {
     super(409, message, code)
     this.latestDocument = latestDocument
   }
+}
+
+/**
+ * Documents API base URL を既存 Workspace API と同じ優先順で解決します。
+ *
+ * @param environment - Vite environment value map です。
+ * @returns 末尾 slash を除いた API base URL です。
+ */
+export function resolveDocumentsApiBaseUrl(
+  environment: Record<string, string | boolean | undefined>,
+) {
+  return resolveApiBaseUrl('workspace', environment)
 }

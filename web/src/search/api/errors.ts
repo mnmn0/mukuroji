@@ -1,4 +1,11 @@
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
+/**
+ * Workspace search API の base URL を既存 Workspace API と同じ優先順で解決します。
+ */
+export function resolveSearchApiBaseUrl(environment: Record<string, string | boolean | undefined>) {
+  return resolveApiBaseUrl('workspace', environment)
+}
 
 /**
  * Workspace search / saved view API が失敗したときの例外です。

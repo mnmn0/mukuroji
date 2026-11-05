@@ -1,8 +1,7 @@
 import type { CreateDocumentInput, DocumentDetail, DocumentNode, DocumentTreeResponse, PublicDocumentResponse, RecentDocumentsResponse, UpdateDocumentInput } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { DocumentsApiError } from './errors'
+import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
-import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 export type {
   CreateDocumentCommentInput,
@@ -75,7 +74,7 @@ export type InstantiateDocumentInput = {
   position?: string
 }
 
-const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
+const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
 
 /**
  * Permission-filtered Document tree を取得します。

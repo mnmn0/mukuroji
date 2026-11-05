@@ -1,3 +1,5 @@
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
+
 /** Trusted transport metadata attached to an AI assistance API failure. */
 export type AiAssistanceApiErrorMetadata = {
   /** Whether the server explicitly identified the response as an idempotency replay. */
@@ -43,4 +45,16 @@ export class AiAssistanceApiError extends Error {
     this.idempotencyReplayed = metadata.idempotencyReplayed === true
     this.successfulResponseReceived = metadata.successfulResponseReceived === true
   }
+}
+
+/**
+ * Resolves the AI assistance API base URL from the existing Workspace API environment.
+ *
+ * @param environment - Vite environment values.
+ * @returns A base URL without trailing slashes.
+ */
+export function resolveAiAssistanceApiBaseUrl(
+  environment: Record<string, string | boolean | undefined>,
+): string {
+  return resolveApiBaseUrl('workspace', environment)
 }

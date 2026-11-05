@@ -12,8 +12,7 @@ import {
   readRecord,
 } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { AutomationApiError } from './errors'
-import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
+import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
 
 /** Automation execution 一覧の取得条件です。 */
 export type AutomationExecutionQuery = {
@@ -33,7 +32,7 @@ export type AutomationExecutionPage = {
   nextCursor?: string
 }
 
-const automationApiBaseUrl = resolveApiBaseUrl('workspace')
+const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
 
 const defaultAutomationApiErrorMessage = 'Unable to complete the automation request.'
 

@@ -1,9 +1,8 @@
 import { type WorkspaceSearchFilters, type WorkspaceSearchResponse } from '@mukuroji/contracts'
-import { WorkspaceSearchApiError } from './errors'
+import { WorkspaceSearchApiError, resolveSearchApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
-import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const searchApiBaseUrl = resolveApiBaseUrl('workspace')
+const searchApiBaseUrl = resolveSearchApiBaseUrl(import.meta.env)
 
 /**
  * Workspace 全体を権限考慮済みsearch indexから検索します。

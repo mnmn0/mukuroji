@@ -10,12 +10,14 @@ import {
   createMutationHeaders,
   type MutationRequestContext,
 } from '../../../shared/api/mutationHeaders'
-import { AiAssistanceApiError } from './errors'
+import {
+  AiAssistanceApiError,
+  resolveAiAssistanceApiBaseUrl,
+} from './errors'
 import { parseAiAssistanceGenerationResponse } from './generationResponse'
 import { isRecord } from '../../../shared/api/jsonValidation'
-import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
-const aiAssistanceApiBaseUrl = `${resolveApiBaseUrl('workspace')}/ai-assistance`
+const aiAssistanceApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const defaultErrorMessage = 'Unable to complete the AI assistance request.'
 
 /** Parsed JSON and trusted response metadata returned by the AI assistance transport. */

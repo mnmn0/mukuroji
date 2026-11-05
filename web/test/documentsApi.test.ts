@@ -13,6 +13,7 @@ import {
   getDocuments,
   getPublicDocument,
   resolvePublicDocumentUrl,
+  resolveDocumentsApiBaseUrl,
   restoreDocumentVersion,
   DocumentRevisionConflictError,
   DocumentsApiError,
@@ -28,6 +29,17 @@ const originalFetch = globalThis.fetch
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+})
+
+describe('Documents API base URL', () => {
+  test('uses the shared Workspace API fallback order', () => {
+    expect(resolveDocumentsApiBaseUrl({
+      VITE_API_BASE_URL: 'https://api.example.test/',
+      VITE_PROJECTS_API_BASE_URL: 'https://projects.example.test/',
+      VITE_WORKSPACE_API_BASE_URL: 'https://workspace.example.test/',
+    })).toBe('https://workspace.example.test')
+    expect(resolveDocumentsApiBaseUrl({})).toBe('/api')
+  })
 })
 
 describe('Canonical Documents API requests', () => {

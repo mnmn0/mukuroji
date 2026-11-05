@@ -1,10 +1,9 @@
 import type { DocumentPresenceResponse, UpdateDocumentPresenceInput } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { DocumentsApiError } from './errors'
+import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
-import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
+const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
 
 /**
  * Document presence 一覧を取得します。
