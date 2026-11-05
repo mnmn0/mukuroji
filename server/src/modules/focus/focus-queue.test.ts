@@ -823,6 +823,92 @@ describe('Focus queue projection', () => {
     expect(findFocusItem(queue, oldActive.id).section).toBe('now')
   })
 
+  test('separates accountable ownership from contribution and mention relevance', () => {
+    const owned = createWorkItem('owned', 'viewer', 'high')
+    const contributed = withContributors(
+      createWorkItem(
+        'contributed',
+        'owner-member',
+        'high',
+        'started',
+        '',
+        1,
+        '2026-08-09T09:00:00.000Z',
+        '2026-08-01T08:00:00.000Z',
+      ),
+      [{ assignmentId: 'a'.repeat(32), memberUserId: 'viewer', status: 'in-progress' }],
+    )
+    const mentioned = createWorkItem('mentioned', 'other-member')
+    const queue = projectQueue({
+      workItems: [owned, contributed, mentioned],
+      notifications: [createMentionNotification(mentioned, 'mention-notification')],
+      viewerMemberKey: ' Viewer ',
+    })
+
+    expect(findFocusItem(queue, owned.id).involvement).toBe('owner')
+    const contributor = findFocusItem(queue, contributed.id)
+    expect(contributor.involvement).toBe('contributor')
+    expect(contributor.signals.map((signal) => signal.type)).toEqual(['urgent'])
+    expect(contributor.capabilities.assign).toBe(true)
+    expect(contributor.section).toBe('now')
+    expect(findFocusItem(queue, mentioned.id).involvement).toBe('related')
+  })
+
+  test('keeps the owner accountable and gives contributors the execution signals only', () => {
+    const ownerAlsoListed = withContributors(
+      createWorkItem('owner-listed', 'viewer', 'high'),
+      [{ assignmentId: 'b'.repeat(32), memberUserId: 'viewer', status: 'planned' }],
+    )
+    const overdueContribution = withContributors(
+      createWorkItem(
+        'overdue-contribution',
+        'owner-member',
+        'medium',
+        'started',
+        '2026-08-01',
+        1,
+        '2026-08-09T09:00:00.000Z',
+        '2026-08-01T08:00:00.000Z',
+      ),
+      [{ assignmentId: 'c'.repeat(32), memberUserId: 'viewer', status: 'planned' }],
+    )
+    const queue = projectQueue({ workItems: [ownerAlsoListed, overdueContribution] })
+
+    expect(findFocusItem(queue, ownerAlsoListed.id).involvement).toBe('owner')
+    const contributor = findFocusItem(queue, overdueContribution.id)
+    expect(contributor.involvement).toBe('contributor')
+    expect(contributor.signals.map((signal) => signal.type)).toEqual(['overdue'])
+  })
+
+  test('drops a finished or role-only contribution from active work but keeps completed work in Done', () => {
+    const finishedShare = withContributors(
+      createWorkItem('finished-share', 'owner-member', 'high'),
+      [{ assignmentId: 'd'.repeat(32), memberUserId: 'viewer', status: 'done' }],
+    )
+    const roleOnly = withContributors(
+      createWorkItem('role-only', 'owner-member', 'high'),
+      [{ assignmentId: 'e'.repeat(32), jobRoleId: 'designer', status: 'planned' }],
+    )
+    const otherMember = withContributors(
+      createWorkItem('other-member-share', 'owner-member', 'high'),
+      [{ assignmentId: 'f'.repeat(32), memberUserId: 'someone-else', status: 'planned' }],
+    )
+    const completedWork = withContributors(
+      createWorkItem('completed-work', 'owner-member', 'medium', 'completed'),
+      [{ assignmentId: '0'.repeat(32), memberUserId: 'viewer', status: 'done' }],
+    )
+    const queue = projectQueue({
+      workItems: [finishedShare, roleOnly, otherMember, completedWork],
+    })
+
+    expect(findOptionalFocusItem(queue, finishedShare.id)).toBeUndefined()
+    expect(findOptionalFocusItem(queue, roleOnly.id)).toBeUndefined()
+    expect(findOptionalFocusItem(queue, otherMember.id)).toBeUndefined()
+    const done = findFocusItem(queue, completedWork.id)
+    expect(done.section).toBe('done')
+    expect(done.involvement).toBe('contributor')
+  })
+
   test('orders equal-rank items by stable tie evidence', () => {
     const later = createWorkItem(
       'z-item',
@@ -985,6 +1071,20 @@ function createWorkItem(
     updatedAt,
     source: 'dynamodb',
   }
+}
+
+/**
+ * Returns a Work Item fixture carrying the given contributor assignments.
+ *
+ * @param workItem - Base canonical Work Item.
+ * @param contributorAssignments - Contributors to attach.
+ * @returns Canonical Work Item with contributors.
+ */
+function withContributors(
+  workItem: CanonicalWorkItem,
+  contributorAssignments: NonNullable<CanonicalWorkItem['contributorAssignments']>,
+): CanonicalWorkItem {
+  return { ...workItem, contributorAssignments }
 }
 
 /**

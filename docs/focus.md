@@ -21,6 +21,21 @@ Focus は「今も解消していない注意事項」を利用者ごとに並�
 
 response の `metrics.blocked` は個人 queue への採否とは分け、現在の利用者が参照できる全 active Work Item の実 relation/dependency から算出します。priority を blocker の代用にはしません。
 
+## 責任者と参加
+
+各 Focus item は、利用者がその Work Item にどう関わっているかを `involvement` で返します（#239）。
+
+| `involvement` | 条件 | 投影する signal |
+| --- | --- | --- |
+| `owner` | 利用者が `assigneeUserId`（単一の責任者） | Work Item 自身の `urgent`・期限・`blocker`・`sla`・`cycle`、approval の集約、review request、mention |
+| `contributor` | 責任者ではなく、`contributorAssignments` に member として入っている | `urgent`・期限・`blocker`・`cycle`、review request、mention。`sla` と approval の集約は責任者の応答義務なので出さない |
+| `related` | 責任者でも Contributor でもない | review request と mention だけ |
+
+- 責任者が Contributor の一覧にも入っている場合は `owner` とします。
+- 自分の分担が `done` の Contributor は、進行中の Work Item では関わりがないものとして扱います（review request や mention があれば `related`）。完了・キャンセル済みの Work Item では分担の状態を問わず `contributor` とし、Done に短期表示します。
+- ロールだけで member が未定の分担は、どの利用者の Focus にも入りません。
+- `involvement` を持たない応答（この field より前の server）は、client が「不明」として扱い、`related` とはみなしません。Web は `owner` と `contributor` の行にだけ「責任者」「参加」の badge を出し、担当者の表示はこれまでどおり責任者を示します。
+
 ## 順位と section
 
 順位は effective policy の weight による contribution の合計です。tie は score 降順、最短期限、古い発生時刻、Team ID / Work Item ID の順で決定し、同じ snapshot では常に同じ順になります。policy は product default、Team override、personal override の順で疎な override を合成し、response に base / Team / resolved settings、weight、contribution、fingerprint、provenance を含めます。個人 policy は本人、Team policy は現在その Team を管理できる利用者だけが version 付きで更新します。

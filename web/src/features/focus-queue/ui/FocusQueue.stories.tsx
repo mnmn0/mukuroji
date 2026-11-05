@@ -62,6 +62,17 @@ export const Waiting: Story = {
   args: { section: 'waiting' },
 }
 
+/** Next section labels work the viewer contributes to apart from the accountable owner. */
+export const ContributorWork: Story = {
+  args: { section: 'next' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('focus-involvement-core-team-WI-205'))
+      .toHaveTextContent('Contributor')
+    await expect(canvas.getByText('Assignee: Lead User')).toBeInTheDocument()
+  },
+}
+
 /** Initial queue skeleton preserving the eventual row rhythm. */
 export const Loading: Story = {
   args: { isLoading: true, response: undefined },

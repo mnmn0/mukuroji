@@ -42,12 +42,27 @@ const nowMentionItem = createFocusFixtureItem(
   'Answer the enterprise rollout question',
   ['mention', 'sla'],
 )
-const nextItem = createFocusFixtureItem(
+const nextItemBase = createFocusFixtureItem(
   'WI-205',
   'next',
   'Prepare the onboarding experiment',
   ['due-soon', 'cycle'],
 )
+const nextItem = {
+  ...nextItemBase,
+  involvement: 'contributor',
+  workItem: {
+    ...nextItemBase.workItem,
+    assigneeEmail: 'lead@example.com',
+    assigneeName: 'Lead User',
+    assigneeUserId: 'lead@example.com',
+    contributorAssignments: [{
+      assignmentId: '0123456789abcdef0123456789abcdef',
+      memberUserId: 'demo@example.com',
+      status: 'in-progress',
+    }],
+  },
+} satisfies FocusItem
 const waitingItem = {
   ...createFocusFixtureItem(
     'WI-207',
@@ -257,6 +272,7 @@ function createFocusFixtureItem(
     },
     effectivePolicyId: 'effective-core-team',
     id: `focus-${id}`,
+    involvement: 'owner',
     rank: {
       components: rankComponents,
       score: rankComponents.reduce((total, component) => total + component.contribution, 0),

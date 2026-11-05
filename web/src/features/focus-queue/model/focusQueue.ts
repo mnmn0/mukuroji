@@ -5,6 +5,7 @@ import {
   type FocusActionabilityReason,
   type FocusEffectivePolicy,
   type FocusItem,
+  type FocusItemInvolvement,
   type FocusQueueResponse,
   type FocusQueueSection,
   type FocusSignalResolutionCondition,
@@ -234,6 +235,27 @@ export function getFocusSignalMessageKey(type: FocusSignalType): MessageKey {
     case 'mention': return 'workspace.focus.signal.mention'
     case 'sla': return 'workspace.focus.signal.sla'
     case 'cycle': return 'workspace.focus.signal.cycle'
+  }
+}
+
+/**
+ * Converts the viewer's involvement into the localized label of the row badge.
+ *
+ * Only ownership and contribution get a badge: a related item is in the queue because of
+ * a review request or mention, which its signal chips already say, and an absent value
+ * from an older server is unknown rather than related.
+ *
+ * @param involvement - How the viewer takes part in the Work Item, when the server says.
+ * @returns Localized badge key, or undefined when no badge is shown.
+ */
+export function getFocusInvolvementMessageKey(
+  involvement: FocusItemInvolvement | undefined,
+): MessageKey | undefined {
+  switch (involvement) {
+    case 'owner': return 'workspace.focus.involvement.owner'
+    case 'contributor': return 'workspace.focus.involvement.contributor'
+    case 'related':
+    case undefined: return undefined
   }
 }
 

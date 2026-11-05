@@ -251,6 +251,35 @@ describe('Focus queue', () => {
     expect(html.match(/aria-controls="focus-item-details-/gu)).toHaveLength(1)
   })
 
+  test('labels owned and contributed work apart and leaves related work unlabeled', () => {
+    const nowSection = focusQueueResponseFixture.sections[0]
+    const relatedItem = nowSection?.items[1]
+    if (!nowSection || !relatedItem) throw new Error('The Focus fixture requires two Now items.')
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => group.section === 'now'
+        ? { ...group, items: [group.items[0], { ...relatedItem, involvement: 'related' }].filter((item) => item !== undefined) }
+        : group),
+    }
+    const render = (section: 'now' | 'next') => renderToStaticMarkup(
+      <FocusQueue
+        configurationsByTeam={{ 'core-team': focusConfigurationFixture }}
+        locale="ja"
+        onSectionChange={() => undefined}
+        response={response}
+        section={section}
+        t={createTranslator('ja')}
+      />,
+    )
+
+    const now = render('now')
+    expect(now).toMatch(/data-testid="focus-involvement-core-team-WI-194"[^>]*>責任者</u)
+    expect(now).not.toContain('focus-involvement-core-team-WI-202')
+    const next = render('next')
+    expect(next).toMatch(/data-testid="focus-involvement-core-team-WI-205"[^>]*>参加</u)
+    expect(next).toContain('担当: Lead User')
+  })
+
   test('keeps non-contiguous Work Item Type runs in server-ranked order', () => {
     const nowItems = getFocusQueueItems(focusQueueResponseFixture, 'now')
     const firstItem = nowItems[0]
