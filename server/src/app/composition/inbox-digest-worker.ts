@@ -4,14 +4,15 @@ import { DynamoDbInboxDigestCheckpoints, DynamoDbInboxDigestStore, runInboxDiges
 import { createInboxDigestAppDependencies } from './inbox-digest-dependencies'
 import { DynamoDbTenantAdministrationClient, TenantAdministrationError } from '../../modules/tenant-administration'
 import { PlanningError } from '../../modules/planning'
-import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { loadServerConfig, readServerEnvironment } from '../../infrastructure/config/server-config'
 
 /** Creates a disabled-by-default worker using the same member and Feed authorization as reads.
  * @returns A bounded handler; disabled invocations perform no AWS calls.
  */
 export function createProductionInboxDigestWorkerHandler() {
+  // Read the flag before loading the validated config so a disabled worker never fails on unrelated settings.
+  if (readServerEnvironment().INBOX_DIGEST_WORKER_ENABLED !== 'true') return async () => ({ processed: 0, delivered: 0, failed: 0, disabled: true })
   const environment = loadServerConfig().environment
-  if (environment.INBOX_DIGEST_WORKER_ENABLED !== 'true') return async () => ({ processed: 0, delivered: 0, failed: 0, disabled: true })
   const planningTable = environment.PLANNING_TABLE_NAME?.trim()
   const notificationsTable = environment.NOTIFICATIONS_TABLE_NAME?.trim()
   const tenantTable = environment.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
