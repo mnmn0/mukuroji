@@ -411,7 +411,7 @@ error を空データとして扱ったり、例外を握りつぶしたりし�
 - UI の表示文言は i18n 対応を前提にする
 - 固定文言をコンポーネントに閉じ込めない
 - グローバル CSS は `web/src/index.css` を最小限に保ち、UI は Tailwind のユーティリティを中心に実装する
-- 既存の `web/src/i18n.ts` と `createTranslator` / `createSidebarLabels` の方針に合わせる
+- 既存の `web/src/shared/i18n/i18n.ts` と `createTranslator` / `createSidebarLabels` の方針に合わせる
 - 画面に表示する文言は i18n key を使い、key は `tasks.*`、`requests.*` のように業務領域の namespace を付ける
 - ブランド表現には `BrandMark` と `mukuroji` 表記を使う
 - Storybook のカテゴリは `Application/...` と `Design System/...` を基本にする
