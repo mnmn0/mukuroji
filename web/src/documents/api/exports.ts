@@ -1,8 +1,9 @@
 import type { ExportDocumentResponse } from '@mukuroji/contracts'
-import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { DocumentsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
+const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * Document または Whiteboard を canonical inline/download response で export します。

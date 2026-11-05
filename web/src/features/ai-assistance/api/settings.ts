@@ -9,13 +9,11 @@ import {
   createMutationHeaders,
   type MutationRequestContext,
 } from '../../../shared/api/mutationHeaders'
-import {
-  AiAssistanceApiError,
-  resolveAiAssistanceApiBaseUrl,
-} from './errors'
+import { AiAssistanceApiError } from './errors'
 import { isRecord } from '../../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
-const aiAssistanceSettingsApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
+const aiAssistanceSettingsApiBaseUrl = `${resolveApiBaseUrl('workspace')}/ai-assistance`
 const aiAssistanceTasks = ['triage', 'summary', 'search', 'planning'] as const satisfies readonly AiAssistanceTask[]
 
 /**

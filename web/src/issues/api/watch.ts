@@ -4,8 +4,8 @@ import {
   createTeamIssuePath,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Work Item の watcher 状態です。
@@ -51,9 +51,7 @@ type TeamIssueWatchResponse = {
   watch: TeamIssueWatchState
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Work Item の現在の watcher 状態を取得します。

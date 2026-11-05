@@ -1,7 +1,8 @@
 import type { CreateDocumentShareInput, CreateDocumentShareResponse, DocumentMemberShare, DocumentPublicShare, RevokeDocumentShareInput, DocumentSharesResponse } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { DocumentsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Share dialog が扱う canonical member/public share です。
@@ -18,7 +19,7 @@ export type DocumentShare =
       url?: string
     })
 
-const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
+const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
 
 const createdPublicShareUrls = new Map<string, string>()
 

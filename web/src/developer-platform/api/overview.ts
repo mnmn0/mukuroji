@@ -1,5 +1,6 @@
 import type { DeveloperPlatformCapabilities as ContractDeveloperPlatformCapabilities, DeveloperPlatformOverview } from '@mukuroji/contracts'
 import { DeveloperPlatformApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Developer Platform の管理画面で許可された操作です。
@@ -12,11 +13,7 @@ export type DeveloperPlatformCapabilities =
  */
 export type DeveloperPlatformResources = DeveloperPlatformOverview
 
-const developerApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const developerApiBaseUrl = resolveApiBaseUrl('workspaceWithoutProjects')
 
 const defaultDeveloperApiErrorMessage =
   'Unable to complete the Developer Platform request.'
@@ -138,8 +135,4 @@ async function readJson<T>(
         isRetryableDeveloperApiResponse(response.status, undefined),
     )
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

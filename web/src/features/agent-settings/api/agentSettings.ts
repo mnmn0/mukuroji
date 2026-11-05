@@ -13,8 +13,9 @@ import {
   type MutationRequestContext,
 } from '../../../shared/api/mutationHeaders'
 import { AgentSettingsApiError } from './errors'
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/+$/, '')
+const apiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Reads the Agent settings of one Team. Project briefs are limited to Projects the caller can view.

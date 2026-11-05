@@ -9,12 +9,13 @@ import {
 } from '@mukuroji/contracts'
 import { isNonnegativeSafeInteger, isRecord, readRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
+import { AutomationApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /** Template kinds accepted from the template collection response. */
 const automationTemplateKinds: readonly AutomationTemplateKind[] = ['work-item', 'project', 'workflow']
 
-const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
+const automationApiBaseUrl = resolveApiBaseUrl('workspace')
 
 const defaultAutomationApiErrorMessage = 'Unable to complete the automation request.'
 

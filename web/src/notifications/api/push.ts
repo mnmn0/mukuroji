@@ -4,8 +4,9 @@ import type {
   PushSubscriptionRemovalInput,
 } from '@mukuroji/contracts'
 import { NotificationsApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const pushApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/+$/, '')
+const pushApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Loads whether this deployment accepts Web Push subscriptions.

@@ -59,13 +59,3 @@ export async function readJson<T>(response: Response): Promise<T> {
     return {} as T
   }
 }
-
-/**
- * Removes trailing slashes from a configured API base URL.
- *
- * @param value - Configured API base URL.
- * @returns URL without trailing slash characters.
- */
-export function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
-}

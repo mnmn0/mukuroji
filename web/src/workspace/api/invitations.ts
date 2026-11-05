@@ -1,6 +1,7 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { WorkspaceInvitation, WorkspaceRole } from './access'
 import { WorkspaceAccessApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Workspace invitation 作成 API の入力です。
@@ -30,12 +31,7 @@ type WorkspaceInvitationResponse = {
   invitation: WorkspaceInvitation
 }
 
-const workspaceApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_PROJECTS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const workspaceApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * Workspace invitation を作成します。
@@ -192,8 +188,4 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -1,8 +1,9 @@
 import type { SetUpdateFeedReadStateInput, UpdateFeedEntry, UpdateFeedReadState, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
 import { isNonnegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../../../shared/api/jsonValidation'
 import { isUpdateFeedView } from '../model/updateFeed'
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
-const apiBase = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
+const apiBase = resolveApiBaseUrl()
 
 /** Typed transport failure used by the shared session boundary. */
 export class UpdateFeedApiError extends Error {

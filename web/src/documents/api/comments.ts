@@ -1,9 +1,10 @@
 import type { CreateDocumentCommentInput, DocumentComment, DocumentCommentsResponse } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { DocumentsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
+const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * Document comment 一覧を取得します。

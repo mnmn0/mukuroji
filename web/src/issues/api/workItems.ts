@@ -24,8 +24,8 @@ import {
   defaultIssuesApiErrorMessage,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * チーム所有の canonical Issue です。
@@ -137,9 +137,7 @@ type UpdateTeamIssueResponse = {
   issue: TeamIssue
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Loads Team-owned Work Items through the canonical list endpoint.

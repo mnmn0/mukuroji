@@ -14,7 +14,8 @@ import {
   readRecord,
 } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
+import { AutomationApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /** Endpoint lifecycle statuses accepted from the endpoint collection response. */
 const inboundWebhookEndpointStatuses: readonly AutomationInboundWebhookEndpointStatus[] = [
@@ -24,7 +25,7 @@ const inboundWebhookEndpointStatuses: readonly AutomationInboundWebhookEndpointS
   'revoked',
 ]
 
-const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
+const automationApiBaseUrl = resolveApiBaseUrl('workspace')
 
 const defaultAutomationApiErrorMessage = 'Unable to complete the automation request.'
 

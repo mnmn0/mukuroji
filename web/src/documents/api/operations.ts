@@ -2,8 +2,9 @@ import type { ApplyDocumentOperationsInput, ApplyDocumentOperationsResponse } fr
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { getDocument } from './documents'
 import type { DocumentRecord } from './documents'
-import { DocumentRevisionConflictError, DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { DocumentRevisionConflictError, DocumentsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Operation POST が確定した revision と、続けて取得した表示用 detail です。
@@ -19,7 +20,7 @@ export type DocumentOperationSaveResult = {
   document: DocumentRecord
 }
 
-const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
+const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * Canonical operation batch を保存し、更新後 detail を取得します。

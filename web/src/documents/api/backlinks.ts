@@ -1,6 +1,7 @@
 import type { DocumentRelation } from '@mukuroji/contracts'
-import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { DocumentsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Relation target から取得する permission-filtered backlink です。
@@ -66,7 +67,7 @@ export type DocumentBacklinksBatchResponse = {
   pending: DocumentBacklinkBatchTarget[]
 }
 
-const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
+const documentsApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * Work Item/Project/Goal target の Document backlinks を取得します。

@@ -1,6 +1,7 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { EnterpriseSecurityApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Workspace に設定できる enterprise identity provider protocol です。
@@ -76,12 +77,7 @@ export type UpdateEnterpriseSsoEnforcementInput = {
   expectedVersion: number
 }
 
-const enterpriseSecurityApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_ENTERPRISE_IDENTITY_API_BASE_URL ??
-    import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')
 
 /**
  * Identity provider 設定を保存し、任意で接続テストを実行します。
@@ -197,8 +193,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     throw createMalformedResponseError()
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

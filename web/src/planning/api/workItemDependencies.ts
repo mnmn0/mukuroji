@@ -7,8 +7,9 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const planningApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const planningApiBaseUrl = resolveApiBaseUrl()
 const defaultPlanningApiErrorMessage = 'Unable to complete the planning request.'
 
 /**
@@ -139,9 +140,4 @@ async function readJson(response: Response): Promise<unknown> {
   } catch {
     return undefined
   }
-}
-
-/** Removes trailing slashes from a configured API base URL. */
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, '')
 }

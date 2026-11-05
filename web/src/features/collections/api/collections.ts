@@ -12,6 +12,7 @@ import {
 import { isRecord } from '../../../shared/api/jsonValidation'
 import { toCollectionCandidates } from '../model/collectionCandidates'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
 /** Error returned by a Collection request. */
 export class CollectionApiError extends Error {
@@ -35,7 +36,7 @@ export class CollectionApiError extends Error {
   }
 }
 
-const collectionsApiBaseUrl = `${(import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/+$/u, '')}/collections`
+const collectionsApiBaseUrl = `${resolveApiBaseUrl()}/collections`
 
 /** Workflow status categories accepted from the API. */
 const statusCategories: readonly WorkflowStatusCategory[] = ['backlog', 'unstarted', 'started', 'completed', 'canceled']

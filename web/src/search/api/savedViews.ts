@@ -1,9 +1,10 @@
 import { type CreateSavedWorkspaceViewInput, type SavedWorkspaceView, type UpdateSavedWorkspaceViewInput } from '@mukuroji/contracts'
 import { isOptionalString, readRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { WorkspaceSearchApiError, resolveSearchApiBaseUrl } from './errors'
+import { WorkspaceSearchApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const searchApiBaseUrl = resolveSearchApiBaseUrl(import.meta.env)
+const searchApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * 現在ユーザーが利用できるpersonal/team/shared saved viewを取得します。
