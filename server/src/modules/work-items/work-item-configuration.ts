@@ -50,6 +50,7 @@ import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Re-exports the canonical relation identifier validator for consumers. */
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
@@ -997,10 +998,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
 
   constructor(
     tableName =
-      process.env.WORK_ITEM_CONFIGURATION_TABLE_NAME ??
+      loadServerConfig().environment.WORK_ITEM_CONFIGURATION_TABLE_NAME ??
       'mukuroji-work-item-configuration-local',
     workItemsTableName =
-      process.env.WORK_ITEMS_TABLE_NAME ??
+      loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ??
       'mukuroji-team-issues-local',
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createConfiguredDynamoDbClient(),

@@ -111,6 +111,7 @@ import {
   type EvaluateEnterpriseAccessInput,
 } from './domain/enterprise-authorization'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 export {
   canAssignEnterpriseRole,
@@ -2958,7 +2959,7 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     tableName: string,
     tokenHashSecret: string,
     documentClient = createEnterpriseDocumentClient(),
-    auditTableName = process.env.AUDIT_EVENTS_TABLE_NAME,
+    auditTableName = loadServerConfig().environment.AUDIT_EVENTS_TABLE_NAME,
     clock: () => Date = () => new Date(),
     scimResourceLimits: EnterpriseScimResourceLimits =
       ENTERPRISE_SCIM_RESOURCE_LIMITS,
@@ -3917,8 +3918,9 @@ export class DynamoDbEnterpriseIdentityReadClient implements EnterpriseIdentityR
  * Environment configuration から production enterprise identity client を作成します。
  */
 export function createEnterpriseIdentityClient() {
-  const tableName = process.env.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
-  const secret = process.env.ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET?.trim()
+  const environment = loadServerConfig().environment
+  const tableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
+  const secret = environment.ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET?.trim()
   if (!tableName) return new InMemoryEnterpriseIdentityClient()
   if (!secret) {
     throw new EnterpriseIdentityError(
@@ -3946,11 +3948,12 @@ export function createEnterpriseIdentityClient() {
 }
 
 function createEnterpriseDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   return DynamoDBDocumentClient.from(new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint ? { endpoint } : {}),
   }), {
     marshallOptions: { removeUndefinedValues: true },

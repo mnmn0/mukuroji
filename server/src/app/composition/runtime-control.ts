@@ -81,9 +81,7 @@ const configuredProviders = new Map<
  * @returns Recorder bound to the stack-injected control identifier.
  */
 export function createProductionRuntimeControlObservationRecorder(
-  environment: ServerEnvironment = typeof Bun !== 'undefined'
-    ? Bun.env
-    : process.env,
+  environment: ServerEnvironment = loadServerConfig().environment,
 ): RuntimeControlObservationRecorder {
   const controlId = createRuntimeControlMetricControlId(
     readNonBlankEnvironmentValue(

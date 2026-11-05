@@ -43,6 +43,7 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../audit'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Comment 本文に保存できる文字数です。 */
 export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
@@ -6650,10 +6651,7 @@ function shouldBootstrapLocalTable() {
 }
 
 function readEnvironment(name: string) {
-  if (typeof Bun !== 'undefined') {
-    return Bun.env[name]
-  }
-  return process.env[name]
+  return loadServerConfig().environment[name]
 }
 
 async function ensureCollaborationTable(tableName: string, client: DynamoDBClient) {

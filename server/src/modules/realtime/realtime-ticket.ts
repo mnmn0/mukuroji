@@ -5,6 +5,7 @@ import {
   PutCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Realtime WebSocket 接続 ticket の有効秒数です。 */
 export const REALTIME_TICKET_TTL_SECONDS = 60
@@ -225,11 +226,7 @@ function createRealtimeDocumentClient() {
 }
 
 function readEnvironment(name: string) {
-  if (typeof Bun !== 'undefined') {
-    return Bun.env[name]
-  }
-
-  return process.env[name]
+  return loadServerConfig().environment[name]
 }
 
 function requireText(value: string, label: string) {

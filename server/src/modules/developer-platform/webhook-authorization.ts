@@ -32,6 +32,7 @@ import {
   type WorkspaceAccessClient,
   type WorkspaceRole,
 } from '../workspace-access'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Webhook subscription 作成者の現在 Team access を検証する境界です。 */
 export interface WebhookSubscriptionAuthorizer {
@@ -142,7 +143,7 @@ export class AwsWebhookCognitoGroupsProvider implements WebhookCognitoGroupsProv
 
   /** Production Cognito group provider を作成します。 */
   constructor(
-    userPoolId = process.env.COGNITO_USER_POOL_ID,
+    userPoolId = loadServerConfig().environment.COGNITO_USER_POOL_ID,
     client = createCognitoClient(),
   ) {
     this.userPoolId = readRequiredEnvironment(
@@ -370,12 +371,12 @@ implements WebhookSubscriptionAuthorizer {
   constructor(options: DynamoDbWebhookSubscriptionAuthorizerOptions) {
     const documentClient = options.documentClient ?? createDocumentClient()
     const projectDirectoryTableName = options.projectDirectoryTableName ??
-      process.env.PROJECT_DIRECTORY_TABLE_NAME ??
+      loadServerConfig().environment.PROJECT_DIRECTORY_TABLE_NAME ??
       'mukuroji-project-directory-local'
     const cognitoGroups = options.cognitoGroups ??
       new AwsWebhookCognitoGroupsProvider()
     const authorizationIndexName = options.authorizationIndexName ??
-      process.env.PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME ??
+      loadServerConfig().environment.PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME ??
         DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME
     const systemAdminGroups = options.systemAdminGroups ??
       readConfiguredSystemAdminGroups()
@@ -893,17 +894,18 @@ function isWebhookTeamGrant(
 }
 
 function createDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -914,14 +916,15 @@ function createDocumentClient() {
 }
 
 function createCognitoClient() {
+  const environment = loadServerConfig().environment
   return new CognitoIdentityProviderClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
   })
 }
 
 function readConfiguredSystemAdminGroups() {
   const configured = (
-    process.env.SYSTEM_ADMIN_GROUPS ??
+    loadServerConfig().environment.SYSTEM_ADMIN_GROUPS ??
     ''
   )
     .split(',')

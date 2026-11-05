@@ -4,24 +4,26 @@ import { DynamoDbInboxDigestCheckpoints, DynamoDbInboxDigestStore, runInboxDiges
 import { createInboxDigestAppDependencies } from './inbox-digest-dependencies'
 import { DynamoDbTenantAdministrationClient, TenantAdministrationError } from '../../modules/tenant-administration'
 import { PlanningError } from '../../modules/planning'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Creates a disabled-by-default worker using the same member and Feed authorization as reads.
  * @returns A bounded handler; disabled invocations perform no AWS calls.
  */
 export function createProductionInboxDigestWorkerHandler() {
-  if (process.env.INBOX_DIGEST_WORKER_ENABLED !== 'true') return async () => ({ processed: 0, delivered: 0, failed: 0, disabled: true })
-  const planningTable = process.env.PLANNING_TABLE_NAME?.trim()
-  const notificationsTable = process.env.NOTIFICATIONS_TABLE_NAME?.trim()
-  const tenantTable = process.env.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
-  const enterpriseTable = process.env.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
+  const environment = loadServerConfig().environment
+  if (environment.INBOX_DIGEST_WORKER_ENABLED !== 'true') return async () => ({ processed: 0, delivered: 0, failed: 0, disabled: true })
+  const planningTable = environment.PLANNING_TABLE_NAME?.trim()
+  const notificationsTable = environment.NOTIFICATIONS_TABLE_NAME?.trim()
+  const tenantTable = environment.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
+  const enterpriseTable = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
   const required = ['WORKSPACE_ACCESS_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'COGNITO_USER_POOL_ID', 'COGNITO_CLIENT_ID']
-  if (!planningTable || !notificationsTable || !tenantTable || !enterpriseTable || required.some((name) => !process.env[name]?.trim())) throw new Error('Inbox digest worker resources are not configured')
+  if (!planningTable || !notificationsTable || !tenantTable || !enterpriseTable || required.some((name) => !environment[name]?.trim())) throw new Error('Inbox digest worker resources are not configured')
   const dependencies = createInboxDigestAppDependencies(planningTable, enterpriseTable)
   const client = createDynamoDbDocumentClient(createDynamoDbClient())
   const metadata = new DynamoDbInboxDigestStore(planningTable, notificationsTable, client)
   const checkpoints = new DynamoDbInboxDigestCheckpoints(planningTable, client)
   const tenant = new DynamoDbTenantAdministrationClient(tenantTable, client)
-  const locale = process.env.INBOX_DIGEST_LOCALE === 'en' ? 'en' : 'ja'
+  const locale = environment.INBOX_DIGEST_LOCALE === 'en' ? 'en' : 'ja'
   return () => runWithAppDependencies(dependencies, async () => {
     const delivery = createInboxDigestRecipientAuthorization((recipient, checks) => {
       const guard = tenant.createActiveWriteCondition(recipient.workspaceId)

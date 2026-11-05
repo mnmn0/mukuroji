@@ -93,6 +93,7 @@ import {
   type TriageTransactionItems,
 } from './triage-transactions'
 import type { TriageAuditOutboxConfiguration } from './triage-audit-events'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Default Team activity GSI name. */
 export const TRIAGE_TEAM_ACTIVITY_INDEX_NAME = 'triage-team-activity-index'
@@ -314,15 +315,16 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param options Persistence, orchestration, and deterministic test options.
    */
   constructor(options: DynamoDbTriageClientOptions = {}) {
+    const environment = loadServerConfig().environment
     const endpoint = getConfiguredDynamoDbEndpoint()
     const dynamoDbClient = options.dynamoDbClient ?? new DynamoDBClient({
-      region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1',
+      region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
       ...(endpoint
         ? {
             endpoint,
             credentials: {
-              accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-              secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+              accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+              secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
             },
           }
         : {}),
@@ -3345,7 +3347,7 @@ function invalidCursor(): TriageError {
 
 /** Reads an optional non-empty environment variable. */
 function readEnvironment(name: string): string | undefined {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   return value || undefined
 }
 

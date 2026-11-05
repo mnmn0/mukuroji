@@ -82,6 +82,7 @@ import {
   bindPlanningRevisionFenceBarrierDocumentClient,
 } from '../../infrastructure/runtime/planning-revision-fence-barrier'
 import { advancePlanningUpdateActivity, readPlanningUpdateActivity, type PlanningUpdateActivity } from './planning-update-activity'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 const META_RECORD_KEY = 'META'
 const META_WORKSPACE_KEY_PREFIX = 'FENCE#'
@@ -2195,12 +2196,12 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   private readonly bootstrapLocalTable: boolean
 
   constructor(
-    tableName = process.env.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+    tableName = loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
     documentClient = createDocumentClient(),
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = Boolean(getDynamoDbEndpoint()),
     now: () => Date = () => new Date(),
-    workItemsTableName = process.env.WORK_ITEMS_TABLE_NAME ??
+    workItemsTableName = loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ??
       'mukuroji-team-issues-local',
   ) {
     super(now)
@@ -6961,15 +6962,16 @@ function isPlanningTableDescription(table: TableDescription | undefined) {
 }
 
 function createDynamoDbClient() {
+  const environment = loadServerConfig().environment
   const endpoint = getDynamoDbEndpoint()
   return new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -6982,14 +6984,15 @@ function createDocumentClient(client = createDynamoDbClient()) {
     DynamoDBDocumentClient.from(client, {
       marshallOptions: { removeUndefinedValues: true },
     }),
-    process.env.PLANNING_TABLE_NAME,
+    loadServerConfig().environment.PLANNING_TABLE_NAME,
   )
 }
 
 function getDynamoDbEndpoint() {
-  return process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  return environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
 }
 
 function isPositiveInteger(value: unknown): value is number {
