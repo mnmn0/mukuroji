@@ -1,10 +1,9 @@
 import type { WorkItemRelationMutationInput, WorkItemRelationMutationResponse } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkItemConfigurationApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const workItemsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const workItemsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultApiErrorMessage = 'Unable to complete the Work Item configuration request.'
 
@@ -113,8 +112,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

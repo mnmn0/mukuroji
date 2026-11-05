@@ -1,10 +1,9 @@
 import type { PlanningSnapshot } from '@mukuroji/contracts'
 import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const planningApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const planningApiBaseUrl = resolveApiBaseUrl()
 
 const defaultPlanningApiErrorMessage = 'Unable to complete the planning request.'
 
@@ -76,8 +75,4 @@ async function readJson(response: Response): Promise<unknown> {
   } catch {
     return undefined
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

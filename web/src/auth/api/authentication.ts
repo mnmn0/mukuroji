@@ -2,6 +2,7 @@ import type { AuthSession } from '../session'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { ApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Cognito が初回パスワード変更を要求したときのログイン結果です。
@@ -114,7 +115,7 @@ export type CompleteMfaChallengeParams = {
   remember: boolean
 }
 
-const apiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const apiBaseUrl = resolveApiBaseUrl()
 
 /**
  * メールアドレスとパスワードでログインし、保存可能な認証セッションを返します。
@@ -306,8 +307,4 @@ function parseAuthSession(
     remember,
     tokenType: response.tokenType,
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

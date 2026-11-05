@@ -20,8 +20,9 @@ import { isNonnegativeSafeInteger, isPositiveSafeInteger, isRecord } from '../..
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { isWorkItemStatusCategory } from './contractValidation'
 import { WorkItemConfigurationApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/+$/, '')
+const apiBaseUrl = resolveApiBaseUrl()
 const runtimes = new Set<string>(['claude-code', 'codex', 'kiro', 'other'])
 const outcomes = new Set<string>(['completed', 'paused', 'failed', 'released', 'superseded'])
 

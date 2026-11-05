@@ -37,10 +37,9 @@ import {
   isRecord,
 } from '../../../shared/api/jsonValidation'
 import { isCanonicalWorkItem } from '../../../work-items/api/contractValidation'
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
-const focusApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const focusApiBaseUrl = resolveApiBaseUrl()
 
 const defaultFocusApiErrorMessage = 'Unable to complete the Focus queue request.'
 
@@ -767,9 +766,4 @@ function readApiError(value: unknown): { code?: string; message: string } {
       ? value.message
       : defaultFocusApiErrorMessage,
   }
-}
-
-/** Removes trailing separators from an API base URL. */
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
 }

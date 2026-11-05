@@ -7,6 +7,7 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { ResolveDeveloperSyncConflictInput } from '../model/connectors'
 import { DeveloperPlatformApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Work Item 同期競合一覧の filter と pagination 入力です。
@@ -26,11 +27,7 @@ export type ListDeveloperSyncConflictsInput = {
   limit?: number
 }
 
-const developerApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const developerApiBaseUrl = resolveApiBaseUrl('workspaceWithoutProjects')
 
 const defaultDeveloperApiErrorMessage =
   'Unable to complete the Developer Platform request.'
@@ -216,8 +213,4 @@ async function readJson<T>(
         isRetryableDeveloperApiResponse(response.status, undefined),
     )
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -1,6 +1,7 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { WorkspaceMemberStatus } from '../../workspace/api'
 import { ProjectDirectoryApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -123,11 +124,7 @@ export function isActiveProjectAssignmentCandidate(candidate: ProjectAssignmentC
   return candidate.enabled !== false && candidate.workspaceStatus === 'active'
 }
 
-const projectsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_PROJECTS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const projectsApiBaseUrl = resolveApiBaseUrl('projects')
 
 /**
  * Loads the active members and project roles for one Project.
@@ -286,13 +283,6 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-/**
- * URL 文字列末尾の slash を取り除きます。
- */
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }
 
 /**

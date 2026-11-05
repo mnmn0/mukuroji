@@ -8,6 +8,7 @@ import type { EnterpriseAssignableRoleIds, EnterprisePermissionDefinition, Enter
 import type { EnterpriseServiceAccount } from './serviceAccounts'
 import type { EnterpriseSessionPolicy } from './sessionPolicy'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Enterprise security 管理 API が返す操作権限です。
@@ -91,12 +92,7 @@ export type EnterpriseSecuritySnapshot = {
   activeBreakGlassActivation?: EnterpriseActiveBreakGlassActivation
 }
 
-const enterpriseSecurityApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_ENTERPRISE_IDENTITY_API_BASE_URL ??
-    import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')
 
 /**
  * Enterprise identity と security policy の管理 snapshot を取得します。
@@ -373,8 +369,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     throw createMalformedResponseError()
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }
