@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE,
+  type FocusItem,
   type FocusQueueResponse,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -274,10 +275,38 @@ describe('Focus queue', () => {
 
     const now = render('now')
     expect(now).toMatch(/data-testid="focus-involvement-core-team-WI-194"[^>]*>責任者</u)
+    expect(now).toContain('focus-item-core-team-WI-202')
     expect(now).not.toContain('focus-involvement-core-team-WI-202')
     const next = render('next')
     expect(next).toMatch(/data-testid="focus-involvement-core-team-WI-205"[^>]*>参加</u)
     expect(next).toContain('担当: Lead User')
+  })
+
+  test('shows no involvement badge for an item from a server that predates the field', () => {
+    const nowSection = focusQueueResponseFixture.sections[0]
+    const firstItem = nowSection?.items[0]
+    if (!nowSection || !firstItem) throw new Error('The Focus fixture requires one Now item.')
+    const legacyItem: FocusItem = { ...firstItem }
+    delete legacyItem.involvement
+    const html = renderToStaticMarkup(
+      <FocusQueue
+        configurationsByTeam={{ 'core-team': focusConfigurationFixture }}
+        locale="en"
+        onSectionChange={() => undefined}
+        response={{
+          ...focusQueueResponseFixture,
+          sections: focusQueueResponseFixture.sections.map((group) => group.section === 'now'
+            ? { ...group, items: [legacyItem] }
+            : group),
+        }}
+        section="now"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toContain('focus-item-core-team-WI-194')
+    expect(html).not.toContain('focus-involvement-')
+    expect(html).not.toContain('>Owner<')
   })
 
   test('keeps non-contiguous Work Item Type runs in server-ranked order', () => {

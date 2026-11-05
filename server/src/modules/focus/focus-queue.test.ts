@@ -884,6 +884,47 @@ describe('Focus queue projection', () => {
     expect(contributor.signals.map((signal) => signal.type)).toEqual(['overdue'])
   })
 
+  test('leaves the approval aggregate to the owner and keeps a contributor review request', () => {
+    const workItem: CanonicalWorkItem = {
+      ...withContributors(
+        createWorkItem('contributor-approval', 'owner-member'),
+        [{ assignmentId: '1'.repeat(32), memberUserId: 'viewer', status: 'in-progress' }],
+      ),
+      approvalSummary: {
+        pendingCount: 2,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+        nextDueAt: '2026-08-11T12:00:00.000Z',
+        updatedAt: '2026-08-09T10:30:00.000Z',
+      },
+    }
+    const approval: ApprovalRequest = {
+      id: 'contributor-review-1',
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'viewer', status: 'pending' }],
+      dueAt: '2026-08-11T12:00:00.000Z',
+      requestedByMemberKey: 'requester',
+      requestedByKind: 'member',
+      createdAt: '2026-08-09T08:00:00.000Z',
+      updatedAt: '2026-08-09T08:00:00.000Z',
+      capabilities: { canDecide: true, canCancel: false },
+      subjectType: 'work-item',
+    }
+
+    const item = findFocusItem(projectQueue({
+      workItems: [workItem],
+      approvals: [approval],
+    }), workItem.id)
+
+    expect(item.involvement).toBe('contributor')
+    expect(item.signals.map((signal) => signal.type)).toEqual(['review-request'])
+  })
+
   test('drops a finished or role-only contribution from active work but keeps completed work in Done', () => {
     const finishedShare = withContributors(
       createWorkItem('finished-share', 'owner-member', 'high'),
