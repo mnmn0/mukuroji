@@ -13,8 +13,6 @@ export type UserIdentityInput = Readonly<{
 export type UserIdentityResources = Readonly<{
   /** True when both Cognito parameters are blank and the stack owns the user pool. */
   readonly userPoolCreated: cdk.CfnCondition;
-  /** True when the deployment passes an existing user pool and client. */
-  readonly existingUserPoolUsed: cdk.CfnCondition;
   /** Stack-owned user pool, created only under `userPoolCreated`. */
   readonly userPool: cognito.UserPool;
   /** User pool ID the API trusts. */
@@ -42,35 +40,18 @@ export function buildUserIdentity(
   input: UserIdentityInput,
 ): UserIdentityResources {
   const userPoolIdBlank = cdk.Fn.conditionEquals(input.userPoolIdParameter.valueAsString, '');
-  const userPoolClientIdBlank = cdk.Fn.conditionEquals(
-    input.userPoolClientIdParameter.valueAsString,
-    '',
-  );
-  new cdk.CfnRule(scope, 'CognitoUserPoolParametersPaired', {
-    assertions: [{
-      assert: cdk.Fn.conditionOr(
-        cdk.Fn.conditionAnd(userPoolIdBlank, userPoolClientIdBlank),
-        cdk.Fn.conditionAnd(
-          cdk.Fn.conditionNot(userPoolIdBlank),
-          cdk.Fn.conditionNot(userPoolClientIdBlank),
-        ),
-      ),
-      assertDescription:
-        'Leave CognitoUserPoolId and CognitoUserPoolClientId both empty to create a user pool, or pass both to use an existing one.',
-    }],
-  });
   const userPoolCreated = new cdk.CfnCondition(scope, 'CognitoUserPoolCreated', {
     expression: userPoolIdBlank,
-  });
-  const existingUserPoolUsed = new cdk.CfnCondition(scope, 'CognitoExistingUserPoolUsed', {
-    expression: cdk.Fn.conditionNot(userPoolIdBlank),
   });
 
   const userPool = new cognito.UserPool(scope, 'UserPool', {
     selfSignUpEnabled: false,
     signInCaseSensitive: false,
+    // Email is not a required schema attribute, because Cognito expects a client to write every
+    // required attribute and the password client must not write email. The API and the owner
+    // invitation always set it.
     standardAttributes: {
-      email: { required: true, mutable: true },
+      email: { required: false, mutable: true },
     },
     customAttributes: {
       directory_id: new cognito.StringAttribute({ mutable: true }),
@@ -94,6 +75,9 @@ export function buildUserIdentity(
   });
   const userPoolClient = userPool.addClient('UserPoolPasswordClient', {
     authFlows: { userPassword: true },
+    // The API authorizes by email and the Workspace attributes, so a user's own access token
+    // must not rewrite them. Only the display name stays writable.
+    writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ fullname: true }),
     disableOAuth: true,
     generateSecret: false,
     preventUserExistenceErrors: true,
@@ -130,7 +114,6 @@ export function buildUserIdentity(
 
   return {
     userPoolCreated,
-    existingUserPoolUsed,
     userPool,
     userPoolId,
     userPoolClientId,

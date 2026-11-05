@@ -225,6 +225,23 @@ test('fresh deployment requires explicit workspace and runtime secrets parameter
         'Leave CognitoUserPoolId and CognitoUserPoolClientId both empty to create a user pool, or pass both to use an existing one.',
     }],
   });
+  expect(template.toJSON().Rules.StackOwnedUserPoolOwnerUsername).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Or': [
+          { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'CognitoUserPoolId' }, ''] }] },
+          {
+            'Fn::Equals': [
+              { Ref: 'InitialOwnerUsername' },
+              { Ref: 'InitialOwnerEmail' },
+            ],
+          },
+        ],
+      },
+      AssertDescription:
+        'When the stack creates the user pool, InitialOwnerUsername must equal InitialOwnerEmail.',
+    }],
+  });
 });
 
 test('derives restore-drill approver ARN partitions from concrete stack Regions', () => {

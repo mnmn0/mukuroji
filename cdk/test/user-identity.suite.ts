@@ -30,7 +30,7 @@ test('creates the user pool and password client only when the Cognito IDs are bl
         }),
       },
       Schema: Match.arrayWith([
-        Match.objectLike({ Name: 'email', Required: true, Mutable: true }),
+        Match.objectLike({ Name: 'email', Required: false, Mutable: true }),
         Match.objectLike({ Name: 'directory_id', AttributeDataType: 'String', Mutable: true }),
         Match.objectLike({ Name: 'workspace_id', AttributeDataType: 'String', Mutable: true }),
       ]),
@@ -39,6 +39,8 @@ test('creates the user pool and password client only when the Cognito IDs are bl
   synthesizedTemplate.hasResource('AWS::Cognito::UserPoolClient', {
     Condition: 'CognitoUserPoolCreated',
     Properties: Match.objectLike({
+      // Users must not rewrite the email or Workspace attributes the API authorizes by.
+      WriteAttributes: ['name'],
       ExplicitAuthFlows: ['ALLOW_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'],
       GenerateSecret: false,
       PreventUserExistenceErrors: 'ENABLED',
@@ -59,8 +61,10 @@ test('invites the initial owner only into a stack-owned user pool', () => {
   expect(create).toContain('{{Ref:InitialOwnerEmail}}');
   expect(create).toContain('"Name":"email_verified","Value":"true"');
   expect(create).toContain('{{Ref:WorkspaceDirectoryId}}');
-  // The invitation runs once; stack updates must not resend it.
+  // The invitation runs once; stack updates must not resend it. Its physical ID is the
+  // username, so consumers read it through Ref instead of a create-only response field.
   expect(createOwner.Properties.Update).toBeUndefined();
+  expect(create).toContain('"physicalResourceId":{"id":"{{Ref:InitialOwnerUsername}}"}');
 
   const [, updateOwner] = findCustomResource(synthesizedTemplate, 'adminUpdateUserAttributes');
   // An existing pool keeps its own owner, so the update has no condition and orders itself after
@@ -70,7 +74,7 @@ test('invites the initial owner only into a stack-owned user pool', () => {
   expect(JSON.stringify(updateOwner.Properties.Create)).toContain(JSON.stringify({
     'Fn::If': [
       'CognitoUserPoolCreated',
-      { 'Fn::GetAtt': [ownerLogicalId, 'User.Username'] },
+      { Ref: ownerLogicalId },
       { Ref: 'InitialOwnerUsername' },
     ],
   }));
@@ -87,9 +91,12 @@ test('adds the invited owner to the first system-admin group of a stack-owned po
       },
     }),
   });
+  const [ownerLogicalId] = findCustomResource(synthesizedTemplate, 'adminCreateUser');
   const [, addToGroup] = findCustomResource(synthesizedTemplate, 'adminAddUserToGroup');
   expect(addToGroup.Condition).toBe('CognitoUserPoolCreated');
   expect(addToGroup.Properties.Update).toBeUndefined();
+  expect(serializeAwsSdkCall(addToGroup.Properties.Create))
+    .toContain(`"Username":"{{Ref:${ownerLogicalId}}}"`);
 });
 
 test('publishes the Cognito IDs the deployment uses', () => {

@@ -93,8 +93,11 @@ export function buildBootstrapResources(
       ],
     },
     logging: customResources.Logging.withDataHidden(),
+    // Keep the stored response small; the user record carries the owner's email.
     outputPaths: ['User.Username'],
-    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-initial-owner-user'),
+    // The physical ID is the username, so `Ref` returns it on every lifecycle event. A response
+    // field would be missing after an update, because the invitation never runs again.
+    physicalResourceId: customResources.PhysicalResourceId.of(initialOwnerUsername.valueAsString),
   };
   const createInitialOwner = new customResources.AwsCustomResource(
     scope,
@@ -109,7 +112,8 @@ export function buildBootstrapResources(
       ]),
     ),
   );
-  (createInitialOwner.node.findChild('Resource').node.defaultChild as cdk.CfnResource)
+  const createInitialOwnerResource = createInitialOwner.node.findChild('Resource') as cdk.CustomResource;
+  (createInitialOwnerResource.node.defaultChild as cdk.CfnResource)
     .cfnOptions.condition = userIdentity.userPoolCreated;
   // The owner also gets the first system-admin group, so team creation works without a CLI step.
   const systemAdminGroup = new cognito.CfnUserPoolGroup(scope, 'SystemAdminGroup', {
@@ -127,7 +131,7 @@ export function buildBootstrapResources(
         action: 'adminAddUserToGroup',
         parameters: {
           UserPoolId: userIdentity.userPool.userPoolId,
-          Username: createInitialOwner.getResponseField('User.Username'),
+          Username: createInitialOwnerResource.ref,
           GroupName: systemAdminGroup.ref,
         },
         logging: customResources.Logging.withDataHidden(),
@@ -146,10 +150,10 @@ export function buildBootstrapResources(
   (addInitialOwnerToSystemAdminGroup.node.findChild('Resource').node.defaultChild as cdk.CfnResource)
     .cfnOptions.condition = userIdentity.userPoolCreated;
   // CloudFormation rejects a DependsOn on a resource whose condition is false, so the owner
-  // update reads the created username through Fn::If to order itself after the invitation.
+  // update reads the invited username through Fn::If to order itself after the invitation.
   const initialOwnerCognitoUsername = cdk.Token.asString(cdk.Fn.conditionIf(
     userIdentity.userPoolCreated.logicalId,
-    createInitialOwner.getResponseField('User.Username'),
+    createInitialOwnerResource.ref,
     initialOwnerUsername.valueAsString,
   ));
   const updateInitialOwnerAttributesCall: customResources.AwsSdkCall = {

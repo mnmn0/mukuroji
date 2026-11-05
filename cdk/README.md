@@ -536,9 +536,9 @@ DLQ の envelope は署名 timestamp が5分で失効するため、そのまま
 作るのは次の4つです。
 
 - self sign-up なしの user pool。`directory_id` / `workspace_id` custom attribute、12文字以上の password policy、任意の TOTP MFA を持ち、Essentials tier で、削除保護と `Retain` 付きです。
-- client secret なし、`ALLOW_USER_PASSWORD_AUTH` だけを許可する password client。
+- client secret なし、`ALLOW_USER_PASSWORD_AUTH` だけを許可する password client。user が自分の token で書き換えられる attribute は `name` だけです。API は email と Workspace attribute で認可するため、これらは管理者 API からしか変えられません。
 - `SystemAdminGroups` の先頭の group。
-- 初期 owner。`InitialOwnerUsername` を username、`InitialOwnerEmail` を verified email にして、Workspace attribute 付きで招待します。
+- 初期 owner。Workspace attribute と verified email 付きで招待します。この user pool は username でサインインし、API はログインの email を username として送るため、`InitialOwnerUsername` は `InitialOwnerEmail` と同じ値にします。違う値は deploy 前に拒否されます。
 
 Cognito の既定 email が初期 owner に仮パスワードを送り、owner は最初のサインインで新しい password に
 変えます。この場合、下の `prepare-workspace-cognito.sh` と group 作成手順は不要です。
@@ -547,7 +547,9 @@ Cognito の既定 email が初期 owner に仮パスワードを送り、owner �
 招待が多い場合は SES の設定を user pool に追加してください。SSO を使う場合は、stack が作った
 user pool に IdP と SSO 専用 client を追加し、その client ID を SSO parameter に渡します。
 
-既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。
+既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。app client の
+`WriteAttributes` には `email`、`custom:directory_id`、`custom:workspace_id` を含めないでください。
+含めると、user が自分の access token でこれらを書き換え、別の user として認可される可能性があります。
 
 初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。
 Password/API client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。SSO client は
