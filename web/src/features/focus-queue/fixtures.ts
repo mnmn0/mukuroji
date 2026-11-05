@@ -50,7 +50,6 @@ const nextItemBase = createFocusFixtureItem(
 )
 const nextItem = {
   ...nextItemBase,
-  capabilities: { ...nextItemBase.capabilities, assign: false },
   involvement: 'contributor',
   workItem: {
     ...nextItemBase.workItem,
@@ -263,7 +262,8 @@ function createFocusFixtureItem(
   return {
     actionability: { actionable: true, reasons: [] },
     capabilities: {
-      assign: true,
+      // Fixture items are owned or contributed work, which the server never offers to reassign.
+      assign: false,
       changeStatus: true,
       complete: true,
       openSource: true,

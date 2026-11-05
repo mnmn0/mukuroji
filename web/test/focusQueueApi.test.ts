@@ -34,6 +34,12 @@ describe('Focus queue API', () => {
     if (!firstSection || !firstItem) throw new Error('The Focus fixture requires one item.')
     const legacyItem: Record<string, unknown> = { ...firstItem }
     delete legacyItem.involvement
+    /**
+     * Builds a queue response whose first Now item is replaced.
+     *
+     * @param item - Item placed first in the Now section.
+     * @returns Queue response payload to serve from the mocked fetch.
+     */
     const withItem = (item: unknown) => ({
       ...focusQueueResponseFixture,
       sections: [

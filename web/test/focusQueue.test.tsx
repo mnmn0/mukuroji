@@ -262,6 +262,12 @@ describe('Focus queue', () => {
         ? { ...group, items: [group.items[0], { ...relatedItem, involvement: 'related' }].filter((item) => item !== undefined) }
         : group),
     }
+    /**
+     * Renders the Focus queue for one section in Japanese.
+     *
+     * @param section - Queue section to render.
+     * @returns Static markup of the queue.
+     */
     const render = (section: 'now' | 'next') => renderToStaticMarkup(
       <FocusQueue
         configurationsByTeam={{ 'core-team': focusConfigurationFixture }}
