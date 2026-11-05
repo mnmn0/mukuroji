@@ -31,6 +31,7 @@ import {
   type DocumentAuthorizationRevisionMutationPort,
 } from '../documents'
 import type { WorkspaceRole } from './domain/workspace-role'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 export type { WorkspaceRole } from './domain/workspace-role'
 
@@ -2833,7 +2834,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 }
 
 function readEnvironment(name: string) {
-  return process.env[name]
+  return loadServerConfig().environment[name]
 }
 
 function createDynamoDbClient() {

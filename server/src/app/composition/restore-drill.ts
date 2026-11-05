@@ -32,6 +32,7 @@ import {
   type RestoreDrillVerifier,
   type RestoreDrillVerifierInput,
 } from '../../modules/restore-drill'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Reusable full runner composition retained across warm Lambda invocations. */
 export type RestoreDrillRunnerRuntime = {
@@ -220,7 +221,7 @@ export function getRestoreDrillCleanupRuntime(): RestoreDrillCleanupRuntime {
  * @returns Trimmed non-empty value.
  */
 function readRequiredEnvironment(name: string): string {
-  const value = process.env[name]
+  const value = loadServerConfig().environment[name]
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new RestoreDrillOrchestratorFailure('CONFIGURATION_INVALID')
   }

@@ -66,6 +66,7 @@ import {
   createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Workspace search table の search document prefix です。 */
 export const WORKSPACE_SEARCH_DOCUMENT_PREFIX = 'DOCUMENT#'
@@ -6682,5 +6683,5 @@ function shouldBootstrapLocalTable() {
 }
 
 function readEnvironment(name: string) {
-  return typeof Bun !== 'undefined' ? Bun.env[name] : process.env[name]
+  return loadServerConfig().environment[name]
 }

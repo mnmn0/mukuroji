@@ -21,6 +21,7 @@ import {
   createCuratedContextItemWorkspaceSearchDocument,
   DynamoDbWorkspaceSearchClient,
 } from '../modules/workspace-search/workspace-search'
+import { loadServerConfig } from '../infrastructure/config/server-config'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
 const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
@@ -115,7 +116,7 @@ async function readMatchingCuratedContextItem(input: CuratedContextSearchProject
  * @returns Trimmed configured value, or undefined when absent.
  */
 function readOptionalEnvironment(name: string) {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   return value || undefined
 }
 
@@ -131,7 +132,7 @@ function createCuratedContextSearchEntityId(input: CuratedContextSearchProjectio
 
 const realtime = {
   async publish(scopeKey: string, payload: Readonly<Record<string, unknown>>) {
-    const callbackEndpoint = process.env.WEBSOCKET_CALLBACK_ENDPOINT?.trim()
+    const callbackEndpoint = loadServerConfig().environment.WEBSOCKET_CALLBACK_ENDPOINT?.trim()
     if (!callbackEndpoint) return
     const connections = await listScopeConnections(scopeKey)
     await Promise.all(connections.map((connection) =>

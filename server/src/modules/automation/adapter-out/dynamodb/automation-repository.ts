@@ -79,6 +79,7 @@ import {
 import {
   createAutomationInboundWebhookSecretId,
 } from '../inbound-webhook-secret-id'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 export { AutomationError } from '../../domain/automation-error'
 export { isAutomationValue } from '../../domain/automation-value'
 export { normalizeAutomationActionFailure } from '../../application/action-failure'
@@ -200,7 +201,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
 
   /** Creates a DynamoDB-backed Automation repository. */
   constructor(
-    tableName = process.env.AUTOMATION_TABLE_NAME ?? 'mukuroji-automation-local',
+    tableName = loadServerConfig().environment.AUTOMATION_TABLE_NAME ?? 'mukuroji-automation-local',
     documentClient: DynamoDBDocumentClient,
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTable = false,

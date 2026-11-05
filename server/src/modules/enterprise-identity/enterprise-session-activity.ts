@@ -4,6 +4,7 @@ import {
   GetCommand,
   PutCommand,
 } from '@aws-sdk/lib-dynamodb'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /**
  * Enterprise interactive session の idle activity 更新入力です。
@@ -258,7 +259,7 @@ implements EnterpriseSessionActivityClient {
  * Environment に応じた session activity client を作成します。
  */
 export function createEnterpriseSessionActivityClient() {
-  const tableName = process.env.REALTIME_SESSIONS_TABLE_NAME?.trim()
+  const tableName = loadServerConfig().environment.REALTIME_SESSIONS_TABLE_NAME?.trim()
   return tableName
     ? new DynamoDbEnterpriseSessionActivityClient(tableName)
     : new InMemoryEnterpriseSessionActivityClient()
@@ -325,11 +326,12 @@ function readAuthenticationMethods(value: unknown, fallback: string[]) {
 }
 
 function createEnterpriseSessionActivityDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   return DynamoDBDocumentClient.from(new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint ? { endpoint } : {}),
   }), {
     marshallOptions: { removeUndefinedValues: true },

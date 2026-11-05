@@ -31,6 +31,7 @@ import {
   type WorkItemImportSourceStore,
 } from './work-item-import'
 import { WORK_ITEM_IMPORT_MAX_BYTES } from './work-item-transfer'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 const executionRecordPrefix = 'IMPORT_EXECUTION#'
 const receiptRecordPrefix = 'IMPORT_RECEIPT#'
@@ -753,7 +754,7 @@ function requireText(value: string, label: string) {
 }
 
 function readEnvironment(name: string) {
-  return process.env[name]?.trim() || undefined
+  return loadServerConfig().environment[name]?.trim() || undefined
 }
 
 function readRequiredImportAwsResource(
@@ -764,7 +765,7 @@ function readRequiredImportAwsResource(
   const configured = readEnvironment(name)
   if (configured) return configured
   if (
-    process.env.NODE_ENV === 'production' ||
+    loadServerConfig().environment.NODE_ENV === 'production' ||
     Boolean(readEnvironment('AWS_LAMBDA_FUNCTION_NAME')) ||
     Boolean(readEnvironment('AWS_EXECUTION_ENV'))
   ) {

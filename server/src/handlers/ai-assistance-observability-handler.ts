@@ -6,8 +6,9 @@ import { createAiAssistanceEmfObservability } from '../modules/ai-assistance'
 import {
   processAiAssistanceObservabilityBatch,
 } from '../modules/ai-assistance/adapter-in/events/ai-assistance-observability-projection'
+import { loadServerConfig } from '../infrastructure/config/server-config'
 
-const applicationCommitSha = process.env.MUKUROJI_APPLICATION_COMMIT_SHA
+const applicationCommitSha = loadServerConfig().environment.MUKUROJI_APPLICATION_COMMIT_SHA
 const observability = createAiAssistanceEmfObservability(
   applicationCommitSha === undefined ? {} : { applicationCommitSha },
 )
