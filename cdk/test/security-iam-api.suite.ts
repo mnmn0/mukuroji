@@ -2,8 +2,7 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
-  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
-  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   findCustomResource,
   serializeAwsSdkCall,
@@ -24,17 +23,11 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Timeout: 20,
     Environment: {
       Variables: Match.objectLike({
-        MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
-          Ref: API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+        MUKUROJI_API_RUNTIME_CONFIG_REVISION: {
+          Ref: 'ApiRuntimeConfigurationRevision',
         },
-        MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
-          Ref: API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
-        },
-        MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN: {
-          Ref: 'ApiIdentityRuntimeConfigurationSecret9BDC16DA',
-        },
-        MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN: {
-          Ref: 'ApiWorkflowRuntimeConfigurationSecret225372D1',
+        MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
+          Ref: API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
         },
       }),
     },
@@ -57,10 +50,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
     'AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE',
     'AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION',
-    'MUKUROJI_API_CORE_CONFIG_SECRET_ARN',
-    'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
-    'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',
-    'MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN',
+    'MUKUROJI_API_RUNTIME_CONFIG_REVISION',
+    'MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN',
     'MUKUROJI_APPLICATION_COMMIT_SHA',
     'TENANT_EXPORT_BUCKET_NAME',
   ]);
@@ -146,10 +137,10 @@ test('public API delivery queues are retained with TLS-only access and worker-sa
 test('inbound automation webhook lifecycle uses a distinct public base URL and secret namespace', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const coreConfiguration =
-    resources[API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+    resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
       .Properties.SecretString;
   const dataConfiguration =
-    resources[API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+    resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
       .Properties.SecretString;
 
   expect(findApiRuntimeConfigurationSource(

@@ -1,7 +1,7 @@
 /** Registers AWS AppConfig runtime-control infrastructure tests. */
 import { expect, test } from '@jest/globals';
 import {
-  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -543,7 +543,7 @@ test('binds exact runtime-control settings through API config and twenty-four di
   }
 
   const coreConfigurationSecretId =
-    API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+    API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const coreConfiguration = resources[coreConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
@@ -579,7 +579,7 @@ test('binds exact runtime-control settings through API config and twenty-four di
   const apiVariables = resources[apiFunctionLogicalId]
     .Properties.Environment.Variables;
   expect(apiVariables).toEqual(expect.objectContaining({
-    MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
+    MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
       Ref: coreConfigurationSecretId,
     },
   }));
