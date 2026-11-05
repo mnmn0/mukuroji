@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { AutomationError } from '../domain/automation-error'
+import { loadServerConfig } from '../../../infrastructure/config/server-config'
 
 /** Default Secrets Manager prefix reserved for inbound Automation webhooks. */
 export const AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX =
@@ -26,7 +27,7 @@ export function createAutomationInboundWebhookSecretId(
 /** Reads and normalizes the configured inbound webhook secret prefix. */
 function readInboundWebhookSecretPrefix() {
   return normalizeSecretPrefix(
-    process.env.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX ??
+    loadServerConfig().environment.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX ??
       AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX,
   )
 }

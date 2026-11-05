@@ -58,6 +58,7 @@ import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Re-exports the production File upload ceiling for existing Files consumers. */
 export { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
@@ -3684,7 +3685,7 @@ function requireApprovalRevision(value: number) {
 
 /** Environment string を trim して取得します。 */
 function readEnvironment(name: string) {
-  return process.env[name]?.trim() || undefined
+  return loadServerConfig().environment[name]?.trim() || undefined
 }
 
 /** Positive integer environment を取得します。 */

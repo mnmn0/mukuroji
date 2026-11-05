@@ -27,6 +27,7 @@ import {
   isCanonicalWorkItemRecord,
   workItemScheduleInstantToLocalDate,
 } from '../../../work-items'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** 期限通知 schedule が生成する通知理由です。 */
 export type ScheduledNotificationReason = 'due' | 'overdue'
@@ -1439,7 +1440,7 @@ function normalizeDate(value: Date, label: string) {
 
 function requireEnvironment(...names: string[]) {
   for (const name of names) {
-    const value = readText(process.env[name])
+    const value = readText(loadServerConfig().environment[name])
 
     if (value) {
       return value
@@ -1457,7 +1458,7 @@ function requireEnvironment(...names: string[]) {
  * @returns The configured positive integer or the fallback.
  */
 function readPositiveIntegerEnvironment(name: string, fallback: number) {
-  const configured = process.env[name]?.trim()
+  const configured = loadServerConfig().environment[name]?.trim()
 
   if (!configured) {
     return fallback

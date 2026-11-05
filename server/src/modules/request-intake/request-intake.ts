@@ -80,6 +80,7 @@ import {
   type TriageAuditOutboxConfiguration,
 } from '../triage'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Request intake queue GSI の既定名です。 */
 export const REQUEST_QUEUE_INDEX_NAME = 'RequestQueueIndex'
@@ -4251,8 +4252,7 @@ function createAwsConfiguration(endpoint: string | undefined) {
 }
 
 function readEnvironment(name: string) {
-  if (typeof Bun !== 'undefined') return Bun.env[name]
-  return typeof process !== 'undefined' ? process.env[name] : undefined
+  return loadServerConfig().environment[name]
 }
 
 function requirePositiveInteger(value: number, label: string) {

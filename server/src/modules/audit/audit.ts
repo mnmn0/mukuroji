@@ -13,6 +13,7 @@ import {
   type QueryCommandInput,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /**
  * 現行の audit event schema version です。
@@ -922,7 +923,7 @@ function createWorkspaceInvitationAuditEntityIdFromKeyBytes(
  * @returns Audit writer 間で固定して共有する32-byte random値のhex表現です。
  */
 export function readWorkspaceAuditPseudonymKey(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
   const key = environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]
 
@@ -1457,7 +1458,7 @@ export function calculateAuditExpiresAt(occurredAt: string, retentionDays: numbe
  * Environment で構成した共通 audit retention 日数を返します。
  */
 export function getConfiguredAuditRetentionDays() {
-  const configuredRetentionDays = process.env.AUDIT_RETENTION_DAYS?.trim() ||
+  const configuredRetentionDays = loadServerConfig().environment.AUDIT_RETENTION_DAYS?.trim() ||
     undefined
   const retentionDays = Number(configuredRetentionDays ?? 2555)
   if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
@@ -1504,7 +1505,7 @@ export function createMutationAuditEventPut(
  * @returns 最初に見つかった空でない DynamoDB endpoint です。
  */
 export function getConfiguredDynamoDbEndpoint(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
   return [
     environment.DYNAMODB_ENDPOINT,
@@ -1517,7 +1518,7 @@ export function getConfiguredDynamoDbEndpoint(
  * process environment から audit event table 名を取得します。
  */
 export function getConfiguredAuditTableName(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
   const configuredName = (
     environment.AUDIT_EVENTS_TABLE_NAME
