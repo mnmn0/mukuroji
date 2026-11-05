@@ -5,17 +5,20 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { buildStackParameters } from '../lib/config/stack-parameters';
 import { synthesizedTemplate } from './test-support';
 
-test('fresh deployment requires explicit Cognito workspace and runtime secrets parameters', () => {
+test('fresh deployment requires explicit workspace and runtime secrets parameters', () => {
   const template = synthesizedTemplate;
   const parameters = template.toJSON().Parameters;
 
+  // Blank Cognito IDs make the stack create the user pool and password client.
   expect(parameters.CognitoUserPoolId).toEqual(expect.objectContaining({
     Type: 'String',
-    AllowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
+    Default: '',
+    AllowedPattern: '^(?:|[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+)$',
   }));
   expect(parameters.CognitoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
-    AllowedPattern: '^[A-Za-z0-9]+$',
+    Default: '',
+    AllowedPattern: '^(?:|[A-Za-z0-9]+)$',
   }));
   expect(parameters.CognitoSsoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
@@ -137,8 +140,6 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
   }));
 
   for (const parameterName of [
-    'CognitoUserPoolId',
-    'CognitoUserPoolClientId',
     'EnterpriseIdentityTokenHashSecret',
     'WorkspaceDirectoryId',
     'WorkspaceAuditPseudonymKey',
@@ -185,20 +186,45 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
   expect(template.toJSON().Rules.CognitoClientSeparation).toEqual({
     Assertions: [{
       Assert: {
-        'Fn::Not': [{
-          'Fn::Equals': [
-            { Ref: 'CognitoSsoUserPoolClientId' },
-            { Ref: 'CognitoUserPoolClientId' },
-          ],
-        }],
+        'Fn::Or': [
+          { 'Fn::Equals': [{ Ref: 'CognitoSsoUserPoolClientId' }, ''] },
+          {
+            'Fn::Not': [{
+              'Fn::Equals': [
+                { Ref: 'CognitoSsoUserPoolClientId' },
+                { Ref: 'CognitoUserPoolClientId' },
+              ],
+            }],
+          },
+        ],
       },
       AssertDescription:
         'CognitoSsoUserPoolClientId must differ from CognitoUserPoolClientId.',
     }],
   });
 
-  template.resourceCountIs('AWS::Cognito::UserPool', 0);
-  template.resourceCountIs('AWS::Cognito::UserPoolClient', 0);
+  expect(template.toJSON().Rules.CognitoUserPoolParametersPaired).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Or': [
+          {
+            'Fn::And': [
+              { 'Fn::Equals': [{ Ref: 'CognitoUserPoolId' }, ''] },
+              { 'Fn::Equals': [{ Ref: 'CognitoUserPoolClientId' }, ''] },
+            ],
+          },
+          {
+            'Fn::And': [
+              { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'CognitoUserPoolId' }, ''] }] },
+              { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'CognitoUserPoolClientId' }, ''] }] },
+            ],
+          },
+        ],
+      },
+      AssertDescription:
+        'Leave CognitoUserPoolId and CognitoUserPoolClientId both empty to create a user pool, or pass both to use an existing one.',
+    }],
+  });
 });
 
 test('derives restore-drill approver ARN partitions from concrete stack Regions', () => {

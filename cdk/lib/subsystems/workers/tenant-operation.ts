@@ -411,7 +411,7 @@ function buildTenantOperationCapabilityFunction(
         input.parameters.automationWebhookSecretPrefix,
       CAPACITY_PLANNING_TABLE_NAME:
         input.dataStores.capacityPlanningTable.tableName,
-      COGNITO_USER_POOL_ID: input.parameters.cognitoUserPoolId.valueAsString,
+      COGNITO_USER_POOL_ID: input.parameters.cognitoUserPoolId,
       COLLABORATION_TABLE_NAME: input.dataStores.collaborationTable.tableName,
       DEVELOPER_PLATFORM_TABLE_NAME:
         input.dataStores.developerPlatformTable.tableName,

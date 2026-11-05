@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import {
@@ -46,6 +47,8 @@ export function buildBootstrapResources(
     cognitoUserPoolId,
     initialOwnerEmail,
     initialOwnerUsername,
+    systemAdminGroups,
+    userIdentity,
     workspaceDirectoryId,
   } = input.parameters;
 
@@ -62,8 +65,8 @@ export function buildBootstrapResources(
     service: 'CognitoIdentityServiceProvider',
     action: 'describeUserPoolClient',
     parameters: {
-      UserPoolId: cognitoUserPoolId.valueAsString,
-      ClientId: cognitoUserPoolClientId.valueAsString,
+      UserPoolId: cognitoUserPoolId,
+      ClientId: cognitoUserPoolClientId,
     },
     logging: customResources.Logging.withDataHidden(),
     physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-cognito-client-validation'),
@@ -73,12 +76,88 @@ export function buildBootstrapResources(
     'ValidateCognitoUserPoolClient',
     createIdempotentAwsCustomResourceProps(validateCognitoClientCall, cognitoPolicy),
   );
+  // A stack-owned pool starts empty, so the stack invites the initial owner by email. Cognito
+  // sends a temporary password that the owner replaces at the first sign-in.
+  const createInitialOwnerCall: customResources.AwsSdkCall = {
+    service: 'CognitoIdentityServiceProvider',
+    action: 'adminCreateUser',
+    parameters: {
+      UserPoolId: userIdentity.userPool.userPoolId,
+      Username: initialOwnerUsername.valueAsString,
+      DesiredDeliveryMediums: ['EMAIL'],
+      UserAttributes: [
+        { Name: 'email', Value: initialOwnerEmail.valueAsString },
+        { Name: 'email_verified', Value: 'true' },
+        { Name: 'custom:directory_id', Value: workspaceDirectoryId.valueAsString },
+        { Name: 'custom:workspace_id', Value: workspaceDirectoryId.valueAsString },
+      ],
+    },
+    logging: customResources.Logging.withDataHidden(),
+    outputPaths: ['User.Username'],
+    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-initial-owner-user'),
+  };
+  const createInitialOwner = new customResources.AwsCustomResource(
+    scope,
+    'CreateInitialOwner',
+    createCreateOnlyBootstrapAwsCustomResourceProps(
+      createInitialOwnerCall,
+      customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['cognito-idp:AdminCreateUser'],
+          resources: [cognitoUserPoolArn],
+        }),
+      ]),
+    ),
+  );
+  (createInitialOwner.node.findChild('Resource').node.defaultChild as cdk.CfnResource)
+    .cfnOptions.condition = userIdentity.userPoolCreated;
+  // The owner also gets the first system-admin group, so team creation works without a CLI step.
+  const systemAdminGroup = new cognito.CfnUserPoolGroup(scope, 'SystemAdminGroup', {
+    userPoolId: userIdentity.userPool.userPoolId,
+    groupName: cdk.Fn.select(0, cdk.Fn.split(',', systemAdminGroups.valueAsString)),
+    description: 'mukuroji system administrators.',
+  });
+  systemAdminGroup.cfnOptions.condition = userIdentity.userPoolCreated;
+  const addInitialOwnerToSystemAdminGroup = new customResources.AwsCustomResource(
+    scope,
+    'AddInitialOwnerToSystemAdminGroup',
+    createCreateOnlyBootstrapAwsCustomResourceProps(
+      {
+        service: 'CognitoIdentityServiceProvider',
+        action: 'adminAddUserToGroup',
+        parameters: {
+          UserPoolId: userIdentity.userPool.userPoolId,
+          Username: createInitialOwner.getResponseField('User.Username'),
+          GroupName: systemAdminGroup.ref,
+        },
+        logging: customResources.Logging.withDataHidden(),
+        physicalResourceId: customResources.PhysicalResourceId.of(
+          'mukuroji-initial-owner-system-admin',
+        ),
+      },
+      customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['cognito-idp:AdminAddUserToGroup'],
+          resources: [cognitoUserPoolArn],
+        }),
+      ]),
+    ),
+  );
+  (addInitialOwnerToSystemAdminGroup.node.findChild('Resource').node.defaultChild as cdk.CfnResource)
+    .cfnOptions.condition = userIdentity.userPoolCreated;
+  // CloudFormation rejects a DependsOn on a resource whose condition is false, so the owner
+  // update reads the created username through Fn::If to order itself after the invitation.
+  const initialOwnerCognitoUsername = cdk.Token.asString(cdk.Fn.conditionIf(
+    userIdentity.userPoolCreated.logicalId,
+    createInitialOwner.getResponseField('User.Username'),
+    initialOwnerUsername.valueAsString,
+  ));
   const updateInitialOwnerAttributesCall: customResources.AwsSdkCall = {
     service: 'CognitoIdentityServiceProvider',
     action: 'adminUpdateUserAttributes',
     parameters: {
-      UserPoolId: cognitoUserPoolId.valueAsString,
-      Username: initialOwnerUsername.valueAsString,
+      UserPoolId: cognitoUserPoolId,
+      Username: initialOwnerCognitoUsername,
       UserAttributes: [
         {
           Name: 'custom:directory_id',

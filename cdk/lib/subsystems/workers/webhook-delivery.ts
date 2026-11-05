@@ -113,7 +113,7 @@ export function buildWebhookDeliveryWorkers(
       },
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:

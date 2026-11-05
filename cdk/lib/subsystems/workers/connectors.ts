@@ -137,7 +137,7 @@ export function buildConnectorWorkers(
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
           connectorRuntimeSecret.secretArn,
         CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,

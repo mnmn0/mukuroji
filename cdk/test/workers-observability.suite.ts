@@ -3,6 +3,8 @@ import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
   API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  COGNITO_USER_POOL_CLIENT_ID_VALUE,
+  COGNITO_USER_POOL_ID_VALUE,
   WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
   expectQueueRequiresSsl,
   findApiRuntimeConfigurationSource,
@@ -190,9 +192,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
           AUDIT_EVENTS_TABLE_NAME: {
             Ref: 'AuditEventsTable0723963E',
           },
-          COGNITO_USER_POOL_ID: {
-            Ref: 'CognitoUserPoolId',
-          },
+          COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
           ENTERPRISE_IDENTITY_TABLE_NAME: {
             Ref: String(tableLogicalId),
           },
@@ -434,8 +434,8 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
         ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
         ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
         AUDIT_EVENTS_TABLE_NAME: { Ref: auditTableLogicalId },
-        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
-        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+        COGNITO_CLIENT_ID: COGNITO_USER_POOL_CLIENT_ID_VALUE,
+        COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: projectDirectoryTableLogicalId },
         WORK_ITEMS_TABLE_NAME: { Ref: workItemsTableLogicalId },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
@@ -944,9 +944,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
         CONNECTOR_SYNC_QUEUE_URL: {
           Ref: 'ConnectorSyncQueue4F8E52D0',
         },
-        COGNITO_USER_POOL_ID: {
-          Ref: 'CognitoUserPoolId',
-        },
+        COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         ENTERPRISE_IDENTITY_TABLE_NAME: {
           Ref: enterpriseIdentityTableId,
         },
@@ -1171,7 +1169,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   }
   const deliveryEnvironment = {
     Variables: Match.objectLike({
-      COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+      COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
       DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
       DEVELOPER_PLATFORM_TABLE_NAME: {
         Ref: 'DeveloperPlatformTable772E085C',
@@ -2910,8 +2908,8 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         COLLABORATION_TABLE_NAME: { Ref: 'WorkItemCollaborationTableFDECF217' },
         CUSTOMERS_TABLE_NAME: { Ref: 'CustomersTableB554B793' },
-        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
-        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+        COGNITO_CLIENT_ID: COGNITO_USER_POOL_CLIENT_ID_VALUE,
+        COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
         MUKUROJI_RUNTIME_ROLE: 'automation-event-worker',
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
@@ -2936,8 +2934,8 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         COLLABORATION_TABLE_NAME: { Ref: 'WorkItemCollaborationTableFDECF217' },
         CUSTOMERS_TABLE_NAME: { Ref: 'CustomersTableB554B793' },
-        COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
-        COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
+        COGNITO_CLIENT_ID: COGNITO_USER_POOL_CLIENT_ID_VALUE,
+        COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
         MUKUROJI_RUNTIME_ROLE: 'automation-schedule-worker',
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
