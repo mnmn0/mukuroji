@@ -5,13 +5,13 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import { MukurojiStack } from '../lib/stacks/mukuroji-stack';
 
-/** Stable logical ID of the core API runtime-configuration secret. */
-export const API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
-  'ApiCoreRuntimeConfigurationSecret5550B12D';
+/** Stable logical ID of the single API runtime-configuration secret. */
+export const API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
+  'ApiRuntimeConfigurationSecretC4AED5C4';
 
-/** Stable logical ID of the data API runtime-configuration secret. */
-export const API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
-  'ApiDataRuntimeConfigurationSecret9AB65533';
+/** Stable logical ID of the shared Workspace audit pseudonym secret. */
+export const WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID =
+  'WorkspaceAuditPseudonymSecretF30E6C2E';
 
 /**
  * Synthesizes the application stack for infrastructure assertions.

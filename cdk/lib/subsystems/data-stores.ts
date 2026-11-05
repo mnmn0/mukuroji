@@ -9,6 +9,8 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 export interface DataStoreBuilderInput {
   /** Secret JSON configuration persisted for connector runtimes. */
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /** Stable Workspace audit pseudonym key shared by every audit writer. */
+  readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
 }
 
 /**
@@ -61,6 +63,11 @@ export type DataStoreResources = {
   readonly documentsTable: dynamodb.Table;
   /** HMAC secret for public document share tokens. */
   readonly documentPublicShareTokenSecret: secretsmanager.Secret;
+  /**
+   * Single retained Workspace audit pseudonym secret read by the API, tenant
+   * lifecycle workers, and restore validation. Its value never rotates.
+   */
+  readonly workspaceAuditPseudonymSecret: secretsmanager.Secret;
   /** Work Item collaboration records table. */
   readonly collaborationTable: dynamodb.Table;
   /** Workspace search documents, views, and preferences table. */
@@ -457,6 +464,20 @@ export function buildDataStores(
   documentPublicShareTokenSecret.applyRemovalPolicy(
     cdk.RemovalPolicy.RETAIN,
   );
+  // One stable secret replaces the per-revision copies. Updating the stack
+  // never creates another secret, so retained copies cannot pile up.
+  const workspaceAuditPseudonymSecret = new secretsmanager.Secret(
+    stack,
+    'WorkspaceAuditPseudonymSecret',
+    {
+      description:
+        'Stable Workspace audit pseudonym key shared by the API, tenant workers, and restore validation.',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      secretStringValue: cdk.SecretValue.cfnParameter(
+        input.workspaceAuditPseudonymKey,
+      ),
+    },
+  );
 
   const collaborationTable = new dynamodb.Table(stack, 'WorkItemCollaborationTable', {
     partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
@@ -606,6 +627,7 @@ export function buildDataStores(
     tenantAdministrationTable,
     documentsTable,
     documentPublicShareTokenSecret,
+    workspaceAuditPseudonymSecret,
     collaborationTable,
     workspaceSearchTable,
     notificationsTable,

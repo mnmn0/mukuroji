@@ -2,7 +2,8 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
-  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
   expectQueueRequiresSsl,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
@@ -1644,7 +1645,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
     },
   });
   const dataConfigurationSecretId =
-    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+    API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const dataConfiguration = resources[dataConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
@@ -1659,7 +1660,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
   expect(apiFunction.Properties.Environment.Variables).toEqual(
     expect.objectContaining({
-      MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+      MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
         Ref: dataConfigurationSecretId,
       },
     }),
@@ -2478,7 +2479,7 @@ test('tenant lifecycle execution is split into queued environment-bound resource
             AUTOMATION_WEBHOOK_SECRET_PREFIX:
               'mukuroji/automation-webhooks',
             TENANT_OPERATION_PSEUDONYM_SECRET_ARN: {
-              Ref: 'ApiWorkspaceAuditPseudonymValueSecretC16FD0F8',
+              Ref: WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
             },
             WORK_ITEM_IMPORT_BUCKET_NAME: {
               Ref: 'WorkItemImportBucket14068778',

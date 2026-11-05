@@ -223,7 +223,7 @@ bun run floci:deploy-backend
 
 `floci:deploy-backend` は `server:build:lambda` で `server/src/handlers/api.handler.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
-Floci は CloudFormation を使わず、production の4分割 API runtime configuration secret
+Floci は CloudFormation を使わず、production の API runtime configuration secret
 pointerを渡さないため、`ApiRuntimeConfigurationRevision` は使いません。Local Lambdaには
 completeなdiscrete environmentを直接設定し、このfallbackをproduction deployへ流用しません。
 
@@ -470,18 +470,19 @@ bun --filter cdk cdk deploy Mukuroji \
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
 
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION` は1〜32文字のdeploy識別子です。APIの
-code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに
+code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに
 新しい値へ進め、同じrevisionを異なる内容へ再利用しません。
 `MUKUROJI_APPLICATION_COMMIT_SHA` はreview済みcheckoutのfull SHAに固定し、deploy後の
 `GET /api/health`とproduction-like AI evaluationで同じ値を照合します。
-Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。deployは新しい
-immutable configuration secretとLambda Versionの準備後に`live` Aliasでtrafficを切り替えます。
-旧secretは`Retain`されますが、CloudFormationが自動で再接続・削除するものではないため、
-rollback/recovery evidenceとして管理します。
-4分割secretはtransformを使わないv2 line envelopeでgroup identityと同一revisionを保持し、各値は
-canonical Base64として保存します。NoEchoの4値はrevision-boundな個別retained secretへ直接保存し、
-Document public-share secretとともにenvelopeにはARNだけを入れます。APIは4 group、同一revision、
-全canonical key、nested secret ARN/valueをすべて検証してから環境へ原子的に反映します。
+Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。runtime
+configurationは1つの安定したsecretにまとめ、deployごとに同じsecretの値をin-placeで更新します。
+deployを重ねてもsecretは増えません。各Lambda Versionは自分のrevisionを環境変数に持ち、loaderは
+`AWSCURRENT`のrevisionが一致しなければ`AWSPREVIOUS`を読むため、Alias切り替え中の旧Versionも
+自分のrevisionの設定で起動できます。CloudFormation rollbackはsecretの値も前のrevisionへ戻します。
+secretはtransformを使わないv3 line envelopeでrevisionを保持し、各値はcanonical Base64として
+保存します。NoEcho値もenvelopeへ直接入れ、Workspace audit pseudonym keyとDocument public-share
+secretだけはnested secret ARNとして参照します。APIはrevision、全canonical key、nested secret
+ARN/valueをすべて検証してから環境へ原子的に反映します。
 
 SSO client は password client とは別に作成し、client secret なし、
 `ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、

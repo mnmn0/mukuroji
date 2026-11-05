@@ -4,16 +4,11 @@ import {
   hydrateApiRuntimeEnvironment,
 } from './api-runtime-environment'
 
-const configurationHeader = 'mukuroji-api-runtime-configuration-v2\n'
-const secretArns = [
-  'arn:aws:secretsmanager:us-east-1:123456789012:secret:core',
-  'arn:aws:secretsmanager:us-east-1:123456789012:secret:data',
-  'arn:aws:secretsmanager:us-east-1:123456789012:secret:identity',
-  'arn:aws:secretsmanager:us-east-1:123456789012:secret:workflow',
-]
-const configurationGroups = ['core', 'data', 'identity', 'workflow']
+const configurationHeader = 'mukuroji-api-runtime-configuration-v3\n'
+const secretArn = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:api-config'
 const configurationRevision = 'revision-7'
 const configuredValuePrefix = '設定済み-configured-'
+const invalidMessage = 'API runtime environment configuration is invalid.'
 
 /**
  * Encodes one test value as canonical standard Base64.
@@ -26,135 +21,114 @@ function encodeConfigurationValue(value: string): string {
 }
 
 /**
- * Creates four complete disjoint v2 configuration envelopes.
+ * Creates one complete v3 configuration envelope.
  *
  * @param secretBackedNames - Canonical names represented by nested secret ARNs.
- * @returns Group strings, deterministic nested loads, and expected final values.
+ * @param revision - Revision written into the envelope.
+ * @returns The secret string, deterministic nested loads, and expected values.
  */
-function createValidConfigurationGroups(
+function createValidConfiguration(
   secretBackedNames: ReadonlySet<string> = new Set(),
+  revision: string = configurationRevision,
 ) {
-  const groupRecords: string[][] = [[], [], [], []]
-  const groupNestedArns: string[][] = [[], [], [], []]
+  const records: string[] = []
+  const nestedSecretArns: string[] = []
   const expectedValues = new Map<string, string>()
   const nestedValues = new Map<string, string>()
 
-  for (
-    let index = 0;
-    index < API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.length;
-    index += 1
-  ) {
-    const groupIndex = index % groupRecords.length
-    const records = groupRecords[groupIndex]
-    const nestedArns = groupNestedArns[groupIndex]
-    const name = API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES[index]
-    if (records === undefined || nestedArns === undefined || name === undefined) {
-      throw new Error('Test configuration partition is invalid.')
-    }
-
+  API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.forEach((name, index) => {
     const configuredValue = `${configuredValuePrefix}${name}`
     expectedValues.set(name, configuredValue)
     if (secretBackedNames.has(name)) {
       const nestedArn =
         `arn:aws:secretsmanager:us-east-1:123456789012:secret:nested-${index}`
-      records.push(
-        `secret:${name}:${encodeConfigurationValue(nestedArn)}`,
-      )
-      nestedArns.push(nestedArn)
+      records.push(`secret:${name}:${encodeConfigurationValue(nestedArn)}`)
+      nestedSecretArns.push(nestedArn)
       nestedValues.set(nestedArn, configuredValue)
-      continue
+      return
     }
-    records.push(
-      `value:${name}:${encodeConfigurationValue(configuredValue)}`,
-    )
-  }
+    records.push(`value:${name}:${encodeConfigurationValue(configuredValue)}`)
+  })
 
   return {
     expectedValues,
-    nestedSecretArns: groupNestedArns.flat(),
+    nestedSecretArns,
     nestedValues,
-    secretStrings: groupRecords.map((records, index) => {
-      const group = configurationGroups[index]
-      if (group === undefined) {
-        throw new Error('Test configuration group identity is invalid.')
-      }
-      return [
-        `${configurationHeader}group:${group}`,
-        `revision:${encodeConfigurationValue(configurationRevision)}`,
-        ...records,
-        '',
-      ].join('\n')
-    }),
+    secretString: [
+      `${configurationHeader}revision:${encodeConfigurationValue(revision)}`,
+      ...records,
+      '',
+    ].join('\n'),
   }
 }
 
 /**
- * Creates a production-like environment containing only configuration pointers.
+ * Creates a production-like environment containing only the configuration pointer.
  *
  * @returns Mutable environment used by hydrator tests.
  */
 function createPointerEnvironment(): Record<string, string | undefined> {
   return {
-    MUKUROJI_API_CORE_CONFIG_SECRET_ARN: secretArns[0],
-    MUKUROJI_API_DATA_CONFIG_SECRET_ARN: secretArns[1],
-    MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN: secretArns[2],
-    MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN: secretArns[3],
+    MUKUROJI_API_RUNTIME_CONFIG_REVISION: configurationRevision,
+    MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: secretArn,
   }
 }
 
 /**
  * Replaces the exact record for one canonical name.
  *
- * @param groups - Complete configuration group strings.
+ * @param secretString - Complete configuration secret string.
  * @param name - Canonical record name to replace.
  * @param replacement - Complete replacement line, or an empty string to remove it.
- * @returns Updated group strings.
+ * @returns Updated secret string.
  */
 function replaceConfigurationRecord(
-  groups: readonly string[],
+  secretString: string,
   name: string,
   replacement: string,
-): string[] {
+): string {
   let replaced = false
-  const updated = groups.map((group) => {
-    const lines = group.slice(0, -1).split('\n')
-    const nextLines = lines.flatMap((line) => {
-      if (
-        line.startsWith(`value:${name}:`) ||
-        line.startsWith(`secret:${name}:`)
-      ) {
-        replaced = true
-        return replacement.length > 0 ? [replacement] : []
-      }
-      return [line]
-    })
-    return `${nextLines.join('\n')}\n`
+  const lines = secretString.slice(0, -1).split('\n').flatMap((line) => {
+    if (line.startsWith(`value:${name}:`) || line.startsWith(`secret:${name}:`)) {
+      replaced = true
+      return replacement.length > 0 ? [replacement] : []
+    }
+    return [line]
   })
   if (!replaced) {
     throw new Error(`Test configuration record ${name} was not found.`)
   }
-  return updated
+  return `${lines.join('\n')}\n`
+}
+
+/**
+ * Expects one configuration to be rejected without touching the environment.
+ *
+ * @param secretString - Configuration secret string returned for every read.
+ */
+async function expectRejectedConfiguration(secretString: string): Promise<void> {
+  const environment = createPointerEnvironment()
+  const originalEnvironment = { ...environment }
+  await expect(hydrateApiRuntimeEnvironment(
+    environment,
+    async () => [secretString],
+  )).rejects.toThrow(invalidMessage)
+  expect(environment).toEqual(originalEnvironment)
 }
 
 test('loads direct and nested API configuration in deterministic order', async () => {
   const secretBackedNames = new Set(
     API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.slice(0, 8),
   )
-  const configuration = createValidConfigurationGroups(secretBackedNames)
+  const configuration = createValidConfiguration(secretBackedNames)
   const environment = createPointerEnvironment()
-  let loadCount = 0
+  const requests: unknown[] = []
 
-  await hydrateApiRuntimeEnvironment(environment, async (requestedArns) => {
-    loadCount += 1
-    if (loadCount === 1) {
-      expect(requestedArns).toEqual(secretArns)
-      return configuration.secretStrings
-    }
-
-    expect(loadCount).toBe(2)
-    expect(requestedArns).toEqual(configuration.nestedSecretArns)
-    return requestedArns.map((secretArn) => {
-      const value = configuration.nestedValues.get(secretArn)
+  await hydrateApiRuntimeEnvironment(environment, async (requestedArns, stage) => {
+    requests.push([requestedArns, stage])
+    if (requests.length === 1) return [configuration.secretString]
+    return requestedArns.map((nestedArn) => {
+      const value = configuration.nestedValues.get(nestedArn)
       if (value === undefined) {
         throw new Error('Unexpected nested test secret ARN.')
       }
@@ -162,15 +136,17 @@ test('loads direct and nested API configuration in deterministic order', async (
     })
   })
 
-  expect(loadCount).toBe(2)
+  expect(requests).toEqual([
+    [[secretArn], 'AWSCURRENT'],
+    [configuration.nestedSecretArns, undefined],
+  ])
   for (const name of API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES) {
     expect(environment[name]).toBe(configuration.expectedValues.get(name))
   }
 })
 
-test('allows omitted SSO values in a complete immutable runtime envelope', async () => {
-  const configuration = createValidConfigurationGroups()
-  const environment = createPointerEnvironment()
+test('allows omitted SSO values in a complete runtime envelope', async () => {
+  const configuration = createValidConfiguration()
   const optionalNames = [
     'COGNITO_SSO_CLIENT_ID',
     'COGNITO_HOSTED_UI_DOMAIN',
@@ -178,29 +154,30 @@ test('allows omitted SSO values in a complete immutable runtime envelope', async
     'COGNITO_ENTERPRISE_IDP_NAME',
     'ENTERPRISE_SSO_STATE_SECRET',
   ]
-  let groups = configuration.secretStrings
+  let secretString = configuration.secretString
   for (const name of optionalNames) {
-    groups = replaceConfigurationRecord(groups, name, `value:${name}:`)
+    secretString = replaceConfigurationRecord(secretString, name, `value:${name}:`)
   }
-  await hydrateApiRuntimeEnvironment(environment, async () => groups)
+  const environment = createPointerEnvironment()
+  await hydrateApiRuntimeEnvironment(environment, async () => [secretString])
   for (const name of optionalNames) expect(environment[name]).toBe('')
   expect(environment.COGNITO_CLIENT_ID).toBe(configuration.expectedValues.get('COGNITO_CLIENT_ID'))
 
-  const invalidGroups = replaceConfigurationRecord(groups, 'COGNITO_CLIENT_ID', 'value:COGNITO_CLIENT_ID:')
-  await expect(hydrateApiRuntimeEnvironment(
-    createPointerEnvironment(), async () => invalidGroups,
-  )).rejects.toThrow()
+  await expectRejectedConfiguration(
+    replaceConfigurationRecord(secretString, 'COGNITO_CLIENT_ID', 'value:COGNITO_CLIENT_ID:'),
+  )
 })
 
-test('loads a direct-only envelope without a second secret request', async () => {
-  const configuration = createValidConfigurationGroups()
+test('loads a direct-only envelope with a single secret request', async () => {
+  const configuration = createValidConfiguration()
   const environment = createPointerEnvironment()
   let loadCount = 0
 
-  await hydrateApiRuntimeEnvironment(environment, async (requestedArns) => {
+  await hydrateApiRuntimeEnvironment(environment, async (requestedArns, stage) => {
     loadCount += 1
-    expect(requestedArns).toEqual(secretArns)
-    return configuration.secretStrings
+    expect(requestedArns).toEqual([secretArn])
+    expect(stage).toBe('AWSCURRENT')
+    return [configuration.secretString]
   })
 
   expect(loadCount).toBe(1)
@@ -209,91 +186,60 @@ test('loads a direct-only envelope without a second secret request', async () =>
   }
 })
 
-test('rejects swapped group identities and mixed revisions atomically', async () => {
-  const configuration = createValidConfigurationGroups()
-  const swappedGroups = [...configuration.secretStrings]
-  const firstGroup = swappedGroups[0]
-  const secondGroup = swappedGroups[1]
-  if (firstGroup === undefined || secondGroup === undefined) {
-    throw new Error('Test configuration groups are invalid.')
-  }
-  swappedGroups[0] = secondGroup
-  swappedGroups[1] = firstGroup
+test('reads the previous secret version while a newer deploy is rolling out', async () => {
+  const newer = createValidConfiguration(new Set(), 'revision-8')
+  const expected = createValidConfiguration()
+  const environment = createPointerEnvironment()
+  const stages: unknown[] = []
 
-  const mixedRevisions = [...configuration.secretStrings]
-  const dataGroup = mixedRevisions[1]
-  if (dataGroup === undefined) {
-    throw new Error('Test data configuration group is invalid.')
-  }
-  mixedRevisions[1] = dataGroup.replace(
-    `revision:${encodeConfigurationValue(configurationRevision)}`,
-    `revision:${encodeConfigurationValue('revision-8')}`,
-  )
+  await hydrateApiRuntimeEnvironment(environment, async (_requestedArns, stage) => {
+    stages.push(stage)
+    return [stage === 'AWSPREVIOUS' ? expected.secretString : newer.secretString]
+  })
 
-  for (const secretStrings of [swappedGroups, mixedRevisions]) {
-    const environment = createPointerEnvironment()
-    const originalEnvironment = { ...environment }
-    await expect(hydrateApiRuntimeEnvironment(
-      environment,
-      async () => secretStrings,
-    )).rejects.toThrow('API runtime environment configuration is invalid.')
-    expect(environment).toEqual(originalEnvironment)
+  expect(stages).toEqual(['AWSCURRENT', 'AWSPREVIOUS'])
+  for (const name of API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES) {
+    expect(environment[name]).toBe(expected.expectedValues.get(name))
   }
 })
 
-test('rejects malformed v2 envelopes and line types atomically', async () => {
-  const configuration = createValidConfigurationGroups()
-  const firstGroup = configuration.secretStrings[0]
-  if (firstGroup === undefined) {
-    throw new Error('Test configuration group is invalid.')
-  }
-  const malformedGroupSets = [
-    [
-      firstGroup.replace(configurationHeader, 'mukuroji-api-runtime-configuration-v1\n'),
-      ...configuration.secretStrings.slice(1),
+test('rejects a configuration whose current and previous revisions both differ', async () => {
+  const newer = createValidConfiguration(new Set(), 'revision-8')
+  const older = createValidConfiguration(new Set(), 'revision-6')
+  const environment = createPointerEnvironment()
+  const originalEnvironment = { ...environment }
+
+  await expect(hydrateApiRuntimeEnvironment(
+    environment,
+    async (_requestedArns, stage) => [
+      stage === 'AWSPREVIOUS' ? older.secretString : newer.secretString,
     ],
-    [
-      JSON.stringify({ schemaVersion: '1' }),
-      ...configuration.secretStrings.slice(1),
-    ],
-    [
-      firstGroup.slice(0, -1),
-      ...configuration.secretStrings.slice(1),
-    ],
-    [
-      `${firstGroup}\n`,
-      ...configuration.secretStrings.slice(1),
-    ],
-    [
-      configurationHeader,
-      ...configuration.secretStrings.slice(1),
-    ],
-    [
-      firstGroup.replace('\nvalue:', '\npointer:'),
-      ...configuration.secretStrings.slice(1),
-    ],
-    [
-      firstGroup.replace('\nvalue:', '\nvalue:UNKNOWN_CONFIGURATION:'),
-      ...configuration.secretStrings.slice(1),
-    ],
+  )).rejects.toThrow(invalidMessage)
+  expect(environment).toEqual(originalEnvironment)
+})
+
+test('rejects malformed v3 envelopes and line types atomically', async () => {
+  const { secretString } = createValidConfiguration()
+  const malformedSecretStrings = [
+    secretString.replace(configurationHeader, 'mukuroji-api-runtime-configuration-v2\n'),
+    secretString.replace(configurationHeader, `${configurationHeader}group:core\n`),
+    JSON.stringify({ schemaVersion: '1' }),
+    secretString.slice(0, -1),
+    `${secretString}\n`,
+    configurationHeader,
+    secretString.replace('\nvalue:', '\npointer:'),
+    secretString.replace('\nvalue:', '\nvalue:UNKNOWN_CONFIGURATION:'),
   ]
 
-  for (const secretStrings of malformedGroupSets) {
-    const environment = createPointerEnvironment()
-    const originalEnvironment = { ...environment }
-    await expect(hydrateApiRuntimeEnvironment(
-      environment,
-      async () => secretStrings,
-    )).rejects.toThrow('API runtime environment configuration is invalid.')
-    expect(environment).toEqual(originalEnvironment)
+  for (const malformed of malformedSecretStrings) {
+    await expectRejectedConfiguration(malformed)
   }
 })
 
 test('rejects incomplete, duplicate, unexpected, and ambiguous records atomically', async () => {
-  const configuration = createValidConfigurationGroups()
+  const configuration = createValidConfiguration()
   const configuredName = API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES[0]
-  const secondGroup = configuration.secretStrings[1]
-  if (configuredName === undefined || secondGroup === undefined) {
+  if (configuredName === undefined) {
     throw new Error('Test configuration fixture is invalid.')
   }
   const configuredValue = configuration.expectedValues.get(configuredName)
@@ -302,32 +248,17 @@ test('rejects incomplete, duplicate, unexpected, and ambiguous records atomicall
   }
   const configuredRecord =
     `value:${configuredName}:${encodeConfigurationValue(configuredValue)}`
-  const incompleteGroups = replaceConfigurationRecord(
-    configuration.secretStrings,
-    configuredName,
-    '',
-  )
-  const duplicateGroups = [...configuration.secretStrings]
-  duplicateGroups[1] =
-    `${secondGroup.slice(0, -1)}\n${configuredRecord}\n`
-  const unexpectedGroups = replaceConfigurationRecord(
-    configuration.secretStrings,
-    configuredName,
-    `value:UNKNOWN_CONFIGURATION:${encodeConfigurationValue('unexpected')}`,
-  )
 
-  for (const secretStrings of [
-    incompleteGroups,
-    duplicateGroups,
-    unexpectedGroups,
+  for (const secretString of [
+    replaceConfigurationRecord(configuration.secretString, configuredName, ''),
+    `${configuration.secretString.slice(0, -1)}\n${configuredRecord}\n`,
+    replaceConfigurationRecord(
+      configuration.secretString,
+      configuredName,
+      `value:UNKNOWN_CONFIGURATION:${encodeConfigurationValue('unexpected')}`,
+    ),
   ]) {
-    const environment = createPointerEnvironment()
-    const originalEnvironment = { ...environment }
-    await expect(hydrateApiRuntimeEnvironment(
-      environment,
-      async () => secretStrings,
-    )).rejects.toThrow('API runtime environment configuration is invalid.')
-    expect(environment).toEqual(originalEnvironment)
+    await expectRejectedConfiguration(secretString)
   }
 
   const ambiguousEnvironment = {
@@ -337,8 +268,8 @@ test('rejects incomplete, duplicate, unexpected, and ambiguous records atomicall
   const originalAmbiguousEnvironment = { ...ambiguousEnvironment }
   await expect(hydrateApiRuntimeEnvironment(
     ambiguousEnvironment,
-    async () => configuration.secretStrings,
-  )).rejects.toThrow('API runtime environment configuration is invalid.')
+    async () => [configuration.secretString],
+  )).rejects.toThrow(invalidMessage)
   expect(ambiguousEnvironment).toEqual(originalAmbiguousEnvironment)
 })
 
@@ -358,20 +289,11 @@ test('rejects invalid, noncanonical, non-UTF-8, and NUL direct values atomically
   }
 
   for (const invalidEncodedValue of invalidEncodedValues) {
-    const configuration = createValidConfigurationGroups()
-    const groups = replaceConfigurationRecord(
-      configuration.secretStrings,
+    await expectRejectedConfiguration(replaceConfigurationRecord(
+      createValidConfiguration().secretString,
       configuredName,
       `value:${configuredName}:${invalidEncodedValue}`,
-    )
-    const environment = createPointerEnvironment()
-    const originalEnvironment = { ...environment }
-
-    await expect(hydrateApiRuntimeEnvironment(
-      environment,
-      async () => groups,
-    )).rejects.toThrow('API runtime environment configuration is invalid.')
-    expect(environment).toEqual(originalEnvironment)
+    ))
   }
 })
 
@@ -380,9 +302,8 @@ test('rejects invalid nested pointers before requesting their values', async () 
   if (configuredName === undefined) {
     throw new Error('Test configuration name is invalid.')
   }
-  const configuration = createValidConfigurationGroups()
-  const groups = replaceConfigurationRecord(
-    configuration.secretStrings,
+  const secretString = replaceConfigurationRecord(
+    createValidConfiguration().secretString,
     configuredName,
     `secret:${configuredName}:${encodeConfigurationValue('not-an-arn')}`,
   )
@@ -390,34 +311,25 @@ test('rejects invalid nested pointers before requesting their values', async () 
   const originalEnvironment = { ...environment }
   let loadCount = 0
 
-  await expect(hydrateApiRuntimeEnvironment(
-    environment,
-    async () => {
-      loadCount += 1
-      return groups
-    },
-  )).rejects.toThrow('API runtime environment configuration is invalid.')
+  await expect(hydrateApiRuntimeEnvironment(environment, async () => {
+    loadCount += 1
+    return [secretString]
+  })).rejects.toThrow(invalidMessage)
   expect(loadCount).toBe(1)
   expect(environment).toEqual(originalEnvironment)
 })
 
 test('rejects duplicate nested secret pointers before loading them', async () => {
-  const secretBackedNames = new Set(
-    API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.slice(0, 2),
+  const configuration = createValidConfiguration(
+    new Set(API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.slice(0, 2)),
   )
-  const configuration = createValidConfigurationGroups(secretBackedNames)
-  const firstName = API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES[0]
   const secondName = API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES[1]
   const firstNestedArn = configuration.nestedSecretArns[0]
-  if (
-    firstName === undefined ||
-    secondName === undefined ||
-    firstNestedArn === undefined
-  ) {
+  if (secondName === undefined || firstNestedArn === undefined) {
     throw new Error('Test nested secret fixture is invalid.')
   }
-  const groups = replaceConfigurationRecord(
-    configuration.secretStrings,
+  const secretString = replaceConfigurationRecord(
+    configuration.secretString,
     secondName,
     `secret:${secondName}:${encodeConfigurationValue(firstNestedArn)}`,
   )
@@ -425,22 +337,18 @@ test('rejects duplicate nested secret pointers before loading them', async () =>
   const originalEnvironment = { ...environment }
   let loadCount = 0
 
-  await expect(hydrateApiRuntimeEnvironment(
-    environment,
-    async () => {
-      loadCount += 1
-      return groups
-    },
-  )).rejects.toThrow('API runtime environment configuration is invalid.')
+  await expect(hydrateApiRuntimeEnvironment(environment, async () => {
+    loadCount += 1
+    return [secretString]
+  })).rejects.toThrow(invalidMessage)
   expect(loadCount).toBe(1)
   expect(environment).toEqual(originalEnvironment)
 })
 
 test('rejects missing, empty, and NUL nested secret values atomically', async () => {
-  const secretBackedNames = new Set(
-    API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.slice(0, 2),
+  const configuration = createValidConfiguration(
+    new Set(API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES.slice(0, 2)),
   )
-  const configuration = createValidConfigurationGroups(secretBackedNames)
   const invalidNestedResponses = [
     ['one-value-only'],
     ['one', 'two', 'three'],
@@ -452,33 +360,23 @@ test('rejects missing, empty, and NUL nested secret values atomically', async ()
     const environment = createPointerEnvironment()
     const originalEnvironment = { ...environment }
     let loadCount = 0
-    await expect(hydrateApiRuntimeEnvironment(
-      environment,
-      async () => {
-        loadCount += 1
-        return loadCount === 1
-          ? configuration.secretStrings
-          : invalidNestedResponse
-      },
-    )).rejects.toThrow('API runtime environment configuration is invalid.')
+    await expect(hydrateApiRuntimeEnvironment(environment, async () => {
+      loadCount += 1
+      return loadCount === 1 ? [configuration.secretString] : invalidNestedResponse
+    })).rejects.toThrow(invalidMessage)
     expect(loadCount).toBe(2)
     expect(environment).toEqual(originalEnvironment)
   }
 })
 
-test('rejects partial, blank, and duplicate group pointers before loading', async () => {
+test('rejects partial, blank, and malformed pointers before loading', async () => {
   const invalidEnvironments = [
-    {
-      MUKUROJI_API_CORE_CONFIG_SECRET_ARN: secretArns[0],
-    },
-    {
-      ...createPointerEnvironment(),
-      MUKUROJI_API_CORE_CONFIG_SECRET_ARN: '',
-    },
-    {
-      ...createPointerEnvironment(),
-      MUKUROJI_API_DATA_CONFIG_SECRET_ARN: secretArns[0],
-    },
+    { MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: secretArn },
+    { MUKUROJI_API_RUNTIME_CONFIG_REVISION: configurationRevision },
+    { ...createPointerEnvironment(), MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: '' },
+    { ...createPointerEnvironment(), MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: 'api-config' },
+    { ...createPointerEnvironment(), MUKUROJI_API_RUNTIME_CONFIG_REVISION: '' },
+    { ...createPointerEnvironment(), MUKUROJI_API_RUNTIME_CONFIG_REVISION: '-starts-with-dash' },
   ]
 
   for (const environment of invalidEnvironments) {
@@ -487,7 +385,7 @@ test('rejects partial, blank, and duplicate group pointers before loading', asyn
     await expect(hydrateApiRuntimeEnvironment(environment, async () => {
       loaderCalled = true
       return []
-    })).rejects.toThrow('API runtime environment configuration is invalid.')
+    })).rejects.toThrow(invalidMessage)
     expect(loaderCalled).toBe(false)
     expect(environment).toEqual(originalEnvironment)
   }
