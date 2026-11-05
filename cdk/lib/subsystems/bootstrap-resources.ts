@@ -116,6 +116,7 @@ export function buildBootstrapResources(
   (createInitialOwnerResource.node.defaultChild as cdk.CfnResource)
     .cfnOptions.condition = userIdentity.userPoolCreated;
   // The owner also gets the first system-admin group, so team creation works without a CLI step.
+  // Adding a member is idempotent, so the call also runs on update and follows a renamed group.
   const systemAdminGroup = new cognito.CfnUserPoolGroup(scope, 'SystemAdminGroup', {
     userPoolId: userIdentity.userPool.userPoolId,
     groupName: cdk.Fn.select(0, cdk.Fn.split(',', systemAdminGroups.valueAsString)),
@@ -125,7 +126,7 @@ export function buildBootstrapResources(
   const addInitialOwnerToSystemAdminGroup = new customResources.AwsCustomResource(
     scope,
     'AddInitialOwnerToSystemAdminGroup',
-    createCreateOnlyBootstrapAwsCustomResourceProps(
+    createIdempotentAwsCustomResourceProps(
       {
         service: 'CognitoIdentityServiceProvider',
         action: 'adminAddUserToGroup',

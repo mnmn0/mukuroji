@@ -94,7 +94,8 @@ test('adds the invited owner to the first system-admin group of a stack-owned po
   const [ownerLogicalId] = findCustomResource(synthesizedTemplate, 'adminCreateUser');
   const [, addToGroup] = findCustomResource(synthesizedTemplate, 'adminAddUserToGroup');
   expect(addToGroup.Condition).toBe('CognitoUserPoolCreated');
-  expect(addToGroup.Properties.Update).toBeUndefined();
+  // Membership follows a renamed group, so the idempotent call also runs on update.
+  expect(addToGroup.Properties.Update).toEqual(addToGroup.Properties.Create);
   expect(serializeAwsSdkCall(addToGroup.Properties.Create))
     .toContain(`"Username":"{{Ref:${ownerLogicalId}}}"`);
 });
