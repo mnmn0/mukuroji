@@ -125,7 +125,7 @@ Web は list/detail response の revision を mutation body に含める。`Work
 まだ実装していない範囲は次のとおり。
 
 - workload / capacity への planned effort の集計
-- My Tasks / Focus での区別
+- My Tasks での区別（Focus は [Focus queue の「責任者と参加」](./focus.md#責任者と参加) で区別済み）
 - automation、template、bulk action からの設定
 - member 無効化や Team 移動時の再割り当て
 - 通知の分離

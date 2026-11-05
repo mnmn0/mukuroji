@@ -103,6 +103,15 @@ export type FocusSignal = {
 /** Sections exposed by the Focus queue in their stable display order. */
 export type FocusQueueSection = 'now' | 'next' | 'waiting' | 'snoozed' | 'done'
 
+/**
+ * How the caller takes part in a Focus item's Work Item.
+ *
+ * - `owner`: the caller is the single accountable owner (`assigneeUserId`).
+ * - `contributor`: the caller is listed in `contributorAssignments` but is not the owner.
+ * - `related`: the caller neither owns nor contributes; a review request or mention brought the item in.
+ */
+export type FocusItemInvolvement = 'owner' | 'contributor' | 'related'
+
 /** One auditable contribution to the deterministic Focus rank. */
 export type FocusRankComponent = {
   /** Signal whose policy weight produced this contribution. */
@@ -320,6 +329,11 @@ export type FocusItem = {
   section: FocusQueueSection
   /** Canonical Work Item snapshot authorized for the caller. */
   workItem: CanonicalWorkItem
+  /**
+   * How the caller takes part in the Work Item. Absent only in responses from servers
+   * that predate the field; clients treat absence as unknown rather than as `related`.
+   */
+  involvement?: FocusItemInvolvement
   /** Deduplicated attention reasons in deterministic display order. */
   signals: FocusSignal[]
   /** Score components and tie-break evidence used for ordering. */
