@@ -9,7 +9,6 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctionsTasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
@@ -103,10 +102,6 @@ export interface RestoreDrillInput {
   readonly fileStorage: FileStorageResources;
   /** Stable paths used to bundle restore-drill Lambda handlers. */
   readonly lambdaBuildPaths: LambdaBuildPaths;
-  /** Revision used to replace the retained restore-only pseudonym secret. */
-  readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
-  /** NoEcho HMAC key stored in Secrets Manager instead of a Lambda environment variable. */
-  readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
 }
 
 /**
@@ -468,28 +463,10 @@ export function buildRestoreDrill(
   }
   evidenceAccessLogsPolicy.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
-  const secretNamePrefix = cdk.Names.uniqueResourceName(scope, {
-    allowedSpecialCharacters: '-',
-    maxLength: 32,
-    separator: '-',
-  });
-  const workspaceAuditPseudonymSecret = new secretsmanager.Secret(
-    scope,
-    'RestoreDrillWorkspaceAuditPseudonymSecret',
-    {
-      description:
-        'Revision-bound Workspace audit pseudonym key consumed only by restore validation.',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      secretName: cdk.Fn.join('-', [
-        secretNamePrefix,
-        'restore-drill-audit-v1',
-        input.apiRuntimeConfigurationRevision.valueAsString,
-      ]),
-      secretStringValue: cdk.SecretValue.unsafePlainText(
-        input.workspaceAuditPseudonymKey.valueAsString,
-      ),
-    },
-  );
+  // Restore validation reads the same stable pseudonym secret as the API so
+  // no per-revision copy is created on each deploy.
+  const workspaceAuditPseudonymSecret =
+    input.dataStores.workspaceAuditPseudonymSecret;
 
   const runnerRole = new iam.Role(scope, 'RestoreDrillRunnerRole', {
     assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),

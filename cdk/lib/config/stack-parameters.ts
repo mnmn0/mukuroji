@@ -227,6 +227,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   const apiAllowedOrigins = new cdk.CfnParameter(stack, 'ApiAllowedOrigins', {
     type: 'String',
     default: 'http://localhost:5173,http://127.0.0.1:5173',
+    maxLength: 2_048,
     allowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
     constraintDescription:
       'ApiAllowedOrigins must be a comma-separated list of HTTP(S) origins without whitespace.',
@@ -263,6 +264,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   const systemAdminGroups = new cdk.CfnParameter(stack, 'SystemAdminGroups', {
     type: 'String',
     default: 'mukuroji-system-admins',
+    maxLength: 1_024,
     description: 'Comma-separated Cognito group names that grant system administrator privileges.',
   });
   const auditRetentionDays = new cdk.CfnParameter(stack, 'AuditRetentionDays', {
@@ -564,11 +566,13 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   });
   const cognitoUserPoolId = new cdk.CfnParameter(stack, 'CognitoUserPoolId', {
     type: 'String',
+    maxLength: 55,
     allowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
     description: 'Existing Cognito user pool ID trusted by the mukuroji API.',
   });
   const cognitoUserPoolClientId = new cdk.CfnParameter(stack, 'CognitoUserPoolClientId', {
     type: 'String',
+    maxLength: 128,
     allowedPattern: '^[A-Za-z0-9]+$',
     description: 'Existing Cognito app client ID used by the mukuroji API.',
   });
@@ -578,6 +582,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     {
       type: 'String',
       default: '',
+      maxLength: 128,
       allowedPattern: '^(?:|[A-Za-z0-9]+)$',
       description:
         'Dedicated public Cognito app client ID restricted to enterprise Hosted UI login.',
@@ -587,11 +592,13 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     type: 'String',
     default: '',
     minLength: 0,
+    maxLength: 512,
     description: 'HTTPS Cognito managed-login domain used for enterprise federation.',
   });
   const cognitoSsoRedirectUri = new cdk.CfnParameter(stack, 'CognitoSsoRedirectUri', {
     type: 'String',
     default: '',
+    maxLength: 1_024,
     allowedPattern: '^(?:|https://[^\\s]+)$',
     description: 'Exact SPA callback URI registered on the Cognito app client.',
   });
@@ -663,6 +670,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   const workspaceDirectoryId = new cdk.CfnParameter(stack, 'WorkspaceDirectoryId', {
     type: 'String',
     minLength: 1,
+    maxLength: 256,
     allowedPattern: '^\\S+$',
     constraintDescription: 'WorkspaceDirectoryId must not contain whitespace.',
     description: 'Canonical workspace directory ID shared by Cognito claims and DynamoDB partitions.',

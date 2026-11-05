@@ -2,7 +2,7 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
-  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -191,7 +191,7 @@ test('Focus state uses a retained expiring scope and record key table', () => {
   });
 
   const workflowConfiguration =
-    document.Resources.ApiWorkflowRuntimeConfigurationSecret225372D1
+    document.Resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
       .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
     workflowConfiguration,
@@ -340,7 +340,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const resources = template.toJSON().Resources;
   const dataConfigurationSecretId =
-    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+    API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const dataConfiguration = resources[dataConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
@@ -359,7 +359,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
     resources.ApiFunctionCE271BD4
       .Properties.Environment.Variables,
   ).toEqual(expect.objectContaining({
-    MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+    MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
       Ref: dataConfigurationSecretId,
     },
   }));

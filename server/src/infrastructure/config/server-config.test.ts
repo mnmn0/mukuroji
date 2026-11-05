@@ -247,3 +247,25 @@ test('never allows the local runtime marker to bypass NODE_ENV production', () =
     SECRETS_MANAGER_ENDPOINT: 'http://localhost:4566',
   }, { localBun: false })).toThrow('MUKUROJI_LOCAL_AWS_RUNTIME=floci')
 })
+
+test('keeps the live environment map for adapter-specific settings', () => {
+  const environment = {
+    NODE_ENV: 'test',
+    ADAPTER_SPECIFIC_TABLE_NAME: 'adapter-table',
+  }
+  const config = loadServerConfig(environment, { localBun: true })
+
+  expect(config.environment).toBe(environment)
+  expect(config.environment.ADAPTER_SPECIFIC_TABLE_NAME).toBe('adapter-table')
+  expect(Object.isFrozen(config)).toBeTrue()
+})
+
+test('reports schema validation failures as a TypeError with the issue message', () => {
+  expect(() => loadServerConfig({
+    AWS_REGION: 'us-east-1',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.example.com',
+  }, { localBun: false })).toThrow(TypeError)
+  expect(() => loadServerConfig({
+    MUKUROJI_APPLICATION_COMMIT_SHA: 'not-a-commit-sha',
+  }, { localBun: true })).toThrow(TypeError)
+})

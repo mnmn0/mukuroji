@@ -19,7 +19,7 @@
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
-| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
 | `AiBedrockModelId` | AI有効時 | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
 | `AiBedrockInputPricePerMillionTokensUsd` | AI有効時 | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
@@ -153,15 +153,16 @@ templateとdeployed configurationの両方で照合します。
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
 
-Shared APIのproduction runtime configurationは4つのSecrets Manager secretへ分割し、Lambda
-environmentにはそのARNだけを渡します。各secret名は`ApiRuntimeConfigurationRevision`を含み、
-replacement時の旧secretは`Retain`されます。Retained secretはrollback/recovery evidenceであり、
-CloudFormationが旧resourceへ自動で再接続したり不要secretを削除したりはしません。
-各groupはCloudFormation transformを使わないv2 line envelopeで、固定group identity、同一revision、
-canonical Base64 valueまたはnested Secret ARNを保持します。NoEcho parameterの4値はprocessed
-templateへ展開させず、revision-boundな個別retained secretの`SecretString`へ直接`Ref`します。
-Document public-share secretを含む5つのnested secretはAPI roleだけが読みます。Loaderは4 groupの
-identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
+Shared APIのproduction runtime configurationは1つのSecrets Manager secret
+(`ApiRuntimeConfigurationSecret`)にまとめ、Lambda environmentにはそのARNと
+`MUKUROJI_API_RUNTIME_CONFIG_REVISION`だけを渡します。Secret名は固定で、deployごとに値を
+in-placeで更新するため、revisionを進めてもsecretは増えません。Stack削除時は`Retain`されます。
+Envelopeはtransformを使わないv3 line formatで、revisionとcanonical Base64 valueまたはnested
+Secret ARNを保持します。NoEcho parameterもenvelopeの`Fn::Join`へ直接入ります。stackは
+transformを使わないため、processed templateへ値が展開されることはありません。Workspace audit
+pseudonym secretとDocument public-share secretの2つだけをnested secretとして参照し、API roleが
+読みます。Loaderは`AWSCURRENT`のrevisionが期待値と違えば`AWSPREVIOUS`を読み、どちらも一致しなければ
+起動を拒否します。全canonical keyとnested secretを検証し終えてから環境へ原子的に反映します。
 
 Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。新しいconfiguration
 secretとLambda Versionの準備完了後にAliasが新Versionへ切り替わるため、API trafficは
