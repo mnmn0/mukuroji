@@ -40,6 +40,7 @@ import {
 import { createEnterpriseCognitoInspectionCache } from '../../../enterprise-identity'
 import { createEnterpriseSsoAuthenticationMethod } from '../../../enterprise-identity'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /**
  * API Gateway WebSocket event の request context です。
@@ -969,7 +970,7 @@ function parseMessageBody(event: WebSocketEvent): RealtimeMessage {
 }
 
 function getCallbackEndpoint(event: WebSocketEvent) {
-  const configured = process.env.WEBSOCKET_CALLBACK_ENDPOINT?.trim()
+  const configured = loadServerConfig().environment.WEBSOCKET_CALLBACK_ENDPOINT?.trim()
 
   if (configured) {
     return configured
@@ -1285,7 +1286,7 @@ async function isRealtimeSessionAuthorized(
       snapshot,
       memberKey,
       memberEmail,
-      process.env.COGNITO_ENTERPRISE_IDP_NAME?.trim() ?? '',
+      loadServerConfig().environment.COGNITO_ENTERPRISE_IDP_NAME?.trim() ?? '',
       readRealtimeCognitoProviderBinding,
     )) return false
   }
@@ -1497,11 +1498,12 @@ function parseRealtimeTimestamp(value: string | undefined) {
 }
 
 function getAwsRegion() {
-  return process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1'
+  const environment = loadServerConfig().environment
+  return environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1'
 }
 
 function requireEnv(name: string) {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
 
   if (!value) {
     throw new Error(`${name} is required.`)
@@ -1511,7 +1513,7 @@ function requireEnv(name: string) {
 }
 
 function readPositiveIntegerEnv(name: string, fallback: number) {
-  const value = Number(process.env[name] ?? fallback)
+  const value = Number(loadServerConfig().environment[name] ?? fallback)
   return Number.isSafeInteger(value) && value > 0 ? value : fallback
 }
 

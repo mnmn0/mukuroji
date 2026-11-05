@@ -2277,7 +2277,7 @@ const connectorRuntimeBundleCache = createConnectorRuntimeCache({
   async load() {
     return createConfiguredConnectorRuntime(
       await loadConnectorRuntimeEnvironment(
-        process.env,
+        loadServerConfig().environment,
         createSecretsManagerConnectorRuntimeSecretLoader(),
       ),
     )

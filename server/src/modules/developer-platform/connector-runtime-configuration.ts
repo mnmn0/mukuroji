@@ -1,3 +1,5 @@
+import { loadServerConfig } from '../../infrastructure/config/server-config'
+
 /** Secrets Manager から読む connector runtime 設定の最大 byte 数です。 */
 const MAX_CONNECTOR_CONFIGURATION_BYTES = 64 * 1024
 
@@ -162,14 +164,14 @@ export function createConnectorRuntimeCache<TValue>(
  * Overlays Secrets Manager-backed connector configuration onto a copied environment.
  *
  * The base environment is returned unchanged when no secret ID is configured. A configured
- * secret ID requires a loader, and `process.env` itself is never mutated.
+ * secret ID requires a loader, and the live server environment itself is never mutated.
  *
  * @param baseEnvironment - Base process environment copied into the runtime configuration.
  * @param loader - Secret loader required when a connector configuration secret ID is present.
  * @returns A new environment containing validated secret-backed configuration values.
  */
 export async function loadConnectorRuntimeEnvironment(
-  baseEnvironment: NodeJS.ProcessEnv = process.env,
+  baseEnvironment: NodeJS.ProcessEnv = loadServerConfig().environment,
   loader?: ConnectorRuntimeSecretLoader,
 ): Promise<NodeJS.ProcessEnv> {
   const secretId = baseEnvironment[

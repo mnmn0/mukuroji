@@ -5,6 +5,7 @@ import {
   type RequestIntakeClient,
 } from '../../request-intake'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Signed email adapter invocation の最大 clock skew 秒です。 */
 export const REQUEST_EMAIL_SIGNATURE_TOLERANCE_SECONDS = 300
@@ -92,6 +93,5 @@ function requireEmailSecret(value: unknown) {
 }
 
 function readEnvironment(name: string) {
-  if (typeof Bun !== 'undefined') return Bun.env[name]
-  return typeof process !== 'undefined' ? process.env[name] : undefined
+  return loadServerConfig().environment[name]
 }

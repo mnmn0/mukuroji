@@ -124,6 +124,7 @@ import {
   readRequiredText as requireText,
 } from '../../domain/validation'
 import { DeveloperPlatformError } from '../../errors'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** API key の既定有効期間です。 */
 export const API_KEY_DEFAULT_TTL_SECONDS = 90 * 24 * 60 * 60
@@ -5699,7 +5700,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     clock: () => Date = () => new Date(),
     lookupIndexName: string | undefined = undefined,
     auditTableName: string | undefined = undefined,
-    environment: Readonly<Record<string, string | undefined>> = process.env,
+    environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
   ) {
     const configuredTableName = tableName ??
       environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
@@ -8619,17 +8620,18 @@ function isTransactionConditionFailure(error: unknown) {
 }
 
 function createDeveloperPlatformDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -8760,7 +8762,7 @@ function createDefaultKmsEnvelopeClient(): KmsEnvelopeClient {
  * @returns A configured secret protector that fails closed in production.
  */
 export function createDefaultSecretProtector(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
   const configuredRawKey =
     environment.DEVELOPER_PLATFORM_SECRET_PROTECTOR_KEY?.trim()

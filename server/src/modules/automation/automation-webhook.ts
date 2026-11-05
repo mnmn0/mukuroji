@@ -18,6 +18,7 @@ import {
   normalizeAutomationWebhookHostname,
   readAutomationWebhookEndpoint,
 } from './automation-webhook-policy'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Secrets Manager で automation webhook secret を隔離する prefix です。 */
 export const AUTOMATION_WEBHOOK_SECRET_PREFIX = 'mukuroji/automation-webhooks'
@@ -317,13 +318,13 @@ function isAutomationWebhookAddressFamily(family: number): family is 4 | 6 {
 
 function getSecretsManagerClient() {
   secretsManagerClient ??= new SecretsManagerClient({
-    region: process.env.AWS_REGION ?? 'us-east-1',
+    region: loadServerConfig().environment.AWS_REGION ?? 'us-east-1',
   })
   return secretsManagerClient
 }
 
 function readSecretPrefix() {
-  const configured = process.env.AUTOMATION_WEBHOOK_SECRET_PREFIX?.trim().replace(/^\/+|\/+$/g, '')
+  const configured = loadServerConfig().environment.AUTOMATION_WEBHOOK_SECRET_PREFIX?.trim().replace(/^\/+|\/+$/g, '')
   return configured || AUTOMATION_WEBHOOK_SECRET_PREFIX
 }
 

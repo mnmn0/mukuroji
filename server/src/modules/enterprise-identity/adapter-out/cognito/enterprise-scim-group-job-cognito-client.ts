@@ -8,6 +8,7 @@ import type {
   EnterpriseScimGroupJobCognitoClient,
 } from '../../application/ports/scim-group-job-worker-dependencies'
 import { WorkspaceAccessError } from '../../../workspace-access'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /**
  * Cognito SDK を利用する SCIM user lifecycle client です。
@@ -57,7 +58,7 @@ export class AwsEnterpriseScimGroupJobCognitoClient
 }
 
 function readRequiredEnvironment(name: string) {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   if (!value) {
     throw new WorkspaceAccessError(
       503,
