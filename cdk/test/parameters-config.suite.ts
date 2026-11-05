@@ -128,6 +128,13 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
       NoEcho: true,
     }));
   }
+  expect(parameters.EdgeOriginSecret).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^[A-Za-z0-9_-]{32,128}$',
+    MinLength: 32,
+    MaxLength: 128,
+    NoEcho: true,
+  }));
 
   for (const parameterName of [
     'CognitoUserPoolId',
@@ -135,6 +142,7 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'EnterpriseIdentityTokenHashSecret',
     'WorkspaceDirectoryId',
     'WorkspaceAuditPseudonymKey',
+    'EdgeOriginSecret',
     'InitialOwnerEmail',
     'InitialOwnerUsername',
     'RequestEmailWebhookSecret',

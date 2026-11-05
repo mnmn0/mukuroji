@@ -284,6 +284,7 @@ function bindApiRuntimeConfiguration(
     fileUploadUrlTtlSeconds,
     requestRateLimitPerHour,
     requestTokenHashSecret,
+    edgeOriginSecret,
     webPushVapidPublicKey,
     systemAdminGroups,
     apiAllowedOrigins,
@@ -389,6 +390,7 @@ function bindApiRuntimeConfiguration(
         enterpriseIdentityTokenHashSecret.valueAsString,
       ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateSecret.valueAsString,
       REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
+      MUKUROJI_EDGE_ORIGIN_SECRET: edgeOriginSecret.valueAsString,
     },
     {
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Builds the Web app and uploads it to the stack's CloudFront-backed bucket.
 #
-# The Web app calls the API on the same CloudFront origin (`/api`), so the
-# build uses no API base URL overrides. Hashed files under `assets/` are cached
-# for a year and kept after later uploads, so a browser that still runs the
-# previous `index.html` can load its lazy chunks. Every other file is served
-# with `no-cache` and replaced on each upload.
+# The Web app calls the API on the same CloudFront origin (`/api`). Every API
+# base URL variable is set to `/api` so a value left in the shell or in a
+# `web/.env*` file cannot point the build at another endpoint. Hashed files
+# under `assets/` are cached for a year and kept after later uploads, so a
+# browser that still runs the previous `index.html` can load its lazy chunks.
+# Every other file is served with `no-cache` and replaced on each upload.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
@@ -40,10 +41,10 @@ WEB_URL="$(stack_output WebUrl)"
 (
   cd "$REPOSITORY_ROOT"
   env \
-    -u VITE_PROJECTS_API_BASE_URL \
-    -u VITE_WORKSPACE_API_BASE_URL \
-    -u VITE_ENTERPRISE_IDENTITY_API_BASE_URL \
     VITE_API_BASE_URL=/api \
+    VITE_PROJECTS_API_BASE_URL=/api \
+    VITE_WORKSPACE_API_BASE_URL=/api \
+    VITE_ENTERPRISE_IDENTITY_API_BASE_URL=/api \
     bun run web:build
 )
 

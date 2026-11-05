@@ -8,6 +8,26 @@ import { createFileBucketBrowserCorsRule } from './file-storage';
 /** Path pattern CloudFront forwards to the shared HTTP API. */
 export const WEB_API_PATH_PATTERN = '/api/*';
 
+/** Origin header carrying the secret that proves a request came through CloudFront. */
+export const EDGE_ORIGIN_SECRET_HEADER = 'x-mukuroji-edge-secret';
+
+/** Origin header carrying the viewer address CloudFront observed. */
+export const EDGE_VIEWER_ADDRESS_HEADER = 'x-mukuroji-viewer-address';
+
+/**
+ * Viewer-request function that records the viewer address for the API.
+ *
+ * The HTTP API sees a CloudFront edge address as the TCP peer, so the API
+ * reads the viewer address from this header instead. The function always
+ * overwrites a value the client sent, and the API trusts the header only
+ * when the origin secret header matches.
+ */
+const API_VIEWER_ADDRESS_FUNCTION_CODE = `function handler(event) {
+  var request = event.request;
+  request.headers['${EDGE_VIEWER_ADDRESS_HEADER}'] = { value: event.viewer.ip };
+  return request;
+}`;
+
 /**
  * Viewer-request function that serves the SPA shell for client-side routes.
  *
@@ -30,6 +50,8 @@ export type WebDistributionInput = Readonly<{
   readonly httpApi: apigatewayv2.HttpApi;
   /** File bucket whose browser uploads must accept the Web origin. */
   readonly fileBucket: s3.Bucket;
+  /** Secret CloudFront sends to the API with every `/api/*` request. */
+  readonly edgeOriginSecret: string;
 }>;
 
 /** Resources that host the built Web app. */
@@ -47,8 +69,10 @@ export type WebDistributionResources = Readonly<{
  *
  * The built SPA lives in a private bucket read through origin access
  * control. `/api/*` goes to the HTTP API without caching, so the browser
- * calls the API on the same origin and needs no CORS. The file bucket also
- * accepts presigned browser uploads from this origin.
+ * calls the API on the same origin and needs no CORS. CloudFront adds the
+ * viewer address and an origin secret to each API request, so rate limits and
+ * enterprise IP policies see the user's address instead of an edge address.
+ * The file bucket also accepts presigned browser uploads from this origin.
  *
  * @param scope Stack scope used directly to keep construct paths flat.
  * @param input HTTP API and file bucket shared with the rest of the stack.
@@ -70,6 +94,15 @@ export function buildWebDistribution(
     comment: 'Serves index.html for mukuroji client-side routes.',
     runtime: cloudfront.FunctionRuntime.JS_2_0,
   });
+  const apiViewerAddressFunction = new cloudfront.Function(
+    scope,
+    'WebApiViewerAddressFunction',
+    {
+      code: cloudfront.FunctionCode.fromInline(API_VIEWER_ADDRESS_FUNCTION_CODE),
+      comment: 'Forwards the mukuroji viewer address to the API.',
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+    },
+  );
   const httpApiDomainName = cdk.Fn.select(
     2,
     cdk.Fn.split('/', input.httpApi.apiEndpoint),
@@ -89,6 +122,7 @@ export function buildWebDistribution(
     additionalBehaviors: {
       [WEB_API_PATH_PATTERN]: {
         origin: new origins.HttpOrigin(httpApiDomainName, {
+          customHeaders: { [EDGE_ORIGIN_SECRET_HEADER]: input.edgeOriginSecret },
           protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
         }),
         allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
@@ -96,6 +130,10 @@ export function buildWebDistribution(
         originRequestPolicy:
           cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+        functionAssociations: [{
+          eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+          function: apiViewerAddressFunction,
+        }],
       },
     },
     defaultRootObject: 'index.html',

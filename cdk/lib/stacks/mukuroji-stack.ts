@@ -134,6 +134,7 @@ export class MukurojiStack extends cdk.Stack {
       workerChannels,
     });
     const webDistribution = buildWebDistribution(this, {
+      edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
       fileBucket: fileStorage.fileBucket,
       httpApi: apiTransports.httpApi,
     });

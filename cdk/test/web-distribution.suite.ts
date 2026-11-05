@@ -60,12 +60,23 @@ test('serves the SPA from a private bucket through origin access control', () =>
   }));
 });
 
-test('rewrites only extensionless routes to the SPA shell', () => {
-  const functions = Object.values(
+/**
+ * Returns the code of the one CloudFront Function whose logical ID starts with the prefix.
+ *
+ * @param logicalIdPrefix Construct ID the function's logical ID starts with.
+ * @returns The inline function code.
+ */
+function requireFunctionCode(logicalIdPrefix: string): string {
+  const functions = Object.entries(
     synthesizedTemplate.findResources('AWS::CloudFront::Function'),
-  );
+  ).filter(([logicalId]) => logicalId.startsWith(logicalIdPrefix));
   expect(functions).toHaveLength(1);
-  const code = functions[0].Properties.FunctionCode as string;
+  return functions[0][1].Properties.FunctionCode as string;
+}
+
+test('rewrites only extensionless routes to the SPA shell', () => {
+  synthesizedTemplate.resourceCountIs('AWS::CloudFront::Function', 2);
+  const code = requireFunctionCode('WebSpaRoutingFunction');
   const handler = new Function(`${code}; return handler;`)() as (
     event: { request: { uri: string } },
   ) => { uri: string };
@@ -91,6 +102,15 @@ test('forwards /api/* to the HTTP API without caching', () => {
       CachePolicyId: '4135ea2d-6df8-44a3-9df3-4b5a84be39ad',
       OriginRequestPolicyId: 'b689b0a8-53d0-40ab-baf2-68738e2966ac',
       ViewerProtocolPolicy: 'https-only',
+      FunctionAssociations: [{
+        EventType: 'viewer-request',
+        FunctionARN: {
+          'Fn::GetAtt': [
+            expect.stringMatching(/^WebApiViewerAddressFunction/),
+            'FunctionARN',
+          ],
+        },
+      }],
     }),
   ]);
   const apiOrigin = (config.Origins as Record<string, unknown>[]).find(
@@ -100,6 +120,11 @@ test('forwards /api/* to the HTTP API without caching', () => {
     CustomOriginConfig: expect.objectContaining({
       OriginProtocolPolicy: 'https-only',
     }),
+    // The API trusts the viewer address header only with this origin secret.
+    OriginCustomHeaders: [{
+      HeaderName: 'x-mukuroji-edge-secret',
+      HeaderValue: { Ref: 'EdgeOriginSecret' },
+    }],
     DomainName: {
       'Fn::Select': [2, {
         'Fn::Split': ['/', {
@@ -108,6 +133,28 @@ test('forwards /api/* to the HTTP API without caching', () => {
       }],
     },
   }));
+});
+
+test('overwrites the viewer address header on every API request', () => {
+  const code = requireFunctionCode('WebApiViewerAddressFunction');
+  const handler = new Function(`${code}; return handler;`)() as (event: {
+    request: { headers: Record<string, { value: string }> };
+    viewer: { ip: string };
+  }) => { headers: Record<string, { value: string }> };
+
+  const request = handler({
+    request: {
+      headers: {
+        authorization: { value: 'Bearer token' },
+        'x-mukuroji-viewer-address': { value: '198.51.100.1' },
+      },
+    },
+    viewer: { ip: '203.0.113.7' },
+  });
+  expect(request.headers).toEqual({
+    authorization: { value: 'Bearer token' },
+    'x-mukuroji-viewer-address': { value: '203.0.113.7' },
+  });
 });
 
 test('accepts presigned browser file uploads from the Web origin', () => {

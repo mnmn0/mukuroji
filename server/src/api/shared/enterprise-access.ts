@@ -5,7 +5,6 @@ import {
   type EnterprisePermissionId,
   type EnterpriseRoleScope,
 } from '@mukuroji/contracts'
-import { getConnInfo } from 'hono/aws-lambda'
 import type { Context } from 'hono'
 import { type AppDependencies } from '../../app/composition/app-dependencies'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
@@ -46,7 +45,7 @@ import {
   workspaceDependencies,
 } from './app-dependencies'
 import { ENTERPRISE_SERVICE_ACCOUNT_SNAPSHOT_RETRY_LIMIT } from './constants'
-import { resolveRequestClientKey } from './http'
+import { resolveTrustedRequestSource } from './request-source'
 import { getAwsRegion, getEnv, trimTrailingSlash } from './runtime-config'
 import { decodeJwtPayload } from './token-claims'
 
@@ -565,22 +564,7 @@ export function readCognitoAuthenticationMethods(
  * @returns The resolved client IP key.
  */
 export function resolveEnterpriseClientIp(c: Context) {
-  let transportSource: string | undefined
-  try {
-    transportSource = getConnInfo(c).remote.address
-  } catch {
-    transportSource = undefined
-  }
-  return resolveRequestClientKey(
-    transportSource,
-    c.req.header('X-Forwarded-For'),
-    new Set(
-      (getEnv('MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES') ?? '')
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter(Boolean),
-    ),
-  )
+  return resolveTrustedRequestSource(c)
 }
 
 /**
