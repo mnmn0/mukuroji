@@ -34,6 +34,7 @@ response の `metrics.blocked` は個人 queue への採否とは分け、現在
 - 責任者が Contributor の一覧にも入っている場合は `owner` とします。
 - 自分の分担が `done` の Contributor は、進行中の Work Item では関わりがないものとして扱います（review request や mention があれば `related`）。完了・キャンセル済みの Work Item では分担の状態を問わず `contributor` とし、Done に短期表示します。
 - ロールだけで member が未定の分担は、どの利用者の Focus にも入りません。
+- 「自分に割り当て」（`capabilities.assign`）は責任者を置き換える操作なので、`related` の item にだけ付けます。Contributor の行から責任者が替わることはありません。
 - `involvement` を持たない応答（この field より前の server）は、client が「不明」として扱い、`related` とはみなしません。Web は `owner` と `contributor` の行にだけ「責任者」「参加」の badge を出し、担当者の表示はこれまでどおり責任者を示します。
 
 ## 順位と section

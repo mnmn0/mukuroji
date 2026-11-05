@@ -50,6 +50,7 @@ const nextItemBase = createFocusFixtureItem(
 )
 const nextItem = {
   ...nextItemBase,
+  capabilities: { ...nextItemBase.capabilities, assign: false },
   involvement: 'contributor',
   workItem: {
     ...nextItemBase.workItem,

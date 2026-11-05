@@ -907,7 +907,6 @@ function projectFocusItem(
     context.viewerMemberKey,
     terminal,
   )
-  const ownedByViewer = involvement === 'owner'
   const projectedSignals = createProjectedSignals(
     context,
     workItem,
@@ -928,7 +927,7 @@ function projectFocusItem(
     terminal,
     canWrite,
     canWatch,
-    ownedByViewer,
+    involvement,
     signals,
   )
   const actionability = createActionability(
@@ -1674,7 +1673,9 @@ function readSignalWeight(weights: FocusSignalWeights, type: FocusSignalType): n
  * @param terminal - Whether the Work Item is terminal.
  * @param canWrite - Whether canonical Work Item writes are authorized.
  * @param canWatch - Whether Collaboration authorizes watcher mutations.
- * @param ownedByViewer - Whether the current viewer is already assigned.
+ * @param involvement - How the current viewer takes part in the Work Item. Assigning to the
+ *   viewer replaces the accountable owner, so it is offered only on related items: an owner
+ *   already holds the Work Item, and a contributor's row must not hand them ownership.
  * @param signals - Current signal sources.
  * @returns Capability set returned by the Focus contract.
  */
@@ -1682,13 +1683,13 @@ function createCapabilities(
   terminal: boolean,
   canWrite: boolean,
   canWatch: boolean,
-  ownedByViewer: boolean,
+  involvement: FocusItemInvolvement,
   signals: readonly FocusSignal[],
 ): FocusItemCapabilities {
   const canMutateWorkItem = !terminal && canWrite
   return {
     complete: canMutateWorkItem,
-    assign: canMutateWorkItem && !ownedByViewer,
+    assign: canMutateWorkItem && involvement === 'related',
     changeStatus: canWrite,
     schedule: canMutateWorkItem,
     snooze: !terminal,

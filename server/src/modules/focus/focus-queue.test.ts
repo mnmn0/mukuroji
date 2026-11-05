@@ -849,9 +849,13 @@ describe('Focus queue projection', () => {
     const contributor = findFocusItem(queue, contributed.id)
     expect(contributor.involvement).toBe('contributor')
     expect(contributor.signals.map((signal) => signal.type)).toEqual(['urgent'])
-    expect(contributor.capabilities.assign).toBe(true)
+    expect(contributor.capabilities.assign).toBe(false)
+    expect(contributor.capabilities.complete).toBe(true)
     expect(contributor.section).toBe('now')
-    expect(findFocusItem(queue, mentioned.id).involvement).toBe('related')
+    expect(findFocusItem(queue, owned.id).capabilities.assign).toBe(false)
+    const related = findFocusItem(queue, mentioned.id)
+    expect(related.involvement).toBe('related')
+    expect(related.capabilities.assign).toBe(true)
   })
 
   test('keeps the owner accountable and gives contributors the execution signals only', () => {
