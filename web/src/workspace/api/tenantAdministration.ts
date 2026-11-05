@@ -14,12 +14,9 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const tenantAdministrationApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const tenantAdministrationApiBaseUrl = resolveApiBaseUrl('workspaceWithoutProjects')
 
 /**
  * Retrieves the tenant administration aggregate for the authenticated Workspace.
@@ -386,8 +383,4 @@ function readErrorMessage(value: unknown): string {
   return isRecord(value) && typeof value.message === 'string'
     ? value.message
     : 'tenant.administration.error'
-}
-
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
 }

@@ -6,8 +6,8 @@ import {
   createTeamIssuePath,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Canonical comment persisted in the Collaboration store for a team-owned Issue.
@@ -181,9 +181,7 @@ type CreateTeamIssueCommentResponse = {
   activity: TeamIssueActivity
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * DynamoDB にチーム所有 Issue コメントを作成します。

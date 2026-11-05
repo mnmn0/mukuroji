@@ -2,8 +2,8 @@ import { TeamIssuesApiError } from './errors'
 import {
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * WebSocket 接続用の短命 ticket です。
@@ -23,9 +23,7 @@ export type TeamIssueRealtimeTicket = {
   expiresAt: string
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Work Item の realtime channel に接続するための短命 ticket を発行します。
