@@ -103,19 +103,16 @@ export async function hydrateApiRuntimeEnvironment(
     throw createInvalidApiRuntimeEnvironmentError()
   }
 
-  let configuration = parseApiRuntimeConfiguration(
-    await loadSingleSecret(loadSecrets, secretArn, 'AWSCURRENT'),
-    expectedNames,
-  )
-  if (configuration.revision !== expectedRevision) {
-    configuration = parseApiRuntimeConfiguration(
-      await loadSingleSecret(loadSecrets, secretArn, 'AWSPREVIOUS'),
-      expectedNames,
-    )
-    if (configuration.revision !== expectedRevision) {
+  // Select the version by revision before validating its records: a newer
+  // deploy may add or remove canonical names this API version does not know.
+  let secretString = await loadSingleSecret(loadSecrets, secretArn, 'AWSCURRENT')
+  if (readApiRuntimeConfigurationRevision(secretString) !== expectedRevision) {
+    secretString = await loadSingleSecret(loadSecrets, secretArn, 'AWSPREVIOUS')
+    if (readApiRuntimeConfigurationRevision(secretString) !== expectedRevision) {
       throw createInvalidApiRuntimeEnvironmentError()
     }
   }
+  const configuration = parseApiRuntimeConfiguration(secretString, expectedNames)
 
   const hydratedValues = new Map(configuration.values)
   const { nestedSecretArns, nestedSecretNames } = configuration
@@ -173,16 +170,14 @@ async function loadSingleSecret(
 }
 
 /**
- * Parses one strict transform-free runtime-configuration envelope.
+ * Splits one envelope into its validated revision and its record lines.
  *
  * @param secretString - Untrusted configuration secret string.
- * @param expectedNames - Exact canonical API environment-name set.
- * @returns The validated revision, direct values, and nested secret pointers.
+ * @returns The decoded revision and the remaining record lines.
  */
-function parseApiRuntimeConfiguration(
+function splitApiRuntimeConfiguration(
   secretString: string,
-  expectedNames: ReadonlySet<string>,
-): ParsedApiRuntimeConfiguration {
+): { readonly revision: string; readonly lines: readonly string[] } {
   if (
     typeof secretString !== 'string' ||
     !secretString.startsWith(API_RUNTIME_CONFIGURATION_HEADER) ||
@@ -208,6 +203,31 @@ function parseApiRuntimeConfiguration(
   if (!API_RUNTIME_CONFIGURATION_REVISION_PATTERN.test(revision)) {
     throw createInvalidApiRuntimeEnvironmentError()
   }
+  return { revision, lines }
+}
+
+/**
+ * Reads only the revision of one envelope, without validating its records.
+ *
+ * @param secretString - Untrusted configuration secret string.
+ * @returns The decoded revision.
+ */
+function readApiRuntimeConfigurationRevision(secretString: string): string {
+  return splitApiRuntimeConfiguration(secretString).revision
+}
+
+/**
+ * Parses one strict transform-free runtime-configuration envelope.
+ *
+ * @param secretString - Untrusted configuration secret string.
+ * @param expectedNames - Exact canonical API environment-name set.
+ * @returns The validated revision, direct values, and nested secret pointers.
+ */
+function parseApiRuntimeConfiguration(
+  secretString: string,
+  expectedNames: ReadonlySet<string>,
+): ParsedApiRuntimeConfiguration {
+  const { revision, lines } = splitApiRuntimeConfiguration(secretString)
 
   const configuredNames = new Set<string>()
   const values = new Map<string, string>()

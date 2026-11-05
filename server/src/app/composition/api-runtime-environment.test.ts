@@ -203,6 +203,30 @@ test('reads the previous secret version while a newer deploy is rolling out', as
   }
 })
 
+test('reads the previous version when a newer deploy changed the key set', async () => {
+  const renamedName = API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES[0]
+  if (renamedName === undefined) {
+    throw new Error('Canonical API runtime names must not be empty.')
+  }
+  // The newer revision drops one name this version needs and adds one it does not know.
+  const newer = replaceConfigurationRecord(
+    createValidConfiguration(new Set(), 'revision-8').secretString,
+    renamedName,
+    `value:FUTURE_API_SETTING:${Buffer.from('future').toString('base64')}`,
+  )
+  const expected = createValidConfiguration()
+  const environment = createPointerEnvironment()
+
+  await hydrateApiRuntimeEnvironment(environment, async (_requestedArns, stage) => [
+    stage === 'AWSPREVIOUS' ? expected.secretString : newer,
+  ])
+
+  expect(environment.FUTURE_API_SETTING).toBeUndefined()
+  for (const name of API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES) {
+    expect(environment[name]).toBe(expected.expectedValues.get(name))
+  }
+})
+
 test('rejects a configuration whose current and previous revisions both differ', async () => {
   const newer = createValidConfiguration(new Set(), 'revision-8')
   const older = createValidConfiguration(new Set(), 'revision-6')
