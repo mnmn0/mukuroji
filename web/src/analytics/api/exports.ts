@@ -1,6 +1,7 @@
 import type { AnalyticsExportInput, AnalyticsQueryInput } from '@mukuroji/contracts'
 import { AnalyticsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Analytics export で生成できるファイル形式です。
@@ -41,9 +42,7 @@ export function createAnalyticsExportInput(
     : { format, locale, query }
 }
 
-const analyticsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const analyticsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultAnalyticsApiErrorMessage = 'Unable to complete the analytics request.'
 
@@ -113,8 +112,4 @@ function readDownloadFilename(contentDisposition: string | null) {
   }
 
   return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1]
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -7,8 +7,8 @@ import {
   createTeamIssuePath,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Work Item 全体で行える共同作業操作です。
@@ -76,9 +76,7 @@ export type GetTeamIssueCollaborationOptions = {
   rootCommentId?: string
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Work Item の comment thread、watcher、presence を cursor 付きで取得します。

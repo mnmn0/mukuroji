@@ -1,6 +1,7 @@
 import type { FileAttachment, FileVersion } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { FilesApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * 署名付き PUT upload を作成する入力です。
@@ -68,9 +69,7 @@ export type FileUploadSession = {
   upload: PresignedPutUpload
 }
 
-const filesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const filesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Work Item に新しい file upload session を作成します。
@@ -296,8 +295,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

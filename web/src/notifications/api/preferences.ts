@@ -1,5 +1,6 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * 配信チャネルごとの有効状態です。
@@ -74,7 +75,7 @@ export type NotificationPreferences = {
   updatedAt?: string
 }
 
-const notificationsApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const notificationsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultNotificationsApiErrorMessage = 'Unable to complete the notification request.'
 
@@ -171,8 +172,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

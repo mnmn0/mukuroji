@@ -22,10 +22,9 @@ import {
   readPlanningUpdateReactionPage,
 } from './contractValidation'
 import { PlanningApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const planningApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const planningApiBaseUrl = resolveApiBaseUrl()
 
 const defaultPlanningApiErrorMessage = 'Unable to complete the planning request.'
 
@@ -574,9 +573,4 @@ function readDownloadFilename(contentDisposition: string | null) {
     }
   }
   return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1]
-}
-
-/** Removes trailing slashes from an API base URL. */
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

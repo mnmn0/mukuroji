@@ -12,12 +12,9 @@ import {
 } from '../../shared/api/mutationHeaders'
 import { ProjectDirectoryApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const projectsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_PROJECTS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const projectsApiBaseUrl = resolveApiBaseUrl('projects')
 
 /**
  * Loads the authenticated viewer's ordered Project quick-access preference.
@@ -201,14 +198,3 @@ async function readJson(response: Response): Promise<unknown> {
     return {}
   }
 }
-
-/**
- * Removes trailing slashes from an API base URL.
- *
- * @param value - Configured API base URL.
- * @returns The URL without trailing separators.
- */
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
-}
-

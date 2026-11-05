@@ -1,6 +1,7 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { EnterpriseSecurityApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * 現在の principal が用途・scope ごとに割り当て可能な role ID 一覧です。
@@ -123,12 +124,7 @@ export type EnterpriseRoleImpact = {
   confirmationToken?: string
 }
 
-const enterpriseSecurityApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_ENTERPRISE_IDENTITY_API_BASE_URL ??
-    import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')
 
 /**
  * Custom role を作成します。
@@ -322,8 +318,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     throw createMalformedResponseError()
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

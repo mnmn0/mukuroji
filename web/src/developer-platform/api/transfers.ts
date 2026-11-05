@@ -10,6 +10,7 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Work Item export response と download metadata です。
@@ -25,11 +26,7 @@ export type DeveloperExportFile = {
   fileName: string
 }
 
-const developerApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const developerApiBaseUrl = resolveApiBaseUrl('workspaceWithoutProjects')
 
 const defaultDeveloperApiErrorMessage =
   'Unable to complete the Developer Platform request.'
@@ -382,8 +379,4 @@ async function readJson<T>(
         isRetryableDeveloperApiResponse(response.status, undefined),
     )
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

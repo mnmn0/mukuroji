@@ -8,6 +8,7 @@ import {
   type WorkingSchedule,
 } from '@mukuroji/contracts'
 import { isRecord } from '../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../shared/api/apiBaseUrl'
 
 /** Error returned by the workload API. */
 export class WorkloadApiError extends Error {
@@ -154,9 +155,7 @@ export type WorkloadWhatIfRequest = {
   plannedEffortMinutes: number
 }
 
-const workloadApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const workloadApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Fetches a Team workload snapshot for a local date range.
@@ -481,9 +480,4 @@ async function readJson(response: Response): Promise<unknown> {
   } catch {
     return {}
   }
-}
-
-/** Removes trailing slashes from an API base URL. */
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
 }

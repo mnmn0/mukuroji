@@ -1,5 +1,6 @@
 import type { WorkspaceMemberStatus, WorkspaceRole } from '../../workspace/api'
 import { ApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Cognito で認証された現在のユーザー情報を表します。
@@ -59,7 +60,7 @@ export function canMutateWorkspaceContent(user?: CurrentUser | null) {
   )
 }
 
-const apiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const apiBaseUrl = resolveApiBaseUrl()
 
 /**
  * アクセストークンを使って認証済みユーザー情報を取得します。
@@ -107,8 +108,4 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

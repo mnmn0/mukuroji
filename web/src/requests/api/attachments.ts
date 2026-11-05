@@ -3,8 +3,9 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import type { FileVersionAccess } from '../../files/api'
 import { RequestIntakeApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const requestsApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const requestsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultRequestApiErrorMessage = 'Unable to complete the request intake operation.'
 
@@ -145,8 +146,4 @@ function readRetryAfterSeconds(value: string | null) {
   const seconds = Number(value)
 
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

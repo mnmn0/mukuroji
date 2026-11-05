@@ -2,10 +2,9 @@ import type { AnalyticsReport, AnalyticsReportListResponse, CreateAnalyticsRepor
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AnalyticsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const analyticsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const analyticsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultAnalyticsApiErrorMessage = 'Unable to complete the analytics request.'
 
@@ -210,8 +209,4 @@ function unwrapRecord<T>(value: unknown, key: string) {
     )
   }
   return wrapped as T
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

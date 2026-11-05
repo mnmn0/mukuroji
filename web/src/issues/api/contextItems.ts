@@ -26,8 +26,8 @@ import {
   createTeamIssuePath,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Cursor options for the curated context ledger.
@@ -49,10 +49,7 @@ export type GetTeamIssueHistoryOptions = {
   cursor?: string
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Loads one cursor page of human-curated Work Item context.

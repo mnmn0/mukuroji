@@ -3,9 +3,9 @@ import {
   createTeamIssuePath,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * チーム所有 Issue の活動種別です。
@@ -86,9 +86,7 @@ export type TeamIssueActivityPage = {
   nextCursor?: string
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Loads one cursor page of Work Item activity from the append-only audit log.

@@ -390,7 +390,7 @@ environment evidenceに残すまで、上記ack targetは実効性を持ちま�
    `cdk-security`、`dependency-review` と、repository review policy をすべて成功させる。
 3. `cdk diff` / synth を保存し、stateful resource replacement/deletion、IAM拡大、PITR/Retain
    の解除がないことを確認する。
-4. `ApiRuntimeConfigurationRevision`はAPI code、または4分割runtime configuration secretへ
+4. `ApiRuntimeConfigurationRevision`はAPI code、またはruntime configuration secretへ
    入るparameter/resource値を変更するdeployごとに新しい値へ進め、diffとdeployで同じ値を使う。
    同じrevisionを異なる内容へ再利用しない。
 5. Schema/API は backward-compatible にする。
@@ -439,15 +439,18 @@ application処理をfail-closedに保ちます。Stack deployだけでbaseline�
 Application処理の再開は、operatorが監査sequenceを増やした新しい`enabled` hosted versionを
 review済みcanary strategyでdeployする別操作です。
 
-Shared APIのruntime configurationは4つのSecrets Manager secretへ分割し、Lambda environmentには
-そのARNだけを設定します。Secret名には必須parameter `ApiRuntimeConfigurationRevision`を含め、
-各groupはtransform-freeなv2 line envelopeとしてfixed group identity、同一revision、canonical Base64の
-direct valueまたはnested Secret ARNを保持します。NoEcho parameterの4値はprocessed templateへ展開せず、
-revision-boundな個別retained secretの`SecretString`へ直接`Ref`します。既存のDocument public-share
-secretを含む5つのnested secretもAPI roleへ限定して読みます。Cold start loaderは4 groupのidentityと
-revision一致、全canonical key、nested ARN/valueを完全検証した後だけ環境へ原子的に反映します。
-API code、またはsecretへ入るparameter/resource値を変えるdeployではrevisionを必ず進めます。旧secretは`Retain`されますが、CloudFormation rollbackが
-自動で再接続・削除するものではないため、evidence inventoryと明示的なretirement判断を必要とします。
+Shared APIのruntime configurationは1つのSecrets Manager secretにまとめ、Lambda environmentには
+そのARNと期待するrevision (`MUKUROJI_API_RUNTIME_CONFIG_REVISION`) だけを設定します。Secret名は
+固定で、必須parameter `ApiRuntimeConfigurationRevision`はenvelopeの中に入ります。envelopeは
+transform-freeなv3 line formatで、revisionとcanonical Base64のdirect valueまたはnested Secret ARNを
+保持します。NoEcho parameterもenvelopeへ直接入りますが、stackにtransformがないため
+processed templateへは展開されません。Workspace audit pseudonym secretとDocument public-share
+secretの2つだけをnested secretとしてAPI roleへ限定して読みます。Cold start loaderは`AWSCURRENT`の
+revisionが一致しなければ`AWSPREVIOUS`を読み、revision、全canonical key、nested ARN/valueを完全検証
+した後だけ環境へ原子的に反映します。API code、またはsecretへ入るparameter/resource値を変えるdeploy
+ではrevisionを必ず進めます。Deployごとに同じsecretをin-placeで更新するのでsecretは増えず、
+CloudFormation rollbackでは値も前のrevisionへ戻ります。旧secretのinventoryやretirement作業は
+不要です。
 
 HTTP APIのdefault routeとLambda Function URLはどちらも`live` Aliasに紐づきます。Deployでは
 configuration secretとLambda Versionを準備してからAliasを更新し、API trafficを

@@ -55,6 +55,7 @@ export class MukurojiStack extends cdk.Stack {
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
+      workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
     });
     const fileStorage = buildFileStorage(this, {
       allowedOrigins: parameters.apiAllowedOriginList,
@@ -78,14 +79,11 @@ export class MukurojiStack extends cdk.Stack {
       workspaceAccessTable: dataStores.workspaceAccessTable,
     });
     const restoreDrill = buildRestoreDrill(this, {
-      apiRuntimeConfigurationRevision:
-        parameters.apiRuntimeConfigurationRevision,
       dataStores,
       fileStorage,
       lambdaBuildPaths,
       cleanupApproverRoleArn:
         parameters.restoreDrillCleanupApproverRoleArn,
-      workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
     });
 
     const workerChannels = buildWorkerChannels(this);

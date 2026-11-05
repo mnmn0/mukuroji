@@ -1,5 +1,6 @@
 import type { ApprovalRequest, FileAttachment } from '@mukuroji/contracts'
 import { FilesApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * File API が返す scope 全体の操作権限です。
@@ -37,9 +38,7 @@ export type FileCollection = {
   capabilities: FileCollectionCapabilities
 }
 
-const filesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const filesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Work Item に添付された file と approval を取得します。
@@ -109,8 +108,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }
