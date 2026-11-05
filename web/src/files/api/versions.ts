@@ -1,5 +1,6 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { FilesApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * preview または download 用の短命 URL です。
@@ -15,9 +16,7 @@ export type FileVersionAccess = {
   expiresAt: string
 }
 
-const filesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const filesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * file version の preview/download URL を取得します。
@@ -115,8 +114,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

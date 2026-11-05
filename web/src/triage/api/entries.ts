@@ -19,8 +19,9 @@ import {
 } from './contractValidation'
 import { TriageApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const triageApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const triageApiBaseUrl = resolveApiBaseUrl()
 const defaultTriageApiErrorMessage = 'Unable to complete the Team triage operation.'
 
 /** Options accepted by the cursor-paginated Team triage queue API. */
@@ -307,9 +308,4 @@ function readApiError(value: unknown) {
 /** Creates the encoded API path for one Team. */
 function triageTeamPath(teamId: string) {
   return `/teams/${encodeURIComponent(teamId)}`
-}
-
-/** Removes trailing slashes from the configured API origin. */
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -1,3 +1,5 @@
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
+
 /** Trusted transport metadata attached to an AI assistance API failure. */
 export type AiAssistanceApiErrorMetadata = {
   /** Whether the server explicitly identified the response as an idempotency replay. */
@@ -54,13 +56,5 @@ export class AiAssistanceApiError extends Error {
 export function resolveAiAssistanceApiBaseUrl(
   environment: Record<string, string | boolean | undefined>,
 ): string {
-  const value = typeof environment.VITE_WORKSPACE_API_BASE_URL === 'string'
-    ? environment.VITE_WORKSPACE_API_BASE_URL
-    : typeof environment.VITE_PROJECTS_API_BASE_URL === 'string'
-      ? environment.VITE_PROJECTS_API_BASE_URL
-      : typeof environment.VITE_API_BASE_URL === 'string'
-        ? environment.VITE_API_BASE_URL
-        : '/api'
-
-  return value.replace(/\/+$/, '')
+  return resolveApiBaseUrl('workspace', environment)
 }

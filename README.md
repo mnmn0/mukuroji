@@ -269,8 +269,10 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 
 - `VITE_API_BASE_URL`: ブラウザから呼ぶ API の base URL。未指定時は `/api`
 - `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_API_BASE_URL`、`/api` の順に使います。
-- `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。Developer Platform と tenant 管理 API は `VITE_PROJECTS_API_BASE_URL` を参照せず、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_ENTERPRISE_IDENTITY_API_BASE_URL`: Enterprise identity/security 管理 API を呼ぶ base URL。未指定時は `VITE_WORKSPACE_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
+
+Web で各 API がどの環境変数をどの順で参照するかは `web/src/shared/api/apiBaseUrl.ts` に集約しています。新しい API module は base URL を自前で組み立てず、`resolveApiBaseUrl()` を使ってください。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
 - `COGNITO_ISSUER`: access token の expected issuer。local ready hook が生成する値を利用します。本番では CDK の user pool から解決します。

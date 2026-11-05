@@ -2,6 +2,7 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import type { SidebarProjectTone } from '../../shared/ui/sidebar'
 import type { Locale } from '../../shared/i18n/i18n'
 import { ProjectDirectoryApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * サイドバーに表示するプロジェクト行です。
@@ -129,11 +130,7 @@ type ArchiveProjectDirectoryProjectResponse = {
   archivedAt: string
 }
 
-const projectsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_PROJECTS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const projectsApiBaseUrl = resolveApiBaseUrl('projects')
 
 /**
  * DynamoDB に保存されたチーム/プロジェクト階層を Lambda API 経由で取得します。
@@ -326,13 +323,6 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-/**
- * URL 文字列末尾の slash を取り除きます。
- */
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }
 
 /**

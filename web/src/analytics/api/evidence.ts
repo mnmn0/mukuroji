@@ -1,10 +1,9 @@
 import type { AnalyticsEvidenceInput, AnalyticsEvidenceResponse } from '@mukuroji/contracts'
 import { AnalyticsApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const analyticsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const analyticsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultAnalyticsApiErrorMessage = 'Unable to complete the analytics request.'
 
@@ -74,8 +73,4 @@ async function throwAnalyticsResponseError(response: Response): Promise<never> {
       : defaultAnalyticsApiErrorMessage,
     typeof record.code === 'string' ? record.code : undefined,
   )
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

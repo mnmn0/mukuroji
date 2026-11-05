@@ -1,5 +1,6 @@
 import type { WorkspaceMemberStatus } from '../../workspace/api'
 import { ProjectDirectoryApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Cognito を master とする user profile です。
@@ -67,11 +68,7 @@ type ProjectUsersResponse = {
   nextToken?: string
 }
 
-const projectsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_PROJECTS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const projectsApiBaseUrl = resolveApiBaseUrl('projects')
 
 /**
  * Cognito user pool から project member 候補を取得します。
@@ -152,13 +149,6 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-/**
- * URL 文字列末尾の slash を取り除きます。
- */
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }
 
 /**

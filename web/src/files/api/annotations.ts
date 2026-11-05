@@ -1,6 +1,7 @@
 import type { AnnotationAnchor, FileAnnotation } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { FilesApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * file annotation 一覧レスポンスです。
@@ -26,9 +27,7 @@ export type CreateFileAnnotationInput = {
   bodyMarkdown: string
 }
 
-const filesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const filesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * file version の位置 annotation を取得します。
@@ -186,8 +185,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }
