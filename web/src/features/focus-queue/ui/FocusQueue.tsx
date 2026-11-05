@@ -27,6 +27,7 @@ import {
   formatFocusTimestamp,
   getFocusActionabilityMessageKey,
   getFocusEmptyMessageKey,
+  getFocusInvolvementMessageKey,
   getFocusQueueItems,
   getFocusQueueSectionCounts,
   getFocusPolicyForEditor,
@@ -605,6 +606,7 @@ function FocusQueueRow({
     item.workItem.workItemTypeId,
   ) ?? DEFAULT_WORK_ITEM_TYPE
   const completedStatus = statuses.find((status) => status.category === 'completed')
+  const involvementMessageKey = getFocusInvolvementMessageKey(item.involvement)
   const busy = isAnyFocusActionPending(isPending)
   const assignee = item.workItem.assigneeName ||
     item.workItem.assigneeEmail ||
@@ -635,7 +637,7 @@ function FocusQueueRow({
           {t('workspace.focus.metadata.rank').replace('{rank}', String(rank))}
         </span>
           <span className="min-w-0">
-          <span className="mb-1 block">
+          <span className="mb-1 flex flex-wrap items-center gap-1.5">
             <span className="workbench-badge inline-flex items-center gap-1.5">
               <WorkItemTypeIcon
                 className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
@@ -643,6 +645,14 @@ function FocusQueueRow({
               />
               {resolveWorkItemTypeLabel(item.workItem, configuration?.configuration)}
             </span>
+            {involvementMessageKey ? (
+              <span
+                className="workbench-badge"
+                data-testid={`focus-involvement-${item.workItem.teamId}-${item.workItem.id}`}
+              >
+                {t(involvementMessageKey)}
+              </span>
+            ) : null}
           </span>
           <span className="block truncate text-app-body font-semibold text-[var(--workbench-text)]">
             {item.workItem.title}

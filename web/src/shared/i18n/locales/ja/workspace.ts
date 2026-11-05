@@ -140,6 +140,8 @@ export const workspaceMessages = {
   'workspace.focus.metadata.noDue': '期限なし',
   'workspace.focus.metadata.status': '状態: {status}',
   'workspace.focus.metadata.rank': '順位 {rank}',
+  'workspace.focus.involvement.owner': '責任者',
+  'workspace.focus.involvement.contributor': '参加',
   'workspace.focus.keyboardHint': 'J / K または矢印で移動、Enter で開く',
   'workspace.focus.policy.title': 'フォーカスの優先ルール',
   'workspace.focus.policy.description': 'ルール階層の差分を設定します。空欄は表示中のチームまたは既定値を継承します。',

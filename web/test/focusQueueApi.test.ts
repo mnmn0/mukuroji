@@ -28,6 +28,36 @@ describe('Focus queue API', () => {
     ])
   })
 
+  test('accepts a missing involvement from an older server and rejects an unknown one', async () => {
+    const firstSection = focusQueueResponseFixture.sections[0]
+    const firstItem = firstSection?.items[0]
+    if (!firstSection || !firstItem) throw new Error('The Focus fixture requires one item.')
+    const legacyItem: Record<string, unknown> = { ...firstItem }
+    delete legacyItem.involvement
+    /**
+     * Builds a queue response whose first Now item is replaced.
+     *
+     * @param item - Item placed first in the Now section.
+     * @returns Queue response payload to serve from the mocked fetch.
+     */
+    const withItem = (item: unknown) => ({
+      ...focusQueueResponseFixture,
+      sections: [
+        { ...firstSection, items: [item, ...firstSection.items.slice(1)] },
+        ...focusQueueResponseFixture.sections.slice(1),
+      ],
+    })
+    globalThis.fetch = async () => new Response(JSON.stringify(withItem(legacyItem)), { status: 200 })
+    const legacy = await getFocusQueue('focus-token')
+    expect(legacy.sections[0]?.items[0]?.involvement).toBeUndefined()
+
+    globalThis.fetch = async () => new Response(
+      JSON.stringify(withItem({ ...firstItem, involvement: 'watcher' })),
+      { status: 200 },
+    )
+    await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+  })
+
   test('fails closed when a source deep link leaves the application origin', async () => {
     const firstSection = focusQueueResponseFixture.sections[0]
     const firstItem = firstSection?.items[0]

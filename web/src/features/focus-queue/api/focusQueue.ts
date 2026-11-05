@@ -4,6 +4,7 @@ import {
   type FocusEffectivePolicy,
   type FocusItem,
   type FocusItemCapabilities,
+  type FocusItemInvolvement,
   type FocusPolicy,
   type FocusPolicyCapabilities,
   type FocusPolicyOverrides,
@@ -51,6 +52,12 @@ const focusQueueSectionOrder: readonly FocusQueueSection[] = [
 ]
 
 const focusQueueSections: ReadonlySet<string> = new Set(focusQueueSectionOrder)
+
+const focusItemInvolvements: ReadonlySet<string> = new Set<FocusItemInvolvement>([
+  'owner',
+  'contributor',
+  'related',
+])
 
 const focusSignalTypes: ReadonlySet<string> = new Set([
   'blocker',
@@ -379,6 +386,7 @@ function isFocusItem(value: unknown): value is FocusItem {
     isNonnegativeSafeInteger(value.snoozeRevision) &&
     isFocusQueueSection(value.section) &&
     isCanonicalWorkItem(value.workItem) &&
+    (value.involvement === undefined || isFocusItemInvolvement(value.involvement)) &&
     Array.isArray(value.signals) &&
     value.signals.every(isFocusSignal) &&
     isFocusRankBreakdown(value.rank) &&
@@ -672,6 +680,11 @@ function isCanonicalUtcTimestamp(value: unknown): value is string {
 /** Returns whether an unknown value is one supported Focus queue section. */
 function isFocusQueueSection(value: unknown): value is FocusQueueSection {
   return typeof value === 'string' && focusQueueSections.has(value)
+}
+
+/** Returns whether an unknown value is one supported Focus item involvement. */
+function isFocusItemInvolvement(value: unknown): value is FocusItemInvolvement {
+  return typeof value === 'string' && focusItemInvolvements.has(value)
 }
 
 /** Returns whether an unknown value is one supported Focus signal type. */

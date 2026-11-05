@@ -140,6 +140,8 @@ export const workspaceMessages = {
   'workspace.focus.metadata.noDue': 'No due date',
   'workspace.focus.metadata.status': 'Status: {status}',
   'workspace.focus.metadata.rank': 'Rank {rank}',
+  'workspace.focus.involvement.owner': 'Owner',
+  'workspace.focus.involvement.contributor': 'Contributor',
   'workspace.focus.keyboardHint': 'Use J / K or arrow keys to move, Enter to open',
   'workspace.focus.policy.title': 'Focus priority rules',
   'workspace.focus.policy.description': 'Adjust one policy layer. Leave a field blank to inherit the Team or system-default value shown.',
