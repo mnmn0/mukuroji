@@ -210,7 +210,7 @@ manual invoke、cleanup、deployを行う場合は、対象account/region、chan
 
 ## API path contract
 
-Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は Function URL / API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
+Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
 
 - `<base-url>/teams/projects`
 - `<base-url>/api/teams/projects`
@@ -275,6 +275,7 @@ Default local table names are:
 - `REQUEST_INTAKE_TABLE_NAME=mukuroji-request-intake-local`
 - `REQUEST_QUEUE_INDEX_NAME=RequestQueueIndex`
 - `REQUEST_RATE_LIMIT_PER_HOUR=10`
+- `MUKUROJI_EDGE_ORIGIN_SECRET=<CloudFrontのorigin secret>`（Lambdaでは任意。`x-mukuroji-edge-secret` がこの値と一致した request だけ `x-mukuroji-viewer-address` を rate-limit key と Enterprise IP policy に使用。未設定時は両headerを信頼しない）
 - `MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES=<comma-separated proxy addresses>`（Bun server で列挙した transport source から到達した場合だけ `X-Forwarded-For` を rate-limit key に使用。未設定時は転送headerを信頼しない）
 - `REQUEST_TOKEN_HASH_SECRET=<32文字以上のsecret>`（Lambda では必須）
 - `REQUEST_EMAIL_WEBHOOK_SECRET=<32文字以上のsecret>`（専用 email ingestion Lambda で必須）

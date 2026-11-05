@@ -65,7 +65,7 @@ Submission は upload session と form field の対応、実 object size、immut
 
 ## Email ingestion
 
-Email ingestion Lambda は通常 HTTP API と Function URL に公開しない。Provider/SES adapter は HTML、quoted reply、任意 header を除去した `RequestEmailEnvelope` を作り、timestamp と HMAC-SHA256 signature を付けて専用 Lambda を invoke する。
+Email ingestion Lambda は HTTP API にも CloudFront にも公開しない。Provider/SES adapter は HTML、quoted reply、任意 header を除去した `RequestEmailEnvelope` を作り、timestamp と HMAC-SHA256 signature を付けて専用 Lambda を invoke する。
 
 Email channel の abuse control は署名前の Provider/SES adapter 境界で実施する。Adapter は sender、reply thread、受信先ごとの rate limit と provider spam verdict を検証し、上限超過 event を署名または Lambda invoke しない。Lambda 内の Message-ID dedupe は再送の冪等性を保証するものであり、adapter の rate limit を代替しない。
 

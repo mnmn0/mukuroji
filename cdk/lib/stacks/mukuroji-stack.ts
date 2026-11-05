@@ -18,6 +18,7 @@ import {
 import { buildStackOutputs } from '../subsystems/outputs';
 import { buildRestoreDrill } from '../subsystems/restore-drill';
 import { buildRuntimeControls } from '../subsystems/runtime-controls';
+import { buildWebDistribution } from '../subsystems/web-distribution';
 import {
   buildAiAssistanceObservabilityWorker,
 } from '../subsystems/workers/ai-assistance-observability';
@@ -132,6 +133,11 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
+    const webDistribution = buildWebDistribution(this, {
+      edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
+      fileBucket: fileStorage.fileBucket,
+      httpApi: apiTransports.httpApi,
+    });
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
       fileStorage,
@@ -244,6 +250,7 @@ export class MukurojiStack extends cdk.Stack {
       ...restoreDrill,
       ...workerChannels,
       ...apiTransports,
+      ...webDistribution,
       ...enterpriseIdentityWorkers,
       ...auditProjection,
       ...aiAssistanceObservabilityWorker,

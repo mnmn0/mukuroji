@@ -619,6 +619,15 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       },
     ],
   };
+  const webDistributionLogicalId = Object.keys(
+    template.findResources('AWS::CloudFront::Distribution'),
+  )[0];
+  const webOrigins = [{
+    'Fn::Join': ['', [
+      'https://',
+      { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
+    ]],
+  }];
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {
@@ -629,7 +638,7 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       }],
     },
     CorsConfiguration: {
-      CorsRules: [{
+      CorsRules: [allowedOrigins, webOrigins].map((origins) => ({
         AllowedHeaders: [
           'content-length',
           'content-type',
@@ -640,10 +649,10 @@ test('file bucket is private durable and scoped for direct browser transfers', (
           'x-amz-tagging',
         ],
         AllowedMethods: ['GET', 'HEAD', 'PUT'],
-        AllowedOrigins: allowedOrigins,
+        AllowedOrigins: origins,
         ExposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
         MaxAge: 600,
-      }],
+      })),
     },
     LifecycleConfiguration: {
       Rules: Match.arrayWith([

@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as guardduty from 'aws-cdk-lib/aws-guardduty';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -146,8 +147,12 @@ export type StackOutputResources = {
   readonly tenantVerificationCapabilityFunction: lambda.IFunction;
   /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.IQueue;
-  /** Lambda Function URL for the shared API. */
-  readonly functionUrl: lambda.FunctionUrl;
+  /** Private bucket holding the built Web assets. */
+  readonly webBucket: s3.IBucket;
+  /** CloudFront distribution serving the Web app and `/api/*`. */
+  readonly webDistribution: cloudfront.IDistribution;
+  /** HTTPS origin of the Web distribution. */
+  readonly webOrigin: string;
   /** HTTP API Gateway endpoint for the shared API. */
   readonly httpApi: apigatewayv2.HttpApi;
   /** AWS AppConfig application identifier for runtime controls. */
@@ -389,8 +394,14 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
     value: resources.tenantOperationDlq.queueUrl,
   });
-  new cdk.CfnOutput(scope, 'ApiFunctionUrl', {
-    value: resources.functionUrl.url,
+  new cdk.CfnOutput(scope, 'WebUrl', {
+    value: resources.webOrigin,
+  });
+  new cdk.CfnOutput(scope, 'WebBucketName', {
+    value: resources.webBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'WebDistributionId', {
+    value: resources.webDistribution.distributionId,
   });
   new cdk.CfnOutput(scope, 'ApiGatewayUrl', {
     value: resources.httpApi.apiEndpoint,

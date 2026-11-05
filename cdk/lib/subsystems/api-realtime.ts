@@ -73,8 +73,6 @@ export interface ApiTransportsAndRealtimeInput {
 export type ApiTransportsAndRealtimeResources = Readonly<{
   /** Live alias receiving all public API traffic. */
   readonly apiLiveAlias: lambda.Alias;
-  /** Public Lambda Function URL for the shared API handler. */
-  readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway backed by the shared API handler. */
   readonly httpApi: apigatewayv2.HttpApi;
   /** Auto-deployed production WebSocket stage. */
@@ -286,6 +284,7 @@ function bindApiRuntimeConfiguration(
     fileUploadUrlTtlSeconds,
     requestRateLimitPerHour,
     requestTokenHashSecret,
+    edgeOriginSecret,
     webPushVapidPublicKey,
     systemAdminGroups,
     apiAllowedOrigins,
@@ -391,6 +390,7 @@ function bindApiRuntimeConfiguration(
         enterpriseIdentityTokenHashSecret.valueAsString,
       ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateSecret.valueAsString,
       REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
+      MUKUROJI_EDGE_ORIGIN_SECRET: edgeOriginSecret.valueAsString,
     },
     {
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
@@ -1335,31 +1335,9 @@ export function buildApiTransportsAndRealtime(
     ),
     routeKey: apigatewayv2.HttpRouteKey.DEFAULT,
   });
-  const functionUrl = apiLiveAlias.addFunctionUrl({
-    authType: lambda.FunctionUrlAuthType.NONE,
-    cors: {
-      allowedOrigins: apiAllowedOriginList,
-      allowedMethods: [
-        lambda.HttpMethod.GET,
-        lambda.HttpMethod.POST,
-        lambda.HttpMethod.PUT,
-        lambda.HttpMethod.PATCH,
-        lambda.HttpMethod.DELETE,
-      ],
-      allowedHeaders: [
-        'authorization',
-        'content-type',
-        'idempotency-key',
-        'x-correlation-id',
-        'x-request-id',
-      ],
-      exposedHeaders: apiExposedHeaders,
-    },
-  });
 
   return {
     apiLiveAlias,
-    functionUrl,
     httpApi,
     realtimeWebSocketStage,
     workspaceAuditPseudonymSecret,

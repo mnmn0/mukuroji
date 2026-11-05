@@ -137,6 +137,8 @@ export interface StackParameters {
   readonly requestEmailWebhookSecret: cdk.CfnParameter;
   /** Secret used to hash public request and reply tokens. */
   readonly requestTokenHashSecret: cdk.CfnParameter;
+  /** Secret CloudFront sends so the API trusts its viewer-address header. */
+  readonly edgeOriginSecret: cdk.CfnParameter;
   /** Secret used to hash enterprise identity credentials. */
   readonly enterpriseIdentityTokenHashSecret: cdk.CfnParameter;
   /** File metadata and noncurrent object retention period in days. */
@@ -531,6 +533,17 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     noEcho: true,
     description: 'Secret used to hash public request and reply capability tokens.',
   });
+  const edgeOriginSecret = new cdk.CfnParameter(stack, 'EdgeOriginSecret', {
+    type: 'String',
+    minLength: 32,
+    maxLength: 128,
+    noEcho: true,
+    allowedPattern: '^[A-Za-z0-9_-]{32,128}$',
+    constraintDescription:
+      'EdgeOriginSecret must be 32 to 128 URL-safe characters, for example the output of "openssl rand -hex 32".',
+    description:
+      'Secret CloudFront adds to API requests so the API trusts the viewer address it forwards.',
+  });
   const enterpriseIdentityTokenHashSecret = new cdk.CfnParameter(
     stack,
     'EnterpriseIdentityTokenHashSecret',
@@ -722,6 +735,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     webPushVapidPublicKey,
     requestEmailWebhookSecret,
     requestTokenHashSecret,
+    edgeOriginSecret,
     enterpriseIdentityTokenHashSecret,
     fileRetentionDays,
     fileUploadUrlTtlSeconds,

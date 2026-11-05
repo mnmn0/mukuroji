@@ -10,7 +10,6 @@ import {
   type CustomFieldValue,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
-import { getConnInfo } from 'hono/aws-lambda'
 import type { Context } from 'hono'
 import { ProjectDataError } from '../../modules/directory'
 import {
@@ -47,7 +46,8 @@ import { workItemDependencies, workspaceDependencies } from '../shared/app-depen
 import { TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS } from '../shared/constants'
 import { requireTriageTeamAccess } from '../shared/customer-access'
 import { projectWorkItemSearchDocumentBestEffort } from '../shared/document-access'
-import { readBearerAccessToken, readJson, resolveRequestClientKey } from '../shared/http'
+import { readBearerAccessToken, readJson } from '../shared/http'
+import { resolveTrustedRequestSource } from '../shared/request-source'
 import { readOptionalPositiveQueryInteger } from '../shared/input-parsing'
 import {
   createApiMutationContext,
@@ -104,23 +104,7 @@ async function authorizeRequestLink(c: Context, resolution: RequestLinkResolutio
 }
 
 function createRequestExternalContext(c: Context): RequestExternalContext {
-  let trustedSource: string | undefined
-  try {
-    trustedSource = getConnInfo(c).remote.address
-  } catch {
-    trustedSource = undefined
-  }
-  const trustedProxyAddresses = new Set(
-    (getEnv('MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES') ?? '')
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter(Boolean),
-  )
-  const source = resolveRequestClientKey(
-    trustedSource,
-    c.req.header('X-Forwarded-For'),
-    trustedProxyAddresses,
-  )
+  const source = resolveTrustedRequestSource(c)
   return {
     clientKey: source,
     ...(c.req.header('Idempotency-Key')?.trim()

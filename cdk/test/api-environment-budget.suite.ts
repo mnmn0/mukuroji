@@ -255,6 +255,7 @@ const expectedWorkflowConfiguration = {
   FILE_RETENTION_DAYS: base64(ref('FileRetentionDays')),
   FILE_UPLOAD_URL_TTL_SECONDS: base64(ref('FileUploadUrlTtlSeconds')),
   FOCUS_TABLE_NAME: base64(ref('FocusTable8B0E7E68')),
+  MUKUROJI_EDGE_ORIGIN_SECRET: base64(ref('EdgeOriginSecret')),
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: nestedSecret(
     ref(WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID),
   ),
@@ -700,6 +701,7 @@ describe('API runtime configuration externalization', () => {
     const parameters = requireRecordProperty(template, 'Parameters');
     const resources = requireRecordProperty(template, 'Resources');
     for (const parameterLogicalId of [
+      'EdgeOriginSecret',
       'EnterpriseIdentityTokenHashSecret',
       'EnterpriseSsoStateSecret',
       'RequestTokenHashSecret',
@@ -875,14 +877,6 @@ describe('API runtime configuration externalization', () => {
     const functionUrls = Object.values(resources)
       .filter((resource) =>
         isRecord(resource) && resource.Type === 'AWS::Lambda::Url');
-    expect(functionUrls).toEqual([
-      expect.objectContaining({
-        DependsOn: expect.arrayContaining([aliasLogicalId]),
-        Properties: expect.objectContaining({
-          Qualifier: 'live',
-          TargetFunctionArn: getAtt(API_FUNCTION_LOGICAL_ID, 'Arn'),
-        }),
-      }),
-    ]);
+    expect(functionUrls).toEqual([]);
   });
 });

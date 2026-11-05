@@ -1,6 +1,6 @@
 # mukuroji AWS deployment
 
-この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、Lambda Function URL と API Gateway HTTP API の両方へ接続します。DynamoDB table、request intake の email ingestion boundary、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
+この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、API Gateway HTTP API へ接続します。Web app は private S3 bucket から CloudFront で配信し、同じ CloudFront domain の `/api/*` を HTTP API へ転送します。DynamoDB table、request intake の email ingestion boundary、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
 
 コマンドは repository root から実行してください。AWS account を変更する `deploy`、Cognito 更新、data migration / recovery は、対象 account・region と `cdk diff` を確認してから実行します。
 
@@ -34,6 +34,7 @@
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | yes | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
+| `EdgeOriginSecret` | yes | CloudFront が `/api/*` の request に付ける 32–128 文字の英数字・`_`・`-` の secret。API はこの値が一致する request の viewer address だけを rate limit と Enterprise IP policy に使います。`openssl rand -hex 32` などで生成し、CloudFormation では `NoEcho` です。 |
 | `EnterpriseIdentityTokenHashSecret` | yes | SCIM bearer token と service account credential の kind・Workspace・credential-ID domain-separated digest、および10分間の idempotency response recovery 用 token 導出に使う32–256文字の安定した secret。CloudFormation では `NoEcho` です。 |
 | `EnterpriseSsoStateSecret` | SSO有効時 | 短命な OAuth state を署名する専用の32–256文字 secret。CloudFormation では `NoEcho` です。 |
 | `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
@@ -120,8 +121,9 @@ templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
-- `ApiFunctionUrl`: Lambda Function URL
-- `ApiGatewayUrl`: API Gateway HTTP API URL
+- `WebUrl`: Web app と `/api` を配信する CloudFront の URL
+- `WebBucketName` / `WebDistributionId`: `bun run web:deploy` が使う Web bucket と distribution
+- `ApiGatewayUrl`: API Gateway HTTP API URL（外部 webhook と、local の Web から直接呼ぶ場合）
 - `WorkItemsTableName`（canonical Work Item store）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
@@ -151,7 +153,20 @@ templateとdeployed configurationの両方で照合します。
 - `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`
 - `WorkspaceDirectoryId`
 
-Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+CloudFront は `/api/*` を cache せず、Host 以外の viewer header をそのまま HTTP API へ渡します。
+HTTP API から見た接続元は CloudFront の edge address になるため、viewer-request の CloudFront Function が
+client の送った値を上書きして `x-mukuroji-viewer-address` に viewer address を入れ、origin custom header
+`x-mukuroji-edge-secret` に `EdgeOriginSecret` を付けます。API は secret が一致した request だけ
+この address を request intake の rate limit と Enterprise IP policy に使い、HTTP API を直接呼ぶ request
+では両 header を無視して transport の接続元を使います。`EdgeOriginSecret` を変えると CloudFront と
+Lambda が同じ deploy で切り替わりますが、切り替え中の数分は一部の request が edge address で判定されます。
+それ以外の path は Web bucket から返し、拡張子のない path は CloudFront Function が `index.html` に
+書き換えるため、client-side route を直接開いても SPA が表示されます。この書き換えは `/api/*` には
+かからないので、API の 404 はそのまま返ります。HTTP API は `<base>/teams/projects` と
+`<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+Lambda Function URL は作りません。外部 sender に渡す signed inbound webhook URL は Lambda の version
+に依存しない安定した HTTP API endpoint を使い、CloudFront の origin も同じ HTTP API にそろえます。
 
 Shared APIのproduction runtime configurationは1つのSecrets Manager secret
 (`ApiRuntimeConfigurationSecret`)にまとめ、Lambda environmentにはそのARNと
@@ -164,7 +179,7 @@ pseudonym secretとDocument public-share secretの2つだけをnested secretと�
 読みます。Loaderは`AWSCURRENT`のrevisionが期待値と違えば`AWSPREVIOUS`を読み、どちらも一致しなければ
 起動を拒否します。全canonical keyとnested secretを検証し終えてから環境へ原子的に反映します。
 
-Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。新しいconfiguration
+API Gatewayのdefault routeは`live` Aliasを呼び出します。新しいconfiguration
 secretとLambda Versionの準備完了後にAliasが新Versionへ切り替わるため、API trafficは
 code/configurationが揃ったversion単位で切り替わります。
 
@@ -542,6 +557,7 @@ export ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET="$(openssl rand -hex 32)"
 export ENTERPRISE_SSO_STATE_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
+export MUKUROJI_EDGE_ORIGIN_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 
@@ -620,6 +636,7 @@ bun --filter cdk cdk diff Mukuroji \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters EdgeOriginSecret="$MUKUROJI_EDGE_ORIGIN_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
@@ -647,6 +664,7 @@ bun --filter cdk cdk deploy Mukuroji \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters EdgeOriginSecret="$MUKUROJI_EDGE_ORIGIN_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
@@ -701,13 +719,13 @@ bash scripts/validate-workspace-bootstrap.sh
 validator は Cognito pool/password client、owner status/email、両 custom attribute、
 Workspace metadata/owner/alias、全 seed project の manager row を consistent read で照合します。
 
-次に owner の新しい Cognito access token を用意し、4 経路がすべて `200` かつ同じ Workspace response を返すことを確認します。古い token は group / identity 更新前の session を表す可能性があるため再利用しません。
+次に owner の新しい Cognito access token を用意し、CloudFront 経由と HTTP API 直接の経路がすべて `200` かつ同じ Workspace response を返すことを確認します。古い token は group / identity 更新前の session を表す可能性があるため再利用しません。
 
 ```sh
-export FUNCTION_URL="$(aws cloudformation describe-stacks \
+export WEB_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name Mukuroji \
-  --query "Stacks[0].Outputs[?OutputKey=='ApiFunctionUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='WebUrl'].OutputValue | [0]" \
   --output text)"
 export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
@@ -716,17 +734,25 @@ export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --output text)"
 export ACCESS_TOKEN=<fresh-owner-access-token>
 
-curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${FUNCTION_URL%/}/teams/projects"
-curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${FUNCTION_URL%/}/api/teams/projects"
+curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${WEB_URL%/}/api/teams/projects"
 curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${API_GATEWAY_URL%/}/teams/projects"
 curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${API_GATEWAY_URL%/}/api/teams/projects"
 ```
 
-Web にはどちらか一方を設定します。
+### 4. Web を配信する
 
 ```sh
-VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
-# または VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
+AWS_REGION=ap-northeast-1 bun run web:deploy
+```
+
+`scripts/deploy-web.sh` は stack output から Web bucket と distribution を読み、`VITE_API_BASE_URL=/api` で
+Web を build して upload し、CloudFront を invalidate します。content hash 付きの `assets/` は1年 cache し、
+古い chunk も残すため、前の `index.html` を開いている browser も lazy chunk を読めます。`index.html`、
+`sw.js` などそれ以外の file は `no-cache` で置き換えます。配信後に `WebUrl` を開き、login と Team/project
+一覧の表示を確認します。local の Web から AWS の API を試す場合だけ、HTTP API を直接指定します。
+
+```sh
+VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
 
 ## Workspace partition migration
@@ -744,7 +770,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
    - `workspace-metadata`、`workspace-member`、`email-alias` の 3 種は旧 partition から copy しない。旧 `workspaceId` や owner key を残すと bootstrap condition と衝突するため、CDK deploy で new Workspace ID / owner parameter から再生成する。
 4. source / destination の件数と代表 item を照合し、重複 key や未処理 write がないことを確認する。
 5. new Workspace ID を parameter にして `cdk diff` / deploy を実行する。CDK が owner attributes と bootstrap row を new partition に揃える。
-6. fresh token で両 API endpoint を検証してから write を再開する。
+6. fresh token で CloudFront と HTTP API の両 endpoint を検証してから write を再開する。
 7. rollback window 中は旧 partition を削除しない。
 
 大量 data の migration を shell の `scan | put-item` で即時実行しないでください。pagination、retry、conditional write、件数/内容照合を備えた一時 migration job として review・dry run してから実行します。
@@ -755,7 +781,7 @@ CDK は canonical Work Item store として `WorkItemsTable` を作成し、tabl
 
 Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
 
-Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を CloudFront 経由と API Gateway 直接の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
 
 ## Work Item configuration
 
@@ -943,8 +969,9 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 
 ## Security and durability checks
 
-- Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
-- Function URL、HTTP API、Hono CORS は同じ `ApiAllowedOrigins` に揃えます。本番で local default を使いません。
+- HTTP API の route auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
+- 本番の Web は CloudFront の同じ origin から API を呼ぶため CORS を使いません。HTTP API と Hono の CORS は `ApiAllowedOrigins` にそろえ、本番で local default を使いません。
+- Web bucket は public access をすべて block し、CloudFront の origin access control だけが読みます。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
 - Email ingestion Lambda は HTTP route を持たず、Request Intake table と failure DLQ 以外の data-plane 権限を持ちません。
 - Enterprise SCIM group reconciliation は API Lambda と concurrency を共有しない専用 Lambda で実行します。
