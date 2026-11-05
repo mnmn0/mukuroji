@@ -75,6 +75,7 @@ import {
   type RestoreDrillFileRangeCheckpoint,
   type RestoreDrillFileRangeWindow,
 } from './restore-drill-file-range'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Re-exported durable checkpoint for callers that persist File range progress. */
 export type { RestoreDrillFileRangeCheckpoint } from './restore-drill-file-range'
@@ -1154,7 +1155,7 @@ export function createRestoreDrillAwsOperations(
  * @returns Validated configuration and closeable AWS operations.
  */
 export function createRestoreDrillAwsOperationsFromEnvironment(
-  environment: RestoreDrillEnvironment = process.env,
+  environment: RestoreDrillEnvironment = loadServerConfig().environment,
 ): RestoreDrillAwsEnvironmentComposition {
   const configuration = readRestoreDrillAwsConfiguration(environment)
   const dynamodbClient = new DynamoDBClient({ region: configuration.region })
@@ -1182,7 +1183,7 @@ export function createRestoreDrillAwsOperationsFromEnvironment(
  * @returns Minimal validated configuration and narrow cleanup operations.
  */
 export function createRestoreDrillAwsCleanupOperationsFromEnvironment(
-  environment: RestoreDrillEnvironment = process.env,
+  environment: RestoreDrillEnvironment = loadServerConfig().environment,
 ): RestoreDrillAwsCleanupEnvironmentComposition {
   const configuration = readRestoreDrillAwsCleanupConfiguration(environment)
   const internalConfiguration = createCleanupRestrictedFullConfiguration(configuration)
@@ -1217,7 +1218,7 @@ export function createRestoreDrillAwsCleanupOperationsFromEnvironment(
  */
 export function createRestoreDrillAwsActionHandlerFromEnvironment(
   driver: RestoreDrillAwsActionDriver,
-  environment: RestoreDrillEnvironment = process.env,
+  environment: RestoreDrillEnvironment = loadServerConfig().environment,
 ): (request: RestoreDrillAwsActionRequest) => Promise<RestoreDrillAwsActionResult> {
   const composition = createRestoreDrillAwsOperationsFromEnvironment(environment)
   /** Dispatches one already structurally parsed outer request. */

@@ -10,15 +10,17 @@ import { createApprovalNotificationReader } from '../../modules/files/adapter-ou
 import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications } from '../../modules/notifications'
 import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { createProductionTenantAvailability } from './tenant-administration'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /**
  * Creates a scheduled sender for opted-in recipients' durable Inbox notifications.
  * @returns A handler with current tenant authorization and recipient-scoped credentials.
  */
 export function createProductionSlackNotificationHandler() {
-  const tableName = process.env.NOTIFICATIONS_TABLE_NAME?.trim()
-  const identityTableName = process.env.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
-  const fileTableName = process.env.FILE_PROOFING_TABLE_NAME?.trim()
+  const environment = loadServerConfig().environment
+  const tableName = environment.NOTIFICATIONS_TABLE_NAME?.trim()
+  const identityTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
+  const fileTableName = environment.FILE_PROOFING_TABLE_NAME?.trim()
   if (!tableName || !identityTableName || !fileTableName) throw new Error('Slack notification runtime is not configured.')
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const store = new DynamoDbSlackDeliveryStore(documentClient, tableName)

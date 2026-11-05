@@ -22,6 +22,7 @@ import {
   createTriageScheduleAuditTransactionItems,
   readTriageNotificationMemberKey,
 } from '../../adapter-out/dynamodb/triage-audit-events'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Default sparse wake-index name. */
 export const TRIAGE_WAKE_INDEX_NAME = 'triage-wake-index'
@@ -80,15 +81,16 @@ export type TriageScheduleResult = {
 export function createProductionTriageScheduleHandler(): (
   event?: TriageScheduleEvent,
 ) => Promise<TriageScheduleResult> {
+  const environment = loadServerConfig().environment
   const endpoint = getConfiguredDynamoDbEndpoint()
   const dynamoDbClient = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -343,7 +345,7 @@ function requireAuditTableName(): string {
 
 /** Reads one optional environment variable. */
 function readEnvironment(name: string): string | undefined {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   return value || undefined
 }
 

@@ -808,9 +808,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   private ensureTablePromise?: Promise<void>
 
   constructor(options: DynamoDbDocumentsClientOptions = {}) {
+    const environment = loadServerConfig().environment
     this.tableName =
       options.tableName ??
-      process.env.DOCUMENTS_TABLE_NAME ??
+      environment.DOCUMENTS_TABLE_NAME ??
       'mukuroji-documents-local'
     this.dynamoClient = options.dynamoClient ?? (
       options.documentClient === undefined
@@ -825,15 +826,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     this.autoCreateLocal =
       options.autoCreateLocal ??
       Boolean(
-        process.env.DYNAMODB_ENDPOINT ??
-          process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-          process.env.LOCALSTACK_HOSTNAME,
+        environment.DYNAMODB_ENDPOINT ??
+          environment.AWS_ENDPOINT_URL_DYNAMODB ??
+          environment.LOCALSTACK_HOSTNAME,
       )
     this.now = options.now ?? (() => new Date())
     this.generateId = options.generateId ?? randomUUID
     this.publicShareTokenSecret = resolvePublicShareTokenSecret(
       options.publicShareTokenSecret ??
-        process.env.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET,
+        environment.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET,
     )
     this.auditTableName =
       options.auditTableName ??
