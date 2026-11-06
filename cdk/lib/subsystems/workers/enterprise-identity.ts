@@ -109,7 +109,7 @@ export function buildEnterpriseIdentityWorkers(
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         DOCUMENTS_TABLE_NAME: documentsTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:

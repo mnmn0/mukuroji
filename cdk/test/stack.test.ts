@@ -10,3 +10,4 @@ import './workers-observability.suite';
 import './bootstrap.suite';
 import './runtime-controls.suite';
 import './web-distribution.suite';
+import './user-identity.suite';

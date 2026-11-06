@@ -3,6 +3,7 @@ import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
   API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  COGNITO_USER_POOL_ID_VALUE,
   findApiRuntimeConfigurationSource,
   findCustomResource,
   serializeAwsSdkCall,
@@ -546,9 +547,7 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
     Runtime: 'nodejs22.x',
     Environment: {
       Variables: Match.objectLike({
-        COGNITO_USER_POOL_ID: {
-          Ref: 'CognitoUserPoolId',
-        },
+        COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: 'ProjectDirectoryTable9ED01C01',

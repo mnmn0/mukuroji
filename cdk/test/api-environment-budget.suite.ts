@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { describe, expect, test } from '@jest/globals';
 import {
   API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  COGNITO_USER_POOL_CLIENT_ID_VALUE,
+  COGNITO_USER_POOL_ID_VALUE,
   WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
   synthesizedTemplate,
 } from './test-support';
@@ -175,12 +177,12 @@ const expectedCoreConfiguration = {
 };
 
 const expectedIdentityConfiguration = {
-  COGNITO_CLIENT_ID: base64(ref('CognitoUserPoolClientId')),
+  COGNITO_CLIENT_ID: base64(COGNITO_USER_POOL_CLIENT_ID_VALUE),
   COGNITO_ENTERPRISE_IDP_NAME: base64(ref('CognitoEnterpriseIdpName')),
   COGNITO_HOSTED_UI_DOMAIN: base64(ref('CognitoHostedUiDomain')),
   COGNITO_SSO_CLIENT_ID: base64(ref('CognitoSsoUserPoolClientId')),
   COGNITO_SSO_REDIRECT_URI: base64(ref('CognitoSsoRedirectUri')),
-  COGNITO_USER_POOL_ID: base64(ref('CognitoUserPoolId')),
+  COGNITO_USER_POOL_ID: base64(COGNITO_USER_POOL_ID_VALUE),
   SYSTEM_ADMIN_GROUPS: base64(ref('SystemAdminGroups')),
   MUKUROJI_WORKSPACE_DIRECTORY_ID: base64(ref('WorkspaceDirectoryId')),
 };
@@ -427,6 +429,11 @@ function resolveMaximumString(
         return 'X'.repeat(512);
       case 'AWS::SecretsManager::Secret':
         return 'X'.repeat(2_048);
+      // Cognito user pool IDs are at most 55 characters and client IDs 128.
+      case 'AWS::Cognito::UserPool':
+        return 'X'.repeat(55);
+      case 'AWS::Cognito::UserPoolClient':
+        return 'X'.repeat(128);
       default:
         throw new Error(
           `Unsupported Ref resource type ${String(resource.Type)} for ${logicalId}.`,

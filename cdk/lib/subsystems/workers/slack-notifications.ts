@@ -48,7 +48,7 @@ export function buildSlackNotificationWorker(scope: cdk.Stack, input: ScheduleWo
       REQUEST_INTAKE_TABLE_NAME: stores.requestIntakeTable.tableName,
       COLLABORATION_TABLE_NAME: stores.collaborationTable.tableName,
       FILE_PROOFING_TABLE_NAME: stores.fileProofingTable.tableName,
-      COGNITO_USER_POOL_ID: parameters.cognitoUserPoolId.valueAsString,
+      COGNITO_USER_POOL_ID: parameters.cognitoUserPoolId,
       SYSTEM_ADMIN_GROUPS: parameters.systemAdminGroups.valueAsString,
     },
   });
