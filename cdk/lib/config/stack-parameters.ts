@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import type * as cognito from 'aws-cdk-lib/aws-cognito';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
+import type { OptionalModules } from './optional-modules';
 
 const restoreDrillApproverRoleArnSuffix =
   'iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$';
@@ -106,12 +107,15 @@ export interface StackParameters {
   readonly systemAdminGroups: cdk.CfnParameter;
   /** Audit event retention period in days. */
   readonly auditRetentionDays: cdk.CfnParameter;
-  /** Secret JSON configuration loaded by connector runtimes. */
-  readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /** Secret JSON configuration loaded by connector runtimes, declared only with the connectors module. */
+  readonly connectorRuntimeConfiguration: cdk.CfnParameter | undefined;
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
-  /** Existing IAM role exclusively authorized to approve restore-drill cleanup. */
-  readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
+  /**
+   * Existing IAM role exclusively authorized to approve restore-drill cleanup, declared
+   * only with the restore-drill module.
+   */
+  readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter | undefined;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
   /** Full Git commit SHA bundled into the deployed API runtime. */
@@ -134,8 +138,8 @@ export interface StackParameters {
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Web Push VAPID public key; empty disables push subscriptions. */
   readonly webPushVapidPublicKey: cdk.CfnParameter;
-  /** Secret authenticating request intake email Webhooks. */
-  readonly requestEmailWebhookSecret: cdk.CfnParameter;
+  /** Secret authenticating request intake email Webhooks, declared only with the request email module. */
+  readonly requestEmailWebhookSecret: cdk.CfnParameter | undefined;
   /** Secret used to hash public request and reply tokens. */
   readonly requestTokenHashSecret: cdk.CfnParameter;
   /** Secret CloudFront sends so the API trusts its viewer-address header. */
@@ -198,10 +202,17 @@ export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey
  *
  * Cognito identifiers are resolved by the stack, because a blank pool ID makes it create the pool.
  *
+ * Parameters used only by an optional module are declared only when that module is
+ * deployed, so a default deployment does not have to supply them.
+ *
  * @param stack - Stack that directly owns the parameters and validation rules.
+ * @param optionalModules - Optional modules the stack creates.
  * @returns Parameters and derived values consumed by the stack subsystems.
  */
-export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
+export function buildStackParameters(
+  stack: cdk.Stack,
+  optionalModules: OptionalModules,
+): StackParameterInputs {
   const alarmPrimaryTopicName = new cdk.CfnParameter(
     stack,
     'AlarmPrimaryTopicName',
@@ -299,17 +310,15 @@ export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
     minValue: 1,
     description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
   });
-  const connectorRuntimeConfiguration = new cdk.CfnParameter(
-    stack,
-    'ConnectorRuntimeConfiguration',
-    {
+  const connectorRuntimeConfiguration = optionalModules.connectors
+    ? new cdk.CfnParameter(stack, 'ConnectorRuntimeConfiguration', {
       type: 'String',
       default: '{}',
       noEcho: true,
       description:
         'Secret JSON object whose string properties are loaded as connector runtime environment variables.',
-    },
-  );
+    })
+    : undefined;
   const workspaceAuditPseudonymKey = new cdk.CfnParameter(
     stack,
     'WorkspaceAuditPseudonymKey',
@@ -323,18 +332,16 @@ export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
     },
   );
-  const restoreDrillCleanupApproverRoleArn = new cdk.CfnParameter(
-    stack,
-    'RestoreDrillCleanupApproverRoleArn',
-    {
+  const restoreDrillCleanupApproverRoleArn = optionalModules.restoreDrill
+    ? new cdk.CfnParameter(stack, 'RestoreDrillCleanupApproverRoleArn', {
       type: 'String',
       allowedPattern: buildRestoreDrillApproverRoleArnPattern(stack),
       constraintDescription:
         'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN in the supported deployment partition.',
       description:
         'Existing data-owner IAM role exclusively authorized to create and admit immutable restore-drill cleanup approvals.',
-    },
-  );
+    })
+    : undefined;
   const apiRuntimeConfigurationRevision = new cdk.CfnParameter(
     stack,
     'ApiRuntimeConfigurationRevision',
@@ -543,13 +550,15 @@ export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
     description:
       'VAPID application server public key browsers use to subscribe to Web Push. Empty disables push subscriptions.',
   });
-  const requestEmailWebhookSecret = new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
-    type: 'String',
-    minLength: 32,
-    maxLength: 256,
-    noEcho: true,
-    description: 'Secret used to authenticate request intake email envelopes.',
-  });
+  const requestEmailWebhookSecret = optionalModules.requestEmail
+    ? new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
+      type: 'String',
+      minLength: 32,
+      maxLength: 256,
+      noEcho: true,
+      description: 'Secret used to authenticate request intake email envelopes.',
+    })
+    : undefined;
   const requestTokenHashSecret = new cdk.CfnParameter(stack, 'RequestTokenHashSecret', {
     type: 'String',
     minLength: 32,

@@ -3,6 +3,10 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
+import {
+  NO_OPTIONAL_MODULES,
+  type OptionalModules,
+} from '../config/optional-modules';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
 import {
   buildApiRuntime,
@@ -39,6 +43,14 @@ import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
 import { buildAgentRunTriageWorker } from '../subsystems/workers/agent-run-triage';
 
 /**
+ * Configuration of the Mukuroji application stack.
+ */
+export interface MukurojiStackProps extends cdk.StackProps {
+  /** Optional modules to create. Every optional module is omitted by default. */
+  readonly optionalModules?: OptionalModules;
+}
+
+/**
  * Composes the Mukuroji application infrastructure from subsystem builders.
  */
 export class MukurojiStack extends cdk.Stack {
@@ -47,13 +59,15 @@ export class MukurojiStack extends cdk.Stack {
    *
    * @param scope Parent construct that owns the stack.
    * @param id Stable stack construct identifier.
-   * @param props Optional CDK stack configuration.
+   * @param props Optional CDK stack configuration and optional-module selection.
    */
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: MukurojiStackProps) {
     super(scope, id, props);
 
+    const optionalModules = props?.optionalModules ?? NO_OPTIONAL_MODULES;
+
     const lambdaBuildPaths = buildLambdaBuildPaths();
-    const parameterInputs = buildStackParameters(this);
+    const parameterInputs = buildStackParameters(this, optionalModules);
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
@@ -91,15 +105,17 @@ export class MukurojiStack extends cdk.Stack {
       workItemConfigurationTable: dataStores.workItemConfigurationTable,
       workspaceAccessTable: dataStores.workspaceAccessTable,
     });
-    const restoreDrill = buildRestoreDrill(this, {
-      dataStores,
-      fileStorage,
-      lambdaBuildPaths,
-      cleanupApproverRoleArn:
-        parameters.restoreDrillCleanupApproverRoleArn,
-    });
+    const { restoreDrillCleanupApproverRoleArn } = parameters;
+    const restoreDrill = restoreDrillCleanupApproverRoleArn
+      ? buildRestoreDrill(this, {
+        dataStores,
+        fileStorage,
+        lambdaBuildPaths,
+        cleanupApproverRoleArn: restoreDrillCleanupApproverRoleArn,
+      })
+      : undefined;
 
-    const workerChannels = buildWorkerChannels(this);
+    const workerChannels = buildWorkerChannels(this, optionalModules.connectors);
     const apiRuntime = buildApiRuntime(this, {
       dataStores,
       fileStorage,
@@ -111,7 +127,7 @@ export class MukurojiStack extends cdk.Stack {
     configureFileStorageApiBoundary(
       fileStorage,
       apiRuntime.apiFunction,
-      restoreDrill.runnerRole,
+      restoreDrill?.runnerRole,
     );
 
     const enterpriseIdentityWorkers = buildEnterpriseIdentityWorkers(this, {
@@ -182,13 +198,15 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
-    buildConnectorWorkers(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-      workerChannels,
-    });
+    if (optionalModules.connectors) {
+      buildConnectorWorkers(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+        workerChannels,
+      });
+    }
     buildSlackNotificationWorker(this, {
       dataStores,
       lambdaBuildPaths,
@@ -201,12 +219,14 @@ export class MukurojiStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
-    const requestEmailWorker = buildRequestEmailWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
+    const requestEmailWorker = optionalModules.requestEmail
+      ? buildRequestEmailWorker(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+      })
+      : undefined;
     const triageScheduleWorker = buildTriageScheduleWorker(this, {
       dataStores,
       lambdaBuildPaths,
@@ -255,11 +275,17 @@ export class MukurojiStack extends cdk.Stack {
       dataStores,
       parameters,
     });
+    const { connectorChannels } = workerChannels;
+    const { connectorRuntimeSecret } = dataStores;
     buildStackOutputs(this, {
+      restoreDrill,
+      connectors: connectorChannels && connectorRuntimeSecret
+        ? { ...connectorChannels, connectorRuntimeSecret }
+        : undefined,
+      requestEmail: requestEmailWorker,
       ...dataStores,
       ...fileStorage,
       ...crossDomainIntegrity,
-      ...restoreDrill,
       ...workerChannels,
       ...apiTransports,
       ...webDistribution,
@@ -268,7 +294,6 @@ export class MukurojiStack extends cdk.Stack {
       ...aiAssistanceObservabilityWorker,
       ...automationWorkers,
       ...scheduleWorkers,
-      ...requestEmailWorker,
       ...triageScheduleWorker,
       ...tenantOperationWorker,
       ...runtimeControls,

@@ -238,10 +238,8 @@ function bindApiRuntimeConfiguration(
     collaborationTable,
     customersTable,
     connectorRuntimeSecret,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
+    developerPlatformKey,
     developerPlatformTable,
-    developerPlatformWebhookKey,
     documentPublicShareTokenSecret,
     documentsTable,
     enterpriseIdentityTable,
@@ -340,16 +338,14 @@ function bindApiRuntimeConfiguration(
       AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
       COLLABORATION_TABLE_NAME: collaborationTable.tableName,
       CUSTOMERS_TABLE_NAME: customersTable.tableName,
+      // Blank when the connectors module is absent: the API then loads no provider.
       CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
-        connectorRuntimeSecret.secretArn,
-      DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
-        developerPlatformConnectorKey.keyArn,
+        connectorRuntimeSecret?.secretArn ?? '',
+      DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: developerPlatformKey.keyArn,
       DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
-      DEVELOPER_PLATFORM_STATE_KMS_KEY_ID:
-        developerPlatformStateKey.keyArn,
+      DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
       DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
-      DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
-        developerPlatformWebhookKey.keyArn,
+      DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: developerPlatformKey.keyArn,
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
@@ -434,10 +430,8 @@ export function buildApiRuntime(
     collaborationTable,
     customersTable,
     connectorRuntimeSecret,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
+    developerPlatformKey,
     developerPlatformTable,
-    developerPlatformWebhookKey,
     documentsTable,
     enterpriseIdentityTable,
     tenantAdministrationTable,
@@ -789,7 +783,7 @@ export function buildApiRuntime(
       statements: [
         new iam.PolicyStatement({
           actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [developerPlatformWebhookKey.keyArn],
+          resources: [developerPlatformKey.keyArn],
           conditions: {
             StringEquals: {
               'kms:EncryptionContext:mukuroji:purpose': 'webhook',
@@ -800,7 +794,7 @@ export function buildApiRuntime(
         }),
         new iam.PolicyStatement({
           actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [developerPlatformConnectorKey.keyArn],
+          resources: [developerPlatformKey.keyArn],
           conditions: {
             StringEquals: {
               'kms:EncryptionContext:mukuroji:purpose': 'connector',
@@ -811,7 +805,7 @@ export function buildApiRuntime(
         }),
         new iam.PolicyStatement({
           actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [developerPlatformStateKey.keyArn],
+          resources: [developerPlatformKey.keyArn],
           conditions: {
             StringEquals: {
               'kms:EncryptionContext:mukuroji:purpose': 'platform-state',
@@ -880,7 +874,7 @@ export function buildApiRuntime(
   apiFunction.role.attachInlinePolicy(apiAuditTransactionDataPolicy);
   apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
   apiFunction.role.attachInlinePolicy(apiTransactionConditionCheckPolicy);
-  connectorRuntimeSecret.grantRead(apiFunction);
+  connectorRuntimeSecret?.grantRead(apiFunction);
   apiFunction.role.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiAutomationWebhookSecretPolicy',
