@@ -382,7 +382,9 @@ CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
 DynamoDB に idempotent に seed し、CloudFront の `/api` 経由で取得できます。
 AWS 環境で確認する場合は以下の順に実行し、最後に `bun run web:deploy` で Web を
-出力された `WebUrl` へ配信してください。
+出力された `WebUrl` へ配信してください。次の例は既存の user pool を使う場合です。stack に
+user pool を作らせる場合は `COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` を空にし、
+`prepare-workspace-cognito.sh` を飛ばします。
 
 ```sh
 export COGNITO_USER_POOL_ID=<user-pool-id>
@@ -503,6 +505,8 @@ CDK parameter `ApiAllowedOrigins` は HTTP API を直接呼ぶ別 origin（local
 使い、未指定時は `http://localhost:5173,http://127.0.0.1:5173` です。File bucket は
 `ApiAllowedOrigins` に加えて CloudFront の origin からの presigned upload を自動で受け付けます。
 認証に使う Cognito user pool は CDK parameter `CognitoUserPoolId` で固定し、
+空のままなら stack が user pool、password client、初期 owner の招待を作ります（詳細は
+[cdk/README.md](cdk/README.md) の Fresh deployment）。
 Lambda は access token の issuer がその user pool と一致する場合だけ処理します。
 Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メールアドレスは
 `InitialOwnerEmail` で指定します。Cognito の

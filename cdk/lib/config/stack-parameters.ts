@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import type * as cognito from 'aws-cdk-lib/aws-cognito';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
 
 const restoreDrillApproverRoleArnSuffix =
@@ -147,10 +148,21 @@ export interface StackParameters {
   readonly fileUploadUrlTtlSeconds: cdk.CfnParameter;
   /** Presigned file download URL lifetime in seconds. */
   readonly fileDownloadUrlTtlSeconds: cdk.CfnParameter;
-  /** Existing Cognito user pool identifier. */
-  readonly cognitoUserPoolId: cdk.CfnParameter;
-  /** Existing Cognito application client identifier used by the API. */
-  readonly cognitoUserPoolClientId: cdk.CfnParameter;
+  /** Cognito user pool identifier the API trusts, stack-owned or existing. */
+  readonly cognitoUserPoolId: string;
+  /** Cognito password application client identifier used by the API. */
+  readonly cognitoUserPoolClientId: string;
+  /** Stack-owned user pool and the condition that picks it over an existing pool. */
+  readonly userIdentity: Readonly<{
+    /** True when the stack owns the user pool. */
+    readonly userPoolCreated: cdk.CfnCondition;
+    /** Stack-owned user pool, created only under `userPoolCreated`. */
+    readonly userPool: cognito.UserPool;
+  }>;
+  /** Existing user pool ID parameter, blank when the stack owns the pool. */
+  readonly cognitoUserPoolIdParameter: cdk.CfnParameter;
+  /** Existing password client ID parameter, blank when the stack owns the pool. */
+  readonly cognitoUserPoolClientIdParameter: cdk.CfnParameter;
   /** Dedicated Cognito application client identifier used by enterprise SSO. */
   readonly cognitoSsoUserPoolClientId: cdk.CfnParameter;
   /** Cognito managed-login domain used by enterprise federation. */
@@ -167,17 +179,29 @@ export interface StackParameters {
   readonly initialOwnerEmail: cdk.CfnParameter;
   /** Cognito username of the initial workspace owner. */
   readonly initialOwnerUsername: cdk.CfnParameter;
-  /** ARN of the existing Cognito user pool. */
+  /** ARN of the Cognito user pool the API trusts. */
   readonly cognitoUserPoolArn: string;
 }
+
+/** Stack parameter fields that exist only once the stack has picked its Cognito user pool. */
+export type ResolvedUserIdentityKey =
+  | 'cognitoUserPoolId'
+  | 'cognitoUserPoolClientId'
+  | 'cognitoUserPoolArn'
+  | 'userIdentity';
+
+/** Stack parameters before the Cognito user pool is resolved. */
+export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey>;
 
 /**
  * Creates stack-level CloudFormation parameters without introducing a nested construct scope.
  *
+ * Cognito identifiers are resolved by the stack, because a blank pool ID makes it create the pool.
+ *
  * @param stack - Stack that directly owns the parameters and validation rules.
  * @returns Parameters and derived values consumed by the stack subsystems.
  */
-export function buildStackParameters(stack: cdk.Stack): StackParameters {
+export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
   const alarmPrimaryTopicName = new cdk.CfnParameter(
     stack,
     'AlarmPrimaryTopicName',
@@ -577,17 +601,21 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     maxValue: 3600,
     description: 'Lifetime in seconds for clean-file download URLs.',
   });
-  const cognitoUserPoolId = new cdk.CfnParameter(stack, 'CognitoUserPoolId', {
+  const cognitoUserPoolIdParameter = new cdk.CfnParameter(stack, 'CognitoUserPoolId', {
     type: 'String',
+    default: '',
     maxLength: 55,
-    allowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
-    description: 'Existing Cognito user pool ID trusted by the mukuroji API.',
+    allowedPattern: '^(?:|[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+)$',
+    description:
+      'Existing Cognito user pool ID trusted by the mukuroji API. Leave empty to let the stack create one.',
   });
-  const cognitoUserPoolClientId = new cdk.CfnParameter(stack, 'CognitoUserPoolClientId', {
+  const cognitoUserPoolClientIdParameter = new cdk.CfnParameter(stack, 'CognitoUserPoolClientId', {
     type: 'String',
+    default: '',
     maxLength: 128,
-    allowedPattern: '^[A-Za-z0-9]+$',
-    description: 'Existing Cognito app client ID used by the mukuroji API.',
+    allowedPattern: '^(?:|[A-Za-z0-9]+)$',
+    description:
+      'Existing Cognito app client ID used by the mukuroji API. Leave empty with CognitoUserPoolId.',
   });
   const cognitoSsoUserPoolClientId = new cdk.CfnParameter(
     stack,
@@ -672,10 +700,15 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   });
   new cdk.CfnRule(stack, 'CognitoClientSeparation', {
     assertions: [{
-      assert: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
-        cognitoSsoUserPoolClientId.valueAsString,
-        cognitoUserPoolClientId.valueAsString,
-      )),
+      // Rules can reference only parameters, so this compares the client ID parameter. A
+      // stack-owned password client never equals an existing SSO client ID.
+      assert: cdk.Fn.conditionOr(
+        cdk.Fn.conditionEquals(cognitoSsoUserPoolClientId.valueAsString, ''),
+        cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
+          cognitoSsoUserPoolClientId.valueAsString,
+          cognitoUserPoolClientIdParameter.valueAsString,
+        )),
+      ),
       assertDescription:
         'CognitoSsoUserPoolClientId must differ from CognitoUserPoolClientId.',
     }],
@@ -701,11 +734,38 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     constraintDescription: 'InitialOwnerUsername must not contain whitespace.',
     description: 'Cognito username targeted when bootstrapping the initial owner attributes.',
   });
-  const cognitoUserPoolArn = cdk.Stack.of(stack).formatArn({
-    service: 'cognito-idp',
-    resource: 'userpool',
-    resourceName: cognitoUserPoolId.valueAsString,
-    arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
+  const userPoolIdBlank = cdk.Fn.conditionEquals(cognitoUserPoolIdParameter.valueAsString, '');
+  const userPoolClientIdBlank = cdk.Fn.conditionEquals(
+    cognitoUserPoolClientIdParameter.valueAsString,
+    '',
+  );
+  new cdk.CfnRule(stack, 'CognitoUserPoolParametersPaired', {
+    assertions: [{
+      assert: cdk.Fn.conditionOr(
+        cdk.Fn.conditionAnd(userPoolIdBlank, userPoolClientIdBlank),
+        cdk.Fn.conditionAnd(
+          cdk.Fn.conditionNot(userPoolIdBlank),
+          cdk.Fn.conditionNot(userPoolClientIdBlank),
+        ),
+      ),
+      assertDescription:
+        'Leave CognitoUserPoolId and CognitoUserPoolClientId both empty to create a user pool, or pass both to use an existing one.',
+    }],
+  });
+  // A stack-owned pool signs users in by username, and the API sends the login email as the
+  // username, so the invited owner's username must be that email.
+  new cdk.CfnRule(stack, 'StackOwnedUserPoolOwnerUsername', {
+    assertions: [{
+      assert: cdk.Fn.conditionOr(
+        cdk.Fn.conditionNot(userPoolIdBlank),
+        cdk.Fn.conditionEquals(
+          initialOwnerUsername.valueAsString,
+          initialOwnerEmail.valueAsString,
+        ),
+      ),
+      assertDescription:
+        'When the stack creates the user pool, InitialOwnerUsername must equal InitialOwnerEmail.',
+    }],
   });
 
   return {
@@ -740,8 +800,8 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     fileRetentionDays,
     fileUploadUrlTtlSeconds,
     fileDownloadUrlTtlSeconds,
-    cognitoUserPoolId,
-    cognitoUserPoolClientId,
+    cognitoUserPoolIdParameter,
+    cognitoUserPoolClientIdParameter,
     cognitoSsoUserPoolClientId,
     cognitoHostedUiDomain,
     cognitoSsoRedirectUri,
@@ -750,6 +810,5 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     workspaceDirectoryId,
     initialOwnerEmail,
     initialOwnerUsername,
-    cognitoUserPoolArn,
   };
 }

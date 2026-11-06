@@ -10,8 +10,8 @@
 | --- | --- | --- |
 | `AlarmPrimaryTopicName` | yes | 全 CloudWatch alarm の primary action に使う、同一 account/region 内の既存 standard SNS topic 名。 |
 | `AlarmSecondaryTopicName` | yes | 全 CloudWatch alarm の secondary action に使う、primary と異なる同一 account/region 内の既存 standard SNS topic 名。 |
-| `CognitoUserPoolId` | yes | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。 |
-| `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。 |
+| `CognitoUserPoolId` | no | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。既定値は空で、空のままなら stack が user pool を作ります。 |
+| `CognitoUserPoolClientId` | no | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。`CognitoUserPoolId` と一緒に指定するか、両方とも空にします。 |
 | `CognitoSsoUserPoolClientId` | SSO有効時 | Password client とは異なる、Hosted UI authorization-code + PKCE 専用 public app client ID。 |
 | `CognitoHostedUiDomain` | SSO有効時 | Enterprise SSO authorization-code flow に使う Cognito managed login domain。 |
 | `CognitoSsoRedirectUri` | SSO有効時 | App client callback に完全一致で登録した HTTPS SPA callback URI。 |
@@ -124,6 +124,7 @@ templateとdeployed configurationの両方で照合します。
 - `WebUrl`: Web app と `/api` を配信する CloudFront の URL
 - `WebBucketName` / `WebDistributionId`: `bun run web:deploy` が使う Web bucket と distribution
 - `ApiGatewayUrl`: API Gateway HTTP API URL（外部 webhook と、local の Web から直接呼ぶ場合）
+- `UserPoolId` / `UserPoolClientId`: API が使う Cognito user pool と password client（stack が作ったものか、parameter で渡したもの）
 - `WorkItemsTableName`（canonical Work Item store）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
@@ -531,6 +532,25 @@ DLQ の envelope は署名 timestamp が5分で失効するため、そのまま
 
 ### 1. Cognito と値を準備する
 
+`CognitoUserPoolId` と `CognitoUserPoolClientId` を両方とも空にすると、stack が Cognito を用意します。
+作るのは次の4つです。
+
+- self sign-up なしの user pool。`directory_id` / `workspace_id` custom attribute、12文字以上の password policy、任意の TOTP MFA を持ち、Essentials tier で、削除保護と `Retain` 付きです。
+- client secret なし、`ALLOW_USER_PASSWORD_AUTH` だけを許可する password client。user が自分の token で書き換えられる attribute は `name` だけです。API は email と Workspace attribute で認可するため、これらは管理者 API からしか変えられません。
+- `SystemAdminGroups` の先頭の group。
+- 初期 owner。Workspace attribute と verified email 付きで招待します。この user pool は username でサインインし、API はログインの email を username として送るため、`InitialOwnerUsername` は `InitialOwnerEmail` と同じ値にします。違う値は deploy 前に拒否されます。
+
+Cognito の既定 email が初期 owner に仮パスワードを送り、owner は最初のサインインで新しい password に
+変えます。この場合、下の `prepare-workspace-cognito.sh` と group 作成手順は不要です。
+`COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` は空のまま deploy し、deploy 後の検証では `UserPoolId` /
+`UserPoolClientId` output の値を使います。Cognito の既定 email は1日あたりの送信数が少ないため、
+招待が多い場合は SES の設定を user pool に追加してください。SSO を使う場合は、stack が作った
+user pool に IdP と SSO 専用 client を追加し、その client ID を SSO parameter に渡します。
+
+既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。app client の
+`WriteAttributes` には `email`、`custom:directory_id`、`custom:workspace_id` を含めないでください。
+含めると、user が自分の access token でこれらを書き換え、別の user として認可される可能性があります。
+
 初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。
 Password/API client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。SSO client は
 別の client ID とし、client secret なし、`ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、
@@ -704,6 +724,10 @@ owner が demo member と同じ email でも最後に manager へ収束します
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
 ### 3. Bootstrap と API を検証する
+
+Stack が user pool を作った場合、初期 owner は最初のサインインで password を変えるまで
+`FORCE_CHANGE_PASSWORD` です。サインインを済ませ、`COGNITO_USER_POOL_ID` と
+`COGNITO_USER_POOL_CLIENT_ID` に `UserPoolId` / `UserPoolClientId` output を入れてから検証します。
 
 ```sh
 export PROJECT_DIRECTORY_TABLE_NAME="$(aws cloudformation describe-stacks \

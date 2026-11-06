@@ -176,3 +176,26 @@ export function expectQueueRequiresSsl(template: Template, logicalIdPrefix: stri
 
 /** The synthesized CloudFormation template shared by tests in a Jest module. */
 export const synthesizedTemplate = createTemplate();
+
+/**
+ * Template value of the Cognito user pool ID the API trusts.
+ *
+ * The stack creates a user pool when the `CognitoUserPoolId` parameter is blank, so every
+ * consumer reads the ID through this condition.
+ */
+export const COGNITO_USER_POOL_ID_VALUE = {
+  'Fn::If': [
+    'CognitoUserPoolCreated',
+    { Ref: 'UserPool6BA7E5F2' },
+    { Ref: 'CognitoUserPoolId' },
+  ],
+} as const;
+
+/** Template value of the Cognito password client ID the API uses. */
+export const COGNITO_USER_POOL_CLIENT_ID_VALUE = {
+  'Fn::If': [
+    'CognitoUserPoolCreated',
+    { Ref: 'UserPoolUserPoolPasswordClient77DEDE49' },
+    { Ref: 'CognitoUserPoolClientId' },
+  ],
+} as const;

@@ -78,6 +78,9 @@ const apiStagePaths = [
 const webDistributionPaths = [
   'WebDistribution/Resource',
 ] as const;
+const userPoolPaths = [
+  'UserPool/Resource',
+] as const;
 const waiterStateMachinePath = [
   'RuntimeControlAlarmReadinessProvider/waiter-state-machine/Resource',
 ] as const;
@@ -398,6 +401,16 @@ const acknowledgedFindings = [
     id: 'AwsSolutions-CFR1',
     reason: 'mukuroji is an internal single-Workspace tool. Every API call is authenticated by Cognito in the application, so a geo restriction would only block legitimate travelling users.',
     scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-COG2',
+    reason: 'The internal tool sign-in has no MFA enrollment screen yet, so the stack-owned pool offers TOTP as optional. Administrators can require it per user, and enterprise SSO keeps the identity provider MFA.',
+    scopePaths: userPoolPaths,
+  },
+  {
+    id: 'AwsSolutions-COG8',
+    reason: 'The Plus feature plan adds a per-user monthly charge for threat protection that the internal-tool deployment does not justify. Essentials keeps the free tier; Cognito still throttles repeated failed sign-ins and the API limits authentication challenge attempts.',
+    scopePaths: userPoolPaths,
   },
   {
     id: 'AwsSolutions-CFR2',

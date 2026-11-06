@@ -3,7 +3,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
-import { buildStackParameters } from '../config/stack-parameters';
+import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
 import {
   buildApiRuntime,
   buildApiTransportsAndRealtime,
@@ -18,6 +18,7 @@ import {
 import { buildStackOutputs } from '../subsystems/outputs';
 import { buildRestoreDrill } from '../subsystems/restore-drill';
 import { buildRuntimeControls } from '../subsystems/runtime-controls';
+import { buildUserIdentity } from '../subsystems/user-identity';
 import { buildWebDistribution } from '../subsystems/web-distribution';
 import {
   buildAiAssistanceObservabilityWorker,
@@ -52,7 +53,18 @@ export class MukurojiStack extends cdk.Stack {
     super(scope, id, props);
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
-    const parameters = buildStackParameters(this);
+    const parameterInputs = buildStackParameters(this);
+    const userIdentity = buildUserIdentity(this, {
+      userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
+      userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
+    });
+    const parameters: StackParameters = {
+      ...parameterInputs,
+      cognitoUserPoolId: userIdentity.userPoolId,
+      cognitoUserPoolClientId: userIdentity.userPoolClientId,
+      cognitoUserPoolArn: userIdentity.userPoolArn,
+      userIdentity,
+    };
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
