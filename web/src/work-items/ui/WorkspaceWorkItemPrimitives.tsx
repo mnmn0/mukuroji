@@ -99,6 +99,8 @@ export type CompactTaskCardProps = {
   onDragEnd?: () => void
   /** Optional callback invoked when a native drag interaction starts. */
   onDragStart?: (event: DragEvent<HTMLElement>) => void
+  /** Badge naming how the viewer takes part, such as a contributor; omitted for the owner. */
+  involvementLabel?: string
   /** Row spacing selected by the effective task view. */
   density?: TaskViewDensity
   /** Opens the responsive canonical action menu for this Work Item. */
@@ -153,6 +155,7 @@ export function CompactTaskCard({
   focused = false,
   isDragging = false,
   isMoving = false,
+  involvementLabel,
   locale = 'ja',
   onDragEnd,
   onDragStart,
@@ -285,6 +288,14 @@ export function CompactTaskCard({
           </button>
         ) : null}
       </div>
+      {involvementLabel ? (
+        <span
+          className="mt-2 mr-1.5 inline-flex workbench-badge"
+          data-testid={testId ? `${testId}-involvement` : undefined}
+        >
+          {involvementLabel}
+        </span>
+      ) : null}
       {visibleFields.includes('workItemType') ? (
         <span
           className="mt-2 inline-flex max-w-full items-center gap-1.5 workbench-badge"

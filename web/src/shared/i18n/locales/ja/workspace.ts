@@ -164,6 +164,7 @@ export const workspaceMessages = {
   'workspace.myTasks.title': 'マイタスク',
   'workspace.myTasks.description':
     '自分が次に進めるタスク、レビュー待ち、完了済みの作業をひとつの流れで扱えます。',
+  'workspace.myTasks.involvement.contributor': '参加',
   'workspace.myTasks.moveError': 'タスクの状態を更新できませんでした。',
   'workspace.myTasks.conflict': '別のメンバーが先に更新しました。最新の状態へ更新しました。',
   'workspace.myTasks.moveStatusLabel': '{title} の状態を変更',
