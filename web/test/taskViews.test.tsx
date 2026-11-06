@@ -35,6 +35,8 @@ import {
   createBuiltInTaskViewDefinition,
   taskViewDefinitionToPresentationSettings,
 } from '../src/task-views/model/taskViewSurfaceState'
+import { createWorkspaceTaskKey } from '../src/work-items/model/workspaceWorkItems'
+import { createWorkspaceTaskTestId } from '../src/work-items/ui/WorkspaceWorkItemPrimitives'
 import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
 import {
   taskViewStoryConfigurationsByTeam,
@@ -475,6 +477,30 @@ describe('independent task views', () => {
     expect(html).toContain(`data-task-view-item-key="${taskKey}"`)
     expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-actions"')
     expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-status-select"')
+  })
+
+  test('marks only the My Tasks cards the viewer contributes to without owning', () => {
+    const [ownedTask, contributedTask] = taskViewStoryTasks
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        contributorTaskKeys={new Set([createWorkspaceTaskKey(contributedTask)])}
+        t={t}
+        tasks={[ownedTask, contributedTask]}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    const contributedTestId = `my-tasks-card-${createWorkspaceTaskTestId(contributedTask)}`
+    const ownedTestId = `my-tasks-card-${createWorkspaceTaskTestId(ownedTask)}`
+    expect(html).toContain(`data-testid="${contributedTestId}-involvement"`)
+    expect(html).not.toContain(`data-testid="${ownedTestId}-involvement"`)
+    expect(html).toContain(`>${t('workspace.myTasks.involvement.contributor')}</span>`)
   })
 
   test('keeps My Tasks status controls hidden when the exact Work Item scope is read-only', () => {
