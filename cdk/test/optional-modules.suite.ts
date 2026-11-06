@@ -4,15 +4,20 @@ import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { MukurojiStack, RESTORE_DRILL_CONTEXT_KEY } from '../lib/stacks/mukuroji-stack';
+import { RESTORE_DRILL_CONTEXT_KEY, readStackModuleProps } from '../bin/stack-modules';
+import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 
 /**
- * Synthesizes the stack the way `cdk deploy` does without module context.
+ * Synthesizes the stack the way `bin/cdk.ts` composes it.
  *
  * @param context - Extra CDK context values.
+ * @param props - Stack Props in place of the ones `bin/cdk.ts` reads from context.
  * @returns The synthesized template and the stack's error annotations.
  */
-function synthesizeDefaultStack(context: Record<string, unknown> = {}) {
+function synthesizeDefaultStack(
+  context: Record<string, unknown> = {},
+  props?: MukurojiStackProps,
+) {
   const app = new cdk.App({
     context: {
       // The feature flags cdk.json sets for every synthesis.
@@ -23,7 +28,7 @@ function synthesizeDefaultStack(context: Record<string, unknown> = {}) {
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-  const stack = new MukurojiStack(app, 'OptionalModules');
+  const stack = new MukurojiStack(app, 'OptionalModules', props ?? readStackModuleProps(app));
   acknowledgeKnownNagFindings(stack);
   const template = Template.fromStack(stack);
   const errors = app.synth().getStackArtifact(stack.artifactId).messages
@@ -66,4 +71,13 @@ test('turns the restore drill on through CDK context', () => {
 
   expect(template.toJSON().Parameters.RestoreDrillCleanupApproverRoleArn).toBeDefined();
   template.hasOutput('RestoreDrillStateMachineArn', {});
+});
+
+test('ignores restore drill context the composition root did not pass to the stack', () => {
+  const { template } = synthesizeDefaultStack(
+    { [RESTORE_DRILL_CONTEXT_KEY]: 'true' },
+    { restoreDrillEnabled: false },
+  );
+
+  expect(template.toJSON().Parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
 });
