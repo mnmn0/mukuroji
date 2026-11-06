@@ -9043,6 +9043,52 @@ test.describe('authenticated task page', () => {
     await expect(designColumn.getByText('デザインチームの担当タスク')).toBeVisible()
   })
 
+  test('My Tasks は Contributor として参加しているタスクを「参加」として区別する', async ({ page }) => {
+    const otherOwner = {
+      assigneeEmail: 'tanaka@example.com',
+      assigneeName: '田中 一郎',
+      assigneeUserId: 'tanaka@example.com',
+    }
+    await mockAuthenticatedTaskPage(page, [], undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({ id: 'owned-task', title: '自分が責任者のタスク' }),
+          createStoredTeamIssue({
+            ...otherOwner,
+            contributorAssignments: [{
+              assignmentId: 'a'.repeat(32),
+              memberUserId: 'sato@example.com',
+              status: 'in-progress',
+            }],
+            id: 'contributed-task',
+            title: '参加しているタスク',
+          }),
+          createStoredTeamIssue({
+            ...otherOwner,
+            contributorAssignments: [{
+              assignmentId: 'b'.repeat(32),
+              memberUserId: 'sato@example.com',
+              status: 'done',
+            }],
+            id: 'finished-share-task',
+            title: '自分の分担を終えたタスク',
+          }),
+          createStoredTeamIssue({ ...otherOwner, id: 'unrelated-task', title: '関わっていないタスク' }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+
+    await page.goto('/my-tasks')
+
+    await expect(page.getByTestId('my-tasks-card-refero-owned-task')).toBeVisible()
+    await expect(page.getByTestId('my-tasks-card-refero-owned-task-involvement')).toHaveCount(0)
+    await expect(page.getByTestId('my-tasks-card-refero-contributed-task')).toBeVisible()
+    await expect(page.getByTestId('my-tasks-card-refero-contributed-task-involvement')).toHaveText('参加')
+    await expect(page.getByTestId('my-tasks-card-refero-finished-share-task')).toHaveCount(0)
+    await expect(page.getByTestId('my-tasks-card-refero-unrelated-task')).toHaveCount(0)
+  })
+
   test('プロジェクト画面の権限タブでメンバーのロールを変更できる', async ({ page }) => {
     await page.unroute('**/api/auth/me')
     await page.route('**/api/auth/me', async (route) => {

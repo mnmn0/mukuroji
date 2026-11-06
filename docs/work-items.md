@@ -122,10 +122,14 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - 保存済み contributor の member ID は trim・小文字化済み・256 文字以内・制御文字なし、ジョブロール ID は設定 ID の文法に従う必要があり、外れた row は読み取り時に失敗する。
 - contributor を変更する更新で `expectedRevision` が古い場合は、assignment ID の検証より先に `409 WorkItemRevisionConflict` を返す。
 
+個人向けの画面では、責任者の仕事と参加している仕事を分けて扱う。
+
+- Focus は [Focus queue の「責任者と参加」](./focus.md#責任者と参加) のとおり `involvement` で区別する。
+- My Tasks は、利用者が責任者の Work Item に加えて、`contributorAssignments` に member として入っている Work Item を表示する。後者のカードにだけ「参加」の badge を付け、担当者の表示はこれまでどおり責任者を示す。対象の判定は Focus と同じで、責任者が Contributor の一覧にも入っている場合は責任者として扱い、自分の分担が `done` の Contributor は進行中の Work Item から外れ、完了・キャンセル済みの Work Item には残る。ロールだけの分担はどの利用者の My Tasks にも入らない。判定は Web が取得済みの Work Item から行い、状態の移動などの操作可否はこれまでどおり Work Item の書き込み権限で決まる。
+
 まだ実装していない範囲は次のとおり。
 
 - workload / capacity への planned effort の集計
-- My Tasks での区別（Focus は [Focus queue の「責任者と参加」](./focus.md#責任者と参加) で区別済み）
 - automation、template、bulk action からの設定
 - member 無効化や Team 移動時の再割り当て
 - 通知の分離
