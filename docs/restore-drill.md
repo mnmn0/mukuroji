@@ -1,5 +1,9 @@
 # Isolated restore drill
 
+The restore drill is the optional CDK module `restoreDrill`. A default stack does
+not create it; see [Optional modules](../cdk/README.md#optional-modules) for how
+to deploy it.
+
 The restore drill is a production-data recovery test. It restores data only to
 resources that are not referenced by the API, workers, runtime configuration,
 or traffic routing. A successful drill is evidence that a selected historical

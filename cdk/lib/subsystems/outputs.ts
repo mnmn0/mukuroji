@@ -12,9 +12,59 @@ import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import type { FileBucketIncarnationMarker } from './file-storage';
 
 /**
+ * Restore-drill resources whose attributes are published as stack outputs.
+ */
+export type RestoreDrillOutputResources = {
+  /** Standard state machine that performs an isolated restore drill. */
+  readonly workflow: stepfunctions.IStateMachine;
+  /** Standard state machine that performs approval-gated drill cleanup. */
+  readonly cleanupWorkflow: stepfunctions.IStateMachine;
+  /** Append-only immutable restore-drill evidence bucket. */
+  readonly evidenceBucket: s3.IBucket;
+  /** Isolated bucket containing temporary exports and exact object copies. */
+  readonly scratchBucket: s3.IBucket;
+  /** Durable restore-drill run, checkpoint, and cadence table. */
+  readonly stateTable: dynamodb.ITable;
+  /** Unattached policy for data-owner cleanup approval sessions. */
+  readonly cleanupApprovalPolicy: iam.IManagedPolicy;
+  /** Dead-letter queue for exhausted restore-drill schedule deliveries. */
+  readonly scheduleDlq: sqs.IQueue;
+};
+
+/**
+ * Connector resources whose attributes are published as stack outputs.
+ */
+export type ConnectorOutputResources = {
+  /** Secret that stores connector runtime credentials. */
+  readonly connectorRuntimeSecret: secretsmanager.ISecret;
+  /** Queue that carries connector synchronization work. */
+  readonly connectorSyncQueue: sqs.IQueue;
+  /** Dead-letter queue for connector synchronization failures. */
+  readonly connectorSyncDlq: sqs.IQueue;
+  /** Dead-letter queue for scheduled connector polling failures. */
+  readonly connectorPollDlq: sqs.IQueue;
+};
+
+/**
+ * Request email ingestion resources whose attributes are published as stack outputs.
+ */
+export type RequestEmailOutputResources = {
+  /** Lambda function that ingests request email. */
+  readonly requestEmailIngestionFunction: lambda.IFunction;
+  /** Dead-letter queue for request email ingestion failures. */
+  readonly requestEmailIngestionDlq: sqs.IQueue;
+};
+
+/**
  * Resources whose deployment attributes are published as stack outputs.
  */
 export type StackOutputResources = {
+  /** Restore-drill resources, present only when the optional module is deployed. */
+  readonly restoreDrill: RestoreDrillOutputResources | undefined;
+  /** Connector resources, present only when the optional module is deployed. */
+  readonly connectors: ConnectorOutputResources | undefined;
+  /** Request email ingestion resources, present only when the optional module is deployed. */
+  readonly requestEmail: RequestEmailOutputResources | undefined;
   /** Project directory table. */
   readonly projectDirectoryTable: dynamodb.ITable;
   /** Canonical Work Item table. */
@@ -57,20 +107,6 @@ export type StackOutputResources = {
   readonly workspaceSearchTable: dynamodb.ITable;
   /** Read-only policy attached explicitly to an approved integrity-check operator. */
   readonly crossDomainIntegrityOperatorPolicy: iam.IManagedPolicy;
-  /** Standard state machine that performs an isolated restore drill. */
-  readonly workflow: stepfunctions.IStateMachine;
-  /** Standard state machine that performs approval-gated drill cleanup. */
-  readonly cleanupWorkflow: stepfunctions.IStateMachine;
-  /** Append-only immutable restore-drill evidence bucket. */
-  readonly evidenceBucket: s3.IBucket;
-  /** Isolated bucket containing temporary exports and exact object copies. */
-  readonly scratchBucket: s3.IBucket;
-  /** Durable restore-drill run, checkpoint, and cadence table. */
-  readonly stateTable: dynamodb.ITable;
-  /** Unattached policy for data-owner cleanup approval sessions. */
-  readonly cleanupApprovalPolicy: iam.IManagedPolicy;
-  /** Dead-letter queue for exhausted restore-drill schedule deliveries. */
-  readonly scheduleDlq: sqs.IQueue;
   /** Durable notification table. */
   readonly notificationsTable: dynamodb.ITable;
   /** Focus queue preferences and snooze state table. */
@@ -107,14 +143,6 @@ export type StackOutputResources = {
   readonly workItemImportQueue: sqs.IQueue;
   /** Dead-letter queue for Work Item import failures. */
   readonly workItemImportDlq: sqs.IQueue;
-  /** Secret that stores connector runtime credentials. */
-  readonly connectorRuntimeSecret: secretsmanager.ISecret;
-  /** Queue that carries connector synchronization work. */
-  readonly connectorSyncQueue: sqs.IQueue;
-  /** Dead-letter queue for connector synchronization failures. */
-  readonly connectorSyncDlq: sqs.IQueue;
-  /** Dead-letter queue for scheduled connector polling failures. */
-  readonly connectorPollDlq: sqs.IQueue;
   /** Dead-letter queue for event-triggered automation failures. */
   readonly automationEventDlq: sqs.IQueue;
   /** Dead-letter queue for scheduled automation failures. */
@@ -123,10 +151,6 @@ export type StackOutputResources = {
   readonly analyticsScheduleDlq: sqs.IQueue;
   /** Dead-letter queue for scheduled notification failures. */
   readonly notificationScheduleDlq: sqs.IQueue;
-  /** Lambda function that ingests request email. */
-  readonly requestEmailIngestionFunction: lambda.IFunction;
-  /** Dead-letter queue for request email ingestion failures. */
-  readonly requestEmailIngestionDlq: sqs.IQueue;
   /** Lambda function that processes scheduled Triage wake-ups. */
   readonly triageScheduleFunction: lambda.IFunction;
   /** Dead-letter queue for scheduled Triage wake-up failures. */
@@ -250,27 +274,30 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
     value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,
   });
-  new cdk.CfnOutput(scope, 'RestoreDrillStateMachineArn', {
-    value: resources.workflow.stateMachineArn,
-  });
-  new cdk.CfnOutput(scope, 'RestoreDrillCleanupStateMachineArn', {
-    value: resources.cleanupWorkflow.stateMachineArn,
-  });
-  new cdk.CfnOutput(scope, 'RestoreDrillEvidenceBucketName', {
-    value: resources.evidenceBucket.bucketName,
-  });
-  new cdk.CfnOutput(scope, 'RestoreDrillScratchBucketName', {
-    value: resources.scratchBucket.bucketName,
-  });
-  new cdk.CfnOutput(scope, 'RestoreDrillStateTableName', {
-    value: resources.stateTable.tableName,
-  });
-  new cdk.CfnOutput(scope, 'RestoreDrillCleanupApprovalPolicyArn', {
-    value: resources.cleanupApprovalPolicy.managedPolicyArn,
-  });
-  new cdk.CfnOutput(scope, 'RestoreDrillScheduleDlqUrl', {
-    value: resources.scheduleDlq.queueUrl,
-  });
+  const { restoreDrill } = resources;
+  if (restoreDrill) {
+    new cdk.CfnOutput(scope, 'RestoreDrillStateMachineArn', {
+      value: restoreDrill.workflow.stateMachineArn,
+    });
+    new cdk.CfnOutput(scope, 'RestoreDrillCleanupStateMachineArn', {
+      value: restoreDrill.cleanupWorkflow.stateMachineArn,
+    });
+    new cdk.CfnOutput(scope, 'RestoreDrillEvidenceBucketName', {
+      value: restoreDrill.evidenceBucket.bucketName,
+    });
+    new cdk.CfnOutput(scope, 'RestoreDrillScratchBucketName', {
+      value: restoreDrill.scratchBucket.bucketName,
+    });
+    new cdk.CfnOutput(scope, 'RestoreDrillStateTableName', {
+      value: restoreDrill.stateTable.tableName,
+    });
+    new cdk.CfnOutput(scope, 'RestoreDrillCleanupApprovalPolicyArn', {
+      value: restoreDrill.cleanupApprovalPolicy.managedPolicyArn,
+    });
+    new cdk.CfnOutput(scope, 'RestoreDrillScheduleDlqUrl', {
+      value: restoreDrill.scheduleDlq.queueUrl,
+    });
+  }
   new cdk.CfnOutput(scope, 'NotificationsTableName', {
     value: resources.notificationsTable.tableName,
   });
@@ -334,18 +361,21 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'WorkItemImportDlqUrl', {
     value: resources.workItemImportDlq.queueUrl,
   });
-  new cdk.CfnOutput(scope, 'ConnectorRuntimeSecretArn', {
-    value: resources.connectorRuntimeSecret.secretArn,
-  });
-  new cdk.CfnOutput(scope, 'ConnectorSyncQueueUrl', {
-    value: resources.connectorSyncQueue.queueUrl,
-  });
-  new cdk.CfnOutput(scope, 'ConnectorSyncDlqUrl', {
-    value: resources.connectorSyncDlq.queueUrl,
-  });
-  new cdk.CfnOutput(scope, 'ConnectorPollDlqUrl', {
-    value: resources.connectorPollDlq.queueUrl,
-  });
+  const { connectors } = resources;
+  if (connectors) {
+    new cdk.CfnOutput(scope, 'ConnectorRuntimeSecretArn', {
+      value: connectors.connectorRuntimeSecret.secretArn,
+    });
+    new cdk.CfnOutput(scope, 'ConnectorSyncQueueUrl', {
+      value: connectors.connectorSyncQueue.queueUrl,
+    });
+    new cdk.CfnOutput(scope, 'ConnectorSyncDlqUrl', {
+      value: connectors.connectorSyncDlq.queueUrl,
+    });
+    new cdk.CfnOutput(scope, 'ConnectorPollDlqUrl', {
+      value: connectors.connectorPollDlq.queueUrl,
+    });
+  }
   new cdk.CfnOutput(scope, 'AutomationEventDlqUrl', {
     value: resources.automationEventDlq.queueUrl,
   });
@@ -358,12 +388,15 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'NotificationScheduleDlqUrl', {
     value: resources.notificationScheduleDlq.queueUrl,
   });
-  new cdk.CfnOutput(scope, 'RequestEmailIngestionFunctionName', {
-    value: resources.requestEmailIngestionFunction.functionName,
-  });
-  new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
-    value: resources.requestEmailIngestionDlq.queueUrl,
-  });
+  const { requestEmail } = resources;
+  if (requestEmail) {
+    new cdk.CfnOutput(scope, 'RequestEmailIngestionFunctionName', {
+      value: requestEmail.requestEmailIngestionFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
+      value: requestEmail.requestEmailIngestionDlq.queueUrl,
+    });
+  }
   new cdk.CfnOutput(scope, 'TriageScheduleFunctionName', {
     value: resources.triageScheduleFunction.functionName,
   });

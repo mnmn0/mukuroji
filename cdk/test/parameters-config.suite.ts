@@ -2,6 +2,7 @@
 import { expect, test } from '@jest/globals';
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import { ALL_OPTIONAL_MODULES } from '../lib/config/optional-modules';
 import { buildStackParameters } from '../lib/config/stack-parameters';
 import { synthesizedTemplate } from './test-support';
 
@@ -266,7 +267,7 @@ test('derives restore-drill approver ARN partitions from concrete stack Regions'
     { partition: 'aws-us-gov', stack: govCloudStack },
     { partition: 'aws-cn', stack: chinaStack },
   ]) {
-    buildStackParameters(stack);
+    buildStackParameters(stack, ALL_OPTIONAL_MODULES);
     expect(
       Template.fromStack(stack).toJSON()
         .Parameters.RestoreDrillCleanupApproverRoleArn.AllowedPattern,
@@ -283,7 +284,7 @@ test('rejects concrete restore-drill stacks in unsupported ARN partitions', () =
     { env: { account: '123456789012', region: 'us-iso-east-1' } },
   );
 
-  expect(() => buildStackParameters(stack)).toThrow(
+  expect(() => buildStackParameters(stack, ALL_OPTIONAL_MODULES)).toThrow(
     'Restore drill does not support the aws-iso AWS partition.',
   );
 
@@ -292,7 +293,7 @@ test('rejects concrete restore-drill stacks in unsupported ARN partitions', () =
     'UnknownPartitionFixture',
     { env: { account: '123456789012', region: 'xx-unknown-1' } },
   );
-  expect(() => buildStackParameters(unknownRegionStack)).toThrow(
+  expect(() => buildStackParameters(unknownRegionStack, ALL_OPTIONAL_MODULES)).toThrow(
     'Unable to resolve an AWS partition for concrete Region xx-unknown-1.',
   );
 });

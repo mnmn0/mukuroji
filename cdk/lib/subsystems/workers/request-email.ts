@@ -51,6 +51,9 @@ export function buildRequestEmailWorker(
 ): RequestEmailWorkerResources {
   const { requestIntakeTable, tenantAdministrationTable } = input.dataStores;
   const { requestEmailWebhookSecret, requestTokenHashSecret } = input.parameters;
+  if (!requestEmailWebhookSecret) {
+    throw new Error('Request email ingestion requires the RequestEmailWebhookSecret parameter.');
+  }
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
 
   const requestEmailIngestionDlq = new sqs.Queue(scope, 'RequestEmailIngestionDlq', {

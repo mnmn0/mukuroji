@@ -278,16 +278,14 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
   });
 });
 
-test('developer platform and connector runtime secrets use rotated purpose-specific KMS keys', () => {
+test('developer platform and connector runtime secrets share one rotated KMS key', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
-  template.resourceCountIs('AWS::KMS::Key', 6);
+  template.resourceCountIs('AWS::KMS::Key', 3);
   for (const description of [
-    'Envelope key for developer platform Webhook signing secrets.',
-    'Envelope key for developer platform connector credentials.',
-    'Envelope key for developer platform cursors and idempotency state.',
-    'Encryption key for connector provider runtime configuration.',
+    'Envelope key for developer platform Webhook secrets, connector credentials, ' +
+      'cursor state, and connector runtime configuration.',
     'Encrypts isolated restore-drill exports and exact-version file copies.',
     'Encrypts immutable secret-free restore-drill evidence.',
   ]) {
@@ -299,7 +297,15 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const protectedKmsKeys = Object.values(resources).filter((resource) =>
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(protectedKmsKeys).toHaveLength(6);
+  expect(protectedKmsKeys).toHaveLength(3);
+  const developerPlatformKeyId = Object.keys(resources).find((logicalId) =>
+    logicalId.startsWith('DeveloperPlatformKey'));
+  expect(developerPlatformKeyId).toBeDefined();
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Description:
+      'Provider configuration and signing secrets loaded only by connector runtimes.',
+    KmsKeyId: { 'Fn::GetAtt': [developerPlatformKeyId, 'Arn'] },
+  });
   expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'
@@ -646,9 +652,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const developerPlatformTableId =
     template.toJSON().Outputs.DeveloperPlatformTableName?.Value?.Ref;
   const developerPlatformKeyExpectations = [
-    { prefix: 'DeveloperPlatformWebhookKey', purpose: 'webhook' },
-    { prefix: 'DeveloperPlatformConnectorKey', purpose: 'connector' },
-    { prefix: 'DeveloperPlatformStateKey', purpose: 'platform-state' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'webhook' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'connector' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'platform-state' },
   ].map(({ prefix, purpose }) => ({
     keyId: Object.entries(resources).find(([logicalId, resource]) =>
       logicalId.startsWith(prefix) &&
@@ -827,9 +833,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
   expect(serializedApiPolicies).toContain('kms:GenerateDataKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformWebhookKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformConnectorKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformStateKey');
+  expect(serializedApiPolicies).toContain('DeveloperPlatformKey');
   expect(serializedApiPolicies).toContain('secretsmanager:GetSecretValue');
   expect(serializedApiPolicies).toContain(':secret:');
   expect(serializedApiPolicies).toContain('mukuroji/automation-webhooks/');
