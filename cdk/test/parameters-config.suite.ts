@@ -266,7 +266,7 @@ test('derives restore-drill approver ARN partitions from concrete stack Regions'
     { partition: 'aws-us-gov', stack: govCloudStack },
     { partition: 'aws-cn', stack: chinaStack },
   ]) {
-    buildStackParameters(stack);
+    buildStackParameters(stack, { restoreDrillEnabled: true });
     expect(
       Template.fromStack(stack).toJSON()
         .Parameters.RestoreDrillCleanupApproverRoleArn.AllowedPattern,
@@ -283,7 +283,7 @@ test('rejects concrete restore-drill stacks in unsupported ARN partitions', () =
     { env: { account: '123456789012', region: 'us-iso-east-1' } },
   );
 
-  expect(() => buildStackParameters(stack)).toThrow(
+  expect(() => buildStackParameters(stack, { restoreDrillEnabled: true })).toThrow(
     'Restore drill does not support the aws-iso AWS partition.',
   );
 
@@ -292,7 +292,7 @@ test('rejects concrete restore-drill stacks in unsupported ARN partitions', () =
     'UnknownPartitionFixture',
     { env: { account: '123456789012', region: 'xx-unknown-1' } },
   );
-  expect(() => buildStackParameters(unknownRegionStack)).toThrow(
+  expect(() => buildStackParameters(unknownRegionStack, { restoreDrillEnabled: true })).toThrow(
     'Unable to resolve an AWS partition for concrete Region xx-unknown-1.',
   );
 });

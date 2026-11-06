@@ -38,6 +38,16 @@ import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-impor
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
 import { buildAgentRunTriageWorker } from '../subsystems/workers/agent-run-triage';
 
+/** Stack configuration, including the optional modules the stack deploys. */
+export type MukurojiStackProps = cdk.StackProps & Readonly<{
+  /**
+   * Deploys the scheduled isolated restore drill. It adds Step Functions workflows, a KMS-encrypted
+   * scratch bucket, and an Object Lock evidence bucket whose objects cannot be deleted for 400
+   * days. Off unless the composition root turns it on.
+   */
+  readonly restoreDrillEnabled?: boolean;
+}>;
+
 /**
  * Composes the Mukuroji application infrastructure from subsystem builders.
  */
@@ -47,13 +57,14 @@ export class MukurojiStack extends cdk.Stack {
    *
    * @param scope Parent construct that owns the stack.
    * @param id Stable stack construct identifier.
-   * @param props Optional CDK stack configuration.
+   * @param props Optional CDK stack configuration and optional modules.
    */
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: MukurojiStackProps) {
     super(scope, id, props);
+    const restoreDrillEnabled = props?.restoreDrillEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
-    const parameterInputs = buildStackParameters(this);
+    const parameterInputs = buildStackParameters(this, { restoreDrillEnabled });
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
@@ -91,13 +102,14 @@ export class MukurojiStack extends cdk.Stack {
       workItemConfigurationTable: dataStores.workItemConfigurationTable,
       workspaceAccessTable: dataStores.workspaceAccessTable,
     });
-    const restoreDrill = buildRestoreDrill(this, {
-      dataStores,
-      fileStorage,
-      lambdaBuildPaths,
-      cleanupApproverRoleArn:
-        parameters.restoreDrillCleanupApproverRoleArn,
-    });
+    const restoreDrill = parameters.restoreDrillCleanupApproverRoleArn
+      ? buildRestoreDrill(this, {
+        dataStores,
+        fileStorage,
+        lambdaBuildPaths,
+        cleanupApproverRoleArn: parameters.restoreDrillCleanupApproverRoleArn,
+      })
+      : undefined;
 
     const workerChannels = buildWorkerChannels(this);
     const apiRuntime = buildApiRuntime(this, {
@@ -111,7 +123,7 @@ export class MukurojiStack extends cdk.Stack {
     configureFileStorageApiBoundary(
       fileStorage,
       apiRuntime.apiFunction,
-      restoreDrill.runnerRole,
+      restoreDrill?.runnerRole,
     );
 
     const enterpriseIdentityWorkers = buildEnterpriseIdentityWorkers(this, {
@@ -259,7 +271,6 @@ export class MukurojiStack extends cdk.Stack {
       ...dataStores,
       ...fileStorage,
       ...crossDomainIntegrity,
-      ...restoreDrill,
       ...workerChannels,
       ...apiTransports,
       ...webDistribution,

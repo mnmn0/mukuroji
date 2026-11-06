@@ -411,7 +411,6 @@ export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
 export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
 export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_API_ALLOWED_ORIGINS=https://app.example.com
 
 bash scripts/prepare-workspace-cognito.sh
@@ -427,7 +426,6 @@ bun --filter cdk cdk diff Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
@@ -455,7 +453,6 @@ bun --filter cdk cdk deploy Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \

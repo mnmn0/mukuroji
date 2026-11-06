@@ -3,7 +3,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { expect } from '@jest/globals';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { MukurojiStack } from '../lib/stacks/mukuroji-stack';
+import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 
 /** Stable logical ID of the single API runtime-configuration secret. */
 export const API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
@@ -16,9 +16,14 @@ export const WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID =
 /**
  * Synthesizes the application stack for infrastructure assertions.
  *
+ * The shared template turns on every optional module so each suite can assert its resources.
+ *
+ * @param props - Optional modules to deploy; every module is on by default.
  * @returns The synthesized CloudFormation template.
  */
-export function createTemplate(): Template {
+export function createTemplate(
+  props: MukurojiStackProps = { restoreDrillEnabled: true },
+): Template {
   const app = new cdk.App({
     context: {
       '@aws-cdk/aws-iam:minimizePolicies': true,
@@ -27,7 +32,7 @@ export function createTemplate(): Template {
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-  const stack = new MukurojiStack(app, 'Test');
+  const stack = new MukurojiStack(app, 'Test', props);
   acknowledgeKnownNagFindings(stack);
 
   return Template.fromStack(stack);

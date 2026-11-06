@@ -18,7 +18,7 @@
 | `CognitoEnterpriseIdpName` | SSO有効時 | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡します。 |
-| `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
+| `RestoreDrillCleanupApproverRoleArn` | 復元ドリル有効時 | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
 | `AiBedrockModelId` | AI有効時 | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
@@ -637,7 +637,6 @@ export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
 export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
 export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff Mukuroji \
@@ -649,7 +648,6 @@ bun --filter cdk cdk diff Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
@@ -677,7 +675,6 @@ bun --filter cdk cdk deploy Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
@@ -909,6 +906,21 @@ aws dynamodb wait table-exists \
 復元 table の key schema / GSI / item count / representative records を確認します。その後は、(a) reviewed conditional copy で元 table の対象 item を修復する、または (b) CDK を更新して復元 table を参照し resource import する、のどちらかを選びます。切替確認前に元 table や旧 partition を削除しません。
 
 ## Scheduled isolated restore drill
+
+復元ドリルは任意の module で、既定では deploy しません。有効にすると Step Functions workflow、
+KMS key 付きの scratch / evidence bucket などが増えます。evidence bucket は 400 日の Object Lock
+COMPLIANCE を使うため、一度書いた evidence は保持期間が終わるまで誰も削除できません。
+有効にするときは CDK context で指定し、`RestoreDrillCleanupApproverRoleArn` も渡します。
+
+```sh
+bun --filter cdk cdk deploy Mukuroji \
+  -c mukuroji:restoreDrill=true \
+  --parameters RestoreDrillCleanupApproverRoleArn='arn:aws:iam::<account-id>:role/<data-owner-role>' \
+  ...
+```
+
+無効のときは drill の resource、output、parameter がなく、削除済み file version を読める principal も
+ありません。以下はこの module を有効にした場合の動作です。
 
 Incident recoveryとは別に、daily due scannerが直近の成功済みverificationから89日で同一regionの
 隔離drillをadmitし、90日でoverdue alarmを発火します。Standard Step Functions workflowは
