@@ -688,17 +688,30 @@ test('limits each role to its own purposes on the shared developer platform key'
       StringEquals?: Record<string, unknown>;
     } | undefined)?.StringEquals?.['kms:ViaService'] ?? '').includes('"secretsmanager."');
 
-  const grants = Object.values(resources)
-    .filter((resource) => resource.Type === 'AWS::IAM::Policy')
-    .flatMap((resource) => {
-      const roles = (resource.Properties.Roles as Array<{ Ref: string }>)
-        .map((role) => role.Ref);
-      return (resource.Properties.PolicyDocument as {
-        Statement: Array<Record<string, unknown>>;
-      }).Statement
-        .filter((statement) => JSON.stringify(statement.Resource).includes(`"${keyId}"`))
-        .flatMap((statement) => roles.map((role) => ({ role, statement })));
-    });
+  // Every identity-based statement in the stack, with the roles it reaches: standalone and
+  // managed policies list their roles, and a role's inline policies belong to that role.
+  const identityStatements = Object.entries(resources).flatMap(([logicalId, resource]) => {
+    const documents = resource.Type === 'AWS::IAM::Role'
+      ? ((resource.Properties.Policies ?? []) as Array<{ PolicyDocument: unknown }>)
+        .map((policy) => policy.PolicyDocument)
+      : resource.Type === 'AWS::IAM::Policy' || resource.Type === 'AWS::IAM::ManagedPolicy'
+        ? [resource.Properties.PolicyDocument]
+        : [];
+    const roles = resource.Type === 'AWS::IAM::Role'
+      ? [logicalId]
+      : ((resource.Properties.Roles ?? []) as Array<{ Ref: string }>).map((role) => role.Ref);
+    return documents.flatMap((document) =>
+      (document as { Statement: Array<Record<string, unknown>> }).Statement
+        .flatMap((statement) => roles.map((role) => ({ role, statement }))));
+  });
+  // No identity policy may grant KMS use on every key, which would bypass the purpose checks.
+  expect(identityStatements.filter(({ statement }) => {
+    const actions = [statement.Action].flat() as string[];
+    return actions.some((action) => action.startsWith('kms:')) &&
+      [statement.Resource].flat().includes('*');
+  })).toEqual([]);
+  const grants = identityStatements.filter(({ statement }) =>
+    JSON.stringify(statement.Resource).includes(`"${keyId}"`));
   expect(grants.length).toBeGreaterThan(0);
   const disallowedGrants = grants.filter(({ role, statement }) => {
     const rolePrefix = Object.keys(allowedPurposesByRolePrefix)
