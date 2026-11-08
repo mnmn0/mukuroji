@@ -646,6 +646,51 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
   expect(serializedRealtimePolicy).not.toContain('/*/*/@connections/*');
 });
 
+test('scopes every grant on the shared developer platform key to one purpose or Secrets Manager', () => {
+  const resources = synthesizedTemplate.toJSON().Resources as Record<string, {
+    Type: string;
+    Properties: Record<string, unknown>;
+  }>;
+  const [keyId, key] = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('DeveloperPlatformKey') && resource.Type === 'AWS::KMS::Key'
+  ) ?? [];
+  expect(keyId).toBeDefined();
+  const purposes = ['webhook', 'connector', 'platform-state'];
+  /**
+   * Reports whether a statement limits use to one data-key purpose or to Secrets Manager.
+   *
+   * @param statement - IAM or key policy statement on the shared key.
+   * @returns Whether the condition binds the statement to a single use.
+   */
+  const isScoped = (statement: Record<string, unknown>): boolean => {
+    const condition = JSON.stringify(statement.Condition ?? {});
+    const purpose = (statement.Condition as {
+      StringEquals?: Record<string, unknown>;
+    } | undefined)?.StringEquals?.['kms:EncryptionContext:mukuroji:purpose'];
+    return (typeof purpose === 'string' && purposes.includes(purpose) &&
+      condition.includes('"kms:EncryptionContext:mukuroji:service":"developer-platform"')) ||
+      condition.includes('"kms:ViaService"') && condition.includes('secretsmanager.');
+  };
+
+  const iamStatements = Object.values(resources)
+    .filter((resource) => resource.Type === 'AWS::IAM::Policy')
+    .flatMap((resource) => (resource.Properties.PolicyDocument as {
+      Statement: Array<Record<string, unknown>>;
+    }).Statement)
+    .filter((statement) => JSON.stringify(statement.Resource).includes(`"${keyId}"`));
+  expect(iamStatements.length).toBeGreaterThan(0);
+  expect(iamStatements.filter((statement) => !isScoped(statement))).toEqual([]);
+
+  // Key policy statements other than the account-root administrator statement.
+  const keyPolicy = key?.Properties.KeyPolicy as {
+    Statement: Array<Record<string, unknown>>;
+  } | undefined;
+  const keyPolicyStatements = (keyPolicy?.Statement ?? [])
+    .filter((statement) => statement.Action !== 'kms:*');
+  expect(keyPolicyStatements.length).toBeGreaterThan(0);
+  expect(keyPolicyStatements.filter((statement) => !isScoped(statement))).toEqual([]);
+});
+
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;

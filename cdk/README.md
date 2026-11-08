@@ -71,9 +71,19 @@ bun --filter cdk cdk deploy Mukuroji \
 `cdk.json` の `context` に `"mukuroji:connectors": true` のように書いても同じです。`true` と文字列の
 `"true"` 以外の値は無効として扱います。
 
-一度作ったモジュールを外すと、CloudFormation は Lambda、queue、alarm などを削除しますが、`Retain` の
-table、bucket、secret、KMS key は AWS アカウントに残ります。Object Lock の evidence bucket は保持期間が
-終わるまで削除できません。外す前に、そのモジュールの DLQ が空であることを確認してください。
+一度作ったモジュールを外すと、CloudFormation は Lambda、alarm、IAM role などを削除しますが、`Retain` の
+resource は stack から外れるだけで AWS アカウントに残ります。残るのは table、bucket、secret、KMS key、
+log group と、connectors の `ConnectorSyncQueue`・`ConnectorSyncDlq`・`ConnectorPollDlq`、requestEmail の
+`RequestEmailIngestionDlq` です。queue 内の message も保持期間までは残ります。Object Lock の evidence
+bucket は保持期間が終わるまで削除できません。外す前に次を行ってください。
+
+- そのモジュールの queue と DLQ が空であることを確認し、`cdk deploy` の output から queue URL と secret ARN を
+  記録します。残った resource は記録した URL / ARN で後から確認し、不要なら手で削除します。
+- connectors を外すと `ConnectorRuntimeSecret` も stack から外れます。あとで再び有効にすると、stack は
+  `ConnectorRuntimeConfiguration`（既定値 `{}`）で新しい secret を作るため、provider 設定は自動では戻りません。
+  secret ARN が変わるので、再有効化の deploy では `ApiRuntimeConfigurationRevision` を増やします。deploy 後に、
+  記録した旧 secret の値を新しい secret（`ConnectorRuntimeSecretArn` output）へコピーしてから connector の
+  同期を再開してください。
 
 Developer platform の Webhook secret、connector credential、cursor state と connector runtime secret は、
 1 つの `DeveloperPlatformKey` で暗号化します。用途ごとに `mukuroji:purpose` encryption context を付け、
