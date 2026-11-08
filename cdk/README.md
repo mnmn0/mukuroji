@@ -94,8 +94,9 @@ bucket は保持期間が終わるまで削除できません。外す前に次�
      出ないことを確認します。
   4. それでも `ConnectorSyncDlq` に入った message は一括 redrive しません。`disconnect-links` は
      [Connector disconnect recovery](#connector-disconnect-recovery) の手順で扱います。`outbound` は provider への
-     反映が漏れている可能性があるため、body の kind・Workspace・installation を記録して運用責任者へ
-     エスカレーションし、対象を確認してから個別に再送するか判断します。`poll` は次の定期実行が成功すれば
+     反映が漏れている可能性があるため、body の `workspaceId`・`linkId`・`sourceEventId` を記録し、installation は
+     その external link から確認します。message は削除せずに運用責任者へエスカレーションし、対象を確認して
+     から個別に再送するか判断します（link を特定できない場合も message を残したままエスカレーションします）。`poll` は次の定期実行が成功すれば
      取り直されるので、成功を確認してから削除します。
 
 Developer platform の Webhook secret、connector credential、cursor state と connector runtime secret は、
