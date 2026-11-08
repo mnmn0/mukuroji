@@ -6,6 +6,12 @@ or traffic routing. A successful drill is evidence that a selected historical
 point can be restored and verified; it is not permission to fail over
 production traffic.
 
+The drill is an optional module and is not deployed by default. Enable it with
+the CDK context value `mukuroji:restoreDrill=true` and pass the
+`RestoreDrillCleanupApproverRoleArn` parameter. The evidence bucket uses a
+400-day Object Lock in COMPLIANCE mode, so enable the drill only when that
+retention is acceptable.
+
 ## Recovery objectives
 
 Version one has two same-Region objectives:

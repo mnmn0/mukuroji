@@ -110,8 +110,11 @@ export interface StackParameters {
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
-  /** Existing IAM role exclusively authorized to approve restore-drill cleanup. */
-  readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
+  /**
+   * Existing IAM role exclusively authorized to approve restore-drill cleanup. Present only when
+   * the stack deploys the optional restore drill.
+   */
+  readonly restoreDrillCleanupApproverRoleArn?: cdk.CfnParameter;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
   /** Full Git commit SHA bundled into the deployed API runtime. */
@@ -190,6 +193,12 @@ export type ResolvedUserIdentityKey =
   | 'cognitoUserPoolArn'
   | 'userIdentity';
 
+/** Synthesis-time choices that decide which optional parameters exist. */
+export type StackParameterOptions = Readonly<{
+  /** Whether the stack deploys the optional restore drill and needs its approver role. */
+  readonly restoreDrillEnabled: boolean;
+}>;
+
 /** Stack parameters before the Cognito user pool is resolved. */
 export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey>;
 
@@ -199,9 +208,13 @@ export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey
  * Cognito identifiers are resolved by the stack, because a blank pool ID makes it create the pool.
  *
  * @param stack - Stack that directly owns the parameters and validation rules.
+ * @param options - Optional modules whose parameters the stack needs.
  * @returns Parameters and derived values consumed by the stack subsystems.
  */
-export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
+export function buildStackParameters(
+  stack: cdk.Stack,
+  options: StackParameterOptions = { restoreDrillEnabled: false },
+): StackParameterInputs {
   const alarmPrimaryTopicName = new cdk.CfnParameter(
     stack,
     'AlarmPrimaryTopicName',
@@ -323,7 +336,9 @@ export function buildStackParameters(stack: cdk.Stack): StackParameterInputs {
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
     },
   );
-  const restoreDrillCleanupApproverRoleArn = new cdk.CfnParameter(
+  const restoreDrillCleanupApproverRoleArn = !options.restoreDrillEnabled
+    ? undefined
+    : new cdk.CfnParameter(
     stack,
     'RestoreDrillCleanupApproverRoleArn',
     {
