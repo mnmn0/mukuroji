@@ -81,9 +81,16 @@ bucket は保持期間が終わるまで削除できません。外す前に次�
   記録します。残った resource は記録した URL / ARN で後から確認し、不要なら手で削除します。
 - connectors を外すと `ConnectorRuntimeSecret` も stack から外れます。あとで再び有効にすると、stack は
   `ConnectorRuntimeConfiguration`（既定値 `{}`）で新しい secret を作るため、provider 設定は自動では戻りません。
-  secret ARN が変わるので、再有効化の deploy では `ApiRuntimeConfigurationRevision` を増やします。deploy 後に、
-  記録した旧 secret の値を新しい secret（`ConnectorRuntimeSecretArn` output）へコピーしてから connector の
-  同期を再開してください。
+  secret ARN が変わるので、再有効化の deploy では `ApiRuntimeConfigurationRevision` を増やします。
+  再有効化の deploy が終わると SQS event source と 5 分ごとの poll がすぐ動き始め、値をコピーするまでの
+  sync job は provider 設定がないため失敗し、retry の後 `ConnectorSyncDlq` に入ります（DLQ alarm も発火します）。
+  次の順で復元してください。
+  1. deploy 直後に、記録した旧 secret の値を新しい secret（`ConnectorRuntimeSecretArn` output）へコピーします。
+  2. Warm Lambda は connector 設定を最大 60 秒 cache するため、コピー後 1 分以上待ちます。
+  3. 次の 5 分ごとの poll が成功し、新しい sync job が `ConnectorSyncDlq` に入らないことを確認します。poll は
+     checkpoint から冪等に再開するため、通常の sync job は再投入しなくても次の poll で取り直されます。
+  4. 復元までに `ConnectorSyncDlq` に入った message は一括 redrive せず、
+     [Connector disconnect recovery](#connector-disconnect-recovery) の手順で 1 件ずつ確認して扱います。
 
 Developer platform の Webhook secret、connector credential、cursor state と connector runtime secret は、
 1 つの `DeveloperPlatformKey` で暗号化します。用途ごとに `mukuroji:purpose` encryption context を付け、
