@@ -24,19 +24,26 @@ import {
   buildAiAssistanceObservabilityWorker,
 } from '../subsystems/workers/ai-assistance-observability';
 import { buildAuditProjectionWorker } from '../subsystems/workers/audit-projection';
-import { buildAutomationWorkers } from '../subsystems/workers/automation';
+import {
+  buildAutomationWorkers,
+  defineAutomationScheduleJob,
+} from '../subsystems/workers/automation';
 import { buildWorkerChannels } from '../subsystems/workers/channels';
 import { buildConnectorWorkers } from '../subsystems/workers/connectors';
 import { buildEnterpriseIdentityWorkers } from '../subsystems/workers/enterprise-identity';
 import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
-import { buildScheduleWorkers } from '../subsystems/workers/schedules';
-import { buildSlackNotificationWorker } from '../subsystems/workers/slack-notifications';
+import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
+import {
+  defineAnalyticsScheduleJob,
+  defineNotificationScheduleJob,
+} from '../subsystems/workers/schedules';
+import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
 import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
-import { buildTriageScheduleWorker } from '../subsystems/workers/triage';
+import { defineTriageScheduleJob } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
-import { buildAgentRunTriageWorker } from '../subsystems/workers/agent-run-triage';
+import { defineAgentRunTriageJob } from '../subsystems/workers/agent-run-triage';
 
 /** Stack configuration, including the optional modules the stack deploys. */
 export type MukurojiStackProps = cdk.StackProps & Readonly<{
@@ -201,35 +208,24 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
-    buildSlackNotificationWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
-    const scheduleWorkers = buildScheduleWorkers(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
     const requestEmailWorker = buildRequestEmailWorker(this, {
       dataStores,
       lambdaBuildPaths,
       parameters,
       runtimeControls,
     });
-    const triageScheduleWorker = buildTriageScheduleWorker(this, {
-      dataStores,
+    // The order matches server/src/handlers/scheduled-jobs-handler.ts.
+    const scheduledJobs = buildScheduledJobsWorker(this, {
       lambdaBuildPaths,
-      parameters,
       runtimeControls,
-    });
-    buildAgentRunTriageWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
+      jobs: [
+        defineAutomationScheduleJob(this, { dataStores, fileStorage, parameters }),
+        defineTriageScheduleJob({ dataStores, parameters }),
+        defineAgentRunTriageJob({ dataStores, parameters }),
+        defineSlackNotificationJob(this, { dataStores, parameters }),
+        defineAnalyticsScheduleJob({ dataStores, parameters }),
+        defineNotificationScheduleJob({ dataStores, parameters }),
+      ],
     });
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
@@ -278,9 +274,8 @@ export class MukurojiStack extends cdk.Stack {
       ...auditProjection,
       ...aiAssistanceObservabilityWorker,
       ...automationWorkers,
-      ...scheduleWorkers,
       ...requestEmailWorker,
-      ...triageScheduleWorker,
+      ...scheduledJobs,
       ...tenantOperationWorker,
       ...runtimeControls,
       workspaceDirectoryId: parameters.workspaceDirectoryId,

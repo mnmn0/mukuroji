@@ -102,20 +102,14 @@ export type StackOutputResources = {
   readonly connectorPollDlq: sqs.IQueue;
   /** Dead-letter queue for event-triggered automation failures. */
   readonly automationEventDlq: sqs.IQueue;
-  /** Dead-letter queue for scheduled automation failures. */
-  readonly automationScheduleDlq: sqs.IQueue;
-  /** Dead-letter queue for scheduled analytics failures. */
-  readonly analyticsScheduleDlq: sqs.IQueue;
-  /** Dead-letter queue for scheduled notification failures. */
-  readonly notificationScheduleDlq: sqs.IQueue;
   /** Lambda function that ingests request email. */
   readonly requestEmailIngestionFunction: lambda.IFunction;
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
-  /** Lambda function that processes scheduled Triage wake-ups. */
-  readonly triageScheduleFunction: lambda.IFunction;
-  /** Dead-letter queue for scheduled Triage wake-up failures. */
-  readonly triageScheduleDlq: sqs.IQueue;
+  /** Lambda function that runs the periodic jobs. */
+  readonly scheduledJobsFunction: lambda.IFunction;
+  /** Dead-letter queue for periodic job failures. */
+  readonly scheduledJobsDlq: sqs.IQueue;
   /** Stream-only tenant lifecycle starter and retention worker. */
   readonly tenantOperationFunction: lambda.IFunction;
   /** Queued export artifact resource owner. */
@@ -313,26 +307,17 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'AutomationEventDlqUrl', {
     value: resources.automationEventDlq.queueUrl,
   });
-  new cdk.CfnOutput(scope, 'AutomationScheduleDlqUrl', {
-    value: resources.automationScheduleDlq.queueUrl,
-  });
-  new cdk.CfnOutput(scope, 'AnalyticsScheduleDlqUrl', {
-    value: resources.analyticsScheduleDlq.queueUrl,
-  });
-  new cdk.CfnOutput(scope, 'NotificationScheduleDlqUrl', {
-    value: resources.notificationScheduleDlq.queueUrl,
-  });
   new cdk.CfnOutput(scope, 'RequestEmailIngestionFunctionName', {
     value: resources.requestEmailIngestionFunction.functionName,
   });
   new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
     value: resources.requestEmailIngestionDlq.queueUrl,
   });
-  new cdk.CfnOutput(scope, 'TriageScheduleFunctionName', {
-    value: resources.triageScheduleFunction.functionName,
+  new cdk.CfnOutput(scope, 'ScheduledJobsFunctionName', {
+    value: resources.scheduledJobsFunction.functionName,
   });
-  new cdk.CfnOutput(scope, 'TriageScheduleDlqUrl', {
-    value: resources.triageScheduleDlq.queueUrl,
+  new cdk.CfnOutput(scope, 'ScheduledJobsDlqUrl', {
+    value: resources.scheduledJobsDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
     value: resources.tenantOperationFunction.functionName,

@@ -136,8 +136,8 @@ templateとdeployed configurationの両方で照合します。
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `FileBucketIncarnationMarkerKey`, `FileBucketIncarnationMarkerVersionId`, `FileBucketIncarnationMarkerChecksumSha256`, `FileBucketIncarnationMarkerSize`（同名 bucket 再作成を検出する固定 marker の exact S3 version、base64 SHA-256、byte size。cross-domain integrity operator の明示入力に使い、current version へ fallback しない）
 - `CrossDomainIntegrityOperatorPolicyArn`（6表の `Scan` / `DescribeTable`、exact FileBucket の `GetBucketVersioning`、`workspaces/*` の exact-version read、出力された marker VersionId に条件固定した marker exact-key read だけを持つ未接続 read-only policy）
-- `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
-- `AnalyticsScheduleDlqUrl`
+- `NotificationsTableName`, `CollaborationProjectionDlqUrl`
+- `ScheduledJobsFunctionName`, `ScheduledJobsDlqUrl`（定期ジョブをまとめて実行する Lambda と、その失敗を14日保持する Retain DLQ）
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `EnterpriseIdentityMaintenanceDlqUrl`
 - `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
@@ -841,12 +841,12 @@ snapshot、scheduled delivery receiptをWorkspaceごとに保存します。Tabl
 
 Shared API Lambdaには`ANALYTICS_TABLE_NAME`と`ANALYTICS_SCHEDULE_INDEX_NAME`を設定し、
 analytics tableへのread/writeだけをstack resourceへ限定して許可します。
-`AnalyticsScheduleFunction`は5分ごとのEventBridge ruleで起動し、同じreport occurrenceを
-決定的なreceiptで重複排除します。Schedule roleはAnalyticsTableへのread/writeに加えて、
-recipientのcurrent ACLとhistorical stateを評価するため、`AuditEventsTable`、
-`ProjectDirectoryTable`、`WorkItemsTable`、`WorkspaceAccessTable`へのread-only権限だけを
-持ちます。非同期retryを2回行った後の失敗は14日保持のencrypted
-`AnalyticsScheduleDlq`へ入り、visible messageが1件以上になるとCloudWatch alarmが
+Analytics scheduleは`ScheduledJobsFunction`の5分ごとのjobとして動き、同じreport occurrenceを
+決定的なreceiptで重複排除します。Jobの権限は`AnalyticsScheduleJobPolicy`にまとまり、
+AnalyticsTableへのread/writeに加えて、recipientのcurrent ACLとhistorical stateを評価するため、
+`AuditEventsTable`、`ProjectDirectoryTable`、`WorkItemsTable`、`WorkspaceAccessTable`への
+read-only権限だけを持ちます。Handler内で2回retryした後も失敗すると、invocationは14日保持の
+encrypted `ScheduledJobsDlq`へ入り、visible messageが1件以上になるとCloudWatch alarmが
 `ALARM`になります。
 
 Schedule deliveryは現在のrecipient認可を確認できない場合に送信しないfail-closed contractです。
@@ -861,13 +861,22 @@ Deploy前後に次を確認します。
 1. `AnalyticsTableName` outputと両Lambdaの`ANALYTICS_TABLE_NAME`が同じtableを指す。
 2. Table replacement/deletionがなく、PITRとRetainが維持される。
 3. `ScheduleDueIndex`のkey schemaが変更されていない。
-4. API/schedule role以外にanalytics table権限が付いていない。
-5. Schedule roleのsource table権限がread-onlyで、write権限がAnalyticsTableだけに限定される。
-6. `AnalyticsScheduleDlqUrl`の滞留とCloudWatch alarmを監視対象に追加する。
+4. API roleと`AnalyticsScheduleJobPolicy`以外にanalytics table権限が付いていない。
+5. `AnalyticsScheduleJobPolicy`のsource table権限がread-onlyで、write権限がAnalyticsTableだけに限定される。
+6. `ScheduledJobsDlqUrl`の滞留とCloudWatch alarmを監視対象に追加する。
 
 ## Notification schedule
 
-期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count も監視します。
+期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
+
+## Scheduled jobs
+
+定期実行の6つの job（Automation の recurring Work、Triage wake-up、Agent Run triage、Slack 通知、analytics、notification）は、`ScheduledJobsFunction` 1本と毎分の EventBridge rule 1つで動きます。Handler（`server/src/handlers/scheduled-jobs-handler.ts`）は event の予定時刻の分から due な job を選び、並行に実行します。
+
+- 間隔は Automation、Triage、Agent Run triage、Slack が毎分、analytics が5分ごと、notification が毎時0分です。
+- 各 job は自分の runtime-control scope で判定されます。Lambda の `MUKUROJI_RUNTIME_CONTROL_SCOPE` は全 scope をカンマ区切りで持ちます。
+- Retry は handler 内で job ごとに行います（Slack は二重送信を避けるため1回、他は最大3回）。Lambda 自体の非同期 retry は0回で、1つでも job が失敗した invocation は `ScheduledJobsDlq` に入ります。
+- 権限は job ごとの IAM policy（`<Job>JobPolicy`）に分けて同じ role へ付けます。Role は共有なので、job 間の権限分離は IAM の境界ではなくコードレビューで保ちます。
 
 ## Rollback
 

@@ -12,10 +12,7 @@ const deadLetterQueuePaths = [
   'ConnectorPollDlq/Resource',
   'CollaborationProjectionDlq/Resource',
   'AutomationEventDlq/Resource',
-  'AutomationScheduleDlq/Resource',
-  'AnalyticsScheduleDlq/Resource',
-  'NotificationScheduleDlq/Resource',
-  'SlackNotificationDlq/Resource',
+  'ScheduledJobsDlq/Resource',
   'RequestEmailIngestionDlq/Resource',
   'AuditExportDlq/Resource',
 ] as const;
@@ -29,14 +26,12 @@ const lambdaPaths = [
   'RealtimeHandlerFunction/Resource',
   'CollaborationProjectionFunction/Resource',
   'AutomationEventFunction/Resource',
-  'AutomationScheduleFunction/Resource',
+  'ScheduledJobsFunction/Resource',
   'RuntimeControlAlarmReadinessOnEventFunction/Resource',
   'RuntimeControlAlarmReadinessPollFunction/Resource',
   'WebhookDeliveryFunction/Resource',
   'ConnectorSyncFunction/Resource',
   'ConnectorPollFunction/Resource',
-  'AnalyticsScheduleFunction/Resource',
-  'NotificationScheduleFunction/Resource',
   'RequestEmailIngestionFunction/Resource',
 ] as const;
 const managedPolicyRolePaths = [
@@ -50,7 +45,7 @@ const managedPolicyRolePaths = [
   'RealtimeHandlerFunction/ServiceRole/Resource',
   'CollaborationProjectionFunction/ServiceRole/Resource',
   'AutomationEventFunction/ServiceRole/Resource',
-  'AutomationScheduleFunction/ServiceRole/Resource',
+  'ScheduledJobsFunction/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessOnEventFunction/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessPollFunction/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/Resource',
@@ -59,9 +54,6 @@ const managedPolicyRolePaths = [
   'WebhookDeliveryFunction/ServiceRole/Resource',
   'ConnectorSyncFunction/ServiceRole/Resource',
   'ConnectorPollFunction/ServiceRole/Resource',
-  'AnalyticsScheduleFunction/ServiceRole/Resource',
-  'NotificationScheduleFunction/ServiceRole/Resource',
-  'SlackNotificationFunction/ServiceRole/Resource',
   'RequestEmailIngestionFunction/ServiceRole/Resource',
   'AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource',
 ] as const;
@@ -121,9 +113,9 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
-      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'NotificationScheduleJobPolicy/Resource',
       'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
@@ -146,7 +138,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
@@ -158,9 +150,9 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
-      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'NotificationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -185,7 +177,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiAutomationDataPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -213,7 +205,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   // The trailing wildcard also covers the Secrets Manager ARN's generated suffix.
   [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
-    ['SlackNotificationFunction/ServiceRole/DefaultPolicy/Resource'],
+    ['SlackNotificationJobPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
@@ -226,7 +218,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     [
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -234,7 +226,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -242,8 +234,8 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
-      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
+      'NotificationScheduleJobPolicy/Resource',
     ],
   ],
   [
