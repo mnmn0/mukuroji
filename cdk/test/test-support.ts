@@ -234,7 +234,7 @@ export function findScheduledJobPolicy(
   template: Template,
   jobId: string,
 ): { logicalId: string; statements: Array<Record<string, unknown>> } {
-  const entry = Object.entries(template.findResources('AWS::IAM::Policy'))
+  const entry = Object.entries(template.findResources('AWS::IAM::ManagedPolicy'))
     .find(([logicalId]) => logicalId.startsWith(`${jobId}JobPolicy`));
   if (!entry) throw new Error(`The ${jobId} job policy was not synthesized.`);
   const statements: unknown = entry[1].Properties?.PolicyDocument?.Statement;

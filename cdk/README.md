@@ -876,7 +876,8 @@ Deploy前後に次を確認します。
 - 間隔は Automation、Triage、Agent Run triage、Slack が毎分、analytics が5分ごと、notification が毎時0分です。
 - 各 job は自分の runtime-control scope で判定されます。Lambda の `MUKUROJI_RUNTIME_CONTROL_SCOPE` は全 scope をカンマ区切りで持ちます。
 - Retry は handler 内で job ごとに行います（Slack は二重送信を避けるため1回、他は最大3回）。Lambda 自体の非同期 retry は0回で、1つでも job が失敗した invocation は `ScheduledJobsDlq` に入ります。
-- 権限は job ごとの IAM policy（`<Job>JobPolicy`）に分けて同じ role へ付けます。Role は共有なので、job 間の権限分離は IAM の境界ではなくコードレビューで保ちます。
+- 権限は job ごとの customer-managed policy（`<Job>JobPolicy`）に分けて同じ role へ付けます。Inline policy は role 全体で10,240文字までなので、job の権限は managed policy（各6,144文字）に置きます。Role は共有なので、job 間の権限分離は IAM の境界ではなくコードレビューで保ちます。
+- DLQ message の error message には、失敗した job ごとに最後の error の名前と message が入ります。
 
 ## Rollback
 

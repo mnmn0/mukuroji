@@ -95,7 +95,7 @@ class JobPolicyPrincipal extends iam.PrincipalBase {
    */
   constructor(
     private readonly role: iam.IRole,
-    private readonly policy: iam.Policy,
+    private readonly policy: iam.ManagedPolicy,
   ) {
     super();
     this.principalAccount = role.principalAccount;
@@ -128,8 +128,8 @@ class JobPolicyPrincipal extends iam.PrincipalBase {
 }
 
 /**
- * Grants each job through its own policy on the shared role, so the permissions stay
- * reviewable per job.
+ * Grants each job through its own customer-managed policy on the shared role, so the
+ * permissions stay reviewable per job and each policy has its own 6,144-character quota.
  *
  * @param scope Stack scope used directly to keep construct paths flat.
  * @param worker Shared scheduled-jobs Lambda.
@@ -147,11 +147,14 @@ function grantJobsSeparately(
   }
   for (const job of jobs) {
     const existing = new Set(scope.node.findAll());
-    const policy = new iam.Policy(scope, `${job.id}JobPolicy`, { roles: [role] });
+    // Customer-managed, so the jobs' statements do not count toward the role's 10,240-character
+    // inline policy quota.
+    const policy = new iam.ManagedPolicy(scope, `${job.id}JobPolicy`, { roles: [role] });
     job.grant(new JobPolicyPrincipal(role, policy), role);
     // The first scheduled run must not start before the job's permissions exist.
     for (const construct of scope.node.findAll()) {
-      if (construct instanceof iam.Policy && !existing.has(construct)) {
+      const isPolicy = construct instanceof iam.Policy || construct instanceof iam.ManagedPolicy;
+      if (isPolicy && !existing.has(construct)) {
         functionResource.node.addDependency(construct);
       }
     }

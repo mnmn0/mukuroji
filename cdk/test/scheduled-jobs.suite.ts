@@ -91,9 +91,10 @@ test('keeps each job in its own policy on the shared role, in place before the f
   const scheduledJobsFunction = template.toJSON().Resources[functionLogicalId];
   const roleLogicalId: unknown = scheduledJobsFunction.Properties.Role['Fn::GetAtt'][0];
   const policies = template.findResources('AWS::IAM::Policy');
+  const managedPolicies = template.findResources('AWS::IAM::ManagedPolicy');
 
   for (const jobId of scheduledJobIds) {
-    const entry = Object.entries(policies)
+    const entry = Object.entries(managedPolicies)
       .find(([logicalId]) => logicalId.startsWith(`${jobId}JobPolicy`));
     expect(entry?.[1].Properties.Roles).toEqual([{ Ref: roleLogicalId }]);
     expect(scheduledJobsFunction.DependsOn).toContain(entry?.[0]);
@@ -121,4 +122,56 @@ test('grants the jobs through the role only, never through table resource polici
     .map(([logicalId]) => logicalId);
 
   expect(tablesTrustingRole).toEqual([]);
+});
+
+/**
+ * Replaces CloudFormation intrinsics with values at least as long as the deployed ones, so a
+ * policy's length approximates the size IAM counts after deployment.
+ *
+ * @param value Policy document fragment.
+ * @returns The fragment with intrinsics resolved to placeholder strings.
+ */
+function resolveConservatively(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(resolveConservatively);
+  if (!value || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  if ('Fn::GetAtt' in record) return 'a'.repeat(128);
+  if ('Ref' in record) return record.Ref === 'AWS::Partition' ? 'aws-us-gov' : 'r'.repeat(64);
+  if ('Fn::Join' in record) {
+    const [separator, parts] = record['Fn::Join'] as [string, unknown[]];
+    return parts.map((part) => String(resolveConservatively(part))).join(separator);
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [key, resolveConservatively(entry)]),
+  );
+}
+
+test('keeps the shared role within the IAM policy size quotas', () => {
+  const template = synthesizedTemplate;
+  const functionLogicalId = findScheduledJobsFunctionLogicalId(template);
+  const roleLogicalId: unknown =
+    template.toJSON().Resources[functionLogicalId].Properties.Role['Fn::GetAtt'][0];
+  const attachedToRole = (resource: Record<string, unknown>) =>
+    JSON.stringify(Reflect.get(Object(resource.Properties), 'Roles') ?? [])
+      .includes(String(roleLogicalId));
+  const policySize = (resource: Record<string, unknown>) =>
+    JSON.stringify(resolveConservatively(
+      Reflect.get(Object(resource.Properties), 'PolicyDocument'),
+    )).length;
+
+  const inlinePolicies = Object.values(template.findResources('AWS::IAM::Policy'))
+    .filter(attachedToRole);
+  const managedPolicies = Object.values(template.findResources('AWS::IAM::ManagedPolicy'))
+    .filter(attachedToRole);
+  const awsManagedPolicies: unknown =
+    template.toJSON().Resources[String(roleLogicalId)].Properties.ManagedPolicyArns;
+
+  // Inline policies share one 10,240-character budget per role.
+  expect(inlinePolicies.reduce((total, policy) => total + policySize(policy), 0))
+    .toBeLessThan(10_240);
+  // Each customer-managed policy has its own 6,144-character budget.
+  for (const policy of managedPolicies) expect(policySize(policy)).toBeLessThan(6_144);
+  // A role holds at most 10 managed policies by default.
+  expect(managedPolicies.length + (Array.isArray(awsManagedPolicies) ? awsManagedPolicies.length : 0))
+    .toBeLessThanOrEqual(10);
 });

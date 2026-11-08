@@ -91,6 +91,11 @@ test('fails the invocation after every job ran when one exhausts its tries', asy
   const error = await run.catch((caught: unknown) => caught)
   expect(error).toBeInstanceOf(ScheduledJobsFailedError)
   expect((error as ScheduledJobsFailedError).failedJobs).toEqual(['once'])
+  // The job's own error stays in the message the DLQ records, and in the cause.
+  expect((error as ScheduledJobsFailedError).message)
+    .toBe('Scheduled jobs failed: once (Error: once failed)')
+  expect(((error as ScheduledJobsFailedError).cause as AggregateError).errors)
+    .toEqual([new Error('once failed')])
   expect(once.calls).toHaveLength(1)
   expect(other.calls).toHaveLength(1)
   expect(failures).toEqual(['once#1'])

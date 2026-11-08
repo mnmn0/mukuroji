@@ -33,18 +33,46 @@ export interface ScheduledJobsDispatcherDependencies {
   readonly logFailure?: (jobName: string, attempt: number, error: unknown) => void
 }
 
-/** Error raised after every due job ran and at least one still failed. */
+/** Last error of one job that exhausted its tries. */
+export interface ScheduledJobFailure {
+  /** Job name. */
+  readonly job: string
+  /** The job's last error. */
+  readonly error: unknown
+}
+
+/**
+ * Describes a job error by its name and message.
+ *
+ * @param error - Error a job threw.
+ * @returns `Name: message`, as Lambda reported it when the job had its own function.
+ */
+function describeJobError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+}
+
+/**
+ * Error raised after every due job ran and at least one still failed.
+ *
+ * Its message names each failed job with that job's last error, so the DLQ record and the
+ * Lambda error report keep the reason the job failed. `cause` holds the original errors.
+ */
 export class ScheduledJobsFailedError extends Error {
   /** Names of the jobs whose last try failed. */
   readonly failedJobs: readonly string[]
 
   /**
-   * @param failedJobs - Names of the jobs whose last try failed.
+   * @param failures - Each failed job with its last error.
    */
-  constructor(failedJobs: readonly string[]) {
-    super(`Scheduled jobs failed: ${failedJobs.join(', ')}`)
+  constructor(failures: readonly ScheduledJobFailure[]) {
+    super(
+      `Scheduled jobs failed: ${
+        failures.map(({ job, error }) => `${job} (${describeJobError(error)})`).join('; ')
+      }`,
+      { cause: new AggregateError(failures.map(({ error }) => error)) },
+    )
     this.name = 'ScheduledJobsFailedError'
-    this.failedJobs = failedJobs
+    this.failedJobs = failures.map(({ job }) => job)
   }
 }
 
@@ -102,11 +130,14 @@ export function createScheduledJobsDispatcher(
     }))
   const logFailure = dependencies.logFailure ??
     ((jobName: string, attempt: number, error: unknown) => {
+      // The same error message and stack Lambda logged when each job had its own function.
       console.error(JSON.stringify({
         message: 'Scheduled job failed',
         job: jobName,
         attempt,
         errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
       }))
     })
 
@@ -126,10 +157,11 @@ export function createScheduledJobsDispatcher(
   return async (event: ScheduledJobsEvent = {}) => {
     const due = selectDueScheduledJobs(jobs, event, now)
     const results = await Promise.allSettled(due.map((job) => runWithRetries(job, event)))
-    const failedJobs = due
-      .filter((_, index) => results[index]?.status === 'rejected')
-      .map((job) => job.name)
-    if (failedJobs.length > 0) throw new ScheduledJobsFailedError(failedJobs)
+    const failures = due.flatMap((job, index) => {
+      const result = results[index]
+      return result?.status === 'rejected' ? [{ job: job.name, error: result.reason }] : []
+    })
+    if (failures.length > 0) throw new ScheduledJobsFailedError(failures)
     return { ran: due.map((job) => job.name) }
   }
 }

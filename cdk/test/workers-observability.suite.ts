@@ -444,7 +444,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   const schedulePolicies = Object.entries(resources)
     .filter(([logicalId, resource]) =>
       logicalId.startsWith('AnalyticsScheduleJobPolicy') &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+      (resource as { Type?: string }).Type === 'AWS::IAM::ManagedPolicy'
     )
     .map(([, resource]) => resource);
   expect(schedulePolicies).toHaveLength(1);
