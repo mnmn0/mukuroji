@@ -164,6 +164,7 @@ export const workspaceMessages = {
   'workspace.myTasks.title': 'My tasks',
   'workspace.myTasks.description':
     'Handle next actions, review work, and completed tasks in one flow.',
+  'workspace.myTasks.involvement.contributor': 'Contributor',
   'workspace.myTasks.moveError': 'Could not update the task status.',
   'workspace.myTasks.conflict': 'Another member updated this first. The latest status has been loaded.',
   'workspace.myTasks.moveStatusLabel': 'Change status for {title}',
