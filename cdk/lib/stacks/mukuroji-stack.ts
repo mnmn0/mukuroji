@@ -3,10 +3,6 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
-import {
-  NO_OPTIONAL_MODULES,
-  type OptionalModules,
-} from '../config/optional-modules';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
 import {
   buildApiRuntime,
@@ -42,13 +38,26 @@ import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-impor
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
 import { buildAgentRunTriageWorker } from '../subsystems/workers/agent-run-triage';
 
-/**
- * Configuration of the Mukuroji application stack.
- */
-export interface MukurojiStackProps extends cdk.StackProps {
-  /** Optional modules to create. Every optional module is omitted by default. */
-  readonly optionalModules?: OptionalModules;
-}
+/** Stack configuration, including the optional modules the stack deploys. */
+export type MukurojiStackProps = cdk.StackProps & Readonly<{
+  /**
+   * Deploys the scheduled isolated restore drill. It adds Step Functions workflows, a KMS-encrypted
+   * scratch bucket, and an Object Lock evidence bucket whose objects cannot be deleted for 400
+   * days. Off unless the composition root turns it on.
+   */
+  readonly restoreDrillEnabled?: boolean;
+  /**
+   * Deploys the external connector sync and poll workers, their queues, and the connector runtime
+   * secret. Without it the audit projection does not dispatch connector sync. Off unless the
+   * composition root turns it on.
+   */
+  readonly connectorsEnabled?: boolean;
+  /**
+   * Deploys the request email ingestion Lambda that an external mail relay invokes. Off unless the
+   * composition root turns it on.
+   */
+  readonly requestEmailEnabled?: boolean;
+}>;
 
 /**
  * Composes the Mukuroji application infrastructure from subsystem builders.
@@ -59,15 +68,20 @@ export class MukurojiStack extends cdk.Stack {
    *
    * @param scope Parent construct that owns the stack.
    * @param id Stable stack construct identifier.
-   * @param props Optional CDK stack configuration and optional-module selection.
+   * @param props Optional CDK stack configuration and optional modules.
    */
   constructor(scope: Construct, id: string, props?: MukurojiStackProps) {
     super(scope, id, props);
-
-    const optionalModules = props?.optionalModules ?? NO_OPTIONAL_MODULES;
+    const restoreDrillEnabled = props?.restoreDrillEnabled ?? false;
+    const connectorsEnabled = props?.connectorsEnabled ?? false;
+    const requestEmailEnabled = props?.requestEmailEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
-    const parameterInputs = buildStackParameters(this, optionalModules);
+    const parameterInputs = buildStackParameters(this, {
+      restoreDrillEnabled,
+      connectorsEnabled,
+      requestEmailEnabled,
+    });
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
@@ -105,17 +119,16 @@ export class MukurojiStack extends cdk.Stack {
       workItemConfigurationTable: dataStores.workItemConfigurationTable,
       workspaceAccessTable: dataStores.workspaceAccessTable,
     });
-    const { restoreDrillCleanupApproverRoleArn } = parameters;
-    const restoreDrill = restoreDrillCleanupApproverRoleArn
+    const restoreDrill = parameters.restoreDrillCleanupApproverRoleArn
       ? buildRestoreDrill(this, {
         dataStores,
         fileStorage,
         lambdaBuildPaths,
-        cleanupApproverRoleArn: restoreDrillCleanupApproverRoleArn,
+        cleanupApproverRoleArn: parameters.restoreDrillCleanupApproverRoleArn,
       })
       : undefined;
 
-    const workerChannels = buildWorkerChannels(this, optionalModules.connectors);
+    const workerChannels = buildWorkerChannels(this, connectorsEnabled);
     const apiRuntime = buildApiRuntime(this, {
       dataStores,
       fileStorage,
@@ -198,7 +211,7 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
-    if (optionalModules.connectors) {
+    if (connectorsEnabled) {
       buildConnectorWorkers(this, {
         dataStores,
         lambdaBuildPaths,
@@ -219,7 +232,7 @@ export class MukurojiStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
-    const requestEmailWorker = optionalModules.requestEmail
+    const requestEmailWorker = requestEmailEnabled
       ? buildRequestEmailWorker(this, {
         dataStores,
         lambdaBuildPaths,
@@ -278,7 +291,6 @@ export class MukurojiStack extends cdk.Stack {
     const { connectorChannels } = workerChannels;
     const { connectorRuntimeSecret } = dataStores;
     buildStackOutputs(this, {
-      restoreDrill,
       connectors: connectorChannels && connectorRuntimeSecret
         ? { ...connectorChannels, connectorRuntimeSecret }
         : undefined,

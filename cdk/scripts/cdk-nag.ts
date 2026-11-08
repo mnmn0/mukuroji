@@ -1,10 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import {
-  ALL_OPTIONAL_MODULES,
-  NO_OPTIONAL_MODULES,
-} from '../lib/config/optional-modules';
+import { ALL_STACK_MODULE_PROPS } from '../bin/stack-modules';
 import { MukurojiStack } from '../lib/stacks/mukuroji-stack';
 
 const app = new cdk.App({
@@ -16,11 +13,11 @@ const app = new cdk.App({
 });
 cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
 // Checks the default stack and the stack with every optional module.
-for (const [id, optionalModules] of [
-  ['NagCheck', NO_OPTIONAL_MODULES],
-  ['NagCheckAllModules', ALL_OPTIONAL_MODULES],
+for (const [id, props] of [
+  ['NagCheck', {}],
+  ['NagCheckAllModules', ALL_STACK_MODULE_PROPS],
 ] as const) {
-  const stack = new MukurojiStack(app, id, { optionalModules });
+  const stack = new MukurojiStack(app, id, props);
   acknowledgeKnownNagFindings(stack);
 }
 app.synth();

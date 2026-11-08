@@ -317,7 +317,7 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、環境ごとに固定します。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
-- `MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET`: email adapter envelope の署名検証に使う 32–256 文字の secret。任意モジュール `requestEmail` を deploy するときだけ使います
+- `MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET`: email adapter envelope の署名検証に使う 32–256 文字の secret。任意モジュール `mukuroji:requestEmail` を deploy するときだけ使います
 - `MUKUROJI_REQUEST_TOKEN_HASH_SECRET`: request/reply capability の hash に使う別の 32–256 文字の secret
 - `MUKUROJI_EDGE_ORIGIN_SECRET`: CloudFront が API request に付ける 32–128 文字の secret。一致した request だけ CloudFront が観測した viewer address を rate limit と Enterprise IP policy に使います。環境作成時に生成して secret store に保存し、毎回の deploy で同じ値を渡します。
 

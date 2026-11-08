@@ -18,7 +18,7 @@
 | `CognitoEnterpriseIdpName` | SSO有効時 | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡します。 |
-| `RestoreDrillCleanupApproverRoleArn` | `restoreDrill` 有効時 | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
+| `RestoreDrillCleanupApproverRoleArn` | 復元ドリル有効時 | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
 | `AiBedrockModelId` | AI有効時 | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
@@ -30,9 +30,9 @@
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
-| `ConnectorRuntimeConfiguration` | no（`connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
+| `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
-| `RequestEmailWebhookSecret` | `requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
+| `RequestEmailWebhookSecret` | `mukuroji:requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `EdgeOriginSecret` | yes | CloudFront が `/api/*` の request に付ける 32–128 文字の英数字・`_`・`-` の secret。API はこの値が一致する request の viewer address だけを rate limit と Enterprise IP policy に使います。`openssl rand -hex 32` などで生成し、CloudFormation では `NoEcho` です。 |
 | `EnterpriseIdentityTokenHashSecret` | yes | SCIM bearer token と service account credential の kind・Workspace・credential-ID domain-separated digest、および10分間の idempotency response recovery 用 token 導出に使う32–256文字の安定した secret。CloudFormation では `NoEcho` です。 |
@@ -47,28 +47,29 @@
 
 ### Optional modules
 
-社内の単一 Workspace で常に必要とは限らない次の機能は、CDK context `mukuroji:optionalModules` で
+社内の単一 Workspace で常に必要とは限らない次の機能は、CDK context でモジュールごとに `true` を
 指定したときだけ作ります。既定では 1 つも作らず、関連する resource、output、parameter、runtime
-wiring も stack に含めません。
+wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み、stack には Props として渡します。
 
-| 名前 | 作るもの | 無効時の動作 |
+| Context key | 作るもの | 無効時の動作 |
 | --- | --- | --- |
-| `restoreDrill` | [隔離 restore drill](#scheduled-isolated-restore-drill) の workflow、Object Lock evidence bucket（400日 COMPLIANCE）、専用 KMS key 2 個、alarm 14 個。`RestoreDrillCleanupApproverRoleArn` parameter が必要になります。 | 定期 drill は行いません。PITR による [incident recovery](#pitr-recovery) は引き続き使えます。削除済み file version は誰も読めません。 |
-| `connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
-| `requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
+| `mukuroji:restoreDrill` | [隔離 restore drill](#scheduled-isolated-restore-drill) の workflow、Object Lock evidence bucket（400日 COMPLIANCE）、専用 KMS key 2 個、alarm 14 個。`RestoreDrillCleanupApproverRoleArn` parameter が必要になります。 | 定期 drill は行いません。PITR による [incident recovery](#pitr-recovery) は引き続き使えます。削除済み file version は誰も読めません。 |
+| `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
+| `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
 ```sh
 bun --filter cdk cdk deploy Mukuroji \
-  -c mukuroji:optionalModules=restoreDrill,requestEmail \
+  -c mukuroji:restoreDrill=true \
+  -c mukuroji:requestEmail=true \
   --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   ...（通常の parameter）
 ```
 
-`cdk.json` の `context` に `"mukuroji:optionalModules": ["restoreDrill"]` のように書いても同じです。
-知らない名前は合成時にエラーになります。空文字か `none` は「何も作らない」の意味です。
+`cdk.json` の `context` に `"mukuroji:connectors": true` のように書いても同じです。`true` と文字列の
+`"true"` 以外の値は無効として扱います。
 
 一度作ったモジュールを外すと、CloudFormation は Lambda、queue、alarm などを削除しますが、`Retain` の
 table、bucket、secret、KMS key は AWS アカウントに残ります。Object Lock の evidence bucket は保持期間が
@@ -164,7 +165,7 @@ templateとdeployed configurationの両方で照合します。
 - `DocumentsTableName`（document、whiteboard、share、comment の workspace store）
 - `AnalyticsTableName`（report、immutable snapshot、scheduled delivery receipt の store）
 - `RequestIntakeTableName`（form version、link capability、submission、queue、reply thread の scope store）
-- `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`（`requestEmail` 有効時のみ）
+- `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`（`mukuroji:requestEmail` 有効時のみ）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `FileBucketIncarnationMarkerKey`, `FileBucketIncarnationMarkerVersionId`, `FileBucketIncarnationMarkerChecksumSha256`, `FileBucketIncarnationMarkerSize`（同名 bucket 再作成を検出する固定 marker の exact S3 version、base64 SHA-256、byte size。cross-domain integrity operator の明示入力に使い、current version へ fallback しない）
@@ -180,11 +181,11 @@ templateとdeployed configurationの両方で照合します。
 - `AiAssistanceObservabilityDlqUrl`（terminal AI observability stream recordの最終失敗を14日保持するRetain DLQ）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
-- `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`（`RestoreDrill*` は `restoreDrill` 有効時のみ）
+- `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`（`RestoreDrill*` は `mukuroji:restoreDrill` 有効時のみ）
 - `DeveloperPlatformTableName`, `DeveloperPlatformLookupIndexName`
 - `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
 - `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`
-- `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`（`connectors` 有効時のみ）
+- `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`（`mukuroji:connectors` 有効時のみ）
 - `WorkspaceDirectoryId`
 
 CloudFront は `/api/*` を cache せず、Host 以外の viewer header をそのまま HTTP API へ渡します。
@@ -238,7 +239,7 @@ JP profile/destination ARN inventory、scheduled live evalを含む完全な手�
 
 ## Connector runtime configuration
 
-この節は任意モジュール `connectors` を有効にした stack だけが対象です。Stack は provider 設定と signing secret 用の Secrets Manager secret を `{}` で作成し、rotation-enabled な `DeveloperPlatformKey` で暗号化します。Secret の read 権限は OAuth callback を扱う API Lambda と provider 呼び出しを行う connector queue worker に限定します。Audit stream projection と scheduled poller は secret を読まず、secret-free な sync job ID だけを SQS へ送ります。
+この節は任意モジュール `mukuroji:connectors` を有効にした stack だけが対象です（[Optional modules](#optional-modules)）。Stack は provider 設定と signing secret 用の Secrets Manager secret を `{}` で作成し、rotation-enabled な `DeveloperPlatformKey` で暗号化します。Secret の read 権限は OAuth callback を扱う API Lambda と provider 呼び出しを行う connector queue worker に限定します。Audit stream projection と scheduled poller は secret を読まず、secret-free な sync job ID だけを SQS へ送ります。
 
 Production credential を CloudFormation parameter、Lambda environment、repository、`cdk diff`、shell history に含めないでください。初回 deploy 後に `ConnectorRuntimeSecretArn` output を取得し、権限を限定した作業端末から reviewed JSON file を新しい secret version として保存します。
 
@@ -555,7 +556,7 @@ GuardDuty plan の作成は Malware Protection for S3 の利用条件と課金�
 
 Shared API Lambda は `REQUEST_INTAKE_TABLE_NAME`、`REQUEST_QUEUE_INDEX_NAME`、`REQUEST_RATE_LIMIT_PER_HOUR` と token hash secret parameter を environment から受け取り、request state、canonical Work Item、audit event を同じ DynamoDB transaction で更新できます。Email webhook secret は dedicated ingestion Lambda だけに渡します。Attachment body は新しい public bucket を作らず、既存の private `FileBucket` と GuardDuty scan boundary を利用します。外部 response に Workspace / Team / Project / workflow / IAM 情報を含めず、opaque capability token の hash だけを table に保存します。
 
-`RequestEmailIngestionFunction` は任意モジュール `requestEmail` を有効にしたときだけ作ります。この Lambda は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出し、stack共通のprimary/secondary SNS actionへ通知します。
+`RequestEmailIngestionFunction` は任意モジュール `mukuroji:requestEmail` を有効にしたときだけ作ります。この Lambda は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出し、stack共通のprimary/secondary SNS actionへ通知します。
 
 `RequestEmailWebhookSecret` は adapter と Lambda の両方で同じ値を設定し、log、output、request metadata に残さないでください。`RequestTokenHashSecret` の rotation は未失効の public form / reply link を無効化するため、通常 deploy と分け、active capability の再発行を含む手順として実施します。`NoEcho` は CloudFormation 表示を抑止しますが、secret の command history や Lambda environment への露出を防ぐものではないため、値は CI/CD の secret store から渡してください。
 
@@ -937,7 +938,20 @@ aws dynamodb wait table-exists \
 
 ## Scheduled isolated restore drill
 
-この節は任意モジュール `restoreDrill` を有効にした stack だけが対象です（[Optional modules](#optional-modules)）。
+復元ドリルは任意の module で、既定では deploy しません。有効にすると Step Functions workflow、
+KMS key 付きの scratch / evidence bucket などが増えます。evidence bucket は 400 日の Object Lock
+COMPLIANCE を使うため、一度書いた evidence は保持期間が終わるまで誰も削除できません。
+有効にするときは CDK context で指定し、`RestoreDrillCleanupApproverRoleArn` も渡します。
+
+```sh
+bun --filter cdk cdk deploy Mukuroji \
+  -c mukuroji:restoreDrill=true \
+  --parameters RestoreDrillCleanupApproverRoleArn='arn:aws:iam::<account-id>:role/<data-owner-role>' \
+  ...
+```
+
+無効のときは drill の resource、output、parameter がなく、削除済み file version を読める principal も
+ありません。以下はこの module を有効にした場合の動作です。
 
 Incident recoveryとは別に、daily due scannerが直近の成功済みverificationから89日で同一regionの
 隔離drillをadmitし、90日でoverdue alarmを発火します。Standard Step Functions workflowは

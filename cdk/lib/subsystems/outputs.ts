@@ -8,28 +8,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
-import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import type { FileBucketIncarnationMarker } from './file-storage';
-
-/**
- * Restore-drill resources whose attributes are published as stack outputs.
- */
-export type RestoreDrillOutputResources = {
-  /** Standard state machine that performs an isolated restore drill. */
-  readonly workflow: stepfunctions.IStateMachine;
-  /** Standard state machine that performs approval-gated drill cleanup. */
-  readonly cleanupWorkflow: stepfunctions.IStateMachine;
-  /** Append-only immutable restore-drill evidence bucket. */
-  readonly evidenceBucket: s3.IBucket;
-  /** Isolated bucket containing temporary exports and exact object copies. */
-  readonly scratchBucket: s3.IBucket;
-  /** Durable restore-drill run, checkpoint, and cadence table. */
-  readonly stateTable: dynamodb.ITable;
-  /** Unattached policy for data-owner cleanup approval sessions. */
-  readonly cleanupApprovalPolicy: iam.IManagedPolicy;
-  /** Dead-letter queue for exhausted restore-drill schedule deliveries. */
-  readonly scheduleDlq: sqs.IQueue;
-};
 
 /**
  * Connector resources whose attributes are published as stack outputs.
@@ -59,8 +38,6 @@ export type RequestEmailOutputResources = {
  * Resources whose deployment attributes are published as stack outputs.
  */
 export type StackOutputResources = {
-  /** Restore-drill resources, present only when the optional module is deployed. */
-  readonly restoreDrill: RestoreDrillOutputResources | undefined;
   /** Connector resources, present only when the optional module is deployed. */
   readonly connectors: ConnectorOutputResources | undefined;
   /** Request email ingestion resources, present only when the optional module is deployed. */
@@ -274,30 +251,6 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
     value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,
   });
-  const { restoreDrill } = resources;
-  if (restoreDrill) {
-    new cdk.CfnOutput(scope, 'RestoreDrillStateMachineArn', {
-      value: restoreDrill.workflow.stateMachineArn,
-    });
-    new cdk.CfnOutput(scope, 'RestoreDrillCleanupStateMachineArn', {
-      value: restoreDrill.cleanupWorkflow.stateMachineArn,
-    });
-    new cdk.CfnOutput(scope, 'RestoreDrillEvidenceBucketName', {
-      value: restoreDrill.evidenceBucket.bucketName,
-    });
-    new cdk.CfnOutput(scope, 'RestoreDrillScratchBucketName', {
-      value: restoreDrill.scratchBucket.bucketName,
-    });
-    new cdk.CfnOutput(scope, 'RestoreDrillStateTableName', {
-      value: restoreDrill.stateTable.tableName,
-    });
-    new cdk.CfnOutput(scope, 'RestoreDrillCleanupApprovalPolicyArn', {
-      value: restoreDrill.cleanupApprovalPolicy.managedPolicyArn,
-    });
-    new cdk.CfnOutput(scope, 'RestoreDrillScheduleDlqUrl', {
-      value: restoreDrill.scheduleDlq.queueUrl,
-    });
-  }
   new cdk.CfnOutput(scope, 'NotificationsTableName', {
     value: resources.notificationsTable.tableName,
   });

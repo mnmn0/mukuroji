@@ -532,8 +532,8 @@ export function buildFileStorage(
  * @param resources File resources that own the bucket policy.
  * @param apiFunction API Lambda whose role may read verified files.
  * @param restoreDrillRunnerRole Isolated drill role that must read exact
- * quarantined or deleted versions without receiving source write access, or
- * `undefined` when the optional restore-drill module is not deployed.
+ * quarantined or deleted versions without receiving source write access. Absent when the
+ * optional restore drill is not deployed, so no principal can read deleted versions.
  */
 export function configureFileStorageApiBoundary(
   resources: FileStorageResources,
@@ -566,7 +566,6 @@ export function configureFileStorageApiBoundary(
     actions: ['s3:GetObject', 's3:GetObjectVersion'],
     resources: [resources.fileBucket.arnForObjects('workspaces/*')],
     conditions: {
-      // Only the restore-drill runner may read deleted versions; without it, nobody can.
       ...(restoreDrillRunnerRole
         ? { ArnNotEquals: { 'aws:PrincipalArn': restoreDrillRunnerRole.roleArn } }
         : {}),

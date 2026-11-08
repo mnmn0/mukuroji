@@ -1,14 +1,17 @@
 # Isolated restore drill
 
-The restore drill is the optional CDK module `restoreDrill`. A default stack does
-not create it; see [Optional modules](../cdk/README.md#optional-modules) for how
-to deploy it.
-
 The restore drill is a production-data recovery test. It restores data only to
 resources that are not referenced by the API, workers, runtime configuration,
 or traffic routing. A successful drill is evidence that a selected historical
 point can be restored and verified; it is not permission to fail over
 production traffic.
+
+The drill is an optional module and is not deployed by default. Enable it with
+the CDK context value `mukuroji:restoreDrill=true` and pass the
+`RestoreDrillCleanupApproverRoleArn` parameter. The evidence bucket uses a
+400-day Object Lock in COMPLIANCE mode, so enable the drill only when that
+retention is acceptable. [Optional modules](../cdk/README.md#optional-modules)
+lists every module that a default stack leaves out.
 
 ## Recovery objectives
 

@@ -505,9 +505,16 @@ const acknowledgedFindings = [
  * finding unacknowledged.
  */
 export function acknowledgeKnownNagFindings(stack: Stack): void {
+  const restoreDrillDeployed = stack.node.tryFindChild('RestoreDrillWorkflow') !== undefined;
   for (const finding of acknowledgedFindings) {
     const id = `AwsSolutions::${finding.id}`;
-    const scopePaths = 'scopePaths' in finding ? finding.scopePaths : undefined;
+    const declaredScopePaths: readonly string[] | undefined =
+      'scopePaths' in finding ? finding.scopePaths : undefined;
+    // The restore drill is optional. Its acknowledgements apply only when it is deployed, while
+    // every other scope path must still exist.
+    const scopePaths = declaredScopePaths?.filter((path) =>
+      restoreDrillDeployed || !path.startsWith('RestoreDrill'));
+    if (scopePaths?.length === 0) continue;
     const scopes: IConstruct[] = scopePaths
       ? scopePaths.flatMap((path: string) => findConstruct(stack, path) ?? [])
       : [stack];
@@ -526,6 +533,7 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
     }
   }
 
+  if (!restoreDrillDeployed) return;
   const cleanupExecutionFinding =
     'AwsSolutions::AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:' +
     'states:<AWS::Region>:<AWS::AccountId>:execution:' +

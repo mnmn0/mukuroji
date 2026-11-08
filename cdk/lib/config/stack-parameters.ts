@@ -1,7 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import type * as cognito from 'aws-cdk-lib/aws-cognito';
 import { RegionInfo } from 'aws-cdk-lib/region-info';
-import type { OptionalModules } from './optional-modules';
 
 const restoreDrillApproverRoleArnSuffix =
   'iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$';
@@ -112,10 +111,10 @@ export interface StackParameters {
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
   /**
-   * Existing IAM role exclusively authorized to approve restore-drill cleanup, declared
-   * only with the restore-drill module.
+   * Existing IAM role exclusively authorized to approve restore-drill cleanup. Present only when
+   * the stack deploys the optional restore drill.
    */
-  readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter | undefined;
+  readonly restoreDrillCleanupApproverRoleArn?: cdk.CfnParameter;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
   /** Full Git commit SHA bundled into the deployed API runtime. */
@@ -194,6 +193,16 @@ export type ResolvedUserIdentityKey =
   | 'cognitoUserPoolArn'
   | 'userIdentity';
 
+/** Synthesis-time choices that decide which optional parameters exist. */
+export type StackParameterOptions = Readonly<{
+  /** Whether the stack deploys the optional restore drill and needs its approver role. */
+  readonly restoreDrillEnabled?: boolean;
+  /** Whether the stack deploys the connector workers and needs their runtime configuration. */
+  readonly connectorsEnabled?: boolean;
+  /** Whether the stack deploys request email ingestion and needs its Webhook secret. */
+  readonly requestEmailEnabled?: boolean;
+}>;
+
 /** Stack parameters before the Cognito user pool is resolved. */
 export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey>;
 
@@ -206,12 +215,12 @@ export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey
  * deployed, so a default deployment does not have to supply them.
  *
  * @param stack - Stack that directly owns the parameters and validation rules.
- * @param optionalModules - Optional modules the stack creates.
+ * @param options - Optional modules whose parameters the stack needs.
  * @returns Parameters and derived values consumed by the stack subsystems.
  */
 export function buildStackParameters(
   stack: cdk.Stack,
-  optionalModules: OptionalModules,
+  options: StackParameterOptions = {},
 ): StackParameterInputs {
   const alarmPrimaryTopicName = new cdk.CfnParameter(
     stack,
@@ -310,7 +319,7 @@ export function buildStackParameters(
     minValue: 1,
     description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
   });
-  const connectorRuntimeConfiguration = optionalModules.connectors
+  const connectorRuntimeConfiguration = options.connectorsEnabled === true
     ? new cdk.CfnParameter(stack, 'ConnectorRuntimeConfiguration', {
       type: 'String',
       default: '{}',
@@ -332,7 +341,7 @@ export function buildStackParameters(
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
     },
   );
-  const restoreDrillCleanupApproverRoleArn = optionalModules.restoreDrill
+  const restoreDrillCleanupApproverRoleArn = options.restoreDrillEnabled === true
     ? new cdk.CfnParameter(stack, 'RestoreDrillCleanupApproverRoleArn', {
       type: 'String',
       allowedPattern: buildRestoreDrillApproverRoleArnPattern(stack),
@@ -550,7 +559,7 @@ export function buildStackParameters(
     description:
       'VAPID application server public key browsers use to subscribe to Web Push. Empty disables push subscriptions.',
   });
-  const requestEmailWebhookSecret = optionalModules.requestEmail
+  const requestEmailWebhookSecret = options.requestEmailEnabled === true
     ? new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
       type: 'String',
       minLength: 32,
