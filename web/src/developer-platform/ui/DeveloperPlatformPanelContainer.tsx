@@ -109,6 +109,7 @@ export function DeveloperPlatformPanelContainer({
   } = useDeveloperPlatformResources(mutationSession.accessToken)
   const {
     data: personalCredentials,
+    error: personalCredentialsError,
     mutate: mutatePersonalCredentials,
   } = usePersonalCredentialAdministration(mutationSession.accessToken)
   const {
@@ -221,6 +222,13 @@ export function DeveloperPlatformPanelContainer({
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
       personalCredentials={personalCredentials}
+      personalCredentialsPending={!personalCredentials}
+      personalCredentialsLoadError={Boolean(personalCredentialsError)}
+      onRetryPersonalCredentials={() => {
+        void mutatePersonalCredentials().catch(() => {
+          // The query error stays visible with its retry action.
+        })
+      }}
       syncConflicts={syncConflicts}
       syncConflictsErrorMessage={
         !hasLoadedSyncConflictPage && syncConflictError

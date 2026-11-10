@@ -46,6 +46,15 @@ export type CredentialsSectionProps = {
   personalCredentials?: PersonalCredentialAdministration
   /** Allows or turns off member-issued agent keys. */
   onChangePersonalCredentialPolicy?: (selfIssuanceEnabled: boolean) => void
+  /**
+   * Whether member-issued keys are still unknown because their administration data is loading
+   * or failed; rotation stays hidden so another member's key is never rotated by mistake.
+   */
+  personalCredentialsPending?: boolean
+  /** Whether the member-issued key administration data failed to load. */
+  personalCredentialsLoadError?: boolean
+  /** Retries loading the member-issued key administration data. */
+  onRetryPersonalCredentials?: () => void
 }
 
 /**
@@ -69,11 +78,36 @@ export function CredentialsSection({
   onRotateOAuthApp,
   personalCredentials,
   onChangePersonalCredentialPolicy,
+  personalCredentialsPending = false,
+  personalCredentialsLoadError = false,
+  onRetryPersonalCredentials,
 }: CredentialsSectionProps) {
   const personalCredentialPolicy = personalCredentials?.policy
   const personalApiKeyIds = new Set(personalCredentials?.personalApiKeyIds)
+  const canRotate = (apiKey: ApiKeySummary) =>
+    !personalCredentialsPending && !personalApiKeyIds.has(apiKey.id)
   return (
     <div className="grid min-w-0 gap-6">
+      {personalCredentialsLoadError ? (
+        <section
+          className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-4"
+          data-testid="personal-credential-policy-error"
+          role="alert"
+        >
+          <p className="min-w-0 max-w-[720px] text-sm font-semibold text-fg-red-800">
+            {labels.helpText.personalCredentialsLoadError}
+          </p>
+          {onRetryPersonalCredentials ? (
+            <button
+              className="workbench-button-secondary min-h-10 px-4"
+              onClick={onRetryPersonalCredentials}
+              type="button"
+            >
+              {labels.retry}
+            </button>
+          ) : null}
+        </section>
+      ) : null}
       {personalCredentialPolicy ? (
         <section
           className="flex min-w-0 flex-wrap items-start justify-between gap-4 rounded-lg border border-[var(--workbench-border)] p-4"
@@ -199,7 +233,7 @@ export function CredentialsSection({
                                 : undefined
                             }
                             onRotate={
-                              onRotateApiKey && !personalApiKeyIds.has(apiKey.id)
+                              onRotateApiKey && canRotate(apiKey)
                                 ? () => onRotateApiKey(apiKey)
                                 : undefined
                             }
@@ -283,7 +317,7 @@ export function CredentialsSection({
                             : undefined
                         }
                         onRotate={
-                          onRotateApiKey && !personalApiKeyIds.has(apiKey.id)
+                          onRotateApiKey && canRotate(apiKey)
                             ? () => onRotateApiKey(apiKey)
                             : undefined
                         }

@@ -66,6 +66,12 @@ export type DeveloperPlatformPanelProps = {
   resources?: DeveloperPlatformOverview
   /** Policy and IDs of member-issued agent keys; omitted hides the policy control and badges. */
   personalCredentials?: PersonalCredentialAdministration
+  /** Whether member-issued keys are still unknown, which hides API key rotation. */
+  personalCredentialsPending?: boolean
+  /** Whether the member-issued key administration data failed to load. */
+  personalCredentialsLoadError?: boolean
+  /** Retries loading the member-issued key administration data. */
+  onRetryPersonalCredentials?: () => void
   /** Connector synchronization conflicts loaded across available pages. */
   syncConflicts?: WorkItemSyncConflict[]
   /** Whether the first synchronization-conflict page is loading. */
@@ -173,6 +179,9 @@ export function DeveloperPlatformPanel({
   loadErrorMessage,
   resources,
   personalCredentials,
+  personalCredentialsPending,
+  personalCredentialsLoadError,
+  onRetryPersonalCredentials,
   syncConflicts = [],
   syncConflictsErrorMessage,
   syncConflictsHasMore,
@@ -645,6 +654,9 @@ export function DeveloperPlatformPanel({
               labels={labels}
               oauthApps={resources.oauthApps}
               personalCredentials={personalCredentials}
+              personalCredentialsPending={personalCredentialsPending}
+              personalCredentialsLoadError={personalCredentialsLoadError}
+              onRetryPersonalCredentials={onRetryPersonalCredentials}
               onChangePersonalCredentialPolicy={
                 onChangePersonalCredentialPolicy
                   ? (selfIssuanceEnabled) =>

@@ -136,4 +136,27 @@ describe('DeveloperPlatformPanel personal agent keys', () => {
     expect(html).toContain('Personal')
     expect(html).toContain('Claude Code (laptop)')
   })
+
+  test('hides API key rotation until member-issued keys are known and offers a retry', () => {
+    const render = (pending: boolean, loadError: boolean) => renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        personalCredentialsPending={pending}
+        personalCredentialsLoadError={loadError}
+        onRetryPersonalCredentials={() => undefined}
+        onRevokeApiKey={async () => undefined}
+        onRotateApiKey={async () => {
+          throw new Error('not used')
+        }}
+      />,
+    )
+    const rotateLabel = `>${developerPlatformLabelsFixture.actions.rotate}<`
+
+    const failed = render(true, true)
+    expect(failed).toContain('data-testid="personal-credential-policy-error"')
+    expect(failed).toContain(developerPlatformLabelsFixture.retry)
+    expect(failed).not.toContain(rotateLabel)
+    expect(render(false, false)).toContain(rotateLabel)
+  })
 })
