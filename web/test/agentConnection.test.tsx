@@ -105,7 +105,6 @@ const overview: PersonalAgentCredentialOverview = {
     createdByUserId: 'taro@example.com',
     createdAt: '2026-11-01T00:00:00.000Z',
     expiresAt: '2026-12-01T00:00:00.000Z',
-    issuance: 'personal',
   }],
 }
 

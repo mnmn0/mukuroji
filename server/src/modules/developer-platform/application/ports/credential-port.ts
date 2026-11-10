@@ -149,6 +149,8 @@ export interface ApiKeyPort {
   createApiKey(request: CreateApiKeyRequest): Promise<ApiKeySecretResult>
   /** Lists secret-free API key summaries for a workspace. */
   listApiKeys(workspaceId: string): Promise<ApiKeySummary[]>
+  /** Lists the API keys members issued for themselves, limited to one owner when given. */
+  listPersonalApiKeys(workspaceId: string, ownerUserId?: string): Promise<ApiKeySummary[]>
   /** Rotates an API key and returns its replacement secret once. */
   rotateApiKey(request: RotateApiKeyRequest): Promise<ApiKeySecretResult>
   /** Revokes an API key. */

@@ -1,4 +1,8 @@
-import type { DeveloperPlatformCapabilities as ContractDeveloperPlatformCapabilities, DeveloperPlatformOverview } from '@mukuroji/contracts'
+import type {
+  DeveloperPlatformCapabilities as ContractDeveloperPlatformCapabilities,
+  DeveloperPlatformOverview,
+  PersonalCredentialAdministration,
+} from '@mukuroji/contracts'
 import { DeveloperPlatformApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
@@ -9,9 +13,12 @@ export type DeveloperPlatformCapabilities =
   ContractDeveloperPlatformCapabilities
 
 /**
- * Developer Platform 管理画面の aggregate response です。
+ * Developer Platform 管理画面の aggregate response と、member の自分用 key の管理情報です。
  */
-export type DeveloperPlatformResources = DeveloperPlatformOverview
+export type DeveloperPlatformResources = DeveloperPlatformOverview & {
+  /** 自分用 key の発行 policy と発行済み key の ID です。 */
+  personalCredentials?: PersonalCredentialAdministration
+}
 
 const developerApiBaseUrl = resolveApiBaseUrl('workspaceWithoutProjects')
 
@@ -25,13 +32,19 @@ const defaultDeveloperApiErrorMessage =
  * @param signal - 画面遷移時に request を中止する AbortSignal です。
  * @returns Developer Platform の resource と capabilities です。
  */
-export function getDeveloperPlatformResources(
+export async function getDeveloperPlatformResources(
   accessToken: string,
   signal?: AbortSignal,
-) {
-  return requestJson<DeveloperPlatformResources>('/developer', accessToken, {
-    signal,
-  })
+): Promise<DeveloperPlatformResources> {
+  const [overview, personalCredentials] = await Promise.all([
+    requestJson<DeveloperPlatformOverview>('/developer', accessToken, { signal }),
+    requestJson<PersonalCredentialAdministration>(
+      '/developer/credential-policy',
+      accessToken,
+      { signal },
+    ),
+  ])
+  return { ...overview, personalCredentials }
 }
 
 async function requestJson<T>(

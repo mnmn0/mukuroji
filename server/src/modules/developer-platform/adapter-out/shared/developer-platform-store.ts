@@ -16,6 +16,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import type {
+  ApiKeyIssuance,
   ApiKeySummary,
   PersonalCredentialPolicy,
   ApiScope,
@@ -460,6 +461,8 @@ type DeveloperPlatformRecord = {
   lookupSortKey?: string
   /** API key、OAuth secret/token の SHA-256 digest です。 */
   secretDigest?: string
+  /** API key の発行経路です。Public な summary には含めず、省略時は Workspace 用です。 */
+  apiKeyIssuance?: ApiKeyIssuance
   /** Webhook/connector credential の authenticated ciphertext です。 */
   secretCiphertext?: string
   /** Connector credential の serialized value を束縛する SHA-256 digest です。 */
@@ -1421,7 +1424,6 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       createdByUserId,
       createdAt: now.toISOString(),
       expiresAt,
-      ...(request.issuance ? { issuance: request.issuance } : {}),
     }
     const record = createRecord(
       workspaceId,
@@ -1430,6 +1432,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       apiKey,
       {
         secretDigest,
+        ...(request.issuance ? { apiKeyIssuance: request.issuance } : {}),
       },
     )
     const authRecord = createCredentialAuthRecord(
@@ -1443,7 +1446,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       ? await this.requirePersonalIssuancePolicyCheck(workspaceId)
       : undefined
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
-    const auditPut = this.createApiKeyAuditPut(apiKey, workspaceId, {
+    const auditPut = this.createApiKeyAuditPut(apiKey, record, {
       eventType: 'api-key.created',
       transitionId: 'created',
       occurredAt: apiKey.createdAt,
@@ -1528,6 +1531,20 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return sortByCreatedAt(apiKeys)
   }
 
+  /** Member が自分用に発行した API key を、owner を指定すればその member の分だけ返します。 */
+  async listPersonalApiKeys(workspaceIdValue: string, ownerUserId?: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const personalIds = new Set(
+      (await this.listRecords(workspaceId, 'APIKEY#'))
+        .filter((record) => record.apiKeyIssuance === 'personal')
+        .map((record) => readRecordValue<ApiKeySummary>(record, 'api-key').id),
+    )
+    return (await this.listApiKeys(workspaceId)).filter((apiKey) =>
+      personalIds.has(apiKey.id) &&
+      (ownerUserId === undefined || apiKey.createdByUserId === ownerUserId)
+    )
+  }
+
   /** API key secret を置換し、新 secret を一度だけ返します。 */
   async rotateApiKey(request: RotateApiKeyRequest) {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
@@ -1603,11 +1620,11 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       secretDigest,
       apiKey.expiresAt ? toEpochSeconds(apiKey.expiresAt) : undefined,
     )
-    const policyCheck = current.issuance === 'personal'
+    const policyCheck = record.apiKeyIssuance === 'personal'
       ? await this.requirePersonalIssuancePolicyCheck(workspaceId)
       : undefined
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
-    const auditPut = this.createApiKeyAuditPut(apiKey, workspaceId, {
+    const auditPut = this.createApiKeyAuditPut(apiKey, record, {
       eventType: 'api-key.rotated',
       transitionId: `rotated:${updatedRecord.version}`,
       occurredAt: rotatedAt.toISOString(),
@@ -1681,7 +1698,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     }, true), { expectedVersion: record.version }, undefined,
     authRecord ? createCredentialAuthDelete(authRecord) : undefined,
     undefined,
-    this.createApiKeyAuditPut(apiKey, workspaceId, {
+    this.createApiKeyAuditPut(apiKey, record, {
       eventType: 'api-key.revoked',
       transitionId: 'revoked',
       occurredAt: apiKey.revokedAt ?? this.clock().toISOString(),
@@ -1758,7 +1775,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
   /** API key lifecycle を secret なしで audit outbox event にします。 */
   protected createApiKeyAuditPut(
     apiKey: ApiKeySummary,
-    workspaceId: string,
+    record: DeveloperPlatformRecord,
     event: {
       /** Audit event type. */
       eventType: string
@@ -1775,13 +1792,13 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     },
   ) {
     return this.createPlatformAuditPut({
-      workspaceId,
+      workspaceId: record.workspaceId,
       entityType: 'api-key',
       entityId: apiKey.id,
       ...event,
       metadata: {
         ownerUserId: apiKey.createdByUserId,
-        issuance: apiKey.issuance ?? 'workspace',
+        issuance: record.apiKeyIssuance ?? 'workspace',
         scopes: [...apiKey.scopes],
         ...(apiKey.expiresAt ? { expiresAt: apiKey.expiresAt } : {}),
       },
@@ -7359,6 +7376,8 @@ type CreateRecordOptions = {
   lookupSortKey?: string
   /** SHA-256 secret digest です。 */
   secretDigest?: string
+  /** API key の発行経路です。 */
+  apiKeyIssuance?: ApiKeyIssuance
   /** Authenticated encrypted credential です。 */
   secretCiphertext?: string
   /** Connector credential の serialized value を束縛する SHA-256 digest です。 */

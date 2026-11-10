@@ -739,8 +739,12 @@ describe('public API router', () => {
     expect(paths['/api/developer/me/api-keys/{apiKeyId}']).toHaveProperty('delete')
     expect(paths['/api/developer/credential-policy']).toHaveProperty('put')
     expect(components.schemas.CreatePersonalApiKeyInput.required).toEqual(['name', 'expiresAt'])
-    expect(components.schemas.ApiKeySummary.properties).toHaveProperty('issuance')
-    expect(components.schemas.DeveloperPlatformOverview.required).toContain('personalCredentialPolicy')
+    // Existing closed response schemas stay unchanged; self-issued keys are listed by new endpoints.
+    expect(components.schemas.ApiKeySummary.properties).not.toHaveProperty('issuance')
+    expect(components.schemas.DeveloperPlatformOverview.properties)
+      .not.toHaveProperty('personalCredentialPolicy')
+    expect(components.schemas.PersonalCredentialAdministration.required)
+      .toEqual(['policy', 'personalApiKeyIds'])
     expect(paths['/api/developer/oauth-apps/{oauthAppId}']).not.toHaveProperty('patch')
     expect(components.schemas.CreateWebhookSubscriptionInput.required).toContain('teamIds')
     expect(components.schemas.WebhookSubscription.required).toContain('createdByUserId')
@@ -3105,9 +3109,9 @@ describe('personal agent credentials', () => {
     expect(created.status).toBe(201)
     expect(created.headers.get('Cache-Control')).toBe('no-store')
     const issued = await created.json() as { apiKey: { id: string }; secret: string }
+    expect(issued.apiKey).not.toHaveProperty('issuance')
     expect(issued.apiKey).toMatchObject({
       createdByUserId: 'member-1',
-      issuance: 'personal',
       scopes: ['work-items:read', 'work-items:write'],
       status: 'active',
       expiresAt: expiresInDays(30),
@@ -3187,10 +3191,11 @@ describe('personal agent credentials', () => {
     )).status).toBe(403)
     expect(await (await send(router, 'member-session', 'GET', '/developer/me/agent-connection')).json())
       .toMatchObject({ canIssue: false, issuanceBlockedReason: 'policy-disabled' })
-    const overview = await (await send(router, 'admin-session', 'GET', '/developer')).json() as {
-      personalCredentialPolicy: { selfIssuanceEnabled: boolean }
-    }
-    expect(overview.personalCredentialPolicy.selfIssuanceEnabled).toBe(false)
+    expect(await (await send(router, 'admin-session', 'GET', '/developer/credential-policy')).json())
+      .toEqual({
+        policy: expect.objectContaining({ selfIssuanceEnabled: false }),
+        personalApiKeyIds: [issued.apiKey.id],
+      })
 
     const revoked = await send(router, 'member-session', 'DELETE', `/developer/me/api-keys/${issued.apiKey.id}`)
     expect(revoked.status).toBe(200)

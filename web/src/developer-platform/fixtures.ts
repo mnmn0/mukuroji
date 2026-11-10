@@ -618,11 +618,11 @@ export const developerPlatformResourcesFixture = {
       createdAt: '2026-07-01T09:00:00.000Z',
       expiresAt: '2026-08-30T14:59:59.999Z',
       lastUsedAt: '2026-07-18T02:10:00.000Z',
-      issuance: 'personal',
     },
   ],
-  personalCredentialPolicy: {
-    selfIssuanceEnabled: true,
+  personalCredentials: {
+    policy: { selfIssuanceEnabled: true },
+    personalApiKeyIds: ['api-key-agent-tanaka'],
   },
   oauthApps: [
     {

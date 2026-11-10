@@ -2,6 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import type {
   ApiScope,
   DeveloperPlatformOverview,
+  PersonalCredentialAdministration,
   ImportDryRunReport,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
@@ -61,8 +62,11 @@ import { WebhooksSection } from './WebhooksSection'
  * Aggregate data and action callbacks accepted by the pure Developer Platform panel.
  */
 export type DeveloperPlatformPanelProps = {
-  /** Developer Platform aggregate resources. */
-  resources?: DeveloperPlatformOverview
+  /** Developer Platform aggregate resources, with member-issued key administration when loaded. */
+  resources?: DeveloperPlatformOverview & {
+    /** Policy and IDs of member-issued agent keys. */
+    personalCredentials?: PersonalCredentialAdministration
+  }
   /** Connector synchronization conflicts loaded across available pages. */
   syncConflicts?: WorkItemSyncConflict[]
   /** Whether the first synchronization-conflict page is loading. */
@@ -640,7 +644,7 @@ export function DeveloperPlatformPanel({
               formatDateTime={formatDateTime}
               labels={labels}
               oauthApps={resources.oauthApps}
-              personalCredentialPolicy={resources.personalCredentialPolicy}
+              personalCredentials={resources.personalCredentials}
               onChangePersonalCredentialPolicy={
                 onChangePersonalCredentialPolicy
                   ? (selfIssuanceEnabled) =>

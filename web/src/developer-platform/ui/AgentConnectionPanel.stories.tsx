@@ -27,7 +27,6 @@ const overview: PersonalAgentCredentialOverview = {
       createdAt: '2026-11-01T00:00:00.000Z',
       expiresAt: '2026-12-01T14:59:59.999Z',
       lastUsedAt: '2026-11-10T03:12:00.000Z',
-      issuance: 'personal',
     },
     {
       id: 'key-old',
@@ -39,7 +38,6 @@ const overview: PersonalAgentCredentialOverview = {
       createdAt: '2026-09-01T00:00:00.000Z',
       expiresAt: '2026-10-01T14:59:59.999Z',
       revokedAt: '2026-09-20T00:00:00.000Z',
-      issuance: 'personal',
     },
   ],
 }

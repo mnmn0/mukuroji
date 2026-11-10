@@ -1,7 +1,7 @@
 import type {
   ApiKeySummary,
   OAuthAppSummary,
-  PersonalCredentialPolicy,
+  PersonalCredentialAdministration,
 } from '@mukuroji/contracts'
 import {
   ActionButtons,
@@ -42,8 +42,8 @@ export type CredentialsSectionProps = {
   onRotateApiKey?: (apiKey: ApiKeySummary) => void
   /** Rotates the selected OAuth application secret. */
   onRotateOAuthApp?: (oauthApp: OAuthAppSummary) => void
-  /** Workspace policy for member-issued agent keys; omitted hides the policy control. */
-  personalCredentialPolicy?: PersonalCredentialPolicy
+  /** Policy and IDs of member-issued agent keys; omitted hides the policy control and badges. */
+  personalCredentials?: PersonalCredentialAdministration
   /** Allows or turns off member-issued agent keys. */
   onChangePersonalCredentialPolicy?: (selfIssuanceEnabled: boolean) => void
 }
@@ -67,9 +67,11 @@ export function CredentialsSection({
   onRevokeOAuthApp,
   onRotateApiKey,
   onRotateOAuthApp,
-  personalCredentialPolicy,
+  personalCredentials,
   onChangePersonalCredentialPolicy,
 }: CredentialsSectionProps) {
+  const personalCredentialPolicy = personalCredentials?.policy
+  const personalApiKeyIds = new Set(personalCredentials?.personalApiKeyIds)
   return (
     <div className="grid min-w-0 gap-6">
       {personalCredentialPolicy ? (
@@ -158,7 +160,7 @@ export function CredentialsSection({
                           labels={labels}
                           status={apiKey.status}
                         />
-                        {apiKey.issuance === 'personal' ? (
+                        {personalApiKeyIds.has(apiKey.id) ? (
                           <span className="workbench-badge ml-1.5">
                             {labels.helpText.personalKey}
                           </span>
@@ -197,7 +199,7 @@ export function CredentialsSection({
                                 : undefined
                             }
                             onRotate={
-                              onRotateApiKey && apiKey.issuance !== 'personal'
+                              onRotateApiKey && !personalApiKeyIds.has(apiKey.id)
                                 ? () => onRotateApiKey(apiKey)
                                 : undefined
                             }
@@ -226,7 +228,7 @@ export function CredentialsSection({
                     </div>
                     <span className="flex flex-wrap gap-1.5">
                       <StatusBadge labels={labels} status={apiKey.status} />
-                      {apiKey.issuance === 'personal' ? (
+                      {personalApiKeyIds.has(apiKey.id) ? (
                         <span className="workbench-badge">
                           {labels.helpText.personalKey}
                         </span>
@@ -281,7 +283,7 @@ export function CredentialsSection({
                             : undefined
                         }
                         onRotate={
-                          onRotateApiKey && apiKey.issuance !== 'personal'
+                          onRotateApiKey && !personalApiKeyIds.has(apiKey.id)
                             ? () => onRotateApiKey(apiKey)
                             : undefined
                         }

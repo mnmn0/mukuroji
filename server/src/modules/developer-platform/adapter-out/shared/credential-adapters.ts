@@ -32,6 +32,11 @@ export class ApiKeyAdapter implements ApiKeyPort {
     return this.#source.listApiKeys(workspaceId)
   }
 
+  /** Lists self-issued API keys. */
+  listPersonalApiKeys(workspaceId: string, ownerUserId?: string) {
+    return this.#source.listPersonalApiKeys(workspaceId, ownerUserId)
+  }
+
   /** Rotates an API key. */
   rotateApiKey(request: RotateApiKeyRequest) {
     return this.#source.rotateApiKey(request)

@@ -77,7 +77,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 - 管理者はDeveloper設定のAPIキー一覧で全メンバーのtoken（「個人用」と表示）を確認・失効でき、「メンバーによる agent 用キーの発行」でメンバーの発行・再発行を止められます。止めても発行済みのtokenは残るため、必要なら一覧から失効します。メンバー自身の失効は止めている間もできます。発行・再発行の途中でpolicyが変わった場合は、その発行・再発行を `409` で失敗させます。
 - Enterprise Identityでroleを割り当てているWorkspaceでは、自分のtokenの確認と失効に `workspace.read`、発行と再発行に `work-items.write` のpermissionが要ります（標準のmember roleはどちらも持ちます）。
 - 発行・再発行・失効とpolicyの変更はauditに記録します（`api-key.created` / `api-key.rotated` / `api-key.revoked` / `credential-policy.updated`）。secretは記録しません。
-- API: `GET /api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`POST /api/developer/me/api-keys/{apiKeyId}/rotate`（新しい `expiresAt` が必須）、`DELETE /api/developer/me/api-keys/{apiKeyId}`、管理者用の `GET` / `PUT /api/developer/credential-policy`。いずれもCognitoのBearer tokenで呼びます。
+- API: `GET /api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`POST /api/developer/me/api-keys/{apiKeyId}/rotate`（新しい `expiresAt` が必須）、`DELETE /api/developer/me/api-keys/{apiKeyId}`、管理者用の `GET` / `PUT /api/developer/credential-policy`（`GET` はpolicyと、メンバーが自分用に発行したAPIキーのIDを返します）。既存のAPIキー応答（`ApiKeySummary`）の形は変えていません。いずれもCognitoのBearer tokenで呼びます。
 
 ### 配布版 `mcp.mjs`
 

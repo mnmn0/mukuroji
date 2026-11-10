@@ -173,10 +173,6 @@ export type ApiKeySummary = {
    * Revoke した日時の ISO 8601 timestamp です。
    */
   revokedAt?: string
-  /**
-   * 管理者が Workspace 用に発行したか、member が自分用に発行したかです。省略時は Workspace 用です。
-   */
-  issuance?: ApiKeyIssuance
 }
 
 /**
@@ -218,6 +214,20 @@ export type PersonalCredentialPolicy = {
    * Policy を最後に変更した Workspace user ID です。未変更なら省略します。
    */
   updatedByUserId?: string
+}
+
+/**
+ * 管理者が Developer 設定で見る、自分用 API key の policy と発行済み key の一覧です。
+ */
+export type PersonalCredentialAdministration = {
+  /**
+   * Member による自分用 API key 発行の policy です。
+   */
+  policy: PersonalCredentialPolicy
+  /**
+   * Member が自分用に発行した API key の ID です。Workspace の API key 一覧で区別に使います。
+   */
+  personalApiKeyIds: string[]
 }
 
 /**
@@ -1609,8 +1619,4 @@ export type DeveloperPlatformOverview = {
    * Workspace の直近 import job です。
    */
   imports: ImportJob[]
-  /**
-   * Member による自分用 API key 発行の policy です。
-   */
-  personalCredentialPolicy: PersonalCredentialPolicy
 }

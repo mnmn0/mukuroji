@@ -4751,7 +4751,12 @@ describe('personal credential policy guard', () => {
       createdByUserId: 'admin-1',
       input: { name: 'Integration', scopes: ['work-items:read'], expiresAt },
       issuance: 'workspace',
-    })).resolves.toMatchObject({ apiKey: { issuance: 'workspace' } })
+    })).resolves.toMatchObject({ apiKey: { name: 'Integration' } })
+    await expect(client.listPersonalApiKeys('workspace-policy'))
+      .resolves.toEqual([expect.objectContaining({ id: personal.apiKey.id })])
+    await expect(client.listPersonalApiKeys('workspace-policy', 'admin-1')).resolves.toEqual([])
+    const [listed] = await client.listApiKeys('workspace-policy')
+    expect(listed).not.toHaveProperty('issuance')
   })
 
   test('fails personal issuance when the policy turns off before the write commits', async () => {

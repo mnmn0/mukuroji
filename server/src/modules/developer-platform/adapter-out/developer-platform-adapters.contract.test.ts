@@ -8,6 +8,7 @@ const expectedCapabilityMethods = {
     'createApiKey',
     'getPersonalCredentialPolicy',
     'listApiKeys',
+    'listPersonalApiKeys',
     'revokeApiKey',
     'rotateApiKey',
     'updatePersonalCredentialPolicy',

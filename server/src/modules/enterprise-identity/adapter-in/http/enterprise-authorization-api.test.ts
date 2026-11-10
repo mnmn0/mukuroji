@@ -1300,6 +1300,9 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
         async getPersonalCredentialPolicy() {
           return { selfIssuanceEnabled: true }
         },
+        async listPersonalApiKeys() {
+          return []
+        },
       } as never,
     })
     const authorization = `Bearer ${createAccessToken([], {

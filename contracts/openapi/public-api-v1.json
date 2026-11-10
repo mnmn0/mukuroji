@@ -760,14 +760,6 @@
           "id": {
             "type": "string"
           },
-          "issuance": {
-            "description": "管理者が Workspace 用に発行したか、member が自分用に発行したかです。省略時は Workspace 用です。",
-            "enum": [
-              "workspace",
-              "personal"
-            ],
-            "type": "string"
-          },
           "lastUsedAt": {
             "format": "date-time",
             "type": "string"
@@ -1632,9 +1624,6 @@
             },
             "type": "array"
           },
-          "personalCredentialPolicy": {
-            "$ref": "#/components/schemas/PersonalCredentialPolicy"
-          },
           "webhookDeliveries": {
             "items": {
               "$ref": "#/components/schemas/WebhookDelivery"
@@ -1655,8 +1644,7 @@
           "webhookSubscriptions",
           "webhookDeliveries",
           "connectors",
-          "imports",
-          "personalCredentialPolicy"
+          "imports"
         ],
         "type": "object"
       },
@@ -2230,6 +2218,26 @@
           "scopes",
           "maxLifetimeDays",
           "apiKeys"
+        ],
+        "type": "object"
+      },
+      "PersonalCredentialAdministration": {
+        "additionalProperties": false,
+        "properties": {
+          "personalApiKeyIds": {
+            "description": "Member が自分用に発行した API key の ID です。",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PersonalCredentialPolicy"
+          }
+        },
+        "required": [
+          "policy",
+          "personalApiKeyIds"
         ],
         "type": "object"
       },
@@ -4898,11 +4906,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PersonalCredentialPolicy"
+                  "$ref": "#/components/schemas/PersonalCredentialAdministration"
                 }
               }
             },
-            "description": "現在の policy です。",
+            "description": "現在の policy と、member が自分用に発行した API key の ID です。",
             "headers": {
               "RateLimit-Limit": {
                 "$ref": "#/components/headers/RateLimitLimit"
@@ -4948,7 +4956,7 @@
             "CognitoBearer": []
           }
         ],
-        "summary": "メンバーによる API key 発行の policy を取得する",
+        "summary": "メンバーによる API key 発行の policy と自分用 key を取得する",
         "tags": [
           "API Key Management"
         ]

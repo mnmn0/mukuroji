@@ -28,6 +28,7 @@ import {
   PERSONAL_API_KEY_MAX_LIFETIME_DAYS,
   PERSONAL_API_KEY_SCOPES,
   type PersonalAgentCredentialOverview,
+  type PersonalCredentialAdministration,
   type PersonalApiKeyScope,
   type RotatePersonalApiKeyInput,
   type UpdatePersonalCredentialPolicyInput,
@@ -1356,7 +1357,6 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       deliveryPage,
       connectors,
       imports,
-      personalCredentialPolicy,
     ] =
       await Promise.all([
         dependencies.apiKeys.listApiKeys(principal.workspaceId),
@@ -1368,7 +1368,6 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         }),
         dependencies.connectors.listConnectors(principal.workspaceId),
         listAuthorizedImportJobs(dependencies.imports, dependencies.workItems, principal),
-        dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
       ])
     return c.json({
       capabilities: principal.capabilities,
@@ -1378,7 +1377,6 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       webhookDeliveries: deliveryPage.deliveries,
       connectors,
       imports,
-      personalCredentialPolicy,
     } satisfies DeveloperPlatformOverview)
   })
 
@@ -1465,7 +1463,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.get('/developer/credential-policy', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
-    return c.json(await dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId))
+    const [policy, personalApiKeys] = await Promise.all([
+      dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
+      dependencies.apiKeys.listPersonalApiKeys(principal.workspaceId),
+    ])
+    return c.json({
+      policy,
+      personalApiKeyIds: personalApiKeys.map((apiKey) => apiKey.id),
+    } satisfies PersonalCredentialAdministration)
   })
 
   router.put('/developer/credential-policy', async (c) => {
@@ -1492,7 +1497,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const principal = await authenticateManagementRequest(c, dependencies)
     const [policy, apiKeys] = await Promise.all([
       dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
-      dependencies.apiKeys.listApiKeys(principal.workspaceId),
+      dependencies.apiKeys.listPersonalApiKeys(principal.workspaceId, principal.userId),
     ])
     const decision = decidePersonalCredentialIssuance(
       principal.canIssuePersonalCredentials === true,
@@ -1505,9 +1510,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       policy,
       scopes: [...PERSONAL_API_KEY_SCOPES],
       maxLifetimeDays: PERSONAL_API_KEY_MAX_LIFETIME_DAYS,
-      apiKeys: apiKeys.filter((apiKey) =>
-        apiKey.createdByUserId === principal.userId && apiKey.issuance === 'personal'
-      ),
+      apiKeys,
     } satisfies PersonalAgentCredentialOverview)
   })
 
@@ -2810,12 +2813,10 @@ async function requireOwnPersonalApiKey(
   principal: DeveloperManagementPrincipal,
   apiKeyId: string,
 ) {
-  const apiKey = (await dependencies.apiKeys.listApiKeys(principal.workspaceId))
-    .find((candidate) =>
-      candidate.id === apiKeyId &&
-      candidate.createdByUserId === principal.userId &&
-      candidate.issuance === 'personal'
-    )
+  const apiKey = (await dependencies.apiKeys.listPersonalApiKeys(
+    principal.workspaceId,
+    principal.userId,
+  )).find((candidate) => candidate.id === apiKeyId)
   if (!apiKey) throw new PublicApiServiceError(404, 'not_found', 'API key was not found.')
   return apiKey
 }
