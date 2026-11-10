@@ -9,6 +9,7 @@ import {
   DEMO_DATA_CONTEXT_KEY,
   REQUEST_EMAIL_CONTEXT_KEY,
   RESTORE_DRILL_CONTEXT_KEY,
+  TENANT_LIFECYCLE_CONTEXT_KEY,
   readStackModuleProps,
 } from '../bin/stack-modules';
 import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
@@ -81,7 +82,7 @@ describe('default deployment without optional modules', () => {
       .toHaveLength(1);
   });
 
-  test('omits every restore-drill, connector, and request email resource and output', () => {
+  test('omits every restore-drill, connector, request email, and tenant lifecycle resource and output', () => {
     template.resourceCountIs('AWS::StepFunctions::StateMachine', 1);
     for (const prefix of [
       'RestoreDrill',
@@ -89,6 +90,12 @@ describe('default deployment without optional modules', () => {
       'ConnectorPoll',
       'ConnectorRuntimeSecret',
       'RequestEmailIngestion',
+      'TenantExport',
+      'TenantAccess',
+      'TenantIdentity',
+      'TenantData',
+      'TenantSecrets',
+      'TenantVerification',
     ]) {
       expect(logicalIds.filter((id) => id.startsWith(prefix))).toEqual([]);
       expect(Object.keys(json.Outputs).filter((id) => id.startsWith(prefix)))
@@ -125,6 +132,40 @@ describe('default deployment without optional modules', () => {
       configuration.Properties?.SecretString,
       'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN',
     )).toEqual({ 'Fn::Base64': '' });
+  });
+
+  test('tells the API to refuse tenant export and closure, and grants it no export bucket', () => {
+    const api = Object.values(resources).find((resource) =>
+      resource.Type === 'AWS::Lambda::Function' &&
+      JSON.stringify(resource.Properties).includes('"TENANT_LIFECYCLE_OPERATIONS"'));
+    const environment = api?.Properties?.Environment as
+      | { Variables: Record<string, unknown> }
+      | undefined;
+    const variables = environment?.Variables ?? {};
+
+    expect(variables.TENANT_LIFECYCLE_OPERATIONS).toBe('disabled');
+    expect(variables).not.toHaveProperty('TENANT_EXPORT_BUCKET_NAME');
+    expect(JSON.stringify(json)).not.toContain('tenant-exports/*');
+  });
+
+  test('keeps audit-retention reconciliation and starts no tenant operation', () => {
+    const worker = Object.entries(resources).find(([id]) =>
+      id.startsWith('TenantOperationFunction') && !id.includes('ServiceRole'));
+    const workerProperties = JSON.stringify(worker?.[1].Properties);
+
+    expect(workerProperties).not.toContain('EXECUTION_QUEUE_URL');
+    const tenantStreamMappings = Object.values(resources).filter((resource) =>
+      resource.Type === 'AWS::Lambda::EventSourceMapping' &&
+      JSON.stringify(resource.Properties).includes(String(worker?.[0])) &&
+      JSON.stringify(resource.Properties).includes('TenantAdministrationTable'));
+    expect(tenantStreamMappings).toHaveLength(1);
+    const filters = JSON.stringify(tenantStreamMappings[0].Properties?.FilterCriteria);
+    expect(filters).toContain('RETENTION_JOB');
+    expect(filters).not.toContain('OPERATION#');
+    expect(Object.values(resources).filter((resource) =>
+      resource.Type === 'AWS::Lambda::EventSourceMapping' &&
+      JSON.stringify(resource.Properties).includes(String(worker?.[0])) &&
+      JSON.stringify(resource.Properties).includes('AuditEventsTable'))).toHaveLength(1);
   });
 
   test('keeps deleted file versions unreadable for everyone without the restore drill', () => {
@@ -186,6 +227,21 @@ describe('optional modules selected through CDK context', () => {
     template.hasOutput('RequestEmailIngestionFunctionName', {});
   });
 
+  test('turns tenant export and closure on', () => {
+    const { template } = synthesizeDefaultStack({ [TENANT_LIFECYCLE_CONTEXT_KEY]: 'true' });
+
+    template.hasOutput('TenantExportCapabilityFunctionName', {});
+    template.hasOutput('TenantVerificationCapabilityFunctionName', {});
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          TENANT_EXPORT_BUCKET_NAME: Match.anyValue(),
+          TENANT_LIFECYCLE_OPERATIONS: 'enabled',
+        }),
+      },
+    });
+  });
+
   test('turns the demo data on', () => {
     const { template, errors } = synthesizeDefaultStack({ [DEMO_DATA_CONTEXT_KEY]: 'true' });
     const payloads = JSON.stringify(template.findResources('Custom::AWS'));
@@ -204,6 +260,7 @@ describe('optional modules selected through CDK context', () => {
         [RESTORE_DRILL_CONTEXT_KEY]: 'true',
         [CONNECTORS_CONTEXT_KEY]: 'true',
         [REQUEST_EMAIL_CONTEXT_KEY]: 'true',
+        [TENANT_LIFECYCLE_CONTEXT_KEY]: 'true',
         [DEMO_DATA_CONTEXT_KEY]: 'true',
       },
       {},
@@ -213,6 +270,7 @@ describe('optional modules selected through CDK context', () => {
     expect(parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
     expect(parameters.ConnectorRuntimeConfiguration).toBeUndefined();
     expect(parameters.RequestEmailWebhookSecret).toBeUndefined();
+    expect(template.toJSON().Outputs).not.toHaveProperty('TenantExportCapabilityFunctionName');
     expect(findDemoSeedLogicalIds(template)).toEqual([]);
   });
 });

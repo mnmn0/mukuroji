@@ -56,6 +56,7 @@ wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み�
 | `mukuroji:restoreDrill` | [隔離 restore drill](#scheduled-isolated-restore-drill) の workflow、Object Lock evidence bucket（400日 COMPLIANCE）、専用 KMS key 2 個、alarm 14 個。`RestoreDrillCleanupApproverRoleArn` parameter が必要になります。 | 定期 drill は行いません。PITR による [incident recovery](#pitr-recovery) は引き続き使えます。削除済み file version は誰も読めません。 |
 | `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
 | `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
+| `mukuroji:tenantLifecycle` | テナントのエクスポートと閉鎖を実行する 6 つの resource owner Lambda（export、access、identity、data、secrets、verification）、それぞれの execution queue、エクスポート成果物を置く `TenantExportBucket`。API にはその bucket の読み取り権限を付けます。 | API はエクスポート・閉鎖の要求と、操作の download・pause・resume・verify を `503 TenantLifecycleNotDeployed` で断ります（`TENANT_LIFECYCLE_OPERATIONS=disabled`）。テナントのプロフィールとガバナンス設定、操作の参照は使えます。`TenantOperationFunction` は残り、監査ログの保持期間の処理だけを行います。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
@@ -74,11 +75,14 @@ bun --filter cdk cdk deploy Mukuroji \
 一度作ったモジュールを外すと、CloudFormation は Lambda、alarm、IAM role などを削除しますが、`Retain` の
 resource は stack から外れるだけで AWS アカウントに残ります。残るのは table、bucket、secret、KMS key、
 log group と、connectors の `ConnectorSyncQueue`・`ConnectorSyncDlq`・`ConnectorPollDlq`、requestEmail の
-`RequestEmailIngestionDlq` です。queue 内の message も保持期間までは残ります。Object Lock の evidence
+`RequestEmailIngestionDlq`、tenantLifecycle の 6 つの `Tenant*ExecutionQueue` と `TenantExportBucket` です。queue 内の message も保持期間までは残ります。Object Lock の evidence
 bucket は保持期間が終わるまで削除できません。外す前に次を行ってください。
 
 - そのモジュールの queue と DLQ が空であることを確認し、`cdk deploy` の output から queue URL と secret ARN を
   記録します。残った resource は記録した URL / ARN で後から確認し、不要なら手で削除します。
+- tenantLifecycle を外す前に、実行中のエクスポートと閉鎖がないことを確認します。外したあとは worker が操作の
+  record を受け取らないため、途中の操作は進まなくなります。完了済みのエクスポート成果物は `TenantExportBucket` に
+  残りますが、API からは download できません。
 - connectors を外すと `ConnectorRuntimeSecret` も stack から外れます。あとで再び有効にすると、stack は
   `ConnectorRuntimeConfiguration`（既定値 `{}`）で新しい secret を作るため、provider 設定は自動では戻りません。
   secret ARN が変わるので、再有効化の deploy では `ApiRuntimeConfigurationRevision` を増やします。
@@ -210,6 +214,8 @@ templateとdeployed configurationの両方で照合します。
 - `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
 - `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`
 - `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`（`mukuroji:connectors` 有効時のみ）
+- `TenantOperationFunctionName`, `TenantOperationDlqUrl`（テナント操作の開始と監査ログ保持の処理）
+- `TenantExportCapabilityFunctionName` など 6 つの `Tenant*CapabilityFunctionName`（`mukuroji:tenantLifecycle` 有効時のみ）
 - `WorkspaceDirectoryId`
 
 CloudFront は `/api/*` を cache せず、Host 以外の viewer header をそのまま HTTP API へ渡します。
