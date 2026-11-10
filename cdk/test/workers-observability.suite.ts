@@ -916,6 +916,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
         },
+        CONNECTOR_SYNC_ENABLED: 'true',
         CONNECTOR_SYNC_QUEUE_URL: {
           Ref: 'ConnectorSyncQueue4F8E52D0',
         },
@@ -1123,7 +1124,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   const workspaceAccessTableId =
     template.toJSON().Outputs.WorkspaceAccessTableName?.Value?.Ref;
   const webhookKeyId = Object.entries(resources).find(([logicalId, resource]) =>
-    logicalId.startsWith('DeveloperPlatformWebhookKey') &&
+    logicalId.startsWith('DeveloperPlatformKey') &&
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   )?.[0];
   expect(typeof auditEventsTableId).toBe('string');
@@ -1436,7 +1437,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   )?.[0];
   const secretId = findResourceId('ConnectorRuntimeSecret', 'AWS::SecretsManager::Secret');
   const configurationKeyId = findResourceId(
-    'ConnectorRuntimeConfigurationKey',
+    'DeveloperPlatformKey',
     'AWS::KMS::Key',
   );
   const queueId = findResourceId('ConnectorSyncQueue', 'AWS::SQS::Queue');
@@ -1449,13 +1450,10 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   const workerFunctionId = findResourceId('ConnectorSyncFunction', 'AWS::Lambda::Function');
   const pollFunctionId = findResourceId('ConnectorPollFunction', 'AWS::Lambda::Function');
   const connectorKeyId = findResourceId(
-    'DeveloperPlatformConnectorKey',
+    'DeveloperPlatformKey',
     'AWS::KMS::Key',
   );
-  const stateKeyId = findResourceId(
-    'DeveloperPlatformStateKey',
-    'AWS::KMS::Key',
-  );
+  const stateKeyId = connectorKeyId;
 
   expect(secretId).toBeDefined();
   expect(configurationKeyId).toBeDefined();
@@ -1843,7 +1841,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(pollPolicies).not.toContain('secretsmanager:GetSecretValue');
   expect(pollPolicies).not.toContain('WorkItemsTableD3F1672B');
   expect(pollPolicies).not.toContain('AuditEventsTable0723963E');
-  expect(pollPolicies).not.toContain('DeveloperPlatformConnectorKey');
+  expect(pollPolicies).not.toContain('DeveloperPlatformKey');
 
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     AlarmDescription:

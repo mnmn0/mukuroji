@@ -744,6 +744,10 @@ restore共通のfull-result contractを持ちます。自動drillは同じnormal
 adapter経由で隔離restoreへ適用し、sourceとのexact row比較は同時点export aggregateで行います。
 Incomplete/fail statusはrestore、migration、deployのterminal successとして受理しません。
 
+自動 drill は CDK の任意モジュール `mukuroji:restoreDrill` を有効にした stack だけで動きます
+（[Optional modules](../cdk/README.md#optional-modules)）。既定の stack では自動 drill を作らないため、
+下の checklist の restore drill evidence は手動の PITR 復元で用意します。
+
 通常runは [Isolated restore drill](./restore-drill.md) の契約に従います。Daily due scannerは直近の
 成功済みverificationから89日で次runをadmitし、90日でoverdue alarmを発火します。1回のrunで
 Work Items、Work Item Configuration、Project Directory、Workspace Access、Audit Events、

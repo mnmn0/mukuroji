@@ -7,8 +7,11 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
  * Inputs required to create the stack data stores.
  */
 export interface DataStoreBuilderInput {
-  /** Secret JSON configuration persisted for connector runtimes. */
-  readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /**
+   * Secret JSON configuration persisted for connector runtimes. The connector runtime
+   * secret is created only when the optional connectors module supplies it.
+   */
+  readonly connectorRuntimeConfiguration: cdk.CfnParameter | undefined;
   /** Stable Workspace audit pseudonym key shared by every audit writer. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
 }
@@ -35,16 +38,17 @@ export type DataStoreResources = {
   readonly requestIntakeTable: dynamodb.Table;
   /** Workspace-scoped Customer, Contact, Customer Request, and saved-view table. */
   readonly customersTable: dynamodb.Table;
-  /** Envelope key for developer platform Webhook secrets. */
-  readonly developerPlatformWebhookKey: kms.Key;
-  /** Envelope key for developer platform connector credentials. */
-  readonly developerPlatformConnectorKey: kms.Key;
-  /** Envelope key for developer platform cursor and idempotency state. */
-  readonly developerPlatformStateKey: kms.Key;
-  /** Encryption key for connector runtime configuration. */
-  readonly connectorRuntimeConfigurationKey: kms.Key;
-  /** Secret containing connector provider runtime configuration. */
-  readonly connectorRuntimeSecret: secretsmanager.Secret;
+  /**
+   * Single envelope key for developer platform Webhook secrets, connector credentials,
+   * and cursor state, plus the connector runtime secret. Every direct use is bound to
+   * a `mukuroji:purpose` encryption context, and IAM grants are scoped per purpose.
+   */
+  readonly developerPlatformKey: kms.Key;
+  /**
+   * Secret containing connector provider runtime configuration, created only when
+   * the optional connectors module is deployed.
+   */
+  readonly connectorRuntimeSecret: secretsmanager.Secret | undefined;
   /** Append-only Work Item event table. */
   readonly teamIssueEventsTable: dynamodb.Table;
   /** Workspace team, project, and membership directory table. */
@@ -273,53 +277,23 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
-  const developerPlatformWebhookKey = new kms.Key(
-    stack,
-    'DeveloperPlatformWebhookKey',
-    {
-      description: 'Envelope key for developer platform Webhook signing secrets.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const developerPlatformConnectorKey = new kms.Key(
-    stack,
-    'DeveloperPlatformConnectorKey',
-    {
-      description: 'Envelope key for developer platform connector credentials.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const developerPlatformStateKey = new kms.Key(
-    stack,
-    'DeveloperPlatformStateKey',
-    {
-      description: 'Envelope key for developer platform cursors and idempotency state.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const connectorRuntimeConfigurationKey = new kms.Key(
-    stack,
-    'ConnectorRuntimeConfigurationKey',
-    {
-      description: 'Encryption key for connector provider runtime configuration.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const connectorRuntimeSecret = new secretsmanager.Secret(
-    stack,
-    'ConnectorRuntimeSecret',
-    {
+  const developerPlatformKey = new kms.Key(stack, 'DeveloperPlatformKey', {
+    description:
+      'Envelope key for developer platform Webhook secrets, connector credentials, ' +
+      'cursor state, and connector runtime configuration.',
+    enableKeyRotation: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+  });
+  const { connectorRuntimeConfiguration } = input;
+  const connectorRuntimeSecret = connectorRuntimeConfiguration
+    ? new secretsmanager.Secret(stack, 'ConnectorRuntimeSecret', {
       description:
         'Provider configuration and signing secrets loaded only by connector runtimes.',
-      encryptionKey: connectorRuntimeConfigurationKey,
-      secretStringValue: cdk.SecretValue.cfnParameter(input.connectorRuntimeConfiguration),
-    },
-  );
-  connectorRuntimeSecret.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+      encryptionKey: developerPlatformKey,
+      secretStringValue: cdk.SecretValue.cfnParameter(connectorRuntimeConfiguration),
+    })
+    : undefined;
+  connectorRuntimeSecret?.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
   requestIntakeTable.addGlobalSecondaryIndex({
     indexName: 'RequestQueueIndex',
@@ -613,10 +587,7 @@ export function buildDataStores(
     analyticsTable,
     requestIntakeTable,
     customersTable,
-    developerPlatformWebhookKey,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
-    connectorRuntimeConfigurationKey,
+    developerPlatformKey,
     connectorRuntimeSecret,
     teamIssueEventsTable,
     projectDirectoryTable,

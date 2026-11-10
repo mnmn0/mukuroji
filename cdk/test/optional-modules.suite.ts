@@ -1,11 +1,20 @@
 /** Registers tests for the stack with every optional module left off. */
-import { expect, test } from '@jest/globals';
+import { describe, expect, test } from '@jest/globals';
 import * as cdk from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { RESTORE_DRILL_CONTEXT_KEY, readStackModuleProps } from '../bin/stack-modules';
+import {
+  CONNECTORS_CONTEXT_KEY,
+  REQUEST_EMAIL_CONTEXT_KEY,
+  RESTORE_DRILL_CONTEXT_KEY,
+  readStackModuleProps,
+} from '../bin/stack-modules';
 import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
+import {
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  findApiRuntimeConfigurationSource,
+} from './test-support';
 
 /**
  * Synthesizes the stack the way `bin/cdk.ts` composes it.
@@ -37,47 +46,127 @@ function synthesizeDefaultStack(
   return { template, errors };
 }
 
-const defaultStack = synthesizeDefaultStack();
-
-test('leaves the restore drill out by default', () => {
-  const { template } = defaultStack;
+describe('default deployment without optional modules', () => {
+  const { template, errors } = synthesizeDefaultStack();
   const json = template.toJSON();
+  const resources = json.Resources as Record<string, {
+    Type: string;
+    Properties?: Record<string, unknown>;
+  }>;
+  const logicalIds = Object.keys(resources);
 
-  template.resourceCountIs('AWS::StepFunctions::StateMachine', 1);
-  expect(Object.keys(json.Resources).filter((id) => id.startsWith('RestoreDrill'))).toEqual([]);
-  expect(Object.keys(json.Outputs).filter((id) => id.startsWith('RestoreDrill'))).toEqual([]);
-  // Without the drill no approver role is needed for a deploy.
-  expect(json.Parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
-});
+  test('creates one KMS key shared by the developer platform', () => {
+    template.resourceCountIs('AWS::KMS::Key', 1);
+    expect(logicalIds.filter((id) => id.startsWith('DeveloperPlatformKey')))
+      .toHaveLength(1);
+  });
 
-test('keeps deleted file versions unreadable for everyone without the restore drill', () => {
-  const bucketPolicy = Object.values(defaultStack.template.findResources('AWS::S3::BucketPolicy'))
-    .map((resource) => resource.Properties.PolicyDocument.Statement as Record<string, unknown>[])
-    .flat()
-    .find((statement) => statement.Sid === 'DeletedObjectsCannotBeRead');
+  test('omits every restore-drill, connector, and request email resource and output', () => {
+    template.resourceCountIs('AWS::StepFunctions::StateMachine', 1);
+    for (const prefix of [
+      'RestoreDrill',
+      'ConnectorSync',
+      'ConnectorPoll',
+      'ConnectorRuntimeSecret',
+      'RequestEmailIngestion',
+    ]) {
+      expect(logicalIds.filter((id) => id.startsWith(prefix))).toEqual([]);
+      expect(Object.keys(json.Outputs).filter((id) => id.startsWith(prefix)))
+        .toEqual([]);
+    }
+  });
 
-  expect(bucketPolicy?.Effect).toBe('Deny');
-  expect(bucketPolicy?.Condition).toEqual({
-    StringEquals: { 's3:ExistingObjectTag/mukuroji-deleted': 'true' },
+  test('declares no parameter that only an omitted module reads', () => {
+    for (const parameterName of [
+      'ConnectorRuntimeConfiguration',
+      'RequestEmailWebhookSecret',
+      'RestoreDrillCleanupApproverRoleArn',
+    ]) {
+      expect(json.Parameters).not.toHaveProperty(parameterName);
+    }
+  });
+
+  test('turns off the connector projection and loads no connector provider', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          CONNECTOR_SYNC_ENABLED: 'false',
+          MUKUROJI_RUNTIME_ROLE: 'audit-projection',
+        }),
+      },
+    });
+    const projection = Object.values(resources).find((resource) =>
+      resource.Type === 'AWS::Lambda::Function' &&
+      JSON.stringify(resource.Properties).includes('"MUKUROJI_RUNTIME_ROLE":"audit-projection"'));
+    expect(JSON.stringify(projection)).not.toContain('CONNECTOR_SYNC_QUEUE_URL');
+
+    const configuration = resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID];
+    expect(findApiRuntimeConfigurationSource(
+      configuration.Properties?.SecretString,
+      'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN',
+    )).toEqual({ 'Fn::Base64': '' });
+  });
+
+  test('keeps deleted file versions unreadable for everyone without the restore drill', () => {
+    const bucketPolicy = Object.values(template.findResources('AWS::S3::BucketPolicy'))
+      .map((resource) => resource.Properties.PolicyDocument.Statement as Record<string, unknown>[])
+      .flat()
+      .find((statement) => statement.Sid === 'DeletedObjectsCannotBeRead');
+
+    expect(bucketPolicy?.Effect).toBe('Deny');
+    expect(bucketPolicy?.Condition).toEqual({
+      StringEquals: { 's3:ExistingObjectTag/mukuroji-deleted': 'true' },
+    });
+  });
+
+  test('passes cdk-nag with every optional module left out', () => {
+    expect(errors).toEqual([]);
   });
 });
 
-test('passes cdk-nag with the restore drill left out', () => {
-  expect(defaultStack.errors).toEqual([]);
-});
+describe('optional modules selected through CDK context', () => {
+  test('turns the restore drill on', () => {
+    const { template } = synthesizeDefaultStack({ [RESTORE_DRILL_CONTEXT_KEY]: 'true' });
 
-test('turns the restore drill on through CDK context', () => {
-  const { template } = synthesizeDefaultStack({ [RESTORE_DRILL_CONTEXT_KEY]: 'true' });
+    expect(template.toJSON().Parameters.RestoreDrillCleanupApproverRoleArn).toBeDefined();
+    template.hasOutput('RestoreDrillStateMachineArn', {});
+  });
 
-  expect(template.toJSON().Parameters.RestoreDrillCleanupApproverRoleArn).toBeDefined();
-  template.hasOutput('RestoreDrillStateMachineArn', {});
-});
+  test('turns the connector workers on', () => {
+    const { template } = synthesizeDefaultStack({ [CONNECTORS_CONTEXT_KEY]: true });
 
-test('ignores restore drill context the composition root did not pass to the stack', () => {
-  const { template } = synthesizeDefaultStack(
-    { [RESTORE_DRILL_CONTEXT_KEY]: 'true' },
-    { restoreDrillEnabled: false },
-  );
+    expect(template.toJSON().Parameters.ConnectorRuntimeConfiguration).toBeDefined();
+    template.hasOutput('ConnectorSyncQueueUrl', {});
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          CONNECTOR_SYNC_ENABLED: 'true',
+          MUKUROJI_RUNTIME_ROLE: 'audit-projection',
+        }),
+      },
+    });
+  });
 
-  expect(template.toJSON().Parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
+  test('turns request email ingestion on', () => {
+    const { template } = synthesizeDefaultStack({ [REQUEST_EMAIL_CONTEXT_KEY]: 'true' });
+
+    expect(template.toJSON().Parameters.RequestEmailWebhookSecret).toBeDefined();
+    template.hasOutput('RequestEmailIngestionFunctionName', {});
+  });
+
+  test('ignores module context the composition root did not pass to the stack', () => {
+    const { template } = synthesizeDefaultStack(
+      {
+        [RESTORE_DRILL_CONTEXT_KEY]: 'true',
+        [CONNECTORS_CONTEXT_KEY]: 'true',
+        [REQUEST_EMAIL_CONTEXT_KEY]: 'true',
+      },
+      {},
+    );
+    const { Parameters: parameters } = template.toJSON();
+
+    expect(parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
+    expect(parameters.ConnectorRuntimeConfiguration).toBeUndefined();
+    expect(parameters.RequestEmailWebhookSecret).toBeUndefined();
+  });
 });

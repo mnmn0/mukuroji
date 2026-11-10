@@ -278,16 +278,14 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
   });
 });
 
-test('developer platform and connector runtime secrets use rotated purpose-specific KMS keys', () => {
+test('developer platform and connector runtime secrets share one rotated KMS key', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
-  template.resourceCountIs('AWS::KMS::Key', 6);
+  template.resourceCountIs('AWS::KMS::Key', 3);
   for (const description of [
-    'Envelope key for developer platform Webhook signing secrets.',
-    'Envelope key for developer platform connector credentials.',
-    'Envelope key for developer platform cursors and idempotency state.',
-    'Encryption key for connector provider runtime configuration.',
+    'Envelope key for developer platform Webhook secrets, connector credentials, ' +
+      'cursor state, and connector runtime configuration.',
     'Encrypts isolated restore-drill exports and exact-version file copies.',
     'Encrypts immutable secret-free restore-drill evidence.',
   ]) {
@@ -299,7 +297,15 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const protectedKmsKeys = Object.values(resources).filter((resource) =>
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(protectedKmsKeys).toHaveLength(6);
+  expect(protectedKmsKeys).toHaveLength(3);
+  const developerPlatformKeyId = Object.keys(resources).find((logicalId) =>
+    logicalId.startsWith('DeveloperPlatformKey'));
+  expect(developerPlatformKeyId).toBeDefined();
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Description:
+      'Provider configuration and signing secrets loaded only by connector runtimes.',
+    KmsKeyId: { 'Fn::GetAtt': [developerPlatformKeyId, 'Arn'] },
+  });
   expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'
@@ -640,15 +646,111 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
   expect(serializedRealtimePolicy).not.toContain('/*/*/@connections/*');
 });
 
+test('limits each role to its own purposes on the shared developer platform key', () => {
+  const resources = synthesizedTemplate.toJSON().Resources as Record<string, {
+    Type: string;
+    Properties: Record<string, unknown>;
+  }>;
+  const [keyId, key] = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('DeveloperPlatformKey') && resource.Type === 'AWS::KMS::Key'
+  ) ?? [];
+  expect(keyId).toBeDefined();
+  // The only purposes each Lambda role may use the key for directly.
+  const allowedPurposesByRolePrefix: Record<string, string[]> = {
+    ApiFunctionServiceRole: ['webhook', 'connector', 'platform-state'],
+    ConnectorSyncFunctionServiceRole: ['connector', 'platform-state'],
+    WebhookDeliveryFunctionServiceRole: ['webhook'],
+  };
+  /**
+   * Reads the single data-key purpose a statement is bound to.
+   *
+   * @param statement - IAM statement on the shared key.
+   * @returns The purpose, or `undefined` when the statement is not bound to one.
+   */
+  const readPurpose = (statement: Record<string, unknown>): string | undefined => {
+    const equals = (statement.Condition as {
+      StringEquals?: Record<string, unknown>;
+    } | undefined)?.StringEquals;
+    const purpose = equals?.['kms:EncryptionContext:mukuroji:purpose'];
+    return typeof purpose === 'string' &&
+      equals?.['kms:EncryptionContext:mukuroji:service'] === 'developer-platform'
+      ? purpose
+      : undefined;
+  };
+  /**
+   * Reports whether a statement only allows use through Secrets Manager.
+   *
+   * @param statement - IAM or key policy statement on the shared key.
+   * @returns Whether `kms:ViaService` limits the statement to Secrets Manager.
+   */
+  const isSecretsManagerOnly = (statement: Record<string, unknown>): boolean =>
+    JSON.stringify((statement.Condition as {
+      StringEquals?: Record<string, unknown>;
+    } | undefined)?.StringEquals?.['kms:ViaService'] ?? '').includes('"secretsmanager."');
+
+  // Every identity-based statement in the stack, with the roles it reaches: standalone and
+  // managed policies list their roles, and a role's inline policies belong to that role.
+  const identityStatements = Object.entries(resources).flatMap(([logicalId, resource]) => {
+    const documents = resource.Type === 'AWS::IAM::Role'
+      ? ((resource.Properties.Policies ?? []) as Array<{ PolicyDocument: unknown }>)
+        .map((policy) => policy.PolicyDocument)
+      : resource.Type === 'AWS::IAM::Policy' || resource.Type === 'AWS::IAM::ManagedPolicy'
+        ? [resource.Properties.PolicyDocument]
+        : [];
+    const roles = resource.Type === 'AWS::IAM::Role'
+      ? [logicalId]
+      : ((resource.Properties.Roles ?? []) as Array<{ Ref: string }>).map((role) => role.Ref);
+    return documents.flatMap((document) =>
+      (document as { Statement: Array<Record<string, unknown>> }).Statement
+        .flatMap((statement) => roles.map((role) => ({ role, statement }))));
+  });
+  // No identity policy may grant KMS use on every key, which would bypass the purpose checks.
+  expect(identityStatements.filter(({ statement }) => {
+    const actions = [statement.Action].flat() as string[];
+    return actions.some((action) => action.startsWith('kms:')) &&
+      [statement.Resource].flat().includes('*');
+  })).toEqual([]);
+  const grants = identityStatements.filter(({ statement }) =>
+    JSON.stringify(statement.Resource).includes(`"${keyId}"`));
+  expect(grants.length).toBeGreaterThan(0);
+  const disallowedGrants = grants.filter(({ role, statement }) => {
+    const rolePrefix = Object.keys(allowedPurposesByRolePrefix)
+      .find((prefix) => role.startsWith(prefix));
+    const purpose = readPurpose(statement);
+    return rolePrefix === undefined || purpose === undefined ||
+      !allowedPurposesByRolePrefix[rolePrefix].includes(purpose);
+  });
+  expect(disallowedGrants).toEqual([]);
+  // The connector worker can never decrypt Webhook signing secrets directly.
+  expect(grants.filter(({ role, statement }) =>
+    role.startsWith('ConnectorSyncFunctionServiceRole') &&
+    readPurpose(statement) === 'webhook')).toEqual([]);
+
+  const keyPolicyStatements = (key?.Properties.KeyPolicy as {
+    Statement: Array<Record<string, unknown>>;
+  } | undefined)?.Statement ?? [];
+  const rootPrincipal = {
+    AWS: {
+      'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::', { Ref: 'AWS::AccountId' }, ':root']],
+    },
+  };
+  // CDK's default administrator statement is the only unconditioned one, and only for the account root.
+  const unconditioned = keyPolicyStatements.filter((statement) => statement.Condition === undefined);
+  expect(unconditioned).toEqual([{ Action: 'kms:*', Effect: 'Allow', Principal: rootPrincipal, Resource: '*' }]);
+  const conditioned = keyPolicyStatements.filter((statement) => statement.Condition !== undefined);
+  expect(conditioned.length).toBeGreaterThan(0);
+  expect(conditioned.filter((statement) => !isSecretsManagerOnly(statement))).toEqual([]);
+});
+
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
   const developerPlatformTableId =
     template.toJSON().Outputs.DeveloperPlatformTableName?.Value?.Ref;
   const developerPlatformKeyExpectations = [
-    { prefix: 'DeveloperPlatformWebhookKey', purpose: 'webhook' },
-    { prefix: 'DeveloperPlatformConnectorKey', purpose: 'connector' },
-    { prefix: 'DeveloperPlatformStateKey', purpose: 'platform-state' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'webhook' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'connector' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'platform-state' },
   ].map(({ prefix, purpose }) => ({
     keyId: Object.entries(resources).find(([logicalId, resource]) =>
       logicalId.startsWith(prefix) &&
@@ -827,9 +929,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
   expect(serializedApiPolicies).toContain('kms:GenerateDataKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformWebhookKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformConnectorKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformStateKey');
+  expect(serializedApiPolicies).toContain('DeveloperPlatformKey');
   expect(serializedApiPolicies).toContain('secretsmanager:GetSecretValue');
   expect(serializedApiPolicies).toContain(':secret:');
   expect(serializedApiPolicies).toContain('mukuroji/automation-webhooks/');

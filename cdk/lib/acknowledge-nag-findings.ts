@@ -492,6 +492,9 @@ const acknowledgedFindings = [
  * Acknowledges the current, reviewed AwsSolutions findings for the stack.
  *
  * New findings remain unacknowledged and therefore continue to fail synthesis.
+ * Paths of optional modules that the stack does not create are skipped: an absent
+ * construct has no finding to acknowledge, and a mistyped path still leaves its
+ * finding unacknowledged.
  */
 export function acknowledgeKnownNagFindings(stack: Stack): void {
   const restoreDrillDeployed = stack.node.tryFindChild('RestoreDrillWorkflow') !== undefined;
@@ -505,7 +508,7 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
       restoreDrillDeployed || !path.startsWith('RestoreDrill'));
     if (scopePaths?.length === 0) continue;
     const scopes: IConstruct[] = scopePaths
-      ? scopePaths.map((path: string) => findConstruct(stack, path))
+      ? scopePaths.flatMap((path: string) => findConstruct(stack, path) ?? [])
       : [stack];
 
     for (const scope of scopes) {
@@ -531,17 +534,25 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
     stack,
     'RestoreDrillCleanupRole/DefaultPolicy/Resource',
   );
-  cleanupRolePolicy.node.addMetadata(Validations.ACKNOWLEDGED_RULES_METADATA_KEY, {
+  cleanupRolePolicy?.node.addMetadata(Validations.ACKNOWLEDGED_RULES_METADATA_KEY, {
     [cleanupExecutionFinding]:
       'The wildcard is restricted to approval-gated execution names on the one exact cleanup state machine.',
   });
 }
 
-function findConstruct(stack: Stack, relativePath: string): IConstruct {
-  let current: IConstruct = stack;
+/**
+ * Finds a construct by its path below the stack.
+ *
+ * @param stack - Stack that owns the construct.
+ * @param relativePath - Construct path relative to the stack.
+ * @returns The construct, or `undefined` when an optional module did not create it.
+ */
+function findConstruct(stack: Stack, relativePath: string): IConstruct | undefined {
+  let current: IConstruct | undefined = stack;
 
   for (const segment of relativePath.split('/')) {
-    current = current.node.findChild(segment);
+    current = current.node.tryFindChild(segment);
+    if (!current) return undefined;
   }
 
   return current;
