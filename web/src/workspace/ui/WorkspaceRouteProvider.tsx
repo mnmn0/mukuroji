@@ -158,8 +158,6 @@ export type WorkspaceRouteContextValue = {
   isAiAssistanceTaskEnabled?: (task: AiAssistanceTask) => boolean
   /** Whether the current user may perform team-scoped content mutations. */
   canMutateTeamConfiguration: boolean
-  /** Whether the current user is a system administrator who bypasses Project roles. */
-  isSystemAdmin?: boolean
   /** Whether route-specific workspace queries may load authenticated data. */
   canLoadWorkspaceData: boolean
   /** Whether authentication or common workspace data is still loading. */
@@ -340,7 +338,6 @@ export function WorkspaceRouteProvider() {
   const canManageCustomerRequests = user?.canManageCustomerRequests ?? false
   const canManageCustomerViews = user?.canManageCustomerViews ?? false
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
-  const isSystemAdmin = user?.isSystemAdmin ?? false
   const hasQuickAccessLoadError = Boolean(quickAccessError)
   const quickAccessProjects = useMemo(
     () => resolveProjectQuickAccessItems(quickAccessPreference.items, teams),
@@ -812,7 +809,6 @@ export function WorkspaceRouteProvider() {
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
-    isSystemAdmin,
     commonErrorKey,
     fontSizePreference,
     themePreference,
@@ -875,7 +871,6 @@ export function WorkspaceRouteProvider() {
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
-    isSystemAdmin,
     commonErrorKey,
     fontSizePreference,
     themePreference,

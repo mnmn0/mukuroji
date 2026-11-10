@@ -3,14 +3,12 @@ import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
+import { selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
-import {
-  canRecordTimeOnWorkItem,
-  readViewerProjectRoles,
-} from '../../features/time-tracking/model/workItemWriteAccess'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
+import { useSavedTaskViews } from '../../task-views/queries/useSavedTaskViews'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -37,33 +35,22 @@ export function TeamTimeTrackingPage() {
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
   const workItems = useWorkspaceWorkItems(accessToken, enabled)
-  const writer = useMemo(() => ({
-    canMutate: workspace.canMutateTeamConfiguration,
-    isSystemAdmin: workspace.isSystemAdmin ?? false,
-    ...(workspace.userKey ? { userKey: workspace.userKey } : {}),
-  }), [workspace.canMutateTeamConfiguration, workspace.isSystemAdmin, workspace.userKey])
-  // Members give approver names, and the viewer's own Project roles decide which tasks accept time.
-  const needsViewerRoles = writer.canMutate && !writer.isSystemAdmin
   const projectMembers = useWorkspaceProjectMembers(
     accessToken,
     activeTeam?.id,
     activeTeam?.projects ?? emptyTeamProjects,
-    enabled && (view === 'approvals' || needsViewerRoles),
+    enabled && view === 'approvals',
   )
-  const viewerProjectRoles = useMemo(
-    () => readViewerProjectRoles(projectMembers.data?.members ?? [], writer.userKey),
-    [projectMembers.data?.members, writer.userKey],
-  )
+  const teamScope = useMemo(() => ({ kind: 'team' as const, teamId: teamId ?? '' }), [teamId])
+  // The Team task-view list carries the server's effective write scopes, enterprise grants included.
+  const writeAccess = useSavedTaskViews(accessToken, 'team', teamScope, enabled && view === 'timesheet')
   // Only tasks the server would accept are offered, so a manual entry is never refused for access.
   const workItemOptions = useMemo(
-    () => (workItems.data ?? [])
-      .filter((item) => item.teamId === teamId && !item.archivedAt)
-      .filter((item) => canRecordTimeOnWorkItem(item, writer, viewerProjectRoles))
-      .map((item) => ({ id: item.id, title: item.title }))
-      .sort((left, right) => left.title.localeCompare(right.title)),
-    [teamId, viewerProjectRoles, workItems.data, writer],
+    () => selectTimeEntryWorkItemChoices(workItems.data ?? [], teamId ?? '', writeAccess.data?.capabilities),
+    [teamId, workItems.data, writeAccess.data?.capabilities],
   )
-  const isLoadingWorkItemOptions = workItems.isLoading || (needsViewerRoles && projectMembers.isLoading)
+  // Until both reads land, an empty list means unknown, not "nothing writable".
+  const isLoadingWorkItemOptions = !workItems.data || !writeAccess.data
   const workItemTitles = useMemo(
     () => Object.fromEntries((workItems.data ?? [])
       .filter((item) => item.teamId === teamId)
@@ -71,7 +58,7 @@ export function TeamTimeTrackingPage() {
     [teamId, workItems.data],
   )
   // Without Work Items the entry form has nothing to pick, so a failed lookup is shown, not treated as empty.
-  const lookupError = workItems.error ?? projectMembers.error ?? projectMembers.data?.errors[0]
+  const lookupError = workItems.error ?? writeAccess.error ?? projectMembers.error ?? projectMembers.data?.errors[0]
   const memberNames = useMemo(() => {
     const names: Record<string, string> = {}
     for (const access of projectMembers.data?.members ?? []) {
@@ -102,7 +89,7 @@ export function TeamTimeTrackingPage() {
   if (!teamId) return null
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, projectMembers.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, writeAccess.error, projectMembers.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={(candidate) => createTeamTimeTrackingPath(teamId, candidate, weekStart)}
@@ -115,7 +102,7 @@ export function TeamTimeTrackingPage() {
             <span>{t('timeTracking.page.lookupError')}</span>
             <button
               className="workbench-button-secondary min-h-8 px-3"
-              onClick={() => { void Promise.all([workItems.mutate(), projectMembers.mutate()]).catch(() => undefined) }}
+              onClick={() => { void Promise.all([workItems.mutate(), writeAccess.mutate(), projectMembers.mutate()]).catch(() => undefined) }}
               type="button"
             >
               {t('timeTracking.page.lookupRetry')}

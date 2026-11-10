@@ -18,6 +18,8 @@ type TimeTrackingMockState = {
   isManager: boolean
   /** Idempotency keys sent with mutations. */
   idempotencyKeys: string[]
+  /** Project scopes where the member may record time. */
+  writableProjectIds: string[]
 }
 
 /**
@@ -27,7 +29,7 @@ type TimeTrackingMockState = {
  * @returns Mutable mock state.
  */
 async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
-  const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [] }
+  const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [], writableProjectIds: ['refero'] }
   await page.clock.setFixedTime(new Date('2026-11-10T01:00:00.000Z'))
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'time-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
@@ -44,6 +46,13 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
       { id: 'demo@example.com', email: 'demo@example.com', name: 'Demo Member', role: 'member', updatedAt: '2026-11-01T00:00:00.000Z' },
     ] } })
   })
+  await page.route((url) => url.pathname === '/api/task-views', (route) => route.fulfill({ json: { views: [], capabilities: {
+    canWrite: state.writableProjectIds.length > 0,
+    canManageSharedViews: false,
+    canSetTeamDefault: false,
+    writableTeamIds: state.writableProjectIds.length > 0 ? ['core-team'] : [],
+    writableProjectScopes: state.writableProjectIds.map((projectId) => ({ teamId: 'core-team', projectId })),
+  } } }))
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
   await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') && !url.pathname.includes('/projects'), async (route) => {
     const request = route.request()
@@ -200,13 +209,8 @@ test.describe('Time tracking', () => {
   })
 
   test('does not offer manual entry to a Project viewer', async ({ page }) => {
-    await mockTimeTracking(page)
-    await page.route((url) => /^\/api\/projects\/[^/]+\/members$/u.test(url.pathname), (route) => {
-      const projectId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
-      return route.fulfill({ json: { projectId, members: [
-        { id: 'demo@example.com', email: 'demo@example.com', name: 'Demo Member', role: 'viewer', updatedAt: '2026-11-01T00:00:00.000Z' },
-      ] } })
-    })
+    const state = await mockTimeTracking(page)
+    state.writableProjectIds = []
     await page.goto('/teams/core-team/timesheet')
     await expect(page.getByTestId('timesheet-no-writable-items')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Add manually' })).toBeDisabled()
