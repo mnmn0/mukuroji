@@ -206,7 +206,9 @@ function TokenStep(props: AgentConnectionPanelProps & { overview: PersonalAgentC
         <p className="rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3 text-sm text-[var(--workbench-text)]" role="status">
           {overview.issuanceBlockedReason === 'guest'
             ? t('agents.connect.blockedGuest')
-            : t('agents.connect.blockedPolicy')}
+            : overview.issuanceBlockedReason === 'missing-permission'
+              ? t('agents.connect.blockedPermission')
+              : t('agents.connect.blockedPolicy')}
         </p>
       ) : null}
       {overview.canIssue ? (

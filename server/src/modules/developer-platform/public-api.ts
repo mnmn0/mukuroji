@@ -90,6 +90,7 @@ import type {
 import { DeveloperPlatformError } from './errors'
 import {
   decidePersonalCredentialIssuance,
+  type PersonalCredentialEligibility,
   isAllowedPersonalApiKeyExpiry,
   isPersonalApiKeyScope,
 } from './domain/personal-credential-policy'
@@ -127,10 +128,10 @@ export type DeveloperManagementPrincipal = {
   /** Server-side RBAC から解決した管理 capability です。 */
   capabilities: DeveloperPlatformCapabilities
   /**
-   * Guest 以外の active member として自分用 API key を発行できる立場かどうかです。
-   * Workspace policy は別途評価します。省略時は発行できません。
+   * 自分用 API key を発行できる立場かどうかです。Workspace policy は別途評価します。
+   * 省略時は guest と同じく発行できません。
    */
-  canIssuePersonalCredentials?: boolean
+  personalCredentialEligibility?: PersonalCredentialEligibility
 }
 
 /** Public mutation を既存 audit/idempotency と関連付ける context です。 */
@@ -1500,7 +1501,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       dependencies.apiKeys.listPersonalApiKeys(principal.workspaceId, principal.userId),
     ])
     const decision = decidePersonalCredentialIssuance(
-      principal.canIssuePersonalCredentials === true,
+      principal.personalCredentialEligibility ?? 'guest',
       policy,
     )
     return c.json({
@@ -2785,7 +2786,7 @@ async function requirePersonalCredentialIssuance(
 ) {
   const principal = await authenticateManagementRequest(c, dependencies)
   const decision = decidePersonalCredentialIssuance(
-    principal.canIssuePersonalCredentials === true,
+    principal.personalCredentialEligibility ?? 'guest',
     await dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
   )
   if (!decision.canIssue) {
@@ -2794,7 +2795,9 @@ async function requirePersonalCredentialIssuance(
       'forbidden',
       decision.blockedReason === 'guest'
         ? 'Guests cannot issue personal API keys.'
-        : 'Personal API keys are disabled for this Workspace.',
+        : decision.blockedReason === 'missing-permission'
+          ? 'Issuing personal API keys requires permission to edit work items.'
+          : 'Personal API keys are disabled for this Workspace.',
     )
   }
   return principal

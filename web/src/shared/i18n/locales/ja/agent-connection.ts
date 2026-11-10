@@ -19,6 +19,7 @@ export const agentConnectionMessages = {
   'agents.connect.tokenTitle': '自分用の token を発行',
   'agents.connect.tokenDescription': 'token の権限は work-items:read / work-items:write だけで、あなた自身として動きます。有効期限は必須で、最長 {days} 日です。token は発行直後に一度だけ表示されます。',
   'agents.connect.blockedGuest': 'ゲストは token を発行できません。Workspace の管理者に相談してください。',
+  'agents.connect.blockedPermission': 'あなたの role には作業項目を編集する権限がないため、token を発行できません。Workspace の管理者に相談してください。発行済みの token の失効はできます。',
   'agents.connect.blockedPolicy': 'この Workspace では、管理者がメンバーによる token の発行を停止しています。発行済みの token の失効はできます。',
   'agents.connect.nameLabel': '名前',
   'agents.connect.namePlaceholder': '例: MacBook の Claude Code',

@@ -271,9 +271,9 @@ export type RotatePersonalApiKeyInput = {
 }
 
 /**
- * 自分用 API key を発行できない理由です。
+ * 自分用 API key を発行できない理由です。`missing-permission` は Enterprise role に work item の編集権限がない場合です。
  */
-export type PersonalCredentialIssuanceBlock = 'guest' | 'policy-disabled'
+export type PersonalCredentialIssuanceBlock = 'guest' | 'missing-permission' | 'policy-disabled'
 
 /**
  * Agent 接続画面の初期表示に使う、現在の member 自身の credential 情報です。

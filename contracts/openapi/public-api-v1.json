@@ -2186,6 +2186,7 @@
           "issuanceBlockedReason": {
             "enum": [
               "guest",
+              "missing-permission",
               "policy-disabled"
             ],
             "type": "string"

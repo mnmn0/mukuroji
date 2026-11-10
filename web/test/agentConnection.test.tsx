@@ -161,4 +161,12 @@ describe('agent connection view', () => {
     expect(html).not.toContain('期限を更新して再発行')
     expect(html).toContain('失効')
   })
+
+  test('explains when the member role cannot edit work items', () => {
+    const html = render({
+      overview: { ...overview, canIssue: false, issuanceBlockedReason: 'missing-permission' },
+    })
+    expect(html).toContain('作業項目を編集する権限がない')
+    expect(html).not.toContain('type="date"')
+  })
 })

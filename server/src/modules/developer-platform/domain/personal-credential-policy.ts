@@ -15,19 +15,26 @@ export type PersonalCredentialIssuanceDecision = {
 }
 
 /**
+ * Whether the member's own access lets them issue a personal API key, before the Workspace policy.
+ *
+ * `missing-permission` is an Enterprise role without permission to edit work items.
+ */
+export type PersonalCredentialEligibility = 'eligible' | 'guest' | 'missing-permission'
+
+/**
  * Decides whether the current member may issue a personal API key.
  *
  * Guests are never allowed, regardless of the Workspace policy, because their access is external.
  *
- * @param eligibleMember - Whether the member is an active non-guest Workspace member.
+ * @param eligibility - The member's own eligibility.
  * @param policy - Current Workspace personal credential policy.
  * @returns The issuance decision.
  */
 export function decidePersonalCredentialIssuance(
-  eligibleMember: boolean,
+  eligibility: PersonalCredentialEligibility,
   policy: PersonalCredentialPolicy,
 ): PersonalCredentialIssuanceDecision {
-  if (!eligibleMember) return { canIssue: false, blockedReason: 'guest' }
+  if (eligibility !== 'eligible') return { canIssue: false, blockedReason: eligibility }
   if (!policy.selfIssuanceEnabled) return { canIssue: false, blockedReason: 'policy-disabled' }
   return { canIssue: true }
 }

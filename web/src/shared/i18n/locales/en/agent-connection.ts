@@ -19,6 +19,7 @@ export const agentConnectionMessages = {
   'agents.connect.tokenTitle': 'Issue your token',
   'agents.connect.tokenDescription': 'The token only has work-items:read and work-items:write and acts as you. An expiry is required, at most {days} days ahead. The token is shown once, right after you issue it.',
   'agents.connect.blockedGuest': 'Guests cannot issue tokens. Ask a Workspace administrator.',
+  'agents.connect.blockedPermission': 'Your role cannot edit work items, so you cannot issue tokens. Ask a Workspace administrator. You can still revoke tokens you issued.',
   'agents.connect.blockedPolicy': 'An administrator has turned off member-issued tokens in this Workspace. You can still revoke tokens you issued.',
   'agents.connect.nameLabel': 'Name',
   'agents.connect.namePlaceholder': 'For example: Claude Code on my MacBook',

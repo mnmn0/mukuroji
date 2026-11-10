@@ -3041,18 +3041,23 @@ describe('personal agent credentials', () => {
       canImport: false,
       canExport: false,
     },
-    canIssuePersonalCredentials: true,
+    personalCredentialEligibility: 'eligible',
   }
   const guestPrincipal: DeveloperManagementPrincipal = {
     ...memberPrincipal,
     userId: 'guest-1',
-    canIssuePersonalCredentials: false,
+    personalCredentialEligibility: 'guest',
   }
   const principals: Record<string, DeveloperManagementPrincipal> = {
-    'Bearer admin-session': { ...managementPrincipal, canIssuePersonalCredentials: true },
+    'Bearer admin-session': { ...managementPrincipal, personalCredentialEligibility: 'eligible' },
     'Bearer member-session': memberPrincipal,
     'Bearer other-member-session': { ...memberPrincipal, userId: 'member-2' },
     'Bearer guest-session': guestPrincipal,
+    'Bearer read-only-member-session': {
+      ...memberPrincipal,
+      userId: 'member-3',
+      personalCredentialEligibility: 'missing-permission',
+    },
   }
 
   /** Creates a router whose management session token selects the acting principal. */
@@ -3163,6 +3168,10 @@ describe('personal agent credentials', () => {
     expect(guest.status).toBe(403)
     expect(await (await send(router, 'guest-session', 'GET', '/developer/me/agent-connection')).json())
       .toMatchObject({ canIssue: false, issuanceBlockedReason: 'guest' })
+    expect((await send(router, 'read-only-member-session', 'POST', '/developer/me/api-keys', body)).status)
+      .toBe(403)
+    expect(await (await send(router, 'read-only-member-session', 'GET', '/developer/me/agent-connection')).json())
+      .toMatchObject({ canIssue: false, issuanceBlockedReason: 'missing-permission' })
 
     const issued = await (await send(router, 'member-session', 'POST', '/developer/me/api-keys', body)).json() as {
       apiKey: { id: string }
