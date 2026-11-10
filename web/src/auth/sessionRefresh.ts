@@ -24,8 +24,11 @@ type RefreshOutcome =
   /** The refresh could not reach a verdict, for example offline or a server failure. */
   | { status: 'unavailable' }
 
-/** Refresh already running in this tab, shared by every request that needs it. */
-let inFlightRefresh: Promise<RefreshOutcome> | undefined
+/**
+ * Refreshes already running in this tab, keyed by refresh token, so requests of one session
+ * share a refresh while a different account's request never receives another session's token.
+ */
+const inFlightRefreshes = new Map<string, Promise<RefreshOutcome>>()
 
 /** `fetch` as it was before the authenticated fetch wrapped it. */
 let baseFetch: typeof fetch = (...args) => globalThis.fetch(...args)
@@ -57,10 +60,14 @@ export function refreshAuthSession(staleAccessToken: string): Promise<RefreshOut
   if (stored.accessToken !== staleAccessToken && !needsRefresh(stored)) {
     return Promise.resolve({ status: 'refreshed', session: stored })
   }
-  inFlightRefresh ??= requestRefresh(stored).finally(() => {
-    inFlightRefresh = undefined
+  const refreshToken = stored.refreshToken
+  const running = inFlightRefreshes.get(refreshToken)
+  if (running) return running
+  const refresh = requestRefresh(stored).finally(() => {
+    inFlightRefreshes.delete(refreshToken)
   })
-  return inFlightRefresh
+  inFlightRefreshes.set(refreshToken, refresh)
+  return refresh
 }
 
 /**

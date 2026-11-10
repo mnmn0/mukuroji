@@ -297,3 +297,39 @@ test('keeps the session when the refresh is throttled', async () => {
   expect(response.status).toBe(503)
   expect(readStoredAuthSession()).toEqual(session)
 })
+
+test('never hands one account the refresh of another account running at the same time', async () => {
+  storeSession({ accessToken: token('other-account', 'access-9'), refreshToken: 'refresh-other', expiresAt: Date.now() + 10_000 })
+  const sessionOnly: AuthSession = {
+    accessToken: token('member', 'access-1'),
+    expiresAt: Date.now() + 10_000,
+    refreshToken: 'refresh-1',
+    remember: false,
+    tokenType: 'Bearer',
+  }
+  window.sessionStorage.setItem('mukuroji.auth', JSON.stringify(sessionOnly))
+  server = (request) => {
+    if (request.url === '/api/auth/refresh') {
+      return refreshed(request.body.includes('refresh-other')
+        ? token('other-account', 'access-10')
+        : token('member', 'access-2'))
+    }
+    return Response.json({ ok: true })
+  }
+
+  await Promise.all([
+    fetchTarget.fetch('/api/workspace', {
+      headers: { Authorization: `Bearer ${token('other-account', 'access-9')}` },
+    }),
+    fetchTarget.fetch('/api/workspace', {
+      headers: { Authorization: `Bearer ${sessionOnly.accessToken}` },
+    }),
+  ])
+
+  expect(requests.filter((request) => request.url === '/api/workspace')
+    .map((request) => request.authorization)
+    .sort()).toEqual([
+    `Bearer ${token('member', 'access-2')}`,
+    `Bearer ${token('other-account', 'access-10')}`,
+  ].sort())
+})
