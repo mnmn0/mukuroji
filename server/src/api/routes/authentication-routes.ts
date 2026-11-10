@@ -153,8 +153,24 @@ function toRefreshErrorResponse(c: Context, error: unknown) {
   if (error instanceof EnterpriseSessionActivityError) {
     return c.json({ code: error.code, message: error.message }, error.status === 403 ? 403 : 503)
   }
+  if (error instanceof CognitoServiceError && retryableCognitoRefreshErrors.has(error.code)) {
+    // Cognito reports throttling as HTTP 400; the refresh token is still valid, so the Web must
+    // retry later instead of discarding the session.
+    c.header('Retry-After', '5')
+    return c.json({
+      code: 'AuthenticationRefreshThrottled' as const,
+      message: 'Session refresh is temporarily unavailable. Try again shortly.',
+    }, 429)
+  }
   return toAuthErrorResponse(c, error)
 }
+
+/** Cognito error codes that leave the refresh token valid and are worth retrying. */
+const retryableCognitoRefreshErrors = new Set([
+  'TooManyRequestsException',
+  'LimitExceededException',
+  'InternalErrorException',
+])
 
 function toSupportedMfaChallenge(response: InitiateAuthResponse, email: string) {
   const challenge = readCognitoMfaChallengeName(response.ChallengeName)

@@ -70,6 +70,66 @@ export function readStoredAuthSession(): AuthSession | null {
 }
 
 /**
+ * Finds the stored session that a token belongs to.
+ *
+ * A tab may hold a session-only sign-in in sessionStorage while another tab remembers a
+ * different account in localStorage, so the session is matched by its account rather than
+ * by which storage wins.
+ *
+ * @param accessToken - Access token the caller holds, possibly replaced by a refresh since.
+ * @returns The matching stored session, or `null` when none matches.
+ */
+export function findStoredAuthSession(accessToken: string): AuthSession | null {
+  if (typeof window === 'undefined') return null
+  try {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      const session = readSession(storage)
+      if (session && isSameAuthSessionToken(session.accessToken, accessToken)) return session
+    }
+  } catch {
+    // Storage access can throw in restricted contexts; the caller then has no stored session.
+  }
+  return null
+}
+
+/**
+ * Replaces a stored session with its refreshed version, in the storage it already uses.
+ *
+ * Unlike {@link saveAuthSession}, this leaves the other storage alone, so a refresh of a
+ * session-only sign-in never removes another account remembered in localStorage.
+ *
+ * @param session - Refreshed session.
+ */
+export function replaceStoredAuthSession(session: AuthSession) {
+  try {
+    const storage = session.remember ? window.localStorage : window.sessionStorage
+    storage.setItem(storageKey, JSON.stringify(session))
+  } catch {
+    // The refreshed token still serves this tab's requests when storage refuses the write.
+  }
+}
+
+/**
+ * Removes the stored session that holds a refresh token, leaving any other sign-in in place.
+ *
+ * @param refreshToken - Refresh token of the session to remove.
+ */
+export function removeStoredAuthSession(refreshToken: string) {
+  let removed = false
+  try {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      if (readSession(storage)?.refreshToken === refreshToken) {
+        storage.removeItem(storageKey)
+        removed = true
+      }
+    }
+  } catch {
+    // Nothing more can be removed when storage access fails.
+  }
+  if (removed) void clearAppBadgeAndNotifyTabs()
+}
+
+/**
  * Checks whether two access tokens belong to the same signed-in account on this device.
  *
  * A refresh replaces the access token, while pages keep the token they read when they

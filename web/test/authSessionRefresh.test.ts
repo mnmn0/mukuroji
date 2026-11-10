@@ -252,3 +252,48 @@ test('revokes the refresh token on sign-out', async () => {
     body: JSON.stringify({ refreshToken: 'refresh-1' }),
   }])
 })
+
+test('refreshes and revokes the session of the account a tab uses, not the remembered one', async () => {
+  const remembered = storeSession({ accessToken: token('other-account', 'access-9'), refreshToken: 'refresh-other' })
+  const sessionOnly: AuthSession = {
+    accessToken: token('member', 'access-1'),
+    expiresAt: Date.now() + 10_000,
+    refreshToken: 'refresh-1',
+    remember: false,
+    tokenType: 'Bearer',
+  }
+  window.sessionStorage.setItem('mukuroji.auth', JSON.stringify(sessionOnly))
+  const renewedToken = token('member', 'access-2')
+  server = (request) => {
+    if (request.url === '/api/auth/refresh') return refreshed(renewedToken)
+    if (request.url === '/api/auth/logout') return new Response(null, { status: 204 })
+    return Response.json({ ok: true })
+  }
+
+  await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${sessionOnly.accessToken}` },
+  })
+  await revokeStoredAuthSession(sessionOnly.accessToken)
+
+  expect(requests.map((request) => [request.url, request.authorization, request.body])).toEqual([
+    ['/api/auth/refresh', `Bearer ${sessionOnly.accessToken}`, JSON.stringify({ refreshToken: 'refresh-1' })],
+    ['/api/workspace', `Bearer ${renewedToken}`, ''],
+    ['/api/auth/logout', `Bearer ${renewedToken}`, JSON.stringify({ refreshToken: 'refresh-1' })],
+  ])
+  // The remembered account stays signed in on this device.
+  expect(JSON.parse(window.localStorage.getItem('mukuroji.auth') ?? 'null')).toEqual(remembered)
+})
+
+test('keeps the session when the refresh is throttled', async () => {
+  const session = storeSession()
+  server = (request) => request.url === '/api/auth/refresh'
+    ? Response.json({ code: 'AuthenticationRefreshThrottled' }, { status: 429 })
+    : Response.json({ message: 'expired' }, { status: 401 })
+
+  const response = await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  })
+
+  expect(response.status).toBe(503)
+  expect(readStoredAuthSession()).toEqual(session)
+})

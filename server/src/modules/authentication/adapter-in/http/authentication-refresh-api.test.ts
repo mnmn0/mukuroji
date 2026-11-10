@@ -271,6 +271,24 @@ test('asks for a new sign-in when Cognito rejects the refresh token', async () =
   expect(await response.json()).toMatchObject({ code: 'RefreshTokenRejected' })
 })
 
+test('keeps the session refreshable when Cognito throttles the refresh', async () => {
+  configureFakeProjectClients(true)
+  configureRefreshingCognito(
+    'unused',
+    new CognitoServiceError(400, 'TooManyRequestsException', 'Rate exceeded'),
+  )
+
+  const response = await app.request('/api/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken: 'refresh-1' }),
+  })
+
+  expect(response.status).toBe(429)
+  expect(response.headers.get('Retry-After')).toBe('5')
+  expect(await response.json()).toMatchObject({ code: 'AuthenticationRefreshThrottled' })
+})
+
 test('rejects a refresh request without a refresh token', async () => {
   const cognito = configureRefreshingCognito('unused')
 

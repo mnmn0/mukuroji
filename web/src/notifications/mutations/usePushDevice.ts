@@ -347,19 +347,20 @@ function isRegistrationRefusal(error: unknown): boolean {
  * @param accessToken - Access token of the session being signed out, if known.
  * @param cleanup - Push cleanup; defaults to removing this device's subscription.
  * @param waitMilliseconds - Longest wait for the cleanup.
- * @param revoke - Server-side sign-out; defaults to revoking the stored refresh token.
+ * @param revoke - Server-side sign-out of the account holding `accessToken`; defaults to
+ * revoking its stored refresh token.
  * @returns A promise that settles once the session is cleared.
  */
 export async function signOutWithPushCleanup(
   accessToken: string | undefined,
   cleanup: (accessToken: string | undefined) => Promise<void> = disconnectPushDeviceOnSignOut,
   waitMilliseconds = signOutPushCleanupWaitMilliseconds,
-  revoke: () => Promise<void> = revokeStoredAuthSession,
+  revoke: (accessToken: string | undefined) => Promise<void> = revokeStoredAuthSession,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
   let revoking: Promise<void> | undefined
   /** Starts the server-side sign-out once; it reads the stored session before it is cleared. */
-  const startRevoke = () => (revoking ??= revoke())
+  const startRevoke = () => (revoking ??= revoke(accessToken))
   try {
     await Promise.race([
       // The push cleanup still needs a valid access token, so the revocation waits for it.

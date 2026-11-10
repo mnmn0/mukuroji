@@ -1,11 +1,11 @@
 import { resolveApiBaseUrl } from '../shared/api/apiBaseUrl'
 import { isRecord } from '../shared/api/jsonValidation'
 import {
-  clearAuthSession,
-  isSameAuthSessionToken,
+  findStoredAuthSession,
   readStoredAuthSession,
   recordReplacedAccessToken,
-  saveAuthSession,
+  removeStoredAuthSession,
+  replaceStoredAuthSession,
   type AuthSession,
 } from './session'
 
@@ -50,8 +50,8 @@ function authenticationEndpoint(path: '/auth/refresh' | '/auth/logout') {
  * @returns The refresh outcome.
  */
 export function refreshAuthSession(staleAccessToken: string): Promise<RefreshOutcome> {
-  const stored = readStoredAuthSession()
-  if (!stored?.refreshToken || !isSameAuthSessionToken(stored.accessToken, staleAccessToken)) {
+  const stored = findStoredAuthSession(staleAccessToken)
+  if (!stored?.refreshToken) {
     return Promise.resolve({ status: 'rejected' })
   }
   if (stored.accessToken !== staleAccessToken && !needsRefresh(stored)) {
@@ -100,15 +100,15 @@ async function requestRefresh(session: AuthSession): Promise<RefreshOutcome> {
   const body: unknown = await response.json().catch(() => undefined)
   const renewed = response.ok ? readRefreshedSession(body, session) : undefined
   if (!renewed) {
-    // Only clear the session that was refreshed: another tab may have signed in since.
-    if (readStoredAuthSession()?.refreshToken === session.refreshToken) clearAuthSession()
+    // Only remove the session that was refreshed: another account may be signed in too.
+    if (session.refreshToken) removeStoredAuthSession(session.refreshToken)
     return { status: 'rejected' }
   }
   // Another tab may have signed out while the refresh was running.
-  if (readStoredAuthSession()?.refreshToken !== session.refreshToken) {
+  if (findStoredAuthSession(session.accessToken)?.refreshToken !== session.refreshToken) {
     return { status: 'rejected' }
   }
-  saveAuthSession(renewed)
+  replaceStoredAuthSession(renewed)
   recordReplacedAccessToken(session.accessToken, renewed.accessToken)
   return { status: 'refreshed', session: renewed }
 }
@@ -146,14 +146,16 @@ function readRefreshedSession(body: unknown, previous: AuthSession): AuthSession
 }
 
 /**
- * Revokes the stored session's refresh token on the server, so it cannot resume after sign-out.
+ * Revokes a stored session's refresh token on the server, so it cannot resume after sign-out.
  *
  * Failures are ignored: the caller still clears the local session.
  *
+ * @param accessToken - Access token of the account signing out. Without it, the session that
+ * storage lists first is revoked.
  * @returns A promise that settles when the server answered or the wait ran out.
  */
-export async function revokeStoredAuthSession(): Promise<void> {
-  const session = readStoredAuthSession()
+export async function revokeStoredAuthSession(accessToken?: string): Promise<void> {
+  const session = accessToken ? findStoredAuthSession(accessToken) : readStoredAuthSession()
   if (!session?.refreshToken) return
   try {
     await baseFetch(authenticationEndpoint('/auth/logout'), {
@@ -215,13 +217,10 @@ export function installAuthSessionFetch(target: { fetch: typeof fetch } = global
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
     const requestToken = readBearerToken(headers)
-    const stored = readStoredAuthSession()
-    if (
-      !requestToken ||
-      isSessionEndpoint(url) ||
-      !stored ||
-      !isSameAuthSessionToken(stored.accessToken, requestToken)
-    ) {
+    const stored = requestToken && !isSessionEndpoint(url)
+      ? findStoredAuthSession(requestToken)
+      : null
+    if (!requestToken || !stored) {
       return send(input, init)
     }
 
