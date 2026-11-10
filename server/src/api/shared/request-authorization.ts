@@ -3,6 +3,7 @@ import {
   type EnterpriseRoutePermissionRule,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
+import { tryDecodeURIComponent } from 'hono/utils/url'
 import { type GetUserResponse } from '../../modules/authentication'
 import { type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
 import { createMutationAuditContext } from '../../modules/audit/audit'
@@ -1453,6 +1454,21 @@ function shouldEvaluateEnterpriseNotificationScopes(context?: Context): boolean 
   )
 }
 
+/**
+ * Decodes one raw `c.req.path` segment exactly as Hono decodes `c.req.param()` values.
+ *
+ * @remarks
+ * Authorization must resolve the same Team, Project, or Work Item ID that the route
+ * handler reads. A malformed percent sequence stays literal instead of throwing, so the
+ * handler can answer it rather than the request failing as an upstream error.
+ *
+ * @param segment - Raw path segment matched from `c.req.path`.
+ * @returns The decoded segment.
+ */
+function decodePathSegment(segment: string): string {
+  return tryDecodeURIComponent(segment)
+}
+
 async function resolveEnterpriseAuthorizationResource(
   workspaceId: string,
   context: Context | undefined,
@@ -1469,8 +1485,8 @@ async function resolveEnterpriseAuthorizationResource(
   )
   if (planningUpdateResource) return planningUpdateResource
   const issueMatch = path?.match(/\/teams\/([^/]+)\/issues\/([^/]+)/u)
-  let teamId = issueMatch?.[1] ? decodeURIComponent(issueMatch[1]) : undefined
-  let issueId = issueMatch?.[2] ? decodeURIComponent(issueMatch[2]) : undefined
+  let teamId = issueMatch?.[1] ? decodePathSegment(issueMatch[1]) : undefined
+  let issueId = issueMatch?.[2] ? decodePathSegment(issueMatch[2]) : undefined
   if (path === '/api/realtime/tickets' && context?.req.method === 'POST') {
     const body = await context.req.raw.clone().json().catch(() => undefined) as
       | Record<string, unknown>
@@ -1497,7 +1513,7 @@ async function resolveEnterpriseAuthorizationResource(
   }
   const issueCollectionMatch = path?.match(/\/teams\/([^/]+)\/issues$/u)
   if (issueCollectionMatch?.[1] && context?.req.method === 'POST') {
-    const issueTeamId = decodeURIComponent(issueCollectionMatch[1])
+    const issueTeamId = decodePathSegment(issueCollectionMatch[1])
     const body = await context.req.raw.clone().json().catch(() => undefined)
     const assignedProjectId = isRecord(body) && typeof body.assignedProjectId === 'string'
       ? body.assignedProjectId.trim()
@@ -1514,8 +1530,8 @@ async function resolveEnterpriseAuthorizationResource(
   }
   if (path?.startsWith('/api/planning/work-item-links/')) {
     const linkMatch = path.match(/\/work-item-links\/([^/]+)\/([^/]+)/u)
-    const linkTeamId = linkMatch?.[1] ? decodeURIComponent(linkMatch[1]) : undefined
-    const workItemId = linkMatch?.[2] ? decodeURIComponent(linkMatch[2]) : undefined
+    const linkTeamId = linkMatch?.[1] ? decodePathSegment(linkMatch[1]) : undefined
+    const workItemId = linkMatch?.[2] ? decodePathSegment(linkMatch[2]) : undefined
     if (linkTeamId && workItemId) {
       const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
         workspaceId,
@@ -1539,7 +1555,7 @@ async function resolveEnterpriseAuthorizationResource(
     if (entityId) {
       const authorizationState = await workItemDependencies.planning.getAuthorizationState(workspaceId)
       const entity = authorizationState.entities.find((candidate) =>
-        candidate.id === decodeURIComponent(entityId)
+        candidate.id === decodePathSegment(entityId)
       )
       if (entity?.projectId) {
         return {
@@ -1577,7 +1593,7 @@ async function resolveEnterpriseAuthorizationResource(
   if (planningCycleId) {
     const authorizationState = await workItemDependencies.planning.getAuthorizationState(workspaceId)
     const cycle = authorizationState.entities.find((candidate) =>
-      candidate.id === decodeURIComponent(planningCycleId)
+      candidate.id === decodePathSegment(planningCycleId)
     )
     if (cycle?.projectId) {
       return {
@@ -1596,7 +1612,7 @@ async function resolveEnterpriseAuthorizationResource(
   }
   const projectId = path?.match(/\/projects\/([^/]+)/u)?.[1]
   if (projectId) {
-    const decodedProjectId = decodeURIComponent(projectId)
+    const decodedProjectId = decodePathSegment(projectId)
     const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
     const ownerTeamIds = new Set(
       directory.teams
@@ -1621,7 +1637,7 @@ async function resolveEnterpriseAuthorizationResource(
     return {
       workspaceId,
       kind: 'team' as const,
-      targetId: decodeURIComponent(pathTeamId),
+      targetId: decodePathSegment(pathTeamId),
     }
   }
   return { workspaceId, kind: 'workspace' as const }
