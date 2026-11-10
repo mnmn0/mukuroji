@@ -291,7 +291,6 @@ function normalizeTaskViewFilters(
       ? { assigneeUserIds: [...filters.assigneeUserIds] }
       : {}),
     ...(filters.creatorUserIds ? { creatorUserIds: [...filters.creatorUserIds] } : {}),
-    ...(filters.statuses ? { statuses: [...filters.statuses] } : {}),
     ...(filters.customFields ? {
       customFields: filters.customFields.map((filter) => ({
         fieldId: filter.fieldId,
@@ -317,9 +316,7 @@ function normalizeTaskViewFilters(
     ...(filters.workflowStatuses ? {
       workflowStatuses: filters.workflowStatuses.map((status) => ({
         teamId: status.teamId,
-        ...(status.workItemTypeId !== undefined
-          ? { workItemTypeId: status.workItemTypeId }
-          : {}),
+        workItemTypeId: status.workItemTypeId,
         statusId: status.statusId,
       })),
     } : {}),

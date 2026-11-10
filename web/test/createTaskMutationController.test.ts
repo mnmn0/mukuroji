@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import type { KeyedMutator } from 'swr'
-import type { CanonicalWorkItem, CreateWorkItemInput } from '../src/tasks/api/tasks'
+import type { CanonicalWorkItem, CreateWorkItemInput } from '@mukuroji/contracts'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { createMutationRequestRunner } from '../src/shared/api/mutationHeaders'
 import { createTaskMutationController } from '../src/tasks/mutations/createTaskMutationController'

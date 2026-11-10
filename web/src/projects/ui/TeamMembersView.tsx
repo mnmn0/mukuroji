@@ -5,7 +5,7 @@ import {
   ProgressBar,
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
-import type { CanonicalWorkItem } from '../../tasks/api'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { createWorkspaceTaskTestToken } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import {

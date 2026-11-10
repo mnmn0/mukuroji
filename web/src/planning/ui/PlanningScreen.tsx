@@ -206,12 +206,6 @@ export type PlanningLabels = PlanningUpdateLabels & {
   carryOverMove: string
   /** Carry-over keep option の文言です。 */
   carryOverKeep: string
-  /** Status update section の見出しです。 */
-  statusUpdate: string
-  /** Status update message field の文言です。 */
-  statusMessage: string
-  /** Status update 追加ボタンの文言です。 */
-  addStatusUpdate: string
   /** Work Item link editor の見出しです。 */
   workItemLinkEditor: string
   /** Work Item field の文言です。 */
@@ -294,8 +288,6 @@ export type PlanningScreenProps = {
   canCreateInScope?: (scope: PlanningScope) => boolean
   /** Entity 作成 form に表示する管理可能な Team / Project scope です。 */
   createScopeTeams?: readonly ProjectDirectoryTeam[]
-  /** Current user が entity に status update を追加できるか判定する callback です。 */
-  canUpdateEntityStatus?: (entity: PlanningEntity) => boolean
   /** Current user が target の update schedule を管理できるか判定する callback です。 */
   canManageUpdateCadence?: (target: PlanningUpdateTargetView) => boolean
   /** Current user が target に manual update を公開できるか判定する callback です。 */
@@ -360,13 +352,6 @@ export type PlanningScreenProps = {
   onMoveEntity?: (
     entity: PlanningEntity,
     target: PlanningMoveSelection,
-  ) => void | Promise<void>
-  /** Entity へ status update を追加する callback です。 */
-  onAddStatusUpdate?: (
-    entity: PlanningEntity,
-    message: string,
-    health: PlanningHealth,
-    risk: PlanningRisk,
   ) => void | Promise<void>
   /** Project または Initiative の recurring update schedule を保存する callback です。 */
   onSaveUpdateCadence?: (

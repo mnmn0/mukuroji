@@ -1,8 +1,8 @@
 import {
+  type CanonicalWorkItem,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from './api'
 import {
   createDefaultDateRangeTaskSchedule,
   createDefaultDueDateTaskSchedule,

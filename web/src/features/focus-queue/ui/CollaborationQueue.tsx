@@ -1,11 +1,14 @@
 import { useId, useState } from 'react'
 import { Link } from 'react-router'
-import type { FocusQueueResponse, ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import type {
+  CanonicalWorkItem,
+  FocusQueueResponse,
+  ResolvedWorkItemConfiguration,
+} from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../../projects/api/directory'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import { createFocusPath, workspaceNavPaths } from '../../../shared/routing/paths'
 import { ChevronIcon } from '../../../shared/ui/icons'
-import type { CanonicalWorkItem } from '../../../tasks/api'
 import { isOpenableWorkspaceTask, resolveWorkspaceTaskConfiguration } from '../../../work-items/model/workspaceWorkItems'
 import { resolveWorkItemAssignee, resolveWorkItemTitle, resolveWorkItemWorkflowStatusLabel } from '../../../work-items/model/workItemDisplay'
 import { collaborationStages, createCollaborationQueue, filterCollaborationQueue, type CollaborationStage } from '../model/collaborationQueue'

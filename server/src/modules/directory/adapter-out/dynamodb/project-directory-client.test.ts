@@ -611,11 +611,11 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
           Items: [
             {
               directoryId: 'user#demo@example.com',
-              entryKey: '000010#000000#TEAM#新規チーム',
+              entryKey: '000010#000000#TEAM#new-team',
               entryType: 'team',
-              teamId: '新規チーム',
+              teamId: 'new-team',
               teamSortOrder: 10,
-              nameJa: '新規チーム',
+              nameJa: 'New Team',
               nameEn: 'New Team',
               expanded: true,
             },
@@ -635,10 +635,10 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
     'WorkspaceAccessTable',
   )
 
-  await expect(client.createTeam('user#demo@example.com', { name: '新規チーム' })).resolves.toEqual({
+  await expect(client.createTeam('user#demo@example.com', { name: 'New Team' })).resolves.toEqual({
     team: {
-      id: '新規チーム-2',
-      name: '新規チーム',
+      id: 'new-team-2',
+      name: 'New Team',
       expanded: true,
       projects: [],
     },
@@ -649,12 +649,12 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
         TableName: 'DirectoryTable',
         Item: {
           directoryId: 'user#demo@example.com',
-          teamId: '新規チーム-2',
+          teamId: 'new-team-2',
           teamSortOrder: 20,
-          entryKey: '000020#000000#TEAM#新規チーム-2',
+          entryKey: '000020#000000#TEAM#new-team-2',
           webhookAuthorizationKey:
             'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
-          webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
+          webhookAuthorizationSortKey: 'TEAM#new-team-2',
         },
         ConditionExpression:
           'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
@@ -684,13 +684,13 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             },
             {
               directoryId: 'user#demo@example.com',
-              entryKey: '000010#000010#PROJECT#新規プロジェクト',
+              entryKey: '000010#000010#PROJECT#new-project',
               entryType: 'project',
               teamId: 'core-team',
               teamSortOrder: 10,
-              projectId: '新規プロジェクト',
+              projectId: 'new-project',
               projectSortOrder: 10,
-              nameJa: '新規プロジェクト',
+              nameJa: 'New Project',
               nameEn: 'New Project',
               tone: 'blue',
             },
@@ -715,15 +715,15 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
       'user#demo@example.com',
       'core-team',
       {
-        name: '新規プロジェクト',
+        name: 'New Project',
         tone: 'green',
       },
       { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
     ),
   ).resolves.toEqual({
     project: {
-      id: '新規プロジェクト-2',
-      name: '新規プロジェクト',
+      id: 'new-project-2',
+      name: 'New Project',
       tone: 'green',
     },
   })
@@ -745,12 +745,12 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           Item: {
             directoryId: 'user#demo@example.com',
             teamId: 'core-team',
-            projectId: '新規プロジェクト-2',
+            projectId: 'new-project-2',
             projectSortOrder: 20,
-            entryKey: '000010#000020#PROJECT#新規プロジェクト-2',
+            entryKey: '000010#000020#PROJECT#new-project-2',
             webhookAuthorizationKey:
               'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
-            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
+            webhookAuthorizationSortKey: 'PROJECT#new-project-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -760,15 +760,15 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           TableName: 'DirectoryTable',
           Item: {
             directoryId: 'user#demo@example.com',
-            entryKey: 'PROJECT_MEMBER#新規プロジェクト-2#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#new-project-2#demo@example.com',
             entryType: 'project-member',
-            projectId: '新規プロジェクト-2',
+            projectId: 'new-project-2',
             memberKey: 'demo@example.com',
             email: 'demo@example.com',
             role: 'manager',
             webhookAuthorizationKey:
               'WEBHOOK_ACL#MEMBER#user#demo@example.com#demo@example.com',
-            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
+            webhookAuthorizationSortKey: 'PROJECT#new-project-2',
           },
           ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
         },
@@ -802,20 +802,20 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           Item: {
             directoryId:
               'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
-            entryKey: 'TEAM#core-team#PROJECT#新規プロジェクト-2',
+            entryKey: 'TEAM#core-team#PROJECT#new-project-2',
             entryType: 'webhook-team-grant',
             workspaceId: 'user#demo@example.com',
             teamId: 'core-team',
-            projectId: '新規プロジェクト-2',
+            projectId: 'new-project-2',
             memberKey: 'demo@example.com',
             sourceEntryKey:
-              'PROJECT_MEMBER#新規プロジェクト-2#demo@example.com',
+              'PROJECT_MEMBER#new-project-2#demo@example.com',
             teamSourceEntryKey: '000010#000000#TEAM#core-team',
             projectSourceEntryKey:
-              '000010#000020#PROJECT#新規プロジェクト-2',
+              '000010#000020#PROJECT#new-project-2',
             webhookAuthorizationKey:
               'WEBHOOK_ACL#TEAM_MEMBER#user#demo@example.com#core-team#demo@example.com',
-            webhookAuthorizationSortKey: 'PROJECT#新規プロジェクト-2',
+            webhookAuthorizationSortKey: 'PROJECT#new-project-2',
           },
         },
       },
@@ -826,16 +826,16 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
             directoryId:
               'WEBHOOK_GRANT_CLEANUP#user#demo@example.com#core-team',
             entryKey:
-              'PROJECT#新規プロジェクト-2#MEMBER#demo@example.com',
+              'PROJECT#new-project-2#MEMBER#demo@example.com',
             entryType: 'webhook-team-grant-cleanup',
             workspaceId: 'user#demo@example.com',
             teamId: 'core-team',
-            projectId: '新規プロジェクト-2',
+            projectId: 'new-project-2',
             memberKey: 'demo@example.com',
             grantDirectoryId:
               'WEBHOOK_TEAM_GRANT#user#demo@example.com#demo@example.com',
             grantEntryKey:
-              'TEAM#core-team#PROJECT#新規プロジェクト-2',
+              'TEAM#core-team#PROJECT#new-project-2',
           },
         },
       },
@@ -994,7 +994,7 @@ test('DynamoDB directory client initializes a missing local table before creatin
 
   await expect(client.createTeam('user#demo@example.com', { name: '復旧チーム' })).resolves.toEqual({
     team: {
-      id: '復旧チーム',
+      id: expect.stringMatching(/^team-[0-9a-f]{12}$/u),
       name: '復旧チーム',
       expanded: true,
       projects: [],
@@ -1020,7 +1020,7 @@ test('DynamoDB directory client initializes a missing local table before creatin
         TableName: 'MissingDirectoryTable',
         Item: {
           directoryId: 'user#demo@example.com',
-          teamId: '復旧チーム',
+          teamId: expect.stringMatching(/^team-[0-9a-f]{12}$/u),
         },
       },
     }],

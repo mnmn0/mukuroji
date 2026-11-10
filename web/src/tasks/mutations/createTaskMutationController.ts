@@ -1,7 +1,7 @@
 import type { KeyedMutator } from 'swr'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTeamIssue } from '../../issues/api/workItems'
-import type { CreateWorkItemInput, CanonicalWorkItem } from '../api/tasks'
+import type { CreateWorkItemInput, CanonicalWorkItem } from '@mukuroji/contracts'
 import { resolveLatestTaskSnapshot } from '../model/taskView'
 
 /** Dependencies used by the Project task create mutation controller. */

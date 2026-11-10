@@ -815,6 +815,7 @@ describe('API runtime configuration externalization', () => {
       MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN:
         ref(API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       TENANT_EXPORT_BUCKET_NAME: ref(TENANT_EXPORT_BUCKET_LOGICAL_ID),
+      TENANT_LIFECYCLE_OPERATIONS: 'enabled',
     });
 
     const resolvedVariables: Record<string, string> = {};
