@@ -8,6 +8,7 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { workspaceDependencies } from '../shared/app-dependencies'
 import { readJson, toAuthErrorResponse } from '../shared/http'
+import { getEnv } from '../shared/runtime-config'
 import { requireWorkspaceAdministration } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
@@ -32,6 +33,12 @@ function toTenantAdministrationErrorResponse(c: Context, error: unknown) {
     : 502
   return c.json({ code: error.code, message: error.message }, status)
 }
+
+/**
+ * Environment variable that CDK sets to `disabled` when the stack omits the tenant export and
+ * closure workers. Any other value, including unset for local runs, keeps the routes open.
+ */
+const TENANT_LIFECYCLE_OPERATIONS_ENVIRONMENT = 'TENANT_LIFECYCLE_OPERATIONS'
 
 /**
  * Registers the tenant administration HTTP routes on the shared route application.
@@ -66,6 +73,8 @@ export function registerTenantAdministrationRoutes(routeApp: Hono): void {
       }
     },
     readJson,
+    lifecycleOperationsDeployed: () =>
+      getEnv(TENANT_LIFECYCLE_OPERATIONS_ENVIRONMENT)?.trim() !== 'disabled',
     mapError: (context, error) => {
       if (error instanceof CognitoServiceError) return toAuthErrorResponse(context, error)
       if (error instanceof WorkspaceAccessError) {

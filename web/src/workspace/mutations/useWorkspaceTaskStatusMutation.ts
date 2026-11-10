@@ -1,4 +1,5 @@
 import type {
+  CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { useCallback, useRef, useState } from 'react'
@@ -7,7 +8,6 @@ import { TeamIssuesApiError } from '../../issues/api'
 import { updateWorkspaceTaskRemote } from '../../issues/mutations/updateWorkspaceTask'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   createWorkspaceTaskKey,
   replaceWorkspaceTask,

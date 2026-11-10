@@ -5,6 +5,8 @@ import type {
   ResolvedWorkItemConfiguration,
   WorkItemPatch,
   WorkItemConfiguration,
+  CanonicalWorkItem,
+  WorkItemPriority,
 } from '@mukuroji/contracts'
 import {
   Fragment,
@@ -13,7 +15,6 @@ import {
   type CSSProperties,
   type KeyboardEvent,
 } from 'react'
-import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'

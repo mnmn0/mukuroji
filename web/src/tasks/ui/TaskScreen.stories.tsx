@@ -1,4 +1,5 @@
 import {
+  type CanonicalWorkItem,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type WorkItemScheduleChangePreview,
@@ -30,7 +31,6 @@ import {
 } from '../../issues/fixtures'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
-import type { CanonicalWorkItem } from '../api/tasks'
 import { referoTaskFixtures } from '../fixtures'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'

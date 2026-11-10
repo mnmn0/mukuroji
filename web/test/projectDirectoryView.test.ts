@@ -10,7 +10,7 @@ import {
   parseProjectDirectoryPage,
 } from '../src/projects/model/projectDirectoryView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { CanonicalWorkItem } from '../src/tasks/api/tasks'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')

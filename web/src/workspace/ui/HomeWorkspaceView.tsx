@@ -1,11 +1,14 @@
-import type { FocusQueueResponse, ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import type {
+  CanonicalWorkItem,
+  FocusQueueResponse,
+  ResolvedWorkItemConfiguration,
+} from '@mukuroji/contracts'
 import { Link } from 'react-router'
 import { CollaborationQueue } from '../../features/focus-queue/ui/CollaborationQueue'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { workspaceNavPaths } from '../../shared/routing/paths'
 import { ChevronIcon } from '../../shared/ui/icons'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import type { WorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 
 /** Inputs for the shared human and coding-agent workspace home. */

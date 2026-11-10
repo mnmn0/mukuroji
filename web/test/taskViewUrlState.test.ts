@@ -29,7 +29,6 @@ describe('task view URL state', () => {
     searchParams.set('view.override', JSON.stringify({
       filters: {
         keyword: 'urgent',
-        statuses: ['todo'],
         workflowStatuses: [{
           teamId: 'team-1',
           workItemTypeId: 'bug',
@@ -53,7 +52,6 @@ describe('task view URL state', () => {
       override: {
         filters: {
           keyword: 'urgent',
-          statuses: ['todo'],
           workflowStatuses: [{
             teamId: 'team-1',
             workItemTypeId: 'bug',
@@ -157,7 +155,7 @@ describe('task view URL state', () => {
     const searchParams = new URLSearchParams({
       'view.v': String(TASK_VIEW_URL_STATE_SCHEMA_VERSION),
       'view.override': JSON.stringify({
-        filters: { statuses: 'todo' },
+        filters: { assigneeUserIds: 'user-1' },
         layout: { mode: 'board' },
       }),
     })
@@ -170,6 +168,25 @@ describe('task view URL state', () => {
         fallback: 'ignored',
       }],
     })
+  })
+
+  test('ignores override status filters that are not Team and Work Item Type-qualified', () => {
+    for (const filters of [
+      { workflowStatuses: [{ teamId: 'team-1', statusId: 'todo' }] },
+      { statuses: ['todo'] },
+    ]) {
+      const parsed = parseTaskViewUrlState(new URLSearchParams({
+        'view.v': String(TASK_VIEW_URL_STATE_SCHEMA_VERSION),
+        'view.override': JSON.stringify({ filters, layout: { mode: 'board' } }),
+      }), context)
+
+      expect(parsed.state.override).toEqual({ layout: { mode: 'board' } })
+      expect(parsed.warnings).toEqual([{
+        code: 'invalid-url-override',
+        section: 'filter',
+        fallback: 'ignored',
+      }])
+    }
   })
 
   test('rejects URL column widths outside persisted server bounds', () => {

@@ -6,7 +6,7 @@ import { readUpdateFeedFilterOptions } from './filter-options'
 
 /** Produces a complete current graph entity without historical reports. */
 function entity(id: string, type: PlanningEntity['type'], parentId?: string): PlanningEntity {
-  return { id, type, title: id, parentId, teamId: 'team', projectId: 'project', ownerMemberKey: 'owner', status: 'active', health: 'on-track', rollupHealth: 'on-track', risk: 'none', progressMode: 'automatic', progress: 0, linkedWorkItemCount: 0, baseline: { startDate: '2026-01-01', endDate: '2026-12-01' }, forecast: { startDate: '2026-01-01', endDate: '2026-12-01' }, statusUpdates: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
+  return { id, type, title: id, parentId, teamId: 'team', projectId: 'project', ownerMemberKey: 'owner', status: 'active', health: 'on-track', rollupHealth: 'on-track', risk: 'none', progressMode: 'automatic', progress: 0, linkedWorkItemCount: 0, baseline: { startDate: '2026-01-01', endDate: '2026-12-01' }, forecast: { startDate: '2026-01-01', endDate: '2026-12-01' }, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
 }
 /** Creates a bounded source graph with both qualified Project and Initiative targets. */
 async function graph(): Promise<PlanningSnapshot> {

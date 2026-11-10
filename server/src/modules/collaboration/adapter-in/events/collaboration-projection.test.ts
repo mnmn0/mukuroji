@@ -934,6 +934,80 @@ describe('collaboration projection pure helpers', () => {
     })
   })
 
+  test('projects context Search once before the projection receipt completes the event', async () => {
+    const keys = ['PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORK_ITEMS_TABLE_NAME']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const searchReceipt = 'collaboration-context-search-v2\0evt-context-search'
+    const projectionReceipt = 'collaboration-projection-v1\0evt-context-search'
+    const receipts = new Map<string, Record<string, unknown>>()
+    const receiptTransactions: unknown[] = []
+    const deletions: CuratedContextSearchProjectionInput[] = []
+    let workItemReads = 0
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        if (command.input.TableName === 'PROCESSED_AUDIT_EVENTS_TABLE_NAME') {
+          const key = `${command.input.Key?.consumerName}\0${command.input.Key?.eventId}`
+          return { Item: receipts.get(key), $metadata: {} }
+        }
+        if (command.input.TableName === 'WORK_ITEMS_TABLE_NAME') {
+          workItemReads += 1
+          return { $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        receiptTransactions.push(command.input.TransactItems)
+      }
+      const puts = command instanceof TransactWriteCommand ? command.input.TransactItems?.flatMap((item) => item.Put ? [item.Put] : [])
+        : command instanceof PutCommand ? [command.input] : undefined
+      if (!puts) throw new Error('Unexpected projection command')
+      for (const put of puts) {
+        if (put.TableName !== 'PROCESSED_AUDIT_EVENTS_TABLE_NAME' || !put.Item) throw new Error('Unexpected projection write')
+        receipts.set(`${put.Item.consumerName}\0${put.Item.eventId}`, put.Item)
+      }
+      return { $metadata: {} }
+    })
+    const batch = { Records: [{ eventName: 'INSERT', dynamodb: { SequenceNumber: 'context-search', NewImage: {
+      eventId: { S: 'evt-context-search' }, eventType: { S: 'context-item.created' }, workspaceId: { S: 'workspace-1' },
+      occurredAt: { S: '2026-07-12T12:00:00.000Z' }, entityType: { S: 'work-item' }, entityId: { S: 'team/core/issue/example' },
+      targetId: { S: 'team/core/issue/example/context-item/context-1' }, outboxStatus: { S: 'pending' },
+      metadata: { M: { teamId: { S: 'core' }, issueId: { S: 'example' }, contextItemId: { S: 'context-1' } } },
+    } } }] }
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: {
+        async upsertCurrent() { throw new Error('A deleted parent must not upsert its context Search document.') },
+        async deleteCurrent(input: CuratedContextSearchProjectionInput) { deletions.push(input) },
+      },
+      realtime: { publish: async () => {} },
+    }
+    try {
+      expect(await processCollaborationProjectionBatch(batch, dependencies)).toEqual({ batchItemFailures: [] })
+      expect(deletions).toEqual([{ workspaceId: 'workspace-1', teamId: 'core', issueId: 'example', contextItemId: 'context-1' }])
+      expect([...receipts.keys()]).toEqual([searchReceipt, projectionReceipt])
+      expect(receiptTransactions).toEqual([[
+        { ConditionCheck: expect.objectContaining({ TableName: 'WORK_ITEMS_TABLE_NAME',
+          Key: { directoryTeamId: 'workspace-1#team#core', issueId: 'example' } }) },
+        { Put: expect.objectContaining({ Item: expect.objectContaining({ consumerName: 'collaboration-context-search-v2' }) }) },
+      ]])
+
+      receipts.delete(projectionReceipt)
+      expect(await processCollaborationProjectionBatch(batch, dependencies)).toEqual({ batchItemFailures: [] })
+      expect(deletions).toHaveLength(1)
+      expect(receipts.has(projectionReceipt)).toBe(true)
+
+      receipts.delete(searchReceipt)
+      workItemReads = 0
+      expect(await processCollaborationProjectionBatch(batch, dependencies)).toEqual({ batchItemFailures: [] })
+      expect(deletions).toHaveLength(1)
+      expect(workItemReads).toBe(0)
+      expect(receipts.has(searchReceipt)).toBe(false)
+    } finally {
+      send.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
   test('fails closed when curated context audit scope metadata is incomplete', async () => {
     await expect(projectCuratedContextSearchEvent(createProjectionEvent({
       eventType: 'context-item.updated',

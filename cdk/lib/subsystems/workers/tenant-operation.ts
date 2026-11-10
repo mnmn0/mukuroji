@@ -32,16 +32,17 @@ export interface TenantOperationWorkerInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Retained secret containing the shared Workspace audit pseudonym key. */
   readonly workspaceAuditPseudonymSecret: secretsmanager.ISecret;
+  /**
+   * Deploys the tenant export and closure resource owners, their queues, and the export bucket.
+   * Without them the worker only reconciles audit retention.
+   */
+  readonly lifecycleEnabled: boolean;
 }
 
-/** Trusted tenant operation worker resources. */
-export type TenantOperationWorkerResources = {
-  /** Dead-letter queue for tenant lifecycle and retention stream failures. */
-  readonly tenantOperationDlq: sqs.Queue;
+/** Resource owners, queues, and the export bucket that run tenant export and closure. */
+export type TenantLifecycleResources = {
   /** Private, versioned bucket containing expiring tenant export artifacts. */
   readonly tenantExportBucket: s3.Bucket;
-  /** Stream-only worker that starts operations and reconciles retention. */
-  readonly tenantOperationFunction: lambdaNodejs.NodejsFunction;
   /** Resource owner that creates and verifies export artifacts. */
   readonly tenantExportCapabilityFunction: lambdaNodejs.NodejsFunction;
   /** Resource owner that revokes tenant access and active sessions. */
@@ -54,6 +55,16 @@ export type TenantOperationWorkerResources = {
   readonly tenantSecretsCapabilityFunction: lambdaNodejs.NodejsFunction;
   /** Resource owner that verifies tenant closure completion. */
   readonly tenantVerificationCapabilityFunction: lambdaNodejs.NodejsFunction;
+};
+
+/** Trusted tenant operation worker resources. */
+export type TenantOperationWorkerResources = {
+  /** Dead-letter queue for tenant lifecycle and retention stream failures. */
+  readonly tenantOperationDlq: sqs.Queue;
+  /** Stream-only worker that starts operations and reconciles retention. */
+  readonly tenantOperationFunction: lambdaNodejs.NodejsFunction;
+  /** Export and closure resources, present only when the lifecycle module is deployed. */
+  readonly tenantLifecycle: TenantLifecycleResources | undefined;
 };
 
 /** Immutable configuration for one IAM-addressable lifecycle capability. */
@@ -72,12 +83,22 @@ type TenantOperationCapabilitySpec = {
   readonly queue: sqs.Queue;
 };
 
+/** Queue each lifecycle resource owner consumes, keyed by the environment name the starter reads. */
+type TenantLifecycleQueues = {
+  readonly TENANT_EXPORT_EXECUTION_QUEUE_URL: sqs.Queue;
+  readonly TENANT_ACCESS_EXECUTION_QUEUE_URL: sqs.Queue;
+  readonly TENANT_IDENTITY_EXECUTION_QUEUE_URL: sqs.Queue;
+  readonly TENANT_DATA_EXECUTION_QUEUE_URL: sqs.Queue;
+  readonly TENANT_SECRETS_EXECUTION_QUEUE_URL: sqs.Queue;
+  readonly TENANT_VERIFICATION_EXECUTION_QUEUE_URL: sqs.Queue;
+};
+
 /**
  * Builds the stream-only tenant lifecycle starter and reconciliation worker.
  *
  * @param scope - Stack scope that owns the worker.
- * @param input - Data stores, build paths, and runtime controls.
- * @returns Worker Lambda and retained dead-letter queue.
+ * @param input - Data stores, build paths, runtime controls, and the lifecycle switch.
+ * @returns Worker Lambda, retained dead-letter queue, and the optional lifecycle resources.
  */
 export function buildTenantOperationWorker(
   scope: cdk.Stack,
@@ -98,58 +119,9 @@ export function buildTenantOperationWorker(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     retentionPeriod: cdk.Duration.days(14),
   });
-  const tenantExportBucket = new s3.Bucket(scope, 'TenantExportBucket', {
-    blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-    encryption: s3.BucketEncryption.S3_MANAGED,
-    enforceSSL: true,
-    lifecycleRules: [{
-      abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
-      expiration: cdk.Duration.days(30),
-      id: 'ExpireTenantExports',
-      noncurrentVersionExpiration: cdk.Duration.days(30),
-    }],
-    objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
-    removalPolicy: cdk.RemovalPolicy.RETAIN,
-    versioned: true,
-  });
-  /** Creates one retained queue with bounded redrive into the shared lifecycle DLQ. */
-  const createExecutionQueue = (id: string) => new sqs.Queue(scope, id, {
-    deadLetterQueue: {
-      maxReceiveCount: 5,
-      queue: tenantOperationDlq,
-    },
-    encryption: sqs.QueueEncryption.SQS_MANAGED,
-    enforceSSL: true,
-    removalPolicy: cdk.RemovalPolicy.RETAIN,
-    retentionPeriod: cdk.Duration.days(14),
-    visibilityTimeout: cdk.Duration.minutes(15),
-  });
-  const tenantExportExecutionQueue = createExecutionQueue(
-    'TenantExportExecutionQueue',
-  );
-  const tenantAccessExecutionQueue = createExecutionQueue(
-    'TenantAccessExecutionQueue',
-  );
-  const tenantIdentityExecutionQueue = createExecutionQueue(
-    'TenantIdentityExecutionQueue',
-  );
-  const tenantDataExecutionQueue = createExecutionQueue(
-    'TenantDataExecutionQueue',
-  );
-  const tenantSecretsExecutionQueue = createExecutionQueue(
-    'TenantSecretsExecutionQueue',
-  );
-  const tenantVerificationExecutionQueue = createExecutionQueue(
-    'TenantVerificationExecutionQueue',
-  );
-  const executionQueues = [
-    tenantExportExecutionQueue,
-    tenantAccessExecutionQueue,
-    tenantIdentityExecutionQueue,
-    tenantDataExecutionQueue,
-    tenantSecretsExecutionQueue,
-    tenantVerificationExecutionQueue,
-  ];
+  const lifecycleQueues = input.lifecycleEnabled
+    ? buildTenantLifecycleQueues(scope, tenantOperationDlq)
+    : undefined;
   const tenantOperationFunction = new lambdaNodejs.NodejsFunction(
     scope,
     'TenantOperationFunction',
@@ -166,8 +138,9 @@ export function buildTenantOperationWorker(
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
       reservedConcurrentExecutions: 2,
-      description:
-        'Trusted tenant lifecycle executor and audit-retention reconciliation worker.',
+      description: input.lifecycleEnabled
+        ? 'Trusted tenant lifecycle executor and audit-retention reconciliation worker.'
+        : 'Trusted audit-retention reconciliation worker.',
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -176,19 +149,11 @@ export function buildTenantOperationWorker(
       },
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
-        TENANT_ACCESS_EXECUTION_QUEUE_URL:
-          tenantAccessExecutionQueue.queueUrl,
         TENANT_ADMINISTRATION_TABLE_NAME:
           tenantAdministrationTable.tableName,
-        TENANT_DATA_EXECUTION_QUEUE_URL: tenantDataExecutionQueue.queueUrl,
-        TENANT_EXPORT_EXECUTION_QUEUE_URL:
-          tenantExportExecutionQueue.queueUrl,
-        TENANT_IDENTITY_EXECUTION_QUEUE_URL:
-          tenantIdentityExecutionQueue.queueUrl,
-        TENANT_SECRETS_EXECUTION_QUEUE_URL:
-          tenantSecretsExecutionQueue.queueUrl,
-        TENANT_VERIFICATION_EXECUTION_QUEUE_URL:
-          tenantVerificationExecutionQueue.queueUrl,
+        ...Object.fromEntries(
+          Object.entries(lifecycleQueues ?? {}).map(([name, queue]) => [name, queue.queueUrl]),
+        ),
       },
     },
   );
@@ -199,9 +164,35 @@ export function buildTenantOperationWorker(
   );
   tenantAdministrationTable.grants.readWriteData(tenantOperationFunction);
   auditEventsTable.grants.readWriteData(tenantOperationFunction);
-  for (const queue of executionQueues) {
+  for (const queue of Object.values(lifecycleQueues ?? {})) {
     queue.grants.sendMessages(tenantOperationFunction);
   }
+  const retentionJobFilter = lambda.FilterCriteria.filter({
+    eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
+    dynamodb: {
+      NewImage: {
+        kind: { S: lambda.FilterRule.isEqual('retention-job') },
+        recordKey: { S: lambda.FilterRule.isEqual('RETENTION_JOB') },
+        status: {
+          S: lambda.FilterRule.or(
+            lambda.FilterRule.isEqual('pending'),
+            lambda.FilterRule.isEqual('running'),
+          ),
+        },
+      },
+    },
+  });
+  // Operation records start export and closure, so they reach the worker only when the
+  // resource owners that run them are deployed.
+  const operationFilter = lambda.FilterCriteria.filter({
+    eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
+    dynamodb: {
+      NewImage: {
+        kind: { S: lambda.FilterRule.isEqual('operation') },
+        recordKey: { S: lambda.FilterRule.beginsWith('OPERATION#') },
+      },
+    },
+  });
   tenantOperationFunction.addEventSource(
     new lambdaEventSources.DynamoEventSource(tenantAdministrationTable, {
       startingPosition: lambda.StartingPosition.TRIM_HORIZON,
@@ -210,29 +201,9 @@ export function buildTenantOperationWorker(
       parallelizationFactor: 1,
       retryAttempts: 10,
       reportBatchItemFailures: true,
-      filters: [lambda.FilterCriteria.filter({
-        eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
-        dynamodb: {
-          NewImage: {
-            kind: { S: lambda.FilterRule.isEqual('operation') },
-            recordKey: { S: lambda.FilterRule.beginsWith('OPERATION#') },
-          },
-        },
-      }), lambda.FilterCriteria.filter({
-        eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
-        dynamodb: {
-          NewImage: {
-            kind: { S: lambda.FilterRule.isEqual('retention-job') },
-            recordKey: { S: lambda.FilterRule.isEqual('RETENTION_JOB') },
-            status: {
-              S: lambda.FilterRule.or(
-                lambda.FilterRule.isEqual('pending'),
-                lambda.FilterRule.isEqual('running'),
-              ),
-            },
-          },
-        },
-      })],
+      filters: lifecycleQueues
+        ? [operationFilter, retentionJobFilter]
+        : [retentionJobFilter],
       onFailure: new lambdaEventSources.SqsDlq(tenantOperationDlq),
     }),
   );
@@ -252,70 +223,6 @@ export function buildTenantOperationWorker(
     }),
   );
   auditEventsTable.grantStreamRead(tenantOperationFunction);
-  const capabilityInput = {
-    dataStores: input.dataStores,
-    fileStorage: input.fileStorage,
-    lambdaBuildPaths: input.lambdaBuildPaths,
-    parameters: input.parameters,
-    runtimeControls: input.runtimeControls,
-    tenantExportBucket,
-    tenantAdministrationTable,
-    workspaceAuditPseudonymSecret: input.workspaceAuditPseudonymSecret,
-  };
-  const tenantExportCapabilityFunction =
-    buildTenantOperationCapabilityFunction(scope, capabilityInput, {
-      id: 'TenantExportCapabilityFunction',
-      executorId: 'executor:tenant-export',
-      allowedSteps: 'snapshot,prepare-artifact,verify-artifact,export',
-      description: 'Creates and verifies redacted tenant export artifacts.',
-      owner: 'export',
-      queue: tenantExportExecutionQueue,
-    });
-  const tenantAccessCapabilityFunction =
-    buildTenantOperationCapabilityFunction(scope, capabilityInput, {
-      id: 'TenantAccessCapabilityFunction',
-      executorId: 'executor:tenant-access-revocation',
-      allowedSteps: 'revoke-access',
-      description: 'Revokes tenant access and active sessions during closure.',
-      owner: 'access',
-      queue: tenantAccessExecutionQueue,
-    });
-  const tenantIdentityCapabilityFunction =
-    buildTenantOperationCapabilityFunction(scope, capabilityInput, {
-      id: 'TenantIdentityCapabilityFunction',
-      executorId: 'executor:tenant-member-anonymization',
-      allowedSteps: 'anonymize-members',
-      description: 'Anonymizes deleted tenant member identities during closure.',
-      owner: 'identity',
-      queue: tenantIdentityExecutionQueue,
-    });
-  const tenantDataCapabilityFunction =
-    buildTenantOperationCapabilityFunction(scope, capabilityInput, {
-      id: 'TenantDataCapabilityFunction',
-      executorId: 'executor:tenant-data-deletion',
-      allowedSteps: 'delete-data',
-      description: 'Deletes tenant-owned business data during closure.',
-      owner: 'data',
-      queue: tenantDataExecutionQueue,
-    });
-  const tenantSecretsCapabilityFunction =
-    buildTenantOperationCapabilityFunction(scope, capabilityInput, {
-      id: 'TenantSecretsCapabilityFunction',
-      executorId: 'executor:tenant-secret-deletion',
-      allowedSteps: 'delete-secrets',
-      description: 'Deletes tenant-owned credentials and secrets during closure.',
-      owner: 'secrets',
-      queue: tenantSecretsExecutionQueue,
-    });
-  const tenantVerificationCapabilityFunction =
-    buildTenantOperationCapabilityFunction(scope, capabilityInput, {
-      id: 'TenantVerificationCapabilityFunction',
-      executorId: 'executor:tenant-closure-verification',
-      allowedSteps: 'verify',
-      description: 'Verifies tenant resources are absent before final closure.',
-      owner: 'verification',
-      queue: tenantVerificationExecutionQueue,
-    });
   new cloudwatch.Alarm(scope, 'TenantOperationDlqAlarm', {
     alarmDescription:
       'Detects tenant lifecycle or audit-retention records that exhausted bounded retries.',
@@ -331,15 +238,141 @@ export function buildTenantOperationWorker(
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   return {
-    tenantAccessCapabilityFunction,
-    tenantDataCapabilityFunction,
-    tenantExportCapabilityFunction,
-    tenantIdentityCapabilityFunction,
     tenantOperationDlq,
     tenantOperationFunction,
+    tenantLifecycle: lifecycleQueues
+      ? buildTenantLifecycleOwners(scope, input, lifecycleQueues)
+      : undefined,
+  };
+}
+
+/**
+ * Creates one retained execution queue per lifecycle resource owner.
+ *
+ * @param scope - Stack scope that owns the queues.
+ * @param tenantOperationDlq - Shared lifecycle dead-letter queue for exhausted messages.
+ * @returns Queues keyed by the environment name the starter reads.
+ */
+function buildTenantLifecycleQueues(
+  scope: cdk.Stack,
+  tenantOperationDlq: sqs.Queue,
+): TenantLifecycleQueues {
+  /** Creates one retained queue with bounded redrive into the shared lifecycle DLQ. */
+  const createExecutionQueue = (id: string) => new sqs.Queue(scope, id, {
+    deadLetterQueue: {
+      maxReceiveCount: 5,
+      queue: tenantOperationDlq,
+    },
+    encryption: sqs.QueueEncryption.SQS_MANAGED,
+    enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retentionPeriod: cdk.Duration.days(14),
+    visibilityTimeout: cdk.Duration.minutes(15),
+  });
+  return {
+    TENANT_EXPORT_EXECUTION_QUEUE_URL: createExecutionQueue('TenantExportExecutionQueue'),
+    TENANT_ACCESS_EXECUTION_QUEUE_URL: createExecutionQueue('TenantAccessExecutionQueue'),
+    TENANT_IDENTITY_EXECUTION_QUEUE_URL: createExecutionQueue('TenantIdentityExecutionQueue'),
+    TENANT_DATA_EXECUTION_QUEUE_URL: createExecutionQueue('TenantDataExecutionQueue'),
+    TENANT_SECRETS_EXECUTION_QUEUE_URL: createExecutionQueue('TenantSecretsExecutionQueue'),
+    TENANT_VERIFICATION_EXECUTION_QUEUE_URL:
+      createExecutionQueue('TenantVerificationExecutionQueue'),
+  };
+}
+
+/**
+ * Builds the export bucket and the six capability-isolated lifecycle resource owners.
+ *
+ * @param scope - Stack scope that owns the resources.
+ * @param input - Worker inputs shared with the resource owners.
+ * @param queues - Execution queue consumed by each owner.
+ * @returns Export bucket and resource-owner functions.
+ */
+function buildTenantLifecycleOwners(
+  scope: cdk.Stack,
+  input: TenantOperationWorkerInput,
+  queues: TenantLifecycleQueues,
+): TenantLifecycleResources {
+  const tenantExportBucket = new s3.Bucket(scope, 'TenantExportBucket', {
+    blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    encryption: s3.BucketEncryption.S3_MANAGED,
+    enforceSSL: true,
+    lifecycleRules: [{
+      abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+      expiration: cdk.Duration.days(30),
+      id: 'ExpireTenantExports',
+      noncurrentVersionExpiration: cdk.Duration.days(30),
+    }],
+    objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    versioned: true,
+  });
+  const capabilityInput = {
+    dataStores: input.dataStores,
+    fileStorage: input.fileStorage,
+    lambdaBuildPaths: input.lambdaBuildPaths,
+    parameters: input.parameters,
+    runtimeControls: input.runtimeControls,
     tenantExportBucket,
-    tenantSecretsCapabilityFunction,
-    tenantVerificationCapabilityFunction,
+    tenantAdministrationTable: input.dataStores.tenantAdministrationTable,
+    workspaceAuditPseudonymSecret: input.workspaceAuditPseudonymSecret,
+  };
+  return {
+    tenantExportBucket,
+    tenantExportCapabilityFunction:
+      buildTenantOperationCapabilityFunction(scope, capabilityInput, {
+        id: 'TenantExportCapabilityFunction',
+        executorId: 'executor:tenant-export',
+        allowedSteps: 'snapshot,prepare-artifact,verify-artifact,export',
+        description: 'Creates and verifies redacted tenant export artifacts.',
+        owner: 'export',
+        queue: queues.TENANT_EXPORT_EXECUTION_QUEUE_URL,
+      }),
+    tenantAccessCapabilityFunction:
+      buildTenantOperationCapabilityFunction(scope, capabilityInput, {
+        id: 'TenantAccessCapabilityFunction',
+        executorId: 'executor:tenant-access-revocation',
+        allowedSteps: 'revoke-access',
+        description: 'Revokes tenant access and active sessions during closure.',
+        owner: 'access',
+        queue: queues.TENANT_ACCESS_EXECUTION_QUEUE_URL,
+      }),
+    tenantIdentityCapabilityFunction:
+      buildTenantOperationCapabilityFunction(scope, capabilityInput, {
+        id: 'TenantIdentityCapabilityFunction',
+        executorId: 'executor:tenant-member-anonymization',
+        allowedSteps: 'anonymize-members',
+        description: 'Anonymizes deleted tenant member identities during closure.',
+        owner: 'identity',
+        queue: queues.TENANT_IDENTITY_EXECUTION_QUEUE_URL,
+      }),
+    tenantDataCapabilityFunction:
+      buildTenantOperationCapabilityFunction(scope, capabilityInput, {
+        id: 'TenantDataCapabilityFunction',
+        executorId: 'executor:tenant-data-deletion',
+        allowedSteps: 'delete-data',
+        description: 'Deletes tenant-owned business data during closure.',
+        owner: 'data',
+        queue: queues.TENANT_DATA_EXECUTION_QUEUE_URL,
+      }),
+    tenantSecretsCapabilityFunction:
+      buildTenantOperationCapabilityFunction(scope, capabilityInput, {
+        id: 'TenantSecretsCapabilityFunction',
+        executorId: 'executor:tenant-secret-deletion',
+        allowedSteps: 'delete-secrets',
+        description: 'Deletes tenant-owned credentials and secrets during closure.',
+        owner: 'secrets',
+        queue: queues.TENANT_SECRETS_EXECUTION_QUEUE_URL,
+      }),
+    tenantVerificationCapabilityFunction:
+      buildTenantOperationCapabilityFunction(scope, capabilityInput, {
+        id: 'TenantVerificationCapabilityFunction',
+        executorId: 'executor:tenant-closure-verification',
+        allowedSteps: 'verify',
+        description: 'Verifies tenant resources are absent before final closure.',
+        owner: 'verification',
+        queue: queues.TENANT_VERIFICATION_EXECUTION_QUEUE_URL,
+      }),
   };
 }
 

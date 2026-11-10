@@ -22,7 +22,8 @@ export type SearchStatusOption = {
  * Creates collision-safe Search status options from Team configurations and visible filter values.
  *
  * @param configurationsByTeam - Resolved Work Item configuration by Team ID.
- * @param visibleStatusIds - Qualified or legacy status values from the URL and loaded results.
+ * @param visibleStatusIds - Qualified Work Item status keys or bare entity status values from the
+ * URL and loaded results.
  * @param teamNamesById - Optional human-readable Team names used in option labels.
  * @returns Search options keyed by Team, Work Item Type, and status identity.
  */

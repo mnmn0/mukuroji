@@ -7,6 +7,8 @@ import {
   type WorkItemConfiguration,
   type WorkItemPatch,
   type WorkItemSchedule,
+  type CanonicalWorkItem,
+  type WorkItemPriority,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
@@ -33,7 +35,6 @@ import {
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
 } from '../../work-items/model/workItemDisplay'
-import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
   deriveTaskScheduleDueDate,
   resolveTaskSchedule,
@@ -1055,7 +1056,7 @@ export function matchesProjectTaskKeyword(
 /**
  * Falls back to all statuses when a selected status column is no longer available.
  *
- * @param statusFilter - Current Team-scoped status filter value.
+ * @param statusFilter - Current Team and Work Item Type-qualified status column key.
  * @param statusColumns - Currently available Team-scoped status columns.
  * @returns The current filter when valid, otherwise the all-status sentinel.
  */
@@ -1063,16 +1064,9 @@ export function resolveEffectiveStatusFilter(
   statusFilter: StatusFilter,
   statusColumns: readonly ProjectTaskStatusColumn[],
 ): StatusFilter {
-  if (statusFilter === 'all' || statusColumns.some((column) => column.key === statusFilter)) {
-    return statusFilter
-  }
-  const separatorIndex = statusFilter.lastIndexOf(':')
-  if (separatorIndex <= 0 || separatorIndex >= statusFilter.length - 1) return 'all'
-  const legacyTeamId = statusFilter.slice(0, separatorIndex)
-  const legacyStatusId = statusFilter.slice(separatorIndex + 1)
-  return statusColumns.find((column) =>
-    column.teamId === legacyTeamId && column.status.id === legacyStatusId
-  )?.key ?? 'all'
+  return statusFilter === 'all' || statusColumns.some((column) => column.key === statusFilter)
+    ? statusFilter
+    : 'all'
 }
 
 /**
