@@ -747,8 +747,11 @@ demo data を有効にして作った stack で後から無効にしても、res
 
 一度無効にした stack で demo data を再び有効にすることはできません。`SeedProjectDirectory` と
 `SeedWorkItems` は既存 row があると書き込まない条件付きの transaction なので、残っている demo の
-Team・Project・Work Item と衝突して custom resource の作成が失敗します。その場合は stack update が
-rollback され、新しい custom resource は書き込みも削除もしないため、既存の row は変わりません。
+Team・Project・Work Item と衝突して custom resource の作成が失敗し、stack update は rollback されます。
+衝突した transaction は何も書き込まないので、残っている Team・Project・Work Item は変わりません。
+ただし、ほかの demo data の custom resource が失敗より先に書き込むことがあり、その書き込みは
+rollback でも取り消されません。たとえば `SeedWorkspaceDemoMembers` は、削除済みの demo member を
+作り直し、既存の demo member に欠けている属性を補います（既存の値は変えません）。
 demo data が必要な環境では無効にせずに使い続けるか、demo data を有効にした新しい stack を作ります。
 
 local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
