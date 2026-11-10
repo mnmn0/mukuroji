@@ -139,7 +139,10 @@ Inbound webhook endpoint は作成時に `purpose` を `automation` か `triage`
 purpose を指定しない endpoint は `automation` である。`triage` endpoint は作成時に存在を確認した
 `triageRouting.teamId` を持ち、payload から Team、Project、owner、SLA を変えることはできない。
 Triage は record key に使える Team ID（英数字で始まり `A-Z a-z 0-9 . _ : -` のみ、200 文字以内）だけを
-扱うため、それ以外の Team ID（日本語名から作られた ID など）への routing は作成時に
+扱う。Team / Project の ID は作成時に ASCII 値として採番する（主表示名 `nameJa` が ASCII の英数字だけで書かれて
+いればその slug、次に `nameEn` の slug、どちらも ASCII でなければ `team-<n>` / `project-<n>`）ため、日本語名の Team も
+この文法に収まり、Triage、Request form の routing、共有からの handoff をそのまま使える。
+この採番より前に作られた非 ASCII の Team ID への routing だけは、作成時に
 `400 AutomationInboundWebhookTriageTeamUnsupported` で拒否する。
 Team の確認は新しい endpoint を予約するときだけ行う。確認時の Team row への条件（active であること）は
 endpoint の予約 transaction に含めるため、確認後から予約の commit までに Team が archive されると予約は
