@@ -1,9 +1,12 @@
 import type {
+  ApiKeyIssuance,
   ApiKeySummary,
   ApiScope,
   CreateApiKeyInput,
   CreateOAuthAppInput,
   OAuthAppSummary,
+  PersonalCredentialPolicy,
+  UpdatePersonalCredentialPolicyInput,
 } from '@mukuroji/contracts'
 import type { IdempotentDomainMutationRequest } from './request-control-port'
 
@@ -15,6 +18,8 @@ export type CreateApiKeyRequest = IdempotentDomainMutationRequest & {
   createdByUserId: string
   /** Validated API key input. */
   input: CreateApiKeyInput
+  /** Issuance path recorded on the key; omitted means a Workspace key issued by an administrator. */
+  issuance?: ApiKeyIssuance
 }
 
 /** API key creation or rotation result containing the one-time secret. */
@@ -31,10 +36,31 @@ export type RotateApiKeyRequest = IdempotentDomainMutationRequest & {
   workspaceId: string
   /** API key to rotate. */
   apiKeyId: string
+  /** Replacement expiry; omitted keeps the current expiry. */
+  expiresAt?: string
+  /** User performing the mutation, recorded in the audit event. */
+  actorUserId?: string
 }
 
 /** Request used to revoke an API key. */
-export type RevokeApiKeyRequest = RotateApiKeyRequest
+export type RevokeApiKeyRequest = IdempotentDomainMutationRequest & {
+  /** Workspace that owns the API key. */
+  workspaceId: string
+  /** API key to revoke. */
+  apiKeyId: string
+  /** User performing the mutation, recorded in the audit event. */
+  actorUserId?: string
+}
+
+/** Request used to change the Workspace personal credential policy. */
+export type UpdatePersonalCredentialPolicyRequest = IdempotentDomainMutationRequest & {
+  /** Workspace that owns the policy. */
+  workspaceId: string
+  /** Administrator changing the policy. */
+  updatedByUserId: string
+  /** Validated policy input. */
+  input: UpdatePersonalCredentialPolicyInput
+}
 
 /** Common request used to authenticate a developer credential. */
 export type AuthenticateCredentialRequest = {
@@ -131,6 +157,12 @@ export interface ApiKeyPort {
   authenticateApiKey(
     request: AuthenticateCredentialRequest,
   ): Promise<AuthenticatedDeveloperCredential>
+  /** Reads the Workspace personal credential policy, defaulting to self-issuance enabled. */
+  getPersonalCredentialPolicy(workspaceId: string): Promise<PersonalCredentialPolicy>
+  /** Replaces the Workspace personal credential policy. */
+  updatePersonalCredentialPolicy(
+    request: UpdatePersonalCredentialPolicyRequest,
+  ): Promise<PersonalCredentialPolicy>
 }
 
 /** Application port for OAuth application and token credentials. */

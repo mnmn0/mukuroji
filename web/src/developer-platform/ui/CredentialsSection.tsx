@@ -1,4 +1,8 @@
-import type { ApiKeySummary, OAuthAppSummary } from '@mukuroji/contracts'
+import type {
+  ApiKeySummary,
+  OAuthAppSummary,
+  PersonalCredentialPolicy,
+} from '@mukuroji/contracts'
 import {
   ActionButtons,
   EmptyState,
@@ -38,6 +42,10 @@ export type CredentialsSectionProps = {
   onRotateApiKey?: (apiKey: ApiKeySummary) => void
   /** Rotates the selected OAuth application secret. */
   onRotateOAuthApp?: (oauthApp: OAuthAppSummary) => void
+  /** Workspace policy for member-issued agent keys; omitted hides the policy control. */
+  personalCredentialPolicy?: PersonalCredentialPolicy
+  /** Allows or turns off member-issued agent keys. */
+  onChangePersonalCredentialPolicy?: (selfIssuanceEnabled: boolean) => void
 }
 
 /**
@@ -59,9 +67,53 @@ export function CredentialsSection({
   onRevokeOAuthApp,
   onRotateApiKey,
   onRotateOAuthApp,
+  personalCredentialPolicy,
+  onChangePersonalCredentialPolicy,
 }: CredentialsSectionProps) {
   return (
     <div className="grid min-w-0 gap-6">
+      {personalCredentialPolicy ? (
+        <section
+          className="flex min-w-0 flex-wrap items-start justify-between gap-4 rounded-lg border border-[var(--workbench-border)] p-4"
+          data-testid="personal-credential-policy"
+        >
+          <div className="min-w-0 max-w-[720px]">
+            <h3 className="text-sm font-semibold text-[var(--workbench-text)]">
+              {labels.headings.personalCredentials}
+              <span
+                className={`ml-2 ${
+                  personalCredentialPolicy.selfIssuanceEnabled
+                    ? 'workbench-badge-success'
+                    : 'workbench-badge'
+                }`}
+              >
+                {personalCredentialPolicy.selfIssuanceEnabled
+                  ? labels.helpText.personalCredentialsEnabled
+                  : labels.helpText.personalCredentialsDisabled}
+              </span>
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-[var(--workbench-muted)]">
+              {labels.helpText.personalCredentials}
+            </p>
+          </div>
+          {canManage && onChangePersonalCredentialPolicy ? (
+            <button
+              className="workbench-button-secondary min-h-10 px-4 disabled:opacity-50"
+              disabled={busyOperation === 'personal-credential-policy'}
+              onClick={() =>
+                onChangePersonalCredentialPolicy(
+                  !personalCredentialPolicy.selfIssuanceEnabled,
+                )
+              }
+              type="button"
+            >
+              {personalCredentialPolicy.selfIssuanceEnabled
+                ? labels.actions.disablePersonalCredentials
+                : labels.actions.enablePersonalCredentials}
+            </button>
+          ) : null}
+        </section>
+      ) : null}
       <section className="min-w-0">
         <SectionHeader
           action={
@@ -106,6 +158,11 @@ export function CredentialsSection({
                           labels={labels}
                           status={apiKey.status}
                         />
+                        {apiKey.issuance === 'personal' ? (
+                          <span className="workbench-badge ml-1.5">
+                            {labels.helpText.personalKey}
+                          </span>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-[var(--workbench-muted)]">
                         {apiKey.prefix}
@@ -140,7 +197,7 @@ export function CredentialsSection({
                                 : undefined
                             }
                             onRotate={
-                              onRotateApiKey
+                              onRotateApiKey && apiKey.issuance !== 'personal'
                                 ? () => onRotateApiKey(apiKey)
                                 : undefined
                             }
@@ -167,7 +224,14 @@ export function CredentialsSection({
                         {apiKey.prefix}
                       </p>
                     </div>
-                    <StatusBadge labels={labels} status={apiKey.status} />
+                    <span className="flex flex-wrap gap-1.5">
+                      <StatusBadge labels={labels} status={apiKey.status} />
+                      {apiKey.issuance === 'personal' ? (
+                        <span className="workbench-badge">
+                          {labels.helpText.personalKey}
+                        </span>
+                      ) : null}
+                    </span>
                   </div>
                   <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-[var(--workbench-muted)]">
                     <div>
@@ -217,7 +281,7 @@ export function CredentialsSection({
                             : undefined
                         }
                         onRotate={
-                          onRotateApiKey
+                          onRotateApiKey && apiKey.issuance !== 'personal'
                             ? () => onRotateApiKey(apiKey)
                             : undefined
                         }

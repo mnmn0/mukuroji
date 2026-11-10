@@ -4641,3 +4641,78 @@ describe('request safety primitives', () => {
       .toBeInstanceOf(LocalAesGcmSecretProtector)
   })
 })
+
+describe('API key audit', () => {
+  /** Returns the audit outbox items written by DynamoDB transactions so far. */
+  function readAuditItems(commands: Array<{ name: string; input: Record<string, unknown> }>) {
+    return commands
+      .filter(({ name }) => name === 'TransactWriteCommand')
+      .flatMap(({ input }) => input.TransactItems as Array<{
+        Put?: { TableName?: string; Item: Record<string, unknown> }
+      }>)
+      .filter(({ Put }) => Put?.TableName === 'AuditEventsTable')
+      .map(({ Put }) => Put?.Item ?? {})
+  }
+
+  test('records issuance, rotation, revocation, and policy changes without secrets', async () => {
+    const memory = createMemoryDocumentClient()
+    const client = new DynamoDbDeveloperPlatformStorage(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(31)),
+      () => START,
+      'LookupKeyIndex',
+      'AuditEventsTable',
+    )
+    const expiresAt = new Date(START.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString()
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-audit',
+      createdByUserId: 'member-1',
+      input: { name: 'Agent', scopes: ['work-items:read', 'work-items:write'], expiresAt },
+      issuance: 'personal',
+    })
+    const rotatedExpiry = new Date(START.getTime() + 60 * 24 * 60 * 60 * 1_000).toISOString()
+    const rotated = await client.rotateApiKey({
+      workspaceId: 'workspace-audit',
+      apiKeyId: created.apiKey.id,
+      expiresAt: rotatedExpiry,
+      actorUserId: 'member-1',
+    })
+    expect(rotated.apiKey.expiresAt).toBe(rotatedExpiry)
+    await client.revokeApiKey({
+      workspaceId: 'workspace-audit',
+      apiKeyId: created.apiKey.id,
+      actorUserId: 'admin-1',
+    })
+    await client.revokeApiKey({
+      workspaceId: 'workspace-audit',
+      apiKeyId: created.apiKey.id,
+      actorUserId: 'admin-1',
+    })
+    await expect(client.updatePersonalCredentialPolicy({
+      workspaceId: 'workspace-audit',
+      updatedByUserId: 'admin-1',
+      input: { selfIssuanceEnabled: false },
+    })).resolves.toMatchObject({ selfIssuanceEnabled: false, updatedByUserId: 'admin-1' })
+    await expect(client.getPersonalCredentialPolicy('workspace-audit'))
+      .resolves.toMatchObject({ selfIssuanceEnabled: false })
+    await expect(client.getPersonalCredentialPolicy('workspace-unset'))
+      .resolves.toEqual({ selfIssuanceEnabled: true })
+
+    const audits = readAuditItems(memory.commands)
+    expect(audits.map((item) => item.eventType)).toEqual([
+      'api-key.created',
+      'api-key.rotated',
+      'api-key.revoked',
+      'credential-policy.updated',
+    ])
+    expect(audits[0]).toMatchObject({
+      entityType: 'api-key',
+      entityId: created.apiKey.id,
+      metadata: expect.objectContaining({ ownerUserId: 'member-1', issuance: 'personal' }),
+    })
+    const serialized = JSON.stringify(audits)
+    expect(serialized).not.toContain(created.secret)
+    expect(serialized).not.toContain(rotated.secret)
+  })
+})

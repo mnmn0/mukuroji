@@ -19,11 +19,18 @@ import {
   type ConnectorProvider,
   type CreateConnectorInstallationInput,
   type CreateApiKeyInput,
+  type CreatePersonalApiKeyInput,
   type CreateOAuthAppInput,
   type CreatePublicWorkItemRequest,
   type CreateWebhookSubscriptionInput,
   type DeveloperPlatformCapabilities,
   type DeveloperPlatformOverview,
+  PERSONAL_API_KEY_MAX_LIFETIME_DAYS,
+  PERSONAL_API_KEY_SCOPES,
+  type PersonalAgentCredentialOverview,
+  type PersonalApiKeyScope,
+  type RotatePersonalApiKeyInput,
+  type UpdatePersonalCredentialPolicyInput,
   type ImportFieldMapping,
   type ImportDryRunReport,
   type ImportJob,
@@ -80,6 +87,11 @@ import type {
   WebhookSubscriptionPort,
 } from './application/ports'
 import { DeveloperPlatformError } from './errors'
+import {
+  decidePersonalCredentialIssuance,
+  isAllowedPersonalApiKeyExpiry,
+  isPersonalApiKeyScope,
+} from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
@@ -113,6 +125,11 @@ export type DeveloperManagementPrincipal = {
   userId: string
   /** Server-side RBAC から解決した管理 capability です。 */
   capabilities: DeveloperPlatformCapabilities
+  /**
+   * Guest 以外の active member として自分用 API key を発行できる立場かどうかです。
+   * Workspace policy は別途評価します。省略時は発行できません。
+   */
+  canIssuePersonalCredentials?: boolean
 }
 
 /** Public mutation を既存 audit/idempotency と関連付ける context です。 */
@@ -1332,7 +1349,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       dependencies,
       'canManageCredentials',
     )
-    const [apiKeys, oauthApps, webhookSubscriptions, deliveryPage, connectors, imports] =
+    const [
+      apiKeys,
+      oauthApps,
+      webhookSubscriptions,
+      deliveryPage,
+      connectors,
+      imports,
+      personalCredentialPolicy,
+    ] =
       await Promise.all([
         dependencies.apiKeys.listApiKeys(principal.workspaceId),
         dependencies.oauthCredentials.listOAuthApps(principal.workspaceId),
@@ -1343,6 +1368,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         }),
         dependencies.connectors.listConnectors(principal.workspaceId),
         listAuthorizedImportJobs(dependencies.imports, dependencies.workItems, principal),
+        dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
       ])
     return c.json({
       capabilities: principal.capabilities,
@@ -1352,6 +1378,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       webhookDeliveries: deliveryPage.deliveries,
       connectors,
       imports,
+      personalCredentialPolicy,
     } satisfies DeveloperPlatformOverview)
   })
 
@@ -1367,6 +1394,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         workspaceId: principal.workspaceId,
         createdByUserId: principal.userId,
         input,
+        issuance: 'workspace',
         idempotency,
       }),
     }))
@@ -1409,6 +1437,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         body: await dependencies.apiKeys.rotateApiKey({
           workspaceId: principal.workspaceId,
           apiKeyId,
+          actorUserId: principal.userId,
           idempotency,
         }),
       }),
@@ -1428,6 +1457,120 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         body: await dependencies.apiKeys.revokeApiKey({
           workspaceId: principal.workspaceId,
           apiKeyId,
+          actorUserId: principal.userId,
+        }),
+      }),
+    )
+  })
+
+  router.get('/developer/credential-policy', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
+    return c.json(await dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId))
+  })
+
+  router.put('/developer/credential-policy', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
+    const input = readUpdatePersonalCredentialPolicyInput(await readJson(c))
+    return executeManagementIdempotentJson(
+      c,
+      dependencies,
+      principal,
+      input,
+      async (_context, idempotency) => ({
+        status: 200,
+        body: await dependencies.apiKeys.updatePersonalCredentialPolicy({
+          workspaceId: principal.workspaceId,
+          updatedByUserId: principal.userId,
+          input,
+          idempotency,
+        }),
+      }),
+    )
+  })
+
+  router.get('/developer/me/agent-connection', async (c) => {
+    const principal = await authenticateManagementRequest(c, dependencies)
+    const [policy, apiKeys] = await Promise.all([
+      dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
+      dependencies.apiKeys.listApiKeys(principal.workspaceId),
+    ])
+    const decision = decidePersonalCredentialIssuance(
+      principal.canIssuePersonalCredentials === true,
+      policy,
+    )
+    return c.json({
+      memberId: principal.userId,
+      canIssue: decision.canIssue,
+      ...(decision.blockedReason ? { issuanceBlockedReason: decision.blockedReason } : {}),
+      policy,
+      scopes: [...PERSONAL_API_KEY_SCOPES],
+      maxLifetimeDays: PERSONAL_API_KEY_MAX_LIFETIME_DAYS,
+      apiKeys: apiKeys.filter((apiKey) =>
+        apiKey.createdByUserId === principal.userId && apiKey.issuance === 'personal'
+      ),
+    } satisfies PersonalAgentCredentialOverview)
+  })
+
+  router.post('/developer/me/api-keys', async (c) => {
+    const principal = await requirePersonalCredentialIssuance(c, dependencies)
+    const input = readCreatePersonalApiKeyInput(await readJson(c), dependencies.now?.() ?? new Date())
+    return executeManagementIdempotentJson(c, dependencies, principal, input, async (
+      _context,
+      idempotency,
+    ) => ({
+      status: 201,
+      body: await dependencies.apiKeys.createApiKey({
+        workspaceId: principal.workspaceId,
+        createdByUserId: principal.userId,
+        input: {
+          name: input.name,
+          scopes: input.scopes ?? [...PERSONAL_API_KEY_SCOPES],
+          expiresAt: input.expiresAt,
+        },
+        issuance: 'personal',
+        idempotency,
+      }),
+    }))
+  })
+
+  router.post('/developer/me/api-keys/:apiKeyId/rotate', async (c) => {
+    const principal = await requirePersonalCredentialIssuance(c, dependencies)
+    const apiKeyId = readRouteId(c.req.param('apiKeyId'), 'API key ID')
+    const input = readRotatePersonalApiKeyInput(await readJson(c), dependencies.now?.() ?? new Date())
+    await requireOwnPersonalApiKey(dependencies, principal, apiKeyId)
+    return executeManagementIdempotentJson(
+      c,
+      dependencies,
+      principal,
+      { apiKeyId, ...input },
+      async (_context, idempotency) => ({
+        status: 200,
+        body: await dependencies.apiKeys.rotateApiKey({
+          workspaceId: principal.workspaceId,
+          apiKeyId,
+          expiresAt: input.expiresAt,
+          actorUserId: principal.userId,
+          idempotency,
+        }),
+      }),
+    )
+  })
+
+  router.delete('/developer/me/api-keys/:apiKeyId', async (c) => {
+    const principal = await authenticateManagementRequest(c, dependencies)
+    const apiKeyId = readRouteId(c.req.param('apiKeyId'), 'API key ID')
+    await requireOwnPersonalApiKey(dependencies, principal, apiKeyId)
+    return executeManagementIdempotentJson(
+      c,
+      dependencies,
+      principal,
+      { apiKeyId },
+      async () => ({
+        status: 200,
+        body: await dependencies.apiKeys.revokeApiKey({
+          workspaceId: principal.workspaceId,
+          apiKeyId,
+          actorUserId: principal.userId,
         }),
       }),
     )
@@ -2569,6 +2712,8 @@ function isSecretBearingRequest(method: string, pathname: string) {
   return pathname.endsWith('/v1/oauth/token') ||
     pathname.endsWith('/developer/api-keys') ||
     /\/developer\/api-keys\/[^/]+\/rotate$/u.test(pathname) ||
+    pathname.endsWith('/developer/me/api-keys') ||
+    /\/developer\/me\/api-keys\/[^/]+\/rotate$/u.test(pathname) ||
     pathname.endsWith('/developer/oauth-apps') ||
     /\/developer\/oauth-apps\/[^/]+\/rotate-secret$/u.test(pathname) ||
     pathname.endsWith('/developer/webhook-subscriptions') ||
@@ -2622,6 +2767,57 @@ async function requireManagementCapability(
     throw new PublicApiServiceError(403, 'forbidden', 'Workspace administrator access is required.')
   }
   return principal
+}
+
+/**
+ * Authenticates a member and requires that they may issue personal API keys now.
+ *
+ * @param c - Hono request context.
+ * @param dependencies - Router dependencies.
+ * @returns The authenticated management principal.
+ */
+async function requirePersonalCredentialIssuance(
+  c: Context,
+  dependencies: PublicApiDependencies,
+) {
+  const principal = await authenticateManagementRequest(c, dependencies)
+  const decision = decidePersonalCredentialIssuance(
+    principal.canIssuePersonalCredentials === true,
+    await dependencies.apiKeys.getPersonalCredentialPolicy(principal.workspaceId),
+  )
+  if (!decision.canIssue) {
+    throw new PublicApiServiceError(
+      403,
+      'forbidden',
+      decision.blockedReason === 'guest'
+        ? 'Guests cannot issue personal API keys.'
+        : 'Personal API keys are disabled for this Workspace.',
+    )
+  }
+  return principal
+}
+
+/**
+ * Requires that an API key exists, belongs to the member, and was self-issued.
+ *
+ * @param dependencies - Router dependencies.
+ * @param principal - Authenticated member.
+ * @param apiKeyId - Target API key ID.
+ * @returns The member's personal API key.
+ */
+async function requireOwnPersonalApiKey(
+  dependencies: PublicApiDependencies,
+  principal: DeveloperManagementPrincipal,
+  apiKeyId: string,
+) {
+  const apiKey = (await dependencies.apiKeys.listApiKeys(principal.workspaceId))
+    .find((candidate) =>
+      candidate.id === apiKeyId &&
+      candidate.createdByUserId === principal.userId &&
+      candidate.issuance === 'personal'
+    )
+  if (!apiKey) throw new PublicApiServiceError(404, 'not_found', 'API key was not found.')
+  return apiKey
 }
 
 /** Idempotent mutation の reservation/replay 制御 option です。 */
@@ -3206,6 +3402,103 @@ function readCreateApiKeyInput(value: unknown): CreateApiKeyInput {
       ? { expiresAt: readFutureTimestamp(body.expiresAt, 'API key expiry') }
       : {}),
   }
+}
+
+/**
+ * Validates a personal API key request: required expiry within the maximum lifetime, member scopes only.
+ *
+ * @param value - Untrusted JSON body.
+ * @param now - Issuance time.
+ * @returns The validated input.
+ */
+function readCreatePersonalApiKeyInput(value: unknown, now: Date): CreatePersonalApiKeyInput {
+  const body = requireRecord(value, 'API key input is required.')
+  assertAllowedFields(body, ['name', 'scopes', 'expiresAt'], 'API key input')
+  return {
+    name: readRequiredString(body.name, 'API key name'),
+    expiresAt: readPersonalApiKeyExpiry(body.expiresAt, now),
+    ...(body.scopes === undefined ? {} : { scopes: readPersonalApiKeyScopes(body.scopes) }),
+  }
+}
+
+/**
+ * Validates a personal API key rotation request.
+ *
+ * @param value - Untrusted JSON body.
+ * @param now - Rotation time.
+ * @returns The validated input.
+ */
+function readRotatePersonalApiKeyInput(value: unknown, now: Date): RotatePersonalApiKeyInput {
+  const body = requireRecord(value, 'API key rotation input is required.')
+  assertAllowedFields(body, ['expiresAt'], 'API key rotation input')
+  return { expiresAt: readPersonalApiKeyExpiry(body.expiresAt, now) }
+}
+
+/**
+ * Reads a required personal API key expiry no later than the maximum lifetime.
+ *
+ * @param value - Untrusted expiry.
+ * @param now - Issuance or rotation time.
+ * @returns Normalized ISO 8601 expiry.
+ */
+function readPersonalApiKeyExpiry(value: unknown, now: Date) {
+  const timestamp = Date.parse(readRequiredString(value, 'API key expiry'))
+  if (!Number.isFinite(timestamp)) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'API key expiry must be an ISO timestamp.',
+    )
+  }
+  const expiresAt = new Date(timestamp).toISOString()
+  if (!isAllowedPersonalApiKeyExpiry(expiresAt, now)) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `API key expiry must be in the future and within ${PERSONAL_API_KEY_MAX_LIFETIME_DAYS} days.`,
+    )
+  }
+  return expiresAt
+}
+
+/**
+ * Reads a non-empty list of scopes a member may grant to a personal API key.
+ *
+ * @param value - Untrusted scopes.
+ * @returns Unique personal scopes.
+ */
+function readPersonalApiKeyScopes(value: unknown): PersonalApiKeyScope[] {
+  const scopes = readStringArray(value, 'API key scopes', PERSONAL_API_KEY_SCOPES.length)
+  const personalScopes = scopes.filter(isPersonalApiKeyScope)
+  if (personalScopes.length !== scopes.length) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'Personal API keys may only use work-items:read and work-items:write.',
+    )
+  }
+  return personalScopes
+}
+
+/**
+ * Validates a personal credential policy update.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns The validated input.
+ */
+function readUpdatePersonalCredentialPolicyInput(
+  value: unknown,
+): UpdatePersonalCredentialPolicyInput {
+  const body = requireRecord(value, 'Credential policy input is required.')
+  assertAllowedFields(body, ['selfIssuanceEnabled'], 'Credential policy input')
+  if (typeof body.selfIssuanceEnabled !== 'boolean') {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'selfIssuanceEnabled must be a boolean.',
+    )
+  }
+  return { selfIssuanceEnabled: body.selfIssuanceEnabled }
 }
 
 function readCreateOAuthAppInput(value: unknown): CreateOAuthAppInput {

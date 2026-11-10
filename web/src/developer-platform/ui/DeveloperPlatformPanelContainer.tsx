@@ -8,6 +8,7 @@ import {
   createDeveloperApiKey,
   revokeDeveloperApiKey,
   rotateDeveloperApiKey,
+  updatePersonalCredentialPolicy,
 } from '../api/apiKeys'
 import {
   connectDeveloperConnector,
@@ -433,6 +434,18 @@ export function DeveloperPlatformPanelContainer({
           },
         )
       }
+      onChangePersonalCredentialPolicy={async (selfIssuanceEnabled) => {
+        await runMutation(
+          `developer-credential-policy:${selfIssuanceEnabled}`,
+          String(selfIssuanceEnabled),
+          (context) =>
+            updatePersonalCredentialPolicy(
+              mutationSession.accessToken,
+              { selfIssuanceEnabled },
+              context,
+            ),
+        )
+      }}
       onRotateApiKey={(apiKeyId) =>
         runMutation(
           `developer-api-key:rotate:${apiKeyId}`,

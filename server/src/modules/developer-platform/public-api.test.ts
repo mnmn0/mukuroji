@@ -3016,3 +3016,225 @@ describe('public Agent Run routes', () => {
     expect(inputs).toHaveLength(1)
   })
 })
+
+describe('personal agent credentials', () => {
+  const DAY_MS = 24 * 60 * 60 * 1_000
+  const memberPrincipal: DeveloperManagementPrincipal = {
+    workspaceId: 'workspace-1',
+    userId: 'member-1',
+    capabilities: {
+      canManageCredentials: false,
+      canManageWebhooks: false,
+      canManageIntegrations: false,
+      canImport: false,
+      canExport: false,
+    },
+    canIssuePersonalCredentials: true,
+  }
+  const guestPrincipal: DeveloperManagementPrincipal = {
+    ...memberPrincipal,
+    userId: 'guest-1',
+    canIssuePersonalCredentials: false,
+  }
+  const principals: Record<string, DeveloperManagementPrincipal> = {
+    'Bearer admin-session': { ...managementPrincipal, canIssuePersonalCredentials: true },
+    'Bearer member-session': memberPrincipal,
+    'Bearer other-member-session': { ...memberPrincipal, userId: 'member-2' },
+    'Bearer guest-session': guestPrincipal,
+  }
+
+  /** Creates a router whose management session token selects the acting principal. */
+  function createPersonalCredentialRouter() {
+    return createTestRouter({
+      authenticateManagement: async (authorization) => {
+        const principal = principals[authorization]
+        if (!principal) throw new PublicApiServiceError(401, 'invalid_credentials', 'Unknown session.')
+        return principal
+      },
+    })
+  }
+
+  /** Sends a management request as the given session. */
+  function send(
+    router: ReturnType<typeof createTestRouter>['router'],
+    session: string,
+    method: string,
+    path: string,
+    body?: unknown,
+    idempotencyKey = crypto.randomUUID(),
+  ) {
+    return router.request(`http://localhost${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${session}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(method === 'GET' ? {} : { 'Idempotency-Key': idempotencyKey }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  }
+
+  const expiresInDays = (days: number) => new Date(NOW.getTime() + days * DAY_MS).toISOString()
+
+  test('lets a non-administrator issue a work-item key that authenticates as themselves', async () => {
+    const { platform, router } = createPersonalCredentialRouter()
+
+    const overview = await send(router, 'member-session', 'GET', '/developer/me/agent-connection')
+    expect(overview.status).toBe(200)
+    expect(await overview.json()).toEqual({
+      memberId: 'member-1',
+      canIssue: true,
+      policy: { selfIssuanceEnabled: true },
+      scopes: ['work-items:read', 'work-items:write'],
+      maxLifetimeDays: 90,
+      apiKeys: [],
+    })
+
+    const created = await send(router, 'member-session', 'POST', '/developer/me/api-keys', {
+      name: 'Laptop Claude Code',
+      expiresAt: expiresInDays(30),
+    })
+    expect(created.status).toBe(201)
+    expect(created.headers.get('Cache-Control')).toBe('no-store')
+    const issued = await created.json() as { apiKey: { id: string }; secret: string }
+    expect(issued.apiKey).toMatchObject({
+      createdByUserId: 'member-1',
+      issuance: 'personal',
+      scopes: ['work-items:read', 'work-items:write'],
+      status: 'active',
+      expiresAt: expiresInDays(30),
+    })
+    await expect(platform.authenticateApiKey({
+      credential: issued.secret,
+      requiredScopes: ['work-items:write'],
+    })).resolves.toMatchObject({ subjectUserId: 'member-1', kind: 'api-key' })
+
+    const listed = await (await send(router, 'member-session', 'GET', '/developer/me/agent-connection')).json() as {
+      apiKeys: Array<{ id: string }>
+    }
+    expect(listed.apiKeys.map((apiKey) => apiKey.id)).toEqual([issued.apiKey.id])
+    const otherMember = await (
+      await send(router, 'other-member-session', 'GET', '/developer/me/agent-connection')
+    ).json() as { apiKeys: unknown[] }
+    expect(otherMember.apiKeys).toEqual([])
+  })
+
+  test('requires an expiry within the limit and only work-item scopes', async () => {
+    const { router } = createPersonalCredentialRouter()
+    const invalidBodies = [
+      { name: 'No expiry' },
+      { name: 'Past', expiresAt: expiresInDays(-1) },
+      { name: 'Too long', expiresAt: expiresInDays(91) },
+      { name: 'Delete scope', expiresAt: expiresInDays(30), scopes: ['work-items:delete'] },
+      { name: 'Webhook scope', expiresAt: expiresInDays(30), scopes: ['webhooks:write'] },
+    ]
+    for (const body of invalidBodies) {
+      const response = await send(router, 'member-session', 'POST', '/developer/me/api-keys', body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'validation_failed' })
+    }
+
+    const readOnly = await send(router, 'member-session', 'POST', '/developer/me/api-keys', {
+      name: 'Read only',
+      expiresAt: expiresInDays(90),
+      scopes: ['work-items:read'],
+    })
+    expect(readOnly.status).toBe(201)
+    expect(await readOnly.json()).toMatchObject({ apiKey: { scopes: ['work-items:read'] } })
+  })
+
+  test('rejects guests and members when the administrator disables self-issuance', async () => {
+    const { router } = createPersonalCredentialRouter()
+    const body = { name: 'Agent', expiresAt: expiresInDays(30) }
+
+    const guest = await send(router, 'guest-session', 'POST', '/developer/me/api-keys', body)
+    expect(guest.status).toBe(403)
+    expect(await (await send(router, 'guest-session', 'GET', '/developer/me/agent-connection')).json())
+      .toMatchObject({ canIssue: false, issuanceBlockedReason: 'guest' })
+
+    const issued = await (await send(router, 'member-session', 'POST', '/developer/me/api-keys', body)).json() as {
+      apiKey: { id: string }
+    }
+
+    expect((await send(router, 'member-session', 'PUT', '/developer/credential-policy', {
+      selfIssuanceEnabled: false,
+    })).status).toBe(403)
+    const disabled = await send(router, 'admin-session', 'PUT', '/developer/credential-policy', {
+      selfIssuanceEnabled: false,
+    })
+    expect(disabled.status).toBe(200)
+    expect(await disabled.json()).toEqual({
+      selfIssuanceEnabled: false,
+      updatedAt: NOW.toISOString(),
+      updatedByUserId: 'user-1',
+    })
+
+    expect((await send(router, 'member-session', 'POST', '/developer/me/api-keys', body)).status).toBe(403)
+    expect((await send(
+      router,
+      'member-session',
+      'POST',
+      `/developer/me/api-keys/${issued.apiKey.id}/rotate`,
+      { expiresAt: expiresInDays(30) },
+    )).status).toBe(403)
+    expect(await (await send(router, 'member-session', 'GET', '/developer/me/agent-connection')).json())
+      .toMatchObject({ canIssue: false, issuanceBlockedReason: 'policy-disabled' })
+    const overview = await (await send(router, 'admin-session', 'GET', '/developer')).json() as {
+      personalCredentialPolicy: { selfIssuanceEnabled: boolean }
+    }
+    expect(overview.personalCredentialPolicy.selfIssuanceEnabled).toBe(false)
+
+    const revoked = await send(router, 'member-session', 'DELETE', `/developer/me/api-keys/${issued.apiKey.id}`)
+    expect(revoked.status).toBe(200)
+    expect(await revoked.json()).toMatchObject({ status: 'revoked' })
+  })
+
+  test('rotates and revokes only the member own personal keys, with immediate effect', async () => {
+    const { platform, router } = createPersonalCredentialRouter()
+    const issued = await (await send(router, 'member-session', 'POST', '/developer/me/api-keys', {
+      name: 'Agent',
+      expiresAt: expiresInDays(10),
+    })).json() as { apiKey: { id: string }; secret: string }
+    const workspaceKey = await createApiKey(platform, ['work-items:read'])
+
+    expect((await send(
+      router,
+      'other-member-session',
+      'POST',
+      `/developer/me/api-keys/${issued.apiKey.id}/rotate`,
+      { expiresAt: expiresInDays(30) },
+    )).status).toBe(404)
+    expect((await send(router, 'other-member-session', 'DELETE', `/developer/me/api-keys/${issued.apiKey.id}`)).status)
+      .toBe(404)
+    expect((await send(router, 'member-session', 'DELETE', `/developer/me/api-keys/${workspaceKey.apiKey.id}`)).status)
+      .toBe(404)
+    expect((await send(
+      router,
+      'member-session',
+      'POST',
+      `/developer/me/api-keys/${issued.apiKey.id}/rotate`,
+      {},
+    )).status).toBe(400)
+
+    const rotated = await send(
+      router,
+      'member-session',
+      'POST',
+      `/developer/me/api-keys/${issued.apiKey.id}/rotate`,
+      { expiresAt: expiresInDays(60) },
+    )
+    expect(rotated.status).toBe(200)
+    expect(rotated.headers.get('Cache-Control')).toBe('no-store')
+    const rotatedBody = await rotated.json() as { apiKey: { expiresAt: string }; secret: string }
+    expect(rotatedBody.apiKey.expiresAt).toBe(expiresInDays(60))
+    await expect(platform.authenticateApiKey({ credential: issued.secret }))
+      .rejects.toMatchObject({ status: 401 })
+    await expect(platform.authenticateApiKey({ credential: rotatedBody.secret }))
+      .resolves.toMatchObject({ subjectUserId: 'member-1' })
+
+    const adminRevoked = await send(router, 'admin-session', 'DELETE', `/developer/api-keys/${issued.apiKey.id}`)
+    expect(adminRevoked.status).toBe(200)
+    await expect(platform.authenticateApiKey({ credential: rotatedBody.secret }))
+      .rejects.toMatchObject({ status: 401 })
+  })
+})

@@ -17,6 +17,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import type {
   ApiKeySummary,
+  PersonalCredentialPolicy,
   ApiScope,
   ConnectorInstallation,
   ExternalWorkItemLink,
@@ -86,6 +87,7 @@ import type {
   RevokeApiKeyRequest,
   RevokeOAuthAppRequest,
   RotateApiKeyRequest,
+  UpdatePersonalCredentialPolicyRequest,
   RotateOAuthClientSecretRequest,
   RotateWebhookSecretRequest,
   SecretProtector,
@@ -440,6 +442,7 @@ type DeveloperPlatformEntryType =
   | 'import-job'
   | 'idempotency'
   | 'rate-limit'
+  | 'credential-policy'
 
 /** Developer platform single-table の共通 row です。 */
 type DeveloperPlatformRecord = {
@@ -837,13 +840,14 @@ abstract class DeveloperPlatformStorageKernel {
     auditPut: AuditTransactWriteItem,
   ): Promise<boolean>
 
-  /** Credential domain/auth rows と optional receipt を原子的に保存します。 */
+  /** Credential domain/auth rows、optional receipt と audit event を原子的に保存します。 */
   protected abstract putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,
     authWrite?: CredentialAuthRecordWrite,
     authDelete?: CredentialAuthRecordDelete,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ): Promise<boolean>
 
   /** OAuth app 利用記録、token domain/auth rows を原子的に保存します。 */
@@ -974,6 +978,7 @@ abstract class DeveloperPlatformStorageKernel {
     authDelete: CredentialAuthRecordDelete | undefined,
     idempotency: IdempotencyMutationToken | undefined,
     response: unknown,
+    auditPut?: AuditTransactWriteItem,
   ) {
     const completion = idempotency
       ? await this.prepareIdempotencyCompletionRecord(
@@ -988,6 +993,7 @@ abstract class DeveloperPlatformStorageKernel {
       authWrite,
       authDelete,
       completion,
+      auditPut,
     )
   }
 
@@ -1402,6 +1408,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       createdByUserId,
       createdAt: now.toISOString(),
       expiresAt,
+      ...(request.issuance ? { issuance: request.issuance } : {}),
     }
     const record = createRecord(
       workspaceId,
@@ -1420,6 +1427,14 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       toEpochSeconds(expiresAt),
     )
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
+    const auditPut = this.createApiKeyAuditPut(apiKey, workspaceId, {
+      eventType: 'api-key.created',
+      transitionId: 'created',
+      occurredAt: apiKey.createdAt,
+      action: 'created',
+      summary: 'API key was issued.',
+      actorId: createdByUserId,
+    })
     if (!await this.persistCredentialMutationRecord(
       workspaceId,
       record,
@@ -1428,6 +1443,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       undefined,
       request.idempotency,
       { status: 201, body: result },
+      auditPut,
     )) {
       throw persistenceConflict()
     }
@@ -1507,10 +1523,16 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       throw conflict('ApiKeyNotActive', 'Only an active API key can be rotated.')
     }
     const secret = createSecret('mk_key')
+    const rotatedAt = this.clock()
     const apiKey: ApiKeySummary = {
       ...current,
       prefix: secret.slice(0, 14),
       lastUsedAt: undefined,
+      ...(request.expiresAt === undefined
+        ? {}
+        : {
+            expiresAt: readFutureTimestamp(request.expiresAt, rotatedAt, 'API key expiry'),
+          }),
     }
     if (!record.secretDigest) {
       throw persistenceInvalid('API key auth digest is missing.')
@@ -1536,6 +1558,14 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       apiKey.expiresAt ? toEpochSeconds(apiKey.expiresAt) : undefined,
     )
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
+    const auditPut = this.createApiKeyAuditPut(apiKey, workspaceId, {
+      eventType: 'api-key.rotated',
+      transitionId: `rotated:${updatedRecord.version}`,
+      occurredAt: rotatedAt.toISOString(),
+      action: 'rotated',
+      summary: 'API key secret was rotated.',
+      actorId: request.actorUserId,
+    })
     const saved = await this.persistCredentialMutationRecord(
       workspaceId,
       updatedRecord,
@@ -1544,6 +1574,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       createCredentialAuthDelete(oldAuthRecord),
       request.idempotency,
       { status: 200, body: result },
+      auditPut,
     )
     if (!saved) throw persistenceConflict()
     return result
@@ -1598,9 +1629,113 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       value: apiKey,
       version: record.version + 1,
     }, true), { expectedVersion: record.version }, undefined,
-    authRecord ? createCredentialAuthDelete(authRecord) : undefined)
+    authRecord ? createCredentialAuthDelete(authRecord) : undefined,
+    undefined,
+    this.createApiKeyAuditPut(apiKey, workspaceId, {
+      eventType: 'api-key.revoked',
+      transitionId: 'revoked',
+      occurredAt: apiKey.revokedAt ?? this.clock().toISOString(),
+      action: 'revoked',
+      summary: 'API key was revoked.',
+      actorId: request.actorUserId,
+    }))
     if (!saved) throw persistenceConflict()
     return clone(apiKey)
+  }
+
+  /** Workspace の自分用 API key policy を返します。未設定なら発行を許可します。 */
+  async getPersonalCredentialPolicy(workspaceIdValue: string): Promise<PersonalCredentialPolicy> {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const record = await this.getRecord(workspaceId, PERSONAL_CREDENTIAL_POLICY_RECORD_KEY)
+    if (!record) return { selfIssuanceEnabled: true }
+    const policy = readRecordValue<PersonalCredentialPolicy>(record, 'credential-policy')
+    if (typeof policy.selfIssuanceEnabled !== 'boolean') {
+      throw persistenceInvalid('Developer credential-policy row is invalid.')
+    }
+    return clone(policy)
+  }
+
+  /** Workspace の自分用 API key policy を置換し、変更を audit に記録します。 */
+  async updatePersonalCredentialPolicy(
+    request: UpdatePersonalCredentialPolicyRequest,
+  ): Promise<PersonalCredentialPolicy> {
+    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const updatedByUserId = readIdentifier(request.updatedByUserId, 'Policy actor user ID')
+    if (typeof request.input.selfIssuanceEnabled !== 'boolean') {
+      throw invalid('DeveloperPolicyInvalid', 'selfIssuanceEnabled must be a boolean.')
+    }
+    const current = await this.getRecord(workspaceId, PERSONAL_CREDENTIAL_POLICY_RECORD_KEY)
+    const updatedAt = this.clock().toISOString()
+    const policy: PersonalCredentialPolicy = {
+      selfIssuanceEnabled: request.input.selfIssuanceEnabled,
+      updatedAt,
+      updatedByUserId,
+    }
+    const record: DeveloperPlatformRecord = current
+      ? { ...current, value: clone(policy), version: current.version + 1 }
+      : createRecord(
+          workspaceId,
+          PERSONAL_CREDENTIAL_POLICY_RECORD_KEY,
+          'credential-policy',
+          policy,
+        )
+    const auditPut = this.createPlatformAuditPut({
+      workspaceId,
+      eventType: 'credential-policy.updated',
+      entityType: 'credential-policy',
+      entityId: 'personal-credentials',
+      transitionId: `updated:${record.version}`,
+      occurredAt: updatedAt,
+      action: 'updated',
+      summary: policy.selfIssuanceEnabled
+        ? 'Member self-issued API keys were enabled.'
+        : 'Member self-issued API keys were disabled.',
+      actorId: updatedByUserId,
+      metadata: { selfIssuanceEnabled: policy.selfIssuanceEnabled },
+    })
+    const saved = await this.persistMutationRecord(
+      workspaceId,
+      record,
+      current ? { expectedVersion: current.version } : { ifAbsent: true },
+      request.idempotency,
+      { status: 200, body: policy },
+      auditPut,
+    )
+    if (!saved) throw persistenceConflict()
+    return clone(policy)
+  }
+
+  /** API key lifecycle を secret なしで audit outbox event にします。 */
+  protected createApiKeyAuditPut(
+    apiKey: ApiKeySummary,
+    workspaceId: string,
+    event: {
+      /** Audit event type. */
+      eventType: string
+      /** Retry-stable transition identity. */
+      transitionId: string
+      /** Transition timestamp. */
+      occurredAt: string
+      /** Audit action code. */
+      action: string
+      /** Activity summary. */
+      summary: string
+      /** Mutation actor ID. */
+      actorId?: string
+    },
+  ) {
+    return this.createPlatformAuditPut({
+      workspaceId,
+      entityType: 'api-key',
+      entityId: apiKey.id,
+      ...event,
+      metadata: {
+        ownerUserId: apiKey.createdByUserId,
+        issuance: apiKey.issuance ?? 'workspace',
+        scopes: [...apiKey.scopes],
+        ...(apiKey.expiresAt ? { expiresAt: apiKey.expiresAt } : {}),
+      },
+    })
   }
 
   /** API key secret を認証し、last-used を更新します。 */
@@ -4911,13 +5046,14 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     return this.putRecord(record, condition)
   }
 
-  /** Credential domain/auth rows と receipt を同じ memory commit にします。 */
+  /** Credential domain/auth rows と receipt を同じ memory commit にします。Audit は emit しません。 */
   protected async putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,
     authWrite?: CredentialAuthRecordWrite,
     authDelete?: CredentialAuthRecordDelete,
     completion?: PreparedIdempotencyCompletionRecord,
+    _auditPut?: AuditTransactWriteItem,
   ) {
     const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
     const currentRecord = this.records.get(recordKey)
@@ -5992,13 +6128,14 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     }
   }
 
-  /** Credential domain/auth rows と receipt を DynamoDB transaction で保存します。 */
+  /** Credential domain/auth rows、receipt と audit event を DynamoDB transaction で保存します。 */
   protected async putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,
     authWrite?: CredentialAuthRecordWrite,
     authDelete?: CredentialAuthRecordDelete,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ) {
     const recordCondition = condition.ifAbsent
       ? {
@@ -6081,6 +6218,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
                 completion,
               )]
             : []),
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
       return true
@@ -7192,6 +7330,9 @@ function withoutStoredCredential(
   }
   return sanitized
 }
+
+/** Workspace partition 内の自分用 API key policy row です。 */
+const PERSONAL_CREDENTIAL_POLICY_RECORD_KEY = 'POLICY#PERSONALCREDENTIALS'
 
 function createApiKeyRecordKey(id: string) {
   return `APIKEY#${id}`
@@ -8552,7 +8693,8 @@ function isDeveloperPlatformEntryType(value: string): value is DeveloperPlatform
     value === 'work-item-link-fence' ||
     value === 'import-job' ||
     value === 'idempotency' ||
-    value === 'rate-limit'
+    value === 'rate-limit' ||
+    value === 'credential-policy'
 }
 
 function sortByCreatedAt<T extends { createdAt: string }>(values: readonly T[]) {

@@ -255,6 +255,8 @@ export const developerPlatformLabelsFixture = {
     updated: 'Updated',
   },
   actions: {
+    disablePersonalCredentials: 'Turn off',
+    enablePersonalCredentials: 'Allow',
     addAccount: 'Add account',
     addMapping: 'Add mapping',
     cancel: 'Cancel',
@@ -321,6 +323,7 @@ export const developerPlatformLabelsFixture = {
     webhookUrl: 'https://example.com/webhooks/mukuroji',
   },
   headings: {
+    personalCredentials: 'Member-issued agent keys',
     apiKeys: 'API keys',
     apiKeysEmpty: 'No API keys yet',
     connectors: 'Connector catalog',
@@ -344,6 +347,11 @@ export const developerPlatformLabelsFixture = {
     webhooksEmpty: 'No webhook subscriptions yet',
   },
   helpText: {
+    personalCredentials:
+      'Members other than guests can issue their own key, limited to work-items:read / write and at most 90 days, from the Connect an agent page. Turning this off keeps issued keys, so revoke them from the list below when needed.',
+    personalCredentialsEnabled: 'Allowed',
+    personalCredentialsDisabled: 'Turned off',
+    personalKey: 'Personal',
     apiKeys:
       'Use a named, scoped key for each automation. The complete key is never shown in this ledger.',
     apiKeysEmpty:
@@ -600,7 +608,22 @@ export const developerPlatformResourcesFixture = {
       createdByUserId: 'user-sato',
       createdAt: '2026-06-10T08:15:00.000Z',
     },
+    {
+      id: 'api-key-agent-tanaka',
+      name: 'Claude Code (laptop)',
+      prefix: 'mk_key_••••c0de',
+      scopes: ['work-items:read', 'work-items:write'],
+      status: 'active',
+      createdByUserId: 'user-tanaka',
+      createdAt: '2026-07-01T09:00:00.000Z',
+      expiresAt: '2026-08-30T14:59:59.999Z',
+      lastUsedAt: '2026-07-18T02:10:00.000Z',
+      issuance: 'personal',
+    },
   ],
+  personalCredentialPolicy: {
+    selfIssuanceEnabled: true,
+  },
   oauthApps: [
     {
       id: 'oauth-reporting',

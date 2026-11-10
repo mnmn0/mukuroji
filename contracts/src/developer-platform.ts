@@ -173,6 +173,130 @@ export type ApiKeySummary = {
    * Revoke した日時の ISO 8601 timestamp です。
    */
   revokedAt?: string
+  /**
+   * 管理者が Workspace 用に発行したか、member が自分用に発行したかです。省略時は Workspace 用です。
+   */
+  issuance?: ApiKeyIssuance
+}
+
+/**
+ * API key の発行経路です。`personal` は member が自分の coding agent 用に発行した key です。
+ */
+export type ApiKeyIssuance = 'workspace' | 'personal'
+
+/**
+ * Member が自分用に発行できる API key の scope です。
+ */
+export const PERSONAL_API_KEY_SCOPES = [
+  'work-items:read',
+  'work-items:write',
+] as const satisfies readonly ApiScope[]
+
+/**
+ * Member が自分用に発行できる API key の scope 型です。
+ */
+export type PersonalApiKeyScope = (typeof PERSONAL_API_KEY_SCOPES)[number]
+
+/**
+ * 自分用 API key に設定できる有効期限の上限日数です。
+ */
+export const PERSONAL_API_KEY_MAX_LIFETIME_DAYS = 90
+
+/**
+ * Member による自分用 API key 発行を Workspace で許可するかどうかの policy です。
+ */
+export type PersonalCredentialPolicy = {
+  /**
+   * Guest 以外の active member が自分用 API key を発行・rotate できるかどうかです。
+   */
+  selfIssuanceEnabled: boolean
+  /**
+   * Policy を最後に変更した日時の ISO 8601 timestamp です。未変更なら省略します。
+   */
+  updatedAt?: string
+  /**
+   * Policy を最後に変更した Workspace user ID です。未変更なら省略します。
+   */
+  updatedByUserId?: string
+}
+
+/**
+ * 自分用 API key の発行 policy を変更する入力です。
+ */
+export type UpdatePersonalCredentialPolicyInput = {
+  /**
+   * Guest 以外の active member に自分用 API key の発行・rotate を許可するかどうかです。
+   */
+  selfIssuanceEnabled: boolean
+}
+
+/**
+ * 自分用 API key を発行する入力です。
+ */
+export type CreatePersonalApiKeyInput = {
+  /**
+   * 一覧で key を見分ける名前です。
+   */
+  name: string
+  /**
+   * 有効期限の ISO 8601 timestamp です。必須で、上限は発行から
+   * {@link PERSONAL_API_KEY_MAX_LIFETIME_DAYS} 日です。
+   */
+  expiresAt: string
+  /**
+   * 付与する scope です。省略時は {@link PERSONAL_API_KEY_SCOPES} のすべてです。
+   */
+  scopes?: PersonalApiKeyScope[]
+}
+
+/**
+ * 自分用 API key を rotation する入力です。
+ */
+export type RotatePersonalApiKeyInput = {
+  /**
+   * 新しい secret の有効期限です。上限は rotation から
+   * {@link PERSONAL_API_KEY_MAX_LIFETIME_DAYS} 日です。
+   */
+  expiresAt: string
+}
+
+/**
+ * 自分用 API key を発行できない理由です。
+ */
+export type PersonalCredentialIssuanceBlock = 'guest' | 'policy-disabled'
+
+/**
+ * Agent 接続画面の初期表示に使う、現在の member 自身の credential 情報です。
+ */
+export type PersonalAgentCredentialOverview = {
+  /**
+   * `MUKUROJI_MCP_ASSIGNEE_ID` に指定する、現在の member の Workspace member ID です。
+   */
+  memberId: string
+  /**
+   * 現在の member が自分用 API key を発行・rotate できるかどうかです。
+   */
+  canIssue: boolean
+  /**
+   * 発行できない場合の理由です。
+   */
+  issuanceBlockedReason?: PersonalCredentialIssuanceBlock
+  /**
+   * Workspace の自分用 API key policy です。
+   */
+  policy: PersonalCredentialPolicy
+  /**
+   * 自分用 API key に付与できる scope です。
+   */
+  scopes: PersonalApiKeyScope[]
+  /**
+   * 有効期限に指定できる上限日数です。
+   */
+  maxLifetimeDays: number
+  /**
+   * 現在の member が作成した API key です。管理者が作成した Workspace 用 key も含みます。
+   */
+  apiKeys: ApiKeySummary[]
 }
 
 /**
@@ -1485,4 +1609,8 @@ export type DeveloperPlatformOverview = {
    * Workspace の直近 import job です。
    */
   imports: ImportJob[]
+  /**
+   * Member による自分用 API key 発行の policy です。
+   */
+  personalCredentialPolicy: PersonalCredentialPolicy
 }

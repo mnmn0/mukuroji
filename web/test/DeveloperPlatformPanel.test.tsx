@@ -113,3 +113,25 @@ describe('DeveloperPlatformPanel connector management', () => {
     expect(html).not.toContain('Operations project')
   })
 })
+
+describe('DeveloperPlatformPanel personal agent keys', () => {
+  test('lets an administrator turn off member-issued keys and marks personal keys', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        onChangePersonalCredentialPolicy={async () => undefined}
+        onRevokeApiKey={async () => undefined}
+        onRotateApiKey={async () => {
+          throw new Error('not used')
+        }}
+      />,
+    )
+
+    expect(html).toContain('data-testid="personal-credential-policy"')
+    expect(html).toContain('Member-issued agent keys')
+    expect(html).toContain('Turn off')
+    expect(html).toContain('Personal')
+    expect(html).toContain('Claude Code (laptop)')
+  })
+})

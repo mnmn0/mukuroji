@@ -6,9 +6,11 @@ const expectedCapabilityMethods = {
   apiKeys: [
     'authenticateApiKey',
     'createApiKey',
+    'getPersonalCredentialPolicy',
     'listApiKeys',
     'revokeApiKey',
     'rotateApiKey',
+    'updatePersonalCredentialPolicy',
   ],
   oauthCredentials: [
     'authenticateOAuthToken',

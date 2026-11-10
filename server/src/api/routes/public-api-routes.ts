@@ -417,6 +417,7 @@ async function authenticateDeveloperManagement(
       canImport: canAdminister,
       canExport: canAdminister,
     },
+    canIssuePersonalCredentials: principal.isSystemAdmin || principal.workspaceRole !== 'guest',
   }
 }
 

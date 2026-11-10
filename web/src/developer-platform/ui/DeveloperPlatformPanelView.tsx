@@ -99,6 +99,8 @@ export type DeveloperPlatformPanelProps = {
   onRotateApiKey?: (apiKeyId: string) => Promise<IssuedApiKeySecret>
   /** Revokes an API key. */
   onRevokeApiKey?: (apiKeyId: string) => Promise<void>
+  /** Allows or turns off member-issued agent keys. */
+  onChangePersonalCredentialPolicy?: (selfIssuanceEnabled: boolean) => Promise<void>
   /** Creates an OAuth application and returns its one-time client secret. */
   onCreateOAuthApp?: (
     input: CreateDeveloperOAuthAppInput,
@@ -188,6 +190,7 @@ export function DeveloperPlatformPanel({
   onRevokeApiKey,
   onRevokeOAuthApp,
   onRevokeWebhook,
+  onChangePersonalCredentialPolicy,
   onRotateApiKey,
   onRotateOAuthApp,
   onRotateWebhook,
@@ -637,6 +640,16 @@ export function DeveloperPlatformPanel({
               formatDateTime={formatDateTime}
               labels={labels}
               oauthApps={resources.oauthApps}
+              personalCredentialPolicy={resources.personalCredentialPolicy}
+              onChangePersonalCredentialPolicy={
+                onChangePersonalCredentialPolicy
+                  ? (selfIssuanceEnabled) =>
+                      void runAction(
+                        'personal-credential-policy',
+                        () => onChangePersonalCredentialPolicy(selfIssuanceEnabled),
+                      )
+                  : undefined
+              }
               onCreateApiKey={
                 onCreateApiKey ? () => openEditor('api-key') : undefined
               }

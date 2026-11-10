@@ -191,6 +191,30 @@ export function WorkspaceSettingsView({
       />
 
       <Link
+        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
+        data-testid="agent-connection-settings-link"
+        to="/settings/agent-connection"
+      >
+        <span className="min-w-0">
+          <span className="workbench-eyebrow">
+            {t('agents.connect.eyebrow')}
+          </span>
+          <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
+            {t('agents.connect.open')}
+          </strong>
+          <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+            {t('agents.connect.openDescription')}
+          </span>
+        </span>
+        <span
+          aria-hidden="true"
+          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
+        >
+          →
+        </span>
+      </Link>
+
+      <Link
         className="workbench-panel group flex min-w-0 items-center justify-between gap-5 border-tone-99d7cf bg-tone-f3fbfa p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
         data-testid="enterprise-security-settings-link"
         to="/settings/security"
