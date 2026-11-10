@@ -51,6 +51,18 @@ export function createSlackNotificationSender(readSecret: SlackSecretReader, sen
           mrkdwn: false, link_names: false, unfurl_links: false, unfurl_media: false,
         }),
       })
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500
+      const seconds = Number(response.headers.get('Retry-After'))
+      const rejected: SlackSendResult = {
+        succeeded: false, retryable, code: 'SlackDeliveryRejected',
+        ...(retryable && Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 86_400
+          ? { retryAfterMs: seconds * 1_000 } : {}),
+      }
+      if (response.status !== 200) {
+        // Status and headers determine rejection policy; an unreadable body cannot override them.
+        try { await response.body?.cancel() } catch { /* Preserve the known HTTP outcome if cleanup fails. */ }
+        return rejected
+      }
       // Read at most the tiny Slack acknowledgement; never retain or log provider response bodies.
       const reader = response.body?.getReader()
       let acknowledgement = ''
@@ -64,16 +76,10 @@ export function createSlackNotificationSender(readSecret: SlackSecretReader, sen
           }
         } finally { await reader.cancel() }
       }
-      if (response.status === 200 && acknowledgement.trim() === 'ok') {
+      if (acknowledgement.trim() === 'ok') {
         return { succeeded: true, retryable: false }
       }
-      const retryable = response.status === 408 || response.status === 429 || response.status >= 500
-      const seconds = Number(response.headers.get('Retry-After'))
-      return {
-        succeeded: false, retryable, code: 'SlackDeliveryRejected',
-        ...(retryable && Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 86_400
-          ? { retryAfterMs: seconds * 1_000 } : {}),
-      }
+      return rejected
     } catch {
       return { succeeded: false, retryable: true, code: 'SlackDeliveryUnavailable' }
     }

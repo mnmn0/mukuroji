@@ -73,8 +73,9 @@ import {
   formatTaskViewMigrationWarning,
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import {
+  createWorkspaceTaskKey,
   isOpenableWorkspaceTask,
-  isWorkspaceTaskAssignedToUser,
+  resolveWorkspaceTaskInvolvement,
 } from '../../work-items/model/workspaceWorkItems'
 import {
   resolveEditableWorkflowStatuses,
@@ -145,13 +146,15 @@ export function MyTasksPage() {
     workspace.teams,
     includeArchivedWorkItems,
   )
-  const myTasks = useMemo(
-    () => workItems.tasks.filter((task) => isWorkspaceTaskAssignedToUser(
-      task,
-      workspace.userIdentityAliases,
-    )),
-    [workItems.tasks, workspace.userIdentityAliases],
-  )
+  const { contributorTaskKeys, myTasks } = useMemo(() => {
+    const contributorKeys = new Set<string>()
+    const tasks = workItems.tasks.filter((task) => {
+      const involvement = resolveWorkspaceTaskInvolvement(task, workspace.userIdentityAliases)
+      if (involvement === 'contributor') contributorKeys.add(createWorkspaceTaskKey(task))
+      return involvement !== undefined
+    })
+    return { contributorTaskKeys: contributorKeys, myTasks: tasks }
+  }, [workItems.tasks, workspace.userIdentityAliases])
   const taskViewScope = useMemo<TaskViewScope>(() => ({ kind: 'viewer' }), [])
   const taskViewConfigurations = useMemo(
     () => Object.entries(workItems.configurationsByTeam),
@@ -798,7 +801,7 @@ export function MyTasksPage() {
         />
         {taskActionErrorMessage ? (
           <p
-            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700"
+            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-fg-red-700"
             role="alert"
           >
             {taskActionErrorMessage}
@@ -841,6 +844,7 @@ export function MyTasksPage() {
           presentation={taskViewPresentation}
           tasks={visibleMyTasks}
           teams={workspace.teams}
+          contributorTaskKeys={contributorTaskKeys}
         />
         {taskActionContextMenuState && taskActionContextMenuContext ? (
           <TaskActionContextMenu

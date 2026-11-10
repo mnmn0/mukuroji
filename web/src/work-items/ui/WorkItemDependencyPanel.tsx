@@ -259,7 +259,7 @@ export function WorkItemDependencyPanel({
           {t('workItems.dependencies.readOnly')}
         </p>
       ) : null}
-      {errorMessage ? <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p> : null}
+      {errorMessage ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{errorMessage}</p> : null}
     </section>
   )
 }
@@ -292,7 +292,7 @@ function AffectedProjectMetric({
                 {onOpenProject ? (
                   <button
                     aria-label={`${label}: ${projectLabel}`}
-                    className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary)]"
+                    className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary-text)]"
                     onClick={() => onOpenProject(project)}
                     type="button"
                   >
@@ -330,7 +330,7 @@ function DependencyMetric({ label, onOpenValue, values }: DependencyMetricProps)
               {onOpenValue ? (
                 <button
                   aria-label={`${label}: ${value}`}
-                  className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary)]"
+                  className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary-text)]"
                   onClick={() => onOpenValue(value)}
                   type="button"
                 >
@@ -403,7 +403,7 @@ function DependencyRow({
         ? 'border-red-300 bg-red-50'
         : critical
           ? 'border-amber-300 bg-amber-50'
-          : 'border-[var(--workbench-border)] bg-white'}`}
+          : 'border-[var(--workbench-border)] bg-surface'}`}
       data-critical={critical ? 'true' : 'false'}
       data-conflict={hasConflicts ? 'true' : 'false'}
       data-testid={`work-item-dependency-${dependency.id}`}
@@ -413,7 +413,7 @@ function DependencyRow({
           {onOpenPredecessor ? (
             <button
               aria-label={`${t('workItems.dependencies.predecessor')}: ${predecessorTitle}`}
-              className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary)]"
+              className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary-text)]"
               onClick={onOpenPredecessor}
               type="button"
             >
@@ -429,7 +429,7 @@ function DependencyRow({
           {onOpenSuccessor ? (
             <button
               aria-label={`${t('workItems.dependencies.successor')}: ${successorTitle}`}
-              className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary)]"
+              className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary-text)]"
               onClick={onOpenSuccessor}
               type="button"
             >
@@ -495,7 +495,7 @@ function DependencyRow({
             <>
               <button
                 aria-label={`${t('workItems.dependencies.removeConfirmAction')}: ${predecessorTitle} → ${successorTitle}`}
-                className="workbench-button-secondary min-h-9 border-red-300 px-3 text-red-700"
+                className="workbench-button-secondary min-h-9 border-red-300 px-3 text-fg-red-700"
                 disabled={busy}
                 onClick={() => void onDelete()}
                 ref={focusDeleteConfirmation}
@@ -517,7 +517,7 @@ function DependencyRow({
         </div>
       </form>
       {onDelete && isDeleteConfirmationOpen ? (
-        <p className="mt-2 text-sm font-semibold text-red-700" role="status">
+        <p className="mt-2 text-sm font-semibold text-fg-red-700" role="status">
           {deleteConfirmation}
         </p>
       ) : null}
@@ -615,7 +615,7 @@ function DependencyCreateForm({
         <DependencyLagInput defaultValue={0} t={t} />
       </div>
       <DependencyConstraintFields t={t} />
-      {validationMessage ? <p className="text-sm font-semibold text-red-700" role="alert">{validationMessage}</p> : null}
+      {validationMessage ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{validationMessage}</p> : null}
       <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={busy} type="submit">
         {busy ? t('workItems.dependencies.saving') : t('workItems.dependencies.add')}
       </button>

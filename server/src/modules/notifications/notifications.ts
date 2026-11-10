@@ -11,6 +11,10 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
+import { NotificationError } from './domain/notification-error'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
+
+export { NotificationError }
 
 /** Notification timeline で選択できる保存状態です。 */
 export type NotificationState = 'unread' | 'read' | 'archived' | 'snoozed'
@@ -252,20 +256,6 @@ export type NotificationClient = {
   savePreferences(input: SaveNotificationPreferencesInput): Promise<NotificationPreferences>
 }
 
-/** Notification API/store の安定した error です。 */
-export class NotificationError extends Error {
-  /** HTTP status code です。 */
-  readonly status: number
-  /** Client が分岐に使う error code です。 */
-  readonly code: string
-
-  constructor(status: number, code: string, message: string) {
-    super(message)
-    this.status = status
-    this.code = code
-  }
-}
-
 /** NotificationsTable 内で preference を識別する sort key です。 */
 export const NOTIFICATION_PREFERENCES_KEY = '!PREFERENCES'
 
@@ -336,19 +326,20 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTable = Boolean(getConfiguredDynamoDbEndpoint()),
-    statusIndexName = process.env.NOTIFICATIONS_STATUS_INDEX_NAME?.trim() || 'RecipientStatusIndex',
+    statusIndexName = loadServerConfig().environment.NOTIFICATIONS_STATUS_INDEX_NAME?.trim() || 'RecipientStatusIndex',
   ) {
+    const environment = loadServerConfig().environment
     const endpoint = getConfiguredDynamoDbEndpoint()
     this.tableName = requireText(tableName, 'Notifications table name')
     this.statusIndexName = requireText(statusIndexName, 'Notifications status index name')
     this.dynamoDbClient = dynamoDbClient ?? new DynamoDBClient({
-      region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1',
+      region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
       ...(endpoint
         ? {
             endpoint,
             credentials: {
-              accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-              secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+              accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+              secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
             },
           }
         : {}),
@@ -806,10 +797,9 @@ export class DynamoDbNotificationsClient implements NotificationClient {
 
 /** Process environment から Notifications table 名を解決します。 */
 export function getConfiguredNotificationsTableName(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
-  return environment.MUKUROJI_NOTIFICATIONS_TABLE?.trim() ||
-    environment.NOTIFICATIONS_TABLE_NAME?.trim() ||
+  return environment.NOTIFICATIONS_TABLE_NAME?.trim() ||
     'mukuroji-notifications-local'
 }
 

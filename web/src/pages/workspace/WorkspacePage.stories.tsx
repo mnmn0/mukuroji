@@ -21,7 +21,11 @@ import { createTranslator } from '../../shared/i18n/i18n'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { inheritedWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
-import type { WorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
+import {
+  createWorkspaceTaskKey,
+  type WorkspaceSummary,
+} from '../../work-items/model/workspaceWorkItems'
+import { createWorkspaceTaskTestId } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { HelpWorkspaceView } from '../../workspace/ui/HelpWorkspaceView'
 import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
@@ -150,6 +154,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   canManageWorkspaceConfiguration: true,
   canMutateTeamConfiguration: true,
   fontSizePreference: 'standard',
+  themePreference: 'light',
   guardEnterpriseSession: (request) => request,
   hasQuickAccessLoadError: false,
   inboxCount: 3,
@@ -164,6 +169,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   onCreateTeam: () => Promise.resolve(),
   onDismissProjectQuickAccessFeedback: () => undefined,
   onFontSizePreferenceChange: () => undefined,
+  onThemePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
@@ -477,6 +483,27 @@ export const MyTasksSavedViewPresentation: Story = {
   ),
 }
 
+/** The `/my-tasks` route where the viewer contributes to one Work Item owned by someone else. */
+export const MyTasksContributorWork: Story = {
+  render: () => (
+    <MyTasksWorkspaceView
+      configurationFailedTeamIds={[]}
+      configurationsByTeam={storyWorkItemConfigurations}
+      contributorTaskKeys={new Set([createWorkspaceTaskKey(storyTasks[1])])}
+      t={t}
+      tasks={storyTasks.slice(0, 2)}
+      teams={projectDirectoryFixtures}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const contributedTestId = `my-tasks-card-${createWorkspaceTaskTestId(storyTasks[1])}`
+
+    await expect(canvas.getByTestId(`${contributedTestId}-involvement`)).toHaveTextContent('参加')
+    await expect(canvas.getAllByText('参加')).toHaveLength(1)
+  },
+}
+
 /** The `/my-tasks` route after a workflow mutation fails. */
 export const MyTasksMoveError: Story = {
   render: () => (
@@ -579,7 +606,9 @@ export const SettingsRoute: Story = {
       locale="ja"
       onFontSizePreferenceChange={() => undefined}
       onLocaleChange={() => undefined}
+      onThemePreferenceChange={() => undefined}
       t={t}
+      themePreference="light"
       userLabel="demo@example.com"
     />
   ),

@@ -18,12 +18,18 @@ import { capacityPlanningMessages } from './capacity-planning'
 import { triageMessages } from './triage'
 import { aiAssistanceMessages } from './ai-assistance'
 import { customersMessages } from './customers'
+import { codingAgentMessages } from './coding-agent'
+import { codingAgentGuideMessages } from './coding-agent-guide'
+import { collectionsMessages } from './collections'
+import { agentSettingsMessages } from './agent-settings'
+import { factoryBoardMessages } from './factory-board'
 
 /**
  * Complete Japanese message dictionary assembled from domain modules.
  */
 export const jaMessages = {
   ...coreMessages,
+  ...updatesMessages,
   ...marketingMessages,
   ...authMessages,
   ...workspaceMessages,
@@ -43,9 +49,15 @@ export const jaMessages = {
   ...triageMessages,
   ...aiAssistanceMessages,
   ...customersMessages,
+  ...codingAgentMessages,
+  ...codingAgentGuideMessages,
+  ...collectionsMessages,
+  ...agentSettingsMessages,
+  ...factoryBoardMessages,
 } as const
 
 /**
  * Translation key defined by the canonical Japanese dictionary.
  */
 export type MessageKey = keyof typeof jaMessages
+import { updatesMessages } from './updates'

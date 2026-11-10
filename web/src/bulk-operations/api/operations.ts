@@ -1,10 +1,10 @@
 import type { BulkOperation, BulkOperationPreview, BulkOperationRequest } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { BulkOperationsApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const bulkOperationsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const bulkOperationsApiBaseUrl = resolveApiBaseUrl()
 
 /** Preview token と確定対象 request をまとめた apply payload です。 */
 export type ApplyBulkOperationRequest = BulkOperationRequest & {
@@ -133,14 +133,10 @@ async function readJson(response: Response): Promise<unknown> {
 }
 
 function readOptionalString(value: unknown, key: string) {
-  if (!value || typeof value !== 'object' || !(key in value)) {
+  if (!isRecord(value) || !(key in value)) {
     return undefined
   }
 
-  const fieldValue = (value as Record<string, unknown>)[key]
+  const fieldValue = value[key]
   return typeof fieldValue === 'string' && fieldValue.trim() ? fieldValue : undefined
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

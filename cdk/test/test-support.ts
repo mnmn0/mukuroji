@@ -3,22 +3,28 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { expect } from '@jest/globals';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { MukurojiStack } from '../lib/stacks/mukuroji-stack';
+import { ALL_STACK_MODULE_PROPS } from '../bin/stack-modules';
+import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 
-/** Stable logical ID of the core API runtime-configuration secret. */
-export const API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
-  'ApiCoreRuntimeConfigurationSecret5550B12D';
+/** Stable logical ID of the single API runtime-configuration secret. */
+export const API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
+  'ApiRuntimeConfigurationSecretC4AED5C4';
 
-/** Stable logical ID of the data API runtime-configuration secret. */
-export const API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
-  'ApiDataRuntimeConfigurationSecret9AB65533';
+/** Stable logical ID of the shared Workspace audit pseudonym secret. */
+export const WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID =
+  'WorkspaceAuditPseudonymSecretF30E6C2E';
 
 /**
  * Synthesizes the application stack for infrastructure assertions.
  *
+ * The shared template turns on every optional module so each suite can assert its resources.
+ *
+ * @param props - Optional modules to deploy; every module is on by default.
  * @returns The synthesized CloudFormation template.
  */
-export function createTemplate(): Template {
+export function createTemplate(
+  props: MukurojiStackProps = ALL_STACK_MODULE_PROPS,
+): Template {
   const app = new cdk.App({
     context: {
       '@aws-cdk/aws-iam:minimizePolicies': true,
@@ -27,7 +33,7 @@ export function createTemplate(): Template {
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-  const stack = new MukurojiStack(app, 'Test');
+  const stack = new MukurojiStack(app, 'Test', props);
   acknowledgeKnownNagFindings(stack);
 
   return Template.fromStack(stack);
@@ -176,3 +182,63 @@ export function expectQueueRequiresSsl(template: Template, logicalIdPrefix: stri
 
 /** The synthesized CloudFormation template shared by tests in a Jest module. */
 export const synthesizedTemplate = createTemplate();
+
+/**
+ * Template value of the Cognito user pool ID the API trusts.
+ *
+ * The stack creates a user pool when the `CognitoUserPoolId` parameter is blank, so every
+ * consumer reads the ID through this condition.
+ */
+export const COGNITO_USER_POOL_ID_VALUE = {
+  'Fn::If': [
+    'CognitoUserPoolCreated',
+    { Ref: 'UserPool6BA7E5F2' },
+    { Ref: 'CognitoUserPoolId' },
+  ],
+} as const;
+
+/** Template value of the Cognito password client ID the API uses. */
+export const COGNITO_USER_POOL_CLIENT_ID_VALUE = {
+  'Fn::If': [
+    'CognitoUserPoolCreated',
+    { Ref: 'UserPoolUserPoolPasswordClient77DEDE49' },
+    { Ref: 'CognitoUserPoolClientId' },
+  ],
+} as const;
+
+/** Description of the Lambda that runs every periodic job. */
+export const SCHEDULED_JOBS_FUNCTION_DESCRIPTION =
+  'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, and notification jobs.';
+
+/**
+ * Finds the logical ID of the Lambda that runs every periodic job.
+ *
+ * @param template Synthesized stack template.
+ * @returns The function's logical ID.
+ */
+export function findScheduledJobsFunctionLogicalId(template: Template): string {
+  const entry = Object.entries(template.findResources('AWS::Lambda::Function', {
+    Properties: { Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION },
+  }))[0];
+  if (!entry) throw new Error('The scheduled jobs Lambda was not synthesized.');
+  return entry[0];
+}
+
+/**
+ * Lists the statements of one periodic job's own IAM policy on the shared role.
+ *
+ * @param template Synthesized stack template.
+ * @param jobId PascalCase job ID, such as `AnalyticsSchedule`.
+ * @returns The policy's logical ID and statements.
+ */
+export function findScheduledJobPolicy(
+  template: Template,
+  jobId: string,
+): { logicalId: string; statements: Array<Record<string, unknown>> } {
+  const entry = Object.entries(template.findResources('AWS::IAM::ManagedPolicy'))
+    .find(([logicalId]) => logicalId.startsWith(`${jobId}JobPolicy`));
+  if (!entry) throw new Error(`The ${jobId} job policy was not synthesized.`);
+  const statements: unknown = entry[1].Properties?.PolicyDocument?.Statement;
+  if (!Array.isArray(statements)) throw new Error(`The ${jobId} job policy has no statements.`);
+  return { logicalId: entry[0], statements: statements as Array<Record<string, unknown>> };
+}

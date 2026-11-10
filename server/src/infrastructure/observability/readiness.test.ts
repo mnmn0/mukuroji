@@ -36,11 +36,11 @@ test('uses canonical Work Items names and stable local table defaults', async ()
   const compatibilityTables: string[] = []
   const compatibilityProbe = createDynamoDbReadinessProbe({
     environment: {
-      AUDIT_EVENTS_TABLE_NAME: 'ignored-audit-events',
-      MUKUROJI_AUDIT_EVENTS_TABLE: 'audit-events',
+      AUDIT_EVENTS_TABLE_NAME: 'audit-events',
+      MUKUROJI_AUDIT_EVENTS_TABLE: 'ignored-removed-audit-alias',
       WORK_ITEMS_TABLE_NAME: 'work-items',
-      MUKUROJI_WORKSPACE_ACCESS_TABLE: 'workspace-access',
-      WORKSPACE_ACCESS_TABLE_NAME: 'ignored-workspace-access',
+      MUKUROJI_WORKSPACE_ACCESS_TABLE: 'ignored-removed-workspace-access-alias',
+      WORKSPACE_ACCESS_TABLE_NAME: 'workspace-access',
     },
     describeTable: async (tableName) => {
       compatibilityTables.push(tableName)

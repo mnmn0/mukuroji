@@ -74,7 +74,8 @@ export function buildAuditProjectionWorker(
   } = input.dataStores;
   const { fileBucket, fileProofingTable } = input.fileStorage;
   const { cognitoUserPoolArn, cognitoUserPoolId, systemAdminGroups } = input.parameters;
-  const { connectorSyncQueue, webhookDeliveryQueue } = input.workerChannels;
+  const { connectorChannels, webhookDeliveryQueue } = input.workerChannels;
+  const connectorSyncQueue = connectorChannels?.connectorSyncQueue;
   const { realtimeWebSocketStage } = input;
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
 
@@ -106,8 +107,12 @@ export function buildAuditProjectionWorker(
       },
       environment: {
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
-        CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        // The connector projection runs only when the connectors module owns a queue.
+        CONNECTOR_SYNC_ENABLED: connectorSyncQueue ? 'true' : 'false',
+        ...(connectorSyncQueue
+          ? { CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl }
+          : {}),
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         FILE_BUCKET_NAME: fileBucket.bucketName,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -253,7 +258,7 @@ export function buildAuditProjectionWorker(
       resources: [cognitoUserPoolArn],
     }),
   );
-  connectorSyncQueue.grants.sendMessages(collaborationProjectionFunction);
+  connectorSyncQueue?.grants.sendMessages(collaborationProjectionFunction);
   webhookDeliveryQueue.grants.sendMessages(collaborationProjectionFunction);
   realtimeWebSocketStage.grantManagementApiAccess(collaborationProjectionFunction);
 

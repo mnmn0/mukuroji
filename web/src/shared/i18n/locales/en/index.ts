@@ -19,6 +19,11 @@ import { capacityPlanningMessages } from './capacity-planning'
 import { triageMessages } from './triage'
 import { aiAssistanceMessages } from './ai-assistance'
 import { customersMessages } from './customers'
+import { codingAgentMessages } from './coding-agent'
+import { codingAgentGuideMessages } from './coding-agent-guide'
+import { collectionsMessages } from './collections'
+import { agentSettingsMessages } from './agent-settings'
+import { factoryBoardMessages } from './factory-board'
 
 /**
  * Verifies that a locale dictionary contains exactly the canonical message keys.
@@ -37,6 +42,7 @@ function defineMessages<const Messages extends Record<MessageKey, string>>(
  */
 export const enMessages = defineMessages({
   ...coreMessages,
+  ...updatesMessages,
   ...marketingMessages,
   ...authMessages,
   ...workspaceMessages,
@@ -56,4 +62,10 @@ export const enMessages = defineMessages({
   ...triageMessages,
   ...aiAssistanceMessages,
   ...customersMessages,
+  ...codingAgentMessages,
+  ...codingAgentGuideMessages,
+  ...collectionsMessages,
+  ...agentSettingsMessages,
+  ...factoryBoardMessages,
 })
+import { updatesMessages } from './updates'

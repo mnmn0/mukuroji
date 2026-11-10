@@ -3,6 +3,7 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import { getDocument } from './documents'
 import type { DocumentRecord } from './documents'
 import { DocumentRevisionConflictError, DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Operation POST が確定した revision と、続けて取得した表示用 detail です。
@@ -118,7 +119,8 @@ async function readJson(response: Response) {
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new DocumentsApiError(
       response.status,
@@ -129,7 +131,7 @@ async function readJson(response: Response) {
 }
 
 function createApiErrorFromBody(status: number, value: unknown) {
-  const record = asRecord(value)
+  const record = readRecord(value)
 
   return new DocumentsApiError(
     status,
@@ -140,8 +142,3 @@ function createApiErrorFromBody(status: number, value: unknown) {
   )
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object'
-    ? (value as Record<string, unknown>)
-    : {}
-}

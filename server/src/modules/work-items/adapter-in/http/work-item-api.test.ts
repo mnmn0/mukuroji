@@ -810,6 +810,36 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
   expect(calls.issueReads).toEqual([])
 })
 
+test('omits contributors and acceptance criteria from developer Work Item exports', async () => {
+  configureFakeProjectClients(true, {
+    issueContributorAssignments: [{
+      assignmentId: 'a'.repeat(32),
+      memberUserId: 'suzuki@example.com',
+      jobRoleId: 'designer',
+      status: 'planned',
+    }],
+    detailAcceptanceCriteria: [{ id: 'b'.repeat(32), text: 'Tests pass', satisfied: false }],
+  })
+  setTestAppDependencies({
+    rateLimits: {
+      async consumeRateLimit() {
+        return { allowed: true, limit: 120, remaining: 119, resetAt: '2026-07-18T00:01:00.000Z' }
+      },
+    },
+  })
+
+  const response = await app.request('/api/developer/exports?format=json&limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body: { items: Record<string, unknown>[] } = await response.json()
+  expect(body.items.length).toBeGreaterThan(0)
+  expect(body.items.some((item) => 'contributorAssignments' in item)).toBe(false)
+  // The closed public Work Item schema omits acceptance criteria; they have their own endpoint.
+  expect(body.items.some((item) => 'acceptanceCriteria' in item)).toBe(false)
+})
+
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {
   const calls = configureFakeProjectClients(true, {
     inaccessibleTeamIssueCount: 200,

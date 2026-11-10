@@ -221,7 +221,7 @@ export function SupportPage({
 
         return (
           <div>
-            <section className="border-b border-[var(--workbench-border)] bg-white">
+            <section className="border-b border-[var(--workbench-border)] bg-surface">
               <div className="mx-auto w-full max-w-[1120px] px-5 py-12 sm:px-8 sm:py-16 lg:py-20">
                 <p className="workbench-eyebrow mb-4">{t('public.support.eyebrow')}</p>
                 <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_380px] lg:items-end lg:gap-14">
@@ -270,7 +270,7 @@ export function SupportPage({
                   </div>
                   <button
                     aria-pressed={activeCategory === 'all'}
-                    className="workbench-button-secondary min-h-10 cursor-pointer px-4 aria-pressed:border-[var(--workbench-primary)] aria-pressed:bg-[#e5f7f4] aria-pressed:text-[var(--workbench-primary)]"
+                    className="workbench-button-secondary min-h-10 cursor-pointer px-4 aria-pressed:border-[var(--workbench-primary)] aria-pressed:bg-tone-e5f7f4 aria-pressed:text-[var(--workbench-primary-text)]"
                     type="button"
                     onClick={() => handleCategoryChange('all')}
                   >
@@ -282,7 +282,7 @@ export function SupportPage({
                   {supportCategories.map((category) => (
                     <button
                       aria-pressed={activeCategory === category.id}
-                      className="workbench-panel group min-h-[150px] cursor-pointer p-5 text-left transition-[border-color,background-color,transform] duration-150 hover:-translate-y-0.5 hover:border-[#99d7cf] aria-pressed:border-[var(--workbench-primary)] aria-pressed:bg-[#eefaf7]"
+                      className="workbench-panel group min-h-[150px] cursor-pointer p-5 text-left transition-[border-color,background-color,transform] duration-150 hover:-translate-y-0.5 hover:border-tone-99d7cf aria-pressed:border-[var(--workbench-primary)] aria-pressed:bg-tone-eefaf7"
                       key={category.id}
                       type="button"
                       onClick={() => handleCategoryChange(category.id)}
@@ -317,9 +317,9 @@ export function SupportPage({
                   <div className="divide-y divide-[var(--workbench-border)]">
                     {filteredArticles.map((article) => (
                       <details className="group py-1" key={article.id}>
-                        <summary className="grid min-h-16 cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-5 rounded-md px-2 py-4 text-base font-bold text-[var(--workbench-text)] hover:bg-white [&::-webkit-details-marker]:hidden">
+                        <summary className="grid min-h-16 cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-5 rounded-md px-2 py-4 text-base font-bold text-[var(--workbench-text)] hover:bg-surface [&::-webkit-details-marker]:hidden">
                           <span>{t(article.titleKey)}</span>
-                          <span className="grid h-8 w-8 place-items-center rounded-full border border-[var(--workbench-border)] bg-white text-xl font-normal text-[var(--workbench-muted)] transition-transform group-open:rotate-45" aria-hidden="true">
+                          <span className="grid h-8 w-8 place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-xl font-normal text-[var(--workbench-muted)] transition-transform group-open:rotate-45" aria-hidden="true">
                             +
                           </span>
                         </summary>
@@ -350,34 +350,34 @@ export function SupportPage({
               <section className="mt-16 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-sidebar)] text-white" aria-labelledby="support-contact-title">
                 <div className="grid lg:grid-cols-[minmax(0,0.8fr)_minmax(420px,1.2fr)]">
                   <div className="p-7 sm:p-9">
-                    <p className="m-0 text-xs font-bold uppercase tracking-[0.08em] text-[#91d8ce]">
+                    <p className="m-0 text-xs font-bold uppercase tracking-[0.08em] text-fg-91d8ce">
                       {t('public.support.contact.eyebrow')}
                     </p>
                     <h2 className="mb-0 mt-3 text-2xl font-bold tracking-[-0.02em]" id="support-contact-title">
                       {t('public.support.contact.title')}
                     </h2>
-                    <p className="mb-0 mt-4 text-sm font-medium leading-7 text-[#c3d0cc]">
+                    <p className="mb-0 mt-4 text-sm font-medium leading-7 text-fg-c3d0cc">
                       {t('public.support.contact.description')}
                     </p>
-                    <div className="mt-6 grid gap-3 text-sm font-semibold text-[#e7efec]">
-                      <span className="flex gap-3"><span className="text-[#91d8ce]">•</span>{t('public.support.contact.admin')}</span>
-                      <span className="flex gap-3"><span className="text-[#91d8ce]">•</span>{t('public.support.contact.contract')}</span>
-                      <span className="flex gap-3"><span className="text-[#91d8ce]">•</span>{t('public.support.contact.security')}</span>
+                    <div className="mt-6 grid gap-3 text-sm font-semibold text-fg-e7efec">
+                      <span className="flex gap-3"><span className="text-fg-91d8ce">•</span>{t('public.support.contact.admin')}</span>
+                      <span className="flex gap-3"><span className="text-fg-91d8ce">•</span>{t('public.support.contact.contract')}</span>
+                      <span className="flex gap-3"><span className="text-fg-91d8ce">•</span>{t('public.support.contact.security')}</span>
                     </div>
                   </div>
 
-                  <div className="border-t border-white/15 bg-white/[0.06] p-7 sm:p-9 lg:border-l lg:border-t-0">
+                  <div className="border-t border-white/15 bg-surface/[0.06] p-7 sm:p-9 lg:border-l lg:border-t-0">
                     <label className="block text-sm font-bold text-white" htmlFor="support-contact-template">
                       {t('public.support.contact.templateLabel')}
                     </label>
                     <textarea
-                      className="mt-3 min-h-[190px] w-full resize-y rounded-lg border border-white/20 bg-white px-4 py-3 text-sm font-medium leading-6 text-[var(--workbench-text)] outline-none focus:border-[#91d8ce] focus:shadow-[0_0_0_4px_rgba(145,216,206,0.16)]"
+                      className="mt-3 min-h-[190px] w-full resize-y rounded-lg border border-white/20 bg-surface px-4 py-3 text-sm font-medium leading-6 text-[var(--workbench-text)] outline-none focus:border-tone-91d8ce focus:shadow-[0_0_0_4px_rgba(145,216,206,0.16)]"
                       id="support-contact-template"
                       readOnly
                       value={contactTemplate}
                     />
                     <div className="mt-4 flex flex-wrap items-center gap-3">
-                      <button className="min-h-11 cursor-pointer rounded-md border border-[#91d8ce] bg-[#d9f8ed] px-4 text-sm font-bold text-[#0b625c] hover:bg-white" type="button" onClick={handleCopy}>
+                      <button className="min-h-11 cursor-pointer rounded-md border border-tone-91d8ce bg-tone-d9f8ed px-4 text-sm font-bold text-fg-0b625c hover:bg-surface" type="button" onClick={handleCopy}>
                         {copyStatus === 'copied' ? t('public.copy.copied') : t('public.support.contact.copyAction')}
                       </button>
                       <Link className="inline-flex min-h-11 items-center text-sm font-bold text-white underline decoration-white/40 underline-offset-4 hover:decoration-white" to="/privacy">
@@ -392,7 +392,7 @@ export function SupportPage({
                           : ''}
                     </p>
                     {copyStatus === 'error' ? (
-                      <p className="mb-0 mt-3 text-sm font-semibold text-[#fecaca]">
+                      <p className="mb-0 mt-3 text-sm font-semibold text-fg-fecaca">
                         {t('public.copy.error')}
                       </p>
                     ) : null}

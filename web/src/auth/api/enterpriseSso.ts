@@ -1,6 +1,8 @@
 import type { AuthSession } from '../session'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { ApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Enterprise SSO authorization 開始 API の入力です。
@@ -95,7 +97,7 @@ export type ExchangeEnterpriseSsoResult = {
   returnTo: string
 }
 
-const apiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
+const apiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Email domain の login policy を確認し、password field を表示してよいか判定します。
@@ -270,12 +272,4 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

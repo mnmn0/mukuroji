@@ -21,15 +21,11 @@ process.env.AWS_SECRET_ACCESS_KEY = 'test'
 process.env.AWS_REGION = 'us-east-1'
 delete process.env.AWS_SESSION_TOKEN
 process.env.MUKUROJI_LOCAL_AWS_RUNTIME = 'floci'
-process.env.PROJECT_DIRECTORY_TABLE_NAME ??= process.env.MUKUROJI_PROJECT_DIRECTORY_TABLE
-process.env.WORKSPACE_ACCESS_TABLE_NAME ??= process.env.MUKUROJI_WORKSPACE_ACCESS_TABLE
-process.env.SYSTEM_ADMIN_GROUPS ??= process.env.MUKUROJI_SYSTEM_ADMIN_GROUPS
 process.env.PROCESSED_AUDIT_EVENTS_TABLE_NAME ??= 'mukuroji-processed-audit-events-local'
 process.env.FILE_PROOFING_TABLE_NAME ??= 'mukuroji-file-proofing'
 process.env.PLANNING_TABLE_NAME ??= 'mukuroji-planning-local'
 process.env.PLANNING_UPDATE_SCHEDULE_INDEX_NAME ??= 'UpdateScheduleDueIndex'
 process.env.REQUEST_INTAKE_TABLE_NAME ??= 'mukuroji-request-intake-local'
-process.env.AUDIT_EVENTS_TABLE_NAME ??= process.env.MUKUROJI_AUDIT_EVENTS_TABLE
 
 const queueUrls = ['WORK_ITEM_IMPORT_QUEUE_URL', 'WEBHOOK_DELIVERY_QUEUE_URL', 'CONNECTOR_SYNC_QUEUE_URL'].map((key) => {
   const value = process.env[key]

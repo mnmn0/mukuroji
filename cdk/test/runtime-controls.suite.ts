@@ -1,7 +1,7 @@
 /** Registers AWS AppConfig runtime-control infrastructure tests. */
 import { expect, test } from '@jest/globals';
 import {
-  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -16,11 +16,10 @@ const runtimeControlEnvironmentKeys = [
 ] as const;
 
 const controlledFunctionScopes = new Map([
-  ['AnalyticsScheduleFunctionBB9E6044', 'analytics-schedule'],
   ['ApiFunctionCE271BD4', 'api'],
+  ['AuditExportWorkerFunction2F3C3D05', 'audit-export'],
   ['CollaborationProjectionFunction1AAC5764', 'audit-projection'],
   ['AutomationEventFunction5E8CB543', 'automation-event'],
-  ['AutomationScheduleFunction29B41328', 'automation-schedule'],
   ['ConnectorPollFunctionB3EBB19B', 'connector-poll'],
   ['ConnectorSyncFunctionA70281DA', 'connector-sync'],
   [
@@ -28,9 +27,12 @@ const controlledFunctionScopes = new Map([
     'enterprise-identity-maintenance',
   ],
   ['EnterpriseScimGroupJobFunction351DCF72', 'enterprise-scim-group-job'],
-  ['NotificationScheduleFunction633E4F4C', 'notification-schedule'],
-  ['SlackNotificationFunctionE618FDB5', 'notification-schedule'],
   ['RealtimeHandlerFunction8A4BF05B', 'realtime'],
+  // One Lambda runs every periodic job, each behind its own runtime-control scope.
+  [
+    'ScheduledJobsFunction2F30945B',
+    'automation-schedule,triage-schedule,agent-run-triage,notification-schedule,analytics-schedule',
+  ],
   ['RequestEmailIngestionFunction84289AE7', 'request-intake-email'],
   ['TenantAccessCapabilityFunction394667B9', 'tenant-operation-execution'],
   ['TenantDataCapabilityFunction8F76A72C', 'tenant-operation-execution'],
@@ -39,7 +41,6 @@ const controlledFunctionScopes = new Map([
   ['TenantOperationFunction9BEB780E', 'tenant-operation-execution'],
   ['TenantSecretsCapabilityFunctionAA395B2E', 'tenant-operation-execution'],
   ['TenantVerificationCapabilityFunctionFBC78F82', 'tenant-operation-execution'],
-  ['TriageScheduleFunctionE7D8D4C9', 'triage-schedule'],
   ['WebhookDeliveryFunctionEA305509', 'webhook-delivery'],
   ['WorkItemImportFunction651B2883', 'work-item-import'],
 ]);
@@ -500,13 +501,13 @@ test('grants every controlled data-plane role only the exact configuration ARN',
     }],
     Version: '2012-10-17',
   });
-  expect(readPolicy.Roles).toHaveLength(23);
+  expect(readPolicy.Roles).toHaveLength(20);
   expect(readPolicy.Roles).toEqual(
     expect.arrayContaining(controlledRoleReferences),
   );
 });
 
-test('binds exact runtime-control settings through API config and twenty-two direct environments', () => {
+test('binds exact runtime-control settings through API config and nineteen direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),
@@ -541,7 +542,7 @@ test('binds exact runtime-control settings through API config and twenty-two dir
   }
 
   const coreConfigurationSecretId =
-    API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+    API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const coreConfiguration = resources[coreConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
@@ -577,7 +578,7 @@ test('binds exact runtime-control settings through API config and twenty-two dir
   const apiVariables = resources[apiFunctionLogicalId]
     .Properties.Environment.Variables;
   expect(apiVariables).toEqual(expect.objectContaining({
-    MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
+    MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
       Ref: coreConfigurationSecretId,
     },
   }));

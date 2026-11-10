@@ -19,6 +19,7 @@ export const activeInboundWebhookEndpointFixture: AutomationInboundWebhookEndpoi
   id: 'release-hook',
   name: 'Release events',
   opaqueEndpointId: 'opaque-release-hook',
+  purpose: 'automation',
   revision: 3,
   schemaVersion: AUTOMATION_SCHEMA_VERSION,
   secretGeneration: 2,
@@ -35,6 +36,7 @@ export const provisioningInboundWebhookEndpointFixture: AutomationInboundWebhook
   id: 'rotating-hook',
   name: 'Rotating events',
   opaqueEndpointId: 'opaque-rotating-hook',
+  purpose: 'automation',
   revision: 4,
   secretGeneration: 3,
   status: 'provisioning',
@@ -47,6 +49,7 @@ export const pausedInboundWebhookEndpointFixture: AutomationInboundWebhookEndpoi
   id: 'billing-hook',
   name: 'Billing events',
   opaqueEndpointId: 'opaque-billing-hook',
+  purpose: 'automation',
   endpointUrl: 'https://api.example.com/api/automation/inbound-webhooks/opaque-billing-hook',
   revision: 5,
   status: 'paused',
@@ -59,6 +62,7 @@ export const revokedInboundWebhookEndpointFixture: AutomationInboundWebhookEndpo
   id: 'legacy-hook',
   name: 'Legacy events',
   opaqueEndpointId: 'opaque-legacy-hook',
+  purpose: 'automation',
   endpointUrl: 'https://api.example.com/api/automation/inbound-webhooks/opaque-legacy-hook',
   revokedAt: fixtureTimestamp,
   revision: 8,
@@ -306,4 +310,15 @@ export const deadLetterAutomationExecutionFixture: AutomationExecution = {
   status: 'dead-letter',
   triggerEventId: 'event-release-1',
   workspaceId: 'workspace-demo',
+}
+
+/** Team-routed Triage-purpose inbound webhook endpoint fixture. */
+export const triageInboundWebhookEndpointFixture: AutomationInboundWebhookEndpoint = {
+  ...activeInboundWebhookEndpointFixture,
+  id: 'webhook-triage',
+  opaqueEndpointId: 'triage-opaque-endpoint',
+  name: 'Status page alerts',
+  purpose: 'triage',
+  triageRouting: { teamId: 'core-team' },
+  endpointUrl: 'https://api.example.com/api/automation/inbound-webhooks/triage-opaque-endpoint',
 }

@@ -5,6 +5,7 @@ import {
   PutCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Realtime WebSocket 接続 ticket の有効秒数です。 */
 export const REALTIME_TICKET_TTL_SECONDS = 60
@@ -85,8 +86,7 @@ export class DynamoDbRealtimeTicketsClient implements RealtimeTicketsClient {
   private readonly clock: () => Date
 
   constructor(
-    tableName = readEnvironment('MUKUROJI_REALTIME_SESSIONS_TABLE') ??
-      readEnvironment('REALTIME_SESSIONS_TABLE_NAME') ??
+    tableName = readEnvironment('REALTIME_SESSIONS_TABLE_NAME') ??
       'mukuroji-realtime-sessions-local',
     documentClient = createRealtimeDocumentClient(),
     websocketUrl = readEnvironment('REALTIME_WEBSOCKET_URL'),
@@ -226,11 +226,7 @@ function createRealtimeDocumentClient() {
 }
 
 function readEnvironment(name: string) {
-  if (typeof Bun !== 'undefined') {
-    return Bun.env[name]
-  }
-
-  return process.env[name]
+  return loadServerConfig().environment[name]
 }
 
 function requireText(value: string, label: string) {

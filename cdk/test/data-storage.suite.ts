@@ -2,7 +2,7 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
-  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -25,6 +25,8 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
     'WorkItemCollaborationTableFDECF217',
     'WorkspaceSearchTable2575AD6B',
     'NotificationsTable76DCFC6C',
+    'PushSubscriptionsTable14F60E9C',
+    'AgentRunsTableB0DA56A7',
     'FocusTable8B0E7E68',
     'RealtimeSessionsTable607096EB',
   ];
@@ -35,7 +37,7 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(24);
+  expect(Object.keys(tables)).toHaveLength(26);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -189,7 +191,7 @@ test('Focus state uses a retained expiring scope and record key table', () => {
   });
 
   const workflowConfiguration =
-    document.Resources.ApiWorkflowRuntimeConfigurationSecret225372D1
+    document.Resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
       .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
     workflowConfiguration,
@@ -338,7 +340,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const resources = template.toJSON().Resources;
   const dataConfigurationSecretId =
-    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+    API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const dataConfiguration = resources[dataConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(
@@ -357,7 +359,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
     resources.ApiFunctionCE271BD4
       .Properties.Environment.Variables,
   ).toEqual(expect.objectContaining({
-    MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+    MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
       Ref: dataConfigurationSecretId,
     },
   }));
@@ -617,6 +619,15 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       },
     ],
   };
+  const webDistributionLogicalId = Object.keys(
+    template.findResources('AWS::CloudFront::Distribution'),
+  )[0];
+  const webOrigins = [{
+    'Fn::Join': ['', [
+      'https://',
+      { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
+    ]],
+  }];
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {
@@ -627,7 +638,7 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       }],
     },
     CorsConfiguration: {
-      CorsRules: [{
+      CorsRules: [allowedOrigins, webOrigins].map((origins) => ({
         AllowedHeaders: [
           'content-length',
           'content-type',
@@ -638,10 +649,10 @@ test('file bucket is private durable and scoped for direct browser transfers', (
           'x-amz-tagging',
         ],
         AllowedMethods: ['GET', 'HEAD', 'PUT'],
-        AllowedOrigins: allowedOrigins,
+        AllowedOrigins: origins,
         ExposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
         MaxAge: 600,
-      }],
+      })),
     },
     LifecycleConfiguration: {
       Rules: Match.arrayWith([

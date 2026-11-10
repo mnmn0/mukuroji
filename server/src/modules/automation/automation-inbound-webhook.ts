@@ -140,7 +140,8 @@ export function parseAutomationInboundWebhookJson(rawBody: Uint8Array) {
     throw new AutomationError('invalid-input', 'AutomationInboundWebhookJsonInvalid', 'Request body must be UTF-8 JSON.')
   }
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new AutomationError('invalid-input', 'AutomationInboundWebhookJsonInvalid', 'Request body must be valid JSON.')
   }

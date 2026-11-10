@@ -11,7 +11,7 @@ const meta = {
   },
   decorators: [
     (Story) => (
-      <div className="flex min-h-24 items-center justify-center bg-[var(--workbench-page)] p-6 text-[var(--workbench-primary)]">
+      <div className="flex min-h-24 items-center justify-center bg-[var(--workbench-page)] p-6 text-[var(--workbench-primary-text)]">
         <Story />
       </div>
     ),

@@ -1,5 +1,6 @@
 import type { ExportDocumentResponse } from '@mukuroji/contracts'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 const documentsApiBaseUrl = resolveDocumentsApiBaseUrl(import.meta.env)
 
@@ -73,7 +74,8 @@ async function readJson(response: Response) {
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new DocumentsApiError(
       response.status,
@@ -84,7 +86,7 @@ async function readJson(response: Response) {
 }
 
 function createApiErrorFromBody(status: number, value: unknown) {
-  const record = asRecord(value)
+  const record = readRecord(value)
 
   return new DocumentsApiError(
     status,
@@ -95,8 +97,3 @@ function createApiErrorFromBody(status: number, value: unknown) {
   )
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object'
-    ? (value as Record<string, unknown>)
-    : {}
-}

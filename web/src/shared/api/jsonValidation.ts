@@ -9,6 +9,16 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Reads the fields of an unknown JSON object without a type assertion.
+ *
+ * @param value - Unknown value read from a JSON boundary.
+ * @returns The value itself when it is a record, otherwise an empty record.
+ */
+export function readRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {}
+}
+
+/**
  * Returns whether a value is a nonnegative safe integer.
  *
  * @param value - Unknown numeric candidate.

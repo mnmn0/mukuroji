@@ -23,10 +23,10 @@ export function ConfidenceBadge({
   t,
 }: ConfidenceBadgeProps) {
   const className = confidence === 'high'
-    ? 'border-green-200 bg-green-50 text-green-800'
+    ? 'border-green-200 bg-green-50 text-fg-green-800'
     : confidence === 'medium'
-      ? 'border-amber-200 bg-amber-50 text-amber-800'
-      : 'border-red-200 bg-red-50 text-red-800'
+      ? 'border-amber-200 bg-amber-50 text-fg-amber-800'
+      : 'border-red-200 bg-red-50 text-fg-red-800'
   const sizeClassName = size === 'compact' ? 'text-[11px]' : 'text-app-caption'
 
   return (

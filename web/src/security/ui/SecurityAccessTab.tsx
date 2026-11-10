@@ -315,7 +315,7 @@ export function SecurityAccessTab({
         <EnterpriseSecurityReadOnlyNotice t={t} />
       ) : null}
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.access.mappingsDescription')}
           title={t('security.access.mappingsTitle')}
@@ -571,7 +571,7 @@ export function SecurityAccessTab({
                           </button>
                           <button
                             aria-label={`${t('security.action.remove')}: ${mapping.directoryGroupName}`}
-                            className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+                            className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                             disabled={isBusy}
                             type="button"
                             onClick={() =>
@@ -598,7 +598,7 @@ export function SecurityAccessTab({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.access.rolesDescription')}
           title={t('security.access.rolesTitle')}
@@ -631,7 +631,7 @@ export function SecurityAccessTab({
               />
             </label>
             <fieldset
-              className="col-span-2 grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-white p-4 max-[760px]:col-span-1"
+              className="col-span-2 grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-4 max-[760px]:col-span-1"
               disabled={isBusy}
             >
               <legend className="px-1 text-xs font-semibold text-[var(--workbench-text)]">
@@ -690,17 +690,17 @@ export function SecurityAccessTab({
                 }
               />
               <span className="min-w-0">
-                <strong className="block text-sm font-semibold text-amber-950">
+                <strong className="block text-sm font-semibold text-fg-amber-950">
                   {t('security.access.guestAssignable')}
                 </strong>
-                <span className="mt-1 block text-xs font-medium leading-5 text-amber-900">
+                <span className="mt-1 block text-xs font-medium leading-5 text-fg-amber-900">
                   {t('security.access.guestAssignableWarning')}
                 </span>
               </span>
             </label>
             <div className="col-span-2 flex items-center justify-between gap-3 max-[760px]:col-span-1">
               {newRolePermissionIds.length === 0 ? (
-                <p className="text-xs font-semibold text-amber-800" role="status">
+                <p className="text-xs font-semibold text-fg-amber-800" role="status">
                   {t('security.access.permissionRequired')}
                 </p>
               ) : (
@@ -723,7 +723,7 @@ export function SecurityAccessTab({
 
         {roleImpactMessage ? (
           <p
-            className="border-t border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900"
+            className="border-t border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-900"
             role="alert"
           >
             {roleImpactMessage}
@@ -872,7 +872,7 @@ function RolePermissionMatrix({
                   key={permission.id}
                 >
                   <th
-                    className="sticky left-0 z-10 bg-white px-4 py-4"
+                    className="sticky left-0 z-10 bg-surface px-4 py-4"
                     scope="row"
                   >
                     <span className="block text-sm font-semibold text-[var(--workbench-text)]">
@@ -890,7 +890,7 @@ function RolePermissionMatrix({
                       </span>
                     ) : null}
                     {!assignablePermissionIdSet.has(permission.id) ? (
-                      <span className="mt-2 block text-xs font-semibold text-slate-500">
+                      <span className="mt-2 block text-xs font-semibold text-fg-slate-500">
                         {t('security.access.permissionOutsideGrantCeiling')}
                       </span>
                     ) : null}
@@ -939,10 +939,10 @@ function RolePermissionMatrix({
               className="sticky left-0 z-10 bg-amber-50 px-4 py-4"
               scope="row"
             >
-              <span className="block text-sm font-semibold text-amber-950">
+              <span className="block text-sm font-semibold text-fg-amber-950">
                 {t('security.access.guestAssignable')}
               </span>
-              <span className="mt-1 block text-xs font-medium leading-5 text-amber-900">
+              <span className="mt-1 block text-xs font-medium leading-5 text-fg-amber-900">
                 {t('security.access.guestAssignableWarning')}
               </span>
             </th>
@@ -998,7 +998,7 @@ function RolePermissionMatrix({
                           )}
                         </button>
                         <button
-                          className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+                          className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                           disabled={isBusy || !canPreviewImpact}
                           type="button"
                           onClick={() => void onDelete(role)}
@@ -1007,11 +1007,11 @@ function RolePermissionMatrix({
                         </button>
                       </div>
                       {roleExceedsGrantCeiling(role.id) ? (
-                        <span className="max-w-[190px] text-xs font-semibold leading-5 text-slate-600">
+                        <span className="max-w-[190px] text-xs font-semibold leading-5 text-fg-slate-600">
                           {t('security.access.roleOutsideGrantCeiling')}
                         </span>
                       ) : (roleDrafts[role.id]?.length ?? 0) === 0 ? (
-                        <span className="text-xs font-semibold text-amber-800">
+                        <span className="text-xs font-semibold text-fg-amber-800">
                           {t('security.access.permissionRequired')}
                         </span>
                       ) : null}

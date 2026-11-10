@@ -241,7 +241,7 @@ function SecurityPrivilegedTabContent({
         <EnterpriseSecurityReadOnlyNotice t={t} />
       ) : null}
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.privileged.serviceAccountsDescription')}
           title={t('security.privileged.serviceAccountsTitle')}
@@ -333,8 +333,8 @@ function SecurityPrivilegedTabContent({
             <div
               className={`col-span-2 rounded-lg border p-3 text-sm font-semibold leading-6 max-[760px]:col-span-1 ${
                 normalizedServiceAccountSourceCidrs.length > 0
-                  ? 'border-[#99d7cf] bg-[#e8f6f3] text-[#285f59]'
-                  : 'border-amber-200 bg-amber-50 text-amber-900'
+                  ? 'border-tone-99d7cf bg-tone-e8f6f3 text-fg-285f59'
+                  : 'border-amber-200 bg-amber-50 text-fg-amber-900'
               }`}
             >
               <strong className="block">
@@ -456,7 +456,7 @@ function SecurityPrivilegedTabContent({
                     </button>
                     <button
                       aria-label={`${t('security.privileged.revoke')}: ${account.name}`}
-                      className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+                      className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                       disabled={isBusy}
                       type="button"
                       onClick={() => onRequestRevokeServiceAccount(account)}
@@ -487,7 +487,7 @@ function SecurityPrivilegedTabContent({
             className="flex min-w-0 flex-wrap items-end gap-3 border-t border-amber-200 bg-amber-50 p-4"
             onSubmit={(event) => void handleRegisterBreakGlass(event)}
           >
-            <label className="grid min-w-[260px] flex-1 gap-2 text-xs font-semibold text-amber-950">
+            <label className="grid min-w-[260px] flex-1 gap-2 text-xs font-semibold text-fg-amber-950">
               {t('security.privileged.breakGlassEmail')}
               <input
                 className="workbench-input min-h-10 px-3"
@@ -522,7 +522,7 @@ function SecurityPrivilegedTabContent({
             ) : null}
           </form>
         ) : null}
-        <div className="grid divide-y divide-amber-200 border-t border-amber-200 bg-white">
+        <div className="grid divide-y divide-amber-200 border-t border-amber-200 bg-surface">
           {snapshot.breakGlassAdministrators.map((administrator) => (
             <article
               className="grid grid-cols-[minmax(240px,1fr)_minmax(170px,0.7fr)_minmax(220px,0.8fr)_auto] items-center gap-4 px-4 py-4 max-[980px]:grid-cols-2 max-[600px]:grid-cols-1"
@@ -563,7 +563,7 @@ function SecurityPrivilegedTabContent({
               {canManageBreakGlass && administrator.status === 'active' ? (
                 <button
                   aria-label={`${t('security.privileged.deactivate')}: ${administrator.email}`}
-                  className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+                  className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                   disabled={isBusy}
                   type="button"
                   onClick={() =>

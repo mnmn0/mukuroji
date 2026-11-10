@@ -27,6 +27,7 @@ import {
   formatFocusTimestamp,
   getFocusActionabilityMessageKey,
   getFocusEmptyMessageKey,
+  getFocusInvolvementMessageKey,
   getFocusQueueItems,
   getFocusQueueSectionCounts,
   getFocusPolicyForEditor,
@@ -272,7 +273,7 @@ export function FocusQueue({
               aria-selected={section === queueSection}
               className={`min-h-[44px] shrink-0 border-b-2 px-4 text-app-meta font-semibold transition-colors ${
                 section === queueSection
-                  ? 'border-[var(--workbench-primary)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-primary)]'
+                  ? 'border-[var(--workbench-primary)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-primary-text)]'
                   : 'border-transparent text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-text)]'
               }`}
               id={`focus-queue-tab-${queueSection}`}
@@ -320,7 +321,7 @@ export function FocusQueue({
 
       {mutationError ? (
         <div
-          className="flex flex-wrap items-center justify-between gap-3 border-l-4 border-[var(--workbench-danger)] bg-white px-4 py-3 text-app-meta text-[var(--workbench-danger)]"
+          className="flex flex-wrap items-center justify-between gap-3 border-l-4 border-[var(--workbench-danger)] bg-surface px-4 py-3 text-app-meta text-[var(--workbench-danger)]"
           role="alert"
         >
           <span>
@@ -340,7 +341,7 @@ export function FocusQueue({
 
       {snoozeFeedback ? (
         <div
-          className="flex flex-wrap items-center justify-between gap-3 border-l-4 border-[var(--workbench-primary)] bg-white px-4 py-3 text-app-meta"
+          className="flex flex-wrap items-center justify-between gap-3 border-l-4 border-[var(--workbench-primary)] bg-surface px-4 py-3 text-app-meta"
           role="status"
         >
           <span>
@@ -605,6 +606,7 @@ function FocusQueueRow({
     item.workItem.workItemTypeId,
   ) ?? DEFAULT_WORK_ITEM_TYPE
   const completedStatus = statuses.find((status) => status.category === 'completed')
+  const involvementMessageKey = getFocusInvolvementMessageKey(item.involvement)
   const busy = isAnyFocusActionPending(isPending)
   const assignee = item.workItem.assigneeName ||
     item.workItem.assigneeEmail ||
@@ -623,7 +625,7 @@ function FocusQueueRow({
         className={`grid min-h-[76px] w-full grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition-colors max-[720px]:grid-cols-[40px_minmax(0,1fr)] ${
           isSelected
             ? 'bg-[var(--workbench-surface-muted)]'
-            : 'bg-white hover:bg-[var(--workbench-surface-muted)]'
+            : 'bg-surface hover:bg-[var(--workbench-surface-muted)]'
         }`}
         data-focus-queue-primary="true"
         onClick={onSelect}
@@ -635,7 +637,7 @@ function FocusQueueRow({
           {t('workspace.focus.metadata.rank').replace('{rank}', String(rank))}
         </span>
           <span className="min-w-0">
-          <span className="mb-1 block">
+          <span className="mb-1 flex flex-wrap items-center gap-1.5">
             <span className="workbench-badge inline-flex items-center gap-1.5">
               <WorkItemTypeIcon
                 className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
@@ -643,6 +645,14 @@ function FocusQueueRow({
               />
               {resolveWorkItemTypeLabel(item.workItem, configuration?.configuration)}
             </span>
+            {involvementMessageKey ? (
+              <span
+                className="workbench-badge"
+                data-testid={`focus-involvement-${item.workItem.teamId}-${item.workItem.id}`}
+              >
+                {t(involvementMessageKey)}
+              </span>
+            ) : null}
           </span>
           <span className="block truncate text-app-body font-semibold text-[var(--workbench-text)]">
             {item.workItem.title}
@@ -674,7 +684,7 @@ function FocusQueueRow({
 
       {isSelected ? (
         <div
-          className="border-t border-[var(--workbench-border)] bg-white px-4 py-4 sm:pl-[68px]"
+          className="border-t border-[var(--workbench-border)] bg-surface px-4 py-4 sm:pl-[68px]"
           id={`focus-item-details-${item.id}`}
         >
           {!item.actionability.actionable && item.actionability.reasons.length > 0 ? (
@@ -817,7 +827,7 @@ function FocusQueueRow({
             ) : null}
             {getFocusSourcePath(item) && onOpenSource ? (
               <button
-                className="min-h-[44px] px-3 text-app-meta font-semibold text-[var(--workbench-primary)] hover:underline"
+                className="min-h-[44px] px-3 text-app-meta font-semibold text-[var(--workbench-primary-text)] hover:underline"
                 disabled={busy}
                 onClick={() => onOpenSource(item)}
                 type="button"
@@ -1251,7 +1261,7 @@ function getSignalChipClassName(type: FocusItem['signals'][number]['type']): str
     return `${base} border-amber-200 bg-amber-50 text-[var(--workbench-warning)]`
   }
   if (type === 'approval' || type === 'review-request' || type === 'mention') {
-    return `${base} border-teal-200 bg-teal-50 text-[var(--workbench-primary)]`
+    return `${base} border-teal-200 bg-teal-50 text-[var(--workbench-primary-text)]`
   }
   return `${base} border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-muted)]`
 }

@@ -273,6 +273,40 @@ test('search endpoint parses filters and revalidates comment scope against curre
   expect(resolvedProjectId).toBe('refero')
 })
 
+test('search scope resolution splits slash-containing Work Item IDs with the document Team', async () => {
+  configureFakeProjectClients(true)
+  const requested: string[] = []
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    teamIssues: {
+      ...teamIssues,
+      async getTeamIssueDetail(workspaceId, teamId, issueId, options) {
+        requested.push(`${teamId}|${issueId}`)
+        return await teamIssues.getTeamIssueDetail(workspaceId, teamId, 'onboarding-friction', options)
+      },
+    },
+    workspaceSearch: createWorkspaceSearchFake({
+      async search(input) {
+        const document = createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'work-item',
+          entityId: 'team/core-team/issue/release/notes',
+          title: 'Release notes',
+          body: 'Search body',
+          url: '/teams/core-team/issues?issueId=release%2Fnotes',
+          teamId: 'core-team',
+        })
+        await input.resolveCurrentScope?.(document)
+        return { schemaVersion: 1, results: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/search?limit=5', { headers: { Authorization: 'Bearer test-token' } })
+  expect(response.status).toBe(200)
+  expect(requested).toEqual(['core-team|release/notes'])
+})
+
 test('Work Item collection endpoints strictly propagate includeArchived and preserve its false default', async () => {
   configureFakeProjectClients(true)
   const baseTeamIssues = getTestAppDependencies().workItems.teamIssues

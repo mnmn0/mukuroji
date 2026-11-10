@@ -15,6 +15,7 @@ import type {
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /** Error returned by a Customer directory request. */
 export class CustomerApiError extends Error {
@@ -37,9 +38,7 @@ export class CustomerApiError extends Error {
   }
 }
 
-const customersApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const customersApiBaseUrl = resolveApiBaseUrl()
 
 /** Loads the Workspace Customer directory using URL-backed filters.
  *
@@ -214,11 +213,6 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-/** Removes trailing slashes from a configured API base URL. */
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
-}
-
 /** Validates the response envelope of the Customer list endpoint. */
 function isCustomerPage(value: unknown): value is CustomerPage {
   return isRecord(value) && Array.isArray(value.customers) && value.customers.every(isCustomer) &&
@@ -271,6 +265,7 @@ function isCustomerImpactRequestSummary(
       'email',
       'webhook',
       'manual-handoff',
+      'agent-run',
       'portal',
       'phone',
       'manual',
@@ -345,6 +340,7 @@ function isCustomerRequestSource(value: unknown): boolean {
     'email',
     'webhook',
     'manual-handoff',
+    'agent-run',
     'portal',
     'phone',
     'manual',

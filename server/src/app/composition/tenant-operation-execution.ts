@@ -146,7 +146,7 @@ function readTenantOperationQueueUrl(
     secrets: 'TENANT_SECRETS_EXECUTION_QUEUE_URL',
     verification: 'TENANT_VERIFICATION_EXECUTION_QUEUE_URL',
   }[owner]
-  const value = process.env[environmentName]?.trim()
+  const value = loadServerConfig().environment[environmentName]?.trim()
   if (!value) {
     throw new Error(`Required tenant operation queue is missing: ${environmentName}`)
   }
@@ -155,7 +155,7 @@ function readTenantOperationQueueUrl(
 
 /** Reads the immutable resource-owner identity configured by CDK. */
 function readTenantOperationResourceOwnerKind(): TenantOperationResourceOwnerKind {
-  const value = process.env.TENANT_OPERATION_RESOURCE_OWNER?.trim()
+  const value = loadServerConfig().environment.TENANT_OPERATION_RESOURCE_OWNER?.trim()
   if (
     value === 'export' ||
     value === 'access' ||
@@ -224,8 +224,9 @@ function readTenantOperationCapability(owner: TenantOperationResourceOwnerKind):
     )[]
   }>
   const capability = expected[owner]
-  const configuredExecutor = process.env.TENANT_OPERATION_EXECUTOR_ID?.trim()
-  const configuredSteps = (process.env.TENANT_OPERATION_ALLOWED_STEPS ?? '')
+  const environment = loadServerConfig().environment
+  const configuredExecutor = environment.TENANT_OPERATION_EXECUTOR_ID?.trim()
+  const configuredSteps = (environment.TENANT_OPERATION_ALLOWED_STEPS ?? '')
     .split(',')
     .map((step) => step.trim())
     .filter((step) => step.length > 0)
@@ -245,9 +246,10 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     tenantExportBucketName: requireEnvironment('TENANT_EXPORT_BUCKET_NAME'),
     fileBucketName: requireEnvironment('FILE_BUCKET_NAME'),
     workItemImportBucketName: requireEnvironment('WORK_ITEM_IMPORT_BUCKET_NAME'),
+    auditExportBucketName: requireEnvironment('AUDIT_EXPORT_BUCKET_NAME'),
     cognitoUserPoolId: requireEnvironment('COGNITO_USER_POOL_ID'),
     workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),
-    workItemEventsTableName: requireEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE'),
+    workItemEventsTableName: requireEnvironment('TEAM_ISSUE_EVENTS_TABLE_NAME'),
     workItemConfigurationTableName: requireEnvironment('WORK_ITEM_CONFIGURATION_TABLE_NAME'),
     automationTableName: requireEnvironment('AUTOMATION_TABLE_NAME'),
     automationWebhookSecretPrefix: requireEnvironment('AUTOMATION_WEBHOOK_SECRET_PREFIX'),
@@ -269,6 +271,8 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     workspaceSearchTableName: requireEnvironment('WORKSPACE_SEARCH_TABLE_NAME'),
     notificationsTableName: requireEnvironment('NOTIFICATIONS_TABLE_NAME'),
     focusTableName: requireEnvironment('FOCUS_TABLE_NAME'),
+    pushSubscriptionsTableName: requireEnvironment('PUSH_SUBSCRIPTIONS_TABLE_NAME'),
+    agentRunsTableName: requireEnvironment('AGENT_RUNS_TABLE_NAME'),
     realtimeSessionsTableName: requireEnvironment('REALTIME_SESSIONS_TABLE_NAME'),
     fileProofingTableName: requireEnvironment('FILE_PROOFING_TABLE_NAME'),
   }
@@ -276,7 +280,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
 
 /** Reads one mandatory CDK-injected environment value. */
 function requireEnvironment(name: string): string {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   if (!value) throw new Error(`Required tenant operation resource is missing: ${name}`)
   return value
 }

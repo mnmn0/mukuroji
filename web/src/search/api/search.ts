@@ -1,5 +1,6 @@
 import { type WorkspaceSearchFilters, type WorkspaceSearchResponse } from '@mukuroji/contracts'
 import { WorkspaceSearchApiError, resolveSearchApiBaseUrl } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 const searchApiBaseUrl = resolveSearchApiBaseUrl(import.meta.env)
 
@@ -125,7 +126,7 @@ async function requestJson<TResponse>(
   const body = await readJson(response)
 
   if (!response.ok) {
-    const error = asRecord(body)
+    const error = readRecord(body)
     throw new WorkspaceSearchApiError(
       response.status,
       typeof error.message === 'string' ? error.message : 'Unable to complete the search request.',
@@ -144,12 +145,10 @@ async function readJson(response: Response) {
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new WorkspaceSearchApiError(response.status, 'Search API returned invalid JSON.', 'InvalidSearchResponse')
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
-}

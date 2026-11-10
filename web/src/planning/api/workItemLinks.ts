@@ -1,10 +1,9 @@
 import type { PlanningRevisionInput, PlanningSnapshot, PlanningWorkItemLinkInput } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { PlanningApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
-const planningApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const planningApiBaseUrl = resolveApiBaseUrl()
 
 const defaultPlanningApiErrorMessage = 'Unable to complete the planning request.'
 
@@ -124,8 +123,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

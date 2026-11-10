@@ -120,7 +120,7 @@ export function WorkItemFieldsEditor({
       </div>
 
       {applicableDefinitions.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-6 text-center text-sm font-medium text-[var(--workbench-muted)]">
+        <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-surface px-4 py-6 text-center text-sm font-medium text-[var(--workbench-muted)]">
           {t('workItems.fields.empty')}
         </p>
       ) : (
@@ -214,7 +214,7 @@ function CustomFieldControl({
         </p>
       ) : null}
       {errorMessage ? (
-        <p className="text-xs font-semibold text-red-700" id={errorId} role="alert">
+        <p className="text-xs font-semibold text-fg-red-700" id={errorId} role="alert">
           {errorMessage}
         </p>
       ) : null}
@@ -264,7 +264,7 @@ function CustomFieldInput({
       <output
         aria-live="polite"
         aria-readonly="true"
-        className="min-h-10 rounded-lg border border-[var(--workbench-border)] bg-white px-3 py-2 text-sm font-semibold text-[var(--workbench-text)]"
+        className="min-h-10 rounded-lg border border-[var(--workbench-border)] bg-surface px-3 py-2 text-sm font-semibold text-[var(--workbench-text)]"
         id={inputId}
       >
         {formatCustomFieldValue(definition, value, {
@@ -277,7 +277,7 @@ function CustomFieldInput({
 
   if (definition.type === 'boolean') {
     return (
-      <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={inputId}>
+      <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-3 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={inputId}>
         <input form={formId} name={name} type="hidden" value="false" />
         <input
           aria-describedby={describedBy}

@@ -1,5 +1,7 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { EnterpriseSecurityApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Directory group mapping の適用 scope です。
@@ -59,12 +61,7 @@ export type UpdateEnterpriseGroupRoleMappingInput =
     expectedVersion: number
   }
 
-const enterpriseSecurityApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_ENTERPRISE_IDENTITY_API_BASE_URL ??
-    import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')
 
 /**
  * Directory group role mapping を作成します。
@@ -185,10 +182,6 @@ function readErrorMessage(data: unknown) {
     : 'Enterprise security request failed.'
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 async function readJson<T>(response: Response): Promise<T> {
   const text = await response.text()
 
@@ -201,8 +194,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     throw createMalformedResponseError()
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -16,6 +16,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_JOB_ROLE_LIMIT,
   DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type CustomFieldDefinition,
@@ -28,6 +29,7 @@ import {
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
   type WorkItemConfigurationScopeType,
+  type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type WorkItemRelationMutationResponse,
   type WorkItemRelationsResponse,
@@ -48,6 +50,7 @@ import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Re-exports the canonical relation identifier validator for consumers. */
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
@@ -451,6 +454,9 @@ export function validateWorkItemConfiguration(
         workflow,
         ...(workflows ?? []),
       ])
+  const jobRoles = value.jobRoles === undefined
+    ? undefined
+    : readJobRoleDefinitions(value.jobRoles)
 
   return {
     scopeType,
@@ -461,6 +467,7 @@ export function validateWorkItemConfiguration(
     ...(workflows === undefined ? {} : { workflows }),
     customFields,
     ...(workItemTypes === undefined ? {} : { workItemTypes }),
+    ...(jobRoles === undefined ? {} : { jobRoles }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
@@ -991,10 +998,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
 
   constructor(
     tableName =
-      process.env.WORK_ITEM_CONFIGURATION_TABLE_NAME ??
+      loadServerConfig().environment.WORK_ITEM_CONFIGURATION_TABLE_NAME ??
       'mukuroji-work-item-configuration-local',
     workItemsTableName =
-      process.env.WORK_ITEMS_TABLE_NAME ??
+      loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ??
       'mukuroji-team-issues-local',
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createConfiguredDynamoDbClient(),
@@ -1833,6 +1840,12 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
         policyHash: createWorkItemConfigurationPolicyHash(type),
       }))
       .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
+    jobRoles: (configuration.jobRoles ?? [])
+      .map((jobRole) => ({
+        id: jobRole.id,
+        policyHash: createWorkItemConfigurationPolicyHash(jobRole),
+      }))
+      .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
   }
 }
 
@@ -1882,6 +1895,31 @@ function readWorkflowDefinitions(value: unknown): WorkItemConfiguration['workflo
   const workflows = value.map((workflow) => validateWorkflowDefinition(workflow))
   assertUnique(workflows.map((workflow) => workflow.id), 'Workflow ID')
   return workflows
+}
+
+/**
+ * Validates the job roles contributors can be planned against.
+ *
+ * @param value - Untrusted job role list.
+ * @returns Job roles with trimmed names and unique stable IDs.
+ */
+function readJobRoleDefinitions(value: unknown): WorkItemJobRoleDefinition[] {
+  if (!Array.isArray(value) || value.length > WORK_ITEM_JOB_ROLE_LIMIT) {
+    throw invalidConfiguration(`Job roles must be an array with at most ${WORK_ITEM_JOB_ROLE_LIMIT} entries.`)
+  }
+  const jobRoles = value.map((candidate): WorkItemJobRoleDefinition => {
+    if (!isRecord(candidate)) {
+      throw invalidConfiguration('Job role must be an object.')
+    }
+    const archived = candidate.archived === undefined ? undefined : readBoolean(candidate.archived, 'Job role archived')
+    return {
+      id: readConfigurationId(candidate.id, 'Job role ID'),
+      name: readDisplayName(candidate.name, 'Job role name'),
+      ...(archived ? { archived } : {}),
+    }
+  })
+  assertUnique(jobRoles.map((jobRole) => jobRole.id), 'Job role ID')
+  return jobRoles
 }
 
 function readWorkItemTypeDefinitions(

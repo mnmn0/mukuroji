@@ -16,8 +16,10 @@ export type RuntimeControlStatus =
  * Stable execution surfaces used by runtime-control guards and metrics.
  */
 export type RuntimeControlSurface =
+  | 'agent-run-triage'
   | 'analytics-schedule'
   | 'api'
+  | 'audit-export'
   | 'audit-projection'
   | 'automation-event'
   | 'automation-schedule'

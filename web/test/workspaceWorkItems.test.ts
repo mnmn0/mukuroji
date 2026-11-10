@@ -21,6 +21,7 @@ import {
   isWorkspaceTaskOverdue,
   parseWorkspaceTaskDueDate,
   resolveWorkspacePortfolioRisk,
+  resolveWorkspaceTaskInvolvement,
 } from '../src/work-items/model/workspaceWorkItems'
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')
@@ -138,6 +139,47 @@ describe('Workspace Work Item model', () => {
     expect(createWorkspaceTaskKey(coreTask)).not.toBe(createWorkspaceTaskKey(designTask))
     expect(isWorkspaceTaskAssignedToUser(coreTask, [' person@example.com '])).toBe(true)
     expect(isWorkspaceTaskAssignedToUser(coreTask, ['someone@example.com'])).toBe(false)
+  })
+
+  test('tells the owner apart from contributors on personal surfaces', () => {
+    const aliases = ['member-2', 'Person@Example.com']
+    const sharedTask = createTask({
+      assigneeEmail: 'owner@example.com',
+      assigneeUserId: 'owner@example.com',
+      contributorAssignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'person@example.com', status: 'in-progress' },
+        { assignmentId: 'b'.repeat(32), jobRoleId: 'designer', status: 'planned' },
+      ],
+      statusCategory: 'started',
+    })
+
+    expect(resolveWorkspaceTaskInvolvement(sharedTask, aliases)).toBe('contributor')
+    expect(resolveWorkspaceTaskInvolvement(sharedTask, ['someone@example.com'])).toBeUndefined()
+    expect(resolveWorkspaceTaskInvolvement(sharedTask, [])).toBeUndefined()
+
+    // The owner wins when also listed as a contributor.
+    expect(resolveWorkspaceTaskInvolvement({
+      ...sharedTask,
+      assigneeEmail: 'person@example.com',
+      assigneeUserId: 'person@example.com',
+    }, aliases)).toBe('owner')
+
+    // A finished share leaves an open Work Item, but a closed one keeps every contributor.
+    const finishedShare = {
+      ...sharedTask,
+      contributorAssignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'person@example.com', status: 'done' as const },
+      ],
+    }
+    expect(resolveWorkspaceTaskInvolvement(finishedShare, aliases)).toBeUndefined()
+    expect(resolveWorkspaceTaskInvolvement({
+      ...finishedShare,
+      statusCategory: 'completed',
+    }, aliases)).toBe('contributor')
+    expect(resolveWorkspaceTaskInvolvement({
+      ...finishedShare,
+      statusCategory: 'canceled',
+    }, aliases)).toBe('contributor')
   })
 
   test('renders and matches type-specific workflow columns', () => {

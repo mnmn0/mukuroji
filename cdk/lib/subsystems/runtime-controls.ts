@@ -16,8 +16,10 @@ import {
  * Stable application surfaces that consume dynamic runtime controls.
  */
 export type RuntimeControlScope =
+  | 'agent-run-triage'
   | 'analytics-schedule'
   | 'api'
+  | 'audit-export'
   | 'audit-projection'
   | 'automation-event'
   | 'automation-schedule'
@@ -391,14 +393,15 @@ export function buildRuntimeControls(
  *
  * @param resources Shared AppConfig resources and least-privilege read policy.
  * @param targetFunction Application Lambda that consumes runtime controls.
- * @param runtimeScope Stable application surface used by runtime policy evaluation.
+ * @param runtimeScope Stable application surface used by runtime policy evaluation, or every
+ *   surface of a Lambda that runs several guarded jobs.
  * @param injectEnvironment Whether to add discrete environment variables.
  * @returns Nothing.
  */
 export function bindRuntimeControls(
   resources: RuntimeControlResources,
   targetFunction: lambdaNodejs.NodejsFunction,
-  runtimeScope: RuntimeControlScope,
+  runtimeScope: RuntimeControlScope | readonly RuntimeControlScope[],
   injectEnvironment = true,
 ): void {
   if (!targetFunction.role) {
@@ -437,7 +440,7 @@ export function bindRuntimeControls(
     );
     targetFunction.addEnvironment(
       'MUKUROJI_RUNTIME_CONTROL_SCOPE',
-      runtimeScope,
+      typeof runtimeScope === 'string' ? runtimeScope : runtimeScope.join(','),
     );
   }
 }

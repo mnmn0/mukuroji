@@ -91,6 +91,10 @@ test('restarts oversized queue scans with smaller cursor-bound pages and preserv
   }))
   const starts: number[] = []
   const api = createAgentWorkItemApi(config, async (url) => {
+    if (url.pathname === '/api/v1/agent-runs') return Response.json({ items: [], hasMore: false })
+    if (url.pathname === '/api/v1/agent-settings') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    // A server older than Ready statuses and briefs has no agent-context endpoint.
+    if (url.pathname === '/api/v1/agent-context') return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
     const limit = Number(url.searchParams.get('limit'))
     const cursor = url.searchParams.get('cursor')
     if (!cursor) starts.push(limit)
@@ -101,8 +105,139 @@ test('restarts oversized queue scans with smaller cursor-bound pages and preserv
       ...(next < rows.length ? { nextCursor: `${limit}:${next}` } : {}),
     })
   })
-  const service = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent' })
+  const service = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent', runtime: 'other', instanceId: 'instance' })
   expect(await service.status({})).toMatchObject({ total: 71, counts: { unstarted: 71 } })
   expect(await service.next({})).toMatchObject({ action: 'start', task: { id: '70' } })
   expect(starts).toEqual([50, 10, 2, 50, 10, 2])
+})
+
+test('reads Ready statuses and briefs from agent-context alongside the run settings', async () => {
+  const api = createAgentWorkItemApi(config, async (url) => {
+    if (url.pathname === '/api/v1/agent-settings') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true })
+    }
+    if (url.pathname === '/api/v1/agent-context') {
+      return Response.json({
+        schemaVersion: 1, teamId: 'team', revision: 4, readyStatusIds: ['ready'], requireAcceptanceCriteria: true,
+        acceptanceCriteriaFieldId: 'criteria', brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
+      })
+    }
+    return Response.json({ status: 500, code: 'internal_error', retryable: false }, { status: 500 })
+  })
+  expect(await api.agentSettings()).toEqual({
+    schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true,
+    readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'criteria',
+    brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
+  })
+  const mismatched = createAgentWorkItemApi(config, async (url) => Response.json(url.pathname === '/api/v1/agent-settings'
+    ? { schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true }
+    : { schemaVersion: 1, teamId: 'other', revision: 4, readyStatusIds: [], projectBriefs: {} }))
+  await expect(mismatched.agentSettings()).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads acceptance criteria from their endpoint and treats an older server as having none', async () => {
+  const criterion = { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    if (url.pathname === '/api/v1/work-items/task/acceptance-criteria') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3, items: [criterion] })
+    }
+    if (url.pathname === '/api/v1/work-items/other/acceptance-criteria') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3, items: [] })
+    }
+    return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+  })
+  expect(await api.acceptanceCriteria('task')).toEqual([criterion])
+  expect(paths[0]).toBe('/api/v1/work-items/task/acceptance-criteria?teamId=team')
+  expect(await api.acceptanceCriteria('legacy')).toEqual([])
+  await expect(api.acceptanceCriteria('other')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+const validRun = {
+  schemaVersion: 1, runId: 'run_00000000-0000-4000-8000-000000000001', teamId: 'team', workItemId: 'task',
+  assigneeUserId: 'agent', runtime: 'codex', agentName: 'Codex', state: 'active', startRevision: 2, leaseMinutes: 30,
+  startedAt: '2026-09-01T00:00:00.000Z', lastHeartbeatAt: '2026-09-01T00:00:00.000Z', leaseExpiresAt: '2026-09-01T00:30:00.000Z',
+  stalled: false, reportCount: 0,
+}
+
+test('starts, lists, heartbeats, and finishes runs on the versioned Agent Run endpoints', async () => {
+  const seen: { method: string; path: string; query: string; body: unknown; key: string | null }[] = []
+  const api = createAgentWorkItemApi(config, async (url, init) => {
+    const body: unknown = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+    seen.push({ method: init.method ?? 'GET', path: url.pathname, query: url.search, body, key: new Headers(init.headers).get('Idempotency-Key') })
+    if (url.pathname.endsWith('/task/agent-runs') && init.method === 'POST') {
+      return Response.json({ run: validRun, workItem: { ...validTask, revision: 2, statusCategory: 'started', workflowStatusId: 'coding' } }, { status: 201 })
+    }
+    if (url.pathname === '/api/v1/agent-runs' || url.pathname.endsWith('/task/agent-runs')) return Response.json({ items: [validRun], hasMore: false })
+    if (url.pathname.endsWith('/finish')) return Response.json({ ...validRun, state: 'finished', outcome: 'completed', finishedAt: validRun.startedAt, finishedBy: 'agent' })
+    if (url.pathname === '/api/v1/agent-settings') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
+    if (url.pathname === '/api/v1/agent-context') return Response.json({ schemaVersion: 1, teamId: 'team', revision: 0, readyStatusIds: [], projectBriefs: {} })
+    if (init.method === 'PATCH') return Response.json({ ...validTask, revision: 3 })
+    if (url.pathname.endsWith('/comments')) return Response.json({ id: 'note', actorUserId: 'agent', body: 'Progress', createdAt: validTask.createdAt })
+    return Response.json(validRun)
+  })
+  const started = await api.startRun('task', { expectedRevision: 1, workflowStatusId: 'coding', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop' }, 'start-key')
+  expect(started).toMatchObject({ run: { runId: validRun.runId }, task: { id: 'task', statusCategory: 'started' } })
+  expect(seen[0]).toMatchObject({ method: 'POST', path: '/api/v1/work-items/task/agent-runs', key: 'start-key', body: { instanceId: 'laptop', runtime: 'codex' } })
+  expect((await api.listActiveRuns({ assigneeUserId: 'agent', instanceId: 'laptop' })).items).toHaveLength(1)
+  expect(new URLSearchParams(seen[1]?.query)).toEqual(new URLSearchParams('?teamId=team&state=active&assigneeUserId=agent&instanceId=laptop&limit=100'))
+  await api.heartbeat(validRun.runId, 'laptop')
+  expect(seen[2]).toMatchObject({ method: 'POST', path: `/api/v1/agent-runs/${validRun.runId}/heartbeat`, key: null, body: { instanceId: 'laptop' } })
+  expect(await api.finishRun(validRun.runId, 'completed', 'laptop', 'finish-key')).toMatchObject({ outcome: 'completed' })
+  expect(seen[3]).toMatchObject({ body: { outcome: 'completed', instanceId: 'laptop' }, key: 'finish-key' })
+  expect(await api.agentSettings()).toMatchObject({ leaseMinutes: 30 })
+  await api.update('task', { expectedRevision: 2, title: 'New' }, 'update-key', { agentInstanceId: 'laptop', agentRunId: validRun.runId })
+  expect(seen.at(-1)?.body).toEqual({ expectedRevision: 2, title: 'New', agentInstanceId: 'laptop', agentRunId: validRun.runId })
+  await api.comment('task', 'Progress', 'comment-key', undefined, 'agent', { agentInstanceId: 'laptop' })
+  expect(seen.at(-1)?.body).toEqual({ body: 'Progress', agentInstanceId: 'laptop' })
+  expect(await api.claimedRun('task', { assigneeUserId: 'agent', instanceId: 'laptop' })).toMatchObject({ runId: validRun.runId })
+  expect(new URLSearchParams(seen.at(-1)?.query))
+    .toEqual(new URLSearchParams('?teamId=team&state=active&workItemId=task&assigneeUserId=agent&instanceId=laptop&limit=1'))
+  await expect(api.claimedRun('task', { assigneeUserId: 'someone-else', instanceId: 'laptop' })).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.claimedRun('other-task')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('saves a structured report on the run endpoint and checks its scope', async () => {
+  const seen: { path: string; query: string; body: unknown; key: string | null }[] = []
+  let reportRunId = validRun.runId
+  const api = createAgentWorkItemApi(config, async (url, init) => {
+    const body: unknown = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+    seen.push({ path: url.pathname, query: url.search, body, key: new Headers(init.headers).get('Idempotency-Key') })
+    return Response.json({
+      report: {
+        schemaVersion: 1, runId: reportRunId, teamId: 'team', workItemId: 'task', sequence: 1, kind: 'artifact', commentId: 'note',
+        verifications: [], artifacts: [{ type: 'commit', url: 'https://github.com/example/repo/commit/abc' }], createdAt: validTask.createdAt,
+      },
+      comment: { id: 'note', actorUserId: 'agent', body: '[Codex]\n\nPushed', createdAt: validTask.createdAt },
+      run: { ...validRun, reportCount: 1 },
+    }, { status: 201 })
+  })
+  const input = { kind: 'artifact' as const, message: 'Pushed', artifacts: [{ type: 'commit' as const, url: 'https://github.com/example/repo/commit/abc' }] }
+  expect(await api.reportRun(validRun.runId, 'laptop', input, 'report-key', 'project')).toMatchObject({
+    report: { sequence: 1, kind: 'artifact' }, run: { reportCount: 1 },
+  })
+  expect(seen[0]).toEqual({
+    path: `/api/v1/agent-runs/${validRun.runId}/reports`, query: '?teamId=team&assignedProjectId=project',
+    key: 'report-key', body: { instanceId: 'laptop', ...input },
+  })
+  reportRunId = 'run_00000000-0000-4000-8000-000000000002'
+  await expect(api.reportRun(validRun.runId, 'laptop', input, 'report-key')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('maps Agent Run problem reasons to stable codes without forwarding remote detail', async () => {
+  for (const [status, reason] of [
+    [409, 'agent_run_conflict'], [409, 'agent_run_not_active'], [403, 'agent_run_forbidden'], [409, 'invalid_transition'],
+    [400, 'invalid_artifact_url'],
+  ] as const) {
+    const api = createAgentWorkItemApi(config, async () => Response.json({
+      status, code: status === 403 ? 'forbidden' : status === 400 ? 'validation_failed' : 'conflict', retryable: false, detail: 'secret-test-token',
+      errors: [{ pointer: '/agentInstanceId', code: reason, message: 'secret-test-token' }],
+    }, { status, headers: { 'Content-Type': 'application/problem+json' } }))
+    const error = await api.update('task', { expectedRevision: 1, title: 'New' }, 'key').catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: reason, retryable: false })
+    expect(String(error)).not.toContain('secret-test-token')
+  }
+  const scoped = createAgentWorkItemApi(config, async () => Response.json({ ...validRun, teamId: 'other' }))
+  await expect(scoped.getRun(validRun.runId)).rejects.toMatchObject({ code: 'invalid_response' })
 })

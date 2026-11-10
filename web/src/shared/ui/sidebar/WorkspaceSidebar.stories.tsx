@@ -136,7 +136,7 @@ function WorkspaceSidebarStory(args: WorkspaceSidebarProps) {
         }}
       />
       <button
-        className="m-4 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm"
+        className="m-4 rounded-md border border-slate-300 bg-surface px-3 py-2 text-sm text-fg-slate-700 shadow-sm"
         type="button"
         onClick={() => setIsMobileOpen(true)}
       >

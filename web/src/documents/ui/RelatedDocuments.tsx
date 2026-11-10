@@ -151,7 +151,7 @@ export function RelatedDocuments({
       ) : null}
       {error ? (
         <p
-          className="text-sm font-semibold text-red-700"
+          className="text-sm font-semibold text-fg-red-700"
           role="alert"
         >
           {t('documents.related.error')}
@@ -166,18 +166,18 @@ export function RelatedDocuments({
         <div className="grid gap-2">
           {backlinks.map((backlink) => (
             <div
-              className="flex min-w-0 items-stretch rounded-lg border border-[var(--workbench-border)] bg-white"
+              className="flex min-w-0 items-stretch rounded-lg border border-[var(--workbench-border)] bg-surface"
               key={`${backlink.documentId}:${backlink.relation.id}`}
             >
               <a
-                className="flex min-h-[44px] min-w-0 flex-1 items-center gap-3 px-3 py-2.5 hover:bg-[#f2fbf9]"
+                className="flex min-h-[44px] min-w-0 flex-1 items-center gap-3 px-3 py-2.5 hover:bg-tone-f2fbf9"
                 href={createDocumentPath(
                   backlink.documentId,
                 )}
               >
                 <span
                   aria-hidden="true"
-                  className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[#e5f7f4] text-sm font-bold text-[var(--workbench-primary)]"
+                  className="grid h-8 w-8 flex-none place-items-center rounded-md bg-tone-e5f7f4 text-sm font-bold text-[var(--workbench-primary-text)]"
                 >
                   D
                 </span>
@@ -198,7 +198,7 @@ export function RelatedDocuments({
                       ? t('documents.related.promotingToContext')
                       : t('documents.related.promoteToContext')
                   }: ${backlink.documentTitle}`}
-                  className="min-h-[44px] flex-none border-l border-[var(--workbench-border)] px-3 text-xs font-semibold text-[var(--workbench-primary)] hover:bg-[#f2fbf9]"
+                  className="min-h-[44px] flex-none border-l border-[var(--workbench-border)] px-3 text-xs font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-f2fbf9"
                   data-testid={createRelatedDocumentPromotionTriggerId(
                     backlink.documentId,
                     backlink.relation.id,
@@ -221,7 +221,7 @@ export function RelatedDocuments({
         </div>
       ) : null}
       {promotionErrorDocumentId ? (
-        <p className="text-sm font-semibold text-red-700" role="alert">
+        <p className="text-sm font-semibold text-fg-red-700" role="alert">
           {t('documents.related.promoteToContextError')}
         </p>
       ) : null}

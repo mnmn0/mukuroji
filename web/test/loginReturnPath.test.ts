@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveSafeLoginReturnPath } from '../src/auth/model/loginReturnPath'
+import {
+  buildLoginRedirectPath,
+  resolveSafeLoginReturnPath,
+} from '../src/auth/model/loginReturnPath'
 
 describe('resolveSafeLoginReturnPath', () => {
   test('accepts a same-origin public request path with URL state', () => {
@@ -51,5 +54,30 @@ describe('resolveSafeLoginReturnPath', () => {
 
   test('uses the dashboard when no return path was provided', () => {
     expect(resolveSafeLoginReturnPath(null)).toBe('/dashboard')
+  })
+})
+
+describe('buildLoginRedirectPath', () => {
+  test('carries allowed workspace locations to the login page', () => {
+    expect(buildLoginRedirectPath('/my-tasks')).toBe('/?returnTo=%2Fmy-tasks')
+    expect(buildLoginRedirectPath('/updates?feed=saved-1')).toBe('/?returnTo=%2Fupdates%3Ffeed%3Dsaved-1')
+    expect(buildLoginRedirectPath('/teams/core-team/issues?issueId=issue-34#activity')).toBe(
+      '/?returnTo=%2Fteams%2Fcore-team%2Fissues%3FissueId%3Dissue-34%23activity',
+    )
+  })
+
+  test('round-trips through the login return path resolver', () => {
+    for (const path of ['/inbox', '/focus?teamId=core-team', '/help', '/share?title=Bug&text=Steps&url=https%3A%2F%2Fexample.com']) {
+      const returnTo = new URL(buildLoginRedirectPath(path), 'https://mukuroji.invalid')
+        .searchParams.get('returnTo')
+
+      expect(resolveSafeLoginReturnPath(returnTo)).toBe(path)
+    }
+  })
+
+  test('uses the plain login URL for paths the login page would not return to', () => {
+    expect(buildLoginRedirectPath('/customers/customer-1')).toBe('/')
+    expect(buildLoginRedirectPath('//evil.example/dashboard')).toBe('/')
+    expect(buildLoginRedirectPath('/')).toBe('/')
   })
 })

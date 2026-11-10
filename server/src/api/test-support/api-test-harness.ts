@@ -12,6 +12,9 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemAcceptanceCriterion,
+  type WorkItemContributorAssignment,
+  type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type CanonicalWorkItem,
   type WorkItemSchedule,
@@ -68,6 +71,8 @@ import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
+import { isStoredContributorAssignmentList } from '../../modules/work-items/domain/contributor-assignments'
+import { isStoredAcceptanceCriterionList } from '../../modules/work-items/domain/acceptance-criteria'
 import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
@@ -75,6 +80,7 @@ import {
   type TeamIssueDetailReadOptions,
   type TeamIssuesClient,
   type UpdateTeamIssueRequestBody,
+  type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
@@ -99,6 +105,9 @@ const enterpriseScimGroupJobProcessors = new WeakMap<
 >()
 
 const HEADLESS_DEVELOPER_WORKSPACE_ID = 'workspace-headless'
+
+/** API key expiry one year after the real clock, because key creation rejects an expiry in the past. */
+const HEADLESS_API_KEY_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
 
 /** Mutable state owned by one domain test suite. */
 type ApiTestHarnessState = {
@@ -226,8 +235,31 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
   return { client }
 }
 
+/** Test overrides for an inbound webhook endpoint; Team routing comes only with the Triage purpose. */
+type InboundWebhookEndpointRecordOverrides =
+  Partial<Omit<AutomationInboundWebhookEndpointRecord, 'purpose' | 'triageRouting'>> & (
+    | {
+      /** Automation purpose, the default. */
+      purpose?: 'automation'
+      /** Automation-purpose endpoints carry no Team routing. */
+      triageRouting?: never
+    }
+    | {
+      /** Triage purpose. */
+      purpose: 'triage'
+      /** Fixed Team routing of the Triage endpoint. */
+      triageRouting: { teamId: string }
+    }
+  )
+
+/**
+ * Creates an active Automation inbound webhook endpoint record for API tests.
+ *
+ * @param overrides - Fields that replace the defaults.
+ * @returns The endpoint record.
+ */
 function createInboundWebhookEndpointRecord(
-  overrides: Partial<AutomationInboundWebhookEndpointRecord> = {},
+  overrides: InboundWebhookEndpointRecordOverrides = {},
 ): AutomationInboundWebhookEndpointRecord {
   return {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -235,6 +267,7 @@ function createInboundWebhookEndpointRecord(
     workspaceId: 'user#demo@example.com',
     opaqueEndpointId: 'A'.repeat(43),
     name: 'Build events',
+    purpose: 'automation',
     status: 'active',
     version: 1,
     secretGeneration: 1,
@@ -606,6 +639,7 @@ function createCollaborationStub(
     removeReaction: unsupported,
     getWatcherState: unsupported,
     getMemberWatcherState: unsupported,
+    async getMemberSubscribedScopes() { return [] },
     subscribe: unsupported,
     unsubscribe: unsupported,
     heartbeatPresence: unsupported,
@@ -1178,7 +1212,7 @@ async function configureHeadlessDeveloperCredential(
     input: {
       name: 'Headless Enterprise RBAC test key',
       scopes,
-      expiresAt: '2027-07-20T00:00:00.000Z',
+      expiresAt: HEADLESS_API_KEY_EXPIRES_AT,
     },
   })
   setTestAppDependencies(state, {
@@ -1281,7 +1315,17 @@ function configureFakeProjectClients(
     profileError?: Error
     /** 指定した active member を Workspace guest として返します。 */
     guestWorkspaceMemberKeys?: string[]
+    /** Job roles returned by the resolved Work Item configuration. */
+    jobRoles?: WorkItemJobRoleDefinition[]
+    /** Custom fields returned by the resolved Work Item configuration. */
+    configurationCustomFields?: WorkItemConfiguration['customFields']
+    /** Contributors stored on the first fake Team Work Item and on detail reads. */
+    issueContributorAssignments?: WorkItemContributorAssignment[]
     inactiveWorkspaceMemberKeys?: string[]
+    /** Members that read as active but are deactivated before their commit-time fence is built. */
+    deactivatedBeforeFenceMemberKeys?: string[]
+    /** Omits the Workspace access membership fence, as an adapter without fencing support would. */
+    withoutMemberFence?: boolean
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
@@ -1325,12 +1369,17 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
     detailAssignedProjectIds?: Record<string, string>
-    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。 */
+    /**
+     * `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。
+     * When set, an update increments the stored revision so later reads observe it.
+     */
     detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Initial acceptance criteria of the detail fake and the first listed Work Item; updates replace them. */
+    detailAcceptanceCriteria?: WorkItemAcceptanceCriterion[]
     /** Detail fake が返す現在の canonical schedule です。 */
     detailSchedule?: WorkItemSchedule
     /** `${teamId}\0${workItemId}` key ごとに detail fake が返す canonical schedule です。 */
@@ -1344,6 +1393,8 @@ function configureFakeProjectClients(
     detailReadHook?: (issueId: string) => Promise<void>
     /** Detail fake が返す現在の設定済み workflow status ID です。 */
     detailWorkflowStatusId?: string
+    /** Status category the detail fake returns instead of the one derived from the status ID. */
+    detailStatusCategory?: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled'
     /** Detail fake が read ごとに返す workflow status ID です。 */
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
@@ -1374,6 +1425,16 @@ function configureFakeProjectClients(
       planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
       /** Updated Team-local Work Item identifier. */
       issueId: string
+      /** Contributor list supplied to the adapter, when the update changes it. */
+      contributorAssignments?: unknown
+      /** Acceptance criteria supplied to the adapter, when the update changes them. */
+      acceptanceCriteria?: unknown
+      /** Caller authorization ConditionChecks supplied to the adapter. */
+      authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
+      /** Configuration guard ConditionChecks supplied to the adapter. */
+      configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
+      /** Agent Run writes committed with the update. */
+      agentRunTransactItems?: UpdateTeamIssueRequestBody['agentRunTransactItems']
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -1557,6 +1618,16 @@ function configureFakeProjectClients(
     role: WorkspaceRole
   }>()
   const deletedIssueIds = new Set<string>()
+  // Criteria saved by an update; until then reads use the configured initial criteria.
+  let savedAcceptanceCriteria: { value: WorkItemAcceptanceCriterion[] | undefined } | undefined
+  /**
+   * Reads the criteria the fake currently stores.
+   *
+   * @returns The saved criteria, or the configured initial criteria before any update.
+   */
+  const currentAcceptanceCriteria = () => savedAcceptanceCriteria
+    ? savedAcceptanceCriteria.value
+    : options.detailAcceptanceCriteria
   const createWorkspaceMember = (memberKey: string) => ({
     id: memberKey,
     memberKey,
@@ -1592,6 +1663,12 @@ function configureFakeProjectClients(
         : `Work Item ${index}`,
       description: '初回体験の摩擦を下げる。',
       assigneeUserId: 'sato@example.com',
+      ...(index === 0 && options.issueContributorAssignments
+        ? { contributorAssignments: options.issueContributorAssignments }
+        : {}),
+      ...(index === 0 && currentAcceptanceCriteria()
+        ? { acceptanceCriteria: currentAcceptanceCriteria() }
+        : {}),
       creatorMemberKey: 'demo@example.com',
       workflowSchemaVersion: 1 as const,
       workflowStatusId: 'in-progress',
@@ -1837,6 +1914,20 @@ function configureFakeProjectClients(
       },
     },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
+      ...(options.jobRoles || options.configurationCustomFields
+        ? {
+            async getTeamConfiguration(_workspaceId: string, teamId: string) {
+              return {
+                configuration: {
+                  ...createTestWorkItemConfiguration('team', teamId),
+                  ...(options.jobRoles ? { jobRoles: options.jobRoles } : {}),
+                  ...(options.configurationCustomFields ? { customFields: options.configurationCustomFields } : {}),
+                },
+                inheritedFrom: 'default' as const,
+              }
+            },
+          }
+        : {}),
       async listRelations() {
         return {
           relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
@@ -2109,17 +2200,20 @@ function configureFakeProjectClients(
       },
     },
     workspaceAccess: {
-      async createActiveMemberConditionCheck(workspaceId, memberKey) {
-        const member = createWorkspaceMember(memberKey)
-        if (member.status !== 'active') return undefined
-        return {
-          ConditionCheck: {
-            TableName: 'WorkspaceAccessTable',
-            Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
-            ConditionExpression: 'attribute_exists(workspaceId)',
-          },
-        }
-      },
+      ...(options.withoutMemberFence ? {} : {
+        async createActiveMemberConditionCheck(workspaceId: string, memberKey: string) {
+          const member = createWorkspaceMember(memberKey)
+          if (member.status !== 'active') return undefined
+          if (options.deactivatedBeforeFenceMemberKeys?.includes(memberKey)) return undefined
+          return {
+            ConditionCheck: {
+              TableName: 'WorkspaceAccessTable',
+              Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+              ConditionExpression: 'attribute_exists(workspaceId)',
+            },
+          }
+        },
+      }),
       async getMember(_workspaceId, memberKey) {
         return createWorkspaceMember(memberKey)
       },
@@ -2477,13 +2571,17 @@ function configureFakeProjectClients(
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
+            ...(options.issueContributorAssignments
+              ? { contributorAssignments: options.issueContributorAssignments }
+              : {}),
+            ...(currentAcceptanceCriteria() ? { acceptanceCriteria: currentAcceptanceCriteria() } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
-            statusCategory:
-              workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
+            statusCategory: options.detailStatusCategory ??
+              (workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
                 ? 'completed'
-                : 'started',
+                : 'started'),
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
@@ -2534,6 +2632,9 @@ function configureFakeProjectClients(
             title: String(input.title),
             description: typeof input.description === 'string' ? input.description : undefined,
             assigneeUserId: String(input.assigneeUserId),
+            ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
+              ? { contributorAssignments: input.contributorAssignments }
+              : {}),
             creatorMemberKey: actorUserId,
             workflowSchemaVersion: 1,
             workflowStatusId: String(input.workflowStatusId),
@@ -2555,12 +2656,23 @@ function configureFakeProjectClients(
           },
         }
       },
-      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId) {
+      async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId, _auditContext, idempotency) {
         await options.issueUpdateHook?.({
           authorizationSnapshot: input.authorizationSnapshot,
           planningRevisionFence: input.planningRevisionFence,
           issueId,
+          ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
+          ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
+          authorizationConditionChecks: input.authorizationConditionChecks,
+          configurationConditionChecks: input.configurationConditionChecks,
+          ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
         })
+        if ('acceptanceCriteria' in input) {
+          // An empty list removes the criteria, like the DynamoDB adapter.
+          savedAcceptanceCriteria = {
+            value: isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? structuredClone(input.acceptanceCriteria) : undefined,
+          }
+        }
         calls.issueUpdates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
@@ -2579,10 +2691,14 @@ function configureFakeProjectClients(
           input.schedule,
           createDefaultDueDateWorkItemSchedule('2026-06-18'),
         )
-        return {
+        const revisionKey: `${string}\0${string}` = `${teamId}\0${issueId}`
+        const nextRevision = (options.detailRevisions?.[revisionKey] ?? 1) + 1
+        // Tests that track revisions opt in through detailRevisions; others keep the fixed revision.
+        if (options.detailRevisions) options.detailRevisions[revisionKey] = nextRevision
+        const updated: UpdateTeamIssueResponse = {
           issue: {
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-            revision: 2,
+            revision: nextRevision,
             id: issueId,
             teamId,
             assignedProjectId: typeof input.assignedProjectId === 'string'
@@ -2590,6 +2706,10 @@ function configureFakeProjectClients(
               : undefined,
             title: typeof input.title === 'string' ? input.title : '初回オンボーディングの離脱要因を減らす',
             assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : 'sato@example.com',
+            ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
+              ? { contributorAssignments: input.contributorAssignments }
+              : {}),
+            ...(isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId: typeof input.workflowStatusId === 'string'
@@ -2612,6 +2732,9 @@ function configureFakeProjectClients(
             source: 'dynamodb',
           },
         }
+        // Like the DynamoDB client, the receipt is prepared from the committed Work Item.
+        await idempotency?.prepare({ status: 200, body: updated.issue })
+        return updated
       },
       async updateTeamIssueSchedules(
         directoryId,

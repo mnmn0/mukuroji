@@ -34,6 +34,7 @@ import type {
   PersistedConnectorSyncState,
   StoredConnectorSyncConflict,
 } from '../../connector-sync-runtime'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Stuck conflict resolution claim を takeover できるまでの既定秒数です。 */
 export const CONNECTOR_CONFLICT_RESOLUTION_LEASE_SECONDS = 15 * 60
@@ -137,7 +138,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
 
   /** Environment または明示 options から durable store を作成します。 */
   constructor(options: DynamoDbConnectorSyncPersistenceOptions = {}) {
-    const environment = options.environment ?? process.env
+    const environment = options.environment ?? loadServerConfig().environment
     const production = isProductionEnvironment(environment)
     const configuredTableName = options.tableName ??
       environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
@@ -1091,7 +1092,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
  * @returns Durable connector sync persistence です。
  */
 export function createDynamoDbConnectorSyncPersistenceFromEnvironment(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
   return new DynamoDbConnectorSyncPersistence({ environment })
 }
@@ -1628,7 +1629,7 @@ function requireSigningSecret(value: string) {
 function readPreviousSigningSecrets(value: string | undefined) {
   if (!value?.trim()) return []
   try {
-    const parsed = JSON.parse(value) as unknown
+    const parsed: unknown = JSON.parse(value)
     if (
       !Array.isArray(parsed) ||
       parsed.length > 3 ||

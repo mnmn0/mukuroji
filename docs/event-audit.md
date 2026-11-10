@@ -150,7 +150,62 @@ GET /api/audit/events?actorId=...&targetType=...&targetId=...&eventType=...&from
 GET /api/audit/events/export?actorId=...&from=...&to=...
 ```
 
-system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。将来は大規模な export を非同期 S3 job へ分離する。
+system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。1,000 件を超える export は次の非同期 S3 job を使う。
+
+### 非同期 audit export job
+
+```text
+POST /api/audit/exports                       # body: { "filters": { actorId?, actorKind?, entityType?, entityId?, targetType?, targetId?, eventTypes?, from?, to? } }
+GET  /api/audit/exports                       # 期限内の最新 20 件
+GET  /api/audit/exports/:exportId
+GET  /api/audit/exports/:exportId/download    # completed の part ごとの署名付き URL（?fromPart= で 100 件ずつ）
+```
+
+system admin または `audit.export` 権限を要求する。
+
+- request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` がない場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。filter に空文字列や空配列を渡すと制限が外れて全件に広がるため、`400 InvalidAuditExportFilters` で拒否する（制限しない項目は省略する）。
+- filter は同期 audit query と同じ規則で作成時に検証する（`eventTypes` は空でない最大 20 件など）。 `entityType` / `targetType` は単独で指定でき、`entityId` / `targetId` には対応する type が必要。worker で初めて失敗する job は作らない。
+- `Idempotency-Key` は必須で、ない場合は `400 IdempotencyKeyRequired` を返す。export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。
+- 要求は job を作る前に `audit.export-requested` として記録する。audit 書き込みに失敗した場合は job を作らずに失敗を返すため、記録のない export は実行されない。
+- 同じ key の再要求は、job の作成、index marker の作成、enqueue のどこで前回失敗していても同じ job を再利用して不足分をやり直す。`queued` の job は再度 enqueue する。
+
+job と worker の動作は次のとおり。
+
+- 要求の audit event を記録した後に job の作成が失敗して同じ key で再送された場合は、記録済み event の時刻を `snapshotAt` に使い、再送時刻の後に追加された event を含めない。
+- job は要求時刻を `snapshotAt` として固定し、`to` を snapshot 時刻で上限化するため、export 中に追加された event は含めない。
+- audit index は結果整合のため、最初の step は `snapshotAt` から 30 秒後まで event を読まない。早く届いた message は残り時間だけ遅延して再 enqueue する。この待機は再走査を減らすための最適化であり、完全性は次の completeness barrier で保証する。
+- completeness barrier: index の走査が snapshot 末尾に達しても、job はすぐには `completed` にしない。同じ Workspace partition の base table（`directoryId`）を strongly consistent read の `Query`（`Select: COUNT`）で読み、index query と同じ述語（index の partition key、`*EventKey` の期間、filter）に一致する event 数を数える。base table の sort key は時刻順でない `eventId` のため、件数の確認は filter や期間にかかわらず Workspace の audit partition 全体を読む（1 export につき 1 回、再走査時はその都度で最大 3 回）。partition の read capacity を API や audit writer に残すため、1 step で読む件数確認の page は走査（最大 50 page）より小さい最大 10 page（1 page 最大 1 MB）とし、cursor を `job.verification` に保存して step をまたいで進める。監視する metric と将来の LSI 案は [operational-readiness.md](operational-readiness.md) に記載する。base table の件数が走査で書いた件数と一致した場合だけ `completed` にする。GSI への伝搬が 30 秒を超えて遅れた event が走査から漏れると件数が食い違うため、part と件数を破棄して `queued` に戻し、`scanAttempt` を増やして待機後に走査をやり直す。3 回の走査で一致しない場合（backfill などで snapshot 以前の時刻の event が書き込まれ続ける場合を含む）は、欠けた export を完了させず `AuditExportIncomplete` で `failed` にする。
+- snapshot の範囲: audit row は書き込み（ingestion）時刻を持たず、`occurredAt` だけを持つ。そのため export は「`occurredAt` が `snapshotAt` 以前で、件数の確認がその row の位置を読んだ時点で base table に確定していた event」を含む。件数の確認が保証するのは、確認の時点までに書き込まれた row が走査から漏れていないことであり、確認の後（`completed` の書き込みまでの間を含む）や完了後に書き込まれた row は、`occurredAt` が `snapshotAt` 以前でも含まれない。確認の途中に書き込まれた row は、`eventId` 順で cursor より前に入れば含まれず、後に入れば件数の食い違いとして再走査される。backfill / migration で過去の時刻の event を追加した場合は、その完了後に export を依頼し直す。書き込み側の fence（audit writer が export 中の Workspace を確認する、または ingestion watermark を書く）は、すべての mutation transaction と backfill に条件を加え、Workspace ごとの hot item で競合させる横断的な変更になるため採用しない。
+- 非同期 export の snapshot は、処理期限（作成から 24 時間）より後に `expiresAt` を迎える event と `expiresAt` のない event（legal hold 中など）だけを含む。DynamoDB TTL は `expiresAt` より前に item を削除しないため、これらの event は job の間ずっと base table に残り、件数の確認で漏れを証明できる。処理中に期限を迎え得る retention 末端の event は、走査から漏れた後に TTL で消えると両方の件数から同時に外れて漏れを検出できないため、export にも件数の確認にも含めない。これらは遅くとも 1 日以内に retention で削除される event であり、必要な場合は同期 export で参照する。
+- `AuditExportQueue` の message ごとに worker Lambda が 1 step を処理する。1 step は query page を最大 50 回まで評価し、5,000 件または約 32 MiB に達したところで part を閉じ、cursor を job に保存して次の step を enqueue する。絞り込みで一致が少ない場合も、page 上限で cursor を保存して進むため、Lambda の timeout まで走り続けない。
+- 合計上限は 1,000,000 件で、超えた場合は `AuditExportTooLarge` で `failed` にする。
+- job state は `audit-exports/<sha256(workspaceId)>/<exportId>/job.json` に置き、作成は `If-None-Match`、更新は ETag の `If-Match` で条件付き書き込みにする。
+- part は内容の SHA-256 を含む `part-NNNNN-<digest>.ndjson` として保存する。同じ step が重複して実行されても、条件付き書き込みに勝った job が参照する object を上書きできない。job は件数・byte 長・checksum を記録する。
+- download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒（job の有効期限までの残り時間がそれより短い場合はその残り時間）。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
+- worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かない。closing は取り消されて active に戻り得るため、job が残っていれば 15 分後に同じ step を再投入して再開できる状態を保つ。tenant closure が export namespace を削除した後は job が存在しないため chain は終わり、object を作り直さない。処理期限を過ぎた job も再投入しない。
+- queue message は `version`（`1`）、`workspaceId`、`exportId`、`correlationId` を持つ。`correlationId` は `audit.export-requested` event の correlation ID（`X-Correlation-Id`、または記録済み event の値）で、job にも保存し、worker の失敗ログに含めて step を依頼元の request まで辿れるようにする。保存済み job の `correlationId` と異なる message は step を実行せずに失敗として返し、redrive policy で DLQ に送る。
+- 読めない queue message（`correlationId` が欠けている、空、前後に余白がある、256 文字を超える場合を含む）は失敗として返し、redrive policy で DLQ に送る。
+- step が job を条件付きで書き込んだ後に次の step の `SendMessage` が失敗した場合に備え、job は直前の step を確定した SQS message ID（`lastStepMessageId`）を保持する。同じ message が再配送されたときは step を再実行せず、続きの message の送信だけをやり直すため、cursor を進め直して part を重複させない。
+- 送信の失敗が `maxReceiveCount` まで続いて message が DLQ に移ると、続きの message がないまま job が `queued` / `running` に残る。`GET /api/audit/exports/:exportId` と `GET /api/audit/exports` は、処理期限内の未完了 job が 20 分（SQS の最大遅延 900 秒と worker の timeout 5 分より長い）書き込まれていない場合、`updatedAt` と `continuationPending` を条件付きで書き込んでから続きを enqueue する。条件付き更新に勝った読み取りだけが enqueue するため、同時に読まれても 1 回しか再開しない。`continuationPending` は送信が成功した後、または次の step が job を確定したときにだけ外す。送信が失敗した場合は印が残り、20 分を待たずに次の読み取りが再び送信する。重複した message は ETag の条件付き書き込みで 1 つだけが step を確定する。誰も読まない job は処理期限後に `AuditExportProcessingTimedOut` として返る。
+- job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。期限後に遅れて届いた message でも worker は失敗状態を書き込まず（`job.json` を書き換えると lifecycle の期限が延びるため）、API が期限を過ぎた未完了の job を読み取り時に `failed` として返す。step の途中で期限を過ぎた場合も、part と job の書き込みの直前に期限を再確認して書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で current version を削除し、noncurrent version をさらに 1 日後に消すため、artifact は作成から最長約 10 日で消える。
+- 1 job の part は 10,000 個まで。選択的な filter で小さな part が続いて上限に達した場合は `AuditExportTooManyParts` で失敗し、filter や期間を絞った再依頼を求める。
+- `from` が依頼時刻より未来の filter は `400 InvalidAuditExportFilters` で拒否する（worker は上限を snapshot 時刻に揃えるため一致し得ない）。
+- `audit.export-requested` event は key から導出した export ID による `audit-export-request:<exportId>` を audit の冪等 key とし、正規化した filter の digest（`filtersDigest`）を含める。同じ key を別の audit 操作に使っても衝突せず、job 作成前に失敗した後で filter を変えて再送すると audit 側で競合になる。
+- `audit.export-requested` event は key の受付記録を兼ねるため、audit retention が短く設定されていても artifact より長く残るよう最低 17 日保持する。
+- API の寿命（7 日）を過ぎた job の object が lifecycle で消える前に同じ key で再送された場合も `409 AuditExportIdempotencyKeyExpired` を返す。
+- job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が処理期限（24 時間）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、実行されない job や新しい snapshot の export を作らない。同じ key の最初の要求が同時に届き、他方の audit event が先に記録された場合も、job の `snapshotAt` には記録済み event の時刻を使う。同じ key で filter が異なる場合は、audit writer が冪等 key の競合として返す `AuditEventIdempotencyConflictError` も含めて `409 AuditExportIdempotencyConflict` を返す。それ以外の audit 書き込み失敗は 409 にせず 5xx として返す。
+- S3 の条件付き書き込みは 412 だけを既存 / 変更済みとして扱い、409 `ConditionalRequestConflict` は再試行対象としてそのまま失敗させる。
+- 保存済み job の `requestFingerprint` が保存済み filter から計算した値と一致しない場合は、壊れた job として読み込みを拒否する。
+- 保存済み job の `eventCount` が 1,000,000 件（`AUDIT_EXPORT_MAX_EVENTS`）を超える場合や part が 10,000 個（`AUDIT_EXPORT_MAX_PARTS`）を超える場合も、走査では作られない状態のため壊れた job として拒否する。
+- 保存済み job の `createdAt` / `expiresAt` などの時刻が読めない場合や、`expiresAt` が `createdAt` のちょうど 7 日（`AUDIT_EXPORT_RETENTION_DAYS`）後でない場合、`updatedAt` が `createdAt` より前の場合は壊れた job として読み込みを拒否する。`queued` / `running` の job の `updatedAt` が処理期限（作成から 24 時間）より後の場合も拒否する。未来の更新時刻は、続きの message を失った job を古い job として再開させなくするため。worker は未完了状態の `updatedAt` を処理期限で頭打ちにし、`completed` / `failed` は実際の時刻を書く。
+- 保存済み job の `correlationId` が空、前後に余白がある、または 256 文字を超える場合も壊れた job として読み込みを拒否する。
+- index marker は存在しない場合だけ作成し、再送で書き直して lifecycle の期限を延ばさない。
+- 保存済み job の filter に未知の key がある場合は壊れた job として読み込みを拒否し、未知の条件を黙って捨てた広い export を作らない。
+- worker は保存済み filter を query 層が拒否する場合だけ `AuditExportQueryInvalid` で終了し、壊れた audit row などそれ以外の失敗は再試行させて DLQ に届ける。
+- `audit.export-downloaded` event は、応答のたびに新しい署名付き URL を発行するため、client が `Idempotency-Key` を再利用しても発行ごとに別 event として記録する（audit の冪等 key は request ごとに新しく生成し、client の key から導出しない）。
+- job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportBucket` は versioning を有効にし、tenant closure はすべての version を削除する。lifecycle は noncurrent version を 1 日で、期限切れの delete marker も削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
+- 行 projection は同期 export と同じ public DTO を使う。
+- export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。`exportId`、`filtered`、`fromPart`、`partCount`、`eventCount` は public metadata として audit query と export に含める。
 
 ### Public response projection
 

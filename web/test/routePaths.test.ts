@@ -17,6 +17,7 @@ import { SettingsPage } from '../src/pages/workspace/SettingsPage'
 import { TaskPage } from '../src/pages/workspace/TaskPage'
 import { TeamMembersPage } from '../src/pages/workspace/TeamMembersPage'
 import { TeamTriagePage } from '../src/pages/workspace/TeamTriagePage'
+import { TeamFactoryBoardPage } from '../src/pages/workspace/TeamFactoryBoardPage'
 import { TeamIssuePage } from '../src/pages/workspace/TeamIssuePage'
 import { TeamOverviewPage } from '../src/pages/workspace/TeamOverviewPage'
 import { DocumentPage } from '../src/documents/DocumentPage'
@@ -50,12 +51,25 @@ type WorkspaceRouteDefinition = {
 }
 
 /**
+ * Reads the page component a route renders, loading it first when the route is lazy.
+ *
+ * @param route - Deepest matched route.
+ * @returns The element type or lazily loaded `Component`, or undefined when the route renders neither.
+ */
+async function resolvePageComponent(route: RouteObject | undefined): Promise<unknown> {
+  if (isValidElement(route?.element)) return route.element.type
+  if (typeof route?.lazy !== 'function') return undefined
+  const loaded = await route.lazy()
+  return loaded.Component
+}
+
+/**
  * Asserts that every supplied path renders through one shared Workspace shell.
  *
  * @param workspaceRoutes - Route/component pairs to verify.
- * @returns Nothing; throws through the test assertions when a mapping is invalid.
+ * @returns Resolves when every mapping is valid; rejects through the test assertions otherwise.
  */
-function expectSharedWorkspaceShell(
+async function expectSharedWorkspaceShell(
   workspaceRoutes: readonly WorkspaceRouteDefinition[],
 ) {
   const shellRoutes = new Set<RouteObject>()
@@ -70,18 +84,17 @@ function expectSharedWorkspaceShell(
       isValidElement(match.route.element) &&
       match.route.element.type === WorkspaceRoute
     )
-    const pageElement = matches?.at(-1)?.route.element
+    const pageComponent = await resolvePageComponent(matches?.at(-1)?.route)
 
     expect(providerMatch).toBeDefined()
     expect(shellMatch).toBeDefined()
-    expect(isValidElement(pageElement)).toBe(true)
 
-    if (!shellMatch || !isValidElement(pageElement)) {
+    if (!shellMatch) {
       throw new Error(`Expected ${path} to render through the Workspace shell.`)
     }
 
     shellRoutes.add(shellMatch.route)
-    expect(pageElement.type).toBe(component)
+    expect(pageComponent).toBe(component)
   }
 
   expect(shellRoutes.size).toBe(1)
@@ -210,8 +223,8 @@ describe('Project directory paths', () => {
     expect(createQuickAccessProjectsPath()).toBe('/projects?quickAccess=1')
   })
 
-  test('registers both discovery routes inside the shared Workspace shell', () => {
-    expectSharedWorkspaceShell([
+  test('registers both discovery routes inside the shared Workspace shell', async () => {
+    await expectSharedWorkspaceShell([
       { component: ProjectsPage, path: '/projects' },
       { component: ProjectsPage, path: '/teams/core-team/projects' },
     ])
@@ -246,8 +259,8 @@ describe('Team triage paths', () => {
     )
   })
 
-  test('registers Team triage inside the shared Workspace shell', () => {
-    expectSharedWorkspaceShell([{
+  test('registers Team triage inside the shared Workspace shell', async () => {
+    await expectSharedWorkspaceShell([{
       component: TeamTriagePage,
       path: '/teams/core-team/triage?entryId=entry-42',
     }])
@@ -255,8 +268,8 @@ describe('Team triage paths', () => {
 })
 
 describe('Workspace route pages', () => {
-  test('maps each split URL through one persistent shell to its direct page', () => {
-    expectSharedWorkspaceShell([
+  test('maps each split URL through one persistent shell to its direct page', async () => {
+    await expectSharedWorkspaceShell([
       { component: DashboardPage, path: '/dashboard' },
       { component: HomePage, path: '/home' },
       { component: FocusPage, path: '/focus' },
@@ -268,11 +281,12 @@ describe('Workspace route pages', () => {
       { component: TeamOverviewPage, path: '/teams/core-team/overview' },
       { component: TeamMembersPage, path: '/teams/core-team/members' },
       { component: TeamTriagePage, path: '/teams/core-team/triage' },
+      { component: TeamFactoryBoardPage, path: '/teams/core-team/factory' },
     ])
   })
 
-  test('maps every authenticated workspace screen through the same persistent shell', () => {
-    expectSharedWorkspaceShell([
+  test('maps every authenticated workspace screen through the same persistent shell', async () => {
+    await expectSharedWorkspaceShell([
       { component: RequestIntakePage, path: '/requests' },
       { component: SearchPage, path: '/search' },
       { component: PlanningPage, path: '/planning/timeline' },

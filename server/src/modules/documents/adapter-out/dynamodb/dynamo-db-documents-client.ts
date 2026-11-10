@@ -808,10 +808,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   private ensureTablePromise?: Promise<void>
 
   constructor(options: DynamoDbDocumentsClientOptions = {}) {
+    const environment = loadServerConfig().environment
     this.tableName =
       options.tableName ??
-      process.env.DOCUMENTS_TABLE_NAME ??
-      process.env.MUKUROJI_DOCUMENTS_TABLE ??
+      environment.DOCUMENTS_TABLE_NAME ??
       'mukuroji-documents-local'
     this.dynamoClient = options.dynamoClient ?? (
       options.documentClient === undefined
@@ -826,15 +826,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     this.autoCreateLocal =
       options.autoCreateLocal ??
       Boolean(
-        process.env.DYNAMODB_ENDPOINT ??
-          process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-          process.env.LOCALSTACK_HOSTNAME,
+        environment.DYNAMODB_ENDPOINT ??
+          environment.AWS_ENDPOINT_URL_DYNAMODB ??
+          environment.LOCALSTACK_HOSTNAME,
       )
     this.now = options.now ?? (() => new Date())
     this.generateId = options.generateId ?? randomUUID
     this.publicShareTokenSecret = resolvePublicShareTokenSecret(
       options.publicShareTokenSecret ??
-        process.env.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET,
+        environment.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET,
     )
     this.auditTableName =
       options.auditTableName ??
@@ -5819,7 +5819,8 @@ function createIdempotentTemplateBlockId(
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  const entries = Object.entries(value as Record<string, unknown>)
+  if (!isRecord(value)) return JSON.stringify(value)
+  const entries = Object.entries(value)
     .filter(([, entry]) => entry !== undefined)
     .sort(([left], [right]) => left.localeCompare(right))
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(',')}}`
@@ -6551,7 +6552,6 @@ function authorizationSnapshotGuards(
     ) {
       guards.push({
         tableName:
-          environment.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
           environment.WORKSPACE_ACCESS_TABLE_NAME ??
           'mukuroji-workspace-access-local',
         key: {
@@ -7185,18 +7185,15 @@ function applyStoredVersionDelta(
     document.revision =
       delta.version.revision
   }
-  const mutableDocument =
-    document as unknown as Record<string, unknown>
   for (
     const [field, value] of Object.entries(
       delta.changedFields ?? {},
     )
   ) {
-    mutableDocument[field] =
-      structuredClone(value)
+    Reflect.set(document, field, structuredClone(value))
   }
   for (const field of delta.removedFields ?? []) {
-    delete mutableDocument[field]
+    Reflect.deleteProperty(document, field)
   }
   document.revision = delta.version.revision
   validateDocumentPayload(document)

@@ -31,6 +31,7 @@ import {
   type DocumentAuthorizationRevisionMutationPort,
 } from '../documents'
 import type { WorkspaceRole } from './domain/workspace-role'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 export type { WorkspaceRole } from './domain/workspace-role'
 
@@ -577,7 +578,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   )
   constructor(
     tableNameOrOptions: string | DynamoDbWorkspaceAccessClientOptions =
-      readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
       readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
     documentClient?: DynamoDBDocumentClient,
@@ -605,9 +605,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       typeof tableNameOrOptions === 'string'
         ? tableNameOrOptions
         : readEnvironment(
-            'MUKUROJI_WORKSPACE_ACCESS_TABLE',
-          ) ??
-          readEnvironment(
             'WORKSPACE_ACCESS_TABLE_NAME',
           ) ??
           'mukuroji-workspace-access-local'
@@ -2837,7 +2834,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 }
 
 function readEnvironment(name: string) {
-  return process.env[name]
+  return loadServerConfig().environment[name]
 }
 
 function createDynamoDbClient() {

@@ -50,13 +50,13 @@ export function EnterpriseDomainVerificationChallengeNotice({
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-sky-950">
+          <h3 className="text-sm font-semibold text-fg-sky-950">
             {t('security.domainChallenge.title').replace(
               '{domain}',
               challenge.domain.domain,
             )}
           </h3>
-          <p className="mt-1 text-xs font-medium leading-5 text-sky-900">
+          <p className="mt-1 text-xs font-medium leading-5 text-fg-sky-900">
             {t('security.domainChallenge.description')}
           </p>
         </div>
@@ -68,7 +68,7 @@ export function EnterpriseDomainVerificationChallengeNotice({
           {t('security.action.close')}
         </button>
       </div>
-      <dl className="mt-3 grid gap-3 rounded-lg border border-sky-300 bg-white px-3 py-3">
+      <dl className="mt-3 grid gap-3 rounded-lg border border-sky-300 bg-surface px-3 py-3">
         <div>
           <dt className="text-xs font-semibold text-[var(--workbench-muted)]">
             {t('security.domainChallenge.recordName')}

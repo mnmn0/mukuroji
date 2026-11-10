@@ -47,12 +47,14 @@ Outbound webhook は HTTPS の既定 port のみを許可し、credential 付き
 
 ## Signed inbound webhook
 
-Inbound webhook は server-issued endpoint と signing secret を Workspace 管理者が発行する。管理 API が使う論理 `endpointId` と、sender が URL で使う推測不能な `opaqueEndpointId` は分離する。Endpoint は `provisioning`、`active`、`paused`、`revoked` の状態を持つ。
+Inbound webhook は server-issued endpoint と signing secret を Workspace 管理者が発行する。Endpoint は作成時に `purpose`（既定 `automation`、または Team を指定した `triage`）を固定し、`triage` endpoint の delivery は Automation event ではなく Triage Entry になる（[Triage の Webhook](./triage.md#webhook)）。管理 API が使う論理 `endpointId` と、sender が URL で使う推測不能な `opaqueEndpointId` は分離する。`triage` endpoint の opaque lookup は `inbound-webhook-triage-lookup` という別の entry type で保存する。`purpose` 導入前の server は `inbound-webhook-lookup` だけを解決するため、rollback 後も `triage` endpoint を未知の endpoint（`404`）として扱い、payload を Automation event や audit に記録しない。Lookup の種類と endpoint の `purpose` が一致しない場合も解決しない。同様に `triage` endpoint 本体の row も `inbound-webhook-triage` という別の entry type で保存し、`automation` endpoint は従来どおり `inbound-webhook` を使う。`purpose` 導入前の server は endpoint の取得・一覧・Automation rule の trigger 検証で `inbound-webhook` だけを読むため、rollback 後の旧管理 UI は `triage` endpoint を一覧に表示せず、Automation rule の trigger にも選べない。`purpose` は作成時に固定されるため、両形式の間の移行は発生しない。現行 server は両方の entry type を読み、entry type と `purpose` が一致しない row は不正データとして扱う。Endpoint は `provisioning`、`active`、`paused`、`revoked` の状態を持つ。
 
 - `provisioning`: create/rotate の secret を確定中。Public delivery からは存在しない endpoint として扱う。処理が完了しない場合は Workspace 管理者が revoke して abort できる。Rotate 途中の abort でも endpoint 全体が終端失効するため、Rule と sender は新しい endpoint へ再設定する。
 - `active`: 署名済み delivery を受け付ける。
 - `paused`: Metadata と secret は保持するが delivery を `423 AutomationInboundWebhookPaused` で拒否する。
-- `revoked`: 終端状態。Opaque lookup と Secrets Manager resource を削除し、public API は `404 AutomationInboundWebhookNotFound` を返す。
+- `revoked`: 終端状態。Opaque lookup と Secrets Manager resource を削除し、public API は `404 AutomationInboundWebhookNotFound` を返す。例外として、`triage` endpoint で revoke 前に delivery receipt を確定済みの delivery の再送は、Triage Entry の作成を完了する（[Triage の Webhook](./triage.md#webhook)）。`paused` や、`active` のまま secret を rotate した後でも同様。
+
+Create の予約 transaction は、`triage` endpoint の routing Team が active であることを Directory の Team row への ConditionCheck として含める。予約前の検証後に Team が archive された場合、予約は `409 AutomationInboundWebhookReferenceUnavailable` で失敗する。
 
 Create と rotate は `Idempotency-Key` を必須にし、actor、operation、endpoint、入力 fingerprint に束縛する。同じ key と同じ入力の retry は予約済み secret generation を回収し、異なる入力への key 再利用は `409 IdempotencyConflict` とする。応答消失時に同じ key で plaintext secret を回収できる recovery window は operation 予約から 24 時間だけとし、期限後は `409 AutomationInboundWebhookSecretRecoveryExpired` を返す。Create/rotate response の `signingSecret` はその応答でだけ返し、list/detail、rule、audit、execution、DynamoDB row には保存または再表示しない。Client は応答直後に安全な保管先へ移し、UI は React の一時 state 以外へ保持しない。一度正常に受領した secret の再表示手段として recovery retry を使ってはならない。
 

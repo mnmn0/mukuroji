@@ -99,7 +99,7 @@ function readEntryState(value: string | null): TriageEntryState | undefined {
 /** Narrows a URL value to a supported source kind. */
 function readSourceKind(value: string | null): TriageSourceKind | undefined {
   return value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
     ? value
     : undefined
 }

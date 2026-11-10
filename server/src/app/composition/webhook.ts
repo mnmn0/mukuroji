@@ -24,6 +24,7 @@ import {
   DynamoDbWorkspaceAccessClient,
 } from '../../modules/workspace-access/workspace-access'
 import { createProductionTenantFeatureGate } from './tenant-administration'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /**
  * Production Webhook SQS queue adapter を作成します。
@@ -99,7 +100,7 @@ export function createProductionQueueWebhookDeliveryMessage(
 }
 
 function readRequiredEnvironment(name: string) {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   if (!value) {
     throw new TypeError(`${name} is required by the Webhook delivery worker.`)
   }

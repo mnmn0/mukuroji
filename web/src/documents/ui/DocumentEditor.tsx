@@ -154,13 +154,13 @@ export function DocumentEditor({
           <button
             aria-expanded={isInsertMenuOpen}
             aria-haspopup="menu"
-            className="flex min-h-10 items-center gap-2 rounded-md px-3 text-sm font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+            className="flex min-h-10 items-center gap-2 rounded-md px-3 text-sm font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
             onClick={() => setIsInsertMenuOpen((current) => !current)}
             type="button"
           >
             <span
               aria-hidden="true"
-              className="grid h-6 w-6 place-items-center rounded border border-[var(--workbench-border)] bg-white"
+              className="grid h-6 w-6 place-items-center rounded border border-[var(--workbench-border)] bg-surface"
             >
               +
             </span>
@@ -168,7 +168,7 @@ export function DocumentEditor({
           </button>
           {isInsertMenuOpen ? (
             <div
-              className="absolute left-0 top-12 z-20 grid w-[min(520px,calc(100vw-44px))] grid-cols-2 gap-1 rounded-lg border border-[var(--workbench-border)] bg-white p-2 shadow-[0_18px_50px_rgba(23,32,29,0.16)] sm:grid-cols-3"
+              className="absolute left-0 top-12 z-20 grid w-[min(520px,calc(100vw-44px))] grid-cols-2 gap-1 rounded-lg border border-[var(--workbench-border)] bg-surface p-2 shadow-[0_18px_50px_rgba(23,32,29,0.16)] sm:grid-cols-3"
               role="menu"
             >
               {insertableBlockTypes.map((type) => (
@@ -187,7 +187,7 @@ export function DocumentEditor({
                 >
                   <span
                     aria-hidden="true"
-                    className="grid h-7 w-7 place-items-center rounded bg-[var(--workbench-surface-muted)] text-xs text-[var(--workbench-primary)]"
+                    className="grid h-7 w-7 place-items-center rounded bg-[var(--workbench-surface-muted)] text-xs text-[var(--workbench-primary-text)]"
                   >
                     {blockGlyphs[type]}
                   </span>
@@ -289,7 +289,7 @@ function EditableBlock({
 }) {
   return (
     <section
-      className="group relative min-w-0 rounded-lg border border-transparent px-3 py-2 transition focus-within:border-[var(--workbench-border)] focus-within:bg-white hover:border-[var(--workbench-border)]"
+      className="group relative min-w-0 rounded-lg border border-transparent px-3 py-2 transition focus-within:border-[var(--workbench-border)] focus-within:bg-surface hover:border-[var(--workbench-border)]"
       data-block-id={block.id}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -302,7 +302,7 @@ function EditableBlock({
         <div className="mb-2 hidden items-center gap-0.5 group-hover:flex group-focus-within:flex sm:absolute sm:-left-[42px] sm:top-2 sm:mb-0">
           <button
             aria-label={t('documents.editor.moveUp')}
-            className="grid h-7 w-7 place-items-center rounded text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)] disabled:opacity-30"
+            className="grid h-7 w-7 place-items-center rounded text-xs text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-primary-text)] disabled:opacity-30"
             disabled={index === 0}
             onClick={() => onMove(index - 1)}
             type="button"
@@ -311,7 +311,7 @@ function EditableBlock({
           </button>
           <button
             aria-label={t('documents.editor.moveDown')}
-            className="grid h-7 w-7 place-items-center rounded text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)] disabled:opacity-30"
+            className="grid h-7 w-7 place-items-center rounded text-xs text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-primary-text)] disabled:opacity-30"
             disabled={index === lastIndex}
             onClick={() => onMove(index + 1)}
             type="button"
@@ -325,7 +325,7 @@ function EditableBlock({
           {onOpenComments ? (
             <button
               aria-label={t('documents.context.comments')}
-              className="grid h-7 w-7 place-items-center rounded bg-white text-xs text-[var(--workbench-muted)] shadow-sm hover:text-[var(--workbench-primary)]"
+              className="grid h-7 w-7 place-items-center rounded bg-surface text-xs text-[var(--workbench-muted)] shadow-sm hover:text-[var(--workbench-primary-text)]"
               onClick={onOpenComments}
               type="button"
             >
@@ -334,7 +334,7 @@ function EditableBlock({
           ) : null}
           <button
             aria-label={t('documents.editor.deleteBlock')}
-            className="grid h-7 w-7 place-items-center rounded bg-white text-xs text-[var(--workbench-muted)] shadow-sm hover:text-[var(--workbench-danger)]"
+            className="grid h-7 w-7 place-items-center rounded bg-surface text-xs text-[var(--workbench-muted)] shadow-sm hover:text-[var(--workbench-danger)]"
             onClick={onDelete}
             type="button"
           >
@@ -554,7 +554,7 @@ function TableBlockEditor({
                   >
                     <input
                       aria-label={`${t('documents.editor.cell')} ${rowIndex + 1}-${cellIndex + 1}`}
-                      className="w-full border-0 bg-white px-3 py-3 text-sm font-medium text-[var(--workbench-text)] outline-none focus:bg-[#f8fffd]"
+                      className="w-full border-0 bg-surface px-3 py-3 text-sm font-medium text-[var(--workbench-text)] outline-none focus:bg-tone-f8fffd"
                       onChange={(event) =>
                         updateCell(rowIndex, cellIndex, event.target.value)
                       }
@@ -595,7 +595,7 @@ function CodeBlockEditor({
         <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
         <input
           aria-label={t('documents.editor.codeLanguage')}
-          className="ml-auto w-28 border-0 bg-transparent text-right font-mono text-xs text-slate-300 outline-none"
+          className="ml-auto w-28 border-0 bg-transparent text-right font-mono text-xs text-fg-slate-300 outline-none"
           onChange={(event) =>
             onChange({ ...block, language: event.target.value })
           }
@@ -604,7 +604,7 @@ function CodeBlockEditor({
       </div>
       <textarea
         aria-label={t('documents.block.code')}
-        className="min-h-32 w-full resize-y border-0 bg-transparent p-4 font-mono text-sm leading-6 text-slate-100 outline-none"
+        className="min-h-32 w-full resize-y border-0 bg-transparent p-4 font-mono text-sm leading-6 text-fg-slate-100 outline-none"
         onChange={(event) => onChange({ ...block, code: event.target.value })}
         placeholder={t('documents.editor.codePlaceholder')}
         value={block.code}
@@ -666,7 +666,7 @@ function ChecklistBlockEditor({
           />
           <button
             aria-label={t('documents.editor.deleteChecklistItem')}
-            className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-danger)]"
+            className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-danger)]"
             onClick={() =>
               onChange({
                 ...block,
@@ -682,7 +682,7 @@ function ChecklistBlockEditor({
         </label>
       ))}
       <button
-        className="justify-self-start rounded-md px-2 py-1.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+        className="justify-self-start rounded-md px-2 py-1.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
         onClick={() =>
           onChange({
             ...block,
@@ -736,7 +736,7 @@ function EmbedBlockEditor({
       </div>
       {safeUrl ? (
         <a
-          className="mt-3 flex items-center gap-3 rounded-md border border-[var(--workbench-border)] bg-white px-4 py-3 text-sm font-semibold text-[var(--workbench-primary)] no-underline hover:underline"
+          className="mt-3 flex items-center gap-3 rounded-md border border-[var(--workbench-border)] bg-surface px-4 py-3 text-sm font-semibold text-[var(--workbench-primary-text)] no-underline hover:underline"
           href={safeUrl}
           rel="noreferrer"
           target={safeUrl.startsWith(window.location.origin) ? undefined : '_blank'}
@@ -783,7 +783,7 @@ function DiagramBlockEditor({
         </select>
         <textarea
           aria-label={t('documents.block.diagram')}
-          className="min-h-36 w-full resize-y border-0 bg-transparent font-mono text-xs leading-6 text-slate-100 outline-none"
+          className="min-h-36 w-full resize-y border-0 bg-transparent font-mono text-xs leading-6 text-fg-slate-100 outline-none"
           onChange={(event) =>
             onChange({ ...block, source: event.target.value })
           }
@@ -851,7 +851,7 @@ function ReadOnlyBlock({
 
   if (block.type === 'code') {
     return (
-      <pre className="overflow-x-auto rounded-lg bg-slate-900 p-4 font-mono text-sm leading-6 text-slate-100">
+      <pre className="overflow-x-auto rounded-lg bg-slate-900 p-4 font-mono text-sm leading-6 text-fg-slate-100">
         <code>{block.code}</code>
       </pre>
     )
@@ -876,7 +876,7 @@ function ReadOnlyBlock({
     const safeUrl = resolveSafeEmbedUrl(block.url)
     return safeUrl ? (
       <a
-        className="workbench-panel flex items-center gap-3 px-4 py-4 text-sm font-semibold text-[var(--workbench-primary)] no-underline hover:underline"
+        className="workbench-panel flex items-center gap-3 px-4 py-4 text-sm font-semibold text-[var(--workbench-primary-text)] no-underline hover:underline"
         href={safeUrl}
         rel="noreferrer"
       >
@@ -904,7 +904,7 @@ function DiagramPreview({ source, title }: { source: string; title: string }) {
     .filter(Boolean)
 
   return (
-    <figure className="m-0 grid min-h-36 content-center gap-3 bg-[#f8fffd] p-5">
+    <figure className="m-0 grid min-h-36 content-center gap-3 bg-tone-f8fffd p-5">
       <figcaption className="sr-only">{title}</figcaption>
       <div className="flex flex-wrap items-center justify-center gap-2">
         {steps.length > 0 ? (
@@ -915,7 +915,7 @@ function DiagramPreview({ source, title }: { source: string; title: string }) {
                   →
                 </span>
               ) : null}
-              <span className="rounded-md border border-[#99d7cf] bg-white px-3 py-2 text-xs font-semibold text-[var(--workbench-text)] shadow-sm">
+              <span className="rounded-md border border-tone-99d7cf bg-surface px-3 py-2 text-xs font-semibold text-[var(--workbench-text)] shadow-sm">
                 {step}
               </span>
             </span>
@@ -939,7 +939,7 @@ function SmallEditorButton({
 }) {
   return (
     <button
-      className="rounded-md border border-[var(--workbench-border)] bg-white px-2.5 py-1.5 text-xs font-semibold text-[var(--workbench-muted)] hover:border-[#99d7cf] hover:text-[var(--workbench-primary)]"
+      className="rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 py-1.5 text-xs font-semibold text-[var(--workbench-muted)] hover:border-tone-99d7cf hover:text-[var(--workbench-primary-text)]"
       onClick={onClick}
       type="button"
     >

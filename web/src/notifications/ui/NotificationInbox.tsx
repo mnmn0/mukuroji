@@ -68,8 +68,8 @@ export function NotificationInbox({
                 aria-pressed={controller.filter === filter}
                 className={`min-h-9 rounded-md px-3 text-sm font-semibold tracking-[0.01em] transition ${
                   controller.filter === filter
-                    ? 'bg-white text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
-                    : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+                    ? 'bg-surface text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
+                    : 'text-[var(--workbench-muted)] hover:bg-surface/70 hover:text-[var(--workbench-text)]'
                 }`}
                 data-testid={`notification-filter-${filter}`}
                 key={filter}
@@ -131,7 +131,7 @@ export function NotificationInbox({
 
       {controller.hasMutationError ? (
         <p
-          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
           role="alert"
         >
           {t('workspace.inbox.mutationError')}
@@ -143,7 +143,7 @@ export function NotificationInbox({
           <NotificationInboxSkeleton t={t} />
         ) : controller.hasLoadError ? (
           <div className="grid justify-items-center gap-3 px-5 py-14 text-center">
-            <span aria-hidden="true" className="grid h-11 w-11 place-items-center rounded-full bg-red-50 text-lg font-bold text-red-600">!</span>
+            <span aria-hidden="true" className="grid h-11 w-11 place-items-center rounded-full bg-red-50 text-lg font-bold text-fg-red-600">!</span>
             <p className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.inbox.loadError')}</p>
             <button
               className="workbench-button-secondary min-h-10 px-4"
@@ -202,7 +202,7 @@ export function NotificationInbox({
             <div className="max-w-[420px]">
               <span
                 aria-hidden="true"
-                className="mx-auto grid h-14 w-14 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-xl font-bold text-[var(--workbench-primary)]"
+                className="mx-auto grid h-14 w-14 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-xl font-bold text-[var(--workbench-primary-text)]"
               >
                 ✓
               </span>
@@ -255,7 +255,7 @@ function NotificationRow({
     <article
       aria-current={selected ? 'true' : undefined}
       className={`relative grid grid-cols-[minmax(0,1fr)_auto] gap-4 px-5 py-4 transition max-[760px]:grid-cols-1 ${
-        isUnread ? 'bg-[#f4fbfa]' : 'bg-white'
+        isUnread ? 'bg-tone-f4fbfa' : 'bg-surface'
       } ${isPending ? 'opacity-60' : 'hover:bg-[var(--workbench-surface-muted)]'} ${
         selected ? 'z-[1] outline outline-2 outline-offset-[-2px] outline-[var(--workbench-primary)]' : ''
       }`}
@@ -286,7 +286,7 @@ function NotificationRow({
         </span>
         <span className="min-w-0">
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-xs font-bold uppercase tracking-[0.07em] text-[var(--workbench-primary)]">
+            <span className="text-xs font-bold uppercase tracking-[0.07em] text-[var(--workbench-primary-text)]">
               {eventLabel}
             </span>
             <time
@@ -321,7 +321,7 @@ function NotificationRow({
       <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[52px]">
         {notification.reasons.includes('mention') && notification.teamId && notification.issueId ? (
           <a
-            className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-primary)] transition hover:border-[#99d7cf] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)] max-[760px]:min-h-[44px]"
+            className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 text-xs font-semibold text-[var(--workbench-primary-text)] transition hover:border-tone-99d7cf focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)] max-[760px]:min-h-[44px]"
             data-testid={`notification-focus-${createNotificationTestToken(notification.id)}`}
             href={createFocusPath(notification.teamId, notification.issueId, notification.eventId)}
             onClick={onOpenFocus
@@ -344,7 +344,7 @@ function NotificationRow({
           </a>
         ) : null}
         <button
-          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:text-[var(--workbench-primary)] disabled:opacity-50 max-[760px]:min-h-[44px]"
+          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-tone-99d7cf hover:text-[var(--workbench-primary-text)] disabled:opacity-50 max-[760px]:min-h-[44px]"
           disabled={isPending}
           onClick={() => void (isRead ? controller.markUnread(notification) : controller.markRead(notification))}
           type="button"
@@ -378,7 +378,7 @@ function NotificationRow({
           </label>
         ) : null}
         <button
-          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:text-[var(--workbench-primary)] disabled:opacity-50 max-[760px]:min-h-[44px]"
+          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-tone-99d7cf hover:text-[var(--workbench-primary-text)] disabled:opacity-50 max-[760px]:min-h-[44px]"
           disabled={isPending}
           onClick={() => void (controller.filter === 'archived'
             ? controller.restore(notification)
@@ -526,13 +526,13 @@ function resolveEventToneClassName(eventType: string) {
   const eventKey = resolveNotificationEventKey(eventType)
 
   if (eventKey === 'workspace.inbox.event.automation' || eventKey === 'workspace.inbox.event.overdue') {
-    return 'border-red-200 bg-red-50 text-red-700'
+    return 'border-red-200 bg-red-50 text-fg-red-700'
   }
   if (eventKey === 'workspace.inbox.event.due' || eventKey === 'workspace.inbox.event.approval') {
-    return 'border-amber-200 bg-amber-50 text-amber-700'
+    return 'border-amber-200 bg-amber-50 text-fg-amber-700'
   }
 
-  return 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
+  return 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
 }
 
 function createNotificationTestToken(value: string) {

@@ -7,8 +7,13 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
  * Inputs required to create the stack data stores.
  */
 export interface DataStoreBuilderInput {
-  /** Secret JSON configuration persisted for connector runtimes. */
-  readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /**
+   * Secret JSON configuration persisted for connector runtimes. The connector runtime
+   * secret is created only when the optional connectors module supplies it.
+   */
+  readonly connectorRuntimeConfiguration: cdk.CfnParameter | undefined;
+  /** Stable Workspace audit pseudonym key shared by every audit writer. */
+  readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
 }
 
 /**
@@ -33,16 +38,17 @@ export type DataStoreResources = {
   readonly requestIntakeTable: dynamodb.Table;
   /** Workspace-scoped Customer, Contact, Customer Request, and saved-view table. */
   readonly customersTable: dynamodb.Table;
-  /** Envelope key for developer platform Webhook secrets. */
-  readonly developerPlatformWebhookKey: kms.Key;
-  /** Envelope key for developer platform connector credentials. */
-  readonly developerPlatformConnectorKey: kms.Key;
-  /** Envelope key for developer platform cursor and idempotency state. */
-  readonly developerPlatformStateKey: kms.Key;
-  /** Encryption key for connector runtime configuration. */
-  readonly connectorRuntimeConfigurationKey: kms.Key;
-  /** Secret containing connector provider runtime configuration. */
-  readonly connectorRuntimeSecret: secretsmanager.Secret;
+  /**
+   * Single envelope key for developer platform Webhook secrets, connector credentials,
+   * and cursor state, plus the connector runtime secret. Every direct use is bound to
+   * a `mukuroji:purpose` encryption context, and IAM grants are scoped per purpose.
+   */
+  readonly developerPlatformKey: kms.Key;
+  /**
+   * Secret containing connector provider runtime configuration, created only when
+   * the optional connectors module is deployed.
+   */
+  readonly connectorRuntimeSecret: secretsmanager.Secret | undefined;
   /** Append-only Work Item event table. */
   readonly teamIssueEventsTable: dynamodb.Table;
   /** Workspace team, project, and membership directory table. */
@@ -61,12 +67,21 @@ export type DataStoreResources = {
   readonly documentsTable: dynamodb.Table;
   /** HMAC secret for public document share tokens. */
   readonly documentPublicShareTokenSecret: secretsmanager.Secret;
+  /**
+   * Single retained Workspace audit pseudonym secret read by the API, tenant
+   * lifecycle workers, and restore validation. Its value never rotates.
+   */
+  readonly workspaceAuditPseudonymSecret: secretsmanager.Secret;
   /** Work Item collaboration records table. */
   readonly collaborationTable: dynamodb.Table;
   /** Workspace search documents, views, and preferences table. */
   readonly workspaceSearchTable: dynamodb.Table;
   /** Durable collaboration notification table. */
   readonly notificationsTable: dynamodb.Table;
+  /** Web Push device subscriptions and exclusive endpoint ownership records. */
+  readonly pushSubscriptionsTable: dynamodb.Table;
+  /** Coding agent runs, per-Work Item claims, and Team Agent settings. */
+  readonly agentRunsTable: dynamodb.Table;
   /** User and Team Focus queue preferences and snooze state. */
   readonly focusTable: dynamodb.Table;
   /** Realtime connection and one-time ticket table. */
@@ -262,53 +277,23 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
-  const developerPlatformWebhookKey = new kms.Key(
-    stack,
-    'DeveloperPlatformWebhookKey',
-    {
-      description: 'Envelope key for developer platform Webhook signing secrets.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const developerPlatformConnectorKey = new kms.Key(
-    stack,
-    'DeveloperPlatformConnectorKey',
-    {
-      description: 'Envelope key for developer platform connector credentials.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const developerPlatformStateKey = new kms.Key(
-    stack,
-    'DeveloperPlatformStateKey',
-    {
-      description: 'Envelope key for developer platform cursors and idempotency state.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const connectorRuntimeConfigurationKey = new kms.Key(
-    stack,
-    'ConnectorRuntimeConfigurationKey',
-    {
-      description: 'Encryption key for connector provider runtime configuration.',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    },
-  );
-  const connectorRuntimeSecret = new secretsmanager.Secret(
-    stack,
-    'ConnectorRuntimeSecret',
-    {
+  const developerPlatformKey = new kms.Key(stack, 'DeveloperPlatformKey', {
+    description:
+      'Envelope key for developer platform Webhook secrets, connector credentials, ' +
+      'cursor state, and connector runtime configuration.',
+    enableKeyRotation: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+  });
+  const { connectorRuntimeConfiguration } = input;
+  const connectorRuntimeSecret = connectorRuntimeConfiguration
+    ? new secretsmanager.Secret(stack, 'ConnectorRuntimeSecret', {
       description:
         'Provider configuration and signing secrets loaded only by connector runtimes.',
-      encryptionKey: connectorRuntimeConfigurationKey,
-      secretStringValue: cdk.SecretValue.cfnParameter(input.connectorRuntimeConfiguration),
-    },
-  );
-  connectorRuntimeSecret.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+      encryptionKey: developerPlatformKey,
+      secretStringValue: cdk.SecretValue.cfnParameter(connectorRuntimeConfiguration),
+    })
+    : undefined;
+  connectorRuntimeSecret?.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
   requestIntakeTable.addGlobalSecondaryIndex({
     indexName: 'RequestQueueIndex',
@@ -453,6 +438,20 @@ export function buildDataStores(
   documentPublicShareTokenSecret.applyRemovalPolicy(
     cdk.RemovalPolicy.RETAIN,
   );
+  // One stable secret replaces the per-revision copies. Updating the stack
+  // never creates another secret, so retained copies cannot pile up.
+  const workspaceAuditPseudonymSecret = new secretsmanager.Secret(
+    stack,
+    'WorkspaceAuditPseudonymSecret',
+    {
+      description:
+        'Stable Workspace audit pseudonym key shared by the API, tenant workers, and restore validation.',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      secretStringValue: cdk.SecretValue.cfnParameter(
+        input.workspaceAuditPseudonymKey,
+      ),
+    },
+  );
 
   const collaborationTable = new dynamodb.Table(stack, 'WorkItemCollaborationTable', {
     partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
@@ -481,6 +480,48 @@ export function buildDataStores(
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     timeToLiveAttribute: 'expiresAt',
+  });
+
+  const pushSubscriptionsTable = new dynamodb.Table(stack, 'PushSubscriptionsTable', {
+    partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    timeToLiveAttribute: 'expiresAt',
+  });
+
+  const agentRunsTable = new dynamodb.Table(stack, 'AgentRunsTable', {
+    partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+  });
+
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'WorkItemRunIndex',
+    partitionKey: { name: 'workItemRunKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'workItemRunSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'ActiveRunIndex',
+    partitionKey: { name: 'activeRunPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'activeRunSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  // Teams that file runs to Triage and failed runs waiting to be filed; both partitions stay small.
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'AgentRunTriageIndex',
+    partitionKey: { name: 'triageIndexPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageIndexSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.INCLUDE,
+    nonKeyAttributes: ['workspaceId', 'teamId', 'runId'],
   });
 
   notificationsTable.addGlobalSecondaryIndex({
@@ -546,10 +587,7 @@ export function buildDataStores(
     analyticsTable,
     requestIntakeTable,
     customersTable,
-    developerPlatformWebhookKey,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
-    connectorRuntimeConfigurationKey,
+    developerPlatformKey,
     connectorRuntimeSecret,
     teamIssueEventsTable,
     projectDirectoryTable,
@@ -560,9 +598,12 @@ export function buildDataStores(
     tenantAdministrationTable,
     documentsTable,
     documentPublicShareTokenSecret,
+    workspaceAuditPseudonymSecret,
     collaborationTable,
     workspaceSearchTable,
     notificationsTable,
+    pushSubscriptionsTable,
+    agentRunsTable,
     focusTable,
     realtimeSessionsTable,
     fileProofingTable,

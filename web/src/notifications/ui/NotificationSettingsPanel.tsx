@@ -56,7 +56,7 @@ export function NotificationSettingsPanel({
         <h2 className="text-lg font-semibold text-[var(--workbench-text)]">
           {t('workspace.settings.notificationTitle')}
         </h2>
-        <p className="text-sm font-medium text-red-700">
+        <p className="text-sm font-medium text-fg-red-700">
           {t('workspace.settings.notifications.loadError')}
         </p>
         <button
@@ -105,7 +105,7 @@ export function NotificationSettingsPanel({
           <div className="grid gap-2">
             {notificationChannelKeys.map((channel) => (
               <label
-                className="flex min-w-0 items-center justify-between gap-4 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 transition hover:border-[#99d7cf]"
+                className="flex min-w-0 items-center justify-between gap-4 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 transition hover:border-tone-99d7cf"
                 key={channel}
               >
                 <span className="min-w-0">
@@ -229,9 +229,9 @@ export function NotificationSettingsPanel({
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
         <p aria-live="polite" className="text-sm font-semibold">
           {controller.hasSaveError ? (
-            <span className="text-red-700">{t('workspace.settings.notifications.saveError')}</span>
+            <span className="text-fg-red-700">{t('workspace.settings.notifications.saveError')}</span>
           ) : controller.didSave ? (
-            <span className="text-emerald-700">{t('workspace.settings.notifications.saved')}</span>
+            <span className="text-fg-emerald-700">{t('workspace.settings.notifications.saved')}</span>
           ) : (
             <span className="text-[var(--workbench-muted)]">{t('workspace.settings.notifications.saveHint')}</span>
           )}

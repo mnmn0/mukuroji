@@ -405,6 +405,11 @@ function createRuleInput(): CreateAutomationRuleInput {
   }
 }
 
+/**
+ * Creates an Automation inbound webhook endpoint fixture.
+ *
+ * @returns The endpoint fixture.
+ */
 function createInboundWebhookEndpoint(): AutomationInboundWebhookEndpoint {
   return {
     createdAt: '2026-07-16T00:00:00.000Z',
@@ -412,6 +417,7 @@ function createInboundWebhookEndpoint(): AutomationInboundWebhookEndpoint {
     id: 'release/hook',
     name: 'Release events',
     opaqueEndpointId: 'opaque-release-hook',
+    purpose: 'automation',
     revision: 4,
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
     secretGeneration: 1,
@@ -439,3 +445,13 @@ function installFetchRecorder(responseBody: unknown) {
 
   return requests
 }
+
+describe('inbound webhook endpoint compatibility', () => {
+  test('treats an endpoint without purpose from an older server as an Automation endpoint', async () => {
+    const { purpose: _purpose, ...legacy } = activeInboundWebhookEndpointFixture
+    void _purpose
+    installFetchRecorder({ endpoints: [legacy] })
+    const listed = await getAutomationInboundWebhookEndpoints('access-token')
+    expect(listed).toEqual([{ ...legacy, purpose: 'automation' }])
+  })
+})

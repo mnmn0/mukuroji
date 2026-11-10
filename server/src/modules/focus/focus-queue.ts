@@ -5,6 +5,7 @@ import type {
   FocusEffectivePolicy,
   FocusItem,
   FocusItemCapabilities,
+  FocusItemInvolvement,
   FocusPolicy,
   FocusPolicyProvenance,
   FocusPolicySettings,
@@ -883,7 +884,7 @@ function appendMapValue<Value>(
 }
 
 /**
- * Projects one canonical Work Item when it is owned by or directly relevant to the viewer.
+ * Projects one canonical Work Item when it is owned by, contributed to, or directly relevant to the viewer.
  *
  * @param input - Queue input containing recipient state maps.
  * @param context - Precomputed canonical source indexes.
@@ -900,18 +901,21 @@ function projectFocusItem(
   snooze: FocusSnoozeRecord | undefined,
 ): ProjectedFocusItem | undefined {
   const key = createWorkItemKey(workItem.teamId, workItem.id)
-  const ownedByViewer = normalizeFocusMemberKey(workItem.assigneeUserId) ===
-    context.viewerMemberKey
+  const terminal = isTerminalWorkItem(workItem)
+  const involvement = resolveFocusItemInvolvement(
+    workItem,
+    context.viewerMemberKey,
+    terminal,
+  )
   const projectedSignals = createProjectedSignals(
     context,
     workItem,
     policy,
-    ownedByViewer,
+    involvement,
   )
   const signals = projectedSignals.map((projected) => projected.signal)
-  const terminal = isTerminalWorkItem(workItem)
   if (terminal && !isWithinDoneRetention(workItem.updatedAt, context.now)) return undefined
-  const directlyRelevant = ownedByViewer || signals.some((signal) =>
+  const directlyRelevant = involvement !== 'related' || signals.some((signal) =>
     signal.type === 'review-request' || signal.type === 'mention'
   )
   if (!directlyRelevant || (!terminal && signals.length === 0)) return undefined
@@ -923,7 +927,7 @@ function projectFocusItem(
     terminal,
     canWrite,
     canWatch,
-    ownedByViewer,
+    involvement,
     signals,
   )
   const actionability = createActionability(
@@ -965,6 +969,7 @@ function projectFocusItem(
     snoozeRevision,
     section,
     workItem,
+    involvement,
     signals,
     rank,
     capabilities,
@@ -1046,24 +1051,50 @@ function createFocusItemVersion(input: CreateFocusItemVersionInput): number {
 }
 
 /**
+ * Resolves how the viewer takes part in one Work Item.
+ *
+ * The accountable owner always wins over a contributor entry for the same member. A
+ * contributor whose own share is `done` no longer takes part in an active Work Item, but
+ * still does in a completed or canceled one so it stays in the short-lived Done section.
+ *
+ * @param workItem - Work Item being evaluated.
+ * @param viewerMemberKey - Normalized viewer member key.
+ * @param terminal - Whether the Work Item is completed or canceled.
+ * @returns The viewer's involvement.
+ */
+function resolveFocusItemInvolvement(
+  workItem: CanonicalWorkItem,
+  viewerMemberKey: string,
+  terminal: boolean,
+): FocusItemInvolvement {
+  if (normalizeFocusMemberKey(workItem.assigneeUserId) === viewerMemberKey) return 'owner'
+  const contributes = (workItem.contributorAssignments ?? []).some((assignment) =>
+    assignment.memberUserId !== undefined &&
+    assignment.memberUserId.trim().toLowerCase() === viewerMemberKey &&
+    (terminal || assignment.status !== 'done')
+  )
+  return contributes ? 'contributor' : 'related'
+}
+
+/**
  * Projects and deduplicates every active signal for one Work Item.
  *
  * @param context - Canonical source indexes.
  * @param workItem - Work Item being evaluated.
  * @param policy - Effective policy controlling time windows.
- * @param ownedByViewer - Whether the current viewer owns the Work Item.
+ * @param involvement - How the current viewer takes part in the Work Item.
  * @returns Stable deduplicated signal projections.
  */
 function createProjectedSignals(
   context: FocusProjectionContext,
   workItem: CanonicalWorkItem,
   policy: FocusEffectivePolicy,
-  ownedByViewer: boolean,
+  involvement: FocusItemInvolvement,
 ): ProjectedSignal[] {
   if (isTerminalWorkItem(workItem)) return []
   const projected = [
-    ...createOwnedWorkItemSignals(context, workItem, policy, ownedByViewer),
-    ...createApprovalSignals(context, workItem, ownedByViewer),
+    ...createOwnedWorkItemSignals(context, workItem, policy, involvement),
+    ...createApprovalSignals(context, workItem, involvement === 'owner'),
     ...createMentionSignals(context, workItem),
   ]
   const bySignalId = new Map<string, ProjectedSignal>()
@@ -1081,27 +1112,31 @@ function createProjectedSignals(
 }
 
 /**
- * Projects assignment-owned priority, deadline, blocker, SLA, and cycle signals.
+ * Projects the Work Item's own priority, deadline, blocker, SLA, and cycle signals.
+ *
+ * Owners and contributors both carry out the work, so both see priority, deadline,
+ * blocker, and cycle signals. The SLA signal tracks the accountable owner's response
+ * obligation and is projected only for the owner.
  *
  * @param context - Canonical source indexes.
  * @param workItem - Work Item being evaluated.
  * @param policy - Effective policy controlling time windows.
- * @param ownedByViewer - Whether the current viewer owns the Work Item.
- * @returns Owned-work signal projections.
+ * @param involvement - How the current viewer takes part in the Work Item.
+ * @returns Work Item signal projections.
  */
 function createOwnedWorkItemSignals(
   context: FocusProjectionContext,
   workItem: CanonicalWorkItem,
   policy: FocusEffectivePolicy,
-  ownedByViewer: boolean,
+  involvement: FocusItemInvolvement,
 ): ProjectedSignal[] {
-  if (!ownedByViewer) return []
+  if (involvement === 'related') return []
   return [
     ...createPrioritySignal(context, workItem),
     ...createDeadlineSignal(context, workItem, policy.settings.dueSoonDays),
     ...createRelationBlockerSignals(context, workItem),
     ...createBlockerSignals(context, workItem),
-    ...createSlaSignal(context, workItem, policy),
+    ...(involvement === 'owner' ? createSlaSignal(context, workItem, policy) : []),
     ...createCycleSignals(context, workItem, policy.settings.cycleDueSoonDays),
   ]
 }
@@ -1638,7 +1673,9 @@ function readSignalWeight(weights: FocusSignalWeights, type: FocusSignalType): n
  * @param terminal - Whether the Work Item is terminal.
  * @param canWrite - Whether canonical Work Item writes are authorized.
  * @param canWatch - Whether Collaboration authorizes watcher mutations.
- * @param ownedByViewer - Whether the current viewer is already assigned.
+ * @param involvement - How the current viewer takes part in the Work Item. Assigning to the
+ *   viewer replaces the accountable owner, so it is offered only on related items: an owner
+ *   already holds the Work Item, and a contributor's row must not hand them ownership.
  * @param signals - Current signal sources.
  * @returns Capability set returned by the Focus contract.
  */
@@ -1646,13 +1683,13 @@ function createCapabilities(
   terminal: boolean,
   canWrite: boolean,
   canWatch: boolean,
-  ownedByViewer: boolean,
+  involvement: FocusItemInvolvement,
   signals: readonly FocusSignal[],
 ): FocusItemCapabilities {
   const canMutateWorkItem = !terminal && canWrite
   return {
     complete: canMutateWorkItem,
-    assign: canMutateWorkItem && !ownedByViewer,
+    assign: canMutateWorkItem && involvement === 'related',
     changeStatus: canWrite,
     schedule: canMutateWorkItem,
     snooze: !terminal,

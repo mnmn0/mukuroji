@@ -73,8 +73,6 @@ export interface ApiTransportsAndRealtimeInput {
 export type ApiTransportsAndRealtimeResources = Readonly<{
   /** Live alias receiving all public API traffic. */
   readonly apiLiveAlias: lambda.Alias;
-  /** Public Lambda Function URL for the shared API handler. */
-  readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway backed by the shared API handler. */
   readonly httpApi: apigatewayv2.HttpApi;
   /** Auto-deployed production WebSocket stage. */
@@ -118,51 +116,9 @@ function createApiAvailabilityErrorRatioMetric(
   });
 }
 
-/**
- * Creates one retained secret containing a single sensitive API value.
- *
- * Keeping NoEcho parameter references outside the configuration envelope
- * prevents macro processing from materializing plaintext into a processed
- * CloudFormation template.
- *
- * @param scope - Stack that owns the sensitive-value secret.
- * @param constructId - Stable construct identifier.
- * @param nameSegment - Bounded physical-name segment for this sensitive value.
- * @param configurationRevision - Operator-incremented immutable configuration revision.
- * @param description - Operational purpose shown in Secrets Manager.
- * @param value - NoEcho parameter value stored without JSON transformation.
- * @returns The retained sensitive-value secret.
- */
-function createApiRuntimeSensitiveValueSecret(
-  scope: cdk.Stack,
-  constructId: string,
-  nameSegment: string,
-  configurationRevision: string,
-  description: string,
-  value: string,
-): secretsmanager.Secret {
-  const secretNamePrefix = cdk.Names.uniqueResourceName(scope, {
-    allowedSpecialCharacters: '-',
-    maxLength: 36,
-    separator: '-',
-  });
-
-  return new secretsmanager.Secret(scope, constructId, {
-    description,
-    removalPolicy: cdk.RemovalPolicy.RETAIN,
-    secretName: cdk.Fn.join('-', [
-      secretNamePrefix,
-      nameSegment,
-      'v1',
-      configurationRevision,
-    ]),
-    secretStringValue: cdk.SecretValue.unsafePlainText(value),
-  });
-}
-
 /** Exact transform-free header required by the API configuration loader. */
 const apiRuntimeConfigurationEnvelopeHeader =
-  'mukuroji-api-runtime-configuration-v2\n';
+  'mukuroji-api-runtime-configuration-v3\n';
 
 /**
  * Creates one encoded line tuple for deterministic configuration ordering.
@@ -181,40 +137,35 @@ function createApiRuntimeConfigurationLine(
 }
 
 /**
- * Creates one retained, versioned-schema API configuration secret.
+ * Creates the single retained API configuration secret.
  *
- * The line envelope uses ordinary Fn::Join and Fn::Base64 intrinsics so
- * arbitrary parameter values remain JSON-independent without a macro that
- * resolves NoEcho parameters into the processed template. Sensitive values
- * are represented only by nested Secrets Manager ARNs.
+ * The secret keeps one stable identity: a deploy that changes configuration
+ * updates its value in place instead of creating another secret. The
+ * envelope carries the operator revision, and each published API version
+ * expects exactly that revision, reading the previous secret version while
+ * a rollout is still in flight. The line envelope uses ordinary Fn::Join and
+ * Fn::Base64 intrinsics, so NoEcho parameter values are written only into the
+ * secret and never into the template. The stack has no Transform, so there is
+ * no processed template that could hold them either.
  *
  * @param scope - Stack that owns the configuration secret.
  * @param constructId - Stable construct identifier.
- * @param nameSegment - Bounded physical-name segment for this configuration group.
- * @param group - Exact group identity validated by the runtime loader.
- * @param configurationRevision - Operator-incremented immutable configuration revision.
+ * @param configurationRevision - Operator-incremented configuration revision.
  * @param description - Operational purpose shown in Secrets Manager.
- * @param values - Canonical API environment names and non-secret deployment-time values.
+ * @param values - Canonical API environment names and deployment-time values.
  * @param secretValues - Canonical names whose values are loaded from nested secrets.
- * @param secretConditions - Conditions that replace disabled nested secrets with empty values.
+ * @param valueConditions - Conditions that replace disabled values with empty values.
  * @returns The retained configuration secret.
  */
 function createApiRuntimeConfigurationSecret(
   scope: cdk.Stack,
   constructId: string,
-  nameSegment: string,
-  group: 'core' | 'data' | 'identity' | 'workflow',
   configurationRevision: string,
   description: string,
   values: Readonly<Record<string, string>>,
   secretValues: Readonly<Record<string, secretsmanager.ISecret>> = {},
-  secretConditions: Readonly<Record<string, cdk.CfnCondition>> = {},
+  valueConditions: Readonly<Record<string, cdk.CfnCondition>> = {},
 ): secretsmanager.Secret {
-  const secretNamePrefix = cdk.Names.uniqueResourceName(scope, {
-    allowedSpecialCharacters: '-',
-    maxLength: 36,
-    separator: '-',
-  });
   const duplicateName = Object.keys(secretValues)
     .find((name) => Object.hasOwn(values, name));
   if (duplicateName) {
@@ -234,11 +185,11 @@ function createApiRuntimeConfigurationSecret(
     throw new Error('API runtime configuration names are invalid.');
   }
   const secretStringParts: string[] = [
-    `${apiRuntimeConfigurationEnvelopeHeader}group:${group}\nrevision:`,
+    `${apiRuntimeConfigurationEnvelopeHeader}revision:`,
     cdk.Fn.base64(configurationRevision),
   ];
   for (const [name, kind, source] of lines) {
-    const condition = secretConditions[name];
+    const condition = valueConditions[name];
     if (condition) {
       secretStringParts.push(cdk.Fn.conditionIf(
         condition.logicalId,
@@ -255,12 +206,6 @@ function createApiRuntimeConfigurationSecret(
   return new secretsmanager.Secret(scope, constructId, {
     description,
     removalPolicy: cdk.RemovalPolicy.RETAIN,
-    secretName: cdk.Fn.join('-', [
-      secretNamePrefix,
-      nameSegment,
-      'v2',
-      configurationRevision,
-    ]),
     secretStringValue: cdk.SecretValue.unsafePlainText(
       cdk.Fn.join('', secretStringParts),
     ),
@@ -269,7 +214,7 @@ function createApiRuntimeConfigurationSecret(
 
 /**
  * Stores complete API configuration outside Lambda's 4 KB environment quota
- * and grants the API execution role read access to each bounded group.
+ * in one stable secret and grants the API execution role read access to it.
  *
  * @param scope - Stack that owns the configuration secrets.
  * @param input - API resources, parameters, and runtime controls.
@@ -293,10 +238,8 @@ function bindApiRuntimeConfiguration(
     collaborationTable,
     customersTable,
     connectorRuntimeSecret,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
+    developerPlatformKey,
     developerPlatformTable,
-    developerPlatformWebhookKey,
     documentPublicShareTokenSecret,
     documentsTable,
     enterpriseIdentityTable,
@@ -305,6 +248,8 @@ function bindApiRuntimeConfiguration(
     focusTable,
     planningTable,
     projectDirectoryTable,
+    pushSubscriptionsTable,
+    agentRunsTable,
     realtimeSessionsTable,
     requestIntakeTable,
     teamIssueEventsTable,
@@ -314,6 +259,7 @@ function bindApiRuntimeConfiguration(
     workspaceSearchTable,
   } = input.dataStores;
   const {
+    auditExportBucket,
     fileBucket,
     fileProofingTable,
     workItemImportBucket,
@@ -336,68 +282,28 @@ function bindApiRuntimeConfiguration(
     fileUploadUrlTtlSeconds,
     requestRateLimitPerHour,
     requestTokenHashSecret,
+    edgeOriginSecret,
+    webPushVapidPublicKey,
     systemAdminGroups,
     apiAllowedOrigins,
-    workspaceAuditPseudonymKey,
     workspaceDirectoryId,
   } = input.parameters;
   const {
+    auditExportQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
-  const enterpriseIdentityTokenHashValueSecret =
-    createApiRuntimeSensitiveValueSecret(
-      scope,
-      'ApiEnterpriseIdentityTokenHashValueSecret',
-      'api-enterprise-identity-token-hash',
-      apiRuntimeConfigurationRevision.valueAsString,
-      'Revision-bound Enterprise Identity token-hash value consumed by the API.',
-      enterpriseIdentityTokenHashSecret.valueAsString,
-    );
   const enterpriseSsoConfigured = new cdk.CfnCondition(scope, 'EnterpriseSsoConfigured', {
     expression: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(enterpriseSsoStateSecret.valueAsString, '')),
   });
-  const enterpriseSsoStateValueSecret =
-    createApiRuntimeSensitiveValueSecret(
-      scope,
-      'ApiEnterpriseSsoStateValueSecret',
-      'api-enterprise-sso-state',
-      apiRuntimeConfigurationRevision.valueAsString,
-      'Revision-bound Enterprise SSO state-signing value consumed by the API.',
-      // Secrets Manager rejects empty strings. Preserve the retained resource with
-      // an inert marker; the disabled envelope never references or loads this value.
-      cdk.Fn.conditionIf(
-        enterpriseSsoConfigured.logicalId,
-        enterpriseSsoStateSecret.valueAsString,
-        'SSO-disabled-no-signing-key',
-      ).toString(),
-    );
-  const requestTokenHashValueSecret =
-    createApiRuntimeSensitiveValueSecret(
-      scope,
-      'ApiRequestTokenHashValueSecret',
-      'api-request-token-hash',
-      apiRuntimeConfigurationRevision.valueAsString,
-      'Revision-bound request capability token-hash value consumed by the API.',
-      requestTokenHashSecret.valueAsString,
-    );
-  const workspaceAuditPseudonymValueSecret =
-    createApiRuntimeSensitiveValueSecret(
-      scope,
-      'ApiWorkspaceAuditPseudonymValueSecret',
-      'api-workspace-audit-pseudonym',
-      apiRuntimeConfigurationRevision.valueAsString,
-      'Revision-bound Workspace audit pseudonym value consumed by the API.',
-      workspaceAuditPseudonymKey.valueAsString,
-    );
+  const workspaceAuditPseudonymSecret =
+    input.dataStores.workspaceAuditPseudonymSecret;
 
-  const coreConfigurationSecret = createApiRuntimeConfigurationSecret(
+  const configurationSecret = createApiRuntimeConfigurationSecret(
     scope,
-    'ApiCoreRuntimeConfigurationSecret',
-    'api-core-config',
-    'core',
+    'ApiRuntimeConfigurationSecret',
     apiRuntimeConfigurationRevision.valueAsString,
-    'Versioned core, identity, transport, and runtime-control configuration for the API.',
+    'Complete API runtime configuration, updated in place on each revision.',
     {
       ALLOWED_ORIGINS: apiAllowedOrigins.valueAsString,
       AUTOMATION_INBOUND_WEBHOOK_BASE_URL: httpApi.apiEndpoint,
@@ -413,35 +319,15 @@ function bindApiRuntimeConfiguration(
         String(RUNTIME_CONTROL_MINIMUM_POLL_INTERVAL_SECONDS),
       MUKUROJI_RUNTIME_CONTROL_SCOPE: 'api',
       REALTIME_WEBSOCKET_URL: realtimeWebSocketStage.url,
-    },
-  );
-  const identityConfigurationSecret = createApiRuntimeConfigurationSecret(
-    scope,
-    'ApiIdentityRuntimeConfigurationSecret',
-    'api-identity-config',
-    'identity',
-    apiRuntimeConfigurationRevision.valueAsString,
-    'Versioned identity, federation, and workspace configuration for the API.',
-    {
-      COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
+      COGNITO_CLIENT_ID: cognitoUserPoolClientId,
       COGNITO_ENTERPRISE_IDP_NAME:
         cognitoEnterpriseIdpName.valueAsString,
       COGNITO_HOSTED_UI_DOMAIN: cognitoHostedUiDomain.valueAsString,
       COGNITO_SSO_CLIENT_ID: cognitoSsoUserPoolClientId.valueAsString,
       COGNITO_SSO_REDIRECT_URI: cognitoSsoRedirectUri.valueAsString,
-      COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
-      MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+      COGNITO_USER_POOL_ID: cognitoUserPoolId,
+      SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
       MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceDirectoryId.valueAsString,
-    },
-  );
-  const dataConfigurationSecret = createApiRuntimeConfigurationSecret(
-    scope,
-    'ApiDataRuntimeConfigurationSecret',
-    'api-data-config',
-    'data',
-    apiRuntimeConfigurationRevision.valueAsString,
-    'Versioned table, index, encryption-key, and durable data configuration for the API.',
-    {
       ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
       ANALYTICS_TABLE_NAME: analyticsTable.tableName,
       AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
@@ -452,34 +338,22 @@ function bindApiRuntimeConfiguration(
       AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
       COLLABORATION_TABLE_NAME: collaborationTable.tableName,
       CUSTOMERS_TABLE_NAME: customersTable.tableName,
+      // Blank when the connectors module is absent: the API then loads no provider.
       CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
-        connectorRuntimeSecret.secretArn,
-      DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
-        developerPlatformConnectorKey.keyArn,
+        connectorRuntimeSecret?.secretArn ?? '',
+      DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: developerPlatformKey.keyArn,
       DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
-      DEVELOPER_PLATFORM_STATE_KMS_KEY_ID:
-        developerPlatformStateKey.keyArn,
+      DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
       DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
-      DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
-        developerPlatformWebhookKey.keyArn,
+      DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: developerPlatformKey.keyArn,
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
-      MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
+      TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
       WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
-    },
-  );
-  const workflowConfigurationSecret = createApiRuntimeConfigurationSecret(
-    scope,
-    'ApiWorkflowRuntimeConfigurationSecret',
-    'api-workflow-config',
-    'workflow',
-    apiRuntimeConfigurationRevision.valueAsString,
-    'Versioned workflow, file, queue, and sensitive runtime configuration for the API.',
-    {
       FILE_BUCKET_NAME: fileBucket.bucketName,
       FILE_DOWNLOAD_URL_TTL_SECONDS:
         fileDownloadUrlTtlSeconds.valueAsString,
@@ -488,6 +362,9 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      PUSH_SUBSCRIPTIONS_TABLE_NAME: pushSubscriptionsTable.tableName,
+      AGENT_RUNS_TABLE_NAME: agentRunsTable.tableName,
+      WEB_PUSH_VAPID_PUBLIC_KEY: webPushVapidPublicKey.valueAsString,
       FOCUS_TABLE_NAME: focusTable.tableName,
       CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
@@ -503,46 +380,35 @@ function bindApiRuntimeConfiguration(
         workItemConfigurationTable.tableName,
       WORK_ITEM_IMPORT_BUCKET_NAME: workItemImportBucket.bucketName,
       WORK_ITEM_IMPORT_QUEUE_URL: workItemImportQueue.queueUrl,
+      AUDIT_EXPORT_BUCKET_NAME: auditExportBucket.bucketName,
+      AUDIT_EXPORT_QUEUE_URL: auditExportQueue.queueUrl,
+      ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
+        enterpriseIdentityTokenHashSecret.valueAsString,
+      ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateSecret.valueAsString,
+      REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
+      MUKUROJI_EDGE_ORIGIN_SECRET: edgeOriginSecret.valueAsString,
     },
     {
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
         documentPublicShareTokenSecret,
-      ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
-        enterpriseIdentityTokenHashValueSecret,
-      ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoStateValueSecret,
       MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
-        workspaceAuditPseudonymValueSecret,
-      REQUEST_TOKEN_HASH_SECRET: requestTokenHashValueSecret,
+        workspaceAuditPseudonymSecret,
     },
     { ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoConfigured },
   );
 
   apiFunction.addEnvironment(
-    'MUKUROJI_API_CORE_CONFIG_SECRET_ARN',
-    coreConfigurationSecret.secretArn,
+    'MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN',
+    configurationSecret.secretArn,
   );
   apiFunction.addEnvironment(
-    'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
-    dataConfigurationSecret.secretArn,
+    'MUKUROJI_API_RUNTIME_CONFIG_REVISION',
+    apiRuntimeConfigurationRevision.valueAsString,
   );
-  apiFunction.addEnvironment(
-    'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',
-    identityConfigurationSecret.secretArn,
-  );
-  apiFunction.addEnvironment(
-    'MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN',
-    workflowConfigurationSecret.secretArn,
-  );
-  coreConfigurationSecret.grantRead(apiFunction);
-  dataConfigurationSecret.grantRead(apiFunction);
-  identityConfigurationSecret.grantRead(apiFunction);
-  workflowConfigurationSecret.grantRead(apiFunction);
+  configurationSecret.grantRead(apiFunction);
   documentPublicShareTokenSecret.grantRead(apiFunction);
-  enterpriseIdentityTokenHashValueSecret.grantRead(apiFunction);
-  enterpriseSsoStateValueSecret.grantRead(apiFunction);
-  requestTokenHashValueSecret.grantRead(apiFunction);
-  workspaceAuditPseudonymValueSecret.grantRead(apiFunction);
-  return workspaceAuditPseudonymValueSecret;
+  workspaceAuditPseudonymSecret.grantRead(apiFunction);
+  return workspaceAuditPseudonymSecret;
 }
 
 /**
@@ -564,14 +430,14 @@ export function buildApiRuntime(
     collaborationTable,
     customersTable,
     connectorRuntimeSecret,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
+    developerPlatformKey,
     developerPlatformTable,
-    developerPlatformWebhookKey,
     documentsTable,
     enterpriseIdentityTable,
     tenantAdministrationTable,
     notificationsTable,
+    pushSubscriptionsTable,
+    agentRunsTable,
     focusTable,
     planningTable,
     projectDirectoryTable,
@@ -584,6 +450,7 @@ export function buildApiRuntime(
     workspaceSearchTable,
   } = input.dataStores;
   const {
+    auditExportBucket,
     fileBucket,
     fileProofingTable,
     workItemImportBucket,
@@ -600,6 +467,7 @@ export function buildApiRuntime(
     cognitoUserPoolArn,
   } = input.parameters;
   const {
+    auditExportQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -702,6 +570,8 @@ export function buildApiRuntime(
   customersTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
+  pushSubscriptionsTable.grants.readWriteData(apiFunction);
+  agentRunsTable.grants.readWriteData(apiFunction);
   apiFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',
@@ -853,6 +723,7 @@ export function buildApiRuntime(
         new iam.PolicyStatement({
           actions: ['sqs:SendMessage'],
           resources: [
+            auditExportQueue.queueArn,
             webhookDeliveryQueue.queueArn,
             workItemImportQueue.queueArn,
           ],
@@ -912,7 +783,7 @@ export function buildApiRuntime(
       statements: [
         new iam.PolicyStatement({
           actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [developerPlatformWebhookKey.keyArn],
+          resources: [developerPlatformKey.keyArn],
           conditions: {
             StringEquals: {
               'kms:EncryptionContext:mukuroji:purpose': 'webhook',
@@ -923,7 +794,7 @@ export function buildApiRuntime(
         }),
         new iam.PolicyStatement({
           actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [developerPlatformConnectorKey.keyArn],
+          resources: [developerPlatformKey.keyArn],
           conditions: {
             StringEquals: {
               'kms:EncryptionContext:mukuroji:purpose': 'connector',
@@ -934,7 +805,7 @@ export function buildApiRuntime(
         }),
         new iam.PolicyStatement({
           actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-          resources: [developerPlatformStateKey.keyArn],
+          resources: [developerPlatformKey.keyArn],
           conditions: {
             StringEquals: {
               'kms:EncryptionContext:mukuroji:purpose': 'platform-state',
@@ -1003,7 +874,7 @@ export function buildApiRuntime(
   apiFunction.role.attachInlinePolicy(apiAuditTransactionDataPolicy);
   apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
   apiFunction.role.attachInlinePolicy(apiTransactionConditionCheckPolicy);
-  connectorRuntimeSecret.grantRead(apiFunction);
+  connectorRuntimeSecret?.grantRead(apiFunction);
   apiFunction.role.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiAutomationWebhookSecretPolicy',
@@ -1053,6 +924,20 @@ export function buildApiRuntime(
         's3:PutObject',
       ],
       resources: [workItemImportBucket.arnForObjects('work-item-imports/*')],
+    }),
+  );
+  apiFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:PutObject'],
+      resources: [auditExportBucket.arnForObjects('audit-exports/*')],
+    }),
+  );
+  // A missing job must read as NoSuchKey, and the check S3 makes for a missing object carries
+  // no `s3:prefix`, so this grant has no prefix condition; the bucket holds only audit exports.
+  apiFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['s3:ListBucket'],
+      resources: [auditExportBucket.bucketArn],
     }),
   );
   apiFunction.addToRolePolicy(
@@ -1366,7 +1251,7 @@ export function buildApiTransportsAndRealtime(
       },
       environment: {
         COGNITO_ENTERPRISE_IDP_NAME: cognitoEnterpriseIdpName.valueAsString,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
@@ -1444,31 +1329,9 @@ export function buildApiTransportsAndRealtime(
     ),
     routeKey: apigatewayv2.HttpRouteKey.DEFAULT,
   });
-  const functionUrl = apiLiveAlias.addFunctionUrl({
-    authType: lambda.FunctionUrlAuthType.NONE,
-    cors: {
-      allowedOrigins: apiAllowedOriginList,
-      allowedMethods: [
-        lambda.HttpMethod.GET,
-        lambda.HttpMethod.POST,
-        lambda.HttpMethod.PUT,
-        lambda.HttpMethod.PATCH,
-        lambda.HttpMethod.DELETE,
-      ],
-      allowedHeaders: [
-        'authorization',
-        'content-type',
-        'idempotency-key',
-        'x-correlation-id',
-        'x-request-id',
-      ],
-      exposedHeaders: apiExposedHeaders,
-    },
-  });
 
   return {
     apiLiveAlias,
-    functionUrl,
     httpApi,
     realtimeWebSocketStage,
     workspaceAuditPseudonymSecret,

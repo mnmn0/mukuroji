@@ -36,6 +36,8 @@ import {
   isCanonicalWorkItemArchiveWindow,
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
+import { isStoredContributorAssignmentList } from '../../domain/contributor-assignments'
+import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteria'
 import { createResourceId } from '../../domain/resource-id'
 import {
   deriveWorkItemScheduleDueDate,
@@ -81,6 +83,8 @@ import type {
   TriageEntryEvent,
   WorkflowStatusCategory,
   WorkItemPriority,
+  WorkItemAcceptanceCriterion,
+  WorkItemContributorAssignment,
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemTriageContextEventSnapshot,
@@ -292,7 +296,6 @@ function createAuthorizationSnapshotConditionEntries(
     {
       kind: 'workspace-member',
       tableName:
-        environment.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
         environment.WORKSPACE_ACCESS_TABLE_NAME ??
         'mukuroji-workspace-access-local',
       key: {
@@ -367,6 +370,50 @@ function createCallerAuthorizationConditionEntries(
     kind: 'workspace-member',
     transactWriteItem,
   }))
+}
+
+/**
+ * Combines caller authorization checks with the adapter-built fences, one check per row.
+ *
+ * DynamoDB rejects a transaction that names one item twice. That happens when the actor
+ * adds themselves as a contributor while an authorization snapshot already fences their
+ * membership row. The snapshot check wins: it pins the membership version observed at
+ * authorization, so a membership change after that still fails the write. Because every
+ * membership change bumps the version, pinning it also keeps the status and role that
+ * the caller's check validated at that version.
+ *
+ * @param callerEntries - Checks supplied by the application caller, in transaction order.
+ * @param fenceEntries - Snapshot and Planning fences built by the adapter, in transaction order.
+ * @returns Caller checks for rows no fence covers, followed by every fence.
+ */
+function mergeAuthorizationConditionEntries(
+  callerEntries: readonly WorkItemAuthorizationConditionEntry[],
+  fenceEntries: readonly WorkItemAuthorizationConditionEntry[],
+): WorkItemAuthorizationConditionEntry[] {
+  const seen = new Set(fenceEntries.flatMap((entry) => {
+    const key = readConditionCheckRowKey(entry)
+    return key === undefined ? [] : [key]
+  }))
+  const keptCallerEntries = callerEntries.filter((entry) => {
+    const key = readConditionCheckRowKey(entry)
+    if (key === undefined) return true
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return [...keptCallerEntries, ...fenceEntries]
+}
+
+/**
+ * Identifies the row a ConditionCheck guards.
+ *
+ * @param entry - Named authorization check.
+ * @returns A stable table-and-key string, or undefined when the item is not a keyed ConditionCheck.
+ */
+function readConditionCheckRowKey(entry: WorkItemAuthorizationConditionEntry): string | undefined {
+  const condition = entry.transactWriteItem.ConditionCheck
+  if (!condition?.TableName || !condition.Key) return undefined
+  return JSON.stringify([condition.TableName, condition.Key])
 }
 
 /**
@@ -470,6 +517,10 @@ type TeamIssueItem = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId: string
+  /** Contributors carrying out the work, separate from the accountable owner; absent when none. */
+  contributorAssignments?: WorkItemContributorAssignment[]
+  /** Acceptance criteria; absent when none. */
+  acceptanceCriteria?: WorkItemAcceptanceCriterion[]
   /**
    * Issue 作成者の Workspace member key です。
    */
@@ -740,6 +791,8 @@ export type CreateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
+  /** Contributor assignments already normalized by the API handler. */
+  contributorAssignments?: unknown
   /** Explicit canonical schedule required for every new Work Item. */
   schedule: unknown
   /**
@@ -892,6 +945,10 @@ export type PublicUpdateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
+  /** Complete replacement contributor list already normalized by the API handler. */
+  contributorAssignments?: unknown
+  /** Complete replacement acceptance criteria list already normalized by the API handler. */
+  acceptanceCriteria?: unknown
   /** Complete replacement schedule shared by every task view. */
   schedule?: unknown
   /**
@@ -935,6 +992,11 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   archivedAt?: unknown
   /** Internal bulk operation が記録する archive actor member key です。 */
   archivedBy?: unknown
+  /**
+   * Agent Run claim, fence, and lease writes committed in the same transaction as the update.
+   * A conditional failure in these items is reported as an Agent Run fence conflict.
+   */
+  agentRunTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /**
@@ -1009,12 +1071,12 @@ export type WorkItemScheduleCascadeResponse = {
 export type WorkItemIdempotencyTransaction = {
   /** Exact HTTP response を encrypted receipt transaction item に変換します。 */
   prepare(
-    response: { /** HTTP status です。 */ status: 200 | 204; /** Replay body です。 */ body: unknown },
+    response: { /** HTTP status です。 */ status: 200 | 201 | 204; /** Replay body です。 */ body: unknown },
   ): Promise<IdempotencyCompletionTransactWrite | undefined>
 }
 
 /** Canonical Work Item delete transaction に含める参照整合性 fence の種別です。 */
-type WorkItemDeletionFenceKind = 'external-links' | 'document-backlinks'
+type WorkItemDeletionFenceKind = 'external-links' | 'document-backlinks' | 'agent-runs'
 
 /** Cancellation reason を安定した domain conflict に分類する名前付き fence です。 */
 export type NamedWorkItemDeletionFence = {
@@ -1289,7 +1351,6 @@ export class DynamoDbTeamIssuesClient {
       getEnv('WORK_ITEMS_TABLE_NAME') ??
       'mukuroji-team-issues-local',
     eventTableName =
-      getEnv('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ??
       getEnv('TEAM_ISSUE_EVENTS_TABLE_NAME') ??
       'mukuroji-team-issue-events-local',
     documentClient = createDynamoDbDocumentClient(),
@@ -1619,6 +1680,9 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
+    const contributorAssignments = input.contributorAssignments === undefined
+      ? []
+      : readNormalizedContributorAssignments(input.contributorAssignments)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readWorkItemPriority(input.priority)
@@ -1683,10 +1747,10 @@ export class DynamoDbTeamIssuesClient {
       ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
       : new Date().toISOString()
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionEntries = [
-      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-    ]
+    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -1748,6 +1812,9 @@ export class DynamoDbTeamIssuesClient {
       if (description) {
         item.description = description
       }
+      if (contributorAssignments.length > 0) {
+        item.contributorAssignments = contributorAssignments
+      }
 
       if (assignedProjectId) {
         item.assignedProjectId = assignedProjectId
@@ -1780,6 +1847,7 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
+          'contributorAssignments',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -1917,6 +1985,7 @@ export class DynamoDbTeamIssuesClient {
             actorUserId,
             assigneeUserId,
             assignedProjectId,
+            contributorAssignments,
             customFieldValues,
             description,
             dueDate,
@@ -2265,11 +2334,15 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionEntries = [
-      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-      ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
-    ]
+    const agentRunTransactItems = input.agentRunTransactItems ?? []
+    let agentRunFenceStartIndex: number | undefined
+    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      [
+        ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+        ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
+      ],
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -2332,6 +2405,28 @@ export class DynamoDbTeamIssuesClient {
       expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId'
       expressionAttributeValues[':assigneeUserId'] = readTeamIssueAssigneeUserId(input)
       setExpressions.push('#assigneeUserId = :assigneeUserId')
+    }
+
+    if ('contributorAssignments' in input) {
+      const contributorAssignments = readNormalizedContributorAssignments(input.contributorAssignments)
+      expressionAttributeNames['#contributorAssignments'] = 'contributorAssignments'
+      if (contributorAssignments.length > 0) {
+        expressionAttributeValues[':contributorAssignments'] = contributorAssignments
+        setExpressions.push('#contributorAssignments = :contributorAssignments')
+      } else {
+        removeExpressions.push('#contributorAssignments')
+      }
+    }
+
+    if ('acceptanceCriteria' in input) {
+      // An empty list is stored as an absent attribute, like contributors.
+      expressionAttributeNames['#acceptanceCriteria'] = 'acceptanceCriteria'
+      if (Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length === 0) {
+        removeExpressions.push('#acceptanceCriteria')
+      } else {
+        expressionAttributeValues[':acceptanceCriteria'] = readNormalizedAcceptanceCriteria(input.acceptanceCriteria)
+        setExpressions.push('#acceptanceCriteria = :acceptanceCriteria')
+      }
     }
 
     if ('workflowStatusId' in input) {
@@ -2482,9 +2577,9 @@ export class DynamoDbTeamIssuesClient {
 
         const value = expressionAttributeValues[`:${field}`]
         if (value !== undefined) {
-          ;(afterIssue as unknown as Record<string, unknown>)[field] = value
+          Reflect.set(afterIssue, field, value)
         } else if (removeExpressions.includes(placeholder)) {
-          delete (afterIssue as unknown as Record<string, unknown>)[field]
+          Reflect.deleteProperty(afterIssue, field)
         }
       }
       const auditBeforeIssue = {
@@ -2517,6 +2612,8 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
+          'contributorAssignments',
+          'acceptanceCriteria',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -2551,6 +2648,9 @@ export class DynamoDbTeamIssuesClient {
         directoryId,
         updatedAt,
       )
+      agentRunFenceStartIndex = 2 + (auditPut ? 1 : 0) + configurationConditionChecks.length +
+        authorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0) +
+        (planningRevisionMutation ? 1 : 0)
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -2583,6 +2683,7 @@ export class DynamoDbTeamIssuesClient {
               ? [idempotencyCompletion.transactWriteItem]
               : []),
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+            ...agentRunTransactItems,
           ],
         }),
       )
@@ -2593,6 +2694,15 @@ export class DynamoDbTeamIssuesClient {
     } catch (error) {
       if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
         throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
+      }
+      const fenceStartIndex = agentRunFenceStartIndex
+      if (
+        fenceStartIndex !== undefined &&
+        agentRunTransactItems.some((_, index) =>
+          isTransactionConditionalFailureAt(error, fenceStartIndex + index)
+        )
+      ) {
+        throw createAgentRunFenceConflictError()
       }
 
       const cancellationReasonsMissing =
@@ -3328,18 +3438,38 @@ export function createWorkItemAuthorizationChangedError() {
   )
 }
 
+/**
+ * Creates the error reported when an Agent Run claim, fence, or lease condition fails.
+ *
+ * Callers re-read the run and claim rows to report the precise reason.
+ *
+ * @returns Stable conflict error for an Agent Run fence failure.
+ */
+export function createAgentRunFenceConflictError() {
+  return new ProjectDataError(
+    409,
+    'AgentRunFenceConflict',
+    'The Agent Run claim changed. Reload the task and its runs before retrying.',
+  )
+}
+
 function createWorkItemDeletionFenceConflictError(kind: WorkItemDeletionFenceKind) {
-  return kind === 'external-links'
-    ? new ProjectDataError(
+  switch (kind) {
+    case 'external-links':
+      return new ProjectDataError(
         409,
         'ExternalWorkItemLinkConflict',
         'Unlink all external resources before deleting this Work Item.',
       )
-    : new ProjectDataError(
+    case 'document-backlinks':
+      return new ProjectDataError(
         409,
         'WorkItemDocumentBacklinkConflict',
         'Unlink all Documents before deleting this Work Item.',
       )
+    case 'agent-runs':
+      return createAgentRunFenceConflictError()
+  }
 }
 
 function createWorkItemDeletionTransactionUnavailableError() {
@@ -3547,6 +3677,14 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
 
   if (item.description) {
     issue.description = item.description
+  }
+
+  if (item.contributorAssignments && item.contributorAssignments.length > 0) {
+    issue.contributorAssignments = item.contributorAssignments
+  }
+
+  if (item.acceptanceCriteria && item.acceptanceCriteria.length > 0) {
+    issue.acceptanceCriteria = item.acceptanceCriteria
   }
 
   if (item.archivedAt) {
@@ -3757,7 +3895,7 @@ function readCanonicalContextInstant(value: unknown): string | undefined {
 /** Returns whether an unknown value is a supported Triage source kind. */
 function isTriageContextSourceKind(value: unknown): boolean {
   return value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
 }
 
 /** Returns whether an unknown value is a source visibility state. */
@@ -4094,12 +4232,20 @@ export function readIdempotencyResourceId(value: unknown) {
   return value
 }
 
+/**
+ * Checks whether an existing Work Item is the replay of the same idempotent create request.
+ *
+ * @param issue - Work Item already stored under the caller-selected resource ID.
+ * @param expected - Normalized fields of the create request being retried.
+ * @returns Whether every logical create field, including contributors, matches the stored Work Item.
+ */
 function isMatchingIdempotentWorkItemCreate(
   issue: TeamIssueResponseItem,
   expected: {
     actorUserId: string
     assigneeUserId: string
     assignedProjectId: string | null | undefined
+    contributorAssignments: WorkItemContributorAssignment[]
     customFieldValues: Record<string, CustomFieldValue>
     description: string | undefined
     dueDate: string
@@ -4115,6 +4261,10 @@ function isMatchingIdempotentWorkItemCreate(
   return issue.creatorMemberKey === expected.actorUserId &&
     issue.assigneeUserId === expected.assigneeUserId &&
     issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
+    contributorAssignmentListsLogicallyEqual(
+      issue.contributorAssignments ?? [],
+      expected.contributorAssignments,
+    ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
     issue.dueDate === expected.dueDate &&
@@ -4125,6 +4275,38 @@ function isMatchingIdempotentWorkItemCreate(
     issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares contributor lists by their logical content, ignoring server-generated assignment IDs and order.
+ *
+ * @param left - First contributor assignment list.
+ * @param right - Second contributor assignment list.
+ * @returns Whether both lists contain the same contributions.
+ */
+function contributorAssignmentListsLogicallyEqual(
+  left: readonly WorkItemContributorAssignment[],
+  right: readonly WorkItemContributorAssignment[],
+): boolean {
+  if (left.length !== right.length) return false
+  const leftKeys = left.map(toLogicalContributorAssignmentKey).sort()
+  const rightKeys = right.map(toLogicalContributorAssignmentKey).sort()
+  return leftKeys.every((key, index) => key === rightKeys[index])
+}
+
+/**
+ * Serializes the caller-controlled fields of one contributor assignment.
+ *
+ * @param assignment - Contributor assignment to serialize.
+ * @returns A deterministic key that excludes the server-generated assignment ID.
+ */
+function toLogicalContributorAssignmentKey(assignment: WorkItemContributorAssignment): string {
+  return JSON.stringify([
+    assignment.memberUserId?.toLowerCase() ?? null,
+    assignment.jobRoleId ?? null,
+    assignment.plannedEffortMinutes ?? null,
+    assignment.status,
+  ])
 }
 
 /**
@@ -4172,6 +4354,37 @@ export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | 
   }
 
   return normalizeCognitoUserId(value)
+}
+
+/**
+ * Reads contributor assignments that the API handler has already normalized.
+ *
+ * The adapter re-checks the stored shape so an unvalidated caller cannot persist a
+ * malformed list.
+ *
+ * @param value - Normalized contributor assignment list.
+ * @returns The list, unchanged.
+ */
+function readNormalizedContributorAssignments(value: unknown): WorkItemContributorAssignment[] {
+  if (!isStoredContributorAssignmentList(value)) {
+    throw new ProjectDataError(400, 'InvalidContributorAssignments', 'Contributor assignments are invalid.')
+  }
+  return value
+}
+
+/**
+ * Reads a non-empty acceptance criteria list that the API handler has already normalized.
+ *
+ * The adapter re-checks the stored shape so an unvalidated caller cannot persist a malformed list.
+ *
+ * @param value - Normalized acceptance criteria list.
+ * @returns The list, unchanged.
+ */
+function readNormalizedAcceptanceCriteria(value: unknown): WorkItemAcceptanceCriterion[] {
+  if (!isStoredAcceptanceCriterionList(value)) {
+    throw new ProjectDataError(400, 'InvalidAcceptanceCriteria', 'Acceptance criteria are invalid.')
+  }
+  return value
 }
 
 /**

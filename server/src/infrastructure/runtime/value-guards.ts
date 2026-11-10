@@ -51,3 +51,13 @@ export function hasCanonicalDenseArrayShape(
     )
   })
 }
+
+/**
+ * Checks whether an unknown runtime value is a non-array object record.
+ *
+ * @param value - Runtime value read from JSON, storage, or another boundary.
+ * @returns Whether the value is a non-null object that is not an array.
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

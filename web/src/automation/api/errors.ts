@@ -1,4 +1,4 @@
-
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /** Automation API の失敗を表す error です。 */
 export class AutomationApiError extends Error {
@@ -32,17 +32,5 @@ export class AutomationApiError extends Error {
 export function resolveAutomationApiBaseUrl(
   environment: Record<string, string | boolean | undefined>,
 ) {
-  return trimTrailingSlash(
-    typeof environment.VITE_WORKSPACE_API_BASE_URL === 'string'
-      ? environment.VITE_WORKSPACE_API_BASE_URL
-      : typeof environment.VITE_PROJECTS_API_BASE_URL === 'string'
-        ? environment.VITE_PROJECTS_API_BASE_URL
-        : typeof environment.VITE_API_BASE_URL === 'string'
-            ? environment.VITE_API_BASE_URL
-            : '/api',
-  )
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
+  return resolveApiBaseUrl('workspace', environment)
 }

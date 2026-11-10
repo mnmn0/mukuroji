@@ -2,6 +2,7 @@ import type {
   AiPlanningDraft,
   AiWorkItemSource,
   PlanningSnapshot,
+  TriageSourceKind,
   WorkItemTypeChangePreview,
   WorkItemDetailSectionId,
   WorkItemDependencyEndpoint,
@@ -52,12 +53,24 @@ import {
   createCustomFieldErrorMessages,
   createVisibleCustomFieldValuePatch,
   resolveEditableWorkflowStatuses,
+  resolveWorkItemContributorDirectory,
+  resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
+import {
+  WorkItemContributorsEditor,
+} from '../../work-items/ui/WorkItemContributorsEditor'
+import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
+import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import { useAcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
+import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
+import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
   WorkItemRelationsEditor,
@@ -76,6 +89,7 @@ import {
   resolveTaskScheduleStartDate,
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
+import { TaskHandoffPanel } from './TaskHandoffPanel'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -310,6 +324,13 @@ export function TaskDetailPane({
   const isAiSummaryOperationPendingRef = useRef(false)
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
+  const agentRunReports = useAgentRunReportCommentDetails({
+    accessToken,
+    commentCount: collaboration?.comments.length ?? 0,
+    locale,
+    teamId: task?.teamId,
+    workItemId: task?.id ?? '',
+  })
   const isWorkItemMutationPending = isIssueSaving ||
     isAiPlanningOperationPending ||
     isAiSummaryOperationPending
@@ -402,6 +423,10 @@ export function TaskDetailPane({
     ? scheduleSelection.mode
     : resolvedSchedule?.mode ?? 'unscheduled'
 
+  // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
+  // The identity matches the editor's, so a new Work Item or revision starts a fresh draft.
+  const contributorDraftState = useContributorDraft(scheduleSelectionIdentity)
+  const acceptanceCriteriaDraftState = useAcceptanceCriteriaDraft(scheduleSelectionIdentity)
   if (!task) {
     const statusMessage = isLoading
       ? t('tasks.detail.loading')
@@ -414,8 +439,8 @@ export function TaskDetailPane({
         <p
           className={`rounded-md border border-dashed px-4 py-8 text-center text-sm font-medium ${
             errorMessage && !isLoading
-              ? 'border-red-200 bg-red-50 text-red-700'
-              : 'border-[var(--workbench-border-strong)] bg-white text-[var(--workbench-muted)]'
+              ? 'border-red-200 bg-red-50 text-fg-red-700'
+              : 'border-[var(--workbench-border-strong)] bg-surface text-[var(--workbench-muted)]'
           }`}
           tabIndex={errorMessage && !isLoading ? -1 : undefined}
           role={errorMessage && !isLoading ? 'alert' : 'status'}
@@ -491,6 +516,8 @@ export function TaskDetailPane({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
+  const contributorDirectory = resolveWorkItemContributorDirectory(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -788,6 +815,19 @@ export function TaskDetailPane({
       ))
       return
     }
+    const contributorSubmission = readContributorDraftSubmission(formData)
+    if (contributorSubmission && 'error' in contributorSubmission) {
+      contributorDraftState.setDraft((current) => ({ ...current, submitError: contributorSubmission }))
+      return
+    }
+    contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
+    const contributorDraft = contributorSubmission
+    const acceptanceCriteriaSubmission = readAcceptanceCriteriaDraftSubmission(formData)
+    if (acceptanceCriteriaSubmission && 'error' in acceptanceCriteriaSubmission) {
+      acceptanceCriteriaDraftState.setDraft((current) => ({ ...current, submitError: acceptanceCriteriaSubmission }))
+      return
+    }
+    acceptanceCriteriaDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -838,6 +878,12 @@ export function TaskDetailPane({
     if (hasOverviewSection && assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
       nextIssueInput.assigneeUserId = selectedAssigneeUserId
     }
+    if (contributorDraft) {
+      nextIssueInput.contributorAssignments = contributorDraft.assignments
+    }
+    if (acceptanceCriteriaSubmission) {
+      nextIssueInput.acceptanceCriteria = acceptanceCriteriaSubmission.criteria
+    }
 
     void submitIssueUpdate(nextIssueInput)
   }
@@ -870,7 +916,7 @@ export function TaskDetailPane({
         ) : null}
       </label>
       {isWorkItemTypeChangeRequested ? (
-        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="task-detail-work-item-type-preview">
+        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-surface p-3 text-sm" data-testid="task-detail-work-item-type-preview">
           <p className="font-semibold text-[var(--workbench-text)]">
             {t('tasks.detail.typeChange.title')}
           </p>
@@ -937,21 +983,50 @@ export function TaskDetailPane({
                 </label>
               ) : null}
               {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
-                <p className="text-amber-700">
+                <p className="text-fg-amber-700">
                   {t('tasks.detail.typeChange.missingRequired')}
                 </p>
               ) : null}
             </>
           ) : activeTypeChangeState.errorMessage ? (
-            <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
+            <p className="text-fg-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
           ) : null}
           {fieldErrors.typeChange ? (
-            <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
+            <p className="font-semibold text-fg-red-700" role="alert">{fieldErrors.typeChange}</p>
           ) : null}
         </div>
       ) : null}
     </section>
   ) : null
+
+  /**
+   * Renders the Work Item-wide contributor and acceptance criteria editors; shown even when a type
+   * omits the overview section.
+   */
+  const renderContributorsEditor = (): ReactNode => (
+    <>
+      <WorkItemContributorsEditor
+        assignments={(issue ?? currentTask).contributorAssignments}
+        formId={editorFormId}
+        jobRoles={resolvedConfiguration?.jobRoles ?? []}
+        draftState={contributorDraftState}
+        key={`contributors:${editorIdentity}`}
+        locale={locale}
+        memberDirectory={contributorDirectory}
+        memberOptions={contributorOptions}
+        ownerUserId={(issue ?? currentTask).assigneeUserId}
+        readOnly={isReadOnly}
+      />
+      <WorkItemAcceptanceCriteriaEditor
+        criteria={(issue ?? currentTask).acceptanceCriteria}
+        draftState={acceptanceCriteriaDraftState}
+        formId={editorFormId}
+        key={`acceptance-criteria:${editorIdentity}`}
+        locale={locale}
+        readOnly={isReadOnly}
+      />
+    </>
+  )
 
   /** Renders one configured Work Item detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
@@ -994,9 +1069,18 @@ export function TaskDetailPane({
                     ))}
                   </select>
                 </label>
-                <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('issues.create.assignee')}
+                <div className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                  {/* The help sits outside the label so it describes the select without joining its name. */}
+                  <label htmlFor={`${editorFormId}-owner`}>{t('workItems.owner.label')}</label>
+                  <span
+                    className="text-xs font-normal text-[var(--workbench-muted)]"
+                    id={`${editorFormId}-owner-help`}
+                  >
+                    {t('workItems.owner.help')}
+                  </span>
                   <select
+                    aria-describedby={`${editorFormId}-owner-help`}
+                    id={`${editorFormId}-owner`}
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={assigneeUserId}
                     form={editorFormId}
@@ -1010,7 +1094,7 @@ export function TaskDetailPane({
                       <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
                     ))}
                   </select>
-                </label>
+                </div>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('tasks.column.priority')}
                   <select
@@ -1026,6 +1110,7 @@ export function TaskDetailPane({
                   </select>
                 </label>
               </div>
+              {renderContributorsEditor()}
               {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
             </section>
           </fieldset>
@@ -1172,7 +1257,7 @@ export function TaskDetailPane({
                   : ''}
               </p>
               {fieldErrors.schedule ? (
-                <p className="text-sm font-semibold text-red-700" role="alert">
+                <p className="text-sm font-semibold text-fg-red-700" role="alert">
                   {fieldErrors.schedule}
                 </p>
               ) : null}
@@ -1190,7 +1275,7 @@ export function TaskDetailPane({
       case 'relations':
         return (
           <>
-            <div className="border-b border-[var(--workbench-border)] bg-white px-5 py-5">
+            <div className="border-b border-[var(--workbench-border)] bg-surface px-5 py-5">
               <WorkItemRelationsEditor
                 candidates={canonicalRelationCandidates.map((candidate) => ({
                   id: candidate.id,
@@ -1212,7 +1297,7 @@ export function TaskDetailPane({
                 relations={relations}
               />
             </div>
-            <div className="border-b border-[var(--workbench-border)] bg-white px-5 py-5">
+            <div className="border-b border-[var(--workbench-border)] bg-surface px-5 py-5">
               <WorkItemDependencyPanel
                 canManageEndpoint={canManageScheduleDependencyEndpoint}
                 currentEndpoint={{ teamId: task.teamId, workItemId: task.id }}
@@ -1251,6 +1336,7 @@ export function TaskDetailPane({
       case 'activity':
         return collaboration ? (
           <fieldset className="contents" disabled={isIssueSaving || isBulkOperationPending}>
+            {agentRunReports.loadNotice}
             <IssueCollaborationPanel
               aiAssistance={collaborationAiAssistance}
               route={collaborationRoute}
@@ -1267,6 +1353,7 @@ export function TaskDetailPane({
               onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
               readOnlyMessage={collaborationReadOnlyMessage}
+              renderCommentDetails={agentRunReports.renderCommentDetails}
             />
           </fieldset>
         ) : null
@@ -1287,7 +1374,7 @@ export function TaskDetailPane({
         onSubmit={submitEditorForm}
       />
       <div
-        className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
+        className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-surface px-5 py-4"
         onChange={() => {
           const nextDirtyState = { dirty: true, identity: editorIdentity }
           editorDirtyStateRef.current = nextDirtyState
@@ -1318,7 +1405,7 @@ export function TaskDetailPane({
             ) : null}
             {canAccessTriage && sourceTriageEntryId ? (
               <a
-                className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                 data-testid="task-detail-triage-source"
                 href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, sourceTriageEntryId)}
                 aria-disabled={isWorkItemMutationPending || undefined}
@@ -1339,7 +1426,7 @@ export function TaskDetailPane({
                   {reverseTriageSources.map((entry) => (
                     <li key={entry.id}>
                       <a
-                        className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        className="text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                         href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, entry.id)}
                         aria-disabled={isWorkItemMutationPending || undefined}
                         tabIndex={isWorkItemMutationPending ? -1 : undefined}
@@ -1350,7 +1437,7 @@ export function TaskDetailPane({
                   ))}
                 </ul>
                 {triageSourcesError ? (
-                  <p className="mt-2 text-xs text-red-700" role="alert">
+                  <p className="mt-2 text-xs text-fg-red-700" role="alert">
                     {t('tasks.detail.triageSources.error')}
                   </p>
                 ) : null}
@@ -1380,7 +1467,7 @@ export function TaskDetailPane({
                   {triageContextSnapshots.map((snapshot) => (
                     <li className="text-xs leading-5 text-[var(--workbench-muted)]" key={snapshot.triageEntryId}>
                       <a
-                        className="font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        className="font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                         href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
                         aria-disabled={isWorkItemMutationPending || undefined}
                         tabIndex={isWorkItemMutationPending ? -1 : undefined}
@@ -1429,11 +1516,20 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
+        {issue && !isRetainedDetail ? (
+          <TaskHandoffPanel configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+        ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}
         {renderedDetailSectionOrder.map((section) => (
           <Fragment key={section}>{renderDetailSection(section)}</Fragment>
         ))}
+        {!hasOverviewSection ? (
+          // Same mutation lock as the overview section, so a draft cannot change while it saves.
+          <fieldset className="contents" disabled={isReadOnly || isWorkItemMutationPending}>
+            {renderContributorsEditor()}
+          </fieldset>
+        ) : null}
         {!hasCustomFieldSection && hasCustomFields ? (
           <fieldset
             className="contents"
@@ -1453,6 +1549,16 @@ export function TaskDetailPane({
             </div>
           </fieldset>
         ) : null}
+        {/* Agent claims are operational state, so Work Item types that hide the workflow section still show them. */}
+        {accessToken && issue && !isRetainedDetail ? (
+          <WorkItemAgentRunsPanelContainer
+            accessToken={accessToken}
+            key={`${issue.teamId}:${issue.id}:agent-runs`}
+            locale={locale}
+            teamId={issue.teamId}
+            workItemId={issue.id}
+          />
+        ) : null}
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
           form={editorFormId}
@@ -1469,7 +1575,7 @@ export function TaskDetailPane({
           </p>
         ) : null}
         {errorMessage ? (
-          <p className="text-sm font-semibold text-red-700" role="alert" tabIndex={-1}>{errorMessage}</p>
+          <p className="text-sm font-semibold text-fg-red-700" role="alert" tabIndex={-1}>{errorMessage}</p>
         ) : null}
       </div>
       <form
@@ -1663,9 +1769,10 @@ function formatProjectMemberOption(member: ProjectMember) {
  * @returns The message key for the source label.
  */
 function resolveTriageSourceMessageKey(
-  sourceKind: 'form' | 'chat' | 'email' | 'webhook' | 'manual-handoff',
+  sourceKind: TriageSourceKind,
 ): MessageKey {
   if (sourceKind === 'manual-handoff') return 'triage.source.manualHandoff'
+  if (sourceKind === 'agent-run') return 'triage.source.agentRun'
   return `triage.source.${sourceKind}`
 }
 

@@ -10,6 +10,7 @@ import type {
 import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
+  createCanonicalPublicAgentRunService,
   createCanonicalPublicWorkItemService,
   shouldEnableWorkspaceSearchProjection,
   testEnterpriseIdentityProviderConnection,
@@ -44,10 +45,13 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { DynamoDbCollectionsStore, InMemoryCollectionsStore } from '../../modules/collections'
+import { DynamoDbInboxDigestStore, DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore } from '../../modules/update-feed'
 import {
   recordApiAccess,
   recordApiError,
 } from '../../infrastructure/observability/api-observability'
+import { createXrayApiAccessRecorder } from '../../infrastructure/observability/xray-request-subsegment'
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
 import {
   createStaticRuntimeControlProvider,
@@ -98,6 +102,8 @@ import {
   InMemoryFocusStateClient,
   createFocusStateClient,
 } from '../../modules/focus'
+import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
+import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -110,13 +116,9 @@ import {
   TriageError,
   type TriageActionReferenceValidator,
   type TriageAdmissionValidator,
-  type TriageAuthorizationConditionChecks,
   type TriageConfigurationReferenceValidator,
 } from '../../modules/triage'
-import {
-  DynamoDbWorkspaceAccessClient,
-  type WorkspaceActiveMemberConditionOptions,
-} from '../../modules/workspace-access'
+import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
 import {
   createDefaultWorkItemImportExecutionStore,
   createDefaultWorkItemImportQueue,
@@ -147,6 +149,14 @@ import {
   type TenantLifecycleEnforcement,
 } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+import {
+  TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  createTriageAdmissionValidator,
+  createTriageOwnerProjectConditionChecks,
+  type TriageOwnerProjectReference,
+} from './triage-admission'
+
+export { createTriageAdmissionValidator }
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
 import {
   DynamoDbTimeTrackingRepository,
@@ -164,6 +174,7 @@ import {
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../modules/capacity-planning'
+import { createConfiguredAuditExportService } from './audit-export'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -242,7 +253,6 @@ export function createAutomationRepository(): DynamoDbAutomationRepository {
 
   return new DynamoDbAutomationRepository(
     config.environment.AUTOMATION_TABLE_NAME ??
-      config.environment.MUKUROJI_AUTOMATION_TABLE ??
       'mukuroji-automation-local',
     createDynamoDbDocumentClient(dynamoDbClient),
     dynamoDbClient,
@@ -325,7 +335,7 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
     throw new Error('ANALYTICS_TABLE_NAME must be set for durable time tracking storage.')
   }
   if (config.production && !auditTableName) {
-    throw new Error('MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for time tracking audit writes.')
+    throw new Error('AUDIT_EVENTS_TABLE_NAME must be set for time tracking audit writes.')
   }
   return new TimeTrackingService(
     new DynamoDbTimeTrackingRepository(
@@ -497,11 +507,17 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
   const { tenantAdministration, workspaceAccess } =
     createProductionTenantWorkspaceAccess()
+  const auditEvents = createAuditEventsClient()
+  const auditExports = createConfiguredAuditExportService({
+    readEvents: (query) => auditEvents.query(query),
+    countEvents: (query) => auditEvents.countEventsConsistently(query),
+  })
   return {
     customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
-    auditEvents: createAuditEventsClient(),
+    auditEvents,
+    ...(auditExports ? { auditExports } : {}),
     workspaceAccess,
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
@@ -537,12 +553,49 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     collaboration: new DynamoDbCollaborationClient(),
     fileProofing: createDefaultFileProofingClient(),
     notifications: new DynamoDbNotificationsClient(),
+    pushSubscriptions: new DynamoDbPushSubscriptionStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
+    ),
+    agentRuns: new DynamoDbAgentRunStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
+    ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
+    updateFeedReadState: new DynamoDbUpdateFeedReadStateStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    collections: new DynamoDbCollectionsStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      [],
+      (workspaceId, fence) => createWorkItemRevisionConditionCheck(
+        loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ?? 'mukuroji-team-issues-local',
+        workspaceId,
+        fence.teamId,
+        fence.issueId,
+        fence.revision,
+      ),
+    ),
+    updateFeedDigest: new DynamoDbUpdateFeedDigestStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    inboxDigestSettings: new DynamoDbInboxDigestStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      loadServerConfig().environment.NOTIFICATIONS_TABLE_NAME ?? 'mukuroji-notifications-local',
+      createDynamoDbDocumentClient(),
+    ),
     requestIntake: createDefaultRequestIntakeClient(
       createProductionTenantAvailability(),
       async (entry) => await triage.prepareEntryAdmission(entry),
@@ -858,8 +911,7 @@ function createProductionAiAssistanceService(
     )
   }
   const tableName = environment.AI_ASSISTANCE_TABLE_NAME?.trim() ||
-    environment.WORKSPACE_SEARCH_TABLE_NAME?.trim() ||
-    environment.MUKUROJI_WORKSPACE_SEARCH_TABLE?.trim()
+    environment.WORKSPACE_SEARCH_TABLE_NAME?.trim()
   if (config.production && !tableName) {
     throw new TypeError(
       'AI_ASSISTANCE_TABLE_NAME must be set for durable AI assistance storage.',
@@ -868,15 +920,14 @@ function createProductionAiAssistanceService(
   const auditTableName = getConfiguredAuditTableName()
   if (config.production && !auditTableName) {
     throw new TypeError(
-      'MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for AI policy audit writes.',
+      'AUDIT_EVENTS_TABLE_NAME must be set for AI policy audit writes.',
     )
   }
   const configuredWorkspaceAccessTableName =
-    environment.WORKSPACE_ACCESS_TABLE_NAME?.trim() ||
-    environment.MUKUROJI_WORKSPACE_ACCESS_TABLE?.trim()
+    environment.WORKSPACE_ACCESS_TABLE_NAME?.trim()
   if (config.production && !configuredWorkspaceAccessTableName) {
     throw new TypeError(
-      'WORKSPACE_ACCESS_TABLE_NAME or MUKUROJI_WORKSPACE_ACCESS_TABLE must be set for production AI policy authorization.',
+      'WORKSPACE_ACCESS_TABLE_NAME must be set for production AI policy authorization.',
     )
   }
   const workspaceAccessTableName = configuredWorkspaceAccessTableName ||
@@ -1075,58 +1126,6 @@ function createTriageClient(
   })
 }
 
-/** Workspace roles that may own a Triage entry or escalation. */
-const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionOptions = {
-  allowedRoles: ['owner', 'admin', 'member'],
-}
-
-/** Identifies one configured owner that must retain access to a destination Project. */
-type TriageOwnerProjectReference = {
-  /** Workspace member selected as the owner. */
-  memberUserId: string
-  /** Project that the owner must be able to operate in. */
-  projectId: string
-}
-
-/** Builds commit-time Project membership fences for configured Triage owners.
- *
- * @param projectDirectory Authoritative Project membership reader.
- * @param workspaceId Owning Workspace identifier.
- * @param references Owner and destination Project pairs to fence.
- * @param errorCode Stable error code when an owner lacks Project access.
- * @param errorMessage Safe error message when an owner lacks Project access.
- * @returns Deduplicated Project membership condition checks.
- */
-async function createTriageOwnerProjectConditionChecks(
-  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createProjectAccessConditionCheck'>,
-  workspaceId: string,
-  references: readonly TriageOwnerProjectReference[],
-  errorCode: string,
-  errorMessage: string,
-): Promise<TriageAuthorizationConditionChecks> {
-  const uniqueReferences = new Map<string, TriageOwnerProjectReference>()
-  for (const reference of references) {
-    const memberUserId = normalizeProjectMemberKey(reference.memberUserId)
-    uniqueReferences.set(`${reference.projectId}\u0000${memberUserId}`, {
-      memberUserId,
-      projectId: reference.projectId,
-    })
-  }
-  const conditionChecks = await Promise.all([...uniqueReferences.values()].map(async (reference) =>
-    await projectDirectory.createProjectAccessConditionCheck(
-      workspaceId,
-      reference.projectId,
-      reference.memberUserId,
-      'member',
-    )
-  ))
-  if (conditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
-    throw new TriageError(409, errorCode, errorMessage)
-  }
-  return conditionChecks.flatMap((conditionCheck) =>
-    conditionCheck === undefined ? [] : [conditionCheck]
-  )
-}
 
 /** Collects every configured owner and Project pair that can be selected together.
  *
@@ -1164,93 +1163,6 @@ function collectTriageConfigurationOwnerProjectReferences(
     }
   }
   return references
-}
-
-/** Creates live Project/member validation for every Triage admission attempt.
- *
- * @param projectDirectory Authoritative active Team and Project directory reader.
- * @param workspaceAccess Authoritative active Workspace member reader.
- * @returns A validator invoked after each current configuration evaluation.
- */
-export function createTriageAdmissionValidator(
-  projectDirectory: Pick<
-    DynamoDbProjectDirectoryClient,
-    'createActiveReferenceConditionChecks' | 'createProjectAccessConditionCheck'
-  >,
-  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
-): TriageAdmissionValidator {
-  return async (entry, configuration) => {
-    let directoryConditionChecks
-    try {
-      directoryConditionChecks = await projectDirectory.createActiveReferenceConditionChecks(
-        entry.workspaceId,
-        entry.teamId,
-        entry.projectId,
-      )
-    } catch (error) {
-      if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
-        throw new TriageError(
-          409,
-          'TriageAdmissionTeamUnavailable',
-          'The target Triage Team is not active.',
-          { cause: error },
-        )
-      }
-      if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
-        throw new TriageError(
-          409,
-          'TriageAdmissionProjectUnavailable',
-          'The configured Triage Project is not active in the target Team.',
-          { cause: error },
-        )
-      }
-      throw error
-    }
-    const memberUserIds = new Set<string>()
-    if (entry.ownerUserId) memberUserIds.add(normalizeProjectMemberKey(entry.ownerUserId))
-    const slaPolicy = entry.sla
-      ? configuration.slaPolicies.find((candidate) => candidate.id === entry.sla?.policyId)
-      : undefined
-    if (slaPolicy?.escalationOwnerUserId) {
-      memberUserIds.add(normalizeProjectMemberKey(slaPolicy.escalationOwnerUserId))
-    }
-    const memberConditionChecks = await Promise.all([...memberUserIds].map(async (memberUserId) =>
-      await workspaceAccess.createActiveMemberConditionCheck(
-        entry.workspaceId,
-        memberUserId,
-        TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
-      )
-    ))
-    if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
-      throw new TriageError(
-        409,
-        'TriageAdmissionOwnerUnavailable',
-        'A configured Triage owner is not an active Workspace member.',
-      )
-    }
-    const admissionProjectId = entry.projectId
-    const ownerProjectConditionChecks = await createTriageOwnerProjectConditionChecks(
-      projectDirectory,
-      entry.workspaceId,
-      admissionProjectId
-        ? [...memberUserIds].map((memberUserId) => ({
-            memberUserId,
-            projectId: admissionProjectId,
-          }))
-        : [],
-      'TriageAdmissionOwnerProjectUnavailable',
-      'A configured Triage owner cannot access the destination Project.',
-    )
-    return {
-      transactItems: [
-        ...directoryConditionChecks,
-        ...memberConditionChecks.flatMap((conditionCheck) =>
-          conditionCheck === undefined ? [] : [conditionCheck]
-        ),
-        ...ownerProjectConditionChecks,
-      ],
-    }
-  }
 }
 
 /** Creates commit-time guards for every directory and member referenced by settings. */
@@ -1452,6 +1364,7 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
   return {
     ...adapters,
     publicWorkItems: createCanonicalPublicWorkItemService(),
+    publicAgentRuns: createCanonicalPublicAgentRunService(),
     workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
     workItemImportSources: createDefaultWorkItemImportSourceStore(),
     workItemImportQueue: createDefaultWorkItemImportQueue(),
@@ -1466,6 +1379,7 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
  */
 export function createProductionOperationalDependencies(): OperationalDependencies {
   const config = loadServerConfig()
+  const recordXrayAccess = createXrayApiAccessRecorder()
   return {
     ...(config.applicationCommitSha === undefined
       ? {}
@@ -1473,7 +1387,12 @@ export function createProductionOperationalDependencies(): OperationalDependenci
     recordRuntimeControl:
       createProductionRuntimeControlObservationRecorder(),
     readiness: createDynamoDbReadinessProbe(),
-    recordAccess: recordApiAccess,
+    recordAccess: recordXrayAccess
+      ? (observation) => {
+        recordApiAccess(observation)
+        recordXrayAccess(observation)
+      }
+      : recordApiAccess,
     recordError: recordApiError,
     runtimeControl: createProductionRuntimeControlProvider('api'),
   }
@@ -1593,6 +1512,7 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
+      publicAgentRuns: createCanonicalPublicAgentRunService(),
       workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
       workItemImportSources: createLazyWorkItemImportSourceStore(),
       workItemImportQueue: createLazyWorkItemImportQueue(),
@@ -1691,8 +1611,14 @@ export function createTestAppDependencies(): AppDependencies {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
       planning: new InMemoryPlanningClient(),
+      updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
+      savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
+      collections: new InMemoryCollectionsStore(),
+      updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
+      inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
+      agentRuns: new InMemoryAgentRunStore(),
       requestIntake,
     },
     automation,
@@ -1750,6 +1676,7 @@ export function overrideAppDependencies(
         ? { projectDirectory: overrides.projectDirectory }
         : {}),
       ...(overrides.auditEvents ? { auditEvents: overrides.auditEvents } : {}),
+      ...(overrides.auditExports ? { auditExports: overrides.auditExports } : {}),
       ...(overrides.workspaceAccess
         ? { workspaceAccess: overrides.workspaceAccess }
         : {}),
@@ -1790,6 +1717,7 @@ export function overrideAppDependencies(
       ...(overrides.collaboration ? { collaboration: overrides.collaboration } : {}),
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
+      ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }
@@ -1805,6 +1733,11 @@ export function overrideAppDependencies(
         ? { workItemConfigurations: overrides.workItemConfigurations }
         : {}),
       ...(overrides.planning ? { planning: overrides.planning } : {}),
+      ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
+      ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
+      ...(overrides.collections ? { collections: overrides.collections } : {}),
+      ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
+      ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),
       ...(overrides.requestIntake ? { requestIntake: overrides.requestIntake } : {}),
       ...(overrides.triage ? { triage: overrides.triage } : {}),
       ...(overrides.analytics ? { analytics: overrides.analytics } : {}),
@@ -1861,6 +1794,9 @@ export function overrideAppDependencies(
       ...(overrides.transactions ? { transactions: overrides.transactions } : {}),
       ...(overrides.publicWorkItems
         ? { publicWorkItems: overrides.publicWorkItems }
+        : {}),
+      ...(overrides.publicAgentRuns
+        ? { publicAgentRuns: overrides.publicAgentRuns }
         : {}),
       ...(overrides.workItemImportExecutions
         ? { workItemImportExecutions: overrides.workItemImportExecutions }

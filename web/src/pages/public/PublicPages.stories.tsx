@@ -4,6 +4,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router'
 import { ForgotPasswordPage } from '../auth/ForgotPasswordPage'
 import { NotFoundPage } from './NotFoundPage'
 import { PrivacyPage } from './PrivacyPage'
+import { RouteErrorPage } from './RouteErrorPage'
 import { SupportPage } from './SupportPage'
 import { TermsPage } from './TermsPage'
 
@@ -127,4 +128,18 @@ export const NotFound: Story = {
  */
 export const NotFoundEnglish: Story = {
   render: () => renderPublicPage(<NotFoundPage initialLocale="en" />, '/unknown/workspace'),
+}
+
+/**
+ * Page shown when a page chunk fails to load, offering a reload.
+ */
+export const RouteError: Story = {
+  render: () => renderPublicPage(<RouteErrorPage initialLocale="ja" onReload={() => undefined} />, '/settings'),
+}
+
+/**
+ * English route error page.
+ */
+export const RouteErrorEnglish: Story = {
+  render: () => renderPublicPage(<RouteErrorPage initialLocale="en" onReload={() => undefined} />, '/settings'),
 }

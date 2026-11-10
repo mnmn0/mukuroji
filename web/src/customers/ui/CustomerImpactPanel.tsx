@@ -19,17 +19,17 @@ export type CustomerImpactPanelProps = {
 export function CustomerImpactPanel({ signal, t }: CustomerImpactPanelProps) {
   const headingId = useId()
   const signalClassName = signal.prioritySignal === 'critical'
-    ? 'border-red-200 bg-red-50 text-red-700'
+    ? 'border-red-200 bg-red-50 text-fg-red-700'
     : signal.prioritySignal === 'high'
-      ? 'border-orange-200 bg-orange-50 text-orange-700'
+      ? 'border-orange-200 bg-orange-50 text-fg-orange-700'
       : signal.prioritySignal === 'watch'
-        ? 'border-amber-200 bg-amber-50 text-amber-800'
+        ? 'border-amber-200 bg-amber-50 text-fg-amber-800'
         : 'border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-muted)]'
 
   return (
     <section
       aria-labelledby={headingId}
-      className="grid gap-3 border-b border-[var(--workbench-border)] bg-white px-5 py-5"
+      className="grid gap-3 border-b border-[var(--workbench-border)] bg-surface px-5 py-5"
       data-testid="customer-impact-panel"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">

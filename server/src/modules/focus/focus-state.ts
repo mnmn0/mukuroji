@@ -24,6 +24,7 @@ import {
   createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Durable recipient-specific snooze state for one Focus Work Item. */
 export type FocusSnoozeRecord = {
@@ -603,7 +604,7 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
 
 /** Resolves the physical Focus table name for the current runtime. */
 export function getConfiguredFocusTableName(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ): string {
   return environment.FOCUS_TABLE_NAME?.trim() || 'mukuroji-focus-local'
 }

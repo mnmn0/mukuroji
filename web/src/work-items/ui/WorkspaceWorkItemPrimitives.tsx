@@ -66,14 +66,14 @@ export function TaskListRow({
       type="button"
     >
       <div className="min-w-0 basis-full">
-        <p className="break-words text-sm font-semibold leading-6 text-[var(--workbench-text)] group-enabled:group-hover:text-[var(--workbench-primary)]">
+        <p className="break-words text-sm font-semibold leading-6 text-[var(--workbench-text)] group-enabled:group-hover:text-[var(--workbench-primary-text)]">
           {resolveWorkItemTitle(task)}
         </p>
         <p className="mt-1 truncate text-xs text-[var(--workbench-muted)]">{resolveWorkItemAssignee(task)}</p>
       </div>
       <StatusPill configuration={configuration} task={task} />
       <span className="text-xs text-[var(--workbench-muted)] tabular-nums">{task.dueDate}</span>
-      <span className="ml-auto text-xs font-medium text-[var(--workbench-primary)]">
+      <span className="ml-auto text-xs font-medium text-[var(--workbench-primary-text)]">
         {t('workspace.action.openTask')}
       </span>
     </button>
@@ -100,6 +100,8 @@ export type CompactTaskCardProps = {
   onDragEnd?: () => void
   /** Optional callback invoked when a native drag interaction starts. */
   onDragStart?: (event: DragEvent<HTMLElement>) => void
+  /** Badge naming how the viewer takes part, such as a contributor; omitted for the owner. */
+  involvementLabel?: string
   /** Row spacing selected by the effective task view. */
   density?: TaskViewDensity
   /** Opens the responsive canonical action menu for this Work Item. */
@@ -154,6 +156,7 @@ export function CompactTaskCard({
   focused = false,
   isDragging = false,
   isMoving = false,
+  involvementLabel,
   locale = 'ja',
   onDragEnd,
   onDragStart,
@@ -225,11 +228,11 @@ export function CompactTaskCard({
       aria-current={focused || undefined}
       aria-grabbed={isDragging || undefined}
       className={`min-w-0 w-full rounded-lg border border-slate-200 ${
-        selected ? 'bg-blue-50/70' : 'bg-white'
+        selected ? 'bg-blue-50/70' : 'bg-surface'
       } ${cardPadding} transition ${
-        draggable ? 'cursor-grab hover:border-[#99d7cf] hover:shadow-[0_1px_2px_rgba(23,32,29,0.06)] active:cursor-grabbing' : ''
+        draggable ? 'cursor-grab hover:border-tone-99d7cf hover:shadow-[0_1px_2px_rgba(23,32,29,0.06)] active:cursor-grabbing' : ''
       } ${focused ? 'ring-2 ring-blue-500/40' : ''} ${
-        isDragging ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''
+        isDragging ? 'opacity-50 ring-2 ring-tone-99d7cf' : ''
       } ${isMoving ? 'opacity-70' : ''}`}
       data-task-view-focused={focused ? 'true' : 'false'}
       data-task-view-item-key={taskViewItemKey}
@@ -252,7 +255,7 @@ export function CompactTaskCard({
       <div className="flex min-w-0 items-start gap-2">
         {onOpenTask ? (
           <button
-            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)] ${
+            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary-text)] disabled:hover:text-[var(--workbench-text)] ${
               wrapText ? 'whitespace-normal break-words' : 'truncate'
             }`}
             data-testid={testId ? `${testId}-open` : undefined}
@@ -270,7 +273,7 @@ export function CompactTaskCard({
         {onOpenActionMenu ? (
           <button
             aria-label={`${t('tasks.action.more')}: ${taskTitle}`}
-            className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+            className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
             data-testid={testId ? `${testId}-actions` : undefined}
             onClick={(event) => {
               const returnFocusElement = event.currentTarget
@@ -286,6 +289,14 @@ export function CompactTaskCard({
           </button>
         ) : null}
       </div>
+      {involvementLabel ? (
+        <span
+          className="mt-2 mr-1.5 inline-flex workbench-badge"
+          data-testid={testId ? `${testId}-involvement` : undefined}
+        >
+          {involvementLabel}
+        </span>
+      ) : null}
       {visibleFields.includes('workItemType') ? (
         <span
           className="mt-2 inline-flex max-w-full items-center gap-1.5 workbench-badge"
@@ -357,7 +368,7 @@ export function CompactTaskCard({
       {(visibleFields.includes('status') || revealStatusControl) && onStatusChange ? (
         <select
           aria-label={statusSelectLabel}
-          className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+          className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-fg-slate-400"
           data-testid={testId ? `${testId}-status-select` : undefined}
           disabled={isMoving}
           onBlur={() => {

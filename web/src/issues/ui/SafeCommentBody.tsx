@@ -23,12 +23,12 @@ export function SafeCommentBody({ bodyMarkdown, className = '' }: SafeCommentBod
   return (
     <div
       className={`min-w-0 break-words text-sm font-medium leading-6 text-[var(--workbench-text)]
-        [&_a]:font-semibold [&_a]:text-[#16766f] [&_a]:underline [&_a]:decoration-[#99d7cf] [&_a]:underline-offset-2
-        [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-[#99d7cf] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--workbench-muted)]
-        [&_code]:rounded [&_code]:bg-[#eef2f5] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.82rem] [&_code]:text-[#26333f]
+        [&_a]:font-semibold [&_a]:text-fg-16766f [&_a]:underline [&_a]:decoration-fg-99d7cf [&_a]:underline-offset-2
+        [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-tone-99d7cf [&_blockquote]:pl-3 [&_blockquote]:text-[var(--workbench-muted)]
+        [&_code]:rounded [&_code]:bg-tone-eef2f5 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.82rem] [&_code]:text-fg-26333f
         [&_input[type=checkbox]]:mr-2 [&_input[type=checkbox]]:accent-[var(--workbench-primary)]
         [&_li]:my-1 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p+p]:mt-2
-        [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--workbench-border)] [&_pre]:bg-[#f7f9fa] [&_pre]:p-3
+        [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--workbench-border)] [&_pre]:bg-tone-f7f9fa [&_pre]:p-3
         [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5
         [&_ul.contains-task-list]:list-none [&_ul.contains-task-list]:pl-0 ${className}`}
     >

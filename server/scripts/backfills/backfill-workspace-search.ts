@@ -348,7 +348,7 @@ function resolveTableNames(
   return {
     projectDirectory: resolveTableName(
       environment,
-      ['MUKUROJI_PROJECT_DIRECTORY_TABLE', 'PROJECT_DIRECTORY_TABLE_NAME'],
+      ['PROJECT_DIRECTORY_TABLE_NAME'],
       'mukuroji-project-directory-local',
       allowLocalDefaults,
     ),
@@ -362,19 +362,19 @@ function resolveTableNames(
     ),
     collaboration: resolveTableName(
       environment,
-      ['MUKUROJI_COLLABORATION_TABLE', 'COLLABORATION_TABLE_NAME'],
+      ['COLLABORATION_TABLE_NAME'],
       'mukuroji-collaboration-local',
       allowLocalDefaults,
     ),
     documents: resolveTableName(
       environment,
-      ['MUKUROJI_DOCUMENTS_TABLE', 'DOCUMENTS_TABLE_NAME'],
+      ['DOCUMENTS_TABLE_NAME'],
       'mukuroji-documents-local',
       allowLocalDefaults,
     ),
     workspaceSearch: resolveTableName(
       environment,
-      ['WORKSPACE_SEARCH_TABLE_NAME', 'MUKUROJI_WORKSPACE_SEARCH_TABLE'],
+      ['WORKSPACE_SEARCH_TABLE_NAME'],
       'mukuroji-workspace-search-local',
       allowLocalDefaults,
     ),

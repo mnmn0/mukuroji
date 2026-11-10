@@ -2401,6 +2401,158 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('admits a webhook entry routed by its endpoint with replies closed', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      const receipt = await harness.client.createWebhookEntry(
+        'workspace-1',
+        'support',
+        { id: 'webhook-1', name: 'Status page' },
+        {
+          eventId: 'evt-1',
+          title: 'Checkout errors',
+          body: 'Customers see 500 on checkout.',
+          requesterDisplayName: 'Status page',
+          requesterEmail: 'alerts@example.com',
+        },
+        { key: 'delivery-1', fingerprint: createTriageInputFingerprint({ eventId: 'evt-1' }) },
+        { receivedAt: '2026-08-01T00:00:00.000Z' },
+      )
+
+      expect(receipt.replayed).toBe(false)
+      const transactItems = harness.commands[2]?.input.TransactItems
+      const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
+      expect(stored).toMatchObject({
+        source: { kind: 'webhook', sourceId: 'webhook-1:evt-1', connectorId: 'webhook-1' },
+        requester: { displayName: 'Status page', email: 'alerts@example.com', guest: true },
+        permission: { canReply: false },
+        teamId: 'support',
+        state: 'pending',
+        // The entry starts from the time the delivery was first accepted.
+        receivedAt: '2026-08-01T00:00:00.000Z',
+      })
+      expect(JSON.stringify(transactItems)).toContain('webhook-ingest')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('admits one agent-run entry per run, with the agent as a non-guest requester', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      const receipt = await harness.client.createAgentRunEntry(
+        'workspace-1',
+        'support',
+        {
+          runId: 'run_1',
+          reason: 'failed',
+          title: 'Agent run failed: Fix checkout',
+          body: 'Claude Code (claude-code) finished the run as failed.',
+          agentName: 'Claude Code',
+          assigneeUserId: 'demo@example.com',
+          projectId: 'checkout',
+        },
+        { key: 'agent-run:run_1', fingerprint: createTriageInputFingerprint({ runId: 'run_1' }) },
+      )
+
+      expect(receipt.replayed).toBe(false)
+      const transactItems = harness.commands[2]?.input.TransactItems
+      const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
+      expect(stored).toMatchObject({
+        source: { kind: 'agent-run', sourceId: 'run_1' },
+        sourcePreview: { title: 'Agent run failed: Fix checkout' },
+        requester: { displayName: 'Claude Code', externalId: 'demo@example.com', guest: false },
+        permission: { canReply: false },
+        teamId: 'support',
+        // Only people who can see the Work Item's Project see the entry.
+        projectId: 'checkout',
+        routing: { candidates: [{ teamId: 'support', projectId: 'checkout', permitted: true }] },
+        state: 'pending',
+      })
+      expect(JSON.stringify(transactItems)).toContain('agent-run-ingest')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('refuses an agent-run entry that a routing rule moves to another Project', async () => {
+    const harness = createHarness([
+      {},
+      {
+        Item: {
+          entryType: 'triage-configuration',
+          configuration: {
+            ...createConfigurationSnapshot(5),
+            rules: [{
+              id: 'agent-runs',
+              name: 'Agent runs',
+              enabled: true,
+              order: 1,
+              sourceKinds: ['agent-run'],
+              keywords: [],
+              teamId: 'support',
+              projectId: 'billing',
+              owner: { type: 'unowned' },
+            }],
+          },
+          revision: 5,
+        },
+      },
+    ])
+    try {
+      await expect(harness.client.createAgentRunEntry(
+        'workspace-1',
+        'support',
+        {
+          runId: 'run_1',
+          reason: 'stalled',
+          title: 'Agent run stalled: Fix checkout',
+          body: 'Claude Code (claude-code) stopped sending heartbeats.',
+          agentName: 'Claude Code',
+          assigneeUserId: 'demo@example.com',
+          projectId: 'checkout',
+        },
+        { key: 'agent-run:run_1', fingerprint: createTriageInputFingerprint({ runId: 'run_1' }) },
+      )).rejects.toMatchObject({ status: 409, code: 'TriageAdmissionProjectChanged' })
+      // Nothing is written, so readers of the billing Project never see the checkout Work Item.
+      expect(harness.commands.map(({ name }) => name)).toEqual(['GetCommand', 'GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('stores a webhook entry admitted after its retention ended only in redacted form', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      await harness.client.createWebhookEntry(
+        'workspace-1',
+        'support',
+        { id: 'webhook-1', name: 'Status page' },
+        {
+          eventId: 'evt-old',
+          title: 'Old checkout errors',
+          body: 'Secret customer details.',
+          requesterDisplayName: 'Alice Requester',
+        },
+        { key: 'delivery-old', fingerprint: createTriageInputFingerprint({ eventId: 'evt-old' }) },
+        { receivedAt: '2020-01-01T00:00:00.000Z' },
+      )
+      const transactItems = JSON.stringify(harness.commands[2]?.input.TransactItems)
+      expect(transactItems).not.toContain('Secret customer details.')
+      expect(transactItems).not.toContain('Old checkout errors')
+      expect(transactItems).not.toContain('Alice Requester')
+      expect(transactItems).toContain('"redactedAt":"2026-08-09T00:00:00.000Z"')
+      const items = harness.commands[2]?.input.TransactItems
+      const receipt = Array.isArray(items)
+        ? items.find((item) => item?.Put?.Item?.entryType === 'triage-operation-receipt')
+        : undefined
+      // The replay receipt expires 90 days after admission, not after the old received time.
+      expect(receipt?.Put?.Item?.expiresAt).toBe(Math.floor(Date.parse('2026-11-07T00:00:00.000Z') / 1_000))
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('replays an existing manual source after a response is lost', async () => {
     const fingerprint = createTriageInputFingerprint({
       workspaceId: 'workspace-1',

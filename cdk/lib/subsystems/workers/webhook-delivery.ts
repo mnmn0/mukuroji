@@ -65,7 +65,7 @@ export function buildWebhookDeliveryWorkers(
   const {
     auditEventsTable,
     developerPlatformTable,
-    developerPlatformWebhookKey,
+    developerPlatformKey,
     enterpriseIdentityTable,
     projectDirectoryTable,
     tenantAdministrationTable,
@@ -113,11 +113,10 @@ export function buildWebhookDeliveryWorkers(
       },
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
-        DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID:
-          developerPlatformWebhookKey.keyArn,
+        DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: developerPlatformKey.keyArn,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
@@ -188,7 +187,7 @@ export function buildWebhookDeliveryWorkers(
     }),
   );
   restrictKmsGrantToWebhookPurpose(
-    developerPlatformWebhookKey.grants.decrypt(webhookDeliveryFunction),
+    developerPlatformKey.grants.decrypt(webhookDeliveryFunction),
   );
   webhookDeliveryQueue.grants.consumeMessages(webhookDeliveryFunction);
   webhookDeliveryQueue.grants.sendMessages(webhookDeliveryFunction);

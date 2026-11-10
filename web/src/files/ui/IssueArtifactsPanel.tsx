@@ -98,7 +98,7 @@ function IssueArtifactsPanelContent({
 
   return (
     <section
-      className={`border-t border-[var(--workbench-border)] bg-white ${className}`}
+      className={`border-t border-[var(--workbench-border)] bg-surface ${className}`}
       data-testid={expanded ? 'project-files-panel' : 'issue-artifacts-panel'}
     >
       <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4">
@@ -112,7 +112,7 @@ function IssueArtifactsPanelContent({
         {controller.capabilities.canUpload ? (
           <div className="flex flex-wrap items-center justify-end gap-2">
             {controller.capabilities.canGrantGuestAccess ? (
-              <label className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-[0.68rem] font-semibold text-[var(--workbench-muted)]">
+              <label className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 text-[0.68rem] font-semibold text-[var(--workbench-muted)]">
                 <input
                   checked={guestAccess}
                   className="h-4 w-4 accent-[var(--workbench-primary)]"
@@ -175,14 +175,14 @@ function IssueArtifactsPanelContent({
 
       {controller.hasLoadError ? (
         <div className="mx-5 mb-4 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5">
-          <p className="text-sm font-semibold text-red-700">{t('files.error.load')}</p>
-          <button className="text-xs font-semibold text-red-700 underline" onClick={() => void controller.refresh()} type="button">
+          <p className="text-sm font-semibold text-fg-red-700">{t('files.error.load')}</p>
+          <button className="text-xs font-semibold text-fg-red-700 underline" onClick={() => void controller.refresh()} type="button">
             {t('collaboration.retry')}
           </button>
         </div>
       ) : null}
       {controller.mutationErrorStatus ? (
-        <p className="mx-5 mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700" role="alert">
+        <p className="mx-5 mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-fg-red-700" role="alert">
           {resolveFileErrorMessage(controller.mutationErrorStatus, controller.mutationErrorCode, t)}
         </p>
       ) : null}
@@ -359,7 +359,7 @@ function FileRow({
         {file.capabilities.canDelete ? (
           <button
             aria-label={t('files.action.deleteNamed').replace('{name}', file.name)}
-            className="h-8 rounded-md px-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+            className="h-8 rounded-md px-2 text-xs font-semibold text-fg-red-700 hover:bg-red-50 disabled:opacity-50"
             disabled={controller.isMutating}
             onClick={() => {
               if (window.confirm(t('files.delete.confirm').replace('{name}', file.name))) {
@@ -436,7 +436,7 @@ function ApprovalSection({
           t={t}
         />
       ) : null}
-      {error ? <p className="mt-3 text-sm font-semibold text-red-700" role="alert">{t('approval.error')}</p> : null}
+      {error ? <p className="mt-3 text-sm font-semibold text-fg-red-700" role="alert">{t('approval.error')}</p> : null}
 
       <div className="mt-4 grid gap-3">
         {approvals.map((approval) => (
@@ -534,7 +534,7 @@ function ApprovalRequestForm({
       </label>
       <fieldset className="grid gap-2">
         <legend className="text-xs font-semibold text-[var(--workbench-text)]">{t('approval.reviewers')}</legend>
-        <div className="grid max-h-32 gap-1 overflow-y-auto rounded-md border border-[var(--workbench-border)] bg-white p-2">
+        <div className="grid max-h-32 gap-1 overflow-y-auto rounded-md border border-[var(--workbench-border)] bg-surface p-2">
           {members.map((member) => (
             <label className="flex items-center gap-2 text-xs font-medium text-[var(--workbench-text)]" key={member.memberKey}>
               <input
@@ -640,7 +640,7 @@ function ApprovalCard({
   }
 
   return (
-    <article className="rounded-lg border border-[var(--workbench-border)] bg-white p-3" data-testid={`approval-${approval.id}`}>
+    <article className="rounded-lg border border-[var(--workbench-border)] bg-surface p-3" data-testid={`approval-${approval.id}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">{subjectLabel}</p>
@@ -663,7 +663,7 @@ function ApprovalCard({
       {canCurrentUserCancel ? (
         <div className="mt-3 flex justify-end border-t border-[var(--workbench-border)] pt-3">
           <button
-            className="h-8 rounded-md border border-red-200 px-3 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+            className="h-8 rounded-md border border-red-200 px-3 text-xs font-semibold text-fg-red-700 hover:bg-red-50 disabled:opacity-50"
             disabled={controller.isMutating}
             onClick={() => void cancel()}
             type="button"
@@ -690,7 +690,7 @@ function ApprovalCard({
             <button className="workbench-button-secondary h-8 px-3 text-xs" disabled={controller.isMutating} onClick={() => void decide('request-changes')} type="button">
               {t('approval.action.requestChanges')}
             </button>
-            <button className="h-8 rounded-md border border-red-200 px-3 text-xs font-semibold text-red-700 hover:bg-red-50" disabled={controller.isMutating} onClick={() => void decide('reject')} type="button">
+            <button className="h-8 rounded-md border border-red-200 px-3 text-xs font-semibold text-fg-red-700 hover:bg-red-50" disabled={controller.isMutating} onClick={() => void decide('reject')} type="button">
               {t('approval.action.reject')}
             </button>
           </div>

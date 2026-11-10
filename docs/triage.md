@@ -102,8 +102,9 @@ subscribe したり、message/File を別 storage へ物理移送したり、dup
 
 ## Source adapters
 
-Production で初期 Entry を作成する compose 済み ingress は Form と manual handoff である。
-Chat、new-email、Webhook は共通 contract/state machine/source-claim を利用する adapter 境界を持つが、
+Production で初期 Entry を作成する compose 済み ingress は Form、manual handoff、Triage purpose の
+署名付き inbound webhook である。
+Chat と new-email は共通 contract/state machine/source-claim を利用する adapter 境界を持つが、
 provider の tenant/signature/reply 検証を行う production adapter が接続されるまでは初期 ingestion と
 request-information を fail closed にする。未配送の reply や未作成 Entry を成功として返さない。
 
@@ -134,11 +135,55 @@ envelope と handler を使い、sender、recipient、Message-ID、spam verdict�
 
 ### Webhook
 
-将来の production adapter は `automation` と `triage` を混同しない明示 purpose と routing 設定を
-持ち、署名検証済み normalized envelope だけを Triage に渡す必要がある。現行 Automation inbound
-endpoint は Triage ingress として接続せず、すべての webhook を暗黙に request とみなさない。
-Adapter 接続時も同じ provider event ID/同じ fingerprint は replay、異なる fingerprint は conflict
-にする。
+Inbound webhook endpoint は作成時に `purpose` を `automation` か `triage` に固定する。既存 endpoint と
+purpose を指定しない endpoint は `automation` である。`triage` endpoint は作成時に存在を確認した
+`triageRouting.teamId` を持ち、payload から Team、Project、owner、SLA を変えることはできない。
+Triage は record key に使える Team ID（英数字で始まり `A-Z a-z 0-9 . _ : -` のみ、200 文字以内）だけを
+扱うため、それ以外の Team ID（日本語名から作られた ID など）への routing は作成時に
+`400 AutomationInboundWebhookTriageTeamUnsupported` で拒否する。
+Team の確認は新しい endpoint を予約するときだけ行う。確認時の Team row への条件（active であること）は
+endpoint の予約 transaction に含めるため、確認後から予約の commit までに Team が archive されると予約は
+`409 AutomationInboundWebhookReferenceUnavailable` で失敗し、無効な Team への endpoint は作られない。
+同じ `Idempotency-Key` の作成 replay は、その後に Team が無効になっていても元の endpoint を返す
+（delivery 時の Team 確認で fail closed になる）。
+
+`triage` endpoint への delivery は Automation と同じ HMAC、timestamp、`Idempotency-Key`、signature
+replay、active tenant の検証を通る。その後:
+
+- body は `{ eventId, title, body, requester: { name, email? } }` だけを受け付け、それ以外の field は
+  `400 InvalidTriageWebhookEnvelope` にする。
+- delivery receipt は payload を含まない `triage.webhook-received` audit event として記録する。
+  Automation rule が評価する `webhook.received` は作らないため、Triage 用 endpoint は Automation を
+  起動しない。Automation rule の webhook trigger に `triage` endpoint は指定できない。
+- 新しい event では、他の source と同じ admission validator が routing Team の存在を commit 時の条件付き書き込みで
+  確認してから `webhook` source の Entry を作り、Team が無ければ `409 TriageAdmissionTeamUnavailable` を返す。
+  Directory の読み込みは admission 1 回につき validator の分だけで、route 側で重ねて読まない。
+  すでに受け付けた event の再配送は Team の確認より先に元の Entry を返すため、その後 Team が無くなっても
+  送信側は元の `triageEntryId` を受け取れる。Response は `{ eventId, triageEntryId }`
+  （`AutomationInboundWebhookDeliveryResponse`）。
+- delivery receipt を記録した後に Triage の受け付けが失敗して再送された場合も、Entry の `receivedAt`、SLA、retention は
+  delivery を最初に受け付けた時刻から計算する。その時点ですでに retention 期限を過ぎている Entry は、
+  redact 済みの形でだけ保存し、期限を過ぎた title、body、requester を新たに書き込まない。Triage の受付 receipt には endpoint と delivery key の SHA-256 digest を使い、
+  256 文字までの `Idempotency-Key` をそのまま扱える。
+  Source identity は `<endpointId>:<eventId>` で、同じ event と同じ envelope の再配送は元の Entry を
+  返し、同じ event に異なる envelope は `409 TriageSourceConflict` にする。Response 消失後の再送も
+  同じ Entry を返す。
+- delivery receipt は Triage の受け付けとは別の transaction で確定するため、`triage` endpoint の receipt と
+  同じ transaction で、opaque endpoint ID と delivery key の digest を key にした recovery marker も保存する
+  （receipt と同じ 400 日 TTL）。Revoke は opaque lookup と secret を削除するが marker は残すため、receipt の
+  確定後に Triage の受け付けが失敗し、再送までに secret が rotate されたり endpoint が pause または revoke
+  されたりしても、同じ `Idempotency-Key` と receipt が受け付けた raw body と SHA-256 が一致する再送は Entry の
+  作成を完了する。この照合は endpoint の状態にかかわらず、現在の secret による署名検証より前に行う。
+  Raw body は receipt の確定時に署名検証済みで、digest の一致がその body への束縛になるため、rotate 後や
+  secret の削除後も署名を検証し直さない。Marker の無い delivery、body が一致しない再送、新しい delivery は
+  照合後に従来どおり現在の secret で署名を検証し、inactive な endpoint では
+  `404 AutomationInboundWebhookNotFound` または `423 AutomationInboundWebhookPaused` で拒否する。
+- Triage の受け付けで起きた失敗は、DynamoDB の throttling などの基盤エラーも含めて Triage の error envelope
+  （`code` と `message`）で返し、基盤エラーは再試行可能な `503 TriageUnavailable` にする。
+- Team configuration の webhook 向け rule、owner rotation、SLA、retention は他の source と同様に
+  admission 時に適用する。
+- requester は外部 guest とし、webhook の reply adapter はまだないため request-information と reply は
+  fail closed のままにする。
 
 ### Manual handoff
 

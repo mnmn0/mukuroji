@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 /**
  * Environment values available to the server composition root.
  */
@@ -66,18 +68,85 @@ export function readServerEnvironment(): ServerEnvironment {
   return typeof Bun !== 'undefined' ? Bun.env : process.env
 }
 
+/** Optional raw environment text, kept exactly as the runtime supplied it. */
+const optionalEnvironmentText = z.string().optional()
+
+/** Message used when deployment commit provenance is malformed. */
+const APPLICATION_COMMIT_SHA_MESSAGE =
+  'MUKUROJI_APPLICATION_COMMIT_SHA must be one full lowercase 40-character Git commit SHA.'
+
 /**
- * Loads existing server defaults and production validation into an immutable value.
+ * Environment variables the server configuration reads, validated as text.
+ *
+ * Unknown keys are ignored here; adapters keep reading them from the live
+ * {@link ServerConfig.environment} map.
  */
-export function loadServerConfig(
-  environment: ServerEnvironment = readServerEnvironment(),
-  runtime: ServerRuntime = {
-    localBun: typeof Bun !== 'undefined' &&
-      environment.NODE_ENV !== 'production' &&
-      !environment.AWS_LAMBDA_FUNCTION_NAME &&
-      !environment.AWS_EXECUTION_ENV,
-  },
-): ServerConfig {
+const serverEnvironmentSchema = z.object({
+  NODE_ENV: optionalEnvironmentText,
+  AWS_LAMBDA_FUNCTION_NAME: optionalEnvironmentText,
+  AWS_EXECUTION_ENV: optionalEnvironmentText,
+  AWS_REGION: optionalEnvironmentText,
+  AWS_DEFAULT_REGION: optionalEnvironmentText,
+  ALLOWED_ORIGINS: optionalEnvironmentText,
+  DYNAMODB_ENDPOINT: optionalEnvironmentText,
+  AWS_ENDPOINT_URL_DYNAMODB: optionalEnvironmentText,
+  AWS_ENDPOINT_URL: optionalEnvironmentText,
+  COGNITO_ENDPOINT: optionalEnvironmentText,
+  SQS_ENDPOINT: optionalEnvironmentText,
+  AWS_ENDPOINT_URL_SQS: optionalEnvironmentText,
+  SECRETS_MANAGER_ENDPOINT: optionalEnvironmentText,
+  AWS_ENDPOINT_URL_SECRETS_MANAGER: optionalEnvironmentText,
+  AWS_ENDPOINT_URL_SECRETSMANAGER: optionalEnvironmentText,
+  MUKUROJI_LOCAL_AWS_RUNTIME: optionalEnvironmentText,
+  PORT: optionalEnvironmentText,
+  WORKSPACE_SEARCH_TABLE_NAME: optionalEnvironmentText,
+  MUKUROJI_RUNTIME_ROLE: optionalEnvironmentText,
+  MUKUROJI_APPLICATION_COMMIT_SHA: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/, APPLICATION_COMMIT_SHA_MESSAGE)
+    .optional(),
+})
+
+/** Environment variables validated by {@link serverEnvironmentSchema}. */
+type ParsedServerEnvironment = z.infer<typeof serverEnvironmentSchema>
+
+/** Validated configuration values derived from the environment, excluding live and lazy members. */
+type ServerConfigValues = Omit<ServerConfig, 'environment' | 'publicApiCursorSecret'>
+
+/** Schemas built for each local-Bun runtime mode, reused across loads. */
+const serverConfigSchemas = new Map<boolean, z.ZodType<ServerConfigValues, ServerEnvironment>>()
+
+/**
+ * Returns the configuration schema for one runtime mode.
+ *
+ * @param runtime - Runtime properties that select local defaults.
+ * @returns A schema that validates the environment and derives the typed configuration values.
+ */
+function getServerConfigSchema(
+  runtime: ServerRuntime,
+): z.ZodType<ServerConfigValues, ServerEnvironment> {
+  const cached = serverConfigSchemas.get(runtime.localBun)
+  if (cached) return cached
+  const schema = serverEnvironmentSchema.transform(
+    (environment, context) => deriveServerConfigValues(environment, runtime, context),
+  )
+  serverConfigSchemas.set(runtime.localBun, schema)
+  return schema
+}
+
+/**
+ * Derives typed configuration values, reporting unsafe endpoints as schema issues.
+ *
+ * @param environment - Environment variables already validated as text.
+ * @param runtime - Runtime properties that select local defaults.
+ * @param context - Transform context that collects validation issues.
+ * @returns The derived configuration values, or `z.NEVER` after reporting an issue.
+ */
+function deriveServerConfigValues(
+  environment: ParsedServerEnvironment,
+  runtime: ServerRuntime,
+  context: z.RefinementCtx,
+): ServerConfigValues {
   const production = environment.NODE_ENV === 'production' ||
     Boolean(environment.AWS_LAMBDA_FUNCTION_NAME) ||
     Boolean(environment.AWS_EXECUTION_ENV)
@@ -90,34 +159,40 @@ export function loadServerConfig(
     environment.DYNAMODB_ENDPOINT,
     environment.AWS_ENDPOINT_URL_DYNAMODB,
     environment.AWS_ENDPOINT_URL,
-  )
-  const dynamoDbEndpoint = validateOptionalDynamoDbEndpoint(
-    configuredDynamoDbEndpoint ?? (runtime.localBun ? 'http://localhost:4566' : undefined),
-    awsRegion,
-    environment,
-  )
-  const cognitoEndpoint =
-    environment.COGNITO_ENDPOINT ?? environment.AWS_ENDPOINT_URL
-  const sqsEndpoint = firstNonBlank(
-    environment.SQS_ENDPOINT,
-    environment.AWS_ENDPOINT_URL_SQS,
-    environment.AWS_ENDPOINT_URL,
-  )
+  ) ?? (runtime.localBun ? 'http://localhost:4566' : undefined)
   const configuredSecretsManagerEndpoint = firstNonBlank(
     environment.SECRETS_MANAGER_ENDPOINT,
     environment.AWS_ENDPOINT_URL_SECRETS_MANAGER,
     environment.AWS_ENDPOINT_URL_SECRETSMANAGER,
     environment.AWS_ENDPOINT_URL,
   )
-  const secretsManagerEndpoint = configuredSecretsManagerEndpoint
-    ? validateSecretsManagerEndpoint(configuredSecretsManagerEndpoint, awsRegion, environment)
-    : undefined
 
-  return Object.freeze({
-    environment,
+  let dynamoDbEndpoint: string | undefined
+  let secretsManagerEndpoint: string | undefined
+  try {
+    dynamoDbEndpoint = configuredDynamoDbEndpoint === undefined
+      ? undefined
+      : validateDynamoDbEndpoint(configuredDynamoDbEndpoint, awsRegion, environment)
+    secretsManagerEndpoint = configuredSecretsManagerEndpoint === undefined
+      ? undefined
+      : validateSecretsManagerEndpoint(configuredSecretsManagerEndpoint, awsRegion, environment)
+  } catch (error) {
+    context.addIssue({
+      code: 'custom',
+      message: error instanceof Error ? error.message : 'Server endpoint configuration is invalid.',
+    })
+    return z.NEVER
+  }
+
+  const cognitoEndpoint = environment.COGNITO_ENDPOINT ?? environment.AWS_ENDPOINT_URL
+  return {
     awsRegion,
     dynamoDbEndpoint,
-    sqsEndpoint,
+    sqsEndpoint: firstNonBlank(
+      environment.SQS_ENDPOINT,
+      environment.AWS_ENDPOINT_URL_SQS,
+      environment.AWS_ENDPOINT_URL,
+    ),
     secretsManagerEndpoint,
     secretsManagerEndpointIsLocal: secretsManagerEndpoint
       ? isLocalSecretsManagerHostname(new URL(secretsManagerEndpoint).hostname)
@@ -132,43 +207,47 @@ export function loadServerConfig(
     ),
     port: Number(environment.PORT ?? 3000),
     workspaceSearchProjectionEnabled: environment.NODE_ENV !== 'test' || Boolean(
-      environment.WORKSPACE_SEARCH_TABLE_NAME ??
-        environment.MUKUROJI_WORKSPACE_SEARCH_TABLE,
+      environment.WORKSPACE_SEARCH_TABLE_NAME,
     ),
     runtimeRole: environment.MUKUROJI_RUNTIME_ROLE,
     production,
-    applicationCommitSha: resolveApplicationCommitSha(
-      environment.MUKUROJI_APPLICATION_COMMIT_SHA,
-    ),
-    get publicApiCursorSecret() {
-      return resolvePublicApiCursorSecret(environment, production)
-    },
-  })
-}
-
-/** Validates an optional DynamoDB endpoint before it is passed to an AWS client. */
-function validateOptionalDynamoDbEndpoint(
-  value: string | undefined,
-  awsRegion: string,
-  environment: ServerEnvironment,
-): string | undefined {
-  return value === undefined ? undefined : validateDynamoDbEndpoint(value, awsRegion, environment)
+    applicationCommitSha: environment.MUKUROJI_APPLICATION_COMMIT_SHA,
+  }
 }
 
 /**
- * Validates an optional full Git commit SHA used as deployment provenance.
+ * Loads existing server defaults and production validation into an immutable value.
  *
- * @param value - Raw environment value supplied by the deployment.
- * @returns The validated full SHA, or undefined when deployment provenance is absent.
+ * The environment is validated and converted by a zod schema. A validation
+ * failure throws a `TypeError` carrying the first issue's message.
+ *
+ * @param environment - Live environment map, or an isolated map in tests.
+ * @param runtime - Runtime properties that select local defaults.
+ * @returns The validated, frozen server configuration.
  */
-function resolveApplicationCommitSha(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined
-  if (!/^[0-9a-f]{40}$/.test(value)) {
-    throw new Error(
-      'MUKUROJI_APPLICATION_COMMIT_SHA must be one full lowercase 40-character Git commit SHA.',
+export function loadServerConfig(
+  environment: ServerEnvironment = readServerEnvironment(),
+  runtime: ServerRuntime = {
+    localBun: typeof Bun !== 'undefined' &&
+      environment.NODE_ENV !== 'production' &&
+      !environment.AWS_LAMBDA_FUNCTION_NAME &&
+      !environment.AWS_EXECUTION_ENV,
+  },
+): ServerConfig {
+  const parsed = getServerConfigSchema(runtime).safeParse(environment)
+  if (!parsed.success) {
+    throw new TypeError(
+      parsed.error.issues[0]?.message ?? 'Server configuration is invalid.',
     )
   }
-  return value
+  const values = parsed.data
+  return Object.freeze({
+    environment,
+    ...values,
+    get publicApiCursorSecret() {
+      return resolvePublicApiCursorSecret(environment, values.production)
+    },
+  })
 }
 
 /** Applies the existing production-only Public API cursor secret validation lazily. */

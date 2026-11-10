@@ -1069,7 +1069,21 @@ function hasCanonicalPhysicalWorkItemShape(
     requiredNumberAttributeNames.every((name) => isNumberAttributeValue(item[name])) &&
     isCanonicalCustomFieldValuesAttribute(item.customFieldValues) &&
     isStringListAttributeValue(item.relationIds) &&
-    isMapAttributeValue(item.schedule)
+    isMapAttributeValue(item.schedule) &&
+    (item.contributorAssignments === undefined || isListOfMapsAttributeValue(item.contributorAssignments))
+}
+
+/**
+ * Checks whether a raw value is a DynamoDB list whose members are all maps.
+ *
+ * @param value - Raw attribute value.
+ * @returns True for a canonical list of map members.
+ */
+function isListOfMapsAttributeValue(value: unknown): boolean {
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !Array.isArray(value.L)) {
+    return false
+  }
+  return value.L.every((entry: unknown) => isMapAttributeValue(entry))
 }
 
 /**

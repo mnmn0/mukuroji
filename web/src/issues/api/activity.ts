@@ -3,8 +3,9 @@ import {
   createTeamIssuePath,
   readApiError,
   readJson,
-  trimTrailingSlash,
 } from './http'
+import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * チーム所有 Issue の活動種別です。
@@ -85,9 +86,7 @@ export type TeamIssueActivityPage = {
   nextCursor?: string
 }
 
-const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const issuesApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Loads one cursor page of Work Item activity from the append-only audit log.
@@ -167,16 +166,6 @@ function isTeamIssueActivityEvent(
     (value.summary === undefined || typeof value.summary === 'string') &&
     (value.metadata === undefined || isRecord(value.metadata))
   )
-}
-
-/**
- * Narrows an unknown JSON value to a non-array object.
- *
- * @param value - Untrusted decoded JSON.
- * @returns Whether the value is a JSON object candidate.
- */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function requestJson<TResponse>(

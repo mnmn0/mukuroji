@@ -89,7 +89,7 @@ export function PublicLegalDocument(props: PublicLegalDocumentProps) {
                 </time>
               </div>
             </div>
-            <div className="mt-8 rounded-lg border border-[#f4d6a6] bg-[#fffaf0] px-5 py-4 text-[#7a4b0c]" role="note">
+            <div className="mt-8 rounded-lg border border-tone-f4d6a6 bg-tone-fffaf0 px-5 py-4 text-fg-7a4b0c" role="note">
               <strong className="block text-sm">{t('public.legal.draftTitle')}</strong>
               <p className="mb-0 mt-1 text-sm font-medium leading-6">
                 {t('public.legal.draftDescription')}
@@ -110,7 +110,7 @@ export function PublicLegalDocument(props: PublicLegalDocumentProps) {
                         className="grid min-h-10 grid-cols-[24px_1fr] items-start gap-2 rounded-md px-2 py-2 text-sm font-semibold leading-5 text-[var(--workbench-muted)] no-underline hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-text)]"
                         href={`#${section.id}`}
                       >
-                        <span aria-hidden="true" className="font-mono text-xs leading-5 text-[var(--workbench-primary)]">
+                        <span aria-hidden="true" className="font-mono text-xs leading-5 text-[var(--workbench-primary-text)]">
                           {String(index + 1).padStart(2, '0')}
                         </span>
                         <span>{t(section.titleKey)}</span>
@@ -129,7 +129,7 @@ export function PublicLegalDocument(props: PublicLegalDocumentProps) {
                   key={section.id}
                 >
                   <div className="grid gap-3 sm:grid-cols-[46px_minmax(0,1fr)] sm:gap-5">
-                    <span className="font-mono text-sm font-bold text-[var(--workbench-primary)]" aria-hidden="true">
+                    <span className="font-mono text-sm font-bold text-[var(--workbench-primary-text)]" aria-hidden="true">
                       {String(index + 1).padStart(2, '0')}
                     </span>
                     <div>
@@ -146,7 +146,7 @@ export function PublicLegalDocument(props: PublicLegalDocumentProps) {
                 </section>
               ))}
 
-              <section className="mt-10 rounded-lg border border-[#99d7cf] bg-[#eefaf7] p-6 sm:flex sm:items-center sm:justify-between sm:gap-7">
+              <section className="mt-10 rounded-lg border border-tone-99d7cf bg-tone-eefaf7 p-6 sm:flex sm:items-center sm:justify-between sm:gap-7">
                 <div>
                   <h2 className="m-0 text-lg font-bold text-[var(--workbench-text)]">
                     {t('public.legal.questionTitle')}

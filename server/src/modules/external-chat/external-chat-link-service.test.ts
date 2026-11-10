@@ -17,6 +17,7 @@ import {
   type MergeExternalChatWorkItemLinksResult,
   type ResyncExternalChatWorkItemLinkResult,
   type UpdateExternalChatWorkItemLinkInput,
+  type WorkItemContributorAssignment,
 } from '@mukuroji/contracts'
 import {
   ChatProviderAdapterRegistry,
@@ -120,6 +121,13 @@ type CreateWorkItemResultCorruption =
   | 'due-after-updated'
   | 'approval-noncanonical'
   | 'approval-before-created'
+  | 'contributors-valid'
+  | 'contributors-unknown-field'
+
+/** Contributor assignments returned by the contributor-preservation fixture. */
+const fixtureContributorAssignments: WorkItemContributorAssignment[] = [
+  { assignmentId: 'a'.repeat(32), memberUserId: 'sam@example.com', jobRoleId: 'qa', plannedEffortMinutes: 60, status: 'planned' },
+]
 
 /** Complete application fixture for external chat link boundary tests. */
 type LinkServiceFixture = {
@@ -671,6 +679,14 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
             updatedAt: '2026-08-06T05:59:00.000Z',
           },
         }
+      case 'contributors-valid':
+        return { ...workItem, contributorAssignments: fixtureContributorAssignments }
+      case 'contributors-unknown-field': {
+        // A non-literal entry bypasses excess-property checks, like an untrusted storage result.
+        const assignment: WorkItemContributorAssignment = { assignmentId: 'b'.repeat(32), jobRoleId: 'qa', status: 'planned' }
+        const withUnknownField = { ...assignment, secretNote: 'x' }
+        return { ...workItem, contributorAssignments: [withUnknownField] }
+      }
       default:
         return workItem
     }
@@ -885,6 +901,7 @@ describe('ExternalChatLinkService', () => {
       'due-after-updated',
       'approval-noncanonical',
       'approval-before-created',
+      'contributors-unknown-field',
     ]
 
     for (const corruption of corruptions) {
@@ -896,6 +913,16 @@ describe('ExternalChatLinkService', () => {
         createWorkItemCommand(),
       )).rejects.toMatchObject({ code: 'ExternalChatPersistenceFailed' })
     }
+  })
+
+  test('keeps validated contributor assignments in the created Work Item', async () => {
+    const fixture = createLinkServiceFixture()
+    fixture.transactions.createWorkItemResultCorruption = 'contributors-valid'
+    const created = await fixture.service.createWorkItemFromThread(
+      createCommandContext('create-with-contributors'),
+      createWorkItemCommand(),
+    )
+    expect(created.workItem.contributorAssignments).toEqual(fixtureContributorAssignments)
   })
 
   test('authorizes an existing Work Item before resolving or linking its provider source', async () => {

@@ -23,6 +23,7 @@ import {
   createAnalyticsSnapshot,
 } from '../../analytics'
 import type { WorkspaceMember } from '../../../workspace-access'
+import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 
 const ANALYTICS_SCHEDULE_PAGE_SIZE = 100
 const ANALYTICS_SCHEDULE_MAX_PAGES = 100
@@ -907,7 +908,10 @@ function stableAnalyticsScheduleStringify(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(stableAnalyticsScheduleStringify).join(',')}]`
   }
-  const entries = Object.entries(value as Record<string, unknown>)
+  if (!isRecord(value)) {
+    return JSON.stringify(value) ?? 'undefined'
+  }
+  const entries = Object.entries(value)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) =>
       `${JSON.stringify(key)}:${stableAnalyticsScheduleStringify(entry)}`

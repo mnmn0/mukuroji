@@ -15,6 +15,7 @@ import {
   resolveAiAssistanceApiBaseUrl,
 } from './errors'
 import { parseAiAssistanceGenerationResponse } from './generationResponse'
+import { isRecord } from '../../../shared/api/jsonValidation'
 
 const aiAssistanceApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const defaultErrorMessage = 'Unable to complete the AI assistance request.'
@@ -463,7 +464,8 @@ async function readJson(
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new AiAssistanceApiError(
       response.status,
@@ -487,7 +489,3 @@ function hasConfirmedIdempotencyReplay(response: Response): boolean {
   return response.headers.get('Idempotency-Replayed') === 'true'
 }
 
-/** Narrows an unknown JSON value to a record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}

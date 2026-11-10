@@ -117,6 +117,39 @@ test('rejects duplicate status IDs and broken transition references', () => {
   })).toThrow('Workflow status ID must be unique.')
 })
 
+test('validates job roles with stable IDs and trimmed names', () => {
+  expect(validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    jobRoles: [
+      { id: 'designer', name: '  Designer  ' },
+      { id: 'legacy.writer', name: 'Writer', archived: true },
+      { id: 'qa', name: 'QA', archived: false },
+    ],
+  }).jobRoles).toEqual([
+    { id: 'designer', name: 'Designer' },
+    { id: 'legacy.writer', name: 'Writer', archived: true },
+    { id: 'qa', name: 'QA' },
+  ])
+  expect(validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION).jobRoles).toBeUndefined()
+
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    jobRoles: [{ id: 'qa', name: 'QA' }, { id: 'qa', name: 'Quality' }],
+  })).toThrow('Job role ID must be unique.')
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    jobRoles: [{ id: 'Quality Assurance', name: 'QA' }],
+  })).toThrow('Job role ID must use letters')
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    jobRoles: [{ id: 'qa', name: ' ' }],
+  })).toThrow('Job role name is invalid.')
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    jobRoles: Array.from({ length: 101 }, (_, index) => ({ id: `role-${index}`, name: `Role ${index}` })),
+  })).toThrow('at most 100 entries')
+})
+
 test('enforces allowed workflow transitions', () => {
   const configuration = createConfiguration({
     workflow: {

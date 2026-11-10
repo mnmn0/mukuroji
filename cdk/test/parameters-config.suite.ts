@@ -5,17 +5,20 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { buildStackParameters } from '../lib/config/stack-parameters';
 import { synthesizedTemplate } from './test-support';
 
-test('fresh deployment requires explicit Cognito workspace and runtime secrets parameters', () => {
+test('fresh deployment requires explicit workspace and runtime secrets parameters', () => {
   const template = synthesizedTemplate;
   const parameters = template.toJSON().Parameters;
 
+  // Blank Cognito IDs make the stack create the user pool and password client.
   expect(parameters.CognitoUserPoolId).toEqual(expect.objectContaining({
     Type: 'String',
-    AllowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
+    Default: '',
+    AllowedPattern: '^(?:|[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+)$',
   }));
   expect(parameters.CognitoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
-    AllowedPattern: '^[A-Za-z0-9]+$',
+    Default: '',
+    AllowedPattern: '^(?:|[A-Za-z0-9]+)$',
   }));
   expect(parameters.CognitoSsoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
@@ -128,13 +131,19 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
       NoEcho: true,
     }));
   }
+  expect(parameters.EdgeOriginSecret).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^[A-Za-z0-9_-]{32,128}$',
+    MinLength: 32,
+    MaxLength: 128,
+    NoEcho: true,
+  }));
 
   for (const parameterName of [
-    'CognitoUserPoolId',
-    'CognitoUserPoolClientId',
     'EnterpriseIdentityTokenHashSecret',
     'WorkspaceDirectoryId',
     'WorkspaceAuditPseudonymKey',
+    'EdgeOriginSecret',
     'InitialOwnerEmail',
     'InitialOwnerUsername',
     'RequestEmailWebhookSecret',
@@ -177,20 +186,62 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
   expect(template.toJSON().Rules.CognitoClientSeparation).toEqual({
     Assertions: [{
       Assert: {
-        'Fn::Not': [{
-          'Fn::Equals': [
-            { Ref: 'CognitoSsoUserPoolClientId' },
-            { Ref: 'CognitoUserPoolClientId' },
-          ],
-        }],
+        'Fn::Or': [
+          { 'Fn::Equals': [{ Ref: 'CognitoSsoUserPoolClientId' }, ''] },
+          {
+            'Fn::Not': [{
+              'Fn::Equals': [
+                { Ref: 'CognitoSsoUserPoolClientId' },
+                { Ref: 'CognitoUserPoolClientId' },
+              ],
+            }],
+          },
+        ],
       },
       AssertDescription:
         'CognitoSsoUserPoolClientId must differ from CognitoUserPoolClientId.',
     }],
   });
 
-  template.resourceCountIs('AWS::Cognito::UserPool', 0);
-  template.resourceCountIs('AWS::Cognito::UserPoolClient', 0);
+  expect(template.toJSON().Rules.CognitoUserPoolParametersPaired).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Or': [
+          {
+            'Fn::And': [
+              { 'Fn::Equals': [{ Ref: 'CognitoUserPoolId' }, ''] },
+              { 'Fn::Equals': [{ Ref: 'CognitoUserPoolClientId' }, ''] },
+            ],
+          },
+          {
+            'Fn::And': [
+              { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'CognitoUserPoolId' }, ''] }] },
+              { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'CognitoUserPoolClientId' }, ''] }] },
+            ],
+          },
+        ],
+      },
+      AssertDescription:
+        'Leave CognitoUserPoolId and CognitoUserPoolClientId both empty to create a user pool, or pass both to use an existing one.',
+    }],
+  });
+  expect(template.toJSON().Rules.StackOwnedUserPoolOwnerUsername).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Or': [
+          { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'CognitoUserPoolId' }, ''] }] },
+          {
+            'Fn::Equals': [
+              { Ref: 'InitialOwnerUsername' },
+              { Ref: 'InitialOwnerEmail' },
+            ],
+          },
+        ],
+      },
+      AssertDescription:
+        'When the stack creates the user pool, InitialOwnerUsername must equal InitialOwnerEmail.',
+    }],
+  });
 });
 
 test('derives restore-drill approver ARN partitions from concrete stack Regions', () => {
@@ -215,7 +266,7 @@ test('derives restore-drill approver ARN partitions from concrete stack Regions'
     { partition: 'aws-us-gov', stack: govCloudStack },
     { partition: 'aws-cn', stack: chinaStack },
   ]) {
-    buildStackParameters(stack);
+    buildStackParameters(stack, { restoreDrillEnabled: true });
     expect(
       Template.fromStack(stack).toJSON()
         .Parameters.RestoreDrillCleanupApproverRoleArn.AllowedPattern,
@@ -232,7 +283,7 @@ test('rejects concrete restore-drill stacks in unsupported ARN partitions', () =
     { env: { account: '123456789012', region: 'us-iso-east-1' } },
   );
 
-  expect(() => buildStackParameters(stack)).toThrow(
+  expect(() => buildStackParameters(stack, { restoreDrillEnabled: true })).toThrow(
     'Restore drill does not support the aws-iso AWS partition.',
   );
 
@@ -241,7 +292,7 @@ test('rejects concrete restore-drill stacks in unsupported ARN partitions', () =
     'UnknownPartitionFixture',
     { env: { account: '123456789012', region: 'xx-unknown-1' } },
   );
-  expect(() => buildStackParameters(unknownRegionStack)).toThrow(
+  expect(() => buildStackParameters(unknownRegionStack, { restoreDrillEnabled: true })).toThrow(
     'Unable to resolve an AWS partition for concrete Region xx-unknown-1.',
   );
 });

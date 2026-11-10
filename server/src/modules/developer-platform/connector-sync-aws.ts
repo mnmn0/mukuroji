@@ -23,6 +23,7 @@ import type {
   ConnectorPollInventoryTarget,
 } from './connector-sync-worker'
 import type { ConnectorWorkItemResourceType } from './connector-sync-runtime'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** DynamoDB poll adapter の共通 options です。 */
 export type DynamoDbConnectorPollOptions = {
@@ -108,7 +109,7 @@ implements ConnectorPollCheckpointStore {
   /** Environment または明示 options から checkpoint store を作成します。 */
   constructor(options: DynamoDbConnectorPollCheckpointStoreOptions = {}) {
     this.tableName = readText(
-      options.tableName ?? process.env.DEVELOPER_PLATFORM_TABLE_NAME ??
+      options.tableName ?? loadServerConfig().environment.DEVELOPER_PLATFORM_TABLE_NAME ??
         'mukuroji-developer-platform-local',
       'Developer platform table name',
     )
@@ -209,12 +210,12 @@ export class DynamoDbConnectorPollInventory implements ConnectorPollInventory {
   /** Environment または明示 options から global inventory を作成します。 */
   constructor(options: DynamoDbConnectorPollOptions = {}) {
     this.tableName = readText(
-      options.tableName ?? process.env.DEVELOPER_PLATFORM_TABLE_NAME ??
+      options.tableName ?? loadServerConfig().environment.DEVELOPER_PLATFORM_TABLE_NAME ??
         'mukuroji-developer-platform-local',
       'Developer platform table name',
     )
     this.lookupIndexName = readText(
-      options.lookupIndexName ?? process.env.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME ??
+      options.lookupIndexName ?? loadServerConfig().environment.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME ??
         'LookupKeyIndex',
       'Developer platform lookup index name',
     )
@@ -318,16 +319,17 @@ export class DynamoDbConnectorPollInventory implements ConnectorPollInventory {
 }
 
 function createDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ?? process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.DYNAMODB_ENDPOINT ?? environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),

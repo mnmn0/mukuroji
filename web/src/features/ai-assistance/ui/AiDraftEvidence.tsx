@@ -52,7 +52,7 @@ export function AiDraftEvidenceMeta({
         {referencedCitations.map((citation) => (
           <li key={citation.id}>
             <a
-              className="inline-flex min-h-[44px] items-center gap-1 text-app-caption font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline"
+              className="inline-flex min-h-[44px] items-center gap-1 text-app-caption font-semibold text-[var(--workbench-primary-text)] underline-offset-2 hover:underline"
               href={citation.href}
               rel="noreferrer"
               target="_blank"

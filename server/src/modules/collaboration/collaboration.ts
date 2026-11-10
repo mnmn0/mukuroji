@@ -7,6 +7,7 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
+  BatchGetCommand,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -42,6 +43,7 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../audit'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Comment 本文に保存できる文字数です。 */
 export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
@@ -445,9 +447,18 @@ export type CreateCollaborationCommentInput = WorkItemCollaborationScope & {
   deepLink?: string
   /** Caller authorization rows guarded in the same transaction as the comment write. */
   authorizationConditionChecks?: readonly CollaborationAuthorizationConditionCheck[]
+  /**
+   * Writes of a trusted caller committed atomically with the comment, after its authorization
+   * checks. With co-writes, a conditional failure is never resolved as a replay of an existing
+   * comment; the caller owns replay and classifies the failure.
+   */
+  coWrites?: readonly CollaborationCoWrite[]
   /** State と同じ transaction に保存する audit context です。 */
   auditContext?: MutationAuditContext
 }
+
+/** One write of a trusted caller committed in the same transaction as a comment. */
+export type CollaborationCoWrite = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
 /** Comment 本文更新入力です。 */
 export type UpdateCollaborationCommentInput = WorkItemCollaborationScope & {
@@ -635,6 +646,12 @@ export interface CollaborationClient {
   getWatcherState(input: GetWatcherStateInput): Promise<CollaborationWatcherState>
   /** Reads one exact member watcher row without scanning the watcher scope. */
   getMemberWatcherState(input: GetWatcherStateInput): Promise<CollaborationMemberWatcherState>
+  /** Reads subscriptions for one member across at most 2,000 authorized scopes, without watcher scans.
+   * @param memberKey - Authenticated member.
+   * @param entityKeys - Server-built currently authorized entity scopes.
+   * @returns Subscribed scope identities only.
+   */
+  getMemberSubscribedScopes(memberKey: string, entityKeys: readonly string[]): Promise<string[]>
   /** 手動または自動 watcher を保存します。 */
   subscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
@@ -2568,8 +2585,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   private readonly bootstrapLocalTable: boolean
 
   constructor(
-    tableName = readEnvironment('MUKUROJI_COLLABORATION_TABLE') ??
-      readEnvironment('COLLABORATION_TABLE_NAME') ??
+    tableName = readEnvironment('COLLABORATION_TABLE_NAME') ??
       'mukuroji-collaboration-local',
     parentIssueTableName = readEnvironment('WORK_ITEMS_TABLE_NAME') ??
       'mukuroji-team-issues-local',
@@ -3764,6 +3780,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         },
       },
       ...(input.authorizationConditionChecks ?? []),
+      ...(input.coWrites ?? []),
       ...automaticWatchers.map(({ memberKey, reasons }) =>
         autoWatcherUpdate(this.tableName, input.entityKey, memberKey, reasons, occurredAt)
       ),
@@ -3774,7 +3791,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: items }))
       return comment
     } catch (error) {
-      if (isConditionalFailure(error) && input.auditContext) {
+      if (isConditionalFailure(error) && input.auditContext && !input.coWrites?.length) {
         const existing = await this.getStoredComment(input.entityKey, commentId)
         if (existing && isSameCreatedComment(existing, comment)) {
           return existing
@@ -3922,6 +3939,48 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           }
         : {}),
     } satisfies CollaborationWatcherState
+  }
+
+  /** Reads at most 2,000 exact member keys in strongly consistent batches with bounded retries.
+   * @param memberKey - Server-resolved current member.
+   * @param entityKeys - Server-built authorized target scopes.
+   * @returns Current subscribed scopes, never partial success on exhaustion.
+   */
+  async getMemberSubscribedScopes(memberKey: string, entityKeys: readonly string[]): Promise<string[]> {
+    if (entityKeys.length > 2000) throw new CollaborationError(413, 'WatcherReadLimitExceeded', 'Watcher scope limit exceeded.')
+    const member = normalizeMemberKey(memberKey)
+    const recordKey = watcherRecordKey(member)
+    const scopes = [...new Set(entityKeys.map((key) => requireText(key, 'Collaboration entity key')))]
+    if (!scopes.length) return []
+    await this.ensureLocalTable()
+    const subscribed: string[] = []
+    try {
+      for (let offset = 0; offset < scopes.length; offset += 100) {
+        let pending = scopes.slice(offset, offset + 100)
+        const seen = new Set<string>()
+        for (let attempt = 0; pending.length && attempt < 3; attempt += 1) {
+          const requested = new Set(pending)
+          const response = await this.documentClient.send(new BatchGetCommand({ RequestItems: { [this.tableName]: { ConsistentRead: true, Keys: pending.map((entityKey) => ({ entityKey, recordKey })) } } }))
+          for (const row of response.Responses?.[this.tableName] ?? []) {
+            const watcher = toStoredWatcher(row)
+            if (!requested.has(watcher.entityKey) || watcher.recordKey !== recordKey || watcher.memberKey !== member || seen.has(watcher.entityKey)) throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Watcher batch identity is invalid.')
+            seen.add(watcher.entityKey)
+            if (watcher.state === 'subscribed') subscribed.push(watcher.entityKey)
+          }
+          pending = (response.UnprocessedKeys?.[this.tableName]?.Keys ?? []).map((key) => {
+            if (typeof key.entityKey !== 'string' || key.recordKey !== recordKey || !requested.has(key.entityKey) || seen.has(key.entityKey)) throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Unprocessed watcher identity is invalid.')
+            return key.entityKey
+          })
+          if (new Set(pending).size !== pending.length) throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Duplicate unprocessed watcher identity.')
+          if (pending.length && attempt < 2) await new Promise((resolve) => setTimeout(resolve, 10 * 2 ** attempt))
+        }
+        if (pending.length) throw new CollaborationError(503, 'WatcherReadRetryable', 'Watcher reads could not be completed.')
+      }
+      return subscribed
+    } catch (error) {
+      if (error instanceof CollaborationError) throw error
+      throw new CollaborationError(503, 'WatcherReadRetryable', 'Watcher reads are temporarily unavailable.')
+    }
   }
 
   /** Reads one exact member watcher row without calculating scope-wide counts. */
@@ -5337,7 +5396,6 @@ function curatedContextAuthorizationConditions(
   const snapshot = input.authorizationSnapshot
   if (!snapshot) return []
   const tableName =
-    readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
     'mukuroji-workspace-access-local'
   const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
@@ -5405,7 +5463,6 @@ function curatedContextDocumentSourceConditions(
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
   const documentsTableName =
     readEnvironment('DOCUMENTS_TABLE_NAME') ??
-    readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
     'mukuroji-documents-local'
   const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
     {
@@ -5457,7 +5514,6 @@ function curatedContextDocumentSourceConditions(
     conditions.push({
       ConditionCheck: {
         TableName:
-          readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
           readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
           'mukuroji-workspace-access-local',
         Key: {
@@ -5546,7 +5602,6 @@ function curatedContextActivitySourceConditions(
   snapshot: CuratedContextActivitySourceAuthorizationSnapshot,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
   const auditTableName =
-    readEnvironment('MUKUROJI_AUDIT_EVENTS_TABLE') ??
     readEnvironment('AUDIT_EVENTS_TABLE_NAME') ??
     'mukuroji-audit-events'
   const hasRetentionDeadline = snapshot.expiresAt !== undefined
@@ -6040,6 +6095,18 @@ function normalizeWatcherReasons(value: string[] | Set<string>) {
   return [...value].filter((reason): reason is string => typeof reason === 'string').sort()
 }
 
+/**
+ * Derives the identifier `createComment` assigns to a comment written with an audit context, so
+ * that a caller can reference the comment from writes committed in the same transaction.
+ *
+ * @param entityKey - Collaboration entity key of the comment.
+ * @param auditContext - Audit context the comment is written with.
+ * @returns Deterministic comment identifier.
+ */
+export function deriveAuditedCommentId(entityKey: string, auditContext: MutationAuditContext): string {
+  return createCommentId(auditContext.occurredAt, auditContext, entityKey)
+}
+
 function createCommentId(
   occurredAt: string,
   context: MutationAuditContext | undefined,
@@ -6457,10 +6524,7 @@ function shouldBootstrapLocalTable() {
 }
 
 function readEnvironment(name: string) {
-  if (typeof Bun !== 'undefined') {
-    return Bun.env[name]
-  }
-  return process.env[name]
+  return loadServerConfig().environment[name]
 }
 
 async function ensureCollaborationTable(tableName: string, client: DynamoDBClient) {

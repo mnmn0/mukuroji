@@ -75,17 +75,17 @@ export function SecretDialog(props: {
         </div>
         <div className="grid gap-4 p-5">
           <p
-            className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900"
+            className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-900"
             id="developer-secret-warning"
           >
             {labels.secretWarning}
           </p>
-          <code className="overflow-x-auto rounded-lg border border-[var(--workbench-border-strong)] bg-slate-950 px-4 py-3 text-sm text-emerald-300">
+          <code className="overflow-x-auto rounded-lg border border-[var(--workbench-border-strong)] bg-slate-950 px-4 py-3 text-sm text-fg-emerald-300">
             {state.value}
           </code>
           {copyErrorMessage ? (
             <p
-              className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700"
+              className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700"
               role="alert"
             >
               {copyErrorMessage}

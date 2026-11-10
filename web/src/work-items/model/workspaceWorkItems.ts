@@ -353,6 +353,44 @@ export function isWorkspaceTaskAssignedToUser(
 }
 
 /**
+ * How the current user takes part in a Work Item shown on a personal surface.
+ *
+ * `owner` is the single accountable owner (`assigneeUserId`); `contributor` is a member
+ * listed in `contributorAssignments` who is not the owner.
+ */
+export type WorkspaceTaskInvolvement = 'owner' | 'contributor'
+
+/**
+ * Resolves whether the current user owns or contributes to a Work Item.
+ *
+ * Follows the Focus queue rule: the owner wins over a contributor entry for the same
+ * member, a contributor whose own share is `done` no longer takes part in an open Work
+ * Item, and every listed contributor keeps a completed or canceled Work Item. A
+ * role-only share without a member belongs to nobody.
+ *
+ * @param task - Work Item to evaluate.
+ * @param userIdentityAliases - Candidate identities such as username, email, or subject.
+ * @returns The user's involvement, or undefined when they neither own nor contribute.
+ */
+export function resolveWorkspaceTaskInvolvement(
+  task: CanonicalWorkItem,
+  userIdentityAliases: readonly string[],
+): WorkspaceTaskInvolvement | undefined {
+  if (isWorkspaceTaskAssignedToUser(task, userIdentityAliases)) return 'owner'
+  const normalizedUserAliases = new Set(
+    userIdentityAliases.map(normalizeWorkspaceSearchText).filter(Boolean),
+  )
+  if (normalizedUserAliases.size === 0) return undefined
+  const open = isOpenWorkItem(task)
+  const contributes = (task.contributorAssignments ?? []).some((assignment) =>
+    assignment.memberUserId !== undefined &&
+    normalizedUserAliases.has(normalizeWorkspaceSearchText(assignment.memberUserId)) &&
+    (!open || assignment.status !== 'done')
+  )
+  return contributes ? 'contributor' : undefined
+}
+
+/**
  * Resolves a Work Item's Project display name from the directory.
  *
  * @param task - Work Item whose Project name to resolve.

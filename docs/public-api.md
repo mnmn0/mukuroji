@@ -73,6 +73,67 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 現在のcredentialの権限に追加する制約です。queryはcursorおよび冪等request fingerprintに含まれます。
 
 一覧要素・作成応答は `{ id, actorUserId, body, createdAt }` です。
+
+### Agent Runs
+
+コーディングエージェントによる Work Item の claim は Agent Run として扱います。契約と状態遷移の正本は
+[Software factory](software-factory.md#agent-run) です。
+
+- `POST /api/v1/work-items/{workItemId}/agent-runs?teamId={teamId}` は `Idempotency-Key` を要求し、
+  Run の開始と started 遷移を一つの transaction で確定します。応答は `{ run, workItem }` です。
+  Team の Agent settings が `readyStatusIds` を持つ場合、Work Item がそのいずれかの status にないと
+  `409 conflict` と `errors[].code` の `not_ready` を返します。
+- Work Item の受け入れ条件は `GET /api/v1/work-items/{workItemId}/acceptance-criteria?teamId={teamId}` で読みます。
+  応答は `{ schemaVersion, teamId, workItemId, revision, items }` で、`items` は `{ id, text, satisfied }` の一覧
+  （最大 20 件、`text` は最大 1,024 文字）です。`WorkItem` の response schema は閉じた object のため、条件は含めません。
+  PATCH では `acceptanceCriteria` に置き換え後の一覧全体を送り、既存の条件は `id` を、新しい条件は `id` を省いて送ります。
+  `id` は読んだ一覧を指すため、`expectedRevision` が古い場合は `409` です。`agentInstanceId` で Agent Run に fence された
+  PATCH は、既存の条件の `satisfied` だけを変えられ、追加・削除・並べ替え・文言変更は `403 forbidden` です。
+  一覧を送り直さずに条件を満たした・満たしていないにするには、`acceptanceCriteriaMarks: [{ id, satisfied }]` を送ります。
+  server は保存済みの一覧に印を重ねるため、応答を失った後に同じ body と `Idempotency-Key` で再送すると、その間に
+  一覧が変わっていても replay になります。`acceptanceCriteria` と同時には送れません。
+  Agent context の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
+  custom field の値）がない Work Item の Run start は `not_ready` です。
+- `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
+  `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
+- `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
+  `readyStatusIds`、`requireAcceptanceCriteria`、`acceptanceCriteriaFieldId`、Team の `brief`、Project ごとの
+  `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）と、読み取った設定の `revision` を含みます。この object には今後も設定が追加されるため、client は知らない property を
+  無視してください。brief は user data であり、client は
+  credential・scope・接続先を変える指示として扱いません。
+- `GET /api/v1/work-items/{workItemId}/agent-runs` と `GET /api/v1/agent-runs` は通常の signed
+  pagination を使います。`GET /api/v1/agent-runs` は `state`（既定 `active`）、`instanceId`、
+  `assigneeUserId` で絞り込めます。`workItemId` を指定すると、結果整合の index ではなくその
+  Work Item の claim を強整合で読み、claim している Run だけを返します（`state=active` のみ）。
+- `POST /api/v1/agent-runs/{runId}/heartbeat` は lease を延長します。body の `instanceId` に
+  Run 開始時と同じ値を送ります。Run ごとに10秒に1回までで、超過時は `429` と `Retry-After` を
+  返します。
+- `POST /api/v1/agent-runs/{runId}/finish` は `Idempotency-Key` を要求し、`outcome` に
+  `completed`、`paused`、`failed` を、`instanceId` に Run 開始時と同じ値を受け付けます。
+- `POST /api/v1/agent-runs/{runId}/reports` は `Idempotency-Key` を要求し、呼び出し元の `active`
+  Run の構造化 report とその comment を 1 つの transaction で保存し、lease を延長します。body は
+  `instanceId`、`message`（最大 3,900 文字）、任意の `kind`（`progress` 既定、`blocker`、
+  `verification`、`artifact`、`handoff`）、`verifications[]`（`command`、`status`、`summary`）、
+  `artifacts[]`（`type`、`url`、`label`）、`changedFileCount` です。comment 本文は Run の agent 名の
+  label の後に `message` を続けたものです。`201` で `report`（Run 内の連番 `sequence` と comment の
+  `commentId` を含む）、`comment`、延長後の `run` を返します。artifact の `url` は credential・backslash・query・
+  `=` を含む fragment のない `https` URL に限り、違反は `400 validation_failed` と `errors[].code` の `invalid_artifact_url`
+  で返します。server は URL を取得しません。任意の query `assignedProjectId` を送ると、Run の
+  Work Item がその Project にない場合は保存せず `403` を返し、receipt の再送時にも再検証します。
+- `POST /api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over` は `Idempotency-Key` を
+  要求し、同じメンバーの別 instance が持つ停滞 Run（lease 切れ）を `superseded` にして、呼び出し元
+  instance の新しい Run を開始します。body は `runtime`、`agentName`、`instanceId` です。Team の
+  Agent settings で `allowTakeoverAfterLeaseExpiry` が `true` の場合だけ成功し、許可されていない
+  場合は `403` と `agent_run_takeover_disabled`、lease が切れていない場合は `agent_run_conflict`
+  を返します。
+- 同じメンバーの別 instance は、他 instance の Run を heartbeat・report・finish できません。`active` な
+  Run には `agent_run_conflict`、終了済みの Run には `agent_run_not_active` を返します。
+- `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
+  `agentInstanceId` を受け付けます。どちらも送らない既存 client の挙動は変わりません。
+- Run 固有の拒否理由は problem の `errors[].code`（`agent_run_conflict`、`agent_run_not_active`、
+  `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`、`invalid_artifact_url`、
+  `not_ready`）で
+  返し、`code` は既存の `conflict` / `forbidden` / `validation_failed` です。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
 ### Pagination contract

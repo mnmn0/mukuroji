@@ -8,9 +8,10 @@ Workspace access lifecycle を引き続き利用します。
 
 ## Trust boundary
 
-- Cognito User Pool と2つの public app client は CDK stack の外で管理します。Stack は
-  `CognitoUserPoolId`、password/API 用 `CognitoUserPoolClientId`、Hosted UI SSO 専用
-  `CognitoSsoUserPoolClientId` を受け取ります。API はその issuer と、相互に異なる2つの
+- Cognito User Pool と password/API 用 public app client は、`CognitoUserPoolId` と
+  `CognitoUserPoolClientId` を空にすると CDK stack が作り、値を渡すと stack の外で管理する既存の
+  ものを使います。Hosted UI SSO 専用 client は常に stack の外で用意し、
+  `CognitoSsoUserPoolClientId` で渡します。API はその issuer と、相互に異なる2つの
   client ID だけを信頼します。
 - SAML/OIDC provider、Hosted UI domain、callback URL、logout URL、OAuth flow は Cognito
   側で設定します。mukuroji は確認済み domain と login policy を保存し、Hosted UI へ遷移する
@@ -411,7 +412,7 @@ IdP secret、bearer credential、HMAC key/digest は event payload に含めま�
 | `ENTERPRISE_IDENTITY_TABLE_NAME` | Enterprise identity/configuration/provisioning state table |
 | `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` | SCIM/service credential HMAC secret。32–256文字、安定値、必須 |
 | `ENTERPRISE_SSO_STATE_SECRET` | SSO state 署名専用 secret。32–256文字、安定値、必須 |
-| `COGNITO_USER_POOL_ID` | Trust する既存 User Pool |
+| `COGNITO_USER_POOL_ID` | Trust する User Pool（stack が作ったものか既存のもの） |
 | `COGNITO_CLIENT_ID` | Password/API 認証用に trust する public app client |
 | `COGNITO_SSO_CLIENT_ID` | Hosted UI SSO 専用に trust する、通常 client と異なる public app client |
 | `COGNITO_ISSUER` | Access token issuer。local では Floci endpoint |
@@ -420,7 +421,7 @@ IdP secret、bearer credential、HMAC key/digest は event payload に含めま�
 | `COGNITO_ENTERPRISE_IDP_NAME` | Cognito に登録した SAML/OIDC provider 名 |
 | `MUKUROJI_WORKSPACE_DIRECTORY_ID` | Cognito claim と DynamoDB が共有する Workspace ID |
 | `AUDIT_EVENTS_TABLE_NAME` | Immutable audit/outbox table |
-| `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` | Enterprise mutation と audit view/export event の保持日数。既定値2555日 |
+| `AUDIT_RETENTION_DAYS` | Enterprise mutation と audit view/export event の保持日数。既定値2555日 |
 | `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` | PII を公開 audit ID へ変換する HMAC key |
 
 CDK parameter `CognitoUserPoolClientId` と `CognitoSsoUserPoolClientId` は、それぞれ

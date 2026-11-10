@@ -13,6 +13,7 @@ import {
   AiAssistanceApiError,
   resolveAiAssistanceApiBaseUrl,
 } from './errors'
+import { isRecord } from '../../../shared/api/jsonValidation'
 
 const aiAssistanceSettingsApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const aiAssistanceTasks = ['triage', 'summary', 'search', 'planning'] as const satisfies readonly AiAssistanceTask[]
@@ -197,7 +198,8 @@ async function readJson(response: Response): Promise<unknown> {
   if (!text) throw invalidResponseError(response.status)
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw invalidResponseError(response.status)
   }
@@ -210,11 +212,6 @@ function invalidResponseError(status = 502): AiAssistanceApiError {
     'AI assistance API returned an invalid settings response.',
     'InvalidAiAssistanceResponse',
   )
-}
-
-/** Narrows an unknown JSON value to a record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Validates the bounded Bedrock model allowlist returned by the API. */

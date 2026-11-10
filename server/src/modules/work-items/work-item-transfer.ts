@@ -188,9 +188,10 @@ export function createWorkItemExport(
   const lines = [
     headers.map(escapeCsvValue).join(','),
     ...workItems.map((workItem) => headers.map((header) => {
+      const fields: unknown = workItem
       const value = header.startsWith('customFieldValues.')
         ? workItem.customFieldValues[header.slice('customFieldValues.'.length)]
-        : (workItem as unknown as Record<string, unknown>)[header]
+        : isRecord(fields) ? fields[header] : undefined
       return escapeCsvValue(serializeCell(value))
     }).join(',')),
   ]

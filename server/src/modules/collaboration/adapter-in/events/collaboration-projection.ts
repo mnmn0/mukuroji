@@ -56,6 +56,7 @@ import type {
   DynamoStreamEvent,
   DynamoStreamRecord,
 } from '../../../../infrastructure/aws/dynamodb-stream'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 export type {
   BatchItemFailure,
@@ -2551,16 +2552,17 @@ function currentEpochSeconds() {
 }
 
 function readPositiveIntegerEnv(name: string, fallback: number) {
-  const value = Number(process.env[name] ?? fallback)
+  const value = Number(loadServerConfig().environment[name] ?? fallback)
   return Number.isSafeInteger(value) && value > 0 ? value : fallback
 }
 
 function getAwsRegion() {
-  return process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1'
+  const environment = loadServerConfig().environment
+  return environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1'
 }
 
 function requireEnv(name: string) {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
 
   if (!value) {
     throw new Error(`${name} is required.`)

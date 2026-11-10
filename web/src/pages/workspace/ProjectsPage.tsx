@@ -159,7 +159,7 @@ export function ProjectsPage() {
         <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
           {workItems.error ? (
             <div
-              className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+              className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
               data-testid="project-directory-work-items-error"
             >
               <p role="alert">{t('tasks.error.loading')}</p>
@@ -175,7 +175,7 @@ export function ProjectsPage() {
             <>
               {planning.error ? (
                 <p
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+                  className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
                   role="status"
                 >
                   {t('workspace.planningUpdate.error.loading')}

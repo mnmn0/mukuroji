@@ -1,10 +1,11 @@
+import { readRecord } from '../../shared/api/jsonValidation'
 
 
 /**
  * Search API resultに含まれる遷移先を同一origin内のpathとして返します。
  */
 export function resolveSearchResultPath(result: unknown) {
-  const record = asRecord(result)
+  const record = readRecord(result)
   const url = typeof record.url === 'string' ? record.url : undefined
 
   if (!url) {
@@ -21,6 +22,3 @@ export function resolveSearchResultPath(result: unknown) {
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
-}

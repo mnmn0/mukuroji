@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "mcp:start": "bun server/src/handlers/coding-agent-mcp.ts",
-    "mcp:build": "bun build server/src/handlers/coding-agent-mcp.ts --target bun --outfile server/dist/mcp.mjs",
+    "mcp:build": "bun scripts/build-coding-agent-mcp.ts",
     "floci:up": "sh floci/up.sh",
     "workers:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env server/scripts/local-workers/run.ts",
     "workers:once": "bun run workers:dev --once",
@@ -35,7 +35,16 @@
     "web:lint:ci": "bun --filter web lint:ci",
     "web:test": "bun --filter web test",
     "web:build": "bun --filter web build",
-    "web:e2e": "playwright test",
+    "web:preview": "bun --filter web preview",
+    "web:deploy": "bash scripts/deploy-web.sh",
+    "pwa:icons": "bun scripts/generate-pwa-icons.ts",
+    "web:e2e": "playwright test && bun run web:e2e:pwa",
+    "web:e2e:desktop": "playwright test",
+    "web:e2e:pwa": "playwright test -c playwright.pwa.config.ts",
+    "web:visual": "playwright test -c playwright.visual.config.ts",
+    "web:visual:docker": "sh scripts/run-visual-regression-in-container.sh",
+    "web:budget": "bun scripts/check-web-bundle-budget.ts",
+    "web:budget:test": "bun test scripts/check-web-bundle-budget.test.ts",
     "web:storybook": "bun --filter web storybook",
     "web:build-storybook": "bun --filter web build-storybook",
     "server:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env --filter server dev",
@@ -58,11 +67,15 @@
     "@aws-sdk/client-dynamodb-streams": "3.1057.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
+    "@playwright/test": "^1.65.0",
     "dependency-cruiser": "^18.1.0",
     "knip": "^6.27.0",
     "oxlint": "^1.70.0",
     "oxlint-plugin-awscdk": "^0.1.3",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "@modelcontextprotocol/server": "2.3.0",
+    "fflate": "0.8.3"
   }
 }

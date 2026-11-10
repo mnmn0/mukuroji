@@ -9,6 +9,19 @@ export {
   type WorkItemScheduleConfirmationReservationRequest,
 } from './application/use-cases/confirm-work-item-schedule-change'
 export {
+  WorkItemContributorAssignmentError,
+  listAddedContributorMembers,
+  normalizeContributorAssignments,
+  type ContributorAssignmentNormalizationContext,
+} from './domain/contributor-assignments'
+export {
+  WorkItemAcceptanceCriteriaError,
+  applyAcceptanceCriteriaMarks,
+  changesOnlyCriterionSatisfaction,
+  isStoredAcceptanceCriterionList,
+  normalizeAcceptanceCriteria,
+} from './domain/acceptance-criteria'
+export {
   createResourceId,
 } from './domain/resource-id'
 export {
@@ -34,6 +47,7 @@ export {
   type PreviewWorkItemDependencyScheduleChangeInput,
   type WorkItemDependencyScheduleState,
 } from './domain/work-item-schedule-dependencies'
+export { isStoredContributorAssignmentList } from './domain/contributor-assignments'
 export {
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,

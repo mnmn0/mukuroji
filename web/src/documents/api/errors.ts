@@ -1,4 +1,5 @@
 import type { DocumentDetail } from '@mukuroji/contracts'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Documents API が失敗したときの例外です。
@@ -63,17 +64,5 @@ export class DocumentRevisionConflictError extends DocumentsApiError {
 export function resolveDocumentsApiBaseUrl(
   environment: Record<string, string | boolean | undefined>,
 ) {
-  return trimTrailingSlash(
-    typeof environment.VITE_WORKSPACE_API_BASE_URL === 'string'
-      ? environment.VITE_WORKSPACE_API_BASE_URL
-      : typeof environment.VITE_PROJECTS_API_BASE_URL === 'string'
-        ? environment.VITE_PROJECTS_API_BASE_URL
-        : typeof environment.VITE_API_BASE_URL === 'string'
-            ? environment.VITE_API_BASE_URL
-            : '/api',
-  )
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/u, '')
+  return resolveApiBaseUrl('workspace', environment)
 }

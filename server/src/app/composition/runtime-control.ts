@@ -81,9 +81,7 @@ const configuredProviders = new Map<
  * @returns Recorder bound to the stack-injected control identifier.
  */
 export function createProductionRuntimeControlObservationRecorder(
-  environment: ServerEnvironment = typeof Bun !== 'undefined'
-    ? Bun.env
-    : process.env,
+  environment: ServerEnvironment = loadServerConfig().environment,
 ): RuntimeControlObservationRecorder {
   const controlId = createRuntimeControlMetricControlId(
     readNonBlankEnvironmentValue(
@@ -106,7 +104,7 @@ export function createProductionRuntimeControlObservationRecorder(
  * tests. Production identifiers, numeric bounds, or scope mismatches return an
  * unavailable fail-closed provider without throwing during module startup.
  *
- * @param surface - Exact deployed scope expected by this runtime.
+ * @param surface - Deployed scope expected by this runtime, one of the configured scopes.
  * @param options - Optional environment, client, and clock replacements.
  * @returns A current local provider or fail-closed production provider.
  */
@@ -134,9 +132,10 @@ export function createProductionRuntimeControlProvider(
     applicationIdentifier,
     configurationProfileIdentifier,
   )
-  const configuredScope = readNonBlankEnvironmentValue(
+  // A Lambda that runs several guarded jobs lists every scope, separated by commas.
+  const configuredScopes = readNonBlankEnvironmentValue(
     environment.MUKUROJI_RUNTIME_CONTROL_SCOPE,
-  )
+  )?.split(',').map((scope) => scope.trim()) ?? []
   const minimumPollIntervalSeconds = readSeconds(
     environment.MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS,
     MINIMUM_APPCONFIG_POLL_INTERVAL_SECONDS,
@@ -155,7 +154,7 @@ export function createProductionRuntimeControlProvider(
     !appConfigEnvironmentIdentifier ||
     !configurationProfileIdentifier ||
     !metricControlId ||
-    configuredScope !== surface ||
+    !configuredScopes.includes(surface) ||
     minimumPollIntervalSeconds === undefined ||
     maximumStalenessSeconds === undefined
   ) {

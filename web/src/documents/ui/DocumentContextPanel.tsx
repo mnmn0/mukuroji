@@ -285,7 +285,7 @@ export function DocumentContextPanel({
     <aside
       aria-label={t('documents.context.aria')}
       aria-modal={modal ? 'true' : undefined}
-      className="flex h-full min-h-0 w-[370px] max-w-full flex-none flex-col border-l border-[var(--workbench-border)] bg-white"
+      className="flex h-full min-h-0 w-[370px] max-w-full flex-none flex-col border-l border-[var(--workbench-border)] bg-surface"
       data-testid="document-context-panel"
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
@@ -325,7 +325,7 @@ export function DocumentContextPanel({
             aria-selected={resolvedActiveTab === tab}
             className={`relative min-h-[44px] rounded-md px-1 text-[11px] font-semibold ${
               resolvedActiveTab === tab
-                ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+                ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
                 : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
             }`}
             id={createDocumentContextTabId(panelIdPrefix, tab)}
@@ -665,7 +665,7 @@ function CommentsPanel({
               />
               {(repliesByRoot.get(root.id) ?? []).length > 0 ? (
                 <div
-                  className="ml-5 grid gap-2 border-l-2 border-[#cfece7] pl-3"
+                  className="ml-5 grid gap-2 border-l-2 border-tone-cfece7 pl-3"
                   data-testid={`document-comment-replies-${root.id}`}
                 >
                   {(repliesByRoot.get(root.id) ?? []).map((reply) => (
@@ -681,7 +681,7 @@ function CommentsPanel({
               ) : null}
               {replyingToId === root.id && onCreateComment ? (
                 <form
-                  className="ml-5 grid gap-2 rounded-lg border border-[#cfece7] bg-[#f4fbfa] p-3"
+                  className="ml-5 grid gap-2 rounded-lg border border-tone-cfece7 bg-tone-f4fbfa p-3"
                   onSubmit={(event) => {
                     void handleReplySubmit(event, root)
                   }}
@@ -727,7 +727,7 @@ function CommentsPanel({
           ))}
           {orphanReplies.map((reply) => (
             <div
-              className="ml-5 border-l-2 border-[#cfece7] pl-3"
+              className="ml-5 border-l-2 border-tone-cfece7 pl-3"
               key={reply.id}
             >
               <CommentCard
@@ -775,7 +775,7 @@ function CommentCard({
       className={`rounded-lg border p-3 outline-none ${
         comment.resolved
           ? 'border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] opacity-75'
-          : 'border-[var(--workbench-border)] bg-white'
+          : 'border-[var(--workbench-border)] bg-surface'
       } ${
         focused
           ? 'ring-2 ring-[var(--workbench-primary)] ring-offset-2'
@@ -786,7 +786,7 @@ function CommentCard({
       tabIndex={-1}
     >
       <div className="flex items-start gap-3">
-        <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-[#e5f7f4] text-xs font-bold text-[var(--workbench-primary)]">
+        <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]">
           {comment.authorUserId.charAt(0).toUpperCase()}
         </span>
         <div className="min-w-0 flex-1">
@@ -815,7 +815,7 @@ function CommentCard({
         <div className="mt-3 flex items-center gap-3">
           {onReply ? (
             <button
-              className="text-xs font-semibold text-[var(--workbench-primary)] hover:underline"
+              className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
               onClick={onReply}
               type="button"
             >
@@ -824,7 +824,7 @@ function CommentCard({
           ) : null}
           {onResolve ? (
             <button
-              className="text-xs font-semibold text-[var(--workbench-primary)] hover:underline"
+              className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
               onClick={() => void onResolve()}
               type="button"
             >
@@ -855,7 +855,7 @@ function renderCommentBody(comment: DocumentComment) {
     }
     content.push(
       <mark
-        className="rounded bg-[#dff3ef] px-0.5 font-semibold text-[var(--workbench-primary)]"
+        className="rounded bg-tone-dff3ef px-0.5 font-semibold text-[var(--workbench-primary-text)]"
         key={`${mention.userId}:${mention.offset}`}
       >
         {comment.body.slice(
@@ -1028,7 +1028,7 @@ function BacklinksPanel({
               className="workbench-panel flex items-center gap-3 p-3"
               key={relation.id}
             >
-            <span className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-primary)]">
+            <span className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-primary-text)]">
               {backlinkGlyphs[relation.target.kind]}
             </span>
             <span className="min-w-0 flex-1">
@@ -1041,7 +1041,7 @@ function BacklinksPanel({
             </span>
             {onNavigate ? (
               <button
-                className="text-xs font-semibold text-[var(--workbench-primary)] hover:underline"
+                className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
                 onClick={() => onNavigate(targetPath)}
                 type="button"
               >
@@ -1074,7 +1074,7 @@ function BacklinksPanel({
       {backlinks.length > 0 ? (
         backlinks.map((backlink) => (
           <button
-            className="workbench-panel flex items-start gap-3 p-4 text-left transition hover:border-[#99d7cf] disabled:cursor-default"
+            className="workbench-panel flex items-start gap-3 p-4 text-left transition hover:border-tone-99d7cf disabled:cursor-default"
             key={`${backlink.documentId}-${backlink.relation.id}`}
             onClick={() =>
               onNavigate?.(
@@ -1083,7 +1083,7 @@ function BacklinksPanel({
             }
             type="button"
           >
-            <span className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-primary)]">
+            <span className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-primary-text)]">
               {backlinkGlyphs[backlink.relation.target.kind]}
             </span>
             <span className="min-w-0">
@@ -1138,7 +1138,7 @@ function VersionsPanel({
       </p>
       {restoreErrorMessage ? (
         <p
-          className="m-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold leading-5 text-red-800"
+          className="m-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold leading-5 text-fg-red-800"
           role="alert"
         >
           {restoreErrorMessage}
@@ -1152,7 +1152,7 @@ function VersionsPanel({
               className="relative border-l-2 border-[var(--workbench-border)] py-2 pl-4"
               key={version.id}
             >
-              <span className="absolute -left-[6px] top-4 h-2.5 w-2.5 rounded-full border-2 border-white bg-[var(--workbench-primary)]" />
+              <span className="absolute -left-[6px] top-4 h-2.5 w-2.5 rounded-full border-2 border-surface bg-[var(--workbench-primary)]" />
               <div className="flex items-center justify-between gap-3">
                 <strong className="text-sm text-[var(--workbench-text)]">
                   {t('documents.versions.revision').replace(
@@ -1182,7 +1182,7 @@ function VersionsPanel({
               {!current && onRestoreVersion ? (
                 confirmVersionId === version.id ? (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3">
-                    <p className="m-0 text-xs font-semibold leading-5 text-amber-800">
+                    <p className="m-0 text-xs font-semibold leading-5 text-fg-amber-800">
                       {t('documents.versions.restoreConfirm')}
                     </p>
                     <div className="mt-2 flex gap-2">
@@ -1221,7 +1221,7 @@ function VersionsPanel({
                   </div>
                 ) : (
                   <button
-                    className="mt-2 text-xs font-semibold text-[var(--workbench-primary)] hover:underline"
+                    className="mt-2 text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
                     onClick={() => setConfirmVersionId(version.id)}
                     type="button"
                   >
@@ -1293,7 +1293,7 @@ function ActivityPanel({
             className="grid grid-cols-[32px_minmax(0,1fr)] gap-3 border-b border-[var(--workbench-border)] py-3 last:border-b-0"
             key={item.id}
           >
-            <span className="grid h-8 w-8 place-items-center rounded-full bg-[var(--workbench-surface-muted)] text-xs text-[var(--workbench-primary)]">
+            <span className="grid h-8 w-8 place-items-center rounded-full bg-[var(--workbench-surface-muted)] text-xs text-[var(--workbench-primary-text)]">
               {item.type === 'comment' ? '◌' : '↺'}
             </span>
             <div className="min-w-0">

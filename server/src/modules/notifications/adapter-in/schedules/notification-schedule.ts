@@ -27,6 +27,7 @@ import {
   isCanonicalWorkItemRecord,
   workItemScheduleInstantToLocalDate,
 } from '../../../work-items'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** 期限通知 schedule が生成する通知理由です。 */
 export type ScheduledNotificationReason = 'due' | 'overdue'
@@ -252,10 +253,7 @@ export function createNotificationScheduleHandler(
         'PLANNING_UPDATE_SCHEDULE_INDEX_NAME',
       ),
       projectDirectoryTableName: requireEnvironment('PROJECT_DIRECTORY_TABLE_NAME'),
-      auditEventsTableName: requireEnvironment(
-        'AUDIT_EVENTS_TABLE_NAME',
-        'MUKUROJI_AUDIT_EVENTS_TABLE',
-      ),
+      auditEventsTableName: requireEnvironment('AUDIT_EVENTS_TABLE_NAME'),
       now: readScheduleTime(event.time),
       scanPageSize: readPositiveIntegerEnvironment(
         'NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE',
@@ -268,7 +266,6 @@ export function createNotificationScheduleHandler(
       auditRetentionDays: readPositiveIntegerEnvironment(
         'AUDIT_RETENTION_DAYS',
         defaultAuditRetentionDays,
-        'MUKUROJI_AUDIT_RETENTION_DAYS',
       ),
       ...(readText(event.id) ? { requestId: readText(event.id) } : {}),
       ...(prepareCustomerCompletionNotifications
@@ -1443,7 +1440,7 @@ function normalizeDate(value: Date, label: string) {
 
 function requireEnvironment(...names: string[]) {
   for (const name of names) {
-    const value = readText(process.env[name])
+    const value = readText(loadServerConfig().environment[name])
 
     if (value) {
       return value
@@ -1453,14 +1450,17 @@ function requireEnvironment(...names: string[]) {
   throw new Error(`${names.join(' or ')} is required.`)
 }
 
-function readPositiveIntegerEnvironment(
-  name: string,
-  fallback: number,
-  alternateName?: string,
-) {
-  const configured = process.env[alternateName ?? name] ?? process.env[name]
+/**
+ * Reads a positive integer environment value, treating unset or blank values as unset.
+ *
+ * @param name - Environment variable name.
+ * @param fallback - Value used when the variable is unset or blank.
+ * @returns The configured positive integer or the fallback.
+ */
+function readPositiveIntegerEnvironment(name: string, fallback: number) {
+  const configured = loadServerConfig().environment[name]?.trim()
 
-  if (configured === undefined) {
+  if (!configured) {
     return fallback
   }
 

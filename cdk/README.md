@@ -1,6 +1,6 @@
 # mukuroji AWS deployment
 
-この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、Lambda Function URL と API Gateway HTTP API の両方へ接続します。DynamoDB table、request intake の email ingestion boundary、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
+この CDK stack は shared Hono handler を Node.js 22 Lambda に bundle し、API Gateway HTTP API へ接続します。Web app は private S3 bucket から CloudFront で配信し、同じ CloudFront domain の `/api/*` を HTTP API へ転送します。DynamoDB table、request intake の email ingestion boundary、private file bucket、GuardDuty malware scan、CORS / IAM、外部 Cognito 設定、Workspace bootstrap も同じ stack で管理します。
 
 コマンドは repository root から実行してください。AWS account を変更する `deploy`、Cognito 更新、data migration / recovery は、対象 account・region と `cdk diff` を確認してから実行します。
 
@@ -10,16 +10,16 @@
 | --- | --- | --- |
 | `AlarmPrimaryTopicName` | yes | 全 CloudWatch alarm の primary action に使う、同一 account/region 内の既存 standard SNS topic 名。 |
 | `AlarmSecondaryTopicName` | yes | 全 CloudWatch alarm の secondary action に使う、primary と異なる同一 account/region 内の既存 standard SNS topic 名。 |
-| `CognitoUserPoolId` | yes | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。 |
-| `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。 |
+| `CognitoUserPoolId` | no | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。既定値は空で、空のままなら stack が user pool を作ります。 |
+| `CognitoUserPoolClientId` | no | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。`CognitoUserPoolId` と一緒に指定するか、両方とも空にします。 |
 | `CognitoSsoUserPoolClientId` | SSO有効時 | Password client とは異なる、Hosted UI authorization-code + PKCE 専用 public app client ID。 |
 | `CognitoHostedUiDomain` | SSO有効時 | Enterprise SSO authorization-code flow に使う Cognito managed login domain。 |
 | `CognitoSsoRedirectUri` | SSO有効時 | App client callback に完全一致で登録した HTTPS SPA callback URI。 |
 | `CognitoEnterpriseIdpName` | SSO有効時 | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡します。 |
-| `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
-| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `RestoreDrillCleanupApproverRoleArn` | 復元ドリル有効時 | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
+| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
 | `AiBedrockModelId` | AI有効時 | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
 | `AiBedrockInputPricePerMillionTokensUsd` | AI有効時 | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
@@ -30,10 +30,11 @@
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
-| `ConnectorRuntimeConfiguration` | no | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
+| `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
-| `RequestEmailWebhookSecret` | yes | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
+| `RequestEmailWebhookSecret` | `mukuroji:requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
+| `EdgeOriginSecret` | yes | CloudFront が `/api/*` の request に付ける 32–128 文字の英数字・`_`・`-` の secret。API はこの値が一致する request の viewer address だけを rate limit と Enterprise IP policy に使います。`openssl rand -hex 32` などで生成し、CloudFormation では `NoEcho` です。 |
 | `EnterpriseIdentityTokenHashSecret` | yes | SCIM bearer token と service account credential の kind・Workspace・credential-ID domain-separated digest、および10分間の idempotency response recovery 用 token 導出に使う32–256文字の安定した secret。CloudFormation では `NoEcho` です。 |
 | `EnterpriseSsoStateSecret` | SSO有効時 | 短命な OAuth state を署名する専用の32–256文字 secret。CloudFormation では `NoEcho` です。 |
 | `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
@@ -43,6 +44,64 @@
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
 `InitialOwnerEmail` / `InitialOwnerUsername` の変更は通常 deploy と分けて owner rotation として扱います。新 owner の検証後、旧 owner の Cognito attributes、system-admin group、workspace/member/alias row、各 project role を明示的に棚卸ししてください。parameter 変更だけでは旧 owner の row や group membership は削除されません。
+
+### Optional modules
+
+社内の単一 Workspace で常に必要とは限らない次の機能は、CDK context でモジュールごとに `true` を
+指定したときだけ作ります。既定では 1 つも作らず、関連する resource、output、parameter、runtime
+wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み、stack には Props として渡します。
+
+| Context key | 作るもの | 無効時の動作 |
+| --- | --- | --- |
+| `mukuroji:restoreDrill` | [隔離 restore drill](#scheduled-isolated-restore-drill) の workflow、Object Lock evidence bucket（400日 COMPLIANCE）、専用 KMS key 2 個、alarm 14 個。`RestoreDrillCleanupApproverRoleArn` parameter が必要になります。 | 定期 drill は行いません。PITR による [incident recovery](#pitr-recovery) は引き続き使えます。削除済み file version は誰も読めません。 |
+| `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
+| `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
+
+有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
+
+```sh
+bun --filter cdk cdk deploy Mukuroji \
+  -c mukuroji:restoreDrill=true \
+  -c mukuroji:requestEmail=true \
+  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  ...（通常の parameter）
+```
+
+`cdk.json` の `context` に `"mukuroji:connectors": true` のように書いても同じです。`true` と文字列の
+`"true"` 以外の値は無効として扱います。
+
+一度作ったモジュールを外すと、CloudFormation は Lambda、alarm、IAM role などを削除しますが、`Retain` の
+resource は stack から外れるだけで AWS アカウントに残ります。残るのは table、bucket、secret、KMS key、
+log group と、connectors の `ConnectorSyncQueue`・`ConnectorSyncDlq`・`ConnectorPollDlq`、requestEmail の
+`RequestEmailIngestionDlq` です。queue 内の message も保持期間までは残ります。Object Lock の evidence
+bucket は保持期間が終わるまで削除できません。外す前に次を行ってください。
+
+- そのモジュールの queue と DLQ が空であることを確認し、`cdk deploy` の output から queue URL と secret ARN を
+  記録します。残った resource は記録した URL / ARN で後から確認し、不要なら手で削除します。
+- connectors を外すと `ConnectorRuntimeSecret` も stack から外れます。あとで再び有効にすると、stack は
+  `ConnectorRuntimeConfiguration`（既定値 `{}`）で新しい secret を作るため、provider 設定は自動では戻りません。
+  secret ARN が変わるので、再有効化の deploy では `ApiRuntimeConfigurationRevision` を増やします。
+  再有効化の deploy が終わると SQS event source と 5 分ごとの poll がすぐ動き始め、値をコピーするまでの
+  sync job は provider 設定がないため失敗します。`ConnectorSyncQueue` は visibility timeout 30 分、
+  最大 5 回の受信で DLQ へ移します。例外で失敗した job はこの retry で再実行されるため、コピーが早いほど
+  DLQ に入る job は減ります。
+  次の順で復元してください。
+  1. deploy 直後に、記録した旧 secret の値を新しい secret（`ConnectorRuntimeSecretArn` output）へコピーします。
+  2. Warm Lambda は connector 設定を最大 60 秒 cache するため、コピー後 1 分以上待ちます。
+  3. `ConnectorSyncQueue` の `ApproximateNumberOfMessagesVisible` と `ApproximateNumberOfMessagesNotVisible` が
+     0 に戻るまで（retry 中の job は最大 30 分見えません）、`ConnectorSyncFunction` の log に新しい error が
+     出ないことを確認します。
+  4. それでも `ConnectorSyncDlq` に入った message は一括 redrive しません。`disconnect-links` は
+     [Connector disconnect recovery](#connector-disconnect-recovery) の手順で扱います。`outbound` は provider への
+     反映が漏れている可能性があるため、body の `workspaceId`・`linkId`・`sourceEventId` を記録し、installation は
+     その external link から確認します。message は削除せずに運用責任者へエスカレーションし、対象を確認して
+     から個別に再送するか判断します（link を特定できない場合も message を残したままエスカレーションします）。`poll` は次の定期実行が成功すれば
+     取り直されるので、成功を確認してから削除します。
+
+Developer platform の Webhook secret、connector credential、cursor state と connector runtime secret は、
+1 つの `DeveloperPlatformKey` で暗号化します。用途ごとに `mukuroji:purpose` encryption context を付け、
+IAM grant も用途ごとの condition で絞っているため、key を分けなくても用途をまたいだ復号はできません。
 
 ### Optional SSO and AI
 
@@ -120,21 +179,23 @@ templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
-- `ApiFunctionUrl`: Lambda Function URL
-- `ApiGatewayUrl`: API Gateway HTTP API URL
+- `WebUrl`: Web app と `/api` を配信する CloudFront の URL
+- `WebBucketName` / `WebDistributionId`: `bun run web:deploy` が使う Web bucket と distribution
+- `ApiGatewayUrl`: API Gateway HTTP API URL（外部 webhook と、local の Web から直接呼ぶ場合）
+- `UserPoolId` / `UserPoolClientId`: API が使う Cognito user pool と password client（stack が作ったものか、parameter で渡したもの）
 - `WorkItemsTableName`（canonical Work Item store）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
 - `DocumentsTableName`（document、whiteboard、share、comment の workspace store）
 - `AnalyticsTableName`（report、immutable snapshot、scheduled delivery receipt の store）
 - `RequestIntakeTableName`（form version、link capability、submission、queue、reply thread の scope store）
-- `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`
+- `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`（`mukuroji:requestEmail` 有効時のみ）
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `FileBucketIncarnationMarkerKey`, `FileBucketIncarnationMarkerVersionId`, `FileBucketIncarnationMarkerChecksumSha256`, `FileBucketIncarnationMarkerSize`（同名 bucket 再作成を検出する固定 marker の exact S3 version、base64 SHA-256、byte size。cross-domain integrity operator の明示入力に使い、current version へ fallback しない）
 - `CrossDomainIntegrityOperatorPolicyArn`（6表の `Scan` / `DescribeTable`、exact FileBucket の `GetBucketVersioning`、`workspaces/*` の exact-version read、出力された marker VersionId に条件固定した marker exact-key read だけを持つ未接続 read-only policy）
-- `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
-- `AnalyticsScheduleDlqUrl`
+- `NotificationsTableName`, `CollaborationProjectionDlqUrl`
+- `ScheduledJobsFunctionName`, `ScheduledJobsDlqUrl`（定期ジョブをまとめて実行する Lambda と、その失敗を14日保持する Retain DLQ）
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
 - `EnterpriseIdentityMaintenanceDlqUrl`
 - `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
@@ -144,26 +205,40 @@ templateとdeployed configurationの両方で照合します。
 - `AiAssistanceObservabilityDlqUrl`（terminal AI observability stream recordの最終失敗を14日保持するRetain DLQ）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
-- `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
+- `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`（`RestoreDrill*` は `mukuroji:restoreDrill` 有効時のみ）
 - `DeveloperPlatformTableName`, `DeveloperPlatformLookupIndexName`
 - `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
 - `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`
-- `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`
+- `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`（`mukuroji:connectors` 有効時のみ）
 - `WorkspaceDirectoryId`
 
-Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+CloudFront は `/api/*` を cache せず、Host 以外の viewer header をそのまま HTTP API へ渡します。
+HTTP API から見た接続元は CloudFront の edge address になるため、viewer-request の CloudFront Function が
+client の送った値を上書きして `x-mukuroji-viewer-address` に viewer address を入れ、origin custom header
+`x-mukuroji-edge-secret` に `EdgeOriginSecret` を付けます。API は secret が一致した request だけ
+この address を request intake の rate limit と Enterprise IP policy に使い、HTTP API を直接呼ぶ request
+では両 header を無視して transport の接続元を使います。`EdgeOriginSecret` を変えると CloudFront と
+Lambda が同じ deploy で切り替わりますが、切り替え中の数分は一部の request が edge address で判定されます。
+それ以外の path は Web bucket から返し、拡張子のない path は CloudFront Function が `index.html` に
+書き換えるため、client-side route を直接開いても SPA が表示されます。この書き換えは `/api/*` には
+かからないので、API の 404 はそのまま返ります。HTTP API は `<base>/teams/projects` と
+`<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
 
-Shared APIのproduction runtime configurationは4つのSecrets Manager secretへ分割し、Lambda
-environmentにはそのARNだけを渡します。各secret名は`ApiRuntimeConfigurationRevision`を含み、
-replacement時の旧secretは`Retain`されます。Retained secretはrollback/recovery evidenceであり、
-CloudFormationが旧resourceへ自動で再接続したり不要secretを削除したりはしません。
-各groupはCloudFormation transformを使わないv2 line envelopeで、固定group identity、同一revision、
-canonical Base64 valueまたはnested Secret ARNを保持します。NoEcho parameterの4値はprocessed
-templateへ展開させず、revision-boundな個別retained secretの`SecretString`へ直接`Ref`します。
-Document public-share secretを含む5つのnested secretはAPI roleだけが読みます。Loaderは4 groupの
-identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
+Lambda Function URL は作りません。外部 sender に渡す signed inbound webhook URL は Lambda の version
+に依存しない安定した HTTP API endpoint を使い、CloudFront の origin も同じ HTTP API にそろえます。
 
-Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。新しいconfiguration
+Shared APIのproduction runtime configurationは1つのSecrets Manager secret
+(`ApiRuntimeConfigurationSecret`)にまとめ、Lambda environmentにはそのARNと
+`MUKUROJI_API_RUNTIME_CONFIG_REVISION`だけを渡します。Secret名は固定で、deployごとに値を
+in-placeで更新するため、revisionを進めてもsecretは増えません。Stack削除時は`Retain`されます。
+Envelopeはtransformを使わないv3 line formatで、revisionとcanonical Base64 valueまたはnested
+Secret ARNを保持します。NoEcho parameterもenvelopeの`Fn::Join`へ直接入ります。stackは
+transformを使わないため、processed templateへ値が展開されることはありません。Workspace audit
+pseudonym secretとDocument public-share secretの2つだけをnested secretとして参照し、API roleが
+読みます。Loaderは`AWSCURRENT`のrevisionが期待値と違えば`AWSPREVIOUS`を読み、どちらも一致しなければ
+起動を拒否します。全canonical keyとnested secretを検証し終えてから環境へ原子的に反映します。
+
+API Gatewayのdefault routeは`live` Aliasを呼び出します。新しいconfiguration
 secretとLambda Versionの準備完了後にAliasが新Versionへ切り替わるため、API trafficは
 code/configurationが揃ったversion単位で切り替わります。
 
@@ -188,7 +263,7 @@ JP profile/destination ARN inventory、scheduled live evalを含む完全な手�
 
 ## Connector runtime configuration
 
-Stack は provider 設定と signing secret 用の Secrets Manager secret を `{}` で作成し、専用の rotation-enabled KMS key で暗号化します。Secret の read 権限は OAuth callback を扱う API Lambda と provider 呼び出しを行う connector queue worker に限定します。Audit stream projection と scheduled poller は secret を読まず、secret-free な sync job ID だけを SQS へ送ります。
+この節は任意モジュール `mukuroji:connectors` を有効にした stack だけが対象です（[Optional modules](#optional-modules)）。Stack は provider 設定と signing secret 用の Secrets Manager secret を `{}` で作成し、rotation-enabled な `DeveloperPlatformKey` で暗号化します。Secret の read 権限は OAuth callback を扱う API Lambda と provider 呼び出しを行う connector queue worker に限定します。Audit stream projection と scheduled poller は secret を読まず、secret-free な sync job ID だけを SQS へ送ります。
 
 Production credential を CloudFormation parameter、Lambda environment、repository、`cdk diff`、shell history に含めないでください。初回 deploy 後に `ConnectorRuntimeSecretArn` output を取得し、権限を限定した作業端末から reviewed JSON file を新しい secret version として保存します。
 
@@ -505,7 +580,7 @@ GuardDuty plan の作成は Malware Protection for S3 の利用条件と課金�
 
 Shared API Lambda は `REQUEST_INTAKE_TABLE_NAME`、`REQUEST_QUEUE_INDEX_NAME`、`REQUEST_RATE_LIMIT_PER_HOUR` と token hash secret parameter を environment から受け取り、request state、canonical Work Item、audit event を同じ DynamoDB transaction で更新できます。Email webhook secret は dedicated ingestion Lambda だけに渡します。Attachment body は新しい public bucket を作らず、既存の private `FileBucket` と GuardDuty scan boundary を利用します。外部 response に Workspace / Team / Project / workflow / IAM 情報を含めず、opaque capability token の hash だけを table に保存します。
 
-`RequestEmailIngestionFunction` は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出し、stack共通のprimary/secondary SNS actionへ通知します。
+`RequestEmailIngestionFunction` は任意モジュール `mukuroji:requestEmail` を有効にしたときだけ作ります。この Lambda は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出し、stack共通のprimary/secondary SNS actionへ通知します。
 
 `RequestEmailWebhookSecret` は adapter と Lambda の両方で同じ値を設定し、log、output、request metadata に残さないでください。`RequestTokenHashSecret` の rotation は未失効の public form / reply link を無効化するため、通常 deploy と分け、active capability の再発行を含む手順として実施します。`NoEcho` は CloudFormation 表示を抑止しますが、secret の command history や Lambda environment への露出を防ぐものではないため、値は CI/CD の secret store から渡してください。
 
@@ -514,6 +589,25 @@ DLQ の envelope は署名 timestamp が5分で失効するため、そのまま
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
+
+`CognitoUserPoolId` と `CognitoUserPoolClientId` を両方とも空にすると、stack が Cognito を用意します。
+作るのは次の4つです。
+
+- self sign-up なしの user pool。`directory_id` / `workspace_id` custom attribute、12文字以上の password policy、任意の TOTP MFA を持ち、Essentials tier で、削除保護と `Retain` 付きです。
+- client secret なし、`ALLOW_USER_PASSWORD_AUTH` だけを許可する password client。user が自分の token で書き換えられる attribute は `name` だけです。API は email と Workspace attribute で認可するため、これらは管理者 API からしか変えられません。
+- `SystemAdminGroups` の先頭の group。
+- 初期 owner。Workspace attribute と verified email 付きで招待します。この user pool は username でサインインし、API はログインの email を username として送るため、`InitialOwnerUsername` は `InitialOwnerEmail` と同じ値にします。違う値は deploy 前に拒否されます。
+
+Cognito の既定 email が初期 owner に仮パスワードを送り、owner は最初のサインインで新しい password に
+変えます。この場合、下の `prepare-workspace-cognito.sh` と group 作成手順は不要です。
+`COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` は空のまま deploy し、deploy 後の検証では `UserPoolId` /
+`UserPoolClientId` output の値を使います。Cognito の既定 email は1日あたりの送信数が少ないため、
+招待が多い場合は SES の設定を user pool に追加してください。SSO を使う場合は、stack が作った
+user pool に IdP と SSO 専用 client を追加し、その client ID を SSO parameter に渡します。
+
+既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。app client の
+`WriteAttributes` には `email`、`custom:directory_id`、`custom:workspace_id` を含めないでください。
+含めると、user が自分の access token でこれらを書き換え、別の user として認可される可能性があります。
 
 初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。
 Password/API client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。SSO client は
@@ -539,8 +633,8 @@ export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
 export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
 export ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET="$(openssl rand -hex 32)"
 export ENTERPRISE_SSO_STATE_SECRET="$(openssl rand -hex 32)"
-export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
+export MUKUROJI_EDGE_ORIGIN_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 
@@ -600,7 +694,6 @@ export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
 export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
 export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff Mukuroji \
@@ -612,13 +705,12 @@ bun --filter cdk cdk diff Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters EdgeOriginSecret="$MUKUROJI_EDGE_ORIGIN_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
@@ -639,13 +731,12 @@ bun --filter cdk cdk deploy Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters EdgeOriginSecret="$MUKUROJI_EDGE_ORIGIN_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
@@ -678,13 +769,55 @@ Bootstrap は次を同一 `WorkspaceDirectoryId` partition に冪等投入しま
 - `WORKSPACE#METADATA` / `workspace-metadata`
 - `WORKSPACE_MEMBER#<lowercase email>` / `workspace-member` / `role=owner`
 - `EMAIL_ALIAS#<lowercase email>` / `email-alias`
-- seed project 4 件の `PROJECT_MEMBER#<projectId>#<lowercase email>` / `role=manager`
 
-owner が demo member と同じ email でも最後に manager へ収束します。Workspace owner row 自体は既存 RBAC の global system-admin 判定には使いません。
+Workspace owner row 自体は既存 RBAC の global system-admin 判定には使いません。Team と Project は
+投入しないので、owner が system-admin として最初の Team を画面から作ります。
+
+#### Demo data
+
+既定の deploy は demo data を投入しません。試用や開発用の環境で demo data が欲しい場合だけ、
+CDK context で有効にします。
+
+```sh
+bun --filter cdk cdk deploy Mukuroji \
+  -c mukuroji:demoData=true \
+  ...
+```
+
+有効にすると、stack 作成時に次も投入します。
+
+- demo member 5 人（`sato@example.com` など 4 人が `member`、`viewer@example.com` が `guest`、いずれも `active`）
+- Team 2 件（`core-team`・`design-team`）と Project 4 件（`refero`・`product-roadmap`・`shared-launch`・`brand-refresh`）
+- `refero` の Work Item 10 件
+- demo Project 4 件の `PROJECT_MEMBER#<projectId>#<lowercase email>` / `role=manager`（owner を各 demo Project の manager にする）
+
+owner の manager row は既存の role を上書きしません。`InitialOwnerEmail` には demo member の email
+（`@example.com`）を使わないでください。同じ email だと owner は demo seed の role のままになり、
+`MUKUROJI_DEMO_DATA=true` の validator が失敗します。
+
+`SeedWorkspaceDemoMembers` は stack の作成時と更新時に書き込みます（既存の role と status は保持します）。
+それ以外の demo data の custom resource は作成時だけ書き込みます。どれも削除時には何もしません。
+demo data を有効にして作った stack で後から無効にしても、resource が消えるだけで投入済みの row は
+残ります。
+
+一度無効にした stack で demo data を再び有効にすることはできません。`SeedProjectDirectory` と
+`SeedWorkItems` は既存 row があると書き込まない条件付きの transaction なので、残っている demo の
+Team・Project・Work Item と衝突して custom resource の作成が失敗し、stack update は rollback されます。
+衝突した transaction は何も書き込まないので、残っている Team・Project・Work Item は変わりません。
+ただし、ほかの demo data の custom resource が失敗より先に書き込むことがあり、その書き込みは
+rollback でも取り消されません。たとえば `SeedWorkspaceDemoMembers` は、削除済みの demo member を
+作り直し、既存の demo member に欠けている属性を補います（既存の値は変えません）。
+demo data が必要な環境では無効にせずに使い続けるか、demo data を有効にした新しい stack を作ります。
+
+local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
 ### 3. Bootstrap と API を検証する
+
+Stack が user pool を作った場合、初期 owner は最初のサインインで password を変えるまで
+`FORCE_CHANGE_PASSWORD` です。サインインを済ませ、`COGNITO_USER_POOL_ID` と
+`COGNITO_USER_POOL_CLIENT_ID` に `UserPoolId` / `UserPoolClientId` output を入れてから検証します。
 
 ```sh
 export PROJECT_DIRECTORY_TABLE_NAME="$(aws cloudformation describe-stacks \
@@ -698,15 +831,17 @@ bash scripts/validate-workspace-bootstrap.sh
 
 `prepare-workspace-cognito.sh` は2つの client と external IdP contract を検証します。Bootstrap
 validator は Cognito pool/password client、owner status/email、両 custom attribute、
-Workspace metadata/owner/alias、全 seed project の manager row を consistent read で照合します。
+Workspace metadata/owner/alias を consistent read で照合します。`-c mukuroji:demoData=true` で
+deploy した stack では `MUKUROJI_DEMO_DATA=true` を付けて実行すると、demo Project 4 件の manager row
+も照合します。
 
-次に owner の新しい Cognito access token を用意し、4 経路がすべて `200` かつ同じ Workspace response を返すことを確認します。古い token は group / identity 更新前の session を表す可能性があるため再利用しません。
+次に owner の新しい Cognito access token を用意し、CloudFront 経由と HTTP API 直接の経路がすべて `200` かつ同じ Workspace response を返すことを確認します。古い token は group / identity 更新前の session を表す可能性があるため再利用しません。
 
 ```sh
-export FUNCTION_URL="$(aws cloudformation describe-stacks \
+export WEB_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name Mukuroji \
-  --query "Stacks[0].Outputs[?OutputKey=='ApiFunctionUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='WebUrl'].OutputValue | [0]" \
   --output text)"
 export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
@@ -715,17 +850,25 @@ export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --output text)"
 export ACCESS_TOKEN=<fresh-owner-access-token>
 
-curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${FUNCTION_URL%/}/teams/projects"
-curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${FUNCTION_URL%/}/api/teams/projects"
+curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${WEB_URL%/}/api/teams/projects"
 curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${API_GATEWAY_URL%/}/teams/projects"
 curl --fail-with-body -H "Authorization: Bearer $ACCESS_TOKEN" "${API_GATEWAY_URL%/}/api/teams/projects"
 ```
 
-Web にはどちらか一方を設定します。
+### 4. Web を配信する
 
 ```sh
-VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
-# または VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
+AWS_REGION=ap-northeast-1 bun run web:deploy
+```
+
+`scripts/deploy-web.sh` は stack output から Web bucket と distribution を読み、`VITE_API_BASE_URL=/api` で
+Web を build して upload し、CloudFront を invalidate します。content hash 付きの `assets/` は1年 cache し、
+古い chunk も残すため、前の `index.html` を開いている browser も lazy chunk を読めます。`index.html`、
+`sw.js` などそれ以外の file は `no-cache` で置き換えます。配信後に `WebUrl` を開き、login と Team/project
+一覧の表示を確認します。local の Web から AWS の API を試す場合だけ、HTTP API を直接指定します。
+
+```sh
+VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
 
 ## Workspace partition migration
@@ -743,7 +886,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
    - `workspace-metadata`、`workspace-member`、`email-alias` の 3 種は旧 partition から copy しない。旧 `workspaceId` や owner key を残すと bootstrap condition と衝突するため、CDK deploy で new Workspace ID / owner parameter から再生成する。
 4. source / destination の件数と代表 item を照合し、重複 key や未処理 write がないことを確認する。
 5. new Workspace ID を parameter にして `cdk diff` / deploy を実行する。CDK が owner attributes と bootstrap row を new partition に揃える。
-6. fresh token で両 API endpoint を検証してから write を再開する。
+6. fresh token で CloudFront と HTTP API の両 endpoint を検証してから write を再開する。
 7. rollback window 中は旧 partition を削除しない。
 
 大量 data の migration を shell の `scan | put-item` で即時実行しないでください。pagination、retry、conditional write、件数/内容照合を備えた一時 migration job として review・dry run してから実行します。
@@ -752,9 +895,9 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 CDK は canonical Work Item store として `WorkItemsTable` を作成し、table 名を `WorkItemsTableName` output で公開します。API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
 
-Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
+Demo data を有効にした場合、demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
 
-Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を CloudFront 経由と API Gateway 直接の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
 
 ## Work Item configuration
 
@@ -793,12 +936,12 @@ snapshot、scheduled delivery receiptをWorkspaceごとに保存します。Tabl
 
 Shared API Lambdaには`ANALYTICS_TABLE_NAME`と`ANALYTICS_SCHEDULE_INDEX_NAME`を設定し、
 analytics tableへのread/writeだけをstack resourceへ限定して許可します。
-`AnalyticsScheduleFunction`は5分ごとのEventBridge ruleで起動し、同じreport occurrenceを
-決定的なreceiptで重複排除します。Schedule roleはAnalyticsTableへのread/writeに加えて、
-recipientのcurrent ACLとhistorical stateを評価するため、`AuditEventsTable`、
-`ProjectDirectoryTable`、`WorkItemsTable`、`WorkspaceAccessTable`へのread-only権限だけを
-持ちます。非同期retryを2回行った後の失敗は14日保持のencrypted
-`AnalyticsScheduleDlq`へ入り、visible messageが1件以上になるとCloudWatch alarmが
+Analytics scheduleは`ScheduledJobsFunction`の5分ごとのjobとして動き、同じreport occurrenceを
+決定的なreceiptで重複排除します。Jobの権限は`AnalyticsScheduleJobPolicy`にまとまり、
+AnalyticsTableへのread/writeに加えて、recipientのcurrent ACLとhistorical stateを評価するため、
+`AuditEventsTable`、`ProjectDirectoryTable`、`WorkItemsTable`、`WorkspaceAccessTable`への
+read-only権限だけを持ちます。Handler内で2回retryした後も失敗すると、invocationは14日保持の
+encrypted `ScheduledJobsDlq`へ入り、visible messageが1件以上になるとCloudWatch alarmが
 `ALARM`になります。
 
 Schedule deliveryは現在のrecipient認可を確認できない場合に送信しないfail-closed contractです。
@@ -813,13 +956,23 @@ Deploy前後に次を確認します。
 1. `AnalyticsTableName` outputと両Lambdaの`ANALYTICS_TABLE_NAME`が同じtableを指す。
 2. Table replacement/deletionがなく、PITRとRetainが維持される。
 3. `ScheduleDueIndex`のkey schemaが変更されていない。
-4. API/schedule role以外にanalytics table権限が付いていない。
-5. Schedule roleのsource table権限がread-onlyで、write権限がAnalyticsTableだけに限定される。
-6. `AnalyticsScheduleDlqUrl`の滞留とCloudWatch alarmを監視対象に追加する。
+4. API roleと`AnalyticsScheduleJobPolicy`以外にanalytics table権限が付いていない。
+5. `AnalyticsScheduleJobPolicy`のsource table権限がread-onlyで、write権限がAnalyticsTableだけに限定される。
+6. `ScheduledJobsDlqUrl`の滞留とCloudWatch alarmを監視対象に追加する。
 
 ## Notification schedule
 
-期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count も監視します。
+期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
+
+## Scheduled jobs
+
+定期実行の6つの job（Automation の recurring Work、Triage wake-up、Agent Run triage、Slack 通知、analytics、notification）は、`ScheduledJobsFunction` 1本と毎分の EventBridge rule 1つで動きます。Handler（`server/src/handlers/scheduled-jobs-handler.ts`）は event の予定時刻の分から due な job を選び、並行に実行します。
+
+- 間隔は Automation、Triage、Agent Run triage、Slack が毎分、analytics が5分ごと、notification が毎時0分です。
+- 各 job は自分の runtime-control scope で判定されます。Lambda の `MUKUROJI_RUNTIME_CONTROL_SCOPE` は全 scope をカンマ区切りで持ちます。
+- Retry は handler 内で job ごとに行います（Slack は二重送信を避けるため1回、他は最大3回）。Lambda 自体の非同期 retry は0回で、1つでも job が失敗した invocation は `ScheduledJobsDlq` に入ります。
+- 権限は job ごとの customer-managed policy（`<Job>JobPolicy`）に分けて同じ role へ付けます。Inline policy は role 全体で10,240文字までなので、job の権限は managed policy（各6,144文字）に置きます。Role は共有なので、job 間の権限分離は IAM の境界ではなくコードレビューで保ちます。
+- DLQ message の error message には、失敗した job ごとに最後の error の名前と message が入ります。
 
 ## Rollback
 
@@ -858,6 +1011,21 @@ aws dynamodb wait table-exists \
 復元 table の key schema / GSI / item count / representative records を確認します。その後は、(a) reviewed conditional copy で元 table の対象 item を修復する、または (b) CDK を更新して復元 table を参照し resource import する、のどちらかを選びます。切替確認前に元 table や旧 partition を削除しません。
 
 ## Scheduled isolated restore drill
+
+復元ドリルは任意の module で、既定では deploy しません。有効にすると Step Functions workflow、
+KMS key 付きの scratch / evidence bucket などが増えます。evidence bucket は 400 日の Object Lock
+COMPLIANCE を使うため、一度書いた evidence は保持期間が終わるまで誰も削除できません。
+有効にするときは CDK context で指定し、`RestoreDrillCleanupApproverRoleArn` も渡します。
+
+```sh
+bun --filter cdk cdk deploy Mukuroji \
+  -c mukuroji:restoreDrill=true \
+  --parameters RestoreDrillCleanupApproverRoleArn='arn:aws:iam::<account-id>:role/<data-owner-role>' \
+  ...
+```
+
+無効のときは drill の resource、output、parameter がなく、削除済み file version を読める principal も
+ありません。以下はこの module を有効にした場合の動作です。
 
 Incident recoveryとは別に、daily due scannerが直近の成功済みverificationから89日で同一regionの
 隔離drillをadmitし、90日でoverdue alarmを発火します。Standard Step Functions workflowは
@@ -942,8 +1110,9 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 
 ## Security and durability checks
 
-- Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
-- Function URL、HTTP API、Hono CORS は同じ `ApiAllowedOrigins` に揃えます。本番で local default を使いません。
+- HTTP API の route auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
+- 本番の Web は CloudFront の同じ origin から API を呼ぶため CORS を使いません。HTTP API と Hono の CORS は `ApiAllowedOrigins` にそろえ、本番で local default を使いません。
+- Web bucket は public access をすべて block し、CloudFront の origin access control だけが読みます。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
 - Email ingestion Lambda は HTTP route を持たず、Request Intake table と failure DLQ 以外の data-plane 権限を持ちません。
 - Enterprise SCIM group reconciliation は API Lambda と concurrency を共有しない専用 Lambda で実行します。

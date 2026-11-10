@@ -117,7 +117,7 @@ export function ImportExportSection({
                   <label className="grid gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                     {labels.fields.importTeam}
                     <select
-                      className="workbench-input min-h-10 bg-white px-3 normal-case tracking-normal"
+                      className="workbench-input min-h-10 bg-surface px-3 normal-case tracking-normal"
                       required
                       value={importTeamId}
                       onChange={(event) =>
@@ -136,7 +136,7 @@ export function ImportExportSection({
                   <label className="grid gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                     {labels.fields.importProject}
                     <select
-                      className="workbench-input min-h-10 bg-white px-3 normal-case tracking-normal"
+                      className="workbench-input min-h-10 bg-surface px-3 normal-case tracking-normal"
                       value={importProjectId}
                       onChange={(event) =>
                         onProjectChange(event.target.value)
@@ -163,7 +163,7 @@ export function ImportExportSection({
                     ? '.csv,text/csv'
                     : '.json,application/json'
                 }
-                className="workbench-input min-h-10 bg-white px-3 py-2 normal-case tracking-normal"
+                className="workbench-input min-h-10 bg-surface px-3 py-2 normal-case tracking-normal"
                 required
                 type="file"
                 onChange={(event) =>
@@ -204,7 +204,7 @@ export function ImportExportSection({
                   <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
                     {labels.fields.sourceField}
                     <input
-                      className="workbench-input min-h-9 bg-white px-3"
+                      className="workbench-input min-h-9 bg-surface px-3"
                       placeholder={labels.placeholders.sourceField}
                       required
                       value={mapping.sourceField}
@@ -229,7 +229,7 @@ export function ImportExportSection({
                   <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
                     {labels.fields.targetField}
                     <select
-                      className="workbench-input min-h-9 bg-white px-3"
+                      className="workbench-input min-h-9 bg-surface px-3"
                       required
                       value={mapping.targetField}
                       onChange={(event) =>
@@ -331,7 +331,7 @@ export function ImportExportSection({
               <ul className="mt-4 grid gap-2">
                 {report.errors.map((error, index) => (
                   <li
-                    className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs text-red-800"
+                    className="rounded-md border border-red-200 bg-surface px-3 py-2 text-xs text-fg-red-800"
                     key={`${error.row}-${error.code}-${index}`}
                   >
                     <strong>

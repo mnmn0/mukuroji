@@ -1,4 +1,5 @@
 import { WorkspaceAccessApiError } from './errors'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * Workspace 全体で付与する member role です。
@@ -183,12 +184,7 @@ export type WorkspaceAccess = {
   capabilities: WorkspaceAccessCapabilities
 }
 
-const workspaceApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_PROJECTS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const workspaceApiBaseUrl = resolveApiBaseUrl('workspace')
 
 /**
  * Workspace member、invitation、操作権限を取得します。
@@ -249,8 +245,4 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 
   return JSON.parse(text) as T
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

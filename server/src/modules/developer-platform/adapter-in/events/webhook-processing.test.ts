@@ -18,6 +18,7 @@ import {
   WEBHOOK_PROJECTION_PAGE_SIZE,
   processWebhookDeliveryBatch,
   processWebhookProjectionBatch,
+  toPublicWebhookEventData,
   type WebhookDeliveryClaimStore,
   type WebhookDeliveryQueue,
   type WebhookDynamoAttributeValue,
@@ -976,6 +977,20 @@ async function createDeliveryFixture(clock: () => Date) {
   })
   return { platform, deliveryId: deliveries[0]!.id }
 }
+
+test('keeps contributor assignments out of public webhook event data', () => {
+  const now = new Date('2026-07-01T00:00:00.000Z')
+  const event = {
+    ...createWorkItemAuditEvent(now),
+    changes: [
+      { field: 'title', before: 'Old', after: 'Ship API' },
+      { field: 'contributorAssignments', after: [{ assignmentId: 'a', memberUserId: 'sato@example.com', status: 'planned' }] },
+    ],
+  }
+  const data = toPublicWebhookEventData(event)
+  expect(data.changes?.map((change) => change.field)).toEqual(['title'])
+  expect(JSON.stringify(data)).not.toContain('sato@example.com')
+})
 
 function createWorkItemAuditEvent(now: Date) {
   const context = createMutationAuditContext({

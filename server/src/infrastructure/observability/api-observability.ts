@@ -97,6 +97,8 @@ const SAFE_API_ROUTE_AREAS = new Set([
   'planning',
   'projects',
   'public',
+  'push',
+  'push-subscriptions',
   'ready',
   'realtime',
   'recurring-work',

@@ -9,6 +9,7 @@ import {
   isNonnegativeSafeInteger,
   isOptionalString,
   isRecord,
+  readRecord,
 } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
@@ -195,7 +196,7 @@ async function requestJson<TResponse>(
   const data = await readJson<unknown>(response)
 
   if (!response.ok) {
-    const error = toRecord(data)
+    const error = readRecord(data)
     const message = typeof error.message === 'string' && error.message.trim()
       ? error.message
       : defaultAutomationApiErrorMessage
@@ -223,8 +224,3 @@ async function readJson<TResponse>(response: Response): Promise<TResponse> {
   }
 }
 
-function toRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
-}

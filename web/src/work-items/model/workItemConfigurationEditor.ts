@@ -40,6 +40,7 @@ export function cloneWorkItemConfiguration(
       projectIds: field.projectIds ? [...field.projectIds] : undefined,
       validation: field.validation ? { ...field.validation } : undefined,
     })),
+    jobRoles: configuration.jobRoles?.map((jobRole) => ({ ...jobRole })),
   }
 }
 
@@ -127,5 +128,10 @@ export function normalizeWorkItemConfigurationForSave(
         sortOrder: index,
       }
       }),
+    jobRoles: configuration.jobRoles?.map((jobRole) => ({
+      id: jobRole.id,
+      name: jobRole.name.trim(),
+      ...(jobRole.archived ? { archived: true } : {}),
+    })),
   }
 }

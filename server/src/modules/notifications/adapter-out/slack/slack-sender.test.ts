@@ -60,6 +60,46 @@ describe('Slack transport', () => {
       if (result.retryable) expect(result.retryAfterMs).toBe(120_000)
     }
   })
+  test.each([302, 400, 403, 404, 410, 408, 429, 500, 503])(
+    'preserves HTTP %i retry policy when the response body fails', async (status) => {
+      secretSpy.mockResolvedValue(url)
+      const body = new ReadableStream<Uint8Array>({
+        /** Simulates a connection failure after the response headers have arrived. */
+        start(controller) { controller.error(new Error('Response body unavailable')) },
+      })
+      const result = await createSlackNotificationSender(secretSpy, async () => new Response(body, {
+        status, headers: { 'Retry-After': '120' },
+      }))(delivery)
+      const retryable = status === 408 || status === 429 || status >= 500
+      expect(result).toEqual({
+        succeeded: false, retryable, code: 'SlackDeliveryRejected',
+        ...(retryable ? { retryAfterMs: 120_000 } : {}),
+      })
+    },
+  )
+  test('cancels rejected response bodies without reading them or losing rate-limit metadata', async () => {
+    secretSpy.mockResolvedValue(url)
+    const pull = mock(() => { throw new Error('Rejected response bodies must not be read') })
+    const cancel = mock(() => { throw new Error('Response cleanup failed') })
+    const body = new ReadableStream<Uint8Array>({ pull, cancel }, { highWaterMark: 0 })
+    const result = await createSlackNotificationSender(secretSpy, async () => new Response(body, {
+      status: 429, headers: { 'Retry-After': '120' },
+    }))(delivery)
+    expect(result).toEqual({
+      succeeded: false, retryable: true, code: 'SlackDeliveryRejected', retryAfterMs: 120_000,
+    })
+    expect(pull).not.toHaveBeenCalled()
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+  test('keeps a failed success acknowledgement retryable without claiming delivery', async () => {
+    secretSpy.mockResolvedValue(url)
+    const body = new ReadableStream<Uint8Array>({
+      /** Fails before Slack can acknowledge successful delivery. */
+      start(controller) { controller.error(new Error('Acknowledgement unavailable')) },
+    })
+    expect(await createSlackNotificationSender(secretSpy, async () => new Response(body))(delivery))
+      .toEqual({ succeeded: false, retryable: true, code: 'SlackDeliveryUnavailable' })
+  })
   test('does not accept malformed success or leak errors containing a secret URL', async () => {
     secretSpy.mockResolvedValue(url)
     for (const body of ['', 'not_ok', 'x'.repeat(10_000)]) {

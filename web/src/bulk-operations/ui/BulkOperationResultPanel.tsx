@@ -73,7 +73,7 @@ export function BulkOperationResultPanel({
   return (
     <section
       aria-label={t(operation ? 'bulk.result.title' : 'bulk.preview.title')}
-      className="mt-3 rounded-lg border border-[var(--workbench-border)] bg-white shadow-[0_12px_30px_rgba(28,40,64,0.08)]"
+      className="mt-3 rounded-lg border border-[var(--workbench-border)] bg-surface shadow-[0_12px_30px_rgba(28,40,64,0.08)]"
       data-testid="bulk-operation-review"
     >
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3">
@@ -100,7 +100,7 @@ export function BulkOperationResultPanel({
       {operation ? <OperationSummary operation={operation} t={t} /> : null}
 
       {errorMessage ? (
-        <p className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+        <p className="mx-4 mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
           {errorMessage}
         </p>
       ) : null}
@@ -177,8 +177,8 @@ function PreviewSummary({
           <li
             className={`rounded-md border px-3 py-2 text-sm ${
               item.status === 'ready'
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                : 'border-red-200 bg-red-50 text-red-800'
+                ? 'border-emerald-200 bg-emerald-50 text-fg-emerald-800'
+                : 'border-red-200 bg-red-50 text-fg-red-800'
             }`}
             key={createBulkItemIdentity(item.teamId, item.workItemId)}
           >
@@ -267,12 +267,12 @@ function resolveOperationToneClassName(status: BulkOperation['status']) {
 
 function resolveItemToneClassName(status: BulkOperationItemResult['status']) {
   if (status === 'succeeded' || status === 'undone') {
-    return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+    return 'border-emerald-200 bg-emerald-50 text-fg-emerald-800'
   }
   if (status === 'ready' || status === 'skipped') {
-    return 'border-amber-200 bg-amber-50 text-amber-800'
+    return 'border-amber-200 bg-amber-50 text-fg-amber-800'
   }
-  return 'border-red-200 bg-red-50 text-red-800'
+  return 'border-red-200 bg-red-50 text-fg-red-800'
 }
 
 function isBulkOperationConflict(item: BulkOperationItemResult) {

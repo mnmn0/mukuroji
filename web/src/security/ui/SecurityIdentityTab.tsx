@@ -152,7 +152,7 @@ function SecurityIdentityTabContent({
       {!canManage ? <EnterpriseSecurityReadOnlyNotice t={t} /> : null}
 
       <form
-        className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white"
+        className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface"
         data-testid="security-identity-provider-form"
         onSubmit={(event) => void handleProviderSubmit(event)}
       >
@@ -296,7 +296,7 @@ function SecurityIdentityTabContent({
         ) : null}
       </form>
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.identity.domainsDescription')}
           title={t('security.identity.domainsTitle')}
@@ -385,7 +385,7 @@ function SecurityIdentityTabContent({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-[#99d7cf] bg-[#f3fbfa]">
+      <section className="overflow-hidden rounded-lg border border-tone-99d7cf bg-tone-f3fbfa">
         <EnterpriseSecuritySectionHeader
           badge={t(
             snapshot.identityProvider.enforced
@@ -395,9 +395,9 @@ function SecurityIdentityTabContent({
           description={t('security.identity.enforcementDescription')}
           title={t('security.identity.enforcementTitle')}
         />
-        <div className="border-t border-[#b8e2dc] p-5">
+        <div className="border-t border-tone-b8e2dc p-5">
           <EnterpriseSsoPrerequisiteList prerequisites={prerequisites} t={t} />
-          <div className="mt-4 flex min-w-0 flex-wrap items-center justify-between gap-4 rounded-lg border border-[#b8e2dc] bg-white p-4">
+          <div className="mt-4 flex min-w-0 flex-wrap items-center justify-between gap-4 rounded-lg border border-tone-b8e2dc bg-surface p-4">
             <p className="max-w-[680px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
               {t(
                 prerequisites.complete
@@ -409,7 +409,7 @@ function SecurityIdentityTabContent({
               <button
                 className={
                   snapshot.identityProvider.enforced
-                    ? 'workbench-button-secondary min-h-10 px-4 text-red-700'
+                    ? 'workbench-button-secondary min-h-10 px-4 text-fg-red-700'
                     : 'workbench-button-primary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-55'
                 }
                 data-testid="security-sso-enforcement"

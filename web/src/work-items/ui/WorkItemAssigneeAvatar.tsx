@@ -15,7 +15,7 @@ export function WorkItemAssigneeAvatar({ label }: WorkItemAssigneeAvatarProps) {
   return (
     <span
       aria-hidden="true"
-      className="grid h-6 w-6 flex-none place-items-center rounded-full bg-[#dceeea] text-[10px] font-bold text-[var(--workbench-primary)]"
+      className="grid h-6 w-6 flex-none place-items-center rounded-full bg-tone-dceeea text-[10px] font-bold text-[var(--workbench-primary-text)]"
       data-testid="work-item-assignee-avatar"
     >
       {initial}

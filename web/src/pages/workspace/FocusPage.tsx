@@ -109,7 +109,7 @@ export function FocusPage() {
         />
         {hasUnavailableDeepLink ? (
           <p
-            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-app-meta font-semibold text-amber-800"
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-app-meta font-semibold text-fg-amber-800"
             data-testid="focus-deep-link-unavailable"
             role="status"
           >

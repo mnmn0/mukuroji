@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { BatchGetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { AcceptedResolution, CuratedContextSource } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../audit/audit'
 import {
@@ -9,6 +9,7 @@ import {
   createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
+  deriveAuditedCommentId,
   DynamoDbCollaborationClient,
 } from './collaboration'
 
@@ -43,6 +44,46 @@ function createClient(
     false,
   )
 }
+
+test('batches only exact current-member watcher keys and retries bounded unprocessed scopes', async () => {
+  const requests: number[] = []
+  let first = true
+  let subscribed = true
+  const client = createClient(async (command) => {
+    if (!(command instanceof BatchGetCommand)) throw new Error('Watcher scan or unbounded read')
+    const request = command.input.RequestItems?.['collaboration-table']
+    expect(request?.ConsistentRead).toBe(true)
+    const keys = request?.Keys ?? []
+    requests.push(keys.length)
+    expect(keys.every((key) => key.recordKey === 'WATCHER#member@example.com')).toBe(true)
+    const pending = first ? keys.slice(0, 1) : []
+    const processed = first ? keys.slice(1) : keys
+    first = false
+    return { Responses: { 'collaboration-table': processed.map((key) => ({ ...key, entryType: 'watcher', memberKey: 'member@example.com', state: subscribed ? 'subscribed' : 'unsubscribed', explicit: true, reasons: new Set(['manual']), createdAt: '2026-08-15T00:00:00.000Z', updatedAt: '2026-08-15T00:00:00.000Z' })) }, UnprocessedKeys: { 'collaboration-table': { Keys: pending } } }
+  })
+  const scopes = Array.from({ length: 101 }, (_, index) => `scope-${index}`)
+  expect(new Set(await client.getMemberSubscribedScopes('Member@Example.com', [...scopes, scopes[0] ?? 'scope-0']))).toEqual(new Set(scopes))
+  expect(requests).toEqual([100, 1, 1])
+  subscribed = false
+  expect(await client.getMemberSubscribedScopes('member@example.com', scopes)).toEqual([])
+})
+
+test('fails watcher batches closed on foreign rows, exhaustion and over-budget inputs', async () => {
+  let mode = 'retry'
+  let calls = 0
+  const client = createClient(async (command) => {
+    if (!(command instanceof BatchGetCommand)) throw new Error('Unexpected command')
+    calls++
+    const keys = command.input.RequestItems?.['collaboration-table']?.Keys ?? []
+    return mode === 'retry' ? { UnprocessedKeys: { 'collaboration-table': { Keys: keys } } } : { Responses: { 'collaboration-table': [{ entityKey: 'foreign', recordKey: 'WATCHER#member@example.com', entryType: 'watcher', memberKey: 'member@example.com', state: 'subscribed', explicit: true, reasons: new Set(['manual']), createdAt: '2026-08-15T00:00:00.000Z', updatedAt: '2026-08-15T00:00:00.000Z' }] } }
+  })
+  await expect(client.getMemberSubscribedScopes('member@example.com', ['scope'])).rejects.toMatchObject({ code: 'WatcherReadRetryable' })
+  expect(calls).toBe(3)
+  mode = 'foreign'
+  await expect(client.getMemberSubscribedScopes('member@example.com', ['scope'])).rejects.toMatchObject({ code: 'InvalidCollaborationRecord' })
+  await expect(client.getMemberSubscribedScopes('member@example.com', Array.from({ length: 2001 }, (_, i) => String(i)))).rejects.toMatchObject({ status: 413 })
+  expect(calls).toBe(4)
+})
 
 /**
  * Tests whether a value supports safe property access in the in-memory DynamoDB test transport.
@@ -1420,6 +1461,63 @@ test('includes caller authorization guards in comment transactions', async () =>
     }),
   ]))
 })
+
+test('commits caller co-writes with an audited comment and leaves a failed co-write to the caller', async () => {
+  const transactions: Record<string, unknown>[] = []
+  let cancel = false
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createTestAuditContext('agent-report', '2026-07-12T00:00:00.000Z', { message: 'Report' })
+  const coWrite = { Put: { TableName: 'agent-runs-table', Item: { recordKey: 'agent-run-report#issue-1#1' } } }
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+      if (cancel) {
+        throw Object.assign(new Error('cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+        })
+      }
+      return {}
+    }
+    // The comment of the first attempt exists, so without co-writes the write would replay it.
+    return { Item: transactions[0] ? findCommentItem(transactions[0]) : undefined }
+  })
+  /**
+   * Creates the audited comment with the co-write.
+   *
+   * @returns The created comment.
+   */
+  const create = () => client.createComment({
+    entityKey, issueId: 'issue-1', teamId: 'team-a', workspaceId: 'workspace#one',
+    actorMemberKey: 'member@example.com', bodyMarkdown: '[Codex]\n\nReport', auditContext, coWrites: [coWrite],
+  })
+  const created = await create()
+  expect(created.id).toBe(deriveAuditedCommentId(entityKey, auditContext))
+  expect(created.createdAt).toBe(auditContext.occurredAt)
+  expect(transactions[0]?.TransactItems).toEqual(expect.arrayContaining([coWrite]))
+  cancel = true
+  await expect(create()).rejects.toMatchObject({ code: 'CollaborationConflict' })
+})
+
+/**
+ * Finds the comment row a transaction puts.
+ *
+ * @param transaction - TransactWrite input.
+ * @returns Comment item, if any.
+ */
+function findCommentItem(transaction: Record<string, unknown>): unknown {
+  const items = Array.isArray(transaction.TransactItems) ? transaction.TransactItems : []
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null || !('Put' in item)) continue
+    const put = item.Put
+    if (typeof put === 'object' && put !== null && 'Item' in put) {
+      const row = put.Item
+      if (typeof row === 'object' && row !== null && 'entryType' in row && row.entryType === 'comment') return row
+    }
+  }
+  return undefined
+}
 
 test('finds a committed comment by its deterministic mutation identity', async () => {
   const memory = createCollaborationMemory()

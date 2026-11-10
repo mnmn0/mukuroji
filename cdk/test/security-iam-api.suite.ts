@@ -2,8 +2,8 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
-  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
-  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  COGNITO_USER_POOL_ID_VALUE,
   findApiRuntimeConfigurationSource,
   findCustomResource,
   serializeAwsSdkCall,
@@ -24,17 +24,11 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Timeout: 20,
     Environment: {
       Variables: Match.objectLike({
-        MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
-          Ref: API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+        MUKUROJI_API_RUNTIME_CONFIG_REVISION: {
+          Ref: 'ApiRuntimeConfigurationRevision',
         },
-        MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
-          Ref: API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
-        },
-        MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN: {
-          Ref: 'ApiIdentityRuntimeConfigurationSecret9BDC16DA',
-        },
-        MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN: {
-          Ref: 'ApiWorkflowRuntimeConfigurationSecret225372D1',
+        MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN: {
+          Ref: API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
         },
       }),
     },
@@ -57,10 +51,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
     'AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE',
     'AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION',
-    'MUKUROJI_API_CORE_CONFIG_SECRET_ARN',
-    'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
-    'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',
-    'MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN',
+    'MUKUROJI_API_RUNTIME_CONFIG_REVISION',
+    'MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN',
     'MUKUROJI_APPLICATION_COMMIT_SHA',
     'TENANT_EXPORT_BUCKET_NAME',
   ]);
@@ -70,6 +62,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
   for (const removedAlias of [
     'MUKUROJI_DOCUMENTS_TABLE',
     'MUKUROJI_PROJECT_DIRECTORY_TABLE',
+    'MUKUROJI_SYSTEM_ADMIN_GROUPS',
+    'MUKUROJI_TEAM_ISSUE_EVENTS_TABLE',
     'WORK_ITEMS_TABLE_NAME',
     'SYSTEM_ADMIN_GROUPS',
     'TEAM_ISSUE_EVENTS_TABLE_NAME',
@@ -144,10 +138,10 @@ test('public API delivery queues are retained with TLS-only access and worker-sa
 test('inbound automation webhook lifecycle uses a distinct public base URL and secret namespace', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const coreConfiguration =
-    resources[API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+    resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
       .Properties.SecretString;
   const dataConfiguration =
-    resources[API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+    resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
       .Properties.SecretString;
 
   expect(findApiRuntimeConfigurationSource(
@@ -237,17 +231,8 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     Name: 'live',
   });
 
-  template.hasResourceProperties('AWS::Lambda::Url', {
-    AuthType: 'NONE',
-    Qualifier: 'live',
-    TargetFunctionArn: {
-      'Fn::GetAtt': [functionLogicalId, 'Arn'],
-    },
-  });
-  const functionUrl = Object.values(
-    template.findResources('AWS::Lambda::Url'),
-  )[0];
-  expect(functionUrl.DependsOn).toEqual([aliasLogicalId]);
+  // The HTTP API is the only HTTP entry; CloudFront forwards /api/* to it.
+  template.resourceCountIs('AWS::Lambda::Url', 0);
   template.hasResourceProperties('AWS::ApiGatewayV2::Integration', {
     IntegrationType: 'AWS_PROXY',
     IntegrationUri: { Ref: aliasLogicalId },
@@ -267,7 +252,7 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     Principal: 'apigateway.amazonaws.com',
     SourceArn: Match.anyValue(),
   });
-  template.hasOutput('ApiFunctionUrl', {});
+  template.hasOutput('WebUrl', {});
   template.hasOutput('ApiGatewayUrl', {});
   template.hasOutput('WorkspaceDirectoryId', {
     Value: {
@@ -293,16 +278,14 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
   });
 });
 
-test('developer platform and connector runtime secrets use rotated purpose-specific KMS keys', () => {
+test('developer platform and connector runtime secrets share one rotated KMS key', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
-  template.resourceCountIs('AWS::KMS::Key', 6);
+  template.resourceCountIs('AWS::KMS::Key', 3);
   for (const description of [
-    'Envelope key for developer platform Webhook signing secrets.',
-    'Envelope key for developer platform connector credentials.',
-    'Envelope key for developer platform cursors and idempotency state.',
-    'Encryption key for connector provider runtime configuration.',
+    'Envelope key for developer platform Webhook secrets, connector credentials, ' +
+      'cursor state, and connector runtime configuration.',
     'Encrypts isolated restore-drill exports and exact-version file copies.',
     'Encrypts immutable secret-free restore-drill evidence.',
   ]) {
@@ -314,7 +297,15 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const protectedKmsKeys = Object.values(resources).filter((resource) =>
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(protectedKmsKeys).toHaveLength(6);
+  expect(protectedKmsKeys).toHaveLength(3);
+  const developerPlatformKeyId = Object.keys(resources).find((logicalId) =>
+    logicalId.startsWith('DeveloperPlatformKey'));
+  expect(developerPlatformKeyId).toBeDefined();
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Description:
+      'Provider configuration and signing secrets loaded only by connector runtimes.',
+    KmsKeyId: { 'Fn::GetAtt': [developerPlatformKeyId, 'Arn'] },
+  });
   expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'
@@ -327,7 +318,7 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   );
 });
 
-test('Function URL and API Gateway expose the same restricted CORS contract', () => {
+test('the HTTP API keeps the restricted CORS contract for direct callers', () => {
   const template = synthesizedTemplate;
   const allowedOrigins = {
     'Fn::Split': [
@@ -351,20 +342,6 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
     'x-request-id',
   ];
 
-  template.hasResourceProperties('AWS::Lambda::Url', {
-    Cors: {
-      AllowHeaders: [
-        'authorization',
-        'content-type',
-        'idempotency-key',
-        'x-correlation-id',
-        'x-request-id',
-      ],
-      AllowMethods: Match.arrayWith(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
-      AllowOrigins: allowedOrigins,
-      ExposeHeaders: exposedHeaders,
-    },
-  });
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: {
       AllowHeaders: [
@@ -576,9 +553,7 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
     Runtime: 'nodejs22.x',
     Environment: {
       Variables: Match.objectLike({
-        COGNITO_USER_POOL_ID: {
-          Ref: 'CognitoUserPoolId',
-        },
+        COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: 'ProjectDirectoryTable9ED01C01',
@@ -671,15 +646,111 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
   expect(serializedRealtimePolicy).not.toContain('/*/*/@connections/*');
 });
 
+test('limits each role to its own purposes on the shared developer platform key', () => {
+  const resources = synthesizedTemplate.toJSON().Resources as Record<string, {
+    Type: string;
+    Properties: Record<string, unknown>;
+  }>;
+  const [keyId, key] = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('DeveloperPlatformKey') && resource.Type === 'AWS::KMS::Key'
+  ) ?? [];
+  expect(keyId).toBeDefined();
+  // The only purposes each Lambda role may use the key for directly.
+  const allowedPurposesByRolePrefix: Record<string, string[]> = {
+    ApiFunctionServiceRole: ['webhook', 'connector', 'platform-state'],
+    ConnectorSyncFunctionServiceRole: ['connector', 'platform-state'],
+    WebhookDeliveryFunctionServiceRole: ['webhook'],
+  };
+  /**
+   * Reads the single data-key purpose a statement is bound to.
+   *
+   * @param statement - IAM statement on the shared key.
+   * @returns The purpose, or `undefined` when the statement is not bound to one.
+   */
+  const readPurpose = (statement: Record<string, unknown>): string | undefined => {
+    const equals = (statement.Condition as {
+      StringEquals?: Record<string, unknown>;
+    } | undefined)?.StringEquals;
+    const purpose = equals?.['kms:EncryptionContext:mukuroji:purpose'];
+    return typeof purpose === 'string' &&
+      equals?.['kms:EncryptionContext:mukuroji:service'] === 'developer-platform'
+      ? purpose
+      : undefined;
+  };
+  /**
+   * Reports whether a statement only allows use through Secrets Manager.
+   *
+   * @param statement - IAM or key policy statement on the shared key.
+   * @returns Whether `kms:ViaService` limits the statement to Secrets Manager.
+   */
+  const isSecretsManagerOnly = (statement: Record<string, unknown>): boolean =>
+    JSON.stringify((statement.Condition as {
+      StringEquals?: Record<string, unknown>;
+    } | undefined)?.StringEquals?.['kms:ViaService'] ?? '').includes('"secretsmanager."');
+
+  // Every identity-based statement in the stack, with the roles it reaches: standalone and
+  // managed policies list their roles, and a role's inline policies belong to that role.
+  const identityStatements = Object.entries(resources).flatMap(([logicalId, resource]) => {
+    const documents = resource.Type === 'AWS::IAM::Role'
+      ? ((resource.Properties.Policies ?? []) as Array<{ PolicyDocument: unknown }>)
+        .map((policy) => policy.PolicyDocument)
+      : resource.Type === 'AWS::IAM::Policy' || resource.Type === 'AWS::IAM::ManagedPolicy'
+        ? [resource.Properties.PolicyDocument]
+        : [];
+    const roles = resource.Type === 'AWS::IAM::Role'
+      ? [logicalId]
+      : ((resource.Properties.Roles ?? []) as Array<{ Ref: string }>).map((role) => role.Ref);
+    return documents.flatMap((document) =>
+      (document as { Statement: Array<Record<string, unknown>> }).Statement
+        .flatMap((statement) => roles.map((role) => ({ role, statement }))));
+  });
+  // No identity policy may grant KMS use on every key, which would bypass the purpose checks.
+  expect(identityStatements.filter(({ statement }) => {
+    const actions = [statement.Action].flat() as string[];
+    return actions.some((action) => action.startsWith('kms:')) &&
+      [statement.Resource].flat().includes('*');
+  })).toEqual([]);
+  const grants = identityStatements.filter(({ statement }) =>
+    JSON.stringify(statement.Resource).includes(`"${keyId}"`));
+  expect(grants.length).toBeGreaterThan(0);
+  const disallowedGrants = grants.filter(({ role, statement }) => {
+    const rolePrefix = Object.keys(allowedPurposesByRolePrefix)
+      .find((prefix) => role.startsWith(prefix));
+    const purpose = readPurpose(statement);
+    return rolePrefix === undefined || purpose === undefined ||
+      !allowedPurposesByRolePrefix[rolePrefix].includes(purpose);
+  });
+  expect(disallowedGrants).toEqual([]);
+  // The connector worker can never decrypt Webhook signing secrets directly.
+  expect(grants.filter(({ role, statement }) =>
+    role.startsWith('ConnectorSyncFunctionServiceRole') &&
+    readPurpose(statement) === 'webhook')).toEqual([]);
+
+  const keyPolicyStatements = (key?.Properties.KeyPolicy as {
+    Statement: Array<Record<string, unknown>>;
+  } | undefined)?.Statement ?? [];
+  const rootPrincipal = {
+    AWS: {
+      'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::', { Ref: 'AWS::AccountId' }, ':root']],
+    },
+  };
+  // CDK's default administrator statement is the only unconditioned one, and only for the account root.
+  const unconditioned = keyPolicyStatements.filter((statement) => statement.Condition === undefined);
+  expect(unconditioned).toEqual([{ Action: 'kms:*', Effect: 'Allow', Principal: rootPrincipal, Resource: '*' }]);
+  const conditioned = keyPolicyStatements.filter((statement) => statement.Condition !== undefined);
+  expect(conditioned.length).toBeGreaterThan(0);
+  expect(conditioned.filter((statement) => !isSecretsManagerOnly(statement))).toEqual([]);
+});
+
 test('API IAM is limited to the data tables and configured Cognito user pool', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
   const developerPlatformTableId =
     template.toJSON().Outputs.DeveloperPlatformTableName?.Value?.Ref;
   const developerPlatformKeyExpectations = [
-    { prefix: 'DeveloperPlatformWebhookKey', purpose: 'webhook' },
-    { prefix: 'DeveloperPlatformConnectorKey', purpose: 'connector' },
-    { prefix: 'DeveloperPlatformStateKey', purpose: 'platform-state' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'webhook' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'connector' },
+    { prefix: 'DeveloperPlatformKey', purpose: 'platform-state' },
   ].map(({ prefix, purpose }) => ({
     keyId: Object.entries(resources).find(([logicalId, resource]) =>
       logicalId.startsWith(prefix) &&
@@ -858,9 +929,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
   expect(serializedApiPolicies).toContain('kms:GenerateDataKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformWebhookKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformConnectorKey');
-  expect(serializedApiPolicies).toContain('DeveloperPlatformStateKey');
+  expect(serializedApiPolicies).toContain('DeveloperPlatformKey');
   expect(serializedApiPolicies).toContain('secretsmanager:GetSecretValue');
   expect(serializedApiPolicies).toContain(':secret:');
   expect(serializedApiPolicies).toContain('mukuroji/automation-webhooks/');
@@ -1055,6 +1124,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Action: 'sqs:SendMessage',
     Effect: 'Allow',
     Resource: [
+      {
+        'Fn::GetAtt': ['AuditExportQueueD1DB7896', 'Arn'],
+      },
       {
         'Fn::GetAtt': ['WebhookDeliveryQueue2A244492', 'Arn'],
       },

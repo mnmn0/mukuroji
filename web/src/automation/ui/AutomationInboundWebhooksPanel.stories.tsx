@@ -6,6 +6,7 @@ import {
   pausedInboundWebhookEndpointFixture,
   provisioningInboundWebhookEndpointFixture,
   revokedInboundWebhookEndpointFixture,
+  triageInboundWebhookEndpointFixture,
 } from '../fixtures'
 
 /** Inbound Webhook lifecycle panel の Storybook metadata です。 */
@@ -56,4 +57,12 @@ export const ProvisioningRecoveryJapanese: Story = {
 /** Mutation controls と secret 発行導線を隠す参照専用状態です。 */
 export const ReadOnly: Story = {
   args: { readOnly: true },
+}
+
+/** Team purpose selector and a Triage-purpose endpoint routed to its Team. */
+export const TriagePurpose: Story = {
+  args: {
+    endpoints: [activeInboundWebhookEndpointFixture, triageInboundWebhookEndpointFixture],
+    teams: [{ id: 'core-team', name: 'Core' }, { id: 'support', name: 'Support' }],
+  },
 }

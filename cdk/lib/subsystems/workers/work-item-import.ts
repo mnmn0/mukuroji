@@ -100,15 +100,12 @@ export function buildWorkItemImportWorker(
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
-        COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        COGNITO_USER_POOL_ID: cognitoUserPoolId,
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
           enterpriseIdentityTokenHashSecret.valueAsString,
-        MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
-        MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
-        MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:

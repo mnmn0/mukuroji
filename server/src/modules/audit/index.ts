@@ -52,3 +52,6 @@ export {
   type MutationAuditContextInput,
   type MutationAuditEventInput,
 } from './audit'
+
+/** Asynchronous audit export object namespace shared with tenant lifecycle owners. */
+export { createAuditExportWorkspacePrefix } from './audit-export'

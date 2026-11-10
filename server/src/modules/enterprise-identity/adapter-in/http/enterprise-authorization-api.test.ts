@@ -2274,3 +2274,38 @@ test.each([false, true])('repairs a lockout through break-glass with partial SSO
   )).toBeUndefined()
   })
 })
+
+test('resolves malformed percent-encoded path IDs as the route handler does instead of failing upstream', async () => {
+  // `%E0%A4%A` is a truncated UTF-8 sequence that `decodeURIComponent` rejects.
+  const malformedId = '%E0%A4%A'
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [],
+    detailMissingIssueIds: [malformedId],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => ({
+    ...await readSnapshot(currentWorkspaceId),
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'core-team-member',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId: 'team:member',
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+      source: 'direct',
+    }],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+  const headers = { Authorization: `Bearer ${createAccessToken([])}` }
+
+  // The granted Team authorizes the lookup, which then reports the literal Work Item ID as missing.
+  const missingWorkItem = await app.request(`/api/teams/core-team/issues/${malformedId}`, { headers })
+  // A Team that is not granted stays denied rather than surfacing a decoding failure.
+  const ungrantedTeam = await app.request(`/api/teams/${malformedId}/issues`, { headers })
+
+  expect(missingWorkItem.status).toBe(404)
+  expect(ungrantedTeam.status).toBe(403)
+})

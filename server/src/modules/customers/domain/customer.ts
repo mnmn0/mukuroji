@@ -762,7 +762,7 @@ function requireImportance(value: CustomerRequestImportance): CustomerRequestImp
 
 /** Requires a known Customer Request source kind. */
 function requireSourceKind(value: CustomerRequestSourceKind): CustomerRequestSourceKind {
-  if (!['form', 'chat', 'email', 'webhook', 'manual-handoff', 'portal', 'phone', 'manual'].includes(value)) {
+  if (!['form', 'chat', 'email', 'webhook', 'manual-handoff', 'agent-run', 'portal', 'phone', 'manual'].includes(value)) {
     throw new CustomerError(400, 'InvalidCustomerInput', 'Customer Request source kind is invalid.')
   }
   return value

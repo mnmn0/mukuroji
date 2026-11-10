@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type {
   CreateManualTriageEntryInput,
+  CreateWebhookTriageEntryInput,
   TriageActionInput,
   TriageBulkActionInput,
   TriageBulkActionResult,
@@ -71,6 +72,41 @@ export function createTriageActionAuditIdempotencyKey(
 export type TriageActor = {
   /** Stable Workspace user or service identifier. */
   id: string
+}
+
+/** Options for admitting a Triage entry from an inbound webhook delivery. */
+export type TriageWebhookAdmissionOptions = {
+  /** ISO time the delivery was first accepted; the entry's received time and deadlines start here. */
+  receivedAt?: string
+}
+
+/** Verified inbound webhook endpoint that delivers Triage entries. */
+export type TriageWebhookEndpointReference = {
+  /** Stable endpoint identifier. */
+  id: string
+  /** Administrator-visible endpoint name. */
+  name: string
+}
+
+/** Why a coding-agent run is filed to Triage. */
+export type AgentRunTriageReason = 'failed' | 'stalled'
+
+/** Validated content of a Triage entry filed for a failed or stalled Agent Run. */
+export type CreateAgentRunTriageEntryInput = {
+  /** Run the entry is about; one entry per run, whichever reason is filed first. */
+  runId: string
+  /** Whether the run failed or stalled. */
+  reason: AgentRunTriageReason
+  /** Entry title shown in the queue. */
+  title: string
+  /** Plain-text summary of the run and its Work Item. */
+  body: string
+  /** Agent name shown as the requester. */
+  agentName: string
+  /** Member responsible for the run, kept as the requester's external ID. */
+  assigneeUserId: string
+  /** Project of the run's Work Item, so the entry is visible only to people who can see that Project. */
+  projectId?: string
 }
 
 /** Replay protection supplied by an HTTP or event adapter. */
@@ -265,6 +301,24 @@ export interface TriageClient {
     input: CreateManualTriageEntryInput,
     idempotency: TriageIdempotency,
     authorizationConditionChecks?: TriageAuthorizationConditionChecks,
+  ): Promise<TriageMutationReceipt>
+  /** Creates a replay-safe entry from a signed Triage-purpose inbound webhook.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param teamId The Team the endpoint routes to.
+   * @param endpoint The verified inbound webhook endpoint.
+   * @param input The validated webhook envelope.
+   * @param idempotency Replay protection bound to the envelope.
+   * @param options Admission-only checks and the time the delivery was first accepted.
+   * @returns The created or replayed entry receipt.
+   */
+  createWebhookEntry(
+    workspaceId: string,
+    teamId: string,
+    endpoint: TriageWebhookEndpointReference,
+    input: CreateWebhookTriageEntryInput,
+    idempotency: TriageIdempotency,
+    options?: TriageWebhookAdmissionOptions,
   ): Promise<TriageMutationReceipt>
   /** Lists source entries attached to a Work Item.
    *

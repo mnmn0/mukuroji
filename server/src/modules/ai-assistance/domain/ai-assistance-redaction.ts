@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import type {
   AiAssistanceCitation,
   AiAssistanceDraft,
@@ -64,6 +65,31 @@ export type AiAssistancePrivateIdentifierGroup = {
   providerAlias: string
   /** Current display identifiers associated with the member. */
   identifiers: readonly string[]
+}
+
+/** Alphabet for provider aliases; letters only, so no digit-based redaction can match inside an alias. */
+const AI_ASSISTANCE_PROVIDER_ALIAS_ALPHABET = 'abcdefghijklmnop'
+
+/**
+ * Creates one cryptographically random, provider-safe member alias.
+ *
+ * Aliases replace member identifiers before redaction runs, so an alias must never look
+ * like redactable data. Hex aliases could contain a digit run such as a Japanese mobile
+ * number, which redaction would rewrite and drop the member from the allowed values.
+ * The 128 random bits are therefore encoded with letters only.
+ *
+ * @param createRandomBytes - Source of the 16 random bytes; injectable for tests.
+ * @returns A `U_` alias of 32 lowercase letters.
+ */
+export function createAiAssistanceProviderAlias(
+  createRandomBytes: (size: number) => Uint8Array = randomBytes,
+): string {
+  let alias = 'U_'
+  for (const byte of createRandomBytes(16)) {
+    alias += AI_ASSISTANCE_PROVIDER_ALIAS_ALPHABET.charAt(byte >> 4)
+    alias += AI_ASSISTANCE_PROVIDER_ALIAS_ALPHABET.charAt(byte & 0x0f)
+  }
+  return alias
 }
 
 /**

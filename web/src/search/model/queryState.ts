@@ -10,6 +10,7 @@ import {
   type WorkspaceSearchDateField,
   type WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
+import { isRecord, readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Filter and layout state restored from the canonical Search URL.
@@ -135,8 +136,8 @@ export function parseSearchRouteState(searchParams: URLSearchParams): SearchRout
  */
 export function serializeSearchRouteState(state: SearchRouteState) {
   const searchParams = new URLSearchParams()
-  const filters = asRecord(state.filters)
-  const layout = asRecord(state.layout)
+  const filters = readRecord(state.filters)
+  const layout = readRecord(state.layout)
 
   searchParams.set('v', String(SEARCH_SCHEMA_VERSION))
   setOptionalValue(searchParams, 'q', readString(filters.keyword))
@@ -147,7 +148,7 @@ export function serializeSearchRouteState(state: SearchRouteState) {
   appendValues(searchParams, 'team', readStringArray(filters.teamIds))
   appendValues(searchParams, 'project', readStringArray(filters.projectIds))
   appendValues(searchParams, 'workItemType', readStringArray(filters.workItemTypeIds))
-  const date = asRecord(filters.date)
+  const date = readRecord(filters.date)
   const dateField = readString(date.field)
   if (dateField && dateField !== 'updatedAt') {
     searchParams.set('dateField', dateField)
@@ -167,7 +168,7 @@ export function serializeSearchRouteState(state: SearchRouteState) {
   }
   const sort = readUnknownArray(layout.sort)
     .map((item) => {
-      const sortItem = asRecord(item)
+      const sortItem = readRecord(item)
       const field = readString(sortItem.field)
       const direction = readString(sortItem.direction)
       return field && (direction === 'asc' || direction === 'desc')
@@ -242,35 +243,35 @@ export function deduplicateSearchMigrationWarnings(
  * URL state から keyword を安全に読み取ります。
  */
 export function getSearchKeyword(filters: WorkspaceSearchFilters) {
-  return readString(asRecord(filters).keyword) ?? ''
+  return readString(readRecord(filters).keyword) ?? ''
 }
 
 /**
  * URL state から検索対象 entity type を読み取ります。
  */
 export function getSearchEntityTypes(filters: WorkspaceSearchFilters) {
-  return readStringArray(asRecord(filters).entityTypes).filter(isSearchEntityType)
+  return readStringArray(readRecord(filters).entityTypes).filter(isSearchEntityType)
 }
 
 /**
  * URL state から選択中 status を読み取ります。
  */
 export function getSearchStatuses(filters: WorkspaceSearchFilters) {
-  return readWorkflowStatusIds(asRecord(filters).statuses)
+  return readWorkflowStatusIds(readRecord(filters).statuses)
 }
 
 /**
  * URL state から任意の複数選択 filter を読み取ります。
  */
 export function getSearchFilterValues(filters: WorkspaceSearchFilters, key: string) {
-  return readStringArray(asRecord(filters)[key])
+  return readStringArray(readRecord(filters)[key])
 }
 
 /**
  * URL state から日付 filter を読み取ります。
  */
 export function getSearchDateValue(filters: WorkspaceSearchFilters, key: 'dateFrom' | 'dateTo') {
-  const date = asRecord(asRecord(filters).date)
+  const date = readRecord(readRecord(filters).date)
   return readString(date[key === 'dateFrom' ? 'from' : 'to']) ?? ''
 }
 
@@ -279,7 +280,7 @@ export function getSearchDateValue(filters: WorkspaceSearchFilters, key: 'dateFr
  */
 export function getSearchDateField(filters: WorkspaceSearchFilters): WorkspaceSearchDateField {
   return readEnumValue(
-    readString(asRecord(asRecord(filters).date).field),
+    readString(readRecord(readRecord(filters).date).field),
     ['createdAt', 'updatedAt', 'dueDate'] as const,
   ) ?? 'updatedAt'
 }
@@ -288,21 +289,21 @@ export function getSearchDateField(filters: WorkspaceSearchFilters): WorkspaceSe
  * URL state から custom field filter を読み取ります。
  */
 export function getSearchCustomFields(filters: WorkspaceSearchFilters) {
-  return readUnknownArray(asRecord(filters).customFields) as SearchCustomFieldFilter[]
+  return readUnknownArray(readRecord(filters).customFields) as SearchCustomFieldFilter[]
 }
 
 /**
  * Search layout の表示モードを読み取ります。
  */
 export function getSearchLayoutMode(layout: SearchViewLayout): SearchViewLayoutMode {
-  return readEnumValue(readString(asRecord(layout).mode), searchLayoutModes) ?? 'table'
+  return readEnumValue(readString(readRecord(layout).mode), searchLayoutModes) ?? 'table'
 }
 
 /**
  * Search layout の sort 値を読み取ります。
  */
 export function getSearchSort(layout: SearchViewLayout) {
-  const firstSort = asRecord(readUnknownArray(asRecord(layout).sort)[0])
+  const firstSort = readRecord(readUnknownArray(readRecord(layout).sort)[0])
   const field = readString(firstSort.field) ?? 'relevance'
   const direction = readString(firstSort.direction) === 'asc' ? 'asc' : 'desc'
 
@@ -313,14 +314,14 @@ export function getSearchSort(layout: SearchViewLayout) {
  * Search layout の group 値を読み取ります。
  */
 export function getSearchGroup(layout: SearchViewLayout) {
-  return readString(asRecord(layout).groupBy) ?? ''
+  return readString(readRecord(layout).groupBy) ?? ''
 }
 
 /**
  * Search layout の表示 column を読み取ります。
  */
 export function getSearchColumns(layout: SearchViewLayout) {
-  const columns = readStringArray(asRecord(layout).columns)
+  const columns = readStringArray(readRecord(layout).columns)
 
   return columns.length > 0
     ? ['title', ...columns.filter((column) => column !== 'title')]
@@ -330,7 +331,7 @@ export function getSearchColumns(layout: SearchViewLayout) {
 function parseCustomFieldFilter(value: string): SearchCustomFieldFilter | undefined {
   try {
     const parsed: unknown = JSON.parse(value)
-    const record = asRecord(parsed)
+    const record = readRecord(parsed)
     const fieldId = readString(record.fieldId)
     const operator = readEnumValue(readString(record.operator), searchCustomFieldOperators)
     if (!fieldId || !operator) {
@@ -428,10 +429,6 @@ function setOptionalValue(searchParams: URLSearchParams, key: string, value?: st
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
-}
-
 function readString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
@@ -457,8 +454,8 @@ function stableStringify(value: unknown): string {
     return `[${value.map(stableStringify).join(',')}]`
   }
 
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
+  if (isRecord(value)) {
+    return `{${Object.entries(value)
       .filter(([, item]) => item !== undefined)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)

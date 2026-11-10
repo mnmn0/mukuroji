@@ -12,29 +12,26 @@ const deadLetterQueuePaths = [
   'ConnectorPollDlq/Resource',
   'CollaborationProjectionDlq/Resource',
   'AutomationEventDlq/Resource',
-  'AutomationScheduleDlq/Resource',
-  'AnalyticsScheduleDlq/Resource',
-  'NotificationScheduleDlq/Resource',
-  'SlackNotificationDlq/Resource',
+  'ScheduledJobsDlq/Resource',
   'RequestEmailIngestionDlq/Resource',
+  'AuditExportDlq/Resource',
 ] as const;
 const lambdaPaths = [
   'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
   'ApiFunction/Resource',
+  'AuditExportWorkerFunction/Resource',
   'WorkItemImportFunction/Resource',
   'RealtimeHandlerFunction/Resource',
   'CollaborationProjectionFunction/Resource',
   'AutomationEventFunction/Resource',
-  'AutomationScheduleFunction/Resource',
+  'ScheduledJobsFunction/Resource',
   'RuntimeControlAlarmReadinessOnEventFunction/Resource',
   'RuntimeControlAlarmReadinessPollFunction/Resource',
   'WebhookDeliveryFunction/Resource',
   'ConnectorSyncFunction/Resource',
   'ConnectorPollFunction/Resource',
-  'AnalyticsScheduleFunction/Resource',
-  'NotificationScheduleFunction/Resource',
   'RequestEmailIngestionFunction/Resource',
 ] as const;
 const managedPolicyRolePaths = [
@@ -43,11 +40,12 @@ const managedPolicyRolePaths = [
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
   'ApiFunction/ServiceRole/Resource',
+  'AuditExportWorkerFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
   'RealtimeHandlerFunction/ServiceRole/Resource',
   'CollaborationProjectionFunction/ServiceRole/Resource',
   'AutomationEventFunction/ServiceRole/Resource',
-  'AutomationScheduleFunction/ServiceRole/Resource',
+  'ScheduledJobsFunction/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessOnEventFunction/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessPollFunction/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/Resource',
@@ -56,9 +54,6 @@ const managedPolicyRolePaths = [
   'WebhookDeliveryFunction/ServiceRole/Resource',
   'ConnectorSyncFunction/ServiceRole/Resource',
   'ConnectorPollFunction/ServiceRole/Resource',
-  'AnalyticsScheduleFunction/ServiceRole/Resource',
-  'NotificationScheduleFunction/ServiceRole/Resource',
-  'SlackNotificationFunction/ServiceRole/Resource',
   'RequestEmailIngestionFunction/ServiceRole/Resource',
   'AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource',
 ] as const;
@@ -71,6 +66,12 @@ const httpApiRoutePaths = [
 const apiStagePaths = [
   'HttpApi/DefaultStage/Resource',
   'RealtimeWebSocketStage/Resource',
+] as const;
+const webDistributionPaths = [
+  'WebDistribution/Resource',
+] as const;
+const userPoolPaths = [
+  'UserPool/Resource',
 ] as const;
 const waiterStateMachinePath = [
   'RuntimeControlAlarmReadinessProvider/waiter-state-machine/Resource',
@@ -98,14 +99,24 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<AuditExportBucketC2429A66.Arn>/audit-exports/*]',
+    [
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
-      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'NotificationScheduleJobPolicy/Resource',
+      'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -116,6 +127,10 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<AgentRunsTableB0DA56A7.Arn>/index/*]',
+    ['ApiFunction/ServiceRole/DefaultPolicy/Resource'],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
@@ -123,7 +138,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
@@ -135,9 +150,9 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
-      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'NotificationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -162,7 +177,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiAutomationDataPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -190,7 +205,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   // The trailing wildcard also covers the Secrets Manager ARN's generated suffix.
   [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
-    ['SlackNotificationFunction/ServiceRole/DefaultPolicy/Resource'],
+    ['SlackNotificationJobPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
@@ -203,7 +218,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     [
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -211,7 +226,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -219,8 +234,8 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
-      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
-      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleJobPolicy/Resource',
+      'NotificationScheduleJobPolicy/Resource',
     ],
   ],
   [
@@ -375,6 +390,41 @@ const acknowledgedFindings = [
     scopePaths: apiStagePaths,
   },
   {
+    id: 'AwsSolutions-CFR1',
+    reason: 'mukuroji is an internal single-Workspace tool. Every API call is authenticated by Cognito in the application, so a geo restriction would only block legitimate travelling users.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-COG2',
+    reason: 'The internal tool sign-in has no MFA enrollment screen yet, so the stack-owned pool offers TOTP as optional. Administrators can require it per user, and enterprise SSO keeps the identity provider MFA.',
+    scopePaths: userPoolPaths,
+  },
+  {
+    id: 'AwsSolutions-COG8',
+    reason: 'The Plus feature plan adds a per-user monthly charge for threat protection that the internal-tool deployment does not justify. Essentials keeps the free tier; Cognito still throttles repeated failed sign-ins and the API limits authentication challenge attempts.',
+    scopePaths: userPoolPaths,
+  },
+  {
+    id: 'AwsSolutions-CFR2',
+    reason: 'AWS WAF adds a fixed monthly cost that the internal-tool deployment does not justify. The API authenticates every request and applies its own rate limits.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-CFR3',
+    reason: 'Standard CloudFront logs need a separate ACL-enabled log bucket. API requests are already logged by the API Lambda and audited in AuditEventsTable, and static asset requests carry no user data.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-CFR4',
+    reason: 'The distribution uses the default cloudfront.net certificate, whose viewer TLS policy CloudFront fixes. A custom domain certificate with TLSv1.2_2021 can be added later without changing the origins.',
+    scopePaths: webDistributionPaths,
+  },
+  {
+    id: 'AwsSolutions-S1',
+    reason: 'The Web bucket only holds the public build output of the SPA and is read through CloudFront origin access control, so S3 server access logs would add no audit value.',
+    scopePaths: ['WebBucket/Resource'],
+  },
+  {
     id: 'AwsSolutions-SF1',
     reason: 'This state machine is the CDK Provider waiter generated for a custom resource, not an application-owned workflow; its logging configuration is controlled by the CDK provider implementation.',
     scopePaths: waiterStateMachinePath,
@@ -388,8 +438,10 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:events:<AWS::Region>:<AWS::AccountId>:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*]',
     'AwsSolutions-IAM5[Resource::<FileBucketCDFCD6DE.Arn>/workspaces/*]',
     'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
+    'AwsSolutions-IAM5[Resource::<AuditExportBucketC2429A66.Arn>/audit-exports/*]',
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<AgentRunsTableB0DA56A7.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemsTableD3F1672B.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
@@ -440,13 +492,23 @@ const acknowledgedFindings = [
  * Acknowledges the current, reviewed AwsSolutions findings for the stack.
  *
  * New findings remain unacknowledged and therefore continue to fail synthesis.
+ * Paths of optional modules that the stack does not create are skipped: an absent
+ * construct has no finding to acknowledge, and a mistyped path still leaves its
+ * finding unacknowledged.
  */
 export function acknowledgeKnownNagFindings(stack: Stack): void {
+  const restoreDrillDeployed = stack.node.tryFindChild('RestoreDrillWorkflow') !== undefined;
   for (const finding of acknowledgedFindings) {
     const id = `AwsSolutions::${finding.id}`;
-    const scopePaths = 'scopePaths' in finding ? finding.scopePaths : undefined;
+    const declaredScopePaths: readonly string[] | undefined =
+      'scopePaths' in finding ? finding.scopePaths : undefined;
+    // The restore drill is optional. Its acknowledgements apply only when it is deployed, while
+    // every other scope path must still exist.
+    const scopePaths = declaredScopePaths?.filter((path) =>
+      restoreDrillDeployed || !path.startsWith('RestoreDrill'));
+    if (scopePaths?.length === 0) continue;
     const scopes: IConstruct[] = scopePaths
-      ? scopePaths.map((path: string) => findConstruct(stack, path))
+      ? scopePaths.flatMap((path: string) => findConstruct(stack, path) ?? [])
       : [stack];
 
     for (const scope of scopes) {
@@ -463,6 +525,7 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
     }
   }
 
+  if (!restoreDrillDeployed) return;
   const cleanupExecutionFinding =
     'AwsSolutions::AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:' +
     'states:<AWS::Region>:<AWS::AccountId>:execution:' +
@@ -471,17 +534,25 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
     stack,
     'RestoreDrillCleanupRole/DefaultPolicy/Resource',
   );
-  cleanupRolePolicy.node.addMetadata(Validations.ACKNOWLEDGED_RULES_METADATA_KEY, {
+  cleanupRolePolicy?.node.addMetadata(Validations.ACKNOWLEDGED_RULES_METADATA_KEY, {
     [cleanupExecutionFinding]:
       'The wildcard is restricted to approval-gated execution names on the one exact cleanup state machine.',
   });
 }
 
-function findConstruct(stack: Stack, relativePath: string): IConstruct {
-  let current: IConstruct = stack;
+/**
+ * Finds a construct by its path below the stack.
+ *
+ * @param stack - Stack that owns the construct.
+ * @param relativePath - Construct path relative to the stack.
+ * @returns The construct, or `undefined` when an optional module did not create it.
+ */
+function findConstruct(stack: Stack, relativePath: string): IConstruct | undefined {
+  let current: IConstruct | undefined = stack;
 
   for (const segment of relativePath.split('/')) {
-    current = current.node.findChild(segment);
+    current = current.node.tryFindChild(segment);
+    if (!current) return undefined;
   }
 
   return current;

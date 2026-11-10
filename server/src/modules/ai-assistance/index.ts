@@ -28,6 +28,7 @@ export {
   aliasAiAssistanceTextIdentifiers,
   classifyAiAssistanceSensitivePromptField,
   createAiAssistancePrivateTextAliases,
+  createAiAssistanceProviderAlias,
   redactAiAssistanceCitation,
   redactAiAssistanceDraft,
   redactAiAssistancePromptFieldValue,

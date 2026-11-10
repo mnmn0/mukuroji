@@ -320,7 +320,7 @@ export function AiPlanningStatusUpdateAssistantView({
 
       {isAdoptionConfirmationVisible ? (
         <div
-          className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950 outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+          className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-fg-amber-950 outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
           ref={confirmationRef}
           role="alert"
           tabIndex={-1}

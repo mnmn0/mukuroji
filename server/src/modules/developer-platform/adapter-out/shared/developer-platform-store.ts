@@ -124,6 +124,7 @@ import {
   readRequiredText as requireText,
 } from '../../domain/validation'
 import { DeveloperPlatformError } from '../../errors'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** API key の既定有効期間です。 */
 export const API_KEY_DEFAULT_TTL_SECONDS = 90 * 24 * 60 * 60
@@ -4802,7 +4803,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     )
     if (records.length > 1) throw persistenceInvalid('Developer lookup is not unique.')
     return records[0]
-      ? readStoredRecordLocator(clone(records[0]) as unknown as Record<string, unknown>, lookupKey)
+      ? readStoredRecordLocator(clone(records[0]), lookupKey)
       : undefined
   }
 
@@ -4828,7 +4829,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     const selected = remaining.slice(0, request.limit)
     const locators = selected.map((record) =>
       readStoredRecordLocator(
-        clone(record) as unknown as Record<string, unknown>,
+        clone(record),
         request.lookupKey,
       )
     )
@@ -5699,7 +5700,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     clock: () => Date = () => new Date(),
     lookupIndexName: string | undefined = undefined,
     auditTableName: string | undefined = undefined,
-    environment: Readonly<Record<string, string | undefined>> = process.env,
+    environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
   ) {
     const configuredTableName = tableName ??
       environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
@@ -8513,10 +8514,11 @@ function isRecordExpired(record: DeveloperPlatformRecord, now: Date) {
 }
 
 function readStoredRecordLocator(
-  value: Record<string, unknown>,
+  value: unknown,
   expectedLookupKey: string,
 ): DeveloperPlatformRecordLocator {
   if (
+    !isRecord(value) ||
     typeof value.workspaceId !== 'string' ||
     typeof value.recordKey !== 'string' ||
     value.lookupKey !== expectedLookupKey ||
@@ -8590,7 +8592,8 @@ function cloneJsonValue(value: unknown) {
     if (encoded === undefined) {
       throw new Error('JSON value is undefined.')
     }
-    return JSON.parse(encoded) as unknown
+    const parsed: unknown = JSON.parse(encoded)
+    return parsed
   } catch (error) {
     throw invalid('DeveloperJsonInvalid', 'Value must be JSON serializable.', error)
   }
@@ -8617,17 +8620,18 @@ function isTransactionConditionFailure(error: unknown) {
 }
 
 function createDeveloperPlatformDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.DYNAMODB_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_DYNAMODB ??
+    environment.AWS_ENDPOINT_URL
   const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -8697,7 +8701,8 @@ function createDefaultKmsEnvelopeClient(): KmsEnvelopeClient {
   const loadSdk = async () => {
     loadedSdk ??= (async () => {
       const packageName = ['@aws-sdk', 'client-kms'].join('/')
-      const sdk = await import(packageName) as Record<string, unknown>
+      const sdk: unknown = await import(packageName)
+      if (!isRecord(sdk)) throw new Error('AWS KMS client is unavailable.')
       const KmsClient = sdk.KMSClient
       if (typeof KmsClient !== 'function') throw new Error('AWS KMS client is unavailable.')
       const client = new (
@@ -8757,7 +8762,7 @@ function createDefaultKmsEnvelopeClient(): KmsEnvelopeClient {
  * @returns A configured secret protector that fails closed in production.
  */
 export function createDefaultSecretProtector(
-  environment: Readonly<Record<string, string | undefined>> = process.env,
+  environment: Readonly<Record<string, string | undefined>> = loadServerConfig().environment,
 ) {
   const configuredRawKey =
     environment.DEVELOPER_PLATFORM_SECRET_PROTECTOR_KEY?.trim()

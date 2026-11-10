@@ -2292,7 +2292,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function getSystemAdminGroups() {
   const configuredGroups = (
-    getEnv('MUKUROJI_SYSTEM_ADMIN_GROUPS') ??
     getEnv('SYSTEM_ADMIN_GROUPS') ??
     ''
   )

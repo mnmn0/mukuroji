@@ -50,6 +50,21 @@ function createCanonicalWorkItem(
 }
 
 describe('canonical Work Item validation', () => {
+  test('accepts rows without acceptance criteria and rejects malformed ones', () => {
+    const criterion = { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ acceptanceCriteria: [criterion] }))).toBe(true)
+    for (const acceptanceCriteria of [
+      [],
+      [{ ...criterion, id: 'not-hex' }],
+      [{ ...criterion, text: '' }],
+      [{ ...criterion, satisfied: 'yes' }],
+      [criterion, criterion],
+      'Tests pass',
+    ]) {
+      expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ acceptanceCriteria: acceptanceCriteria as never }))).toBe(false)
+    }
+  })
+
   test('accepts assigned and unassigned strict canonical rows', () => {
     const unassigned = createCanonicalWorkItem()
     delete unassigned.assignedProjectId
@@ -69,6 +84,12 @@ describe('canonical Work Item validation', () => {
       archivedBy: 'archiver@example.com',
     }))).toBe(true)
     expect(isCanonicalWorkItemRecord(unassigned)).toBe(true)
+  })
+
+  test('accepts contributors only as a non-empty list; an empty list is stored as absence', () => {
+    const contributor = { assignmentId: 'a'.repeat(32), jobRoleId: 'designer', status: 'planned' }
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ contributorAssignments: [contributor] }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ contributorAssignments: [] }))).toBe(false)
   })
 
   test('accepts all four explicit schedule states with an exact due-date projection', () => {

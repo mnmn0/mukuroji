@@ -3180,6 +3180,7 @@ function isRequestSource(value: unknown): boolean {
     'email',
     'webhook',
     'manual-handoff',
+    'agent-run',
     'portal',
     'phone',
     'manual',

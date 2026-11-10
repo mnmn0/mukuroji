@@ -414,7 +414,7 @@ function ViewTab({ active, disabled = false, label, onClick }: ViewTabProps) {
     <button
       aria-selected={active}
       className={`min-h-10 border-b-2 px-4 text-sm font-semibold ${active
-        ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary)]'
+        ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary-text)]'
         : 'border-transparent text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'} disabled:cursor-not-allowed disabled:opacity-50`}
       disabled={disabled}
       onClick={onClick}

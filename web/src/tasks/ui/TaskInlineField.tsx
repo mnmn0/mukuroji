@@ -100,7 +100,7 @@ export function TaskInlineField({
     return (
       <button
         aria-label={ariaLabel}
-        className={`inline-flex min-w-0 max-w-full rounded px-1.5 py-0.5 text-left transition hover:bg-[#e5f7f4] hover:text-[var(--workbench-primary)] focus:outline-none focus:ring-2 focus:ring-[#2563eb]/20 ${
+        className={`inline-flex min-w-0 max-w-full rounded px-1.5 py-0.5 text-left transition hover:bg-tone-e5f7f4 hover:text-[var(--workbench-primary-text)] focus:outline-none focus:ring-2 focus:ring-tone-2563eb/20 ${
           wrapText ? 'whitespace-normal break-words' : 'truncate'
         }`}
         data-task-field={fieldKey}

@@ -1257,7 +1257,7 @@ function readRequestListInput(context: Context) {
     ...(readOptionalQuery(context, 'customerId') ? { customerId: readOptionalQuery(context, 'customerId') } : {}),
     ...(readOptionalEnum(context.req.query('status'), ['requested', 'in-progress', 'completed', 'closed', 'merged'] as const) ? { status: readOptionalEnum(context.req.query('status'), ['requested', 'in-progress', 'completed', 'closed', 'merged'] as const) } : {}),
     ...(readOptionalEnum(context.req.query('importance'), ['low', 'normal', 'high', 'urgent'] as const) ? { importance: readOptionalEnum(context.req.query('importance'), ['low', 'normal', 'high', 'urgent'] as const) } : {}),
-    ...(readOptionalEnum(context.req.query('sourceKind'), ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'portal', 'phone', 'manual'] as const) ? { sourceKind: readOptionalEnum(context.req.query('sourceKind'), ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'portal', 'phone', 'manual'] as const) } : {}),
+    ...(readOptionalEnum(context.req.query('sourceKind'), ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'agent-run', 'portal', 'phone', 'manual'] as const) ? { sourceKind: readOptionalEnum(context.req.query('sourceKind'), ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'agent-run', 'portal', 'phone', 'manual'] as const) } : {}),
     ...(readOptionalQuery(context, 'search') ? { search: readOptionalQuery(context, 'search') } : {}),
     ...(readOptionalInteger(context.req.query('limit'), 'Customer Request page limit') === undefined ? {} : { limit: readOptionalInteger(context.req.query('limit'), 'Customer Request page limit') }),
     ...(readOptionalQuery(context, 'cursor') ? { cursor: readOptionalQuery(context, 'cursor') } : {}),
@@ -1419,7 +1419,7 @@ function readUpdateRequestInput(value: unknown): UpdateCustomerRequestInput {
 function readSource(value: unknown): CustomerRequestSource {
   const source = readRecord(value)
   return {
-    kind: readEnum(source.kind, ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'portal', 'phone', 'manual'], 'Request source kind'),
+    kind: readEnum(source.kind, ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'agent-run', 'portal', 'phone', 'manual'], 'Request source kind'),
     ...(readOptionalString(source.provider, 'Request source provider') ? { provider: readOptionalString(source.provider, 'Request source provider') } : {}),
     ...(readOptionalString(source.referenceId, 'Request source reference') ? { referenceId: readOptionalString(source.referenceId, 'Request source reference') } : {}),
     ...(readOptionalString(source.permalink, 'Request source permalink') ? { permalink: readOptionalString(source.permalink, 'Request source permalink') } : {}),

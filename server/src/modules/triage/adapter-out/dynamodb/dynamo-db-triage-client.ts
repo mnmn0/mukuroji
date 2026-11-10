@@ -18,6 +18,7 @@ import {
   TRIAGE_ENTRY_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type CreateManualTriageEntryInput,
+  type CreateWebhookTriageEntryInput,
   type TriageActionInput,
   type TriageBulkActionInput,
   type TriageBulkActionResult,
@@ -61,8 +62,11 @@ import {
   type TriageCustomerAssociationOperation,
 } from '../../triage'
 import type {
+  CreateAgentRunTriageEntryInput,
   ResolveTriageWorkItemAction,
   TriageActor,
+  TriageWebhookEndpointReference,
+  TriageWebhookAdmissionOptions,
   TriageAuditContextFactory,
   TriageAuthorizationConditionChecks,
   TriageCustomerAssociationAuthorizationFactory,
@@ -89,6 +93,7 @@ import {
   type TriageTransactionItems,
 } from './triage-transactions'
 import type { TriageAuditOutboxConfiguration } from './triage-audit-events'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Default Team activity GSI name. */
 export const TRIAGE_TEAM_ACTIVITY_INDEX_NAME = 'triage-team-activity-index'
@@ -310,15 +315,16 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param options Persistence, orchestration, and deterministic test options.
    */
   constructor(options: DynamoDbTriageClientOptions = {}) {
+    const environment = loadServerConfig().environment
     const endpoint = getConfiguredDynamoDbEndpoint()
     const dynamoDbClient = options.dynamoDbClient ?? new DynamoDBClient({
-      region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1',
+      region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
       ...(endpoint
         ? {
             endpoint,
             credentials: {
-              accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-              secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+              accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+              secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
             },
           }
         : {}),
@@ -1468,38 +1474,140 @@ export class DynamoDbTriageClient implements TriageClient {
     idempotency: TriageIdempotency,
     authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt> {
-    const existing = await this.readSourceClaim(workspaceId, 'manual-handoff', input.sourceId)
+    if (
+      input.preparedConfigurationRevision !== undefined &&
+      (!Number.isSafeInteger(input.preparedConfigurationRevision) ||
+        input.preparedConfigurationRevision < 0)
+    ) {
+      throw new TriageError(
+        400,
+        'InvalidTriageInput',
+        'The prepared Triage configuration revision is invalid.',
+      )
+    }
+    return this.admitSourceEntry({
+      workspaceId,
+      teamId,
+      sourceKind: 'manual-handoff',
+      sourceId: input.sourceId,
+      createEntry: (entryId, now) => createManualEntry(workspaceId, teamId, actor, input, entryId, now),
+      idempotency,
+      operation: 'manual-handoff',
+      ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
+      validateAdmission: (admission) => {
+        if (
+          input.preparedConfigurationRevision !== undefined &&
+          admission.configurationRevision !== input.preparedConfigurationRevision
+        ) {
+          throw new TriageError(
+            409,
+            'TriageConfigurationConflict',
+            'Triage settings changed while the handoff was prepared. Retry the request.',
+          )
+        }
+        requireSamePreparedManualProject(input, admission.entry)
+      },
+    })
+  }
+
+  /**
+   * Creates a replay-safe entry from a signed Triage-purpose inbound webhook.
+   *
+   * The source identity is the endpoint plus the sender's event ID, so redelivering the
+   * same event replays the original entry and a different body for it is a conflict.
+   *
+   * @param workspaceId - Owning Workspace ID.
+   * @param teamId - Team the endpoint routes to.
+   * @param endpoint - Verified inbound webhook endpoint.
+   * @param input - Validated webhook envelope.
+   * @param idempotency - Replay protection bound to the envelope.
+   * @param options - The time the delivery was first accepted.
+   * @returns The created or replayed entry receipt.
+   */
+  async createWebhookEntry(
+    workspaceId: string,
+    teamId: string,
+    endpoint: TriageWebhookEndpointReference,
+    input: CreateWebhookTriageEntryInput,
+    idempotency: TriageIdempotency,
+    options: TriageWebhookAdmissionOptions = {},
+  ): Promise<TriageMutationReceipt> {
+    return this.admitSourceEntry({
+      ...(options.receivedAt ? { receivedAt: options.receivedAt } : {}),
+      workspaceId,
+      teamId,
+      sourceKind: 'webhook',
+      sourceId: createWebhookTriageSourceId(endpoint.id, input.eventId),
+      createEntry: (entryId, now) => createWebhookEntry(workspaceId, teamId, endpoint, input, entryId, now),
+      idempotency,
+      operation: 'webhook-ingest',
+    })
+  }
+
+  /**
+   * Creates a replay-safe entry for a failed or stalled coding-agent run.
+   *
+   * @param workspaceId - Owning Workspace ID.
+   * @param teamId - Team of the run.
+   * @param input - Validated entry content.
+   * @param idempotency - Replay protection bound to the run.
+   * @param authorizationConditionChecks - Checks committed with the entry, such as the Workspace still being active.
+   * @returns The created or replayed entry receipt.
+   */
+  async createAgentRunEntry(
+    workspaceId: string,
+    teamId: string,
+    input: CreateAgentRunTriageEntryInput,
+    idempotency: TriageIdempotency,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
+  ): Promise<TriageMutationReceipt> {
+    return this.admitSourceEntry({
+      workspaceId,
+      teamId,
+      sourceKind: 'agent-run',
+      sourceId: createAgentRunTriageSourceId(input),
+      createEntry: (entryId, now) => createAgentRunEntry(workspaceId, teamId, input, entryId, now),
+      idempotency,
+      operation: 'agent-run-ingest',
+      ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
+      validateAdmission: (admission) => requireAgentRunProject(input, admission.entry),
+    })
+  }
+
+  /**
+   * Admits a new source entry with Team routing, a source claim, and an operation receipt.
+   *
+   * @param request - Source identity, entry factory, replay protection, and optional checks.
+   * @returns The created or replayed entry receipt.
+   */
+  private async admitSourceEntry(request: {
+    workspaceId: string
+    teamId: string
+    sourceKind: TriageSourceKind
+    sourceId: string
+    createEntry: (entryId: string, now: string) => TriageEntry
+    idempotency: TriageIdempotency
+    operation: string
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks
+    validateAdmission?: (admission: Awaited<ReturnType<DynamoDbTriageClient['prepareEntryAdmission']>>) => void
+    receivedAt?: string
+  }): Promise<TriageMutationReceipt> {
+    const { workspaceId, teamId, sourceKind, sourceId, idempotency } = request
+    const existing = await this.readSourceClaim(workspaceId, sourceKind, sourceId)
     if (existing) return this.replaySourceClaim(existing, idempotency.fingerprint, teamId)
-    const now = this.now().toISOString()
-    const baseEntry = createManualEntry(workspaceId, teamId, actor, input, this.id(), now)
+    // A delivery accepted earlier keeps its original received time, SLA, and retention start.
+    const processedAt = this.now().toISOString()
+    const now = request.receivedAt ? requireIsoInstant(request.receivedAt, 'Webhook received time') : processedAt
+    const baseEntry = request.createEntry(this.id(), now)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const admission = await this.prepareEntryAdmission(baseEntry)
-      if (
-        input.preparedConfigurationRevision !== undefined &&
-        (!Number.isSafeInteger(input.preparedConfigurationRevision) ||
-          input.preparedConfigurationRevision < 0)
-      ) {
-        throw new TriageError(
-          400,
-          'InvalidTriageInput',
-          'The prepared Triage configuration revision is invalid.',
-        )
-      }
-      if (
-        input.preparedConfigurationRevision !== undefined &&
-        admission.configurationRevision !== input.preparedConfigurationRevision
-      ) {
-        throw new TriageError(
-          409,
-          'TriageConfigurationConflict',
-          'Triage settings changed while the handoff was prepared. Retry the request.',
-        )
-      }
-      const entry = admission.entry
-      requireSamePreparedManualProject(input, entry)
+      request.validateAdmission?.(admission)
+      // A delivery admitted after its inherited retention ended is stored already redacted,
+      // so content past its deadline is never newly written at rest.
+      const entry = redactExpiredTriageEntry(admission.entry, this.now().toISOString())
       const admissionItems = admission.transactItems
       const transactItems = dedupeTriageConditionChecks([
-        ...(authorizationConditionChecks ?? []),
+        ...(request.authorizationConditionChecks ?? []),
         ...createTriageEntryTransactionItems({
           tableName: this.tableName,
           entry,
@@ -1510,9 +1618,10 @@ export class DynamoDbTriageClient implements TriageClient {
         createTriageOperationReceiptTransactionPut({
           tableName: this.tableName,
           entry,
-          operation: 'manual-handoff',
+          operation: request.operation,
           idempotency,
-          expiresAt: addDays(now, 90),
+          // The replay receipt lives from this admission, so an old delivery is not stored expired.
+          expiresAt: addDays(processedAt, 90),
         }),
         ...admissionItems,
       ])
@@ -1533,7 +1642,7 @@ export class DynamoDbTriageClient implements TriageClient {
         throw new TriageError(
           409,
           'TriageTransactionTooLarge',
-          'The manual Triage handoff transaction is too large.',
+          'The Triage admission transaction is too large.',
         )
       }
       try {
@@ -1551,12 +1660,12 @@ export class DynamoDbTriageClient implements TriageClient {
           throw new TriageError(
             409,
             'TriageConfigurationConflict',
-            'Triage settings changed while the handoff was created.',
+            'Triage settings changed while the entry was created.',
             { cause: error },
           )
         }
         if (!isConditionalConflict(error)) throw error
-        const concurrent = await this.readSourceClaim(workspaceId, 'manual-handoff', input.sourceId)
+        const concurrent = await this.readSourceClaim(workspaceId, sourceKind, sourceId)
         if (concurrent) return this.replaySourceClaim(concurrent, idempotency.fingerprint, teamId)
         throw new TriageError(409, 'TriageSourceConflict', 'The triage source already exists.', {
           cause: error,
@@ -1565,6 +1674,7 @@ export class DynamoDbTriageClient implements TriageClient {
     }
     throw new TriageError(409, 'TriageConfigurationConflict', 'Triage settings changed.')
   }
+
 
   /** Lists reverse source associations under the Workspace partition.
    *
@@ -2082,6 +2192,185 @@ async function readCanonicalQueueEntries(
   return results.filter((entry): entry is TriageEntry => entry !== undefined)
 }
 
+/**
+ * Derives the source identity of a webhook event.
+ *
+ * @param endpointId - Inbound webhook endpoint ID.
+ * @param eventId - Sender's event ID.
+ * @returns Source ID unique per endpoint and event.
+ */
+function createWebhookTriageSourceId(endpointId: string, eventId: string): string {
+  return `${requireText(endpointId, 'Webhook endpoint ID', 200)}:${requireText(eventId, 'Webhook event ID', 200)}`
+}
+
+/**
+ * Builds the source ID of an Agent Run entry. It is the run ID alone, so a run that stalled and
+ * later failed keeps its first entry instead of opening a second one.
+ *
+ * @param input - Agent Run entry content.
+ * @returns The run ID.
+ */
+function createAgentRunTriageSourceId(input: Pick<CreateAgentRunTriageEntryInput, 'runId' | 'reason'>): string {
+  if (input.reason !== 'failed' && input.reason !== 'stalled') {
+    throw new TriageError(400, 'InvalidTriageInput', 'Agent Run triage reason is invalid.')
+  }
+  return requireText(input.runId, 'Agent Run ID', 200)
+}
+
+/**
+ * Creates an initial entry for a failed or stalled coding-agent run.
+ *
+ * The requester is the agent, not a guest, and there is no channel to reply on, so
+ * request-information keeps failing closed like a webhook entry.
+ *
+ * @param workspaceId - Owning Workspace ID.
+ * @param teamId - Team of the run.
+ * @param input - Validated entry content.
+ * @param entryId - New entry ID.
+ * @param now - Admission time.
+ * @returns The normalized entry before Team configuration is applied.
+ */
+function createAgentRunEntry(
+  workspaceId: string,
+  teamId: string,
+  input: CreateAgentRunTriageEntryInput,
+  entryId: string,
+  now: string,
+): TriageEntry {
+  const permission: TriagePermission = {
+    visibility: 'full',
+    canReply: false,
+    guestVisible: false,
+    checkedAt: now,
+  }
+  const routingReason = input.reason === 'failed'
+    ? 'Filed because a coding-agent run failed.'
+    : 'Filed because a coding-agent run stalled.'
+  return {
+    schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
+    id: requireIdentifier(entryId, 'Triage entry ID'),
+    workspaceId: requireWorkspaceId(workspaceId),
+    source: { kind: 'agent-run', sourceId: createAgentRunTriageSourceId(input) },
+    sourcePreview: {
+      title: requireText(input.title, 'Agent Run entry title', 500),
+      body: requireText(input.body, 'Agent Run entry body', 8_000, true),
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: requireText(input.agentName, 'Agent name', 300),
+      externalId: requireText(input.assigneeUserId, 'Agent Run assignee', 300),
+      guest: false,
+    },
+    receivedAt: now,
+    lastActivityAt: now,
+    state: 'pending',
+    routing: {
+      reason: routingReason,
+      candidates: [{
+        teamId,
+        ...(input.projectId ? { projectId: requireIdentifier(input.projectId, 'Project ID') } : {}),
+        reason: routingReason,
+        permitted: true,
+      }],
+    },
+    teamId,
+    ...(input.projectId ? { projectId: requireIdentifier(input.projectId, 'Project ID') } : {}),
+    permission,
+    retention: { expiresAt: now },
+    capabilities: createTriageCapabilities({ state: 'pending', permission }),
+    events: [{
+      id: `created:1:${now}`,
+      type: 'created',
+      actorId: requireUserId('agent-run-triage', 'Triage actor ID'),
+      summary: input.reason === 'failed' ? 'A failed coding-agent run entered triage.' : 'A stalled coding-agent run entered triage.',
+      createdAt: now,
+    }],
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+/**
+ * Creates an initial entry from a signed inbound webhook envelope.
+ *
+ * The requester is an external guest, and replies stay unavailable until a reply
+ * adapter exists for webhooks, so request-information keeps failing closed.
+ *
+ * @param workspaceId - Owning Workspace ID.
+ * @param teamId - Team the endpoint routes to.
+ * @param endpoint - Verified inbound webhook endpoint.
+ * @param input - Validated webhook envelope.
+ * @param entryId - New entry ID.
+ * @param now - Admission time.
+ * @returns The normalized entry before Team configuration is applied.
+ */
+function createWebhookEntry(
+  workspaceId: string,
+  teamId: string,
+  endpoint: TriageWebhookEndpointReference,
+  input: CreateWebhookTriageEntryInput,
+  entryId: string,
+  now: string,
+): TriageEntry {
+  const permission: TriagePermission = {
+    visibility: 'full',
+    canReply: false,
+    guestVisible: false,
+    checkedAt: now,
+  }
+  const routingReason = `Received by inbound webhook "${requireText(endpoint.name, 'Webhook endpoint name', 200)}".`
+  return {
+    schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
+    id: requireIdentifier(entryId, 'Triage entry ID'),
+    workspaceId: requireWorkspaceId(workspaceId),
+    source: {
+      kind: 'webhook',
+      sourceId: createWebhookTriageSourceId(endpoint.id, input.eventId),
+      connectorId: endpoint.id,
+    },
+    sourcePreview: {
+      title: requireText(input.title, 'Webhook title', 500),
+      body: requireText(input.body, 'Webhook body', 8_000, true),
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: requireText(input.requesterDisplayName, 'Requester display name', 300),
+      ...(input.requesterEmail ? { email: requireEmail(input.requesterEmail) } : {}),
+      guest: true,
+    },
+    receivedAt: now,
+    lastActivityAt: now,
+    state: 'pending',
+    routing: {
+      reason: routingReason,
+      candidates: [{ teamId, reason: routingReason, permitted: true }],
+    },
+    teamId,
+    permission,
+    retention: { expiresAt: now },
+    capabilities: createTriageCapabilities({ state: 'pending', permission }),
+    events: [{
+      id: `created:1:${now}`,
+      type: 'created',
+      actorId: requireUserId(`inbound-webhook:${endpoint.id}`, 'Triage actor ID'),
+      summary: 'An inbound webhook entered triage.',
+      createdAt: now,
+    }],
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
 /** Creates an initial manual handoff entry. */
 function createManualEntry(
   workspaceId: string,
@@ -2408,6 +2697,26 @@ function requireSamePreparedManualProject(
       409,
       'TriageConfigurationConflict',
       'Triage routing changed while the handoff was created. Retry the request.',
+    )
+  }
+}
+
+/**
+ * Keeps an Agent Run entry inside its Work Item's Project. Readers of another Project must not see
+ * the Work Item's title and path, so a routing rule that moves the entry is refused.
+ *
+ * @param input - Agent Run entry input.
+ * @param entry - Entry after routing.
+ */
+function requireAgentRunProject(
+  input: CreateAgentRunTriageEntryInput,
+  entry: TriageEntry,
+): void {
+  if (input.projectId !== entry.projectId) {
+    throw new TriageError(
+      409,
+      'TriageAdmissionProjectChanged',
+      'A Triage routing rule moves this Agent Run entry to another Project.',
     )
   }
 }
@@ -2781,7 +3090,7 @@ function invalidStoredConfiguration(): TriageError {
  */
 function isTriageSourceKind(value: unknown): value is TriageSourceKind {
   return value === 'form' || value === 'chat' || value === 'email' ||
-    value === 'webhook' || value === 'manual-handoff'
+    value === 'webhook' || value === 'manual-handoff' || value === 'agent-run'
 }
 
 /** Returns whether a persisted value is a bounded non-empty string.
@@ -3038,7 +3347,7 @@ function invalidCursor(): TriageError {
 
 /** Reads an optional non-empty environment variable. */
 function readEnvironment(name: string): string | undefined {
-  const value = process.env[name]?.trim()
+  const value = loadServerConfig().environment[name]?.trim()
   return value || undefined
 }
 

@@ -16,6 +16,8 @@ export type TriageSourceKind =
   | 'email'
   | 'webhook'
   | 'manual-handoff'
+  /** A coding-agent run that failed or stalled, filed by the Agent Run triage worker. */
+  | 'agent-run'
 
 /** The complete lifecycle state of a triage entry. */
 export type TriageEntryState =
@@ -614,6 +616,25 @@ export type UpdateTriageConfigurationInput = {
   allowedBulkActions: TriageBulkOperation['action'][]
   /** Default retention duration for projected source content. */
   retentionDays: number
+}
+
+/**
+ * Normalized envelope that a signed Triage-purpose inbound webhook delivers.
+ *
+ * Routing, owner, and SLA always come from the endpoint and the Team configuration,
+ * never from the payload.
+ */
+export type CreateWebhookTriageEntryInput = {
+  /** Sender's stable event identifier; redelivering the same event is a replay. */
+  eventId: string
+  /** Short summary shown in the queue. */
+  title: string
+  /** Plain-text details. */
+  body: string
+  /** Requester name reported by the sender. */
+  requesterDisplayName: string
+  /** Requester email reported by the sender. */
+  requesterEmail?: string
 }
 
 /** Input for an internal user handing an item to a Team queue. */

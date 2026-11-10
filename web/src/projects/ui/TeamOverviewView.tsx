@@ -167,7 +167,7 @@ export function TeamOverviewView({
                       <div className="min-w-[180px]">
                         <p className="font-semibold">{project.name}</p>
                         <button
-                          className="mt-2 text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                          className="mt-2 text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                           type="button"
                           onClick={() => {
                             if (team) {
@@ -222,7 +222,7 @@ export function TeamOverviewView({
                     <td className="px-5 py-4">
                       {nextTask ? (
                         <button
-                          className="grid max-w-[280px] gap-1 text-left hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)]"
+                          className="grid max-w-[280px] gap-1 text-left hover:text-[var(--workbench-primary-text)] disabled:hover:text-[var(--workbench-text)]"
                           disabled={!onOpenTask || !isOpenableWorkspaceTask(nextTask)}
                           type="button"
                           onClick={() => onOpenTask?.(nextTask)}
@@ -287,7 +287,7 @@ export function TeamMembersNotice({
 }: TeamMembersNoticeProps) {
   if (isLoading) {
     return (
-      <p className="rounded-lg border border-[#99d7cf] bg-[#e5f7f4] px-4 py-3 text-sm font-semibold text-[var(--workbench-primary)]">
+      <p className="rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold text-[var(--workbench-primary-text)]">
         {t('workspace.members.loading')}
       </p>
     )
@@ -298,7 +298,7 @@ export function TeamMembersNotice({
   }
 
   return (
-    <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
+    <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800">
       {t('workspace.members.partialError').replace(
         '{count}',
         String(failedProjectIds.length),

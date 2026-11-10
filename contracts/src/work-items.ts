@@ -8,6 +8,12 @@ import type {
   WorkItemScheduleDependencyConflict,
 } from './schedule-dependencies'
 import type {
+  WorkItemContributorAssignment,
+  WorkItemContributorAssignmentCreateInput,
+  WorkItemContributorAssignmentInput,
+} from './work-item-contributors'
+import type { WorkItemAcceptanceCriterion, WorkItemAcceptanceCriterionInput } from './work-item-acceptance-criteria'
+import type {
   TriageEntryEvent,
   TriagePermissionVisibility,
   TriageSourceKind,
@@ -430,8 +436,15 @@ export type CanonicalWorkItem = {
   title: string
   /** Canonical Work Item は表示文言 key を持ちません。 */
   titleKey?: never
-  /** 担当者を参照する Workspace user ID です。 */
+  /**
+   * Workspace user ID of the single accountable owner. Contributors who carry out
+   * part of the work are listed separately in `contributorAssignments`.
+   */
   assigneeUserId: string
+  /** Contributors carrying out the work, separate from the accountable owner; absent when none. */
+  contributorAssignments?: WorkItemContributorAssignment[]
+  /** Conditions the Work Item must meet before it is accepted; absent when none. */
+  acceptanceCriteria?: WorkItemAcceptanceCriterion[]
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
@@ -536,9 +549,11 @@ export type CreateWorkItemInput = {
    */
   assignedProjectId?: string
   /**
-   * 担当者を参照する Workspace user ID です。
+   * Workspace user ID of the single accountable owner.
    */
   assigneeUserId: string
+  /** Contributors to plan for the new Work Item; new assignments never carry an ID. */
+  contributorAssignments?: WorkItemContributorAssignmentCreateInput[]
   /** Stable Work Item Type selected for the new Work Item. */
   workItemTypeId?: string
   /**
@@ -578,9 +593,16 @@ export type WorkItemPatch = {
    */
   assignedProjectId?: string | null
   /**
-   * 変更後の担当者 ID です。
+   * Workspace user ID of the new accountable owner.
    */
   assigneeUserId?: string
+  /** Complete replacement list of contributors; an empty list removes every contributor. */
+  contributorAssignments?: WorkItemContributorAssignmentInput[]
+  /**
+   * Complete replacement list of acceptance criteria; an empty list removes every criterion. An agent
+   * fenced by its Agent Run may only change `satisfied` of the existing criteria.
+   */
+  acceptanceCriteria?: WorkItemAcceptanceCriterionInput[]
   /** Stable Work Item Type that should replace the current type. */
   workItemTypeId?: string
   /** Explicit acknowledgement for fields or status affected by a type change. */

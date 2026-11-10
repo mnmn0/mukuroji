@@ -40,6 +40,8 @@ import {
 export type MyTasksWorkspaceViewProps = {
   /** Checks whether one permission-pruned Work Item exposes status mutation controls. */
   canMoveTaskStatus?: (task: CanonicalWorkItem) => boolean
+  /** Workspace task keys of Work Items the user contributes to without owning them. */
+  contributorTaskKeys?: ReadonlySet<string>
   /** Team IDs whose Work Item configurations could not be loaded. */
   configurationFailedTeamIds: readonly string[]
   /** Resolved Work Item configurations indexed by Team ID. */
@@ -76,7 +78,7 @@ export type MyTasksWorkspaceViewProps = {
   taskViewToolbar?: ReactNode
   /** Team-qualified keys selected through the shared task-view reducer. */
   selectedTaskKeys?: readonly string[]
-  /** Work Items assigned to the current user. */
+  /** Work Items the current user owns or contributes to. */
   tasks: readonly CanonicalWorkItem[]
   /** Workspace directory used to label Team-scoped workflow columns. */
   teams: readonly ProjectDirectoryTeam[]
@@ -85,11 +87,12 @@ export type MyTasksWorkspaceViewProps = {
 /**
  * Renders the current user's Team-scoped kanban board with drag-and-drop status changes.
  *
- * @param props - Assigned Work Items, Team configurations, and board actions.
+ * @param props - Owned and contributed Work Items, Team configurations, and board actions.
  * @returns The personal Workspace task board.
  */
 export function MyTasksWorkspaceView({
   canMoveTaskStatus,
+  contributorTaskKeys,
   configurationFailedTeamIds,
   configurationsByTeam,
   focusedTaskKey,
@@ -358,7 +361,7 @@ export function MyTasksWorkspaceView({
               aria-label={column.label}
               className={`min-h-[420px] min-w-[260px] rounded-lg border transition-colors ${
                 isDropTarget
-                  ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40'
+                  ? 'border-tone-99d7cf bg-tone-e5f7f4 ring-2 ring-tone-99d7cf/40'
                   : 'border-transparent bg-[var(--workbench-surface-muted)]'
               }`}
               data-testid={`my-tasks-column-${createWorkspaceTaskTestToken(column.key)}`}
@@ -401,6 +404,9 @@ export function MyTasksWorkspaceView({
                       isDragging={draggedTaskKey === taskKey}
                       isMoving={isMoving}
                       focused={focusedTaskKey === taskViewKey}
+                      involvementLabel={contributorTaskKeys?.has(taskKey)
+                        ? t('workspace.myTasks.involvement.contributor')
+                        : undefined}
                       projectLabel={resolveMyTaskProjectLabel(task, teams)}
                       locale={locale}
                       personLabels={personLabels}
@@ -441,7 +447,7 @@ export function MyTasksWorkspaceView({
                   )
                 })}
                 {columnTasks.length === 0 ? (
-                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-surface px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
                     {t('tasks.board.empty')}
                   </p>
                 ) : null}
@@ -450,7 +456,7 @@ export function MyTasksWorkspaceView({
           )
         })}
         {visibleStatusColumns.length === 0 && configurationUnavailableTasks.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+          <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-surface px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
             {t('tasks.board.empty')}
           </p>
         ) : null}
@@ -473,6 +479,9 @@ export function MyTasksWorkspaceView({
                   draggable={false}
                   density={presentation?.density}
                   focused={focusedTaskKey === createTaskViewItemKey(task.teamId, task.id)}
+                  involvementLabel={contributorTaskKeys?.has(createWorkspaceTaskKey(task))
+                    ? t('workspace.myTasks.involvement.contributor')
+                    : undefined}
                   key={createWorkspaceTaskKey(task)}
                   locale={locale}
                   personLabels={personLabels}

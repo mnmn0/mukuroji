@@ -298,7 +298,7 @@ export function AiAssistanceSettingsPanel({
   return (
     <section className="workbench-panel overflow-hidden" data-testid="ai-assistance-settings-panel">
       <div className="flex items-start gap-3 px-5 py-5 sm:px-7">
-        <span className="mt-1 text-[var(--workbench-primary)]">
+        <span className="mt-1 text-[var(--workbench-primary-text)]">
           <ShieldIcon className="h-6 w-6 fill-none stroke-current stroke-2" />
         </span>
         <SectionHeader

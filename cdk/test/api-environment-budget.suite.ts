@@ -3,29 +3,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, test } from '@jest/globals';
 import {
-  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
-  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  COGNITO_USER_POOL_CLIENT_ID_VALUE,
+  COGNITO_USER_POOL_ID_VALUE,
+  WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
   synthesizedTemplate,
 } from './test-support';
 
 const API_FUNCTION_LOGICAL_ID = 'ApiFunctionCE271BD4';
-const API_IDENTITY_SECRET_LOGICAL_ID =
-  'ApiIdentityRuntimeConfigurationSecret9BDC16DA';
-const API_WORKFLOW_SECRET_LOGICAL_ID =
-  'ApiWorkflowRuntimeConfigurationSecret225372D1';
 const TENANT_EXPORT_BUCKET_LOGICAL_ID = 'TenantExportBucket06599E71';
-const API_ENTERPRISE_IDENTITY_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID =
-  'ApiEnterpriseIdentityTokenHashValueSecretD05ED67C';
-const API_ENTERPRISE_SSO_STATE_VALUE_SECRET_LOGICAL_ID =
-  'ApiEnterpriseSsoStateValueSecret52653A73';
-const API_REQUEST_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID =
-  'ApiRequestTokenHashValueSecret1C7880D4';
-const API_WORKSPACE_AUDIT_PSEUDONYM_VALUE_SECRET_LOGICAL_ID =
-  'ApiWorkspaceAuditPseudonymValueSecretC16FD0F8';
 const DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID =
   'DocumentPublicShareTokenSecret3151B43C';
 const API_CONFIGURATION_ENVELOPE_HEADER =
-  'mukuroji-api-runtime-configuration-v2\n';
+  'mukuroji-api-runtime-configuration-v3\n';
 const API_CONFIGURATION_SECRET_LIMIT_BYTES = 65_536;
 const LAMBDA_ENVIRONMENT_LIMIT_BYTES = 4_096;
 const CLOUDFORMATION_PARAMETER_LIMIT_BYTES = 4_096;
@@ -187,13 +177,13 @@ const expectedCoreConfiguration = {
 };
 
 const expectedIdentityConfiguration = {
-  COGNITO_CLIENT_ID: base64(ref('CognitoUserPoolClientId')),
+  COGNITO_CLIENT_ID: base64(COGNITO_USER_POOL_CLIENT_ID_VALUE),
   COGNITO_ENTERPRISE_IDP_NAME: base64(ref('CognitoEnterpriseIdpName')),
   COGNITO_HOSTED_UI_DOMAIN: base64(ref('CognitoHostedUiDomain')),
   COGNITO_SSO_CLIENT_ID: base64(ref('CognitoSsoUserPoolClientId')),
   COGNITO_SSO_REDIRECT_URI: base64(ref('CognitoSsoRedirectUri')),
-  COGNITO_USER_POOL_ID: base64(ref('CognitoUserPoolId')),
-  MUKUROJI_SYSTEM_ADMIN_GROUPS: base64(ref('SystemAdminGroups')),
+  COGNITO_USER_POOL_ID: base64(COGNITO_USER_POOL_ID_VALUE),
+  SYSTEM_ADMIN_GROUPS: base64(ref('SystemAdminGroups')),
   MUKUROJI_WORKSPACE_DIRECTORY_ID: base64(ref('WorkspaceDirectoryId')),
 };
 
@@ -217,23 +207,23 @@ const expectedDataConfiguration = {
   ),
   CUSTOMERS_TABLE_NAME: base64(ref('CustomersTableB554B793')),
   DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: base64(
-    getAtt('DeveloperPlatformConnectorKey7AD18512', 'Arn'),
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
   ),
   DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: base64('LookupKeyIndex'),
   DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: base64(
-    getAtt('DeveloperPlatformStateKey5AAD6FB8', 'Arn'),
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
   ),
   DEVELOPER_PLATFORM_TABLE_NAME: base64(
     ref('DeveloperPlatformTable772E085C'),
   ),
   DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: base64(
-    getAtt('DeveloperPlatformWebhookKey6B581CD4', 'Arn'),
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
   ),
   DOCUMENTS_TABLE_NAME: base64(ref('DocumentsTable7E808EE5')),
   ENTERPRISE_IDENTITY_TABLE_NAME: base64(
     ref('EnterpriseIdentityTable7491FB7A'),
   ),
-  MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: base64(
+  TEAM_ISSUE_EVENTS_TABLE_NAME: base64(
     ref('TeamIssueEventsTableDD2B0F96'),
   ),
   PROJECT_DIRECTORY_TABLE_NAME: base64(
@@ -250,15 +240,15 @@ const expectedDataConfiguration = {
 };
 
 const expectedWorkflowConfiguration = {
+  AUDIT_EXPORT_BUCKET_NAME: base64(ref('AuditExportBucketC2429A66')),
+  AUDIT_EXPORT_QUEUE_URL: base64(ref('AuditExportQueueD1DB7896')),
   DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET: nestedSecret(
     ref(DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID),
   ),
-  ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: nestedSecret(
-    ref(API_ENTERPRISE_IDENTITY_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
+  ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: base64(
+    ref('EnterpriseIdentityTokenHashSecret'),
   ),
-  ENTERPRISE_SSO_STATE_SECRET: nestedSecret(
-    ref(API_ENTERPRISE_SSO_STATE_VALUE_SECRET_LOGICAL_ID),
-  ),
+  ENTERPRISE_SSO_STATE_SECRET: base64(ref('EnterpriseSsoStateSecret')),
   FILE_BUCKET_NAME: base64(ref('FileBucketCDFCD6DE')),
   FILE_DOWNLOAD_URL_TTL_SECONDS: base64(
     ref('FileDownloadUrlTtlSeconds'),
@@ -267,11 +257,15 @@ const expectedWorkflowConfiguration = {
   FILE_RETENTION_DAYS: base64(ref('FileRetentionDays')),
   FILE_UPLOAD_URL_TTL_SECONDS: base64(ref('FileUploadUrlTtlSeconds')),
   FOCUS_TABLE_NAME: base64(ref('FocusTable8B0E7E68')),
+  MUKUROJI_EDGE_ORIGIN_SECRET: base64(ref('EdgeOriginSecret')),
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: nestedSecret(
-    ref(API_WORKSPACE_AUDIT_PSEUDONYM_VALUE_SECRET_LOGICAL_ID),
+    ref(WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID),
   ),
   NOTIFICATIONS_STATUS_INDEX_NAME: base64('RecipientStatusIndex'),
   NOTIFICATIONS_TABLE_NAME: base64(ref('NotificationsTable76DCFC6C')),
+  PUSH_SUBSCRIPTIONS_TABLE_NAME: base64(ref('PushSubscriptionsTable14F60E9C')),
+  AGENT_RUNS_TABLE_NAME: base64(ref('AgentRunsTableB0DA56A7')),
+  WEB_PUSH_VAPID_PUBLIC_KEY: base64(ref('WebPushVapidPublicKey')),
   CAPACITY_PLANNING_TABLE_NAME: base64(ref('CapacityPlanningTable0EECD517')),
   PLANNING_TABLE_NAME: base64(ref('PlanningTable2A0D4CC5')),
   REALTIME_SESSIONS_TABLE_NAME: base64(
@@ -280,9 +274,7 @@ const expectedWorkflowConfiguration = {
   REQUEST_INTAKE_TABLE_NAME: base64(ref('RequestIntakeTable608708D4')),
   REQUEST_QUEUE_INDEX_NAME: base64('RequestQueueIndex'),
   REQUEST_RATE_LIMIT_PER_HOUR: base64(ref('RequestRateLimitPerHour')),
-  REQUEST_TOKEN_HASH_SECRET: nestedSecret(
-    ref(API_REQUEST_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
-  ),
+  REQUEST_TOKEN_HASH_SECRET: base64(ref('RequestTokenHashSecret')),
   TRIAGE_OWNER_ACTIVITY_INDEX_NAME: base64('triage-owner-activity-index'),
   TRIAGE_TEAM_ACTIVITY_INDEX_NAME: base64('triage-team-activity-index'),
   TRIAGE_WAKE_INDEX_NAME: base64('triage-wake-index'),
@@ -298,38 +290,27 @@ const expectedWorkflowConfiguration = {
   WORK_ITEM_IMPORT_QUEUE_URL: base64(ref('WorkItemImportQueueA2F07A30')),
 };
 
-const expectedConfigurations = {
-  [API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]:
-    expectedCoreConfiguration,
-  [API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]:
-    expectedDataConfiguration,
-  [API_IDENTITY_SECRET_LOGICAL_ID]: expectedIdentityConfiguration,
-  [API_WORKFLOW_SECRET_LOGICAL_ID]: expectedWorkflowConfiguration,
-};
-
-/** Exact group identity emitted by each configuration secret. */
-const expectedConfigurationGroups: Readonly<Record<string, string>> = {
-  [API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]: 'core',
-  [API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]: 'data',
-  [API_IDENTITY_SECRET_LOGICAL_ID]: 'identity',
-  [API_WORKFLOW_SECRET_LOGICAL_ID]: 'workflow',
+/** Every canonical name in the single configuration secret. */
+const expectedConfiguration = {
+  ...expectedCoreConfiguration,
+  ...expectedIdentityConfiguration,
+  ...expectedDataConfiguration,
+  ...expectedWorkflowConfiguration,
 };
 
 /**
- * Builds the exact transform-free line envelope for one expected group.
+ * Builds the exact transform-free line envelope for the configuration secret.
  *
  * @param configuration - Canonical names mapped to encoded value sources.
- * @param group - Exact configuration-group identity.
  * @returns Exact Fn::Join expression synthesized for SecretString.
  */
 function createExpectedConfigurationEnvelope(
   configuration: Readonly<Record<string, unknown>>,
-  group: string,
 ): Record<string, unknown> {
   const entries = Object.entries(configuration).sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0);
   const parts: unknown[] = [
-    `${API_CONFIGURATION_ENVELOPE_HEADER}group:${group}\nrevision:`,
+    `${API_CONFIGURATION_ENVELOPE_HEADER}revision:`,
     base64(ref('ApiRuntimeConfigurationRevision')),
   ];
   for (const [name, candidate] of entries) {
@@ -342,7 +323,7 @@ function createExpectedConfigurationEnvelope(
       parts.push({
         'Fn::If': [
           'EnterpriseSsoConfigured',
-          join('', [`\nsecret:${name}:`, nested]),
+          join('', [`\nvalue:${name}:`, candidate]),
           `\nvalue:${name}:`,
         ],
       });
@@ -422,6 +403,10 @@ function resolveMaximumString(
         }
         return 'X'.repeat(maxLength);
       }
+      if (definition.Type === 'Number') {
+        // A Number parameter is a decimal literal; 32 digits bounds it.
+        return 'X'.repeat(32);
+      }
       return 'X'.repeat(CLOUDFORMATION_PARAMETER_LIMIT_BYTES);
     }
     const resource = requireRecord(
@@ -433,14 +418,22 @@ function resolveMaximumString(
         return 'X'.repeat(255);
       case 'AWS::S3::Bucket':
         return 'X'.repeat(63);
+      // A queue URL is https://sqs.<region>.amazonaws.com/<account>/<name of
+      // at most 80 characters>; AppConfig and API Gateway IDs are short
+      // generated identifiers. 512 bytes bounds each of them generously.
       case 'AWS::SQS::Queue':
       case 'AWS::AppConfig::Application':
       case 'AWS::AppConfig::ConfigurationProfile':
       case 'AWS::AppConfig::Environment':
       case 'AWS::ApiGatewayV2::Api':
-        return 'X'.repeat(4_096);
+        return 'X'.repeat(512);
       case 'AWS::SecretsManager::Secret':
         return 'X'.repeat(2_048);
+      // Cognito user pool IDs are at most 55 characters and client IDs 128.
+      case 'AWS::Cognito::UserPool':
+        return 'X'.repeat(55);
+      case 'AWS::Cognito::UserPoolClient':
+        return 'X'.repeat(128);
       default:
         throw new Error(
           `Unsupported Ref resource type ${String(resource.Type)} for ${logicalId}.`,
@@ -462,7 +455,7 @@ function resolveMaximumString(
     }
     if (resource.Type === 'AWS::ApiGatewayV2::Api' &&
         attribute === 'ApiEndpoint') {
-      return 'X'.repeat(4_096);
+      return 'X'.repeat(512);
     }
     throw new Error(
       `Unsupported Fn::GetAtt ${logicalId}.${attribute}.`,
@@ -567,10 +560,11 @@ function resolveApiEnvironmentValue(
     throw new Error(`${expression.Ref} is not a Secrets Manager secret.`);
   }
   const properties = requireRecordProperty(secret, 'Properties');
-  const secretName = resolveMaximumSecretName(
-    properties.Name,
-    parameters,
-  );
+  // CloudFormation generates a name from the logical ID plus a random
+  // suffix when none is declared; 256 bytes bounds it conservatively.
+  const secretName = properties.Name === undefined
+    ? 'X'.repeat(256)
+    : resolveMaximumSecretName(properties.Name, parameters);
   return [
     'arn:',
     'X'.repeat(32),
@@ -603,7 +597,7 @@ function resolveSsoCondition(value: unknown, enabled: boolean): unknown {
 }
 
 describe('API runtime configuration externalization', () => {
-  test('hydrates disabled SSO as an empty direct value without loading an empty nested secret', () => {
+  test('writes disabled SSO as an empty direct value', () => {
     const template = requireRecord(synthesizedTemplate.toJSON(), 'CloudFormation template');
     const parameters = requireRecordProperty(template, 'Parameters');
     const resources = requireRecordProperty(template, 'Resources');
@@ -612,14 +606,15 @@ describe('API runtime configuration externalization', () => {
       'Fn::Not': [{ 'Fn::Equals': [ref('EnterpriseSsoStateSecret'), ''] }],
     });
     const envelope = requireRecordProperty(
-      requireRecord(resources[API_WORKFLOW_SECRET_LOGICAL_ID], 'Workflow secret'), 'Properties',
+      requireRecord(resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID], 'Configuration secret'), 'Properties',
     ).SecretString;
     const disabled = resolveMaximumString(resolveSsoCondition(envelope, false), parameters, resources);
     expect(disabled).toContain('\nvalue:ENTERPRISE_SSO_STATE_SECRET:\n');
     expect(disabled).not.toContain('\nsecret:ENTERPRISE_SSO_STATE_SECRET:');
     const enabled = resolveMaximumString(resolveSsoCondition(envelope, true), parameters, resources);
-    expect(enabled).toContain('\nsecret:ENTERPRISE_SSO_STATE_SECRET:');
-    expect(enabled).not.toContain('\nvalue:ENTERPRISE_SSO_STATE_SECRET:');
+    expect(enabled).not.toContain('\nvalue:ENTERPRISE_SSO_STATE_SECRET:\n');
+    expect(enabled).toMatch(/\nvalue:ENTERPRISE_SSO_STATE_SECRET:[A-Za-z0-9+/]+=*\n/);
+    expect(enabled).not.toContain('\nsecret:ENTERPRISE_SSO_STATE_SECRET:');
   });
 
   test('maps every canonical runtime name to its exact deployment source', () => {
@@ -629,34 +624,22 @@ describe('API runtime configuration externalization', () => {
     );
     const resources = requireRecordProperty(template, 'Resources');
 
-    for (const [logicalId, expectedConfiguration] of
-      Object.entries(expectedConfigurations)) {
-      const secret = requireRecord(resources[logicalId], logicalId);
-      expect(secret.Type).toBe('AWS::SecretsManager::Secret');
-      expect(secret.UpdateReplacePolicy).toBe('Retain');
-      expect(secret.DeletionPolicy).toBe('Retain');
+    const secret = requireRecord(
+      resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID],
+      API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+    );
+    expect(secret.Type).toBe('AWS::SecretsManager::Secret');
+    expect(secret.UpdateReplacePolicy).toBe('Retain');
+    expect(secret.DeletionPolicy).toBe('Retain');
+    const properties = requireRecordProperty(secret, 'Properties');
+    expect(properties.SecretString).toEqual(
+      createExpectedConfigurationEnvelope(expectedConfiguration),
+    );
+    // A stable generated name: updating the revision changes the value in
+    // place and never creates another retained secret.
+    expect(properties.Name).toBeUndefined();
 
-      const properties = requireRecordProperty(secret, 'Properties');
-      const group = expectedConfigurationGroups[logicalId];
-      if (group === undefined) {
-        throw new Error(`Configuration group ${logicalId} is missing.`);
-      }
-      expect(properties.SecretString).toEqual(
-        createExpectedConfigurationEnvelope(expectedConfiguration, group),
-      );
-      expect(properties.Name).toEqual({
-        'Fn::Join': [
-          '-',
-          [
-            expect.stringMatching(/^Test-api-(?:core|data|identity|workflow)-config-v2$/),
-            { Ref: 'ApiRuntimeConfigurationRevision' },
-          ],
-        ],
-      });
-    }
-
-    const canonicalNames = Object.values(expectedConfigurations)
-      .flatMap((configuration) => Object.keys(configuration));
+    const canonicalNames = Object.keys(expectedConfiguration);
     const sharedCanonicalNames =
       readSharedApiRuntimeEnvironmentVariableNames();
     expect(canonicalNames.sort()).toEqual(
@@ -667,7 +650,7 @@ describe('API runtime configuration externalization', () => {
     );
   });
 
-  test('keeps every conservatively resolved secret document below 64 KiB', () => {
+  test('keeps the conservatively resolved secret document below 64 KiB', () => {
     const template = requireRecord(
       synthesizedTemplate.toJSON(),
       'CloudFormation template',
@@ -675,17 +658,18 @@ describe('API runtime configuration externalization', () => {
     const parameters = requireRecordProperty(template, 'Parameters');
     const resources = requireRecordProperty(template, 'Resources');
 
-    for (const logicalId of Object.keys(expectedConfigurations)) {
-      const secret = requireRecord(resources[logicalId], logicalId);
-      const properties = requireRecordProperty(secret, 'Properties');
-      const resolved = resolveMaximumString(
-        properties.SecretString,
-        parameters,
-        resources,
-      );
-      expect(Buffer.byteLength(resolved, 'utf8'))
-        .toBeLessThanOrEqual(API_CONFIGURATION_SECRET_LIMIT_BYTES);
-    }
+    const secret = requireRecord(
+      resources[API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID],
+      API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+    );
+    const properties = requireRecordProperty(secret, 'Properties');
+    const resolved = resolveMaximumString(
+      properties.SecretString,
+      parameters,
+      resources,
+    );
+    expect(Buffer.byteLength(resolved, 'utf8'))
+      .toBeLessThanOrEqual(API_CONFIGURATION_SECRET_LIMIT_BYTES);
   });
 
   test('uses declared parameter string bounds before the CloudFormation fallback', () => {
@@ -705,66 +689,67 @@ describe('API runtime configuration externalization', () => {
       ref('ApiAllowedOrigins'),
       parameters,
       resources,
+    )).toHaveLength(2_048);
+    expect(resolveMaximumString(
+      ref('InitialOwnerEmail'),
+      parameters,
+      resources,
     )).toHaveLength(CLOUDFORMATION_PARAMETER_LIMIT_BYTES);
   });
 
-  test('keeps sensitive values outside processed configuration documents', () => {
+  test('writes sensitive values only into secrets and keeps one stable secret per value', () => {
     const template = requireRecord(
       synthesizedTemplate.toJSON(),
       'CloudFormation template',
     );
+    // Without a Transform there is no processed template, so NoEcho values
+    // referenced inside the configuration envelope never reach a template.
     expect(template.Transform).toBeUndefined();
     const parameters = requireRecordProperty(template, 'Parameters');
     const resources = requireRecordProperty(template, 'Resources');
-    const sensitiveValueSecrets: Readonly<Record<string, string>> = {
-      [API_ENTERPRISE_IDENTITY_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID]:
-        'EnterpriseIdentityTokenHashSecret',
-      [API_ENTERPRISE_SSO_STATE_VALUE_SECRET_LOGICAL_ID]:
-        'EnterpriseSsoStateSecret',
-      [API_REQUEST_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID]:
-        'RequestTokenHashSecret',
-      [API_WORKSPACE_AUDIT_PSEUDONYM_VALUE_SECRET_LOGICAL_ID]:
-        'WorkspaceAuditPseudonymKey',
-    };
-
-    for (const [logicalId, parameterLogicalId] of
-      Object.entries(sensitiveValueSecrets)) {
+    for (const parameterLogicalId of [
+      'EdgeOriginSecret',
+      'EnterpriseIdentityTokenHashSecret',
+      'EnterpriseSsoStateSecret',
+      'RequestTokenHashSecret',
+      'WorkspaceAuditPseudonymKey',
+    ]) {
       const parameter = requireRecord(
         parameters[parameterLogicalId],
         parameterLogicalId,
       );
       expect(parameter.NoEcho).toBe(true);
-      const secret = requireRecord(resources[logicalId], logicalId);
-      expect(secret.Type).toBe('AWS::SecretsManager::Secret');
-      expect(secret.UpdateReplacePolicy).toBe('Retain');
-      expect(secret.DeletionPolicy).toBe('Retain');
-      const properties = requireRecordProperty(secret, 'Properties');
-      expect(properties.SecretString).toEqual(
-        parameterLogicalId === 'EnterpriseSsoStateSecret'
-          ? { 'Fn::If': ['EnterpriseSsoConfigured', ref(parameterLogicalId), 'SSO-disabled-no-signing-key'] }
-          : ref(parameterLogicalId),
-      );
-      expect(properties.Name).toEqual({
-        'Fn::Join': [
-          '-',
-          [
-            expect.stringMatching(/^Test-api-[a-z-]+-v1$/),
-            { Ref: 'ApiRuntimeConfigurationRevision' },
-          ],
-        ],
-      });
+      // The API function receives only secret ARNs, never a NoEcho value.
+      expect(JSON.stringify(requireRecord(
+        resources[API_FUNCTION_LOGICAL_ID],
+        API_FUNCTION_LOGICAL_ID,
+      ))).not.toContain(JSON.stringify(ref(parameterLogicalId)));
     }
 
-    const sensitiveParameterRefs = Object.values(sensitiveValueSecrets)
-      .map((logicalId) => JSON.stringify(ref(logicalId)));
-    for (const logicalId of Object.keys(expectedConfigurations)) {
-      const secret = requireRecord(resources[logicalId], logicalId);
-      const properties = requireRecordProperty(secret, 'Properties');
-      const serializedSecretString = JSON.stringify(properties.SecretString);
-      expect(serializedSecretString).not.toContain('{{resolve:');
-      for (const sensitiveParameterRef of sensitiveParameterRefs) {
-        expect(serializedSecretString).not.toContain(sensitiveParameterRef);
-      }
+    const auditSecret = requireRecord(
+      resources[WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID],
+      WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
+    );
+    expect(auditSecret.UpdateReplacePolicy).toBe('Retain');
+    expect(auditSecret.DeletionPolicy).toBe('Retain');
+    const auditProperties = requireRecordProperty(auditSecret, 'Properties');
+    expect(auditProperties.SecretString).toEqual(ref('WorkspaceAuditPseudonymKey'));
+    expect(auditProperties.Name).toBeUndefined();
+
+    // Four secrets in total, none named after the configuration revision.
+    const secrets = Object.entries(resources)
+      .filter(([, resource]) =>
+        isRecord(resource) &&
+        resource.Type === 'AWS::SecretsManager::Secret');
+    expect(secrets.map(([logicalId]) => logicalId).sort()).toEqual([
+      API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+      'ConnectorRuntimeSecret7993B96D',
+      DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID,
+      WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
+    ].sort());
+    for (const [, resource] of secrets) {
+      expect(JSON.stringify(requireRecord(resource, 'secret').Properties))
+        .not.toContain('"Name"');
     }
 
     const apiPolicy = requireRecord(
@@ -788,14 +773,8 @@ describe('API runtime configuration externalization', () => {
       throw new Error('API secret-read statement is missing.');
     }
     expect(secretReadStatement.Resource).toEqual(expect.arrayContaining([
-      ref(API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
-      ref(API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
-      ref(API_IDENTITY_SECRET_LOGICAL_ID),
-      ref(API_WORKFLOW_SECRET_LOGICAL_ID),
-      ref(API_ENTERPRISE_IDENTITY_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
-      ref(API_ENTERPRISE_SSO_STATE_VALUE_SECRET_LOGICAL_ID),
-      ref(API_REQUEST_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
-      ref(API_WORKSPACE_AUDIT_PSEUDONYM_VALUE_SECRET_LOGICAL_ID),
+      ref(API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
+      ref(WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID),
       ref(DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID),
     ]));
   });
@@ -831,14 +810,10 @@ describe('API runtime configuration externalization', () => {
       AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE: '32000000',
       AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION: '1000000',
       MUKUROJI_APPLICATION_COMMIT_SHA: ref('ApplicationCommitSha'),
-      MUKUROJI_API_CORE_CONFIG_SECRET_ARN:
-        ref(API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
-      MUKUROJI_API_DATA_CONFIG_SECRET_ARN:
-        ref(API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
-      MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN:
-        ref(API_IDENTITY_SECRET_LOGICAL_ID),
-      MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN:
-        ref(API_WORKFLOW_SECRET_LOGICAL_ID),
+      MUKUROJI_API_RUNTIME_CONFIG_REVISION:
+        ref('ApiRuntimeConfigurationRevision'),
+      MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN:
+        ref(API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       TENANT_EXPORT_BUCKET_NAME: ref(TENANT_EXPORT_BUCKET_LOGICAL_ID),
     });
 
@@ -909,14 +884,6 @@ describe('API runtime configuration externalization', () => {
     const functionUrls = Object.values(resources)
       .filter((resource) =>
         isRecord(resource) && resource.Type === 'AWS::Lambda::Url');
-    expect(functionUrls).toEqual([
-      expect.objectContaining({
-        DependsOn: expect.arrayContaining([aliasLogicalId]),
-        Properties: expect.objectContaining({
-          Qualifier: 'live',
-          TargetFunctionArn: getAtt(API_FUNCTION_LOGICAL_ID, 'Arn'),
-        }),
-      }),
-    ]);
+    expect(functionUrls).toEqual([]);
   });
 });

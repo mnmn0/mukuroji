@@ -3,6 +3,7 @@ import type {
   CreateWorkItemInput,
   WorkItemPatch,
 } from './work-items'
+import type { WorkItemAcceptanceCriterionMark } from './work-item-acceptance-criteria'
 import type {
   CustomFieldDefinition,
   WorkflowDefinition,
@@ -1328,8 +1329,10 @@ export type ListPublicWorkItemsRequest = {
 
 /**
  * Public Work Item create endpoint の request body です。
+ *
+ * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type CreatePublicWorkItemRequest = CreateWorkItemInput & {
+export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments'> & {
   /**
    * Work Item を所有する Team ID です。
    */
@@ -1338,12 +1341,20 @@ export type CreatePublicWorkItemRequest = CreateWorkItemInput & {
 
 /**
  * Public Work Item update endpoint の request body です。
+ *
+ * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type UpdatePublicWorkItemRequest = WorkItemPatch & {
+export type UpdatePublicWorkItemRequest = Omit<WorkItemPatch, 'contributorAssignments'> & {
   /**
    * 読み込み時点の Work Item revision です。
    */
   expectedRevision: number
+  /**
+   * Marks existing acceptance criteria met or unmet; criteria not listed keep their state. The server
+   * applies the marks to the stored list, so a retry with the same body replays. Cannot be combined
+   * with `acceptanceCriteria`.
+   */
+  acceptanceCriteriaMarks?: WorkItemAcceptanceCriterionMark[]
 }
 
 /** Public Work Item Type change preview endpoint の request body です。 */
@@ -1403,9 +1414,18 @@ export type DeletePublicWorkItemRequest = {
 }
 
 /**
+ * Public API が返す Work Item です。
+ *
+ * Contributors are managed only through the Workspace API, so public responses never
+ * contain `contributorAssignments`. Acceptance criteria are read from their own endpoint because
+ * the public Work Item schema is closed.
+ */
+export type PublicWorkItem = Omit<CanonicalWorkItem, 'contributorAssignments' | 'acceptanceCriteria'>
+
+/**
  * Public Work Item list endpoint の cursor page です。
  */
-export type PublicWorkItemPage = CursorPage<CanonicalWorkItem>
+export type PublicWorkItemPage = CursorPage<PublicWorkItem>
 
 /**
  * Developer settings UI で actor に許可する管理操作です。

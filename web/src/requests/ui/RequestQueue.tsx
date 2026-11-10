@@ -233,12 +233,12 @@ export function RequestQueue({
                       <button
                         aria-current={selectedSubmission?.id === submission.id ? 'true' : undefined}
                         aria-label={`${t('requests.queue.openSubmission')}: ${submission.formName} ${submission.formVersionLabel}`}
-                        className="group block min-h-10 w-full rounded-md px-2 py-1 text-left outline-none hover:bg-white focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
+                        className="group block min-h-10 w-full rounded-md px-2 py-1 text-left outline-none hover:bg-surface focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
                         disabled={isPendingForSelectedSubmission}
                         onClick={() => selectSubmission(submission.id)}
                         type="button"
                       >
-                        <strong className="block truncate group-hover:text-[var(--workbench-primary)]">{submission.formName}</strong>
+                        <strong className="block truncate group-hover:text-[var(--workbench-primary-text)]">{submission.formName}</strong>
                         <span className="text-xs text-[var(--workbench-muted)]">{submission.formVersionLabel}</span>
                       </button>
                     </td>
@@ -261,7 +261,7 @@ export function RequestQueue({
           </div>
         ) : null}
         {errorMessage ? (
-          <p className="m-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+          <p className="m-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
             {errorMessage}
           </p>
         ) : null}
@@ -568,7 +568,7 @@ function RequestSubmissionDetail({
         <DetailSection title={t('requests.detail.answers')}>
           <dl className="grid gap-3">
             {submission.answers.map((answer) => (
-              <div className="rounded-lg border border-[var(--workbench-border)] bg-white px-4 py-3" key={answer.fieldId}>
+              <div className="rounded-lg border border-[var(--workbench-border)] bg-surface px-4 py-3" key={answer.fieldId}>
                 <dt className="text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                   {resolveRequestLocalizedText(answer.label, locale, submission.formDefaultLocale) || answer.fieldId}
                 </dt>
@@ -600,7 +600,7 @@ function RequestSubmissionDetail({
                       </button>
                     ) : null}
                   </span>
-                  {attachmentErrorId === attachment.id ? <span className="basis-full text-xs font-semibold text-red-700" role="alert">{t('requests.detail.attachmentError')}</span> : null}
+                  {attachmentErrorId === attachment.id ? <span className="basis-full text-xs font-semibold text-fg-red-700" role="alert">{t('requests.detail.attachmentError')}</span> : null}
                 </li>
               ))}
             </ul>
@@ -632,7 +632,7 @@ function RequestSubmissionDetail({
           <DetailSection title={t('requests.detail.messages')}>
             <div className="grid gap-2">
               {submission.messages.map((message) => (
-                <div className={`rounded-lg border px-4 py-3 ${message.direction === 'internal' ? 'border-teal-200 bg-teal-50' : 'border-[var(--workbench-border)] bg-white'}`} key={message.id}>
+                <div className={`rounded-lg border px-4 py-3 ${message.direction === 'internal' ? 'border-teal-200 bg-teal-50' : 'border-[var(--workbench-border)] bg-surface'}`} key={message.id}>
                   <p className="text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                     {t(`requests.messageDirection.${message.direction}`)} · {formatDateTime(message.createdAt, locale)}
                   </p>
@@ -742,7 +742,7 @@ function RequestSubmissionDetail({
                       {t('tasks.detail.loading')}
                     </span>
                   ) : !hasCreatableWorkItemType ? (
-                    <span className="text-xs font-semibold text-amber-700">
+                    <span className="text-xs font-semibold text-fg-amber-700">
                       {t('tasks.create.noActiveWorkItemTypes')}
                     </span>
                   ) : null}
@@ -795,7 +795,7 @@ function RequestSubmissionDetail({
                 onChange={(event) => setActionValue(event.target.value)}
               />
             )}
-            {actionError ? <p className="text-sm font-semibold text-red-700" role="alert">{t('requests.action.error')}</p> : null}
+            {actionError ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('requests.action.error')}</p> : null}
             <div className="flex justify-end gap-2">
               <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={() => setActionMode(undefined)} type="button">{t('requests.action.cancel')}</button>
               <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending || (actionMode === 'convert' && !hasCreatableWorkItemType)} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>

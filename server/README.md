@@ -210,7 +210,7 @@ manual invoke、cleanup、deployを行う場合は、対象account/region、chan
 
 ## API path contract
 
-Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は Function URL / API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
+Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
 
 - `<base-url>/teams/projects`
 - `<base-url>/api/teams/projects`
@@ -229,6 +229,9 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/teams/{teamId}/issues/{issueId}/collaboration`, `/comments`, `/watch`, `/presence`
 - `/api/projects/{projectId}/issues`, `/members`, `/users`, `/watch`
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
+- `GET /api/push/config`, `PUT /api/push-subscriptions`, `DELETE /api/push-subscriptions`
+- `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs`, `POST /api/teams/{teamId}/agent-runs/{runId}/release`
+- `GET /api/teams/{teamId}/agent-settings`, `PUT /api/teams/{teamId}/agent-settings`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
 - `GET /api/enterprise/security` と `/api/enterprise/security/*` の管理 mutation
@@ -242,14 +245,14 @@ The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNA
 Default local table names are:
 
 - `MUKUROJI_DASHBOARD_TABLE=mukuroji-dashboard-local`
-- `MUKUROJI_PROJECT_DIRECTORY_TABLE=mukuroji-project-directory-local`
-- `MUKUROJI_COLLABORATION_TABLE=mukuroji-collaboration-local`
-- `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）
+- `PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local`
+- `COLLABORATION_TABLE_NAME=mukuroji-collaboration-local`
+- `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）
 - `DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET`（public link の冪等再送用 HMAC key。本番 CDK は 64 文字の secret を自動生成）
-- `MUKUROJI_NOTIFICATIONS_TABLE=mukuroji-notifications-local`
+- `NOTIFICATIONS_TABLE_NAME=mukuroji-notifications-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME=RecipientStatusIndex`
-- `MUKUROJI_REALTIME_SESSIONS_TABLE=mukuroji-realtime-sessions-local`
-- `MUKUROJI_AUDIT_EVENTS_TABLE=mukuroji-audit-events`
+- `REALTIME_SESSIONS_TABLE_NAME=mukuroji-realtime-sessions-local`
+- `AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events`
 - `ENTERPRISE_IDENTITY_TABLE_NAME=mukuroji-enterprise-identity-local`（Workspace generation/`CONTROL`
   checkpoint と global domain claim を保存。Enterprise Identity 専用 GSI はありません）
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<32–256文字の安定したsecret>`（credential
@@ -263,15 +266,16 @@ Default local table names are:
 - `PLANNING_TABLE_NAME=mukuroji-planning-local`
 - `ANALYTICS_TABLE_NAME=mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME=ScheduleDueIndex`
-- `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
-- `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
+- `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
+- `AUDIT_RETENTION_DAYS=2555`
 - `TENANT_ADMINISTRATION_TABLE_NAME=mukuroji-tenant-administration-local`
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
-- `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
+- `WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local`
 - `REQUEST_INTAKE_TABLE_NAME=mukuroji-request-intake-local`
 - `REQUEST_QUEUE_INDEX_NAME=RequestQueueIndex`
 - `REQUEST_RATE_LIMIT_PER_HOUR=10`
+- `MUKUROJI_EDGE_ORIGIN_SECRET=<CloudFrontのorigin secret>`（Lambdaでは任意。`x-mukuroji-edge-secret` がこの値と一致した request だけ `x-mukuroji-viewer-address` を rate-limit key と Enterprise IP policy に使用。未設定時は両headerを信頼しない）
 - `MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES=<comma-separated proxy addresses>`（Bun server で列挙した transport source から到達した場合だけ `X-Forwarded-For` を rate-limit key に使用。未設定時は転送headerを信頼しない）
 - `REQUEST_TOKEN_HASH_SECRET=<32文字以上のsecret>`（Lambda では必須）
 - `REQUEST_EMAIL_WEBHOOK_SECRET=<32文字以上のsecret>`（専用 email ingestion Lambda で必須）

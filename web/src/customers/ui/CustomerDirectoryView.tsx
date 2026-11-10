@@ -231,7 +231,7 @@ export function CustomerDirectoryView({
               {canManageCustomerViews ? (
                 <SaveViewControl isSaving={isSavingView} onSave={onSaveView} t={t} />
               ) : null}
-              {saveViewError ? <span className="text-sm font-semibold text-red-700" role="alert">{saveViewError}</span> : null}
+              {saveViewError ? <span className="text-sm font-semibold text-fg-red-700" role="alert">{saveViewError}</span> : null}
               <span className="ml-auto text-sm font-semibold text-[var(--workbench-muted)]">
                 {t('customers.requestCount').replace('{count}', String(customers.reduce((sum, customer) => sum + customer.requestCount, 0)))}
               </span>
@@ -241,7 +241,7 @@ export function CustomerDirectoryView({
       </div>
 
       {errorMessage ? (
-        <div className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+        <div className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
           <p>{errorMessage}</p>
           <button className="workbench-button-secondary min-h-10 px-4" onClick={onRetry} type="button">
             {t('customers.retry')}
@@ -378,7 +378,7 @@ function CustomerDetailPanel({
             {contacts.map((contact) => (
               <li className="rounded-lg border border-[var(--workbench-border)] px-3 py-2 text-sm" key={contact.id}>
                 <span className="font-semibold text-[var(--workbench-text)]">{contact.name}</span>
-                {contact.primary ? <span className="ml-2 text-xs font-semibold text-[var(--workbench-primary)]">{t('customers.detail.contactPrimary')}</span> : null}
+                {contact.primary ? <span className="ml-2 text-xs font-semibold text-[var(--workbench-primary-text)]">{t('customers.detail.contactPrimary')}</span> : null}
                 {contact.email ? <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{contact.email}</span> : null}
               </li>
             ))}
@@ -458,10 +458,10 @@ function CustomerDetailPanel({
 /** Renders a compact Customer health badge. */
 function CustomerBadge({ t, value }: { /** Translator for Customer labels. */ t: (key: MessageKey) => string; /** Customer health value. */ value: Customer['health'] }) {
   const className = value === 'critical' || value === 'at-risk'
-    ? 'border-red-200 bg-red-50 text-red-700'
+    ? 'border-red-200 bg-red-50 text-fg-red-700'
     : value === 'watch'
-      ? 'border-amber-200 bg-amber-50 text-amber-800'
-      : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      ? 'border-amber-200 bg-amber-50 text-fg-amber-800'
+      : 'border-emerald-200 bg-emerald-50 text-fg-emerald-700'
   return <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${className}`}>{t(customerHealthLabels[value])}</span>
 }
 

@@ -1089,7 +1089,8 @@ async function readBoundedJson(response: Response) {
   }
   const text = Buffer.concat(chunks, totalBytes).toString('utf8')
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw malformedProviderResponse('Connector provider returned malformed JSON.')
   }
@@ -1461,7 +1462,7 @@ function readEnvironmentEntry(value: unknown): ConnectorOAuthEnvironmentEntry {
       'Connector provider is not supported by this runtime.',
     )
   }
-  const copy = structuredClone(value) as Record<string, unknown>
+  const copy = structuredClone(value)
   delete copy.definition
   delete copy.fetch
   delete copy.clock

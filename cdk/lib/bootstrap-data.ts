@@ -42,7 +42,7 @@ const canonicalWorkflowStatusCategories = {
 const canonicalWorkItemSeedTimestamp = '2026-06-01T00:00:00.000Z';
 
 /**
- * Project IDs that register the initial owner as a manager.
+ * Demo Project IDs that register the initial owner as a manager.
  */
 const ownerProjectIds = ['refero', 'product-roadmap', 'shared-launch', 'brand-refresh'] as const;
 
@@ -538,7 +538,9 @@ export function createProjectDirectoryTransactItems(tableName: string, directory
 }
 
 /**
- * Creates idempotent workspace metadata, owner, email alias, and Project permissions.
+ * Creates idempotent workspace metadata, owner, and email alias rows.
+ *
+ * Every deployment writes these rows, with or without demo data.
  *
  * @param tableName - Project directory table name.
  * @param directoryId - Canonical workspace directory identifier.
@@ -621,6 +623,25 @@ export function createWorkspaceBootstrapTransactItems(
       },
     },
   };
+
+  return [workspaceMetadataItem, workspaceOwnerItem, emailAliasItem];
+}
+
+/**
+ * Makes the initial owner a manager of every demo Project.
+ *
+ * Only demo deployments write these rows, after the demo Teams and Projects exist.
+ *
+ * @param tableName - Project directory table name.
+ * @param directoryId - Canonical workspace directory identifier.
+ * @param initialOwnerEmail - Lowercase email address of the initial owner.
+ * @returns Idempotent manager rows and materialized Webhook Team grants for the owner.
+ */
+export function createDemoProjectOwnerAccessTransactItems(
+  tableName: string,
+  directoryId: string,
+  initialOwnerEmail: string,
+) {
   const ownerProjectMemberItems = ownerProjectIds.map((projectId) => ({
     Update: {
       TableName: tableName,
@@ -668,13 +689,7 @@ export function createWorkspaceBootstrapTransactItems(
       )
   );
 
-  return [
-    workspaceMetadataItem,
-    workspaceOwnerItem,
-    emailAliasItem,
-    ...ownerProjectMemberItems,
-    ...ownerTeamGrantItems,
-  ];
+  return [...ownerProjectMemberItems, ...ownerTeamGrantItems];
 }
 
 /**

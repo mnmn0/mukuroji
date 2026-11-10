@@ -1,6 +1,10 @@
 # mukuroji
 
-mukuroji は、プロジェクトやタスクの進捗をチームで見渡すための進捗管理アプリケーションです。
+mukuroji は、人間とコーディングエージェントが同じタスク・進捗・レビューの文脈を共有するワークスペースです。
+ホームでは、自分のフォーカスに含まれる未完了の仕事を「要確認」「作業中」「次に着手」「待機」で絞り込み、
+タスク詳細から保存済みの内容と実装・検証手順を引き継ぎ文としてコピーできます。
+コピー自体は担当や状態を変更せず、エージェントを実行しません。
+エージェント接続の設定例はアプリのヘルプと [Coding Agent MCP](docs/coding-agent-mcp.md) にあります。
 
 このリポジトリは Bun workspaces で構成されています。依存関係と lockfile はルートで管理します。
 
@@ -15,6 +19,11 @@ SLO、alarm、incident response、migration、deploy、restore drill の運用�
 [`docs/operational-readiness.md`](docs/operational-readiness.md) を参照してください。
 Bedrock model allowlist、Lambda/local認証、live evaluationの運用契約は
 [`docs/ai-assistance.md`](docs/ai-assistance.md)を参照してください。
+installable PWA の cache 安全境界と hosting 要件は [`docs/pwa.md`](docs/pwa.md) を参照してください。
+ローカルの coding agent を Software factory として運用するための Agent Run、Ready 判定、
+Factory board の設計は [`docs/software-factory.md`](docs/software-factory.md) を参照してください。
+Web の業務領域フォルダを `features/` と `entities/` へ移す順序は
+[`docs/web-structure-migration.md`](docs/web-structure-migration.md) を参照してください。
 
 ## セットアップ
 
@@ -214,7 +223,7 @@ bun run floci:deploy-backend
 
 `floci:deploy-backend` は `server:build:lambda` で `server/src/handlers/api.handler.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
-Floci は CloudFormation を使わず、production の4分割 API runtime configuration secret
+Floci は CloudFormation を使わず、production の API runtime configuration secret
 pointerを渡さないため、`ApiRuntimeConfigurationRevision` は使いません。Local Lambdaには
 completeなdiscrete environmentを直接設定し、このfallbackをproduction deployへ流用しません。
 
@@ -259,9 +268,11 @@ bun run web:dev
 Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送します。必要に応じて以下の環境変数を上書きできます。
 
 - `VITE_API_BASE_URL`: ブラウザから呼ぶ API の base URL。未指定時は `/api`
-- `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_API_BASE_URL`、`/api` の順に使います。
-- `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する API の base URL。未指定時は `VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。Developer Platform と tenant 管理 API は `VITE_PROJECTS_API_BASE_URL` を参照せず、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_ENTERPRISE_IDENTITY_API_BASE_URL`: Enterprise identity/security 管理 API を呼ぶ base URL。未指定時は `VITE_WORKSPACE_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
+
+Web で各 API がどの環境変数をどの順で参照するかは `web/src/shared/api/apiBaseUrl.ts` に集約しています。新しい API module は base URL を自前で組み立てず、`resolveApiBaseUrl()` を使ってください。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
 - `COGNITO_ISSUER`: access token の expected issuer。local ready hook が生成する値を利用します。本番では CDK の user pool から解決します。
@@ -272,13 +283,13 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
-- `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
-- `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
+- `PROJECT_DIRECTORY_TABLE_NAME`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
+- `WORKSPACE_ACCESS_TABLE_NAME`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
-- `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue の活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
-- `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
-- `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
-- `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
+- `TEAM_ISSUE_EVENTS_TABLE_NAME`: チーム Issue の活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
+- `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
+- `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
+- `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
 - `AI_ASSISTANCE_BEDROCK_REGION`: AI assistanceが呼ぶBedrock Runtime region。本番はLambdaの`AWS_REGION`、localのJP既定は`ap-northeast-1`
 - `AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD` / `AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD`: exact model/profile用にdeploy時レビューしたstandard token単価。両方を設定した場合だけgeneration auditへ推定costを保存します。
 - `AI_ASSISTANCE_DEFAULT_MODEL_ID` / `AI_ASSISTANCE_ALLOWED_MODEL_IDS`: defaultとcomma-separated allowlist。本番CDKは両方を同じexact `AiBedrockModelId`（有効化時は `jp.anthropic.claude-sonnet-4-6`、未設定時はAI無効）へ固定します。
@@ -287,27 +298,28 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION`: 同じatomic reservationで管理するworst-case token budget（既定32,000,000 / 4,000,000 / 1,000,000）。
 - `ANALYTICS_TABLE_NAME`: 保存済みレポート、immutable snapshot、定期配信 receipt を保存する DynamoDB table 名。未指定時は `mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME`: 定期配信対象の取得に使う `scheduleShard` / `nextDeliveryAtRecordKey` GSI 名。未指定時は `ScheduleDueIndex`
-- `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
+- `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
 - `PLANNING_TABLE_NAME`: Cycle、Milestone、Release、Phase、Goal/OKR、Initiative、Roadmap、Portfolio の Planning entity、entity dependency、qualified Work Item schedule dependency、Work Item link を保存する DynamoDB table 名。未指定時は `mukuroji-planning-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME`: unread/read/archive/snooze ごとの timeline query に使う GSI 名。未指定時は `RecipientStatusIndex`
-- `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
+- `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
-- `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
 - `TENANT_ADMINISTRATION_TABLE_NAME`: tenant profile、governance、lifecycle を保存する DynamoDB table 名。ローカル既定値は `mukuroji-tenant-administration-local`
 - `ENTERPRISE_IDENTITY_TABLE_NAME`: Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/domain/policy/role、SCIM identity/group、provisioning run、service account、break-glass metadata を保存する DynamoDB table 名。Enterprise Identity 専用 GSI はなく、ローカル既定値は `mukuroji-enterprise-identity-local`
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET`: SCIM bearer token と service account credential を HMAC-SHA-256 する32–256文字の安定した secret。DynamoDB には credential kind・Workspace・credential ID で domain-separated な digest だけを保存します。作成・rotate response の raw credential は通常一回だけ表示し、同じ idempotency request の応答消失時に限り10分以内は同じ値を回復できます。
-- `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
+- `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
 - `AUTOMATION_WEBHOOK_SECRET_PREFIX`: outbound webhook の workspace-scoped signing secret を置く Secrets Manager prefix。未指定時は `mukuroji/automation-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX`: server-issued inbound webhook signing secret を outbound secret から分離して置く Secrets Manager prefix。未指定時は `mukuroji/automation-inbound-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_BASE_URL`: Sender に渡す inbound webhook URL の public API base URL。Server はこの値へ `/api/automation/inbound-webhooks/{opaqueEndpointId}` を追加します。HTTPS が必須で、HTTP は `localhost`、`127.0.0.1`、`[::1]` の loopback development host だけに許可します。Floci deploy では作成済み REST API ID と stage から自動設定します。
 - `SECRETS_MANAGER_ENDPOINT` / `AWS_ENDPOINT_URL_SECRETS_MANAGER` / `AWS_ENDPOINT_URL_SECRETSMANAGER` / `AWS_ENDPOINT_URL`: API Lambda から見る Secrets Manager endpoint（左から優先）。AWS 接続では `AWS_REGION` と一致する standard/FIPS の HTTPS hostname だけを許可します。ローカル Lambda では Floci 内部 endpoint の `http://floci:4566` を使います。
 - `MUKUROJI_LOCAL_AWS_RUNTIME`: `floci` のときだけ loopback、`localhost`、`floci`、`localstack` の HTTP Secrets Manager endpoint を許可する明示的な local marker。`floci:deploy-backend` が自動設定し、`NODE_ENV=production` では常に無効です。本番環境へ設定しないでください。
-- `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
+- `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、環境ごとに固定します。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
-- `MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET`: email adapter envelope の署名検証に使う 32–256 文字の secret
+- `MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET`: email adapter envelope の署名検証に使う 32–256 文字の secret。任意モジュール `mukuroji:requestEmail` を deploy するときだけ使います
 - `MUKUROJI_REQUEST_TOKEN_HASH_SECRET`: request/reply capability の hash に使う別の 32–256 文字の secret
+- `MUKUROJI_EDGE_ORIGIN_SECRET`: CloudFront が API request に付ける 32–128 文字の secret。一致した request だけ CloudFront が観測した viewer address を rate limit と Enterprise IP policy に使います。環境作成時に生成して secret store に保存し、毎回の deploy で同じ値を渡します。
 
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
@@ -366,11 +378,14 @@ owner-only の root `.env` から読み込みます。
 へ複製せず、local backend deploy と `server:dev` が root `.env` の安定値を共有します。
 これら2つの Enterprise secret は ready hook や Floci コンテナへ渡しません。
 
-CDK stack も同じタスクデータと指定した Workspace 用の
-チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
-DynamoDB に idempotent に seed し、Lambda Function URL 経由で取得できます。
-AWS 環境で確認する場合は以下の順に実行し、出力された `ApiFunctionUrl` を
-Web の環境変数へ渡してください。
+CDK stack は指定した Workspace 用の Workspace metadata と初期 active owner を DynamoDB に
+idempotent に seed し、CloudFront の `/api` 経由で取得できます。ローカルと同じ demo の
+タスクデータとチーム/プロジェクト階層は、`-c mukuroji:demoData=true` を付けて deploy した
+場合だけ seed します（[cdk/README.md](cdk/README.md) の「Demo data」）。
+AWS 環境で確認する場合は以下の順に実行し、最後に `bun run web:deploy` で Web を
+出力された `WebUrl` へ配信してください。次の例は既存の user pool を使う場合です。stack に
+user pool を作らせる場合は `COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` を空にし、
+`prepare-workspace-cognito.sh` を飛ばします。
 
 ```sh
 export COGNITO_USER_POOL_ID=<user-pool-id>
@@ -385,8 +400,8 @@ export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
 export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
 export ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET="$(openssl rand -hex 32)"
 export ENTERPRISE_SSO_STATE_SECRET="$(openssl rand -hex 32)"
-export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
+export MUKUROJI_EDGE_ORIGIN_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
@@ -396,7 +411,6 @@ export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
 export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
 export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_API_ALLOWED_ORIGINS=https://app.example.com
 
 bash scripts/prepare-workspace-cognito.sh
@@ -412,13 +426,12 @@ bun --filter cdk cdk diff Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters EdgeOriginSecret="$MUKUROJI_EDGE_ORIGIN_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
@@ -439,13 +452,12 @@ bun --filter cdk cdk deploy Mukuroji \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters EdgeOriginSecret="$MUKUROJI_EDGE_ORIGIN_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
@@ -461,18 +473,20 @@ bun --filter cdk cdk deploy Mukuroji \
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
 
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION` は1〜32文字のdeploy識別子です。APIの
-code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに
+code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに
 新しい値へ進め、同じrevisionを異なる内容へ再利用しません。
 `MUKUROJI_APPLICATION_COMMIT_SHA` はreview済みcheckoutのfull SHAに固定し、deploy後の
 `GET /api/health`とproduction-like AI evaluationで同じ値を照合します。
-Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。deployは新しい
-immutable configuration secretとLambda Versionの準備後に`live` Aliasでtrafficを切り替えます。
-旧secretは`Retain`されますが、CloudFormationが自動で再接続・削除するものではないため、
-rollback/recovery evidenceとして管理します。
-4分割secretはtransformを使わないv2 line envelopeでgroup identityと同一revisionを保持し、各値は
-canonical Base64として保存します。NoEchoの4値はrevision-boundな個別retained secretへ直接保存し、
-Document public-share secretとともにenvelopeにはARNだけを入れます。APIは4 group、同一revision、
-全canonical key、nested secret ARN/valueをすべて検証してから環境へ原子的に反映します。
+API Gatewayのdefault routeは`live` Aliasを呼び出し、CloudFrontの`/api/*`はこのHTTP APIへ
+転送します。runtime
+configurationは1つの安定したsecretにまとめ、deployごとに同じsecretの値をin-placeで更新します。
+deployを重ねてもsecretは増えません。各Lambda Versionは自分のrevisionを環境変数に持ち、loaderは
+`AWSCURRENT`のrevisionが一致しなければ`AWSPREVIOUS`を読むため、Alias切り替え中の旧Versionも
+自分のrevisionの設定で起動できます。CloudFormation rollbackはsecretの値も前のrevisionへ戻します。
+secretはtransformを使わないv3 line envelopeでrevisionを保持し、各値はcanonical Base64として
+保存します。NoEcho値もenvelopeへ直接入れ、Workspace audit pseudonym keyとDocument public-share
+secretだけはnested secret ARNとして参照します。APIはrevision、全canonical key、nested secret
+ARN/valueをすべて検証してから環境へ原子的に反映します。
 
 SSO client は password client とは別に作成し、client secret なし、
 `ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、
@@ -481,15 +495,18 @@ scope は `openid email profile` のみ、callback は `COGNITO_SSO_REDIRECT_URI
 `COGNITO` を含めないでください。通常の password client に federation を同居させると、password login
 で得た code を SSO exchange へ持ち込めるため、この構成は fail-closed で拒否されます。
 
-Lambda Function URL の CORS 許可 origin は CDK parameter
-`ApiAllowedOrigins` で指定します。未指定時は
-`http://localhost:5173,http://127.0.0.1:5173` です。
+Web と API は同じ CloudFront domain から配信するため、本番の Web は CORS を使いません。
+CDK parameter `ApiAllowedOrigins` は HTTP API を直接呼ぶ別 origin（local の Vite など）だけに
+使い、未指定時は `http://localhost:5173,http://127.0.0.1:5173` です。File bucket は
+`ApiAllowedOrigins` に加えて CloudFront の origin からの presigned upload を自動で受け付けます。
 認証に使う Cognito user pool は CDK parameter `CognitoUserPoolId` で固定し、
+空のままなら stack が user pool、password client、初期 owner の招待を作ります（詳細は
+[cdk/README.md](cdk/README.md) の Fresh deployment）。
 Lambda は access token の issuer がその user pool と一致する場合だけ処理します。
 Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メールアドレスは
 `InitialOwnerEmail` で指定します。Cognito の
 `custom:directory_id` / `custom:workspace_id` は `WorkspaceDirectoryId` と一致させてください。
-同じ Function URL から `/teams/projects`, `/teams/{teamId}/issues`,
+同じ `/api` から `/teams/projects`, `/teams/{teamId}/issues`,
 `/projects/{projectId}/issues`,
 `/api/workspace/access` などの Workspace invitation API も取得できます。
 
@@ -500,7 +517,7 @@ Workspace access table の member が `active` でなければ、Lambda はす�
 `403` で拒否します。`deactivated` member や、`pending` / `revoked` invitation だけが残る
 user は Project、Work Item、Issue API を利用できません。
 
-招待 API は以下です。Lambda Function URL では `/api` prefix の有無をどちらも受け付けます。
+招待 API は以下です。HTTP API を直接呼ぶ場合は `/api` prefix の有無をどちらも受け付けます。
 
 - `GET /api/workspace/access`: current member、member/invitation 一覧、操作 capability
 - `POST /api/workspace/invitations`: invitation 作成
@@ -522,10 +539,14 @@ membership 確定失敗は通常ログイン時にも再照合されるため、
 復旧できます。owner の降格・利用停止は metadata の active owner count と member version を
 同じ DynamoDB transaction で更新し、最後の active owner と自己停止を拒否します。
 
-deploy 後は Function URL または API Gateway URL の output を Web に設定します。どちらも base URL の直下パスと `/api` prefix を受け付けます。
+deploy 後は `bun run web:deploy` で Web を build し、stack の Web bucket へ配信します。Web は
+同じ CloudFront domain の `/api` を呼ぶため、API の URL を設定する必要はありません。
+local の Web から AWS の API を呼ぶときだけ、`ApiGatewayUrl` output を設定します。
 
 ```sh
-VITE_API_BASE_URL=<ApiFunctionUrl>
+AWS_REGION=ap-northeast-1 bun run web:deploy
+# local の Web から AWS の API を呼ぶ場合
+VITE_API_BASE_URL=<ApiGatewayUrl> bun run web:dev
 ```
 
 fresh deploy、bootstrap 検証、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
@@ -549,7 +570,7 @@ ISSUE_ID=<IssueId> \
 bun run issues:check-dynamodb
 ```
 
-CDK stack の demo seed は stack 作成時だけ、`WorkItemsTableName` が指す canonical store へ
+CDK stack の demo seed は `-c mukuroji:demoData=true` のとき stack 作成時だけ、`WorkItemsTableName` が指す canonical store へ
 `schemaVersion=2`, `revision=1` で投入します。手動 seed はローカル Floci 専用で、canonical store
 だけを対象とし、既存 row は conditional write で保持します。
 

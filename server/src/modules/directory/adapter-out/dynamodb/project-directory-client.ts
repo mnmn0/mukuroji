@@ -815,7 +815,6 @@ export class DynamoDbProjectDirectoryClient {
 
   constructor(
     tableName =
-      getEnv('MUKUROJI_PROJECT_DIRECTORY_TABLE') ??
       getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
       'mukuroji-project-directory-local',
     documentClient = createDynamoDbDocumentClient(),
@@ -823,7 +822,6 @@ export class DynamoDbProjectDirectoryClient {
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
     auditTableName = getConfiguredAuditTableName(),
     workspaceAccessTableName =
-      getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
       getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
     planningTableName = getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',

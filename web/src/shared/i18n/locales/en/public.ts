@@ -195,6 +195,12 @@ export const publicMessages = {
     '[mukuroji support request]\nCategory: {category}\nTime observed: \nWorkspace / project: \nAction taken: \nMessage shown: \nExpected result: \n\nI have not included a password, verification code, or access token.',
   'public.support.contact.copyAction': 'Copy support note',
   'public.support.contact.privacyAction': 'Review data handling',
+  'public.routeError.eyebrow': 'Page failed to load',
+  'public.routeError.title': 'This page could not be loaded',
+  'public.routeError.description':
+    'Check your connection and reload. If the app was just updated, reloading loads the new version.',
+  'public.routeError.reloadAction': 'Reload',
+  'public.routeError.loginAction': 'Back to login',
   'public.notFound.eyebrow': 'Page not found',
   'public.notFound.title': 'This route does not exist',
   'public.notFound.description':

@@ -337,12 +337,12 @@ export function TaskCalendarView({
         titleKey="tasks.view.calendar"
       />
       {errorMessage ? (
-        <p className="border-b border-[#fecaca] bg-[#fef2f2] px-4 py-2 text-sm font-medium text-[#b42318]" role="alert">
+        <p className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318" role="alert">
           {errorMessage}
         </p>
       ) : null}
       {rangeStartDate ? (
-        <div className="flex items-center justify-between gap-3 border-b border-[#f4d38b] bg-[#fffaeb] px-4 py-2 text-sm text-[#93370d]" role="status">
+        <div className="flex items-center justify-between gap-3 border-b border-tone-f4d38b bg-tone-fffaeb px-4 py-2 text-sm text-fg-93370d" role="status">
           <span>{t('tasks.schedule.rangeStart').replace('{date}', rangeStartDate)}</span>
           <button className="font-semibold underline" onClick={() => setRangeStartDate(undefined)} type="button">
             {t('tasks.create.cancel')}
@@ -355,7 +355,7 @@ export function TaskCalendarView({
       >
         {calendar.days.map((day) => (
           <div
-            className="min-h-[210px] border-b border-r border-[#e4e7ec] p-3 transition-colors"
+            className="min-h-[210px] border-b border-r border-tone-e4e7ec p-3 transition-colors"
             data-testid={`task-calendar-day-${day.date}`}
             key={day.date}
             onDragOver={(event) => {
@@ -370,12 +370,12 @@ export function TaskCalendarView({
             }}
           >
             <div className="flex items-center justify-between gap-2">
-              <time className="text-sm font-semibold text-[#1c1d1f]" dateTime={day.date}>{day.date}</time>
+              <time className="text-sm font-semibold text-fg-1c1d1f" dateTime={day.date}>{day.date}</time>
               {onCreateTaskOpen ? (
                 <span className="flex items-center gap-1">
                   <button
                     aria-label={`${t('tasks.calendar.addOnDate')}: ${day.date}`}
-                    className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
+                    className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4"
                     onClick={() => openCreateForDate(day.date, false)}
                     type="button"
                   >
@@ -384,7 +384,7 @@ export function TaskCalendarView({
                   <button
                     aria-label={t('tasks.schedule.rangeCreate').replace('{date}', day.date)}
                     aria-pressed={rangeStartDate === day.date}
-                    className="rounded px-1.5 py-1 text-xs font-bold text-[var(--workbench-primary)] hover:bg-[#e5f7f4] aria-pressed:bg-[#ccfbea]"
+                    className="rounded px-1.5 py-1 text-xs font-bold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4 aria-pressed:bg-tone-ccfbea"
                     onClick={() => openCreateForDate(day.date, true)}
                     type="button"
                   >
@@ -428,7 +428,7 @@ export function TaskCalendarView({
           </div>
         ))}
         <div
-          className="min-h-[210px] border-b border-r border-[#e4e7ec] bg-[#f8fafb] p-3"
+          className="min-h-[210px] border-b border-r border-tone-e4e7ec bg-tone-f8fafb p-3"
           data-testid="task-calendar-unscheduled"
           onDragOver={(event) => {
             if (draggedTaskKey) {
@@ -441,11 +441,11 @@ export function TaskCalendarView({
           }}
         >
           <div className="flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-[#1c1d1f]">{t('tasks.calendar.empty')}</p>
+            <p className="text-sm font-semibold text-fg-1c1d1f">{t('tasks.calendar.empty')}</p>
             {onCreateTaskOpen ? (
               <button
                 aria-label={t('tasks.calendar.addWithoutDate')}
-                className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
+                className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4"
                 onClick={() => onCreateTaskOpen({
                   ...(projectId ? { projectId } : {}),
                   schedule: createDefaultUnscheduledTaskSchedule(),
@@ -589,19 +589,19 @@ function CalendarTaskCard({
         {scheduleRange ? (
           <span className="mt-1 block text-xs font-semibold">{scheduleRange}</span>
         ) : null}
-        <span className="mt-2 block text-xs font-medium text-[var(--workbench-primary)]">
+        <span className="mt-2 block text-xs font-medium text-[var(--workbench-primary-text)]">
           {resolveWorkItemAssignee(entry.task)}
         </span>
         {busy ? <span className="mt-1 block text-xs" role="status">{t('bulk.previewing')}</span> : null}
       </button>
       {canEditSchedule && !primaryDate ? (
-        <label className="mt-2 grid gap-1 text-xs font-semibold text-[#667085]">
+        <label className="mt-2 grid gap-1 text-xs font-semibold text-fg-667085">
           {t('tasks.schedule.scheduleOnDate').replace(
             '{task}',
             resolveWorkItemTitle(entry.task),
           )}
           <input
-            className="rounded border border-[#cfd5de] bg-white px-2 py-1"
+            className="rounded border border-tone-cfd5de bg-surface px-2 py-1"
             disabled={busy}
             onChange={(event) => {
               if (event.currentTarget.value) {
@@ -646,45 +646,45 @@ function CalendarSchedulePreview({
   const dialogRef = useModalFocus<HTMLDivElement>(onCancel)
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[#101828]/45 p-4">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-tone-101828/45 p-4">
       <div
         aria-labelledby="calendar-schedule-preview-title"
         aria-modal="true"
-        className="max-h-[min(680px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl bg-white p-5 shadow-2xl"
+        className="max-h-[min(680px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl bg-surface p-5 shadow-2xl"
         ref={dialogRef}
         role="dialog"
         tabIndex={-1}
       >
-        <h2 className="text-lg font-bold text-[#101828]" id="calendar-schedule-preview-title">
+        <h2 className="text-lg font-bold text-fg-101828" id="calendar-schedule-preview-title">
           {t('bulk.preview.title')}
         </h2>
-        <p className="mt-1 text-sm text-[#667085]">{resolveWorkItemTitle(pending.task)}</p>
+        <p className="mt-1 text-sm text-fg-667085">{resolveWorkItemTitle(pending.task)}</p>
         <ul className="mt-4 grid gap-3">
           {pending.controller.preview.impacts.map((impact) => (
-            <li className="rounded-lg border border-[#d8dde5] bg-[#f8fafb] p-3" key={`${impact.teamId}:${impact.workItemId}`}>
+            <li className="rounded-lg border border-tone-d8dde5 bg-tone-f8fafb p-3" key={`${impact.teamId}:${impact.workItemId}`}>
               <div className="flex items-center justify-between gap-3">
-                <span className="font-mono text-xs font-semibold text-[#344054]">{impact.workItemId}</span>
-                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#667085]">
+                <span className="font-mono text-xs font-semibold text-fg-344054">{impact.workItemId}</span>
+                <span className="rounded-full bg-surface px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-fg-667085">
                   {t(`tasks.schedule.impact.${impact.kind}`)}
                 </span>
               </div>
-              <p className="mt-2 text-sm text-[#475467]">
+              <p className="mt-2 text-sm text-fg-475467">
                 <span className="sr-only">{t('tasks.schedule.before')}: </span>
                 <span className="line-through">{describeCalendarSchedule(impact.before, t)}</span>
                 <span aria-hidden="true"> → </span>
                 <span className="sr-only">{t('tasks.schedule.after')}: </span>
-                <span className="font-semibold text-[#101828]">{describeCalendarSchedule(impact.after, t)}</span>
+                <span className="font-semibold text-fg-101828">{describeCalendarSchedule(impact.after, t)}</span>
               </p>
             </li>
           ))}
         </ul>
         <TaskSchedulePreviewMetadata preview={pending.controller.preview} t={t} />
         {pending.controller.preview.warnings.length > 0 ? (
-          <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
-            <p className="text-xs font-bold uppercase tracking-wide text-[#93370d]">
+          <div className="mt-4 rounded-lg border border-tone-f4d38b bg-tone-fffaeb p-3" role="status">
+            <p className="text-xs font-bold uppercase tracking-wide text-fg-93370d">
               {t('tasks.schedule.warnings')}
             </p>
-            <ul className="mt-1 list-disc pl-5 text-sm text-[#93370d]">
+            <ul className="mt-1 list-disc pl-5 text-sm text-fg-93370d">
               {pending.controller.preview.warnings.map((warning) => (
                 <li key={warning}>{resolveCalendarScheduleWarning(warning, t)}</li>
               ))}
@@ -693,7 +693,7 @@ function CalendarSchedulePreview({
         ) : null}
         <div className="mt-5 flex justify-end gap-2">
           <button
-            className="rounded-md border border-[#cfd5de] bg-white px-4 py-2 text-sm font-semibold text-[#344054] disabled:opacity-60"
+            className="rounded-md border border-tone-cfd5de bg-surface px-4 py-2 text-sm font-semibold text-fg-344054 disabled:opacity-60"
             disabled={isApplying}
             onClick={onCancel}
             type="button"
@@ -818,13 +818,13 @@ function handleCalendarMoveKey(
 function resolveCalendarCardClass(mode: WorkItemSchedule['mode']): string {
   switch (mode) {
     case 'date-range':
-      return 'border-[#99d7cf] bg-[#e5f7f4] text-[#085d55]'
+      return 'border-tone-99d7cf bg-tone-e5f7f4 text-fg-085d55'
     case 'milestone':
-      return 'border-[#bdb4fe] bg-[#f4f3ff] text-[#53389e]'
+      return 'border-tone-bdb4fe bg-tone-f4f3ff text-fg-53389e'
     case 'due-date':
-      return 'border-dashed border-[#f4b740] bg-[#fffaeb] text-[#93370d]'
+      return 'border-dashed border-tone-f4b740 bg-tone-fffaeb text-fg-93370d'
     case 'unscheduled':
-      return 'border-[#d8dde5] bg-white text-[#667085]'
+      return 'border-tone-d8dde5 bg-surface text-fg-667085'
   }
 }
 

@@ -388,7 +388,7 @@ export function WorkspaceAccessPanel({
       <section className="workbench-panel overflow-hidden" data-testid="workspace-access-error">
         <WorkspaceAccessHeader t={t} />
         <div className="grid gap-4 border-t border-[var(--workbench-border)] px-5 py-6">
-          <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+          <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
             {loadErrorMessage}
           </p>
           <button
@@ -539,18 +539,18 @@ export function WorkspaceAccessPanel({
 
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-6 p-5">
         {!hasManagementCapability ? (
-          <p className="rounded-lg border border-[#99d7cf] bg-[#e5f7f4] px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary)]">
+          <p className="rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]">
             {t('workspace.access.readOnly')}
           </p>
         ) : null}
 
         {operationErrorMessage && !action ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
-            <p className="text-sm font-semibold text-red-700" role="alert">
+            <p className="text-sm font-semibold text-fg-red-700" role="alert">
               {operationErrorMessage}
             </p>
             <button
-              className="min-h-9 rounded-md border border-red-300 bg-white px-3 text-sm font-semibold text-red-700 hover:bg-red-100"
+              className="min-h-9 rounded-md border border-red-300 bg-surface px-3 text-sm font-semibold text-fg-red-700 hover:bg-red-100"
               type="button"
               onClick={() => setOperationErrorMessage(undefined)}
             >
@@ -566,7 +566,7 @@ export function WorkspaceAccessPanel({
             onSubmit={handleInvite}
           >
             <div>
-              <p className="workbench-eyebrow text-[var(--workbench-primary)]">{t('workspace.access.invite.eyebrow')}</p>
+              <p className="workbench-eyebrow text-[var(--workbench-primary-text)]">{t('workspace.access.invite.eyebrow')}</p>
               <h3 className="mt-1 text-base font-semibold text-[var(--workbench-text)]">{t('workspace.access.invite.title')}</h3>
             </div>
             <div className="grid grid-cols-[minmax(220px,1fr)_minmax(180px,0.8fr)_180px_auto] items-end gap-3 max-[960px]:grid-cols-2 max-[620px]:grid-cols-1">
@@ -653,11 +653,11 @@ function WorkspaceAccessHeader({ t }: { t: (key: MessageKey) => string }) {
   return (
     <div className="flex min-w-0 flex-wrap items-start justify-between gap-4 px-5 py-5">
       <div className="min-w-0 max-w-[760px]">
-        <p className="workbench-eyebrow text-[var(--workbench-primary)]">{t('workspace.access.eyebrow')}</p>
+        <p className="workbench-eyebrow text-[var(--workbench-primary-text)]">{t('workspace.access.eyebrow')}</p>
         <h2 className="mt-1.5 text-xl font-semibold text-[var(--workbench-text)]">{t('workspace.access.title')}</h2>
         <p className="mt-2 text-sm font-medium leading-6 text-[var(--workbench-muted)]">{t('workspace.access.description')}</p>
       </div>
-      <span className="rounded-full border border-[#99d7cf] bg-[#e5f7f4] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-primary)]">
+      <span className="rounded-full border border-tone-99d7cf bg-tone-e5f7f4 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-primary-text)]">
         {t('workspace.access.ledger')}
       </span>
     </div>
@@ -676,7 +676,7 @@ function AccessLedgerMetric({
   return (
     <div className="border-r border-[var(--workbench-border)] px-4 py-3 last:border-r-0 max-[860px]:border-b">
       <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{label}</p>
-      <p className={`mt-1 text-2xl font-semibold ${attention ? 'text-red-700' : 'text-[var(--workbench-text)]'}`}>{value}</p>
+      <p className={`mt-1 text-2xl font-semibold ${attention ? 'text-fg-red-700' : 'text-[var(--workbench-text)]'}`}>{value}</p>
     </div>
   )
 }
@@ -697,7 +697,7 @@ function WorkspaceMemberLedger({
   )
 
   return (
-    <section className="min-w-0 border-t border-[var(--workbench-border)] bg-white">
+    <section className="min-w-0 border-t border-[var(--workbench-border)] bg-surface">
       <LedgerSectionHeader
         description={t('workspace.access.members.description')}
         title={t('workspace.access.members.title')}
@@ -788,7 +788,7 @@ function WorkspaceMemberLedger({
                   <td className="px-4 py-4 text-right max-[760px]:col-span-2 max-[760px]:py-2">
                     <button
                       className={member.status === 'active'
-                        ? 'min-h-10 rounded-md border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400'
+                        ? 'min-h-10 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-fg-slate-400'
                         : 'workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-60'}
                       disabled={cannotChangeStatus}
                       title={isCurrentMember && nextStatus === 'deactivated'
@@ -831,7 +831,7 @@ function WorkspaceInvitationLedger({
   onRequestAction: (action: WorkspaceAccessAction) => void
 }) {
   return (
-    <section className="min-w-0 border-t border-[var(--workbench-border)] bg-white">
+    <section className="min-w-0 border-t border-[var(--workbench-border)] bg-surface">
       <LedgerSectionHeader
         description={t('workspace.access.invitations.description')}
         title={t('workspace.access.invitations.title')}
@@ -866,7 +866,7 @@ function WorkspaceInvitationLedger({
                   />
                 </div>
                 {invitation.failureMessage ? (
-                  <p className="text-xs font-semibold leading-5 text-red-700">{invitation.failureMessage}</p>
+                  <p className="text-xs font-semibold leading-5 text-fg-red-700">{invitation.failureMessage}</p>
                 ) : null}
               </div>
               <div className="grid gap-1 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
@@ -880,7 +880,7 @@ function WorkspaceInvitationLedger({
                 {actions.map((invitationAction) => (
                   <button
                     className={invitationAction === 'revoke'
-                      ? 'min-h-9 rounded-md border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400'
+                      ? 'min-h-9 rounded-md border border-red-200 bg-surface px-3 text-xs font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-fg-slate-400'
                       : 'workbench-button-secondary min-h-9 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60'}
                     disabled={!canManage}
                     key={invitationAction}
@@ -927,10 +927,10 @@ function AccessStatusBadge({
   tone: 'danger' | 'neutral' | 'success' | 'warning'
 }) {
   const toneClassNames = {
-    danger: 'border-red-200 bg-red-50 text-red-700',
-    neutral: 'border-slate-200 bg-slate-50 text-slate-600',
-    success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-    warning: 'border-amber-200 bg-amber-50 text-amber-700',
+    danger: 'border-red-200 bg-red-50 text-fg-red-700',
+    neutral: 'border-slate-200 bg-slate-50 text-fg-slate-600',
+    success: 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+    warning: 'border-amber-200 bg-amber-50 text-fg-amber-700',
   } as const
 
   return (
@@ -1017,8 +1017,8 @@ function WorkspaceAccessConfirmationDialog({
           <p className="text-sm font-medium leading-6 text-[var(--workbench-muted)]" id={descriptionId}>{description}</p>
           {errorMessage ? (
             <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
-              <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p>
-              <p className="mt-1 text-xs font-medium leading-5 text-red-700">{t('workspace.access.error.retryHint')}</p>
+              <p className="text-sm font-semibold text-fg-red-700" role="alert">{errorMessage}</p>
+              <p className="mt-1 text-xs font-medium leading-5 text-fg-red-700">{t('workspace.access.error.retryHint')}</p>
             </div>
           ) : null}
           <div className="mt-6 flex justify-end gap-3">
@@ -1177,7 +1177,7 @@ function getInvitationRailClassName(status: WorkspaceInvitationStatus) {
     return 'border-l-emerald-500'
   }
 
-  return 'border-l-[#6fbfb4]'
+  return 'border-l-tone-6fbfb4'
 }
 
 function formatAccessDate(value: string, locale: Locale) {

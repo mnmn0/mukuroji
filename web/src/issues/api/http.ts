@@ -1,3 +1,5 @@
+import { isRecord } from '../../shared/api/jsonValidation'
+
 /** Default message used when an Issues API error does not include one. */
 export const defaultIssuesApiErrorMessage =
   'Unable to complete the Work Item request.'
@@ -27,11 +29,11 @@ export function createTeamIssuePath(
  * @returns Optional error code and a safe human-readable message.
  */
 export function readApiError(data: unknown): { code?: string; message: string } {
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+  if (!isRecord(data)) {
     return { message: defaultIssuesApiErrorMessage }
   }
 
-  const record = data as Record<string, unknown>
+  const record = data
   return {
     code: typeof record.code === 'string' ? record.code : undefined,
     message:
@@ -56,14 +58,4 @@ export async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
-}
-
-/**
- * Removes trailing slashes from a configured API base URL.
- *
- * @param value - Configured API base URL.
- * @returns URL without trailing slash characters.
- */
-export function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
 }

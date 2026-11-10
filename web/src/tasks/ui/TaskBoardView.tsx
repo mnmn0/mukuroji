@@ -278,7 +278,7 @@ export function TaskBoardView({
           <div
             className={`workbench-panel min-w-0 min-h-[420px] transition ${
               dropTargetColumnKey === column.key
-                ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40'
+                ? 'border-tone-99d7cf bg-tone-e5f7f4 ring-2 ring-tone-99d7cf/40'
                 : ''
             }`}
             data-testid={`project-task-column-${createProjectStatusTestToken(column.key)}`}
@@ -315,7 +315,7 @@ export function TaskBoardView({
                 {onCreateTaskOpen && canCreateInColumn ? (
                   <button
                     aria-label={`${t('tasks.board.addInColumn')}: ${column.label}`}
-                    className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-white"
+                    className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-surface"
                     data-testid={`project-task-add-${createProjectStatusTestToken(column.key)}`}
                     onClick={() => onCreateTaskOpen({
                       projectId: projectId ?? tasks[0]?.assignedProjectId ?? '',
@@ -329,7 +329,7 @@ export function TaskBoardView({
                     +
                   </button>
                 ) : null}
-                <span className="text-sm font-semibold text-[#5f6874]">
+                <span className="text-sm font-semibold text-fg-5f6874">
                   {t('tasks.board.columnCount').replace('{count}', String(statusTasks.length))}
                 </span>
               </div>
@@ -401,9 +401,9 @@ export function TaskBoardView({
                       aria-grabbed={draggedTaskKey === taskKey || undefined}
                       className={`min-w-0 rounded-md border ${cardPadding} text-left transition ${
                         selectedDetailTaskKey === taskKey
-                          ? 'border-[#99d7cf] bg-[#e5f7f4] shadow-[inset_3px_0_0_var(--workbench-primary)]'
-                          : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
-                      } ${draggedTaskKey === taskKey ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
+                          ? 'border-tone-99d7cf bg-tone-e5f7f4 shadow-[inset_3px_0_0_var(--workbench-primary)]'
+                          : 'border-[var(--workbench-border)] bg-surface hover:border-tone-99d7cf hover:bg-[var(--workbench-surface-muted)]'
+                      } ${draggedTaskKey === taskKey ? 'opacity-50 ring-2 ring-tone-99d7cf' : ''} ${isMoving ? 'opacity-70' : ''}`}
                       data-testid={`project-task-card-${task.id}`}
                       draggable={canEditTask(task) && !isMoving}
                       onDragEnd={() => {
@@ -436,7 +436,7 @@ export function TaskBoardView({
                           </div>
                         ) : (
                           <button
-                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[#1c1d1f] hover:text-[var(--workbench-primary)] ${
+                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-fg-1c1d1f hover:text-[var(--workbench-primary-text)] ${
                               wrapText ? 'whitespace-normal break-words' : 'truncate'
                             }`}
                             data-task-action="open"
@@ -451,7 +451,7 @@ export function TaskBoardView({
                         {canEditTask(task) ? (
                           <button
                             aria-label={`${t('tasks.detail.title')}: ${resolveWorkItemTitle(task)}`}
-                            className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)]"
+                            className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-primary-text)]"
                             data-task-action="open"
                             data-task-team-id={task.teamId}
                             data-task-work-item-id={task.id}
@@ -464,7 +464,7 @@ export function TaskBoardView({
                         {onTaskActionMenuOpen ? (
                           <button
                             aria-label={`${t('tasks.action.more')}: ${resolveWorkItemTitle(task)}`}
-                            className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                            className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
                             data-task-action="context-menu"
                             data-task-open-variant="context-menu"
                             data-task-team-id={task.teamId}
@@ -512,7 +512,7 @@ export function TaskBoardView({
                         />
                       ) : null}
                       {visibleFields.has('assignee') ? (
-                        <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[#5f6874]">
+                        <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-fg-5f6874">
                           {showAssigneeAvatars ? (
                             <WorkItemAssigneeAvatar label={resolveWorkItemAssignee(task)} />
                           ) : null}
@@ -590,7 +590,7 @@ export function TaskBoardView({
                             }).then(() => undefined)}
                           />
                         ) : visibleFields.has('dueDate') ? (
-                          <span className="text-xs font-semibold text-[#5f6874]">{scheduleDisplay}</span>
+                          <span className="text-xs font-semibold text-fg-5f6874">{scheduleDisplay}</span>
                         ) : null}
                         </div>
                       ) : null}
@@ -630,13 +630,13 @@ export function TaskBoardView({
           className="workbench-panel min-w-0 min-h-[420px] border-red-200"
           data-testid="project-task-configuration-unavailable-column"
         >
-          <div className="border-b border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700">
+          <div className="border-b border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-fg-red-700">
             {t('workItems.configuration.loadError')}
           </div>
           <div className="grid gap-2 p-2.5">
             {unavailableTasks.map((task) => (
               <article
-                className="rounded-md border border-red-100 bg-white p-3 text-left transition hover:border-red-200"
+                className="rounded-md border border-red-100 bg-surface p-3 text-left transition hover:border-red-200"
                 key={createTaskKey(task)}
                 onContextMenu={(event) => {
                   if (!onTaskActionMenuOpen) return
@@ -651,7 +651,7 @@ export function TaskBoardView({
               >
                 <div className="flex items-start gap-2">
                   <button
-                    className="min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)]"
+                    className="min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[var(--workbench-text)] hover:text-[var(--workbench-primary-text)]"
                     data-task-action="open"
                     data-task-team-id={task.teamId}
                     data-task-work-item-id={task.id}
@@ -663,7 +663,7 @@ export function TaskBoardView({
                   {onTaskActionMenuOpen ? (
                     <button
                       aria-label={`${t('tasks.action.more')}: ${resolveWorkItemTitle(task)}`}
-                      className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-red-50 hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                      className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-red-50 hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
                       data-task-action="context-menu"
                       data-task-open-variant="context-menu"
                       data-task-team-id={task.teamId}

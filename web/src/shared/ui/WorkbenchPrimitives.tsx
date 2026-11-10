@@ -43,7 +43,7 @@ export function MetricCard({
 
   return (
     <section
-      className="min-w-0 rounded-lg border border-[var(--workbench-border)] bg-white p-4 sm:p-5"
+      className="min-w-0 rounded-lg border border-[var(--workbench-border)] bg-surface p-4 sm:p-5"
       data-testid={testId}
     >
       <p className="flex items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">

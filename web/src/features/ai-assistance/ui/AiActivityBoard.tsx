@@ -30,11 +30,11 @@ const statuses: readonly AiActivityStatus[] = ['running', 'review', 'paused', 'c
 
 /** Semantic color treatments always appear alongside explicit state text. */
 const statusStyles: Record<AiActivityStatus, { /** State marker color. */ dot: string; /** Readable state text color. */ text: string }> = {
-  running: { dot: 'bg-blue-600', text: 'text-blue-700' },
-  review: { dot: 'bg-amber-500', text: 'text-amber-800' },
-  paused: { dot: 'bg-slate-400', text: 'text-slate-600' },
-  completed: { dot: 'bg-emerald-600', text: 'text-emerald-700' },
-  failed: { dot: 'bg-red-600', text: 'text-red-700' },
+  running: { dot: 'bg-blue-600', text: 'text-fg-blue-700' },
+  review: { dot: 'bg-amber-500', text: 'text-fg-amber-800' },
+  paused: { dot: 'bg-slate-400', text: 'text-fg-slate-600' },
+  completed: { dot: 'bg-emerald-600', text: 'text-fg-emerald-700' },
+  failed: { dot: 'bg-red-600', text: 'text-fg-red-700' },
 }
 
 /**
@@ -108,7 +108,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
     <section aria-labelledby={titleId} className="flex h-full min-h-0 flex-col bg-[var(--workbench-canvas)] text-[var(--workbench-text)]" onBlurCapture={(event) => {
       if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) focusedCardRef.current = null
     }} onFocusCapture={() => { focusedCardRef.current = null }} ref={boardRef}>
-      <header className="flex flex-none items-start justify-between gap-2 border-b border-[var(--workbench-border)] bg-white px-5 py-4 min-[760px]:items-center min-[760px]:px-7">
+      <header className="flex flex-none items-start justify-between gap-2 border-b border-[var(--workbench-border)] bg-surface px-5 py-4 min-[760px]:items-center min-[760px]:px-7">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <span aria-hidden="true" className="grid size-10 shrink-0 place-items-center rounded-lg bg-teal-700 text-sm font-bold tracking-tight text-white max-[759px]:size-8">AI</span>
           <div>
@@ -124,12 +124,12 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
         {onClose ? <button aria-label={t('ai.activity.close')} className="workbench-button-secondary min-h-[44px] min-w-[44px] shrink-0 px-3" onClick={onClose} type="button"><span className="max-[759px]:hidden">{t('ai.activity.close')}</span><span aria-hidden="true" className="text-xl min-[760px]:hidden">×</span></button> : null}
       </header>
 
-      <div className="flex flex-none flex-wrap items-center gap-3 border-b border-[var(--workbench-border)] bg-white px-5 py-2 min-[760px]:px-7">
+      <div className="flex flex-none flex-wrap items-center gap-3 border-b border-[var(--workbench-border)] bg-surface px-5 py-2 min-[760px]:px-7">
         <div aria-label={t('ai.activity.filter')} className="flex flex-wrap gap-1" ref={filterRef} role="group" tabIndex={-1}>
           {(['all', 'running', 'attention'] satisfies Array<typeof filter>).map((value) => (
             <button
               aria-pressed={filter === value}
-              className={`min-h-[44px] rounded-md px-3 text-sm font-medium ${filter === value ? 'bg-teal-50 text-teal-800' : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'}`}
+              className={`min-h-[44px] rounded-md px-3 text-sm font-medium ${filter === value ? 'bg-teal-50 text-fg-teal-800' : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'}`}
               key={value}
               onClick={() => { setFilter(value); setSelectedId(undefined) }}
               type="button"
@@ -148,7 +148,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
 
       {activities.length === 0 ? (
         <div className="grid min-h-0 flex-1 place-content-center gap-3 overflow-auto px-7 py-12 text-center">
-          <span aria-hidden="true" className="mx-auto grid size-12 place-items-center rounded-lg border border-[var(--workbench-border)] bg-white font-semibold text-teal-700">AI</span>
+          <span aria-hidden="true" className="mx-auto grid size-12 place-items-center rounded-lg border border-[var(--workbench-border)] bg-surface font-semibold text-fg-teal-700">AI</span>
           <h2 className="text-lg font-semibold">{t('ai.activity.empty')}</h2>
           <p className="max-w-sm text-sm leading-6 text-[var(--workbench-muted)]">{t('ai.activity.emptyDescription')}</p>
         </div>
@@ -159,12 +159,12 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
           {selected ? (
             <aside
               aria-label={t('ai.activity.details')}
-              className={`${hasMobileSelection ? 'block' : 'hidden'} min-h-0 overflow-y-auto overscroll-contain border-[var(--workbench-border)] bg-white px-5 py-5 min-[1000px]:block min-[1000px]:border-r min-[1280px]:px-7`}
+              className={`${hasMobileSelection ? 'block' : 'hidden'} min-h-0 overflow-y-auto overscroll-contain border-[var(--workbench-border)] bg-surface px-5 py-5 min-[1000px]:block min-[1000px]:border-r min-[1280px]:px-7`}
               id={detailId}
               ref={detailRef}
               tabIndex={-1}
             >
-              <button className="mb-4 flex min-h-[44px] items-center gap-1 text-sm font-medium text-teal-700 min-[1000px]:hidden" onClick={() => {
+              <button className="mb-4 flex min-h-[44px] items-center gap-1 text-sm font-medium text-fg-teal-700 min-[1000px]:hidden" onClick={() => {
                 setSelectedId(undefined)
                 requestAnimationFrame(() => {
                   const trigger = Array.from(boardRef.current?.querySelectorAll<HTMLButtonElement>('[data-ai-activity-id]') ?? [])
@@ -197,7 +197,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
                           <button
                             aria-controls={detailId}
                             aria-pressed={isSelected}
-                            className={`min-w-0 rounded-lg border bg-white p-3 text-left transition-colors ${isSelected ? 'border-teal-600 ring-1 ring-teal-600' : 'border-[var(--workbench-border)] hover:border-[var(--workbench-border-strong)]'}`}
+                            className={`min-w-0 rounded-lg border bg-surface p-3 text-left transition-colors ${isSelected ? 'border-teal-600 ring-1 ring-teal-600' : 'border-[var(--workbench-border)] hover:border-[var(--workbench-border-strong)]'}`}
                             data-ai-activity-id={activity.id}
                             key={activity.id}
                             onClick={(event) => {
@@ -227,7 +227,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
           </div>
         </div>
       )}
-      <footer className="flex flex-none flex-wrap items-center justify-between gap-2 border-t border-[var(--workbench-border)] bg-white px-5 py-2 text-xs text-[var(--workbench-muted)]">
+      <footer className="flex flex-none flex-wrap items-center justify-between gap-2 border-t border-[var(--workbench-border)] bg-surface px-5 py-2 text-xs text-[var(--workbench-muted)]">
         <span>{t('ai.activity.sessionNote')}</span>
         {onClearHistory && hasHistory ? <button className="min-h-[44px] px-2 font-medium text-[var(--workbench-text)] hover:underline" onClick={() => {
           onClearHistory()

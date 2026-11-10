@@ -195,6 +195,12 @@ export const publicMessages = {
     '[mukuroji サポート依頼]\nカテゴリ: {category}\n発生日時: \nワークスペース / プロジェクト: \n行った操作: \n表示されたメッセージ: \n期待した結果: \n\n※パスワード、認証コード、アクセストークンは記載していません。',
   'public.support.contact.copyAction': '問い合わせメモをコピー',
   'public.support.contact.privacyAction': '情報の扱いを確認',
+  'public.routeError.eyebrow': 'ページを読み込めません',
+  'public.routeError.title': 'このページを読み込めませんでした',
+  'public.routeError.description':
+    '接続を確認して再読み込みしてください。アプリが更新された直後の場合は、再読み込みで新しい版を読み込みます。',
+  'public.routeError.reloadAction': '再読み込み',
+  'public.routeError.loginAction': 'ログインに戻る',
   'public.notFound.eyebrow': 'ページが見つかりません',
   'public.notFound.title': 'この経路は存在しません',
   'public.notFound.description':

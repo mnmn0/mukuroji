@@ -2,6 +2,7 @@
 import { expect, test } from '@jest/globals';
 import {
   createCanonicalWorkItemTransactItems,
+  createDemoProjectOwnerAccessTransactItems,
   createProjectDirectoryTransactItems,
   createWorkspaceAccessTransactItems,
   createWorkspaceBootstrapTransactItems,
@@ -12,7 +13,7 @@ import {
   synthesizedTemplate,
 } from './test-support';
 
-test('workspace metadata owner alias and project manager rows are idempotently bootstrapped', () => {
+test('workspace metadata owner and alias rows are idempotently bootstrapped', () => {
   const template = synthesizedTemplate;
   const [, bootstrap] = Object.entries(template.findResources('Custom::AWS')).find(([, candidate]) =>
     JSON.stringify(candidate).includes('workspace-bootstrap'),
@@ -34,6 +35,31 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload).toContain('InitialOwnerEmail');
   expect(createPayload).toContain('InitialOwnerUsername');
   expect(createPayload).toContain('WorkspaceDirectoryId');
+  expect(createPayload).not.toContain('PROJECT_MEMBER#');
+  expect(createPayload).not.toContain('WEBHOOK_TEAM_GRANT#');
+  expect(createPayload.match(/":timestamp":\{"S":"2026-07-11T00:00:00.000Z"\}/g)).toHaveLength(1);
+  expect(createPayload.match(/"Update"/g)).toHaveLength(3);
+  expect(createPayload).not.toContain('"Put"');
+  expect(createPayload.match(/#role = :role/g)).toHaveLength(1);
+  expect(createPayload).toContain('attribute_not_exists(directoryId) OR');
+  expect(bootstrap.Properties.Update).toBeUndefined();
+});
+
+test('demo seed makes the initial owner a manager of every demo Project', () => {
+  const template = synthesizedTemplate;
+  const [, ownerAccess] = Object.entries(template.findResources('Custom::AWS')).find(([, candidate]) =>
+    JSON.stringify(candidate).includes('demo-project-owner-access-seed'),
+  ) ?? [];
+
+  if (!ownerAccess) {
+    throw new Error('Demo Project owner access custom resource was not found.');
+  }
+
+  const createPayload = serializeAwsSdkCall(ownerAccess.Properties.Create);
+
+  expect(createPayload).toContain('transactWriteItems');
+  expect(createPayload).toContain('InitialOwnerEmail');
+  expect(createPayload).toContain('WorkspaceDirectoryId');
   expect(createPayload).toContain('PROJECT_MEMBER#refero#');
   expect(createPayload).toContain('PROJECT_MEMBER#product-roadmap#');
   expect(createPayload).toContain('PROJECT_MEMBER#shared-launch#');
@@ -41,8 +67,8 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload).toContain('WEBHOOK_TEAM_GRANT#');
   expect(createPayload).toContain('WEBHOOK_ACL#TEAM_MEMBER#');
   expect(createPayload.match(/":role":\{"S":"manager"\}/g)).toHaveLength(4);
-  expect(createPayload.match(/":timestamp":\{"S":"2026-07-11T00:00:00.000Z"\}/g)).toHaveLength(5);
-  expect(createPayload.match(/"Update"/g)).toHaveLength(7);
+  expect(createPayload.match(/":timestamp":\{"S":"2026-07-11T00:00:00.000Z"\}/g)).toHaveLength(4);
+  expect(createPayload.match(/"Update"/g)).toHaveLength(4);
   expect(createPayload.match(/"Put"/g)).toHaveLength(10);
   expect(createPayload.match(/"entryType":\{"S":"webhook-team-grant"\}/g))
     .toHaveLength(5);
@@ -65,10 +91,10 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   );
   expect(createPayload).toContain('createdAt = if_not_exists(createdAt, :timestamp)');
   expect(createPayload).toContain('updatedAt = if_not_exists(updatedAt, :timestamp)');
-  expect(createPayload.match(/#role = :role/g)).toHaveLength(1);
+  expect(createPayload).not.toMatch(/#role = :role/);
   expect(createPayload.match(/#role = if_not_exists\(#role, :role\)/g)).toHaveLength(4);
   expect(createPayload).toContain('attribute_not_exists(directoryId) OR');
-  expect(bootstrap.Properties.Update).toBeUndefined();
+  expect(ownerAccess.Properties.Update).toBeUndefined();
 });
 
 test('table bootstrap resources keep stable IDs and a create-only lifecycle', () => {
@@ -89,11 +115,18 @@ test('table bootstrap resources keep stable IDs and a create-only lifecycle', ()
       'workspace-bootstrap',
       'ProjectDirectoryTable9ED01C01',
     ],
+    [
+      'SeedDemoProjectOwnerAccess',
+      'demo-project-owner-access-seed',
+      'ProjectDirectoryTable9ED01C01',
+    ],
   ];
 
   for (const [logicalId, physicalResourceId, tableLogicalId] of
     createOnlySeeds) {
-    const resource = resources[logicalId];
+    const resource = resources[logicalId] ?? Object.entries(resources).find(([candidate]) =>
+      candidate.startsWith(logicalId)
+    )?.[1];
     expect(resource).toBeDefined();
     const lifecycleActions = ['Create', 'Update', 'Delete'].filter(
       (action) => resource?.Properties?.[action] !== undefined,
@@ -140,9 +173,17 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
     {
       customResourcePrefix: 'BootstrapWorkspace',
       policyPrefix: 'BootstrapWorkspaceCustomResourcePolicy',
-      itemActions: ['dynamodb:UpdateItem', 'dynamodb:PutItem'],
+      itemActions: ['dynamodb:UpdateItem'],
       tableOutputName: 'ProjectDirectoryTableName',
       physicalResourceId: 'workspace-bootstrap',
+      runsOnUpdate: false,
+    },
+    {
+      customResourcePrefix: 'SeedDemoProjectOwnerAccess',
+      policyPrefix: 'SeedDemoProjectOwnerAccessCustomResourcePolicy',
+      itemActions: ['dynamodb:UpdateItem', 'dynamodb:PutItem'],
+      tableOutputName: 'ProjectDirectoryTableName',
+      physicalResourceId: 'demo-project-owner-access-seed',
       runsOnUpdate: false,
     },
     {
@@ -327,6 +368,11 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
     'owner@example.com',
     'owner',
   );
+  const demoOwnerAccess = createDemoProjectOwnerAccessTransactItems(
+    'DirectoryTable',
+    'directory-1',
+    'owner@example.com',
+  );
 
   expect(workspaceAccess).toHaveLength(2);
   expect(workspaceAccess[0].Update.Key).toEqual({
@@ -399,10 +445,27 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
   })).toBe(true);
   expect(directoryItems).toEqual(createProjectDirectoryTransactItems('DirectoryTable', 'directory-1'));
 
-  expect(workspaceBootstrap).toHaveLength(17);
-  expect(workspaceBootstrap.filter((item) => 'Update' in item)).toHaveLength(7);
-  expect(workspaceBootstrap.filter((item) => 'Put' in item)).toHaveLength(10);
-  expect(workspaceBootstrap.every((item) => {
+  expect(workspaceBootstrap).toHaveLength(3);
+  expect(workspaceBootstrap.map(({ Update }) => Update.Key.entryKey)).toEqual([
+    { S: 'WORKSPACE#METADATA' },
+    { S: 'WORKSPACE_MEMBER#owner@example.com' },
+    { S: 'EMAIL_ALIAS#owner@example.com' },
+  ]);
+  expect(workspaceBootstrap.every(({ Update }) =>
+    Update.ConditionExpression?.includes('attribute_not_exists(directoryId)') &&
+    !('Item' in Update),
+  )).toBe(true);
+  expect(workspaceBootstrap).toEqual(createWorkspaceBootstrapTransactItems(
+    'DirectoryTable',
+    'directory-1',
+    'owner@example.com',
+    'owner',
+  ));
+
+  expect(demoOwnerAccess).toHaveLength(14);
+  expect(demoOwnerAccess.filter((item) => 'Update' in item)).toHaveLength(4);
+  expect(demoOwnerAccess.filter((item) => 'Put' in item)).toHaveLength(10);
+  expect(demoOwnerAccess.every((item) => {
     if (!('Update' in item)) {
       return true;
     }
@@ -410,7 +473,7 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
     return item.Update.ConditionExpression?.includes('attribute_not_exists(directoryId)') &&
       !('Item' in item.Update);
   })).toBe(true);
-  expect(workspaceBootstrap.every((item) => {
+  expect(demoOwnerAccess.every((item) => {
     if (!('Update' in item)) {
       return true;
     }
@@ -422,7 +485,7 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
         values[':timestamp']?.S === '2026-07-11T00:00:00.000Z'
       );
   })).toBe(true);
-  expect(workspaceBootstrap.every((item) => {
+  expect(demoOwnerAccess.every((item) => {
     if (!('Put' in item)) {
       return true;
     }
@@ -431,10 +494,9 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
       item.Put.Item.entryType.S,
     );
   })).toBe(true);
-  expect(workspaceBootstrap).toEqual(createWorkspaceBootstrapTransactItems(
+  expect(demoOwnerAccess).toEqual(createDemoProjectOwnerAccessTransactItems(
     'DirectoryTable',
     'directory-1',
     'owner@example.com',
-    'owner',
   ));
 });

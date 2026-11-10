@@ -1,5 +1,7 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { EnterpriseSecurityApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
+import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
  * SCIM directory connection の状態です。
@@ -106,12 +108,7 @@ export type EnterpriseScimTokenResponse = {
   token: string
 }
 
-const enterpriseSecurityApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_ENTERPRISE_IDENTITY_API_BASE_URL ??
-    import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
-    '/api',
-)
+const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')
 
 /**
  * SCIM bearer token を発行または rotate します。
@@ -311,10 +308,6 @@ function readErrorMessage(data: unknown) {
     : 'Enterprise security request failed.'
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function isEnterpriseScimConfiguration(
   value: unknown,
 ): value is EnterpriseScimConfiguration {
@@ -357,8 +350,4 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     throw createMalformedResponseError()
   }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

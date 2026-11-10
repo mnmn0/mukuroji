@@ -45,6 +45,7 @@ import {
   createWebhookGrantCleanupEntryKeyPrefix,
   createWebhookGrantCleanupItem,
 } from '../../webhook-authorization-projection'
+import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** SQS が1 message に設定できる最大 delay 秒です。 */
 export const WEBHOOK_QUEUE_MAX_DELAY_SECONDS = 15 * 60
@@ -498,7 +499,7 @@ async function processWebhookProjectionMessage(
     apiVersion: '2026-07-01',
     occurredAt: event.occurredAt,
     workspaceId: event.workspaceId,
-    data: toAuditEventView(event),
+    data: toPublicWebhookEventData(event),
   }
   const resourceScope = readWebhookEventResourceScope(envelope)
   if (!resourceScope) {
@@ -1286,7 +1287,7 @@ export function createSqsWebhookDeliveryQueue(): WebhookDeliveryQueue {
   let sqsClient: SQSClient | undefined
   return {
     async enqueue(message) {
-      const queueUrl = process.env.WEBHOOK_DELIVERY_QUEUE_URL?.trim()
+      const queueUrl = loadServerConfig().environment.WEBHOOK_DELIVERY_QUEUE_URL?.trim()
       if (!queueUrl) {
         throw new DeveloperPlatformError(
           503,
@@ -1308,17 +1309,18 @@ export function createSqsWebhookDeliveryQueue(): WebhookDeliveryQueue {
 }
 
 function createSqsClient() {
-  const endpoint = process.env.SQS_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_SQS ??
-    process.env.AWS_ENDPOINT_URL
+  const environment = loadServerConfig().environment
+  const endpoint = environment.SQS_ENDPOINT ??
+    environment.AWS_ENDPOINT_URL_SQS ??
+    environment.AWS_ENDPOINT_URL
   return new SQSClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
+    region: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
           endpoint,
           credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+            accessKeyId: environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: environment.AWS_SECRET_ACCESS_KEY ?? 'test',
           },
         }
       : {}),
@@ -1331,12 +1333,13 @@ function createWebhookDocumentClient() {
 }
 
 function readWebhookAuditTableName() {
+  const environment = loadServerConfig().environment
   const configured = getConfiguredAuditTableName()
   if (configured) return configured
   if (
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
-    Boolean(process.env.AWS_EXECUTION_ENV?.trim())
+    environment.NODE_ENV === 'production' ||
+    Boolean(environment.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
+    Boolean(environment.AWS_EXECUTION_ENV?.trim())
   ) {
     throw new TypeError('Audit event table name is required in production.')
   }
@@ -1344,12 +1347,13 @@ function readWebhookAuditTableName() {
 }
 
 function readWebhookClaimTableName() {
-  const configured = process.env.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
+  const environment = loadServerConfig().environment
+  const configured = environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
   if (configured) return configured
   if (
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
-    Boolean(process.env.AWS_EXECUTION_ENV?.trim())
+    environment.NODE_ENV === 'production' ||
+    Boolean(environment.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
+    Boolean(environment.AWS_EXECUTION_ENV?.trim())
   ) {
     throw new TypeError('Developer platform table name is required in production.')
   }
@@ -1357,12 +1361,13 @@ function readWebhookClaimTableName() {
 }
 
 function readWebhookProjectDirectoryTableName() {
-  const configured = process.env.PROJECT_DIRECTORY_TABLE_NAME?.trim()
+  const environment = loadServerConfig().environment
+  const configured = environment.PROJECT_DIRECTORY_TABLE_NAME?.trim()
   if (configured) return configured
   if (
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
-    Boolean(process.env.AWS_EXECUTION_ENV?.trim())
+    environment.NODE_ENV === 'production' ||
+    Boolean(environment.AWS_LAMBDA_FUNCTION_NAME?.trim()) ||
+    Boolean(environment.AWS_EXECUTION_ENV?.trim())
   ) {
     throw new TypeError('Project directory table name is required in production.')
   }
@@ -1714,7 +1719,7 @@ function decodeWebhookGrantCleanupCursor(
 
 function readPreparedWebhookEvent(payload: string): WebhookEventEnvelope {
   try {
-    const event = JSON.parse(payload) as unknown
+    const event: unknown = JSON.parse(payload)
     if (
       !isRecord(event) ||
       typeof event.id !== 'string' ||
@@ -1852,4 +1857,27 @@ function chunkValues<Value>(values: readonly Value[], size: number) {
 
 function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined
+}
+
+/**
+ * Change fields kept in the internal audit trail but left out of public webhook events,
+ * because the Public API contract does not expose them.
+ */
+const PUBLIC_WEBHOOK_EXCLUDED_CHANGE_FIELDS = ['contributorAssignments']
+
+/**
+ * Projects an audit event into public webhook data without non-public change fields.
+ *
+ * @param event - Normalized audit event.
+ * @returns The audit view with changes to non-public fields removed.
+ */
+export function toPublicWebhookEventData(event: AuditEventV1): ReturnType<typeof toAuditEventView> {
+  const view = toAuditEventView(event)
+  if (!view.changes) return view
+  return {
+    ...view,
+    changes: view.changes.filter((change) => !PUBLIC_WEBHOOK_EXCLUDED_CHANGE_FIELDS.some((field) =>
+      change.field === field || change.field.startsWith(`${field}.`)
+    )),
+  }
 }

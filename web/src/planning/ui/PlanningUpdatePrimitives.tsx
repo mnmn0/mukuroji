@@ -343,7 +343,7 @@ export function PlanningUpdateDetailPane({
         </div>
         {collaboration?.errorMessage ? (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2" role="alert">
-            <p className="text-xs font-semibold text-red-800">
+            <p className="text-xs font-semibold text-fg-red-800">
               {collaborationErrorMessage || labels.collaborationError}
             </p>
             {collaboration.onRetry ? (
@@ -615,7 +615,7 @@ export function PlanningUpdateCadenceEditor({
         {formError ? (
           <p
             id="planning-update-cadence-error"
-            className="text-sm font-semibold text-red-700"
+            className="text-sm font-semibold text-fg-red-700"
             role="alert"
           >
             {formError}
@@ -888,7 +888,7 @@ export function PlanningStatusUpdateComposer({
       pendingAiDraft.sessionKey === aiAssistantSessionKey &&
       aiT ? (
         <div
-          className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950"
+          className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-fg-amber-950"
           role="alert"
         >
           <p className="text-sm font-semibold">
@@ -1072,7 +1072,7 @@ export function PlanningStatusUpdateComposer({
             {labels.evidence}
           </legend>
           {aiGenerationReference && aiT ? (
-            <p className="border-l-2 border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-950">
+            <p className="border-l-2 border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-fg-teal-950">
               {aiEvidenceSeed
                 ? `${aiT('ai.planning.evidenceRetained')} (${aiGenerationReference})`
                 : aiT('ai.planning.evidenceRequired')}
@@ -1175,7 +1175,7 @@ export function PlanningStatusUpdateComposer({
         {formError ? (
           <p
             id="planning-update-composer-error"
-            className="text-sm font-semibold text-red-700"
+            className="text-sm font-semibold text-fg-red-700"
             role="alert"
           >
             {formError}
@@ -1296,7 +1296,7 @@ export function PlanningStatusUpdateLedger({
       </div>
       {errorMessage ? (
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4" role="alert">
-          <p className="text-sm font-semibold text-red-800">{errorMessage || labels.historyError}</p>
+          <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.historyError}</p>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
               {labels.retryHistory}
@@ -1380,7 +1380,7 @@ export function PlanningStatusUpdateLedger({
               ) : null}
               {update.changes.length > 0 ? (
                 <details className="mt-4 border-t border-[var(--workbench-border)] pt-3">
-                  <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-primary)]">
+                  <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-primary-text)]">
                     {labels.comparePrevious}
                   </summary>
                   <div className="mt-3 divide-y divide-[var(--workbench-border)] border-y border-[var(--workbench-border)]">
@@ -1398,7 +1398,7 @@ export function PlanningStatusUpdateLedger({
                             {labels.current}
                           </span>
                           {change.url ? (
-                            <a className="text-[var(--workbench-primary)] underline-offset-4 hover:underline" href={change.url}>
+                            <a className="text-[var(--workbench-primary-text)] underline-offset-4 hover:underline" href={change.url}>
                               {change.currentValue}
                             </a>
                           ) : change.currentValue}

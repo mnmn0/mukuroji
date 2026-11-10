@@ -411,7 +411,7 @@ function buildTenantOperationCapabilityFunction(
         input.parameters.automationWebhookSecretPrefix,
       CAPACITY_PLANNING_TABLE_NAME:
         input.dataStores.capacityPlanningTable.tableName,
-      COGNITO_USER_POOL_ID: input.parameters.cognitoUserPoolId.valueAsString,
+      COGNITO_USER_POOL_ID: input.parameters.cognitoUserPoolId,
       COLLABORATION_TABLE_NAME: input.dataStores.collaborationTable.tableName,
       DEVELOPER_PLATFORM_TABLE_NAME:
         input.dataStores.developerPlatformTable.tableName,
@@ -421,10 +421,13 @@ function buildTenantOperationCapabilityFunction(
       FILE_BUCKET_NAME: input.fileStorage.fileBucket.bucketName,
       FILE_PROOFING_TABLE_NAME: input.dataStores.fileProofingTable.tableName,
       FOCUS_TABLE_NAME: input.dataStores.focusTable.tableName,
-      MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:
+      TEAM_ISSUE_EVENTS_TABLE_NAME:
         input.dataStores.teamIssueEventsTable.tableName,
       NOTIFICATIONS_TABLE_NAME: input.dataStores.notificationsTable.tableName,
       PLANNING_TABLE_NAME: input.dataStores.planningTable.tableName,
+      PUSH_SUBSCRIPTIONS_TABLE_NAME:
+        input.dataStores.pushSubscriptionsTable.tableName,
+      AGENT_RUNS_TABLE_NAME: input.dataStores.agentRunsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME:
         input.dataStores.projectDirectoryTable.tableName,
       REALTIME_SESSIONS_TABLE_NAME:
@@ -448,6 +451,8 @@ function buildTenantOperationCapabilityFunction(
         input.dataStores.workItemConfigurationTable.tableName,
       WORK_ITEM_IMPORT_BUCKET_NAME:
         input.fileStorage.workItemImportBucket.bucketName,
+      AUDIT_EXPORT_BUCKET_NAME:
+        input.fileStorage.auditExportBucket.bucketName,
       WORK_ITEMS_TABLE_NAME: input.dataStores.workItemsTable.tableName,
     },
   });
@@ -507,6 +512,8 @@ function grantTenantResourceOwner(
     stores.workspaceSearchTable,
     stores.notificationsTable,
     stores.focusTable,
+    stores.pushSubscriptionsTable,
+    stores.agentRunsTable,
     stores.realtimeSessionsTable,
     stores.fileProofingTable,
   ];
@@ -553,6 +560,11 @@ function grantTenantResourceOwner(
       resources: [
         input.fileStorage.workItemImportBucket.arnForObjects('work-item-imports/*'),
       ],
+    }));
+    grantAuditExportList(target, input.fileStorage.auditExportBucket, false);
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [input.fileStorage.auditExportBucket.arnForObjects('audit-exports/*')],
     }));
     target.addToRolePolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject', 's3:PutObject'],
@@ -603,6 +615,11 @@ function grantTenantResourceOwner(
         input.fileStorage.workItemImportBucket.arnForObjects('work-item-imports/*'),
       ],
     }));
+    grantAuditExportList(target, input.fileStorage.auditExportBucket, true);
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+      resources: [input.fileStorage.auditExportBucket.arnForObjects('audit-exports/*')],
+    }));
     return;
   }
   if (owner === 'secrets') {
@@ -642,6 +659,30 @@ function grantTenantResourceOwner(
     conditions: {
       StringLike: {
         's3:prefix': ['work-item-imports/*'],
+      },
+    },
+  }));
+  grantAuditExportList(target, input.fileStorage.auditExportBucket, true);
+}
+
+/**
+ * Grants listing of the tenant audit export namespace.
+ *
+ * @param target Resource-owner Lambda that inspects audit exports.
+ * @param bucket Audit export bucket.
+ * @param includeVersions Whether object versions must also be listed.
+ */
+function grantAuditExportList(
+  target: lambdaNodejs.NodejsFunction,
+  bucket: s3.IBucket,
+  includeVersions: boolean,
+): void {
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: includeVersions ? ['s3:ListBucket', 's3:ListBucketVersions'] : ['s3:ListBucket'],
+    resources: [bucket.bucketArn],
+    conditions: {
+      StringLike: {
+        's3:prefix': ['audit-exports/*'],
       },
     },
   }));

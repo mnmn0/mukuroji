@@ -165,6 +165,8 @@ export type WorkItemConfiguration = {
   customFields: CustomFieldDefinition[]
   /** Scope で利用する Work Item Type 一覧です。省略時は built-in type を利用します。 */
   workItemTypes?: import('./work-item-types').WorkItemTypeDefinition[]
+  /** Job roles contributors can be planned against; absent when the scope defines none. */
+  jobRoles?: import('./work-item-contributors').WorkItemJobRoleDefinition[]
   /** 最終更新日時の ISO 8601 timestamp です。 */
   updatedAt?: string
 }

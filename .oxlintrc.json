@@ -11,6 +11,12 @@
   ],
   "overrides": [
     {
+      "files": ["contracts/src/openapi.ts"],
+      "rules": {
+        "typescript/prefer-as-const": "off"
+      }
+    },
+    {
       "files": ["cdk/**/*.ts", "cdk/**/*.tsx"],
       "jsPlugins": ["oxlint-plugin-awscdk"],
       "rules": {

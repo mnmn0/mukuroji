@@ -66,6 +66,7 @@ import {
   createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Workspace search table の search document prefix です。 */
 export const WORKSPACE_SEARCH_DOCUMENT_PREFIX = 'DOCUMENT#'
@@ -1211,6 +1212,29 @@ function createDocumentWorkspaceSearchProjection(
   })
 }
 
+/**
+ * Builds the search identity `team/<teamId>/issue/<issueId>` of a Work Item.
+ *
+ * The identity is the document's record key, so two Work Items must never share one. A Team
+ * ID without `/` ends at the first `/` after `team/`, which makes the identity decode to
+ * exactly one `(teamId, issueId)` pair even when the Work Item ID contains `/` or `/issue/`.
+ * Team IDs are generated from letters, digits, and `-`, so no existing Team is refused.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item identifier.
+ * @returns The unambiguous search identity.
+ */
+function createWorkItemSearchEntityId(teamId: string, issueId: string): string {
+  if (teamId.includes('/')) {
+    throw new WorkspaceSearchError(
+      400,
+      'InvalidSearchWorkItemIdentity',
+      'A Team ID that contains "/" cannot identify a Work Item search document.',
+    )
+  }
+  return `team/${teamId}/issue/${issueId}`
+}
+
 /** Canonical Work Item source を runtime/backfill 共通の search document へ変換します。 */
 export function createWorkItemWorkspaceSearchDocument(input: {
   /** Canonical Workspace ID です。 */
@@ -1244,7 +1268,7 @@ export function createWorkItemWorkspaceSearchDocument(input: {
   /** Work Item の最終更新日時です。 */
   updatedAt?: string
 }) {
-  const entityId = `team/${input.teamId}/issue/${input.issueId}`
+  const entityId = createWorkItemSearchEntityId(input.teamId, input.issueId)
   const query = new URLSearchParams({
     ...(input.projectId ? { teamId: input.teamId } : {}),
     issueId: input.issueId,
@@ -1435,7 +1459,6 @@ export class DynamoDbWorkspaceSearchClient {
 
   constructor(
     tableName = readEnvironment('WORKSPACE_SEARCH_TABLE_NAME') ??
-      readEnvironment('MUKUROJI_WORKSPACE_SEARCH_TABLE') ??
       'mukuroji-workspace-search-local',
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createDynamoDbClient(),
@@ -5541,8 +5564,8 @@ function encodeCursor(value: SearchCursor | SavedViewCursor | TaskViewCursor) {
 
 function decodeCursor(value: string) {
   try {
-    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Record<string, unknown>
-    if (parsed.version !== 1) throw new TypeError('Unsupported cursor version.')
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecordValue(parsed) || parsed.version !== 1) throw new TypeError('Unsupported cursor version.')
     return parsed
   } catch (error) {
     throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Cursor is invalid.', { cause: error })
@@ -6611,5 +6634,5 @@ function shouldBootstrapLocalTable() {
 }
 
 function readEnvironment(name: string) {
-  return typeof Bun !== 'undefined' ? Bun.env[name] : process.env[name]
+  return loadServerConfig().environment[name]
 }

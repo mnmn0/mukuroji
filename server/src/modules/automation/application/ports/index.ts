@@ -19,6 +19,7 @@ export {
 } from './execution-port'
 export { type AutomationFeatureEntitlementPort } from './feature-entitlement-port'
 export {
+  type AutomationAcceptedTriageWebhookDelivery,
   type AutomationInboundWebhookDeliveryInput,
   type AutomationInboundWebhookDeliveryResult,
   type AutomationInboundWebhookEndpointRecord,

@@ -66,7 +66,7 @@ export function WebhooksSection({
           description={labels.helpText.webhooks}
           title={labels.headings.webhooks}
         />
-        <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs font-medium leading-5 text-blue-900">
+        <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs font-medium leading-5 text-fg-blue-900">
           {labels.helpText.webhookSigning}
         </p>
         {subscriptions.length ? (

@@ -62,7 +62,35 @@ export type FileStorageResources = {
   readonly malwareProtectionRole: iam.Role;
   /** Versioned bucket that stores Work Item import sources. */
   readonly workItemImportBucket: s3.Bucket;
+  /** Private bucket that stores asynchronous audit export jobs and NDJSON parts. */
+  readonly auditExportBucket: s3.Bucket;
 };
+
+/**
+ * Builds the CORS rule that lets browsers use presigned file URLs.
+ *
+ * @param allowedOrigins Browser origins allowed to upload and download.
+ * @returns One file bucket CORS rule.
+ */
+export function createFileBucketBrowserCorsRule(
+  allowedOrigins: string[],
+): s3.CorsRule {
+  return {
+    allowedHeaders: [
+      'content-length',
+      'content-type',
+      'if-none-match',
+      'x-amz-checksum-*',
+      'x-amz-meta-*',
+      'x-amz-server-side-encryption',
+      'x-amz-tagging',
+    ],
+    allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD, s3.HttpMethods.PUT],
+    allowedOrigins,
+    exposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
+    maxAge: 600,
+  };
+}
 
 /**
  * Builds durable file storage, import storage, and malware scanning resources.
@@ -77,21 +105,7 @@ export function buildFileStorage(
 ): FileStorageResources {
   const fileBucket = new s3.Bucket(scope, 'FileBucket', {
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-    cors: [{
-      allowedHeaders: [
-        'content-length',
-        'content-type',
-        'if-none-match',
-        'x-amz-checksum-*',
-        'x-amz-meta-*',
-        'x-amz-server-side-encryption',
-        'x-amz-tagging',
-      ],
-      allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD, s3.HttpMethods.PUT],
-      allowedOrigins: configuration.allowedOrigins,
-      exposedHeaders: ['ETag', 'x-amz-checksum-sha256', 'x-amz-version-id'],
-      maxAge: 600,
-    }],
+    cors: [createFileBucketBrowserCorsRule(configuration.allowedOrigins)],
     encryption: s3.BucketEncryption.S3_MANAGED,
     enforceSSL: true,
     eventBridgeEnabled: true,
@@ -290,6 +304,55 @@ export function buildFileStorage(
     versioned: true,
   });
 
+  const auditExportAccessLogsBucket = new s3.Bucket(
+    scope,
+    'AuditExportAccessLogsBucket',
+    {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      lifecycleRules: [{
+        expiration: cdk.Duration.days(90),
+        id: 'ExpireAuditExportAccessLogs',
+        noncurrentVersionExpiration: cdk.Duration.days(90),
+      }],
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      versioned: true,
+    },
+  );
+  // Audit export jobs and parts are derived, short-lived copies of the audit log.
+  // Objects expire one day after the seven-day download window ends. The bucket is
+  // versioned like the other tenant-data buckets, because tenant closure deletes every
+  // object version; replaced or expired versions are removed one day later.
+  const auditExportBucket = new s3.Bucket(scope, 'AuditExportBucket', {
+    blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    encryption: s3.BucketEncryption.S3_MANAGED,
+    enforceSSL: true,
+    lifecycleRules: [
+      {
+        abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        id: 'AbortIncompleteAuditExportUploads',
+      },
+      {
+        expiration: cdk.Duration.days(8),
+        id: 'ExpireAuditExports',
+        noncurrentVersionExpiration: cdk.Duration.days(1),
+        prefix: 'audit-exports/',
+      },
+      {
+        expiredObjectDeleteMarker: true,
+        id: 'RemoveExpiredAuditExportDeleteMarkers',
+        prefix: 'audit-exports/',
+      },
+    ],
+    objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    versioned: true,
+    serverAccessLogsBucket: auditExportAccessLogsBucket,
+    serverAccessLogsPrefix: 'audit-export/',
+  });
+
   const malwareProtectionRole = new iam.Role(scope, 'FileMalwareProtectionRole', {
     assumedBy: new iam.ServicePrincipal('malware-protection-plan.guardduty.amazonaws.com'),
     description: 'Allows GuardDuty Malware Protection to scan and tag mukuroji files.',
@@ -459,6 +522,7 @@ export function buildFileStorage(
     malwareProtectionPlan,
     malwareProtectionRole,
     workItemImportBucket,
+    auditExportBucket,
   };
 }
 
@@ -468,12 +532,13 @@ export function buildFileStorage(
  * @param resources File resources that own the bucket policy.
  * @param apiFunction API Lambda whose role may read verified files.
  * @param restoreDrillRunnerRole Isolated drill role that must read exact
- * quarantined or deleted versions without receiving source write access.
+ * quarantined or deleted versions without receiving source write access. Absent when the
+ * optional restore drill is not deployed, so no principal can read deleted versions.
  */
 export function configureFileStorageApiBoundary(
   resources: FileStorageResources,
   apiFunction: lambdaNodejs.NodejsFunction,
-  restoreDrillRunnerRole: iam.IRole,
+  restoreDrillRunnerRole: iam.IRole | undefined,
 ): void {
   resources.fileBucket.addToResourcePolicy(new iam.PolicyStatement({
     sid: 'NoReadUnlessGuardDutyClean',
@@ -486,7 +551,7 @@ export function configureFileStorageApiBoundary(
         'aws:PrincipalArn': [
           resources.malwareProtectionRole.roleArn,
           apiFunction.role!.roleArn,
-          restoreDrillRunnerRole.roleArn,
+          ...(restoreDrillRunnerRole ? [restoreDrillRunnerRole.roleArn] : []),
         ],
       },
       StringNotEquals: {
@@ -501,9 +566,9 @@ export function configureFileStorageApiBoundary(
     actions: ['s3:GetObject', 's3:GetObjectVersion'],
     resources: [resources.fileBucket.arnForObjects('workspaces/*')],
     conditions: {
-      ArnNotEquals: {
-        'aws:PrincipalArn': restoreDrillRunnerRole.roleArn,
-      },
+      ...(restoreDrillRunnerRole
+        ? { ArnNotEquals: { 'aws:PrincipalArn': restoreDrillRunnerRole.roleArn } }
+        : {}),
       StringEquals: {
         's3:ExistingObjectTag/mukuroji-deleted': 'true',
       },

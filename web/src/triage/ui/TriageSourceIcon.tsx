@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react'
 import type { TriageSourceKind } from '@mukuroji/contracts'
 import {
+  AgentIcon,
   ChatIcon,
   FormIcon,
   HandoffIcon,
@@ -17,6 +18,7 @@ export type TriageSourceIconProps = {
 }
 
 const sourceIcons: Record<TriageSourceKind, ComponentType<{ className?: string }>> = {
+  'agent-run': AgentIcon,
   chat: ChatIcon,
   email: MailIcon,
   form: FormIcon,

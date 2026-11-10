@@ -22,6 +22,8 @@ import {
 
 /** Stable router test instant. */
 const NOW = '2026-08-09T00:00:00.000Z'
+/** Triage retention deadline one year after the real clock, because entries past it are no longer readable. */
+const RETENTION_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
 
 /** Creates a complete entry fixture with intentionally sensitive content.
  *
@@ -72,7 +74,7 @@ function createEntry(
     teamId: 'support',
     ...(projectId === undefined ? {} : { projectId }),
     permission,
-    retention: { expiresAt: '2027-08-09T00:00:00.000Z' },
+    retention: { expiresAt: RETENTION_EXPIRES_AT },
     capabilities: createTriageCapabilities({ state: 'pending', permission }),
     events: [{
       id: 'created-1',
@@ -147,6 +149,7 @@ function createClient(entry: TriageEntry, entries: TriageEntry[] = [entry]): Tri
       return configurationReceipt
     },
     createManualHandoff: async () => ({ entry, replayed: false }),
+    createWebhookEntry: async () => ({ entry, replayed: false }),
     listWorkItemSources: async () => ({ entries: [entry] }),
   }
 }
@@ -926,7 +929,7 @@ describe('triage HTTP router', () => {
           requesterDisplayName: 'Operator',
           projectId: 'project-visible',
           routingReason: 'Operator handoff.',
-          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+          retentionExpiresAt: RETENTION_EXPIRES_AT,
         }),
       },
     )
@@ -966,7 +969,7 @@ describe('triage HTTP router', () => {
           body: '',
           requesterDisplayName: 'Operator',
           routingReason: 'Operator handoff.',
-          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+          retentionExpiresAt: RETENTION_EXPIRES_AT,
         }),
       },
     )
@@ -1011,7 +1014,7 @@ describe('triage HTTP router', () => {
         body: '',
         requesterDisplayName: 'Operator',
         routingReason: 'Operator handoff.',
-        retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+        retentionExpiresAt: RETENTION_EXPIRES_AT,
       }),
     }
 
@@ -1064,7 +1067,7 @@ describe('triage HTTP router', () => {
           requesterDisplayName: 'Operator',
           projectId: 'project-visible',
           routingReason: 'Operator handoff.',
-          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+          retentionExpiresAt: RETENTION_EXPIRES_AT,
         }),
       },
     )

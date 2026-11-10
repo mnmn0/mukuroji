@@ -191,7 +191,7 @@ export function TaskActionContextMenu({
       <div
         aria-label={menuLabel}
         aria-orientation="vertical"
-        className={`fixed z-[81] grid overflow-y-auto border border-[var(--workbench-border-strong)] bg-white shadow-[0_16px_40px_rgba(15,23,42,0.18)] outline-none ${
+        className={`fixed z-[81] grid overflow-y-auto border border-[var(--workbench-border-strong)] bg-surface shadow-[0_16px_40px_rgba(15,23,42,0.18)] outline-none ${
           layout.mode === 'sheet'
             ? 'bottom-2 left-2 right-2 max-h-[calc(100vh-1rem)] rounded-xl px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2'
             : 'max-h-[min(520px,calc(100vh-1rem))] w-56 max-w-[calc(100vw-1rem)] rounded-lg p-1.5'
@@ -228,12 +228,12 @@ export function TaskActionContextMenu({
                   layout.mode === 'sheet' ? 'min-h-[52px] py-2' : 'min-h-9 py-1.5'
                 } ${
                   disabled
-                    ? 'cursor-not-allowed text-slate-400'
+                    ? 'cursor-not-allowed text-fg-slate-400'
                     : item.destructive
-                      ? 'text-red-600'
+                      ? 'text-fg-red-600'
                       : 'text-[var(--workbench-text)]'
                 } ${
-                  active ? 'bg-[var(--workbench-surface-muted)] ring-2 ring-[#2563eb]/10' : ''
+                  active ? 'bg-[var(--workbench-surface-muted)] ring-2 ring-tone-2563eb/10' : ''
                 }`}
                 data-action-id={item.id}
                 data-disabled-reason={item.disabledReason}

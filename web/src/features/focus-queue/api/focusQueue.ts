@@ -4,6 +4,7 @@ import {
   type FocusEffectivePolicy,
   type FocusItem,
   type FocusItemCapabilities,
+  type FocusItemInvolvement,
   type FocusPolicy,
   type FocusPolicyCapabilities,
   type FocusPolicyOverrides,
@@ -36,10 +37,9 @@ import {
   isRecord,
 } from '../../../shared/api/jsonValidation'
 import { isCanonicalWorkItem } from '../../../work-items/api/contractValidation'
+import { resolveApiBaseUrl } from '../../../shared/api/apiBaseUrl'
 
-const focusApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_API_BASE_URL ?? '/api',
-)
+const focusApiBaseUrl = resolveApiBaseUrl()
 
 const defaultFocusApiErrorMessage = 'Unable to complete the Focus queue request.'
 
@@ -52,6 +52,12 @@ const focusQueueSectionOrder: readonly FocusQueueSection[] = [
 ]
 
 const focusQueueSections: ReadonlySet<string> = new Set(focusQueueSectionOrder)
+
+const focusItemInvolvements: ReadonlySet<string> = new Set<FocusItemInvolvement>([
+  'owner',
+  'contributor',
+  'related',
+])
 
 const focusSignalTypes: ReadonlySet<string> = new Set([
   'blocker',
@@ -380,6 +386,7 @@ function isFocusItem(value: unknown): value is FocusItem {
     isNonnegativeSafeInteger(value.snoozeRevision) &&
     isFocusQueueSection(value.section) &&
     isCanonicalWorkItem(value.workItem) &&
+    (value.involvement === undefined || isFocusItemInvolvement(value.involvement)) &&
     Array.isArray(value.signals) &&
     value.signals.every(isFocusSignal) &&
     isFocusRankBreakdown(value.rank) &&
@@ -675,6 +682,11 @@ function isFocusQueueSection(value: unknown): value is FocusQueueSection {
   return typeof value === 'string' && focusQueueSections.has(value)
 }
 
+/** Returns whether an unknown value is one supported Focus item involvement. */
+function isFocusItemInvolvement(value: unknown): value is FocusItemInvolvement {
+  return typeof value === 'string' && focusItemInvolvements.has(value)
+}
+
 /** Returns whether an unknown value is one supported Focus signal type. */
 function isFocusSignalType(value: unknown): value is FocusSignalType {
   return typeof value === 'string' && focusSignalTypes.has(value)
@@ -754,9 +766,4 @@ function readApiError(value: unknown): { code?: string; message: string } {
       ? value.message
       : defaultFocusApiErrorMessage,
   }
-}
-
-/** Removes trailing separators from an API base URL. */
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/u, '')
 }

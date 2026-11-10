@@ -29,7 +29,7 @@ const meta = {
   decorators: [
     (Story) => (
       <main className="min-h-screen bg-[var(--workbench-page)] p-6 max-[720px]:p-3">
-        <div className="mx-auto max-w-3xl overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+        <div className="mx-auto max-w-3xl overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
           <Story />
         </div>
       </main>

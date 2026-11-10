@@ -123,6 +123,8 @@ export type IssueCollaborationPanelProps = {
   onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Optional outer layout class name. */
   className?: string
+  /** Renders extra read-only details under a comment body, such as an agent report. */
+  renderCommentDetails?: (comment: TeamIssueComment) => ReactNode
 }
 
 /**
@@ -150,6 +152,7 @@ export function IssueCollaborationPanel({
   onAiSummaryOperationPendingChange,
   onCommentDraftDirtyChange,
   readOnlyMessage,
+  renderCommentDetails,
   route,
 }: IssueCollaborationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -363,7 +366,7 @@ export function IssueCollaborationPanel({
 
   return (
     <section
-      className={`border-t border-[var(--workbench-border)] bg-white ${className}`}
+      className={`border-t border-[var(--workbench-border)] bg-surface ${className}`}
       data-testid="issue-collaboration-panel"
     >
       <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4">
@@ -388,8 +391,8 @@ export function IssueCollaborationPanel({
             aria-pressed={controller.watch.subscribed}
             className={`inline-flex min-h-[44px] items-center gap-2 rounded-md border px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-55 ${
               controller.watch.subscribed
-                ? 'border-[#72c9bf] bg-[#e5f7f4] text-[#116b63]'
-                : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[#99d7cf] hover:text-[var(--workbench-text)]'
+                ? 'border-tone-72c9bf bg-tone-e5f7f4 text-fg-116b63'
+                : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:border-tone-99d7cf hover:text-[var(--workbench-text)]'
             }`}
             disabled={Boolean(readOnlyMessage) || !controller.capabilities.canWatch}
             onClick={() => void controller.toggleWatch()}
@@ -425,7 +428,7 @@ export function IssueCollaborationPanel({
         <div className="mx-5 -mt-2 mb-3">
           <button
             aria-pressed={controller.watch.projectSubscribed}
-            className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2 disabled:opacity-55"
+            className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2 disabled:opacity-55"
             data-testid="project-watch-toggle"
             disabled={Boolean(readOnlyMessage) || !controller.capabilities.canWatch}
             onClick={() => void controller.toggleProjectWatch?.()}
@@ -441,7 +444,7 @@ export function IssueCollaborationPanel({
         </div>
       ) : null}
 
-      <div className="sticky top-0 z-10 border-y border-[var(--workbench-border)] bg-white px-3">
+      <div className="sticky top-0 z-10 border-y border-[var(--workbench-border)] bg-surface px-3">
         <div
           aria-label={t('collaboration.tabs.aria')}
           className="flex min-w-0 gap-0 overflow-x-auto"
@@ -453,7 +456,7 @@ export function IssueCollaborationPanel({
               aria-selected={selectedTab === tab}
               className={`relative inline-flex min-h-[44px] flex-none items-center gap-1.5 whitespace-nowrap px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--workbench-primary)] ${
                 selectedTab === tab
-                  ? 'text-[var(--workbench-primary)]'
+                  ? 'text-[var(--workbench-primary-text)]'
                   : 'text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'
               }`}
               id={createCollaborationTabId(panelIdPrefix, tab)}
@@ -493,6 +496,7 @@ export function IssueCollaborationPanel({
           >
           <IssueConversationTab
             artifacts={artifacts}
+            renderCommentDetails={renderCommentDetails}
             canAcceptResolution={
               !readOnlyMessage && controller.context.capabilities.canAcceptResolution
             }
