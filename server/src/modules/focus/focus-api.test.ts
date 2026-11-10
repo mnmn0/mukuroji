@@ -1411,11 +1411,11 @@ test('returns the committed policy when a contributing layer changes after the w
 
 test('rejects personal policy updates beyond the Focus Team limit before persistence', async () => {
   configureFocusSources('manager')
-  const additionalTeams = Array.from({ length: 100 }, (_, index) => ({
-    id: `team-${String(index + 1).padStart(3, '0')}`,
+  const additionalTeams = Array.from({ length: 20 }, (_, index) => ({
+    id: `team-${String(index + 1).padStart(2, '0')}`,
     name: `Team ${index + 1}`,
     projects: [{
-      id: `project-${String(index + 1).padStart(3, '0')}`,
+      id: `project-${String(index + 1).padStart(2, '0')}`,
       name: `Project ${index + 1}`,
       tone: 'blue' as const,
     }],

@@ -9,11 +9,11 @@ import {
   confirmTeamIssueSchedule,
   getProjectIssues,
   getTeamIssues,
-  getWorkspaceWorkItems,
   previewTeamIssueSchedule,
   TeamIssuesApiError,
   updateTeamIssue,
 } from '../src/issues/api'
+import { loadWorkspaceWorkItems } from '../src/issues/queries/workspaceWorkItemLoader'
 import {
   isCanonicalWorkItem,
   isWorkItemTypeChangePreview,
@@ -165,7 +165,7 @@ describe('canonical Work Item API', () => {
     const workItem = createWorkItem({ assignedProjectId: undefined })
     const requests = installFetchRecorder({ workItems: [workItem] })
 
-    const result = await getWorkspaceWorkItems('access-token')
+    const result = await loadWorkspaceWorkItems('access-token')
 
     expect(result).toEqual([workItem])
     expect(requests).toHaveLength(1)
@@ -191,7 +191,7 @@ describe('canonical Work Item API', () => {
       })
     }) as typeof fetch
 
-    const result = await getWorkspaceWorkItems('access-token', false, {
+    const result = await loadWorkspaceWorkItems('access-token', false, {
       involvement: 'mine',
       teamId: 'core team',
       statusCategories: ['started', 'unstarted'],
@@ -208,7 +208,7 @@ describe('canonical Work Item API', () => {
   test('fails closed when a Workspace Work Item read never runs out of pages', async () => {
     installFetchRecorder({ workItems: [], nextCursor: 'again' })
 
-    await expect(getWorkspaceWorkItems('access-token')).rejects.toMatchObject({
+    await expect(loadWorkspaceWorkItems('access-token')).rejects.toMatchObject({
       status: 413,
       code: 'WorkItemListLimitExceeded',
     })
@@ -228,7 +228,7 @@ describe('canonical Work Item API', () => {
     )
 
     requests = installFetchRecorder({ workItems: [workItem] })
-    await expect(getWorkspaceWorkItems('access-token', true)).resolves.toEqual([workItem])
+    await expect(loadWorkspaceWorkItems('access-token', true)).resolves.toEqual([workItem])
     expect(requests[0]?.url).toBe('/api/work-items?limit=200&includeArchived=true')
   })
 
@@ -483,7 +483,7 @@ describe('canonical Work Item API', () => {
       status: 502,
     })) as typeof fetch
 
-    const error = await getWorkspaceWorkItems('access-token').catch((reason: unknown) => reason)
+    const error = await loadWorkspaceWorkItems('access-token').catch((reason: unknown) => reason)
 
     expect(error).toBeInstanceOf(TeamIssuesApiError)
     expect(error).toMatchObject({
@@ -498,7 +498,7 @@ describe('canonical Work Item API', () => {
       status: 500,
     })) as typeof fetch
 
-    const error = await getWorkspaceWorkItems('access-token').catch((reason: unknown) => reason)
+    const error = await loadWorkspaceWorkItems('access-token').catch((reason: unknown) => reason)
 
     expect(error).toBeInstanceOf(TeamIssuesApiError)
     expect(error).toMatchObject({

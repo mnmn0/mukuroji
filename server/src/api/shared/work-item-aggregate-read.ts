@@ -13,6 +13,7 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
+  type TeamIssuesResponse,
 } from '../../modules/work-items'
 import { mapInOrderWithConcurrency } from './agent-run-access'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
@@ -209,10 +210,11 @@ export async function readAccessibleWorkItemPage(
           limit: Math.min(WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE, remainingBudget),
           consistentRead: true,
           includeArchived: options.includeArchived,
+          limitEvaluatedRows: true,
           ...(startAfterIssueId ? { startAfterIssueId } : {}),
         },
       )
-      evaluated += response.issues.length
+      evaluated += readEvaluatedRowCount(response)
       const accessible = new Set(filterAccessibleTeamIssues(response.issues, principal, context))
       for (const [position, issue] of response.issues.entries()) {
         startAfterIssueId = issue.id
@@ -338,10 +340,11 @@ async function forEachTeamPartitionPage(
         limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
         consistentRead: true,
         includeArchived,
+        limitEvaluatedRows: true,
         ...(startAfterIssueId ? { startAfterIssueId } : {}),
       },
     )
-    visit(filterAccessibleTeamIssues(response.issues, principal, context), response.issues.length)
+    visit(filterAccessibleTeamIssues(response.issues, principal, context), readEvaluatedRowCount(response))
     if (
       response.nextStartAfterIssueId !== undefined &&
       response.nextStartAfterIssueId === startAfterIssueId
@@ -354,6 +357,16 @@ async function forEachTeamPartitionPage(
     }
     startAfterIssueId = response.nextStartAfterIssueId
   } while (startAfterIssueId !== undefined)
+}
+
+/**
+ * Returns how many stored rows a Team read evaluated, counting rows its filters dropped.
+ *
+ * @param response - Team partition read made with `limitEvaluatedRows`.
+ * @returns The evaluated row count, or the returned row count for adapters that do not report it.
+ */
+function readEvaluatedRowCount(response: TeamIssuesResponse): number {
+  return response.evaluatedCount ?? response.issues.length
 }
 
 /**

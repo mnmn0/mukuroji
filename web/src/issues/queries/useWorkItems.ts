@@ -7,9 +7,9 @@ import {
   getTeamIssueDetail,
   getTeamIssues,
   getWorkspaceWorkItemSummary,
-  getWorkspaceWorkItems,
 } from '../api/workItems'
 import { TeamIssuesApiError } from '../api/errors'
+import { loadWorkspaceWorkItems } from './workspaceWorkItemLoader'
 
 /** Complete Project issue response stored in the SWR cache. */
 type ProjectIssuesPage = Awaited<ReturnType<typeof getProjectIssuesPage>>
@@ -221,7 +221,7 @@ export function useWorkspaceWorkItems(
   const query = useSWR(
     key,
     ([, token, shouldIncludeArchived]) =>
-      getWorkspaceWorkItems(token, shouldIncludeArchived, filter),
+      loadWorkspaceWorkItems(token, shouldIncludeArchived, filter),
     workItemQueryConfig,
   )
 

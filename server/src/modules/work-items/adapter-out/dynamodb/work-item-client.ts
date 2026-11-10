@@ -661,6 +661,15 @@ export type WorkItemListReadOptions = {
    * Only valid with `consistentRead`, because the base table is ordered by Work Item ID.
    */
   startAfterIssueId?: string
+  /**
+   * Makes `limit` bound the rows DynamoDB evaluates instead of the rows returned.
+   *
+   * Archived or other-type rows dropped by the filters still count, so a partition full of
+   * filtered rows cannot turn one read into a full partition scan. The response reports
+   * `evaluatedCount` and continues after the last evaluated row. Only valid with
+   * `consistentRead` and a finite `limit`.
+   */
+  limitEvaluatedRows?: boolean
 }
 
 /** Public Work Item の DynamoDB-backed bounded page read options です。 */
@@ -737,6 +746,10 @@ export type TeamIssuesResponse = {
    * Work Item ID to pass as `startAfterIssueId` when `limit` stopped a consistent read early.
    */
   nextStartAfterIssueId?: string
+  /**
+   * Rows DynamoDB evaluated, including filtered-out rows. Set only for `limitEvaluatedRows` reads.
+   */
+  evaluatedCount?: number
 }
 
 /**
@@ -1477,11 +1490,13 @@ export class DynamoDbTeamIssuesClient {
     await this.ensureLocalTables()
 
     try {
-      const { items, nextStartAfterIssueId } = await this.queryTeamIssueItems(
-        directoryId,
-        teamId,
-        options,
-      )
+      const { items, nextStartAfterIssueId, evaluatedCount }: {
+        items: TeamIssueItem[]
+        nextStartAfterIssueId?: string
+        evaluatedCount?: number
+      } = options.limitEvaluatedRows
+        ? await this.queryEvaluatedTeamIssueItems(directoryId, teamId, options)
+        : await this.queryTeamIssueItems(directoryId, teamId, options)
       const visibleItems = options.includeArchived
         ? items
         : items.filter((item) => item.archivedAt === undefined)
@@ -1490,6 +1505,7 @@ export class DynamoDbTeamIssuesClient {
         teamId,
         issues: visibleItems.map(toTeamIssueResponseItem),
         ...(nextStartAfterIssueId === undefined ? {} : { nextStartAfterIssueId }),
+        ...(evaluatedCount === undefined ? {} : { evaluatedCount }),
       } satisfies TeamIssuesResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -3039,6 +3055,64 @@ export class DynamoDbTeamIssuesClient {
     } while (exclusiveStartKey)
 
     return { items }
+  }
+
+  /**
+   * Reads at most `limit` rows of one Team partition, counting rows the filters drop.
+   *
+   * @param directoryId - Workspace directory that owns the Team partition.
+   * @param teamId - Team whose Work Items are read.
+   * @param options - Evaluated-row limit, archive, type, and continuation options.
+   * @returns Matching rows, the evaluated row count, and the continuation after the last
+   *   evaluated row when the partition may hold more.
+   */
+  private async queryEvaluatedTeamIssueItems(
+    directoryId: string,
+    teamId: string,
+    options: WorkItemListReadOptions,
+  ): Promise<{ items: TeamIssueItem[]; nextStartAfterIssueId?: string; evaluatedCount: number }> {
+    const limit = normalizeWorkItemListReadLimit(options.limit)
+    if (!options.consistentRead || limit === undefined) {
+      throw new ProjectDataError(
+        500,
+        'InvalidWorkItemListRead',
+        'An evaluated-row bounded Work Item read requires a consistent read and a limit.',
+      )
+    }
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const items: TeamIssueItem[] = []
+    let evaluatedCount = 0
+    let exclusiveStartKey: Record<string, unknown> | undefined = options.startAfterIssueId
+      ? { directoryTeamId, issueId: options.startAfterIssueId }
+      : undefined
+
+    while (evaluatedCount < limit) {
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.issueTableName,
+          ConsistentRead: true,
+          KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+          ExpressionAttributeValues: {
+            ':directoryTeamId': directoryTeamId,
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          Limit: limit - evaluatedCount,
+        }),
+      )
+      const rows = (response.Items ?? []).map(toTeamIssueItem)
+      evaluatedCount += rows.length
+      items.push(...rows
+        .filter((item) => options.includeArchived || item.archivedAt === undefined)
+        .filter((item) => matchesWorkItemTypeFilter(item, options.workItemTypeId)))
+      exclusiveStartKey = response.LastEvaluatedKey
+      if (!exclusiveStartKey) return { items, evaluatedCount }
+    }
+
+    // The base table key is the Work Item ID, so the last evaluated key is where to resume.
+    const lastEvaluatedIssueId = exclusiveStartKey?.issueId
+    return typeof lastEvaluatedIssueId === 'string'
+      ? { items, evaluatedCount, nextStartAfterIssueId: lastEvaluatedIssueId }
+      : { items, evaluatedCount }
   }
 
   private async queryProjectIssueItems(

@@ -158,7 +158,7 @@ Web は list/detail response の revision を mutation body に含める。`Work
 ### `GET /api/work-items` の page と filter
 
 - `limit`（1〜200、既定 100）または `cursor` を付けると `{ workItems, nextCursor? }` を返す。`nextCursor` が無くなるまで同じ filter で読み続ける。
-- 1 request が評価する row は 2,000 件までなので、絞り込みが強いと `workItems` が `limit` 未満（0 件もある）でも `nextCursor` が付く。件数が少ないことを終端と見なさない。
+- 1 request が評価する row は 2,000 件まで（archive 済みなど filter で落ちる row も数える）なので、絞り込みが強いと `workItems` が `limit` 未満（0 件もある）でも `nextCursor` が付く。件数が少ないことを終端と見なさない。
 - 順序は Team ID、次に Work Item ID。cursor は filter と `includeArchived` に結び付いており、別の filter で使うと `400 InvalidWorkItemPageCursor` になる。
 - filter はどれも閲覧できる範囲を狭めるだけで広げない。
   - `involvement=mine`: 責任者（`assigneeUserId`）または Contributor が自分の Work Item
@@ -181,7 +181,7 @@ Team と Project ごとの bucket（Project 未割当は `projectId` なし）�
 3. `limit=200` を付け、`nextCursor` が返る間は `cursor=<nextCursor>` を付けて同じ filter で読み続ける。response の `workItems` を連結したものが従来の `workItems` に当たる。
 4. `413 WorkItemListLimitExceeded` は「範囲を絞る必要がある」という意味なので、generic error ではなく原因を表示する。Web は `tasks.error.limitExceeded` を表示し、API の message を「原因」として併記する。
 
-Web の `getWorkspaceWorkItems(accessToken, includeArchived, filter)` は 3 の手順を実装しており、50 page（10,000 件）を超えると同じ `413` 相当の error にする。
+Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/src/issues/queries/workspaceWorkItemLoader.ts`）は 3 の手順を実装しており、50 page（10,000 件）を超えると同じ `413` 相当の error にする。
 
 ### まだ残している上限
 

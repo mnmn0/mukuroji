@@ -921,6 +921,38 @@ test('pages accessible Work Items with a cursor instead of failing past the lega
   expect(third.nextCursor).toBeUndefined()
 })
 
+test('counts archived rows against the Work Item page scan budget', async () => {
+  const calls = configureFakeProjectClients(true, {
+    archivedTeamIssueCount: 2600,
+    teamIssueCount: 2700,
+  })
+
+  const first = await app.request('/api/work-items?limit=100', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(first.status).toBe(200)
+  const firstPage = await first.json() as { workItems: unknown[]; nextCursor?: string }
+  expect(firstPage.workItems).toEqual([])
+  expect(firstPage.nextCursor).toEqual(expect.any(String))
+  expect(calls.issueReads.map((read) => read.startAfterIssueId)).toEqual([
+    undefined,
+    'work-item-499',
+    'work-item-999',
+    'work-item-1499',
+  ])
+
+  const second = await app.request(
+    `/api/work-items?limit=100&cursor=${encodeURIComponent(firstPage.nextCursor ?? '')}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(second.status).toBe(200)
+  const secondPage = await second.json() as { workItems: Array<{ id: string }>; nextCursor?: string }
+  expect(secondPage.workItems.map((workItem) => workItem.id)).toEqual(
+    Array.from({ length: 100 }, (_, index) => `work-item-${2600 + index}`),
+  )
+  expect(secondPage.nextCursor).toBeUndefined()
+})
+
 test('rejects a Work Item page cursor reused with different filters', async () => {
   configureFakeProjectClients(true, { teamIssueCount: 5 })
 
