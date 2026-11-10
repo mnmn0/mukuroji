@@ -10,10 +10,13 @@ export const CONNECTORS_CONTEXT_KEY = 'mukuroji:connectors';
 /** Context key that turns on the optional request email ingestion. */
 export const REQUEST_EMAIL_CONTEXT_KEY = 'mukuroji:requestEmail';
 
+/** Context key that turns on the optional tenant export and closure workers. */
+export const TENANT_LIFECYCLE_CONTEXT_KEY = 'mukuroji:tenantLifecycle';
+
 /** Optional-module switches the stack receives through its Props. */
 type StackModuleProps = Pick<
   MukurojiStackProps,
-  'restoreDrillEnabled' | 'connectorsEnabled' | 'requestEmailEnabled'
+  'restoreDrillEnabled' | 'connectorsEnabled' | 'requestEmailEnabled' | 'tenantLifecycleEnabled'
 >;
 
 /** Module switches that deploy every optional module, for full-coverage synthesis and checks. */
@@ -21,6 +24,7 @@ export const ALL_STACK_MODULE_PROPS: StackModuleProps = {
   restoreDrillEnabled: true,
   connectorsEnabled: true,
   requestEmailEnabled: true,
+  tenantLifecycleEnabled: true,
 };
 
 /**
@@ -48,5 +52,6 @@ export function readStackModuleProps(app: Construct): StackModuleProps {
     restoreDrillEnabled: readBooleanContext(app, RESTORE_DRILL_CONTEXT_KEY),
     connectorsEnabled: readBooleanContext(app, CONNECTORS_CONTEXT_KEY),
     requestEmailEnabled: readBooleanContext(app, REQUEST_EMAIL_CONTEXT_KEY),
+    tenantLifecycleEnabled: readBooleanContext(app, TENANT_LIFECYCLE_CONTEXT_KEY),
   };
 }

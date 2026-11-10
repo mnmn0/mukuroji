@@ -64,6 +64,12 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * composition root turns it on.
    */
   readonly requestEmailEnabled?: boolean;
+  /**
+   * Deploys the tenant export and closure resource owners, their queues, and the export bucket.
+   * Without them the API refuses export and closure requests, and the tenant operation worker
+   * only reconciles audit retention. Off unless the composition root turns it on.
+   */
+  readonly tenantLifecycleEnabled?: boolean;
 }>;
 
 /**
@@ -82,6 +88,7 @@ export class MukurojiStack extends cdk.Stack {
     const restoreDrillEnabled = props?.restoreDrillEnabled ?? false;
     const connectorsEnabled = props?.connectorsEnabled ?? false;
     const requestEmailEnabled = props?.requestEmailEnabled ?? false;
+    const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameterInputs = buildStackParameters(this, {
@@ -256,26 +263,35 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workspaceAuditPseudonymSecret:
         apiTransports.workspaceAuditPseudonymSecret,
+      lifecycleEnabled: tenantLifecycleEnabled,
     });
-    apiRuntime.apiFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['s3:ListBucket'],
-      resources: [tenantOperationWorker.tenantExportBucket.bucketArn],
-      conditions: {
-        StringLike: {
-          's3:prefix': ['tenant-exports/*'],
-        },
-      },
-    }));
-    apiRuntime.apiFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['s3:GetObject'],
-      resources: [
-        tenantOperationWorker.tenantExportBucket.arnForObjects('tenant-exports/*'),
-      ],
-    }));
+    const { tenantLifecycle } = tenantOperationWorker;
+    // The API refuses export and closure requests unless their resource owners exist.
     apiRuntime.apiFunction.addEnvironment(
-      'TENANT_EXPORT_BUCKET_NAME',
-      tenantOperationWorker.tenantExportBucket.bucketName,
+      'TENANT_LIFECYCLE_OPERATIONS',
+      tenantLifecycle ? 'enabled' : 'disabled',
     );
+    if (tenantLifecycle) {
+      apiRuntime.apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['s3:ListBucket'],
+        resources: [tenantLifecycle.tenantExportBucket.bucketArn],
+        conditions: {
+          StringLike: {
+            's3:prefix': ['tenant-exports/*'],
+          },
+        },
+      }));
+      apiRuntime.apiFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [
+          tenantLifecycle.tenantExportBucket.arnForObjects('tenant-exports/*'),
+        ],
+      }));
+      apiRuntime.apiFunction.addEnvironment(
+        'TENANT_EXPORT_BUCKET_NAME',
+        tenantLifecycle.tenantExportBucket.bucketName,
+      );
+    }
 
     configureAlarmRouting(this, {
       notificationTopicArns: parameters.alarmNotificationTopicArns,
