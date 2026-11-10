@@ -55,6 +55,48 @@ export function toLocalDateKey(instant: string | Date): string {
 }
 
 /**
+ * Returns the instants that bound a local date in the browser timezone.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @returns Epoch milliseconds of its midnight and of the next midnight, or undefined for invalid text.
+ */
+export function readLocalDayRange(date: string): { from: number; to: number } | undefined {
+  const start = parseLocalDate(date)
+  if (!start) return undefined
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  return { from: start.getTime(), to: end.getTime() }
+}
+
+/**
+ * Moves a local date by whole days.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param days - Days to move; negative moves back.
+ * @returns Target date, or undefined for invalid text.
+ */
+export function shiftLocalDate(date: string, days: number): string | undefined {
+  const day = parseLocalDate(date)
+  if (!day) return undefined
+  day.setDate(day.getDate() + days)
+  return formatLocalDate(day)
+}
+
+/**
+ * Counts whole local days from one date to another.
+ *
+ * @param from - Local `YYYY-MM-DD` date.
+ * @param to - Local `YYYY-MM-DD` date.
+ * @returns Days from `from` to `to`, or undefined when either is invalid.
+ */
+export function countLocalDaysBetween(from: string, to: string): number | undefined {
+  const start = parseLocalDate(from)
+  const end = parseLocalDate(to)
+  if (!start || !end) return undefined
+  return Math.round((Date.UTC(end.getFullYear(), end.getMonth(), end.getDate()) - Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())) / 86_400_000)
+}
+
+/**
  * Returns the local `HH:MM` time of an instant in the browser timezone.
  *
  * @param instant - ISO 8601 instant.

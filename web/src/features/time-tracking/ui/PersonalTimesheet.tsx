@@ -5,9 +5,9 @@ import {
   buildTimeEntryWeekRows,
   countTimeEntriesByStatus,
   groupTimeEntriesByDay,
-  sumTimeEntryMinutes,
+  sumTimeEntryMinutesInDays,
 } from '../model/timeEntryLifecycle'
-import { formatMinutes, toLocalDateKey, type TimeWeekPeriod } from '../model/timePeriod'
+import { formatMinutes, type TimeWeekPeriod } from '../model/timePeriod'
 import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
@@ -33,6 +33,8 @@ export type PersonalTimesheetProps = {
   entries: readonly TimeEntry[]
   /** Whether the first read is loading. */
   isLoading?: boolean
+  /** Whether the week holds more entries than were read, so the totals are partial. */
+  isPartial?: boolean
   /** Whether the read failed. */
   hasLoadError?: boolean
   /** Work Items offered when recording time. */
@@ -66,6 +68,7 @@ export function PersonalTimesheet({
   formatters,
   hasLoadError = false,
   isLoading = false,
+  isPartial = false,
   onCreateEntry,
   onMoveWeek,
   onRetry,
@@ -83,12 +86,11 @@ export function PersonalTimesheet({
   const [isCreating, setIsCreating] = useState(false)
   const [isSubmittingWeek, setIsSubmittingWeek] = useState(false)
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
-  const toDateKey = (instant: string) => toLocalDateKey(instant)
-  const days = groupTimeEntriesByDay(entries, week.days, toDateKey)
-  const rows = buildTimeEntryWeekRows(entries, week.days, toDateKey)
+  const days = groupTimeEntriesByDay(entries, week.days)
+  const rows = buildTimeEntryWeekRows(entries, week.days)
   const counts = countTimeEntriesByStatus(entries)
   const submittableCount = counts.draft + counts.rejected
-  const weekTotal = sumTimeEntryMinutes(entries)
+  const weekTotal = sumTimeEntryMinutesInDays(entries, week.days)
   const defaultDate = week.days.includes(today) ? today : week.days[0] ?? today
 
   /** Submits the whole week and reports entries that still need a retry. */
@@ -168,6 +170,11 @@ export function PersonalTimesheet({
         />
       ) : null}
 
+      {isPartial ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800" role="alert">
+          {t('timeTracking.timesheet.partial')}
+        </p>
+      ) : null}
       {isLoading ? <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">{t('timeTracking.loading')}</p> : null}
 
       {!isLoading && !hasLoadError && entries.length === 0 ? (

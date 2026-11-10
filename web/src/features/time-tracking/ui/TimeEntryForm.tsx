@@ -2,7 +2,7 @@ import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import type { TimeEntryDraftInput } from '../api/timeEntries'
 import { maxTimeEntryMinutes } from '../model/timeEntryLifecycle'
-import { toInstantFromLocal, toLocalDateKey, toLocalTimeInput } from '../model/timePeriod'
+import { countLocalDaysBetween, shiftLocalDate, toInstantFromLocal, toLocalDateKey, toLocalTimeInput } from '../model/timePeriod'
 import { describeTimeTrackingFailure, type TimeTrackingTranslator } from './timeTrackingText'
 
 /** A Work Item a member may record time on. */
@@ -34,6 +34,9 @@ export type TimeEntryFormProps = {
 /**
  * Form that records or edits a manual time entry in local date and time.
  *
+ * The end has its own date so an interval that crosses midnight keeps its days. Moving the start
+ * date moves the end date by the same number of days, which keeps the interval's length.
+ *
  * @param props - Entry, Work Item choice, and actions.
  * @returns Form.
  */
@@ -51,6 +54,24 @@ export function TimeEntryForm({
   const [isSaving, setIsSaving] = useState(false)
   const selectedWorkItemId = entry?.workItemId ?? fixedWorkItemId
   const hasSelectedOption = workItemOptions.some((option) => option.id === selectedWorkItemId)
+  const [startDate, setStartDate] = useState(() => entry ? toLocalDateKey(entry.startAt) : defaultDate)
+  const [endDate, setEndDate] = useState(() => entry ? toLocalDateKey(entry.endAt) : defaultDate)
+  // Last complete start date, so a date typed in pieces still moves the end date once it is whole.
+  const [anchorStartDate, setAnchorStartDate] = useState(startDate)
+
+  /**
+   * Moves the start date and carries the end date along by the same number of days.
+   *
+   * @param nextStartDate - Date typed into the start date field.
+   */
+  const changeStartDate = (nextStartDate: string) => {
+    setStartDate(nextStartDate)
+    const movedDays = countLocalDaysBetween(anchorStartDate, nextStartDate)
+    if (movedDays === undefined) return
+    setAnchorStartDate(nextStartDate)
+    const nextEndDate = shiftLocalDate(endDate, movedDays)
+    if (nextEndDate) setEndDate(nextEndDate)
+  }
 
   /**
    * Validates the local inputs and saves the entry.
@@ -66,9 +87,8 @@ export function TimeEntryForm({
       return typeof value === 'string' ? value : ''
     }
     const workItemId = fixedWorkItemId ?? readText('workItemId')
-    const date = readText('date')
-    const startAt = toInstantFromLocal(date, readText('start'))
-    const endAt = toInstantFromLocal(date, readText('end'))
+    const startAt = toInstantFromLocal(readText('date'), readText('start'))
+    const endAt = toInstantFromLocal(readText('endDate'), readText('end'))
     if (!workItemId) {
       setError(t('timeTracking.form.workItemRequired'))
       return
@@ -116,16 +136,17 @@ export function TimeEntryForm({
           </select>
         </label>
       )}
-      <div className="grid min-w-0 grid-cols-3 gap-2 max-[520px]:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-2 gap-2">
         <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-date`}>
           {t('timeTracking.form.date')}
           <input
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={entry ? toLocalDateKey(entry.startAt) : defaultDate}
             id={`${id}-date`}
             name="date"
+            onChange={(event) => changeStartDate(event.target.value)}
             required
             type="date"
+            value={startDate}
           />
         </label>
         <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-start`}>
@@ -137,6 +158,18 @@ export function TimeEntryForm({
             name="start"
             required
             type="time"
+          />
+        </label>
+        <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-end-date`}>
+          {t('timeTracking.form.endDate')}
+          <input
+            className="workbench-input h-9 w-full min-w-0 px-3"
+            id={`${id}-end-date`}
+            name="endDate"
+            onChange={(event) => setEndDate(event.target.value)}
+            required
+            type="date"
+            value={endDate}
           />
         </label>
         <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-end`}>

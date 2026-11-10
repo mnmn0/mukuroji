@@ -46,7 +46,7 @@ export function PersonalTimesheetContainer({
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
   const week = useMemo(() => createWeekPeriod(weekStart), [weekStart])
   const entries = useTimeEntries(accessToken, teamId, week, memberKey ? { userId: memberKey } : {})
-  const rejectionReasons = useRejectionReasons(accessToken, entries.data ?? [])
+  const rejectionReasons = useRejectionReasons(accessToken, entries.data?.entries ?? [])
   const mutations = useTimeEntryMutations(accessToken)
   const workItemTitles = useMemo(
     () => Object.fromEntries(workItemOptions.map((option) => [option.id, option.title])),
@@ -55,10 +55,11 @@ export function PersonalTimesheetContainer({
 
   return (
     <PersonalTimesheet
-      entries={entries.data ?? []}
+      entries={entries.data?.entries ?? []}
       formatters={formatters}
       hasLoadError={Boolean(entries.error)}
       isLoading={entries.isLoading}
+      isPartial={entries.data?.complete === false}
       onCreateEntry={(input) => mutations.create(teamId, input)}
       onMoveWeek={onMoveWeek}
       onRetry={() => { void entries.mutate() }}

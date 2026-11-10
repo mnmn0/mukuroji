@@ -114,7 +114,7 @@ export function WorkItemTimePanelContainer({
   // Managers would otherwise read every member's entries; the panel lists the member's own.
   const ownEntries = useTimeEntries(accessToken, teamId, period, memberKey ? { userId: memberKey } : {})
   const entries = useMemo(
-    () => sortTimeEntries((ownEntries.data ?? []).filter((entry) => entry.workItemId === workItemId)).reverse(),
+    () => sortTimeEntries((ownEntries.data?.entries ?? []).filter((entry) => entry.workItemId === workItemId)).reverse(),
     [ownEntries.data, workItemId],
   )
   const rejectionReasons = useRejectionReasons(accessToken, entries)

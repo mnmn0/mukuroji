@@ -6,6 +6,7 @@ import {
   createTeamTimeTrackingUrl,
   requestTimeTrackingJson,
 } from './timeTrackingRequest'
+import { sortTimeEntries } from '../model/timeEntryLifecycle'
 import { readTimeEntries, readTimeEntry, readTimeEntryHistory } from './timeTrackingValidation'
 
 /** Filters of a time entry list request. */
@@ -49,20 +50,66 @@ export type TimesheetTransitionResult = {
   entries: TimeEntry[]
 }
 
+/** Entries of a period, with whether every matching entry was read. */
+export type TimeEntryListResult = {
+  /** Entries ordered by start time. */
+  entries: TimeEntry[]
+  /** False when the period holds more entries than the client reads, so the list is partial. */
+  complete: boolean
+}
+
+/** Largest page the list endpoint returns. */
+const timeEntryPageSize = 500
+
+/** Most pages read for one period before the list is reported as partial. */
+const maxTimeEntryPages = 20
+
 /**
- * Lists time entries of a Team in a period.
+ * Lists every time entry of a Team that overlaps a period.
+ *
+ * The endpoint returns at most one page of entries, earliest start first, with no cursor. A full
+ * page continues from the start of its last entry; entries that overlap that instant come back
+ * again and are skipped by identifier. The list is reported as partial when a page brings nothing
+ * new or the page budget runs out, so callers never present it as the whole period.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param teamId - Team that owns the entries.
+ * @param input - Period and filters.
+ * @returns Entries ordered by start time and whether the list is complete.
+ */
+export async function listTimeEntries(
+  accessToken: string,
+  teamId: string,
+  input: ListTimeEntriesInput,
+): Promise<TimeEntryListResult> {
+  const entries = new Map<string, TimeEntry>()
+  let from = input.from
+  for (let page = 0; page < maxTimeEntryPages; page += 1) {
+    const pageEntries = await listTimeEntryPage(accessToken, teamId, { ...input, from })
+    const sizeBefore = entries.size
+    for (const entry of pageEntries) entries.set(entry.id, entry)
+    if (pageEntries.length < timeEntryPageSize) return { entries: sortTimeEntries([...entries.values()]), complete: true }
+    const nextFrom = pageEntries.at(-1)?.startAt
+    if (entries.size === sizeBefore || !nextFrom || !(Date.parse(nextFrom) > Date.parse(from))) break
+    from = nextFrom
+  }
+  return { entries: sortTimeEntries([...entries.values()]), complete: false }
+}
+
+/**
+ * Reads one page of time entries.
  *
  * @param accessToken - Bearer token of the signed-in member.
  * @param teamId - Team that owns the entries.
  * @param input - Period and filters.
  * @returns Entries ordered by start time.
  */
-export async function listTimeEntries(
+async function listTimeEntryPage(
   accessToken: string,
   teamId: string,
   input: ListTimeEntriesInput,
 ): Promise<TimeEntry[]> {
-  const query = new URLSearchParams({ from: input.from, to: input.to, limit: '500' })
+  const query = new URLSearchParams({ from: input.from, to: input.to, limit: String(timeEntryPageSize) })
   if (input.userId) query.set('userId', input.userId)
   if (input.status) query.set('status', input.status)
   const data = await requestTimeTrackingJson(

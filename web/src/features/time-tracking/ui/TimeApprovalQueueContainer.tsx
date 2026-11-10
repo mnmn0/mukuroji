@@ -56,10 +56,11 @@ export function TimeApprovalQueueContainer({
   return (
     <TimeApprovalQueue
       canManage={canManage}
-      entries={entries.data ?? []}
+      entries={entries.data?.entries ?? []}
       formatters={formatters}
       hasLoadError={Boolean(timesheet.error ?? entries.error)}
       isLoading={entries.isLoading}
+      isPartial={entries.data?.complete === false}
       memberNames={memberNames}
       onMoveWeek={onMoveWeek}
       onRetry={() => { void Promise.all([timesheet.mutate(), entries.mutate()]).catch(() => undefined) }}

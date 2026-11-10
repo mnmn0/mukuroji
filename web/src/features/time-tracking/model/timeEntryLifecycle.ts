@@ -1,4 +1,5 @@
 import type { TimeEntry, TimeEntryStatus } from '@mukuroji/contracts'
+import { readLocalDayRange } from './timePeriod'
 
 /** Longest interval the API accepts for one entry or timer, in minutes. */
 export const maxTimeEntryMinutes = 7 * 24 * 60
@@ -7,9 +8,9 @@ export const maxTimeEntryMinutes = 7 * 24 * 60
 export type TimeEntryDay = {
   /** Local date as `YYYY-MM-DD`. */
   date: string
-  /** Entries that start on the date, by start time. */
+  /** Entries listed under the date: those that start on it, or carried over into the first date of the week. */
   entries: TimeEntry[]
-  /** Sum of the entries' minutes. */
+  /** Minutes recorded on the date, including parts of entries that cross midnight. */
   totalMinutes: number
 }
 
@@ -67,46 +68,89 @@ export function sumTimeEntryMinutes(entries: readonly Pick<TimeEntry, 'durationM
 }
 
 /**
- * Groups entries by the local date they start on.
+ * Splits an entry's minutes across the local dates its interval covers.
  *
- * @param entries - Entries of the week.
- * @param days - Local dates of the week.
- * @param toDateKey - Converts an instant to its local date.
- * @returns One group per day, including empty days.
+ * The recorded duration is shared out in proportion to the time on each date, so an entry that
+ * crosses midnight counts on both days and the parts add up to its recorded minutes.
+ *
+ * @param entry - Entry to split.
+ * @param days - Local dates to split across.
+ * @returns Minutes keyed by each listed date the entry overlaps.
  */
-export function groupTimeEntriesByDay(
-  entries: readonly TimeEntry[],
+export function splitTimeEntryMinutesByDay(
+  entry: Pick<TimeEntry, 'startAt' | 'endAt' | 'durationMinutes'>,
   days: readonly string[],
-  toDateKey: (instant: string) => string,
-): TimeEntryDay[] {
-  const sorted = sortTimeEntries(entries)
-  return days.map((date) => {
-    const dayEntries = sorted.filter((entry) => toDateKey(entry.startAt) === date)
-    return { date, entries: dayEntries, totalMinutes: sumTimeEntryMinutes(dayEntries) }
-  })
+): Map<string, number> {
+  const start = Date.parse(entry.startAt)
+  const end = Date.parse(entry.endAt)
+  const span = end - start
+  const minutesByDate = new Map<string, number>()
+  if (!(span > 0)) return minutesByDate
+  for (const date of days) {
+    const range = readLocalDayRange(date)
+    if (!range) continue
+    const overlap = Math.min(end, range.to) - Math.max(start, range.from)
+    if (overlap > 0) minutesByDate.set(date, entry.durationMinutes * overlap / span)
+  }
+  return minutesByDate
 }
 
 /**
- * Builds the Work Item × day table of a week.
+ * Sums the minutes of entries that fall on the listed local dates.
+ *
+ * @param entries - Entries to sum.
+ * @param days - Local dates to count.
+ * @returns Minutes inside the dates; time outside them is left out.
+ */
+export function sumTimeEntryMinutesInDays(entries: readonly TimeEntry[], days: readonly string[]): number {
+  let total = 0
+  for (const entry of entries) {
+    for (const minutes of splitTimeEntryMinutesByDay(entry, days).values()) total += minutes
+  }
+  return total
+}
+
+/**
+ * Groups entries by local date for the daily lists.
+ *
+ * Each entry is listed once, under the first listed date it overlaps, so an entry carried over
+ * from the previous week stays reachable. Day totals count only the time on that date.
  *
  * @param entries - Entries of the week.
  * @param days - Local dates of the week.
- * @param toDateKey - Converts an instant to its local date.
+ * @returns One group per day, including empty days.
+ */
+export function groupTimeEntriesByDay(entries: readonly TimeEntry[], days: readonly string[]): TimeEntryDay[] {
+  const groups = new Map<string, TimeEntryDay>(days.map((date) => [date, { date, entries: [], totalMinutes: 0 }]))
+  for (const entry of sortTimeEntries(entries)) {
+    const minutesByDate = splitTimeEntryMinutesByDay(entry, days)
+    const firstDate = days.find((date) => minutesByDate.has(date))
+    if (firstDate) groups.get(firstDate)?.entries.push(entry)
+    for (const [date, minutes] of minutesByDate) {
+      const group = groups.get(date)
+      if (group) group.totalMinutes += minutes
+    }
+  }
+  return [...groups.values()]
+}
+
+/**
+ * Builds the Work Item × day table of a week, splitting entries that cross midnight.
+ *
+ * @param entries - Entries of the week.
+ * @param days - Local dates of the week.
  * @returns Rows in order of first appearance.
  */
-export function buildTimeEntryWeekRows(
-  entries: readonly TimeEntry[],
-  days: readonly string[],
-  toDateKey: (instant: string) => string,
-): TimeEntryWeekRow[] {
-  const dates = new Set(days)
+export function buildTimeEntryWeekRows(entries: readonly TimeEntry[], days: readonly string[]): TimeEntryWeekRow[] {
   const rows = new Map<string, TimeEntryWeekRow>()
   for (const entry of sortTimeEntries(entries)) {
-    const date = toDateKey(entry.startAt)
-    if (!dates.has(date)) continue
+    const minutesByDate = splitTimeEntryMinutesByDay(entry, days)
+    if (minutesByDate.size === 0) continue
     const row = rows.get(entry.workItemId) ?? { workItemId: entry.workItemId, minutesByDate: {}, totalMinutes: 0 }
-    row.minutesByDate[date] = (row.minutesByDate[date] ?? 0) + entry.durationMinutes
-    row.totalMinutes += entry.durationMinutes
+    for (const [date, minutes] of minutesByDate) {
+      row.minutesByDate[date] = (row.minutesByDate[date] ?? 0) + minutes
+      row.totalMinutes += minutes
+    }
     rows.set(entry.workItemId, row)
   }
   return [...rows.values()]

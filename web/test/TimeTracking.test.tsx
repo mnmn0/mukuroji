@@ -22,15 +22,19 @@ import {
 import {
   buildTimeEntryWeekRows,
   countTimeEntriesByStatus,
+  groupTimeEntriesByDay,
   groupTimeEntriesByMember,
   isTimerOverlong,
+  sumTimeEntryMinutesInDays,
 } from '../src/features/time-tracking/model/timeEntryLifecycle'
 import {
+  countLocalDaysBetween,
   createWeekPeriod,
   formatElapsed,
   formatMinutes,
   parseHoursInput,
   resolveWeekStart,
+  shiftLocalDate,
   shiftWeek,
   toInstantFromLocal,
   toLocalDateKey,
@@ -38,6 +42,7 @@ import {
 import { classifyTimeTrackingFailure, shouldRetainTimeTrackingMutation } from '../src/features/time-tracking/model/timeTrackingFailure'
 import { PersonalTimesheet } from '../src/features/time-tracking/ui/PersonalTimesheet'
 import { TimeApprovalQueue } from '../src/features/time-tracking/ui/TimeApprovalQueue'
+import { TimeEntryForm } from '../src/features/time-tracking/ui/TimeEntryForm'
 import { WorkItemTimePanel } from '../src/features/time-tracking/ui/WorkItemTimePanel'
 import { createTimeTrackingFormatters } from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -108,18 +113,40 @@ describe('time tracking periods', () => {
     expect(parseHoursInput('1.5')).toBe(90)
     expect(parseHoursInput('2:15')).toBe(135)
     expect(parseHoursInput('-1')).toBeUndefined()
+    expect(shiftLocalDate('2026-11-30', 1)).toBe('2026-12-01')
+    expect(countLocalDaysBetween('2026-11-09', '2026-11-16')).toBe(7)
+    expect(countLocalDaysBetween('2026-11-10', '2026-11-09')).toBe(-1)
     expect(createTeamTimeTrackingPath('core team', 'approvals', '2026-11-09')).toBe('/teams/core%20team/timesheet?view=approvals&week=2026-11-09')
   })
 })
 
 describe('time tracking model', () => {
   test('builds the Work Item × day table and lifecycle counts', () => {
-    const rows = buildTimeEntryWeekRows(timeTrackingFixtureEntries, week.days, toLocalDateKey)
+    const rows = buildTimeEntryWeekRows(timeTrackingFixtureEntries, week.days)
     expect(rows).toEqual([
       { workItemId: 'onboarding', minutesByDate: { '2026-11-09': 90, '2026-11-10': 60, '2026-11-11': 45 }, totalMinutes: 195 },
       { workItemId: 'pricing', minutesByDate: { '2026-11-10': 120 }, totalMinutes: 120 },
     ])
     expect(countTimeEntriesByStatus(timeTrackingFixtureEntries)).toEqual({ draft: 1, submitted: 1, approved: 1, rejected: 1, locked: 0 })
+  })
+
+  test('splits entries that cross local midnight across days and weeks', () => {
+    // 23:00 Wednesday to 01:00 Thursday in Japan time.
+    const overnight = createTimeEntryFixture({ id: 'overnight', startAt: '2026-11-11T14:00:00.000Z', endAt: '2026-11-11T16:00:00.000Z', durationMinutes: 120 })
+    expect(buildTimeEntryWeekRows([overnight], week.days)).toEqual([
+      { workItemId: 'onboarding', minutesByDate: { '2026-11-11': 60, '2026-11-12': 60 }, totalMinutes: 120 },
+    ])
+    const days = groupTimeEntriesByDay([overnight], week.days)
+    expect(days.map((day) => [day.date, day.entries.map((entry) => entry.id), day.totalMinutes]).filter(([, , minutes]) => minutes)).toEqual([
+      ['2026-11-11', ['overnight'], 60],
+      ['2026-11-12', [], 60],
+    ])
+    // 23:00 Sunday to 02:00 Monday: each week counts its own part, and the next week still lists the entry.
+    const acrossWeeks = createTimeEntryFixture({ id: 'across-weeks', startAt: '2026-11-15T14:00:00.000Z', endAt: '2026-11-15T17:00:00.000Z', durationMinutes: 180 })
+    const nextWeek = createWeekPeriod(shiftWeek(timeTrackingFixtureWeekStart, 1))
+    expect(sumTimeEntryMinutesInDays([acrossWeeks], week.days)).toBe(60)
+    expect(sumTimeEntryMinutesInDays([acrossWeeks], nextWeek.days)).toBe(120)
+    expect(groupTimeEntriesByDay([acrossWeeks], nextWeek.days)[0]).toEqual({ date: '2026-11-16', entries: [acrossWeeks], totalMinutes: 120 })
   })
 
   test('groups submitted entries by member for approval', () => {
@@ -152,8 +179,9 @@ describe('time tracking API', () => {
 
   test('lists entries for a period and validates them', async () => {
     const requests = respondWith({ entries: timeTrackingFixtureEntries })
-    const entries = await listTimeEntries('token', 'core team', { from: week.from, to: week.to, userId: 'aoi@example.com' })
+    const { entries, complete } = await listTimeEntries('token', 'core team', { from: week.from, to: week.to, userId: 'aoi@example.com' })
     expect(entries).toHaveLength(4)
+    expect(complete).toBe(true)
     const url = new URL(requests[0]?.url ?? '', 'http://localhost')
     expect(url.pathname).toBe('/api/teams/core%20team/time-entries')
     expect(url.searchParams.get('userId')).toBe('aoi@example.com')
@@ -161,6 +189,37 @@ describe('time tracking API', () => {
     expect(requests[0]?.headers.get('Authorization')).toBe('Bearer token')
     respondWith({ entries: [{ id: 'broken' }] })
     await expect(listTimeEntries('token', 'core-team', week)).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('reads every page of a busy period and flags a list it cannot finish', async () => {
+    const minute = 60_000
+    const start = Date.parse(week.from)
+    const createEntry = (index: number) => createTimeEntryFixture({
+      id: `entry-${String(index).padStart(4, '0')}`,
+      startAt: new Date(start + index * minute).toISOString(),
+      endAt: new Date(start + (index + 1) * minute).toISOString(),
+      durationMinutes: 1,
+    })
+    const all = Array.from({ length: 700 }, (_, index) => createEntry(index))
+    const froms: string[] = []
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL) => {
+      const from = new URL(String(input), 'http://localhost').searchParams.get('from') ?? ''
+      froms.push(from)
+      // Like the server: entries overlapping the range, earliest start first, at most 500.
+      const page = all.filter((entry) => Date.parse(entry.endAt) > Date.parse(from)).slice(0, 500)
+      return Response.json({ entries: page })
+    }, { preconnect: originalFetch.preconnect })
+    const result = await listTimeEntries('token', 'core-team', week)
+    expect(result.complete).toBe(true)
+    expect(result.entries.map((entry) => entry.id)).toEqual(all.map((entry) => entry.id))
+    expect(froms).toEqual([week.from, all[499]?.startAt])
+
+    // 500 entries overlap one instant, so the next page cannot move forward.
+    const stuck = Array.from({ length: 500 }, (_, index) => createTimeEntryFixture({ id: `stuck-${index}`, startAt: week.from, endAt: week.to }))
+    respondWith({ entries: stuck })
+    const partial = await listTimeEntries('token', 'core-team', week)
+    expect(partial.complete).toBe(false)
+    expect(partial.entries).toHaveLength(500)
   })
 
   test('sends the expected revision and idempotency key when editing and submitting', async () => {
@@ -348,6 +407,57 @@ describe('time tracking views', () => {
     expect(html).toContain('data-testid="team-timesheet-table"')
     expect(html).not.toContain('27000')
     expect(html).not.toContain('9000')
+  })
+
+  test('warns about a partial week and turns off week-wide approval actions', () => {
+    const queue = renderToStaticMarkup(
+      <TimeApprovalQueue
+        canManage
+        entries={timeTrackingFixtureTeamEntries}
+        formatters={formatters}
+        isPartial
+        memberNames={timeTrackingFixtureMemberNames}
+        onMoveWeek={() => undefined}
+        onRetry={() => undefined}
+        onTransitionEntry={noop}
+        onTransitionWeek={async () => ({ count: 0, failedEntryIds: [], partialFailure: false, entries: [] })}
+        t={t}
+        week={week}
+        workItemTitles={workItemTitles}
+      />,
+    )
+    expect(queue).toContain(t('timeTracking.approval.partial'))
+    expect(queue).toMatch(/<button[^>]*disabled=""[^>]*>Approve all submitted this week</)
+    const timesheet = renderToStaticMarkup(
+      <PersonalTimesheet
+        entries={timeTrackingFixtureEntries}
+        formatters={formatters}
+        isPartial
+        onCreateEntry={noop}
+        onMoveWeek={() => undefined}
+        onRetry={() => undefined}
+        onSubmitEntry={noop}
+        onSubmitWeek={async () => ({ count: 0, failedEntryIds: [], partialFailure: false, entries: [] })}
+        onUpdateEntry={noop}
+        t={t}
+        today="2026-11-10"
+        week={week}
+        workItemOptions={timeTrackingFixtureWorkItems}
+        workItemTitles={workItemTitles}
+      />,
+    )
+    expect(timesheet).toContain(t('timeTracking.timesheet.partial'))
+  })
+
+  test('keeps the end date of an overnight entry when editing it', () => {
+    const overnight = createTimeEntryFixture({ id: 'overnight', startAt: '2026-11-11T14:00:00.000Z', endAt: '2026-11-11T16:00:00.000Z', durationMinutes: 120 })
+    const html = renderToStaticMarkup(
+      <TimeEntryForm defaultDate="2026-11-10" entry={overnight} fixedWorkItemId="onboarding" onCancel={() => undefined} onSave={noop} t={t} />,
+    )
+    expect(html).toMatch(/name="date"[^>]*value="2026-11-11"/)
+    expect(html).toMatch(/name="endDate"[^>]*value="2026-11-12"/)
+    expect(html).toMatch(/name="start"[^>]*value="23:00"/)
+    expect(html).toMatch(/name="end"[^>]*value="01:00"/)
   })
 
   test('the default Work Item type includes the time section before activity', () => {

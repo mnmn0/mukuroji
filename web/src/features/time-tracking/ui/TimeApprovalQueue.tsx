@@ -27,6 +27,8 @@ export type TimeApprovalQueueProps = {
   canManage: boolean | undefined
   /** Whether the first read is loading. */
   isLoading?: boolean
+  /** Whether the week holds more entries than were read, so week-wide actions would touch unseen entries. */
+  isPartial?: boolean
   /** Whether a read failed. */
   hasLoadError?: boolean
   /** Member display names keyed by member key. */
@@ -56,6 +58,7 @@ export function TimeApprovalQueue({
   formatters,
   hasLoadError = false,
   isLoading = false,
+  isPartial = false,
   memberNames,
   onMoveWeek,
   onRetry,
@@ -238,6 +241,11 @@ export function TimeApprovalQueue({
           <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetry} type="button">{t('timeTracking.retry')}</button>
         </div>
       ) : null}
+      {isPartial ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800" role="alert">
+          {t('timeTracking.approval.partial')}
+        </p>
+      ) : null}
       {isLoading || (canManage === undefined && !hasLoadError) ? <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">{t('timeTracking.loading')}</p> : null}
 
       {canManage ? (
@@ -274,7 +282,7 @@ export function TimeApprovalQueue({
               </h3>
               <button
                 className="workbench-button-primary min-h-9 px-3"
-                disabled={submittedCount === 0 || pendingKey !== undefined}
+                disabled={submittedCount === 0 || isPartial || pendingKey !== undefined}
                 onClick={() => { void transitionWeek('approve') }}
                 type="button"
               >
@@ -293,7 +301,7 @@ export function TimeApprovalQueue({
               </h3>
               <button
                 className="workbench-button-secondary min-h-9 px-3"
-                disabled={approved.length === 0 || pendingKey !== undefined}
+                disabled={approved.length === 0 || isPartial || pendingKey !== undefined}
                 onClick={() => { void transitionWeek('lock') }}
                 type="button"
               >
