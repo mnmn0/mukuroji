@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 import { CognitoServiceError } from '../..'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { InMemoryEnterpriseSessionActivityClient } from '../../../enterprise-identity/enterprise-session-activity'
 
 const {
@@ -183,6 +184,73 @@ test('refreshes an SSO session with the SSO app client', async () => {
     expect(cognito.refreshes).toEqual([
       { refreshToken: 'sso-refresh', clientId: 'mukuroji-sso-client' },
     ])
+  })
+})
+
+test('ends a password session whose email domain now requires SSO', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
+    const calls = configureFakeProjectClients(true)
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const discovered: string[] = []
+    identity.discoverSso = async (email) => {
+      discovered.push(email)
+      const timestamp = new Date().toISOString()
+      return {
+        provider: {
+          workspaceId: 'user#demo@example.com',
+          providerId: 'idp-enforced',
+          kind: 'oidc' as const,
+          displayName: 'Enterprise SSO',
+          cognitoProviderName: 'EnterpriseOidc',
+          status: 'active' as const,
+          revision: 1,
+          issuer: 'https://idp.example.com',
+          clientId: 'enterprise-client',
+          authorizationEndpoint: 'https://idp.example.com/authorize',
+          tokenEndpoint: 'https://idp.example.com/token',
+          jwksUri: 'https://idp.example.com/jwks',
+          scopes: ['openid', 'email'],
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          lastTestedAt: timestamp,
+        },
+        domain: {
+          workspaceId: 'user#demo@example.com',
+          domainId: 'example',
+          domain: 'example.com',
+          status: 'verified',
+          revision: 1,
+          verificationRecordName: '_mukuroji-challenge.example.com',
+          verifiedAt: timestamp,
+          enforceSso: true,
+          identityProviderId: 'idp-enforced',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+      }
+    }
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    configureRefreshingCognito(createAccessToken([], { ...signInClaims, jti: 'access-2' }))
+
+    const response = await app.request('/api/auth/refresh', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${createAccessToken([], { ...signInClaims, jti: 'access-1' })}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refreshToken: 'password-refresh' }),
+    })
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'SsoRequired' })
+    expect(discovered).toEqual(['Demo@Example.com'])
+    expect(calls.workspaceReconciliations).toEqual([])
   })
 })
 
