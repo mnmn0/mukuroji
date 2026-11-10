@@ -2172,6 +2172,19 @@ async function mockAuthenticatedTaskPage(
     await route.fallback()
   })
 
+  // Time tracking reads from the Work Item "time" section start empty; tests that need state override them.
+  await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
+  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|time-tracking\/summary|work-items\/[^/]+\/time-estimate)$/u.test(url.pathname), async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/time-entries')) await route.fulfill({ json: { entries: [] } })
+    else if (path.endsWith('/time-estimate')) await route.fulfill({ json: { estimate: null } })
+    else await route.fulfill({ json: { totalMinutes: 0, groups: [] } })
+  })
+
 }
 
 /**

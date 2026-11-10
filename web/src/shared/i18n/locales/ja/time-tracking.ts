@@ -11,7 +11,7 @@ export const timeTrackingMessages = {
   'timeTracking.week.current': '今週',
   'timeTracking.week.next': '次の週',
   'timeTracking.loading': '工数を読み込んでいます。',
-  'timeTracking.retry': '再読み込み',
+  'timeTracking.retry': '工数を再読み込み',
   'timeTracking.status.draft': '下書き',
   'timeTracking.status.submitted': '提出済み',
   'timeTracking.status.approved': '承認済み',

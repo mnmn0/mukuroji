@@ -11,7 +11,7 @@ export const timeTrackingMessages = {
   'timeTracking.week.current': 'This week',
   'timeTracking.week.next': 'Next week',
   'timeTracking.loading': 'Loading time entries.',
-  'timeTracking.retry': 'Reload',
+  'timeTracking.retry': 'Reload time',
   'timeTracking.status.draft': 'Draft',
   'timeTracking.status.submitted': 'Submitted',
   'timeTracking.status.approved': 'Approved',
