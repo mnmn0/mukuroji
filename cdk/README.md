@@ -743,7 +743,15 @@ owner の manager row は既存の role を上書きしません。`InitialOwner
 `SeedWorkspaceDemoMembers` は stack の作成時と更新時に書き込みます（既存の role と status は保持します）。
 それ以外の demo data の custom resource は作成時だけ書き込みます。どれも削除時には何もしません。
 demo data を有効にして作った stack で後から無効にしても、resource が消えるだけで投入済みの row は
-残ります。local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
+残ります。
+
+一度無効にした stack で demo data を再び有効にすることはできません。`SeedProjectDirectory` と
+`SeedWorkItems` は既存 row があると書き込まない条件付きの transaction なので、残っている demo の
+Team・Project・Work Item と衝突して custom resource の作成が失敗します。その場合は stack update が
+rollback され、新しい custom resource は書き込みも削除もしないため、既存の row は変わりません。
+demo data が必要な環境では無効にせずに使い続けるか、demo data を有効にした新しい stack を作ります。
+
+local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
