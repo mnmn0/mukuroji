@@ -2,6 +2,8 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemScheduleDueDate,
   type ResolvedWorkItemConfiguration,
+  type WorkItemSummaryBucket,
+  type WorkItemSummaryResponse,
   type WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
@@ -253,23 +255,58 @@ export function filterTasksByTeamProjectIds(
 }
 
 /**
- * Aggregates Workspace summary values from the directory and Work Items.
+ * Aggregates Workspace summary values from the directory and the server-side Work Item summary.
  *
  * @param teams - Workspace directory.
- * @param tasks - Workspace Work Items.
+ * @param workItemSummary - Server-side Work Item counts, when loaded.
  * @param blockedCount - Count derived from active canonical relation/dependency signals.
  * @returns Project, incomplete, and attention counts.
  */
 export function createWorkspaceSummary(
   teams: readonly ProjectDirectoryTeam[],
-  tasks: readonly CanonicalWorkItem[],
+  workItemSummary: WorkItemSummaryResponse | undefined,
   blockedCount: number,
 ): WorkspaceSummary {
   return {
     projects: countWorkspaceProjects(teams),
-    tasks: tasks.filter((task) => isOpenWorkItem(task)).length,
+    tasks: workItemSummary?.totals.open ?? 0,
     blocked: blockedCount,
   }
+}
+
+/**
+ * Calculates the Workspace completion rate from the server-side Work Item summary.
+ *
+ * @param workItemSummary - Server-side Work Item counts, when loaded.
+ * @returns Completion percentage from zero through one hundred.
+ */
+export function calculateWorkItemSummaryProgress(
+  workItemSummary: WorkItemSummaryResponse | undefined,
+) {
+  const totals = workItemSummary?.totals
+  if (!totals || totals.total === 0) {
+    return 0
+  }
+
+  return Math.round((totals.completed / totals.total) * 100)
+}
+
+/**
+ * Finds the summary bucket of one Team-owned Project.
+ *
+ * @param workItemSummary - Server-side Work Item counts, when loaded.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns The bucket, or undefined when the Project has no Work Items.
+ */
+export function findWorkItemSummaryBucket(
+  workItemSummary: WorkItemSummaryResponse | undefined,
+  teamId: string,
+  projectId: string,
+): WorkItemSummaryBucket | undefined {
+  return workItemSummary?.buckets.find((bucket) =>
+    bucket.teamId === teamId && bucket.projectId === projectId
+  )
 }
 
 /**
@@ -530,19 +567,23 @@ export function calculateWorkspaceProgress(tasks: readonly CanonicalWorkItem[]) 
 }
 
 /**
- * Resolves portfolio risk from a Project's Work Items.
+ * Resolves portfolio risk from a Project's summary counts.
  *
- * @param tasks - Work Items within the Project scope.
+ * @param bucket - Summary bucket of the Project, when it has Work Items.
  * @returns The risk level representing high-priority open work, full completion, or neither.
  */
 export function resolveWorkspacePortfolioRisk(
-  tasks: readonly CanonicalWorkItem[],
+  bucket: WorkItemSummaryBucket | undefined,
 ): WorkspacePortfolioProject['risk'] {
-  if (tasks.some((task) => task.priority === 'high' && isOpenWorkItem(task))) {
+  if (!bucket) {
+    return 'clear'
+  }
+
+  if (bucket.highPriorityOpen > 0) {
     return 'watch'
   }
 
-  if (tasks.length > 0 && tasks.every((task) => isCompletedWorkItem(task))) {
+  if (bucket.total > 0 && bucket.completed === bucket.total) {
     return 'low'
   }
 
@@ -550,28 +591,30 @@ export function resolveWorkspacePortfolioRisk(
 }
 
 /**
- * Creates portfolio rows from the Workspace directory and Work Items.
+ * Creates portfolio rows from the Workspace directory and the server-side Work Item summary.
  *
  * @param teams - Workspace directory.
- * @param tasks - Workspace Work Items.
+ * @param workItemSummary - Server-side Work Item counts, when loaded.
  * @returns Project portfolio rows grouped by Team.
  */
 export function createWorkspacePortfolioProjects(
   teams: readonly ProjectDirectoryTeam[],
-  tasks: readonly CanonicalWorkItem[],
+  workItemSummary: WorkItemSummaryResponse | undefined,
 ): WorkspacePortfolioProject[] {
   return teams.flatMap((team) =>
     team.projects.map((project) => {
-      const projectTasks = filterTasksByTeamProjectIds(tasks, [project.id], team.id)
+      const bucket = findWorkItemSummaryBucket(workItemSummary, team.id, project.id)
 
       return {
-        progress: calculateWorkspaceProgress(projectTasks),
+        progress: bucket && bucket.total > 0
+          ? Math.round((bucket.completed / bucket.total) * 100)
+          : 0,
         id: `${team.id}-${project.id}`,
         teamId: team.id,
         projectId: project.id,
         name: project.name,
         teamName: team.name,
-        risk: resolveWorkspacePortfolioRisk(projectTasks),
+        risk: resolveWorkspacePortfolioRisk(bucket),
       }
     }),
   )

@@ -1,3 +1,4 @@
+import type { WorkspaceWorkItemListFilter } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
 import { useMemo } from 'react'
@@ -5,6 +6,7 @@ import {
   getProjectIssuesPage,
   getTeamIssueDetail,
   getTeamIssues,
+  getWorkspaceWorkItemSummary,
   getWorkspaceWorkItems,
 } from '../api/workItems'
 import { TeamIssuesApiError } from '../api/errors'
@@ -195,30 +197,75 @@ export function useProjectIssues(
 }
 
 /**
- * Workspace 全体の Work Item 投影を取得します。
+ * Workspace 横断の Work Item 投影を server 側の filter で絞って取得します。
+ *
+ * 全件ではなく、画面に必要な範囲（自分の担当、1 Team など）だけを cursor で読み切ります。
  *
  * @param accessToken - Work Item API の access token です。
  * @param enabled - Query を実行するかどうかです。
  * @param includeArchived - Whether the Workspace query includes archived Work Items.
+ * @param filter - Server-side filter. Omitting it reads every visible Work Item.
  * @returns Workspace Work Item 一覧の SWR state です。
  */
 export function useWorkspaceWorkItems(
   accessToken?: string,
   enabled = true,
   includeArchived = false,
+  filter: WorkspaceWorkItemListFilter = {},
 ) {
+  const filterKey = createWorkspaceWorkItemFilterKey(filter)
   const key = accessToken && enabled
-    ? ['workspace-work-items', accessToken, includeArchived] as const
+    ? ['workspace-work-items', accessToken, includeArchived, filterKey] as const
     : null
 
   const query = useSWR(
     key,
     ([, token, shouldIncludeArchived]) =>
-      getWorkspaceWorkItems(token, shouldIncludeArchived),
+      getWorkspaceWorkItems(token, shouldIncludeArchived, filter),
     workItemQueryConfig,
   )
 
   return { ...query, key }
+}
+
+/**
+ * Workspace の Work Item 件数を Team と Project ごとに server で集計して取得します。
+ *
+ * @param accessToken - Work Item API の access token です。
+ * @param enabled - Query を実行するかどうかです。
+ * @returns Work Item summary の SWR state です。
+ */
+export function useWorkspaceWorkItemSummary(
+  accessToken?: string,
+  enabled = true,
+) {
+  const key = accessToken && enabled
+    ? ['workspace-work-item-summary', accessToken] as const
+    : null
+
+  const query = useSWR(
+    key,
+    ([, token]) => getWorkspaceWorkItemSummary(token),
+    workItemQueryConfig,
+  )
+
+  return { ...query, key }
+}
+
+/**
+ * Serializes a Workspace Work Item filter into a stable SWR key segment.
+ *
+ * @param filter - Server-side filter.
+ * @returns A string that is equal for equal filters.
+ */
+function createWorkspaceWorkItemFilterKey(filter: WorkspaceWorkItemListFilter) {
+  return JSON.stringify([
+    filter.involvement ?? null,
+    filter.teamId ?? null,
+    filter.projectId ?? null,
+    [...(filter.statusCategories ?? [])].sort(),
+    filter.openOnly === true,
+  ])
 }
 
 /**

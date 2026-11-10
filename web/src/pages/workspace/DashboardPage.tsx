@@ -5,7 +5,7 @@ import { useWorkspaceFocusOverview } from '../../features/focus-queue/queries/us
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createPlanningProjectUpdatePath } from '../../shared/routing/paths'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
-import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
+import { useWorkspaceWorkItemSummaryData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import {
   WorkspaceFocusLoadNotice,
@@ -23,7 +23,7 @@ export function DashboardPage() {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const workItems = useWorkspaceWorkItemData(
+  const workItems = useWorkspaceWorkItemSummaryData(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
     workspace.teams,
@@ -35,10 +35,10 @@ export function DashboardPage() {
   const summary = useMemo(
     () => createWorkspaceSummary(
       workspace.teams,
-      workItems.tasks,
+      workItems.summary,
       focus.blockedCount,
     ),
-    [focus.blockedCount, workItems.tasks, workspace.teams],
+    [focus.blockedCount, workItems.summary, workspace.teams],
   )
   const planning = usePlanningSnapshot(
     workspace.accessToken,
@@ -48,13 +48,17 @@ export function DashboardPage() {
     <WorkspaceRouteContent
       isLoading={workItems.isLoading || focus.isLoading || Boolean(planning.key && planning.isLoading)}
       sessionErrors={[
-        workItems.workItemsError,
+        workItems.summaryError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <WorkspaceTaskLoadNotice failedProjectCount={workItems.failedProjectCount} t={t} />
+        <WorkspaceTaskLoadNotice
+          error={workItems.summaryError}
+          failedProjectCount={workItems.failedProjectCount}
+          t={t}
+        />
         <WorkspaceFocusLoadNotice {...focus.noticeProps} t={t} />
         <DashboardWorkspaceView
           focusQueue={focus.response}
@@ -69,9 +73,9 @@ export function DashboardPage() {
             : undefined}
           summary={summary}
           t={t}
-          tasks={workItems.tasks}
           teams={workspace.teams}
           workItemConfigurationsByTeam={workItems.configurationsByTeam}
+          workItemSummary={workItems.summary}
         />
       </div>
     </WorkspaceRouteContent>

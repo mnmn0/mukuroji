@@ -655,6 +655,12 @@ export type WorkItemListReadOptions = {
   includeArchived?: boolean
   /** Stable Work Item Type filter. */
   workItemTypeId?: string
+  /**
+   * Resumes a strongly consistent base-table read after this Work Item ID.
+   *
+   * Only valid with `consistentRead`, because the base table is ordered by Work Item ID.
+   */
+  startAfterIssueId?: string
 }
 
 /** Public Work Item の DynamoDB-backed bounded page read options です。 */
@@ -727,6 +733,10 @@ export type TeamIssuesResponse = {
    * チームに紐づく Issue 一覧です。
    */
   issues: TeamIssueResponseItem[]
+  /**
+   * Work Item ID to pass as `startAfterIssueId` when `limit` stopped a consistent read early.
+   */
+  nextStartAfterIssueId?: string
 }
 
 /**
@@ -1467,7 +1477,11 @@ export class DynamoDbTeamIssuesClient {
     await this.ensureLocalTables()
 
     try {
-      const items = await this.queryTeamIssueItems(directoryId, teamId, options)
+      const { items, nextStartAfterIssueId } = await this.queryTeamIssueItems(
+        directoryId,
+        teamId,
+        options,
+      )
       const visibleItems = options.includeArchived
         ? items
         : items.filter((item) => item.archivedAt === undefined)
@@ -1475,6 +1489,7 @@ export class DynamoDbTeamIssuesClient {
       return {
         teamId,
         issues: visibleItems.map(toTeamIssueResponseItem),
+        ...(nextStartAfterIssueId === undefined ? {} : { nextStartAfterIssueId }),
       } satisfies TeamIssuesResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -2959,17 +2974,35 @@ export class DynamoDbTeamIssuesClient {
     return toTeamIssueItem(response.Item)
   }
 
+  /**
+   * Queries one Team partition, optionally resuming a strongly consistent read.
+   *
+   * @param directoryId - Workspace directory that owns the Team partition.
+   * @param teamId - Team whose Work Items are read.
+   * @param options - Read limit, consistency, archive, type, and continuation options.
+   * @returns Matching rows and the continuation when `limit` stopped a consistent read early.
+   */
   private async queryTeamIssueItems(
     directoryId: string,
     teamId: string,
     options: WorkItemListReadOptions = {},
-  ) {
+  ): Promise<{ items: TeamIssueItem[]; nextStartAfterIssueId?: string }> {
     const items: TeamIssueItem[] = []
     const limit = normalizeWorkItemListReadLimit(options.limit)
-    let exclusiveStartKey: Record<string, unknown> | undefined
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    if (options.startAfterIssueId !== undefined && !options.consistentRead) {
+      throw new ProjectDataError(
+        500,
+        'InvalidWorkItemListRead',
+        'Work Item list continuation requires a consistent base-table read.',
+      )
+    }
+    let exclusiveStartKey: Record<string, unknown> | undefined = options.startAfterIssueId
+      ? { directoryTeamId, issueId: options.startAfterIssueId }
+      : undefined
 
     if (limit === 0) {
-      return []
+      return { items }
     }
 
     do {
@@ -2982,7 +3015,7 @@ export class DynamoDbTeamIssuesClient {
             : { IndexName: 'TeamIssueSortOrderIndex', ScanIndexForward: true }),
           KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
           ExpressionAttributeValues: {
-            ':directoryTeamId': createDirectoryTeamId(directoryId, teamId),
+            ':directoryTeamId': directoryTeamId,
           },
           ExclusiveStartKey: exclusiveStartKey,
           ...(remaining === undefined ? {} : { Limit: remaining }),
@@ -2994,13 +3027,18 @@ export class DynamoDbTeamIssuesClient {
         .filter((item) => options.includeArchived || item.archivedAt === undefined)
         .filter((item) => matchesWorkItemTypeFilter(item, options.workItemTypeId))
       items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
-      if (limit !== undefined && items.length >= limit) {
-        break
-      }
       exclusiveStartKey = response.LastEvaluatedKey
+      if (limit !== undefined && items.length >= limit) {
+        const lastItem = items.at(-1)
+        const hasMore = exclusiveStartKey !== undefined ||
+          (remaining !== undefined && pageItems.length > remaining)
+        return options.consistentRead && hasMore && lastItem
+          ? { items, nextStartAfterIssueId: lastItem.issueId }
+          : { items }
+      }
     } while (exclusiveStartKey)
 
-    return items
+    return { items }
   }
 
   private async queryProjectIssueItems(

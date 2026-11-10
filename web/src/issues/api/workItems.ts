@@ -11,7 +11,11 @@ import type {
   WorkItemRelation,
   WorkItemTriageContextSnapshot,
   WorkItemTypeChangePreview,
+  WorkItemSummaryResponse,
+  WorkspaceWorkItemListFilter,
+  WorkspaceWorkItemPage,
 } from '@mukuroji/contracts'
+import { WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import {
   isConfirmWorkItemScheduleChangeResponse,
@@ -108,14 +112,12 @@ type ProjectIssuesResponse = {
 }
 
 /**
- * Workspace 全体の Work Item 一覧レスポンスです。
+ * Largest number of pages one complete Workspace Work Item read follows.
+ *
+ * With the maximum page size this allows 10,000 Work Items; beyond that the read fails
+ * with `WorkItemListLimitExceeded` instead of showing a silently truncated list.
  */
-type WorkspaceWorkItemsResponse = {
-  /**
-   * 未割り当てを含む Workspace 内の Work Item 一覧です。
-   */
-  workItems: TeamIssue[]
-}
+const WORKSPACE_WORK_ITEM_MAX_PAGES = 50
 
 /**
  * Issue 作成 API が返す response body です。
@@ -204,23 +206,104 @@ export async function getProjectIssuesPage(
   return response
 }
 
+/** Options of one Workspace Work Item page request. */
+export type WorkspaceWorkItemPageRequest = {
+  /** Whether archived Work Items should be included. */
+  includeArchived?: boolean
+  /** Server-side filter that narrows the Work Items the viewer can read. */
+  filter?: WorkspaceWorkItemListFilter
+  /** Page size, up to the contract maximum. */
+  limit?: number
+  /** Cursor returned by the previous page. */
+  cursor?: string
+}
+
 /**
- * Loads the Workspace-wide Work Item projection, including unassigned items.
+ * Loads one page of the Workspace-wide Work Item projection.
+ *
+ * @param accessToken - Bearer token for the Work Item API.
+ * @param request - Filter, archive option, page size, and cursor.
+ * @returns The page and the cursor of the next one.
+ */
+export async function getWorkspaceWorkItemPage(
+  accessToken: string,
+  request: WorkspaceWorkItemPageRequest = {},
+) {
+  return requestJson<WorkspaceWorkItemPage<TeamIssue>>(
+    createWorkspaceWorkItemPageUrl(request),
+    accessToken,
+  )
+}
+
+/**
+ * Loads every Workspace Work Item that matches the filter by following page cursors.
  *
  * @param accessToken - Bearer token for the Work Item API.
  * @param includeArchived - Whether archived Work Items should be included.
- * @returns Workspace Work Items visible to the current viewer.
+ * @param filter - Server-side filter, such as `involvement: 'mine'` or a Team ID.
+ * @returns Matching Work Items visible to the current viewer, including unassigned items.
  */
 export async function getWorkspaceWorkItems(
   accessToken: string,
   includeArchived = false,
+  filter: WorkspaceWorkItemListFilter = {},
 ) {
-  const response = await requestJson<WorkspaceWorkItemsResponse>(
-    createWorkItemListUrl(`${issuesApiBaseUrl}/work-items`, includeArchived),
+  const workItems: TeamIssue[] = []
+  let cursor: string | undefined
+
+  for (let page = 0; page < WORKSPACE_WORK_ITEM_MAX_PAGES; page += 1) {
+    const response = await getWorkspaceWorkItemPage(accessToken, {
+      includeArchived,
+      filter,
+      limit: WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT,
+      ...(cursor ? { cursor } : {}),
+    })
+    workItems.push(...response.workItems)
+    if (!response.nextCursor) return workItems
+    cursor = response.nextCursor
+  }
+
+  throw new TeamIssuesApiError(
+    413,
+    `More than ${WORKSPACE_WORK_ITEM_MAX_PAGES * WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT} Work Items match this view.`,
+    'WorkItemListLimitExceeded',
+  )
+}
+
+/**
+ * Loads Work Item counts per Team and Project for Workspace dashboards.
+ *
+ * @param accessToken - Bearer token for the Work Item API.
+ * @returns Totals and per-bucket counts computed by the server.
+ */
+export async function getWorkspaceWorkItemSummary(accessToken: string) {
+  return requestJson<WorkItemSummaryResponse>(
+    `${issuesApiBaseUrl}/work-items/summary`,
     accessToken,
   )
+}
 
-  return response.workItems
+/**
+ * Builds the paged Workspace Work Item list URL.
+ *
+ * @param request - Filter, archive option, page size, and cursor.
+ * @returns The list URL with only the parameters that are set.
+ */
+function createWorkspaceWorkItemPageUrl(request: WorkspaceWorkItemPageRequest): string {
+  const searchParams = new URLSearchParams({
+    limit: String(request.limit ?? WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT),
+  })
+  const filter = request.filter ?? {}
+  if (request.includeArchived) searchParams.set('includeArchived', 'true')
+  if (filter.involvement) searchParams.set('involvement', filter.involvement)
+  if (filter.teamId) searchParams.set('teamId', filter.teamId)
+  if (filter.projectId) searchParams.set('projectId', filter.projectId)
+  for (const category of filter.statusCategories ?? []) {
+    searchParams.append('statusCategory', category)
+  }
+  if (filter.openOnly) searchParams.set('open', 'true')
+  if (request.cursor) searchParams.set('cursor', request.cursor)
+  return `${issuesApiBaseUrl}/work-items?${searchParams.toString()}`
 }
 
 /**

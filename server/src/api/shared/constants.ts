@@ -9,17 +9,41 @@ export const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberCon
 }
 
 /**
- * `/api/work-items` は既存の `{ workItems }` 契約を維持するため cursor を追加せず、
- * pagination 契約を導入するまで hard cap 超過を 413 で fail-closed にします。
- * この値は一度に返す Work Item の最大件数です。
+ * `limit` も `cursor` も付けない旧来の `/api/work-items` が一度に返す Work Item の最大件数です。
+ * 旧 client は続きを読めないため、超過時は部分応答にせず 413 で fail-closed にします。
+ * 新しい client は cursor 付きの page か `/api/work-items/summary` を使います。
  */
 export const WORK_ITEMS_RESPONSE_LIMIT = 200
 
-/** `/api/work-items` が一度に読む Team partition の最大数です。 */
+/** Planning publish と Task view の relation 解決が一度に読む Team partition の最大数です。 */
 export const WORK_ITEMS_TEAM_READ_LIMIT = 20
 
-/** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
+/** Automation と Planning publish が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 export const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
+
+/** Workspace 横断の Work Item 集約読み取りが対象にできる Team partition の最大数です。 */
+export const WORK_ITEMS_AGGREGATE_TEAM_LIMIT = 100
+
+/**
+ * 全件をメモリに載せる集約読み取り（Focus、Planning snapshot、AI assistance）が保持する
+ * Work Item の最大件数です。超過時は 413 で fail-closed にします。
+ */
+export const WORK_ITEMS_AGGREGATE_ITEM_LIMIT = 10_000
+
+/** 件数だけを数える `/api/work-items/summary` が評価する Work Item row の最大数です。 */
+export const WORK_ITEMS_SUMMARY_SCAN_LIMIT = 20_000
+
+/** 集約読み取りが 1 回の DynamoDB Query で読む Work Item の最大件数です。 */
+export const WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE = 500
+
+/** 集約読み取りが同時に読む Team partition の数です。 */
+export const WORK_ITEMS_AGGREGATE_READ_CONCURRENCY = 8
+
+/**
+ * cursor 付き `/api/work-items` が 1 request で評価する Work Item row の最大数です。
+ * 到達すると条件に合う件数が `limit` 未満でも continuation 付きで応答します。
+ */
+export const WORK_ITEMS_PAGE_SCAN_BUDGET = 2_000
 
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 export const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8

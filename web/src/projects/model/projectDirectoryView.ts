@@ -1,10 +1,9 @@
-import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
+import type {
+  ProjectQuickAccessItem,
+  WorkItemSummaryBucket,
+  WorkItemSummaryResponse,
+} from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
-import type { CanonicalWorkItem } from '../../tasks/api/tasks'
-import {
-  isOpenWorkItem,
-  resolveWorkItemAssignee,
-} from '../../work-items/model/workItemDisplay'
 
 /** Number of Project rows rendered on one directory page. */
 export const PROJECT_DIRECTORY_PAGE_SIZE = 50
@@ -102,85 +101,76 @@ export function createProjectDirectoryRowKey(teamId: string, projectId: string) 
 }
 
 /**
- * Derives searchable Project rows from the directory and canonical Work Items.
+ * Derives searchable Project rows from the directory and the server-side Work Item summary.
  *
  * @param teams - Permission-filtered Team and Project directory.
- * @param tasks - Canonical Work Items loaded for the Workspace.
+ * @param workItemSummary - Work Item counts per Team and Project.
  * @param isProjectQuickAccess - Predicate that recognizes starred Team/Project pairs.
  * @returns Project rows in the stable Team and Project order supplied by the directory.
  */
 export function createProjectDirectoryRows(
   teams: readonly ProjectDirectoryTeam[],
-  tasks: readonly CanonicalWorkItem[],
+  workItemSummary: WorkItemSummaryResponse,
   isProjectQuickAccess: (item: ProjectQuickAccessItem) => boolean = () => false,
 ): ProjectDirectoryRow[] {
-  const tasksByProject = new Map<string, CanonicalWorkItem[]>()
+  const bucketsByProject = new Map<string, WorkItemSummaryBucket>()
 
-  for (const task of tasks) {
-    if (!task.assignedProjectId) {
+  for (const bucket of workItemSummary.buckets) {
+    if (!bucket.projectId) {
       continue
     }
 
-    const key = createProjectDirectoryRowKey(task.teamId, task.assignedProjectId)
-    const projectTasks = tasksByProject.get(key)
-    if (projectTasks) {
-      projectTasks.push(task)
-    } else {
-      tasksByProject.set(key, [task])
-    }
+    bucketsByProject.set(createProjectDirectoryRowKey(bucket.teamId, bucket.projectId), bucket)
   }
 
   return teams.flatMap((team) =>
     team.projects.map((project): ProjectDirectoryRow => {
-      const projectTasks = tasksByProject.get(
-        createProjectDirectoryRowKey(team.id, project.id),
-      ) ?? []
-      const closedWorkItemCount = projectTasks.filter(
-        (task) => !isOpenWorkItem(task),
-      ).length
-      const openWorkItemCount = projectTasks.length - closedWorkItemCount
+      const bucket = bucketsByProject.get(createProjectDirectoryRowKey(team.id, project.id))
+      const workItemCount = bucket?.total ?? 0
+      const openWorkItemCount = bucket?.open ?? 0
+      const closedWorkItemCount = workItemCount - openWorkItemCount
 
       return {
-        assignees: createProjectAssignees(projectTasks),
+        assignees: bucket?.assignees.map((assignee) => ({ ...assignee })) ?? [],
         isQuickAccess: isProjectQuickAccess({
           projectId: project.id,
           teamId: team.id,
         }),
         key: createProjectDirectoryRowKey(team.id, project.id),
         openWorkItemCount,
-        progress: projectTasks.length === 0
+        progress: workItemCount === 0
           ? 0
-          : Math.round((closedWorkItemCount / projectTasks.length) * 100),
+          : Math.round((closedWorkItemCount / workItemCount) * 100),
         projectId: project.id,
         projectName: project.name,
-        status: resolveProjectDirectoryStatus(projectTasks),
+        status: resolveProjectDirectoryStatus(bucket),
         teamId: team.id,
         teamName: team.name,
         tone: project.tone,
-        workItemCount: projectTasks.length,
+        workItemCount,
       }
     }),
   )
 }
 
 /**
- * Resolves a Project lifecycle state from its canonical Work Items.
+ * Resolves a Project lifecycle state from its Work Item counts.
  *
- * @param tasks - Work Items scoped to one Team-owned Project.
+ * @param bucket - Summary bucket of one Team-owned Project, when it has Work Items.
  * @returns Attention, active, completed, or not-started state.
  */
 export function resolveProjectDirectoryStatus(
-  tasks: readonly CanonicalWorkItem[],
+  bucket: WorkItemSummaryBucket | undefined,
 ): ProjectDirectoryStatus {
-  if (tasks.length === 0) {
+  if (!bucket || bucket.total === 0) {
     return 'not-started'
   }
 
-  if (tasks.some((task) => task.priority === 'high' && isOpenWorkItem(task))) {
+  if (bucket.highPriorityOpen > 0) {
     return 'attention'
   }
 
-  if (tasks.every((task) => !isOpenWorkItem(task))) {
+  if (bucket.open === 0) {
     return 'completed'
   }
 
@@ -330,31 +320,6 @@ export function parseProjectDirectoryStatusFilter(
   value: string | null,
 ): ProjectDirectoryStatusFilter {
   return isProjectDirectoryStatusFilter(value) ? value : 'all'
-}
-
-/**
- * Collects one Project's unique assignees in stable Work Item order.
- *
- * @param tasks - Work Items scoped to one Project.
- * @returns Unique person references suitable for display and filtering.
- */
-function createProjectAssignees(
-  tasks: readonly CanonicalWorkItem[],
-): ProjectDirectoryAssignee[] {
-  const assigneesById = new Map<string, ProjectDirectoryAssignee>()
-
-  for (const task of tasks) {
-    const id = task.assigneeUserId.trim()
-    if (!id || assigneesById.has(id)) {
-      continue
-    }
-    assigneesById.set(id, {
-      id,
-      label: resolveWorkItemAssignee(task),
-    })
-  }
-
-  return Array.from(assigneesById.values())
 }
 
 /**

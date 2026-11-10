@@ -8,7 +8,9 @@ import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
+import { createWorkItemSummaryFromWorkItems } from '../src/work-items/model/workItemSummary'
 import {
+  calculateWorkItemSummaryProgress,
   calculateWorkspaceActionScore,
   calculateWorkspaceProgress,
   createWorkspaceActionQueue,
@@ -250,7 +252,7 @@ describe('Workspace Work Item model', () => {
     })
     const rows = createWorkspacePortfolioProjects(
       projectDirectoryFixtures,
-      [coreCompleted, designRisk],
+      createWorkItemSummaryFromWorkItems([coreCompleted, designRisk], new Date('2026-06-10T00:00:00Z')),
     )
     const coreRow = rows.find((row) => row.id === 'core-team-shared-launch')
     const designRow = rows.find((row) => row.id === 'design-team-shared-launch')
@@ -293,7 +295,7 @@ describe('Workspace Work Item model', () => {
   })
 
   test('does not report an empty Project portfolio as low risk', () => {
-    expect(resolveWorkspacePortfolioRisk([])).toBe('clear')
+    expect(resolveWorkspacePortfolioRisk(undefined)).toBe('clear')
   })
 
   test('creates summary and progress without transport-only metadata', () => {
@@ -305,11 +307,82 @@ describe('Workspace Work Item model', () => {
     })
     const openHigh = createTask({ id: 'open-high', priority: 'high' })
 
+    const summary = createWorkItemSummaryFromWorkItems(
+      [completed, openHigh],
+      new Date('2026-06-10T00:00:00Z'),
+    )
+
     expect(calculateWorkspaceProgress([completed, openHigh])).toBe(50)
-    expect(createWorkspaceSummary(projectDirectoryFixtures, [completed, openHigh], 3)).toEqual({
+    expect(calculateWorkItemSummaryProgress(summary)).toBe(50)
+    expect(createWorkspaceSummary(projectDirectoryFixtures, summary, 3)).toEqual({
       blocked: 3,
       projects: 4,
       tasks: 1,
     })
+  })
+
+  test('counts Work Items into Team and Project buckets like the summary API', () => {
+    const summary = createWorkItemSummaryFromWorkItems([
+      createTask({
+        assignedProjectId: 'refero',
+        assigneeName: 'Aoi',
+        assigneeUserId: 'aoi',
+        id: 'late-high',
+        priority: 'high',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-06-01'),
+        teamId: 'core-team',
+      }),
+      createTask({
+        assignedProjectId: 'refero',
+        assigneeUserId: 'aoi',
+        id: 'review',
+        priority: 'low',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-01'),
+        teamId: 'core-team',
+        workflowStatusId: 'review',
+      }),
+      createTask({
+        assignedProjectId: undefined,
+        assigneeUserId: '',
+        id: 'unassigned-done',
+        priority: 'low',
+        statusCategory: 'completed',
+        teamId: 'core-team',
+        workflowStatusId: 'done',
+      }),
+      createTask({
+        archivedAt: '2026-06-02T00:00:00.000Z',
+        assignedProjectId: 'refero',
+        id: 'archived',
+        teamId: 'core-team',
+      }),
+    ], new Date('2026-06-10T00:00:00Z'))
+
+    expect(summary.totals).toEqual({ total: 3, open: 2, completed: 1 })
+    expect(summary.buckets).toEqual([
+      {
+        teamId: 'core-team',
+        projectId: 'refero',
+        total: 2,
+        open: 2,
+        completed: 0,
+        highPriorityOpen: 1,
+        overdueOpen: 1,
+        attentionOpen: 1,
+        inReview: 1,
+        assignees: [{ id: 'aoi', label: 'Aoi' }],
+      },
+      {
+        teamId: 'core-team',
+        total: 1,
+        open: 0,
+        completed: 1,
+        highPriorityOpen: 0,
+        overdueOpen: 0,
+        attentionOpen: 0,
+        inReview: 0,
+        assignees: [],
+      },
+    ])
   })
 })

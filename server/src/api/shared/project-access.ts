@@ -631,6 +631,21 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (
+    error.status === 400 &&
+    (
+      error.code === 'InvalidWorkItemListQuery' ||
+      error.code === 'InvalidWorkItemPageCursor' ||
+      error.code === 'InvalidWorkItemPageLimit'
+    )
+  ) {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (error.code === 'WorkItemListReadStalled') {
+    return c.json({ code: error.code, message: error.message }, 503)
+  }
+
+  if (
     error.code.startsWith('InvalidWorkItemSchedule') ||
     error.code === 'WorkItemScheduleDurationMismatch'
   ) {

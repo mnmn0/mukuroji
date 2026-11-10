@@ -4,6 +4,7 @@ import type {
   PlanningUpdateState,
   PlanningUpdateTargetSummary,
   ResolvedWorkItemConfiguration,
+  WorkItemSummaryResponse,
 } from '@mukuroji/contracts'
 import { getFocusQueueItems } from '../../features/focus-queue/model/focusQueue'
 import type { ProjectDirectoryTeam } from '../../projects/api'
@@ -15,7 +16,7 @@ import {
 } from '../../shared/ui/WorkbenchPrimitives'
 import type { CanonicalWorkItem } from '../../tasks/api'
 import {
-  calculateWorkspaceProgress,
+  calculateWorkItemSummaryProgress,
   createWorkspacePortfolioProjects,
   resolveWorkspaceTaskConfiguration,
   type WorkspacePortfolioProject,
@@ -38,8 +39,8 @@ export type DashboardWorkspaceViewProps = {
   summary: WorkspaceSummary
   /** Translator used for dashboard labels. */
   t: (key: MessageKey) => string
-  /** Workspace Work Items used for progress and decision queues. */
-  tasks: readonly CanonicalWorkItem[]
+  /** Server-side Work Item counts used for completion and portfolio progress. */
+  workItemSummary?: WorkItemSummaryResponse
   /** Workspace directory used to build portfolio rows. */
   teams: readonly ProjectDirectoryTeam[]
   /** Resolved Work Item configurations indexed by Team ID. */
@@ -133,15 +134,15 @@ export function DashboardWorkspaceView({
   planningUpdatesErrorMessage,
   summary,
   t,
-  tasks,
   teams,
   workItemConfigurationsByTeam,
+  workItemSummary,
 }: DashboardWorkspaceViewProps) {
   const decisionTasks = [
     ...getFocusQueueItems(focusQueue, 'now'),
     ...getFocusQueueItems(focusQueue, 'next'),
   ].slice(0, 5)
-  const projects = createWorkspacePortfolioProjects(teams, tasks)
+  const projects = createWorkspacePortfolioProjects(teams, workItemSummary)
   const planningUpdatesUnavailable = Boolean(planningUpdatesErrorMessage)
   const reportingAttentionCount = planningUpdatesUnavailable
     ? undefined
@@ -167,7 +168,7 @@ export function DashboardWorkspaceView({
           value={isFocusUnavailable ? '—' : summary.blocked}
           tone="red"
         />
-        <MetricCard label={t('workspace.reports.metric.completion')} value={`${calculateWorkspaceProgress(tasks)}%`} tone="amber" />
+        <MetricCard label={t('workspace.reports.metric.completion')} value={`${calculateWorkItemSummaryProgress(workItemSummary)}%`} tone="amber" />
         <MetricCard
           label={t('workspace.planningUpdate.metric.attention')}
           srValue={planningUpdatesUnavailable ? t('workspace.planningUpdate.unavailable') : undefined}

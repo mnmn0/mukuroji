@@ -168,7 +168,10 @@ import {
   toCollaborationErrorResponse,
   toWorkItemConfigurationErrorResponse,
 } from '../shared/collaboration-access'
-import { WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY } from '../shared/constants'
+import {
+  WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY,
+  WORK_ITEMS_RESPONSE_LIMIT,
+} from '../shared/constants'
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import {
   createProjectSearchDocument,
@@ -203,7 +206,6 @@ import { readAuditEventQuery, readLocale, readRequiredRouteId } from '../shared/
 import {
   createPlanningFencedWorkItemAuthorizationSnapshot,
   filterPlanningSnapshotForPrincipal,
-  readAccessibleWorkItems,
   readPlanningIdentifier,
   readPlanningWorkItemState,
   requirePlanningUpdateProjectPermission,
@@ -251,9 +253,17 @@ import {
   createWorkItemIdempotencyTransaction,
   filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
+  createWorkItemListLimitExceededError,
   normalizeTeamIssueInput,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
+import {
+  readAccessibleWorkItemPage,
+  readAllAccessibleWorkItems,
+  readWorkspaceWorkItemListQuery,
+  resolveAccessibleWorkItemTeamContexts,
+  summarizeAccessibleWorkItems,
+} from '../shared/work-item-aggregate-read'
 import {
   filterRequestConversionCustomFieldValues,
   getWorkItemConfigurationTableName,
@@ -3041,8 +3051,18 @@ async function readProjectIssues(
 }
 
 async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
+  return readAssigneeProfiles(issues.map((issue) => issue.assigneeUserId).filter(isDefined))
+}
+
+/**
+ * Reads Cognito profiles for assignee IDs, skipping users that no longer exist.
+ *
+ * @param assigneeIds - Assignee user IDs, possibly repeated.
+ * @returns Profiles keyed by assignee ID.
+ */
+async function readAssigneeProfiles(assigneeIds: readonly string[]) {
   const profiles = new Map<string, CognitoUserProfile>()
-  const userIds = new Set(issues.map((issue) => issue.assigneeUserId).filter(isDefined))
+  const userIds = new Set(assigneeIds.filter(Boolean))
 
   await Promise.all(
     Array.from(userIds).map(async (userId) => {
@@ -3946,7 +3966,13 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
     }
   })
 
-  /** 現在ユーザーが参照できる canonical Work Item を Workspace 横断で返します。 */
+  /**
+   * 現在ユーザーが参照できる canonical Work Item を Workspace 横断で返します。
+   *
+   * `limit` または `cursor` を付けると `{ workItems, nextCursor? }` の page を返します。
+   * どちらも無い旧来の request は全件を返し、200 件を超えると 413 で fail-closed にします。
+   * `involvement=mine`、`teamId`、`projectId`、`statusCategory`、`open=true` は server 側で絞ります。
+   */
   routeApp.get('/api/work-items', async (c) => {
     const accessToken = readBearerAccessToken(c)
 
@@ -3957,10 +3983,71 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
-      return c.json(await hydrateWorkItemsResponse(
-        await readAccessibleWorkItems(principal, includeArchived),
-        principal.directoryId,
-      ))
+      const query = readWorkspaceWorkItemListQuery(
+        (name) => c.req.query(name),
+        (name) => c.req.queries(name),
+        principal,
+      )
+      const contexts = await resolveAccessibleWorkItemTeamContexts(principal, {
+        ...(query.filter.teamId ? { teamId: query.filter.teamId } : {}),
+        ...(query.filter.projectId ? { projectId: query.filter.projectId } : {}),
+      })
+      if (query.paged) {
+        const page = await readAccessibleWorkItemPage(principal, contexts, {
+          limit: query.limit,
+          ...(query.cursor ? { cursor: query.cursor } : {}),
+          includeArchived,
+          filter: query.filter,
+        })
+        const hydrated = await hydrateWorkItemsResponse(
+          { workItems: page.workItems },
+          principal.directoryId,
+        )
+        return c.json({
+          ...hydrated,
+          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        })
+      }
+      const workItems = await readAllAccessibleWorkItems(principal, contexts, {
+        includeArchived,
+        filter: query.filter,
+      })
+      if (workItems.length > WORK_ITEMS_RESPONSE_LIMIT) {
+        throw createWorkItemListLimitExceededError(
+          `Workspace has more than ${WORK_ITEMS_RESPONSE_LIMIT} accessible Work Items.`,
+        )
+      }
+      return c.json(await hydrateWorkItemsResponse({ workItems }, principal.directoryId))
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /** 現在ユーザーが参照できる Work Item の件数を Team と Project ごとに集計して返します。 */
+  routeApp.get('/api/work-items/summary', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const contexts = await resolveAccessibleWorkItemTeamContexts(principal)
+      const summary = await summarizeAccessibleWorkItems(principal, contexts, new Date())
+      const profiles = await readAssigneeProfiles(
+        summary.buckets.flatMap((bucket) => bucket.assignees.map((assignee) => assignee.id)),
+      )
+      return c.json({
+        ...summary,
+        buckets: summary.buckets.map((bucket) => ({
+          ...bucket,
+          assignees: bucket.assignees.map((assignee) => {
+            const profile = profiles.get(assignee.id)
+            return { id: assignee.id, label: profile?.name ?? profile?.email ?? assignee.id }
+          }),
+        })),
+      })
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }

@@ -10,7 +10,8 @@ import {
   parseProjectDirectoryPage,
 } from '../../projects/model/projectDirectoryView'
 import { ProjectDirectoryView } from '../../projects/ui/ProjectDirectoryView'
-import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
+import { useWorkspaceWorkItemSummary } from '../../issues/queries/useWorkItems'
+import { TeamIssuesApiError } from '../../issues/api/errors'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createPlanningProjectUpdatePath } from '../../shared/routing/paths'
 import {
@@ -32,7 +33,7 @@ export function ProjectsPage() {
   const { teamId: routeTeamId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const workItems = useWorkspaceWorkItems(
+  const workItems = useWorkspaceWorkItemSummary(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
@@ -162,7 +163,17 @@ export function ProjectsPage() {
               className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
               data-testid="project-directory-work-items-error"
             >
-              <p role="alert">{t('tasks.error.loading')}</p>
+              <p role="alert">
+                {workItems.error instanceof TeamIssuesApiError &&
+                    workItems.error.code === 'WorkItemListLimitExceeded'
+                  ? t('tasks.error.limitExceeded')
+                  : t('tasks.error.loading')}
+              </p>
+              {workItems.error instanceof Error && workItems.error.message ? (
+                <p className="text-xs font-medium">
+                  {t('tasks.error.reason').replace('{reason}', workItems.error.message)}
+                </p>
+              ) : null}
               <button
                 className="workbench-button-secondary min-h-10 px-4"
                 onClick={() => void workItems.mutate()}

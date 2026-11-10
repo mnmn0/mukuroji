@@ -73,7 +73,7 @@ import {
   workspaceDependencies,
 } from '../shared/app-dependencies'
 import { toCollaborationErrorResponse } from '../shared/collaboration-access'
-import { WORK_ITEMS_TEAM_READ_LIMIT } from '../shared/constants'
+import { WORK_ITEMS_AGGREGATE_TEAM_LIMIT } from '../shared/constants'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import {
   hasApprovalSummaryContent,
@@ -602,10 +602,10 @@ async function prepareFocusPolicyMutation(
   const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
   if (
     target.type === 'user' &&
-    accessibleTeamIds.length > WORK_ITEMS_TEAM_READ_LIMIT
+    accessibleTeamIds.length > WORK_ITEMS_AGGREGATE_TEAM_LIMIT
   ) {
     throw createWorkItemListLimitExceededError(
-      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} accessible Teams.`,
+      `Workspace has more than ${WORK_ITEMS_AGGREGATE_TEAM_LIMIT} accessible Teams.`,
     )
   }
   const policyStateTeamIds = target.type === 'team'
@@ -1193,7 +1193,7 @@ function readStoredFocusPolicyOutcome(value: Record<string, unknown>) {
     value.policyVersion < 1 ||
     !isStoredFocusTimestamp(value.policyUpdatedAt) ||
     !Array.isArray(value.effectivePolicies) ||
-    value.effectivePolicies.length > WORK_ITEMS_TEAM_READ_LIMIT
+    value.effectivePolicies.length > WORK_ITEMS_AGGREGATE_TEAM_LIMIT
   ) {
     throw invalidStoredFocusMutationReceipt()
   }

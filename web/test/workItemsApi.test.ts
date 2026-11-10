@@ -169,9 +169,48 @@ describe('canonical Work Item API', () => {
 
     expect(result).toEqual([workItem])
     expect(requests).toHaveLength(1)
-    expect(requests[0]?.url).toBe('/api/work-items')
+    expect(requests[0]?.url).toBe('/api/work-items?limit=200')
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
+    })
+  })
+
+  test('follows Workspace Work Item cursors and sends server-side filters', async () => {
+    const first = createWorkItem({ id: 'first' })
+    const second = createWorkItem({ id: 'second' })
+    const responses = [
+      { workItems: [first], nextCursor: 'cursor 1' },
+      { workItems: [second] },
+    ]
+    const requests: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
+      return new Response(JSON.stringify(responses.shift()), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }) as typeof fetch
+
+    const result = await getWorkspaceWorkItems('access-token', false, {
+      involvement: 'mine',
+      teamId: 'core team',
+      statusCategories: ['started', 'unstarted'],
+      openOnly: true,
+    })
+
+    expect(result).toEqual([first, second])
+    expect(requests).toEqual([
+      '/api/work-items?limit=200&involvement=mine&teamId=core+team&statusCategory=started&statusCategory=unstarted&open=true',
+      '/api/work-items?limit=200&involvement=mine&teamId=core+team&statusCategory=started&statusCategory=unstarted&open=true&cursor=cursor+1',
+    ])
+  })
+
+  test('fails closed when a Workspace Work Item read never runs out of pages', async () => {
+    installFetchRecorder({ workItems: [], nextCursor: 'again' })
+
+    await expect(getWorkspaceWorkItems('access-token')).rejects.toMatchObject({
+      status: 413,
+      code: 'WorkItemListLimitExceeded',
     })
   })
 
@@ -190,7 +229,7 @@ describe('canonical Work Item API', () => {
 
     requests = installFetchRecorder({ workItems: [workItem] })
     await expect(getWorkspaceWorkItems('access-token', true)).resolves.toEqual([workItem])
-    expect(requests[0]?.url).toBe('/api/work-items?includeArchived=true')
+    expect(requests[0]?.url).toBe('/api/work-items?limit=200&includeArchived=true')
   })
 
   test('sends expectedRevision with stable mutation headers', async () => {

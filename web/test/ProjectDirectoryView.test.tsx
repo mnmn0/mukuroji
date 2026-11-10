@@ -9,10 +9,11 @@ import {
 import { ProjectDirectoryView } from '../src/projects/ui/ProjectDirectoryView'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
+import { createWorkItemSummaryFromWorkItems } from '../src/work-items/model/workItemSummary'
 
 const rows = createProjectDirectoryRows(
   projectDirectoryFixtures,
-  referoTaskFixtures,
+  createWorkItemSummaryFromWorkItems(referoTaskFixtures, new Date('2026-06-10T00:00:00.000Z')),
   () => false,
 )
 const assigneeOptions = createProjectDirectoryAssigneeOptions(rows)

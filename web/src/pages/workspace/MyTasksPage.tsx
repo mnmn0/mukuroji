@@ -4,6 +4,7 @@ import type {
   WorkItemActionId,
   WorkItemActionResult,
   WorkItemActionSelection,
+  WorkspaceWorkItemListFilter,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
@@ -92,6 +93,12 @@ import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
+/**
+ * Server-side filter for My Tasks: only Work Items the viewer owns or contributes to are read,
+ * so the route keeps working when the Workspace holds thousands of Work Items.
+ */
+const myTasksWorkItemFilter: WorkspaceWorkItemListFilter = { involvement: 'mine' }
+
 const taskViewBuiltInFields = [
   'title',
   'status',
@@ -146,6 +153,7 @@ export function MyTasksPage() {
     workspace.canLoadWorkspaceData,
     workspace.teams,
     includeArchivedWorkItems,
+    myTasksWorkItemFilter,
   )
   const { contributorTaskKeys, myTasks } = useMemo(() => {
     const contributorKeys = new Set<string>()
@@ -799,7 +807,11 @@ export function MyTasksPage() {
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <WorkspaceTaskLoadNotice failedProjectCount={workItems.failedProjectCount} t={t} />
+        <WorkspaceTaskLoadNotice
+          error={workItems.workItemsError}
+          failedProjectCount={workItems.failedProjectCount}
+          t={t}
+        />
         <WorkspaceConfigurationLoadNotice
           failedTeamCount={workItems.configurationFailedTeamIds.length}
           onRetry={() => void workItems.mutateConfigurations()}

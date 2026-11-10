@@ -1,6 +1,12 @@
-import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import type {
+  ResolvedWorkItemConfiguration,
+  WorkspaceWorkItemListFilter,
+} from '@mukuroji/contracts'
 import { useMemo } from 'react'
-import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
+import {
+  useWorkspaceWorkItems,
+  useWorkspaceWorkItemSummary,
+} from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { CanonicalWorkItem } from '../../tasks/api'
 import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
@@ -22,6 +28,7 @@ const emptyConfigurationLoadResult: TeamWorkItemConfigurationLoadResult = {
  * @param enabled - Whether queries may run for the authenticated route.
  * @param teams - Workspace directory used to report the affected Project count.
  * @param includeArchived - Whether archived Work Items should be loaded for the route.
+ * @param filter - Server-side filter that limits the read to the route's scope.
  * @returns Work Items, configurations, query states, and cache mutation callbacks.
  */
 export function useWorkspaceWorkItemData(
@@ -29,8 +36,9 @@ export function useWorkspaceWorkItemData(
   enabled = true,
   teams: readonly ProjectDirectoryTeam[] = [],
   includeArchived = false,
+  filter: WorkspaceWorkItemListFilter = {},
 ) {
-  const workItemsQuery = useWorkspaceWorkItems(accessToken, enabled, includeArchived)
+  const workItemsQuery = useWorkspaceWorkItems(accessToken, enabled, includeArchived, filter)
   const tasks = workItemsQuery.data ?? emptyWorkspaceTasks
   const teamIds = useMemo(
     () => Array.from(new Set(tasks.map((task) => task.teamId))).sort(),
@@ -65,5 +73,55 @@ export function useWorkspaceWorkItemData(
     tasks,
     workItemsError: workItemsQuery.error,
     workItemsKey: workItemsQuery.key,
+  }
+}
+
+const emptySummaryTeamIds: string[] = []
+
+/**
+ * Loads the server-side Work Item summary and the configurations of the Teams it covers.
+ *
+ * Dashboards use this instead of {@link useWorkspaceWorkItemData}, so their counts do not depend
+ * on downloading every Work Item.
+ *
+ * @param accessToken - Access token used by Workspace APIs.
+ * @param enabled - Whether queries may run for the authenticated route.
+ * @param teams - Workspace directory used to report the affected Project count.
+ * @returns The summary, configurations, query states, and the load error.
+ */
+export function useWorkspaceWorkItemSummaryData(
+  accessToken: string | undefined,
+  enabled = true,
+  teams: readonly ProjectDirectoryTeam[] = [],
+) {
+  const summaryQuery = useWorkspaceWorkItemSummary(accessToken, enabled)
+  const teamIds = useMemo(
+    () => summaryQuery.data
+      ? Array.from(new Set(summaryQuery.data.buckets.map((bucket) => bucket.teamId))).sort()
+      : emptySummaryTeamIds,
+    [summaryQuery.data],
+  )
+  const configurationsQuery = useTeamWorkItemConfigurations(
+    accessToken,
+    'workspace',
+    teamIds,
+    enabled,
+  )
+  const configurationLoadResult = configurationsQuery.data ?? emptyConfigurationLoadResult
+
+  return {
+    configurationErrors: configurationLoadResult.errors,
+    configurationsByTeam: configurationLoadResult.configurationsByTeam,
+    configurationsError: configurationsQuery.error,
+    failedProjectCount: summaryQuery.error
+      ? getUniqueWorkspaceProjectIds(teams).length
+      : 0,
+    isLoading: Boolean(
+      summaryQuery.key && summaryQuery.isLoading,
+    ) || Boolean(
+      configurationsQuery.key && configurationsQuery.isLoading,
+    ),
+    summary: summaryQuery.data,
+    summaryError: summaryQuery.error,
   }
 }

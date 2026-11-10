@@ -43,7 +43,7 @@ export function isFocusAffectedCacheKey(
   if (!Array.isArray(key) || typeof key[0] !== 'string') return false
 
   const cacheScope = key[0]
-  if (cacheScope === 'workspace-work-items') return true
+  if (cacheScope === 'workspace-work-items' || cacheScope === 'workspace-work-item-summary') return true
   if (scope.includePlanning && cacheScope === 'planning-snapshot') return true
 
   if (

@@ -223,7 +223,7 @@ test('loads all accessible canonical Work Items including unassigned items', asy
   })
   expect(body.workItems[0].assignedProjectId).toBeUndefined()
   expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', limit: 500, teamId: 'core-team' },
   ])
   expect(calls.projectIssueReads).toEqual([])
 })
@@ -245,12 +245,12 @@ test('rejects an oversized Work Item aggregate instead of returning a silent par
       'Refine the Workspace before loading the aggregate Work Item list.',
   })
   expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', limit: 500, teamId: 'core-team' },
   ])
 })
 
 test('rejects Work Item aggregate Team fan-out beyond the hard cap before item reads', async () => {
-  const additionalTeams = Array.from({ length: 24 }, (_, teamIndex) => ({
+  const additionalTeams = Array.from({ length: 100 }, (_, teamIndex) => ({
     id: `team-${teamIndex}`,
     name: `Team ${teamIndex}`,
     projects: Array.from({ length: 6 }, (_, projectIndex) => ({
@@ -856,26 +856,148 @@ test('filters canonical Work Items for authorization before enforcing the respon
     'work-item-200',
   ])
   expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', limit: 500, teamId: 'core-team' },
   ])
 })
 
-test('rejects a canonical partition that exceeds the bounded Work Item scan budget', async () => {
+test('reads every page of a Team partition larger than one aggregate read', async () => {
   const calls = configureFakeProjectClients(true, {
-    inaccessibleTeamIssueCount: 1001,
-    teamIssueCount: 1001,
+    inaccessibleTeamIssueCount: 1100,
+    teamIssueCount: 1150,
   })
 
   const response = await app.request('/api/work-items', {
     headers: { Authorization: 'Bearer test-token' },
   })
 
-  expect(response.status).toBe(413)
-  expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.workItems).toHaveLength(50)
+  expect(body.workItems[0].id).toBe('work-item-1100')
   expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
+    { directoryId: 'user#demo@example.com', limit: 500, teamId: 'core-team' },
+    {
+      directoryId: 'user#demo@example.com',
+      limit: 500,
+      startAfterIssueId: 'work-item-499',
+      teamId: 'core-team',
+    },
+    {
+      directoryId: 'user#demo@example.com',
+      limit: 500,
+      startAfterIssueId: 'work-item-999',
+      teamId: 'core-team',
+    },
   ])
   expect(calls.projectIssueReads).toEqual([])
+})
+
+test('pages accessible Work Items with a cursor instead of failing past the legacy limit', async () => {
+  configureFakeProjectClients(true, {
+    inaccessibleTeamIssueCount: 10,
+    teamIssueCount: 260,
+  })
+
+  const readPage = async (cursor?: string) => {
+    const search = new URLSearchParams({ limit: '100', ...(cursor ? { cursor } : {}) })
+    const response = await app.request(`/api/work-items?${search.toString()}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(response.status).toBe(200)
+    return await response.json() as { workItems: Array<{ id: string }>; nextCursor?: string }
+  }
+
+  const first = await readPage()
+  expect(first.workItems).toHaveLength(100)
+  expect(first.workItems[0]?.id).toBe('work-item-10')
+  expect(first.nextCursor).toEqual(expect.any(String))
+  const second = await readPage(first.nextCursor)
+  expect(second.workItems).toHaveLength(100)
+  expect(second.workItems[0]?.id).toBe('work-item-110')
+  const third = await readPage(second.nextCursor)
+  expect(third.workItems.map((workItem) => workItem.id)).toEqual(
+    Array.from({ length: 50 }, (_, index) => `work-item-${210 + index}`),
+  )
+  expect(third.nextCursor).toBeUndefined()
+})
+
+test('rejects a Work Item page cursor reused with different filters', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 5 })
+
+  const first = await app.request('/api/work-items?limit=2', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const { nextCursor } = await first.json() as { nextCursor: string }
+  const reused = await app.request(
+    `/api/work-items?limit=2&open=true&cursor=${encodeURIComponent(nextCursor)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(reused.status).toBe(400)
+  expect(await reused.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+})
+
+test('rejects unsupported Work Item list filters', async () => {
+  configureFakeProjectClients(true)
+
+  for (const query of ['involvement=team', 'statusCategory=done', 'open=yes', 'limit=201', 'limit=0']) {
+    const response = await app.request(`/api/work-items?${query}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(response.status).toBe(400)
+  }
+})
+
+test('narrows Work Items to the caller as owner or contributor', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 3,
+    issueContributorAssignments: [{
+      assignmentId: 'assignment-1',
+      memberUserId: 'Demo@Example.com',
+      status: 'in-progress',
+    }],
+  })
+
+  const response = await app.request('/api/work-items?involvement=mine&limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual([
+    'onboarding-friction',
+  ])
+  expect(body.nextCursor).toBeUndefined()
+})
+
+test('summarizes accessible Work Items per Team and Project', async () => {
+  const calls = configureFakeProjectClients(true, {
+    inaccessibleTeamIssueCount: 1,
+    teamIssueCount: 4,
+  })
+
+  const response = await app.request('/api/work-items/summary', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.totals).toEqual({ total: 3, open: 3, completed: 0 })
+  expect(body.buckets).toEqual([{
+    teamId: 'core-team',
+    projectId: 'refero',
+    total: 3,
+    open: 3,
+    completed: 0,
+    highPriorityOpen: 3,
+    overdueOpen: 3,
+    attentionOpen: 3,
+    inReview: 0,
+    assignees: [{ id: 'sato@example.com', label: expect.any(String) }],
+  }])
+  expect(calls.issueReads).toEqual([
+    { directoryId: 'user#demo@example.com', limit: 500, teamId: 'core-team' },
+  ])
 })
 
 test('creates a team-owned issue after team access is confirmed', async () => {

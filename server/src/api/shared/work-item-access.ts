@@ -15,7 +15,7 @@ import {
 } from '../../modules/work-items'
 import type { IdempotencyMutationToken } from '../../modules/developer-platform/application/ports'
 import { developerPlatformDependencies, workItemDependencies } from './app-dependencies'
-import { WORK_ITEMS_PARTITION_SCAN_LIMIT, WORK_ITEMS_RESPONSE_LIMIT } from './constants'
+import { WORK_ITEMS_PARTITION_SCAN_LIMIT } from './constants'
 import {
   canAccessAssignedProject,
   type ProjectPrincipal,
@@ -158,24 +158,6 @@ export async function readCanonicalTeamIssuesForAggregate(
     teamId: context.team.id,
     issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
   } satisfies TeamIssuesResponse
-}
-
-/**
- * Adds a Work Item to an aggregate list and enforces the response limit.
- *
- * @param workItemsById - Aggregate Work Items keyed by Team and ID.
- * @param workItem - Work Item response item.
- */
-export function addAggregateWorkItem(
-  workItemsById: Map<string, TeamIssueResponseItem>,
-  workItem: TeamIssueResponseItem,
-) {
-  workItemsById.set(`${workItem.teamId}\0${workItem.id}`, workItem)
-  if (workItemsById.size > WORK_ITEMS_RESPONSE_LIMIT) {
-    throw createWorkItemListLimitExceededError(
-      `Workspace has more than ${WORK_ITEMS_RESPONSE_LIMIT} accessible Work Items.`,
-    )
-  }
 }
 
 /**

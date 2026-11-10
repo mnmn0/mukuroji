@@ -1551,7 +1551,12 @@ function configureFakeProjectClients(
       teamId: string
       readOptions?: TeamIssueDetailReadOptions
     }>,
-    issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
+    issueReads: [] as Array<{
+      directoryId: string
+      limit?: number
+      teamId: string
+      startAfterIssueId?: string
+    }>,
     publicIssuePageReads: [] as Array<{
       directoryId: string
       teamId: string
@@ -2450,12 +2455,28 @@ function configureFakeProjectClients(
           directoryId,
           teamId,
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
+          ...(readOptions?.startAfterIssueId === undefined
+            ? {}
+            : { startAfterIssueId: readOptions.startAfterIssueId }),
         })
 
-        const issues = createFakeTeamIssues(teamId)
+        // The fake partition is ordered by array position, like the base table is by Work Item ID.
+        const partition = createFakeTeamIssues(teamId)
+        const startIndex = readOptions?.startAfterIssueId === undefined
+          ? 0
+          : partition.findIndex((issue) => issue.id === readOptions.startAfterIssueId) + 1
+        const remaining = partition.slice(startIndex)
+        if (readOptions?.limit === undefined) {
+          return { teamId, issues: remaining }
+        }
+        const issues = remaining.slice(0, readOptions.limit)
+        const lastIssue = issues.at(-1)
         return {
           teamId,
-          issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),
+          issues,
+          ...(readOptions.consistentRead && remaining.length > readOptions.limit && lastIssue
+            ? { nextStartAfterIssueId: lastIssue.id }
+            : {}),
         }
       },
       async getPublicWorkItemPage(directoryId, teamId, readOptions) {
