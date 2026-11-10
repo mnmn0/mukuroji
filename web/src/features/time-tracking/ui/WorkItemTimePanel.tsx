@@ -70,7 +70,7 @@ export type WorkItemTimePanelProps = {
   /** Discards the running timer. */
   onDiscardTimer: (timer: RunningTimer) => Promise<unknown>
   /** Saves the estimate in minutes. */
-  onSaveEstimate: (minutes: number) => Promise<unknown>
+  onSaveEstimate: (minutes: number, expectedRevision: number) => Promise<unknown>
   /** Records a manual entry. */
   onCreateEntry: (input: TimeEntryDraftInput) => Promise<unknown>
   /** Edits an entry. */
@@ -161,7 +161,7 @@ export function WorkItemTimePanelContainer({
           teamAccess.mutate(),
         ]).catch(() => undefined)
       }}
-      onSaveEstimate={(minutes) => saveEstimate(minutes, estimate.data?.revision ?? 0)}
+      onSaveEstimate={(minutes, expectedRevision) => saveEstimate(minutes, expectedRevision)}
       onStartTimer={(billable) => timerMutations.start(teamId, { workItemId, billable })}
       onStopTimer={(running) => timerMutations.stop(running)}
       onSubmitEntry={(entry) => entryMutations.transition(entry, 'submit')}
@@ -212,7 +212,10 @@ export function WorkItemTimePanel({
 }: WorkItemTimePanelProps) {
   const id = useId()
   const [isCreating, setIsCreating] = useState(false)
-  const [isEditingEstimate, setIsEditingEstimate] = useState(false)
+  // Revision of the estimate when its editor opened, so a change made elsewhere meanwhile is a
+  // revision conflict rather than overwritten; undefined while the editor is closed.
+  const [estimateEditRevision, setEstimateEditRevision] = useState<number>()
+  const isEditingEstimate = estimateEditRevision !== undefined
   const [pendingAction, setPendingAction] = useState<'start' | 'stop' | 'discard' | 'estimate'>()
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
   const isTimerOnItem = timer?.teamId === teamId && timer.workItemId === workItemId
@@ -262,10 +265,43 @@ export function WorkItemTimePanel({
       setMessage({ tone: 'error', text: t('timeTracking.estimate.invalid') })
       return
     }
-    if (await runAction('estimate', () => onSaveEstimate(minutes), t('timeTracking.estimate.saved'))) {
-      setIsEditingEstimate(false)
+    const expectedRevision = estimateEditRevision ?? estimate?.revision ?? 0
+    if (await runAction('estimate', () => onSaveEstimate(minutes, expectedRevision), t('timeTracking.estimate.saved'))) {
+      setEstimateEditRevision(undefined)
     }
   }
+
+  /**
+   * Renders stop and discard for the member's running timer.
+   *
+   * @param running - Timer to act on.
+   * @returns Timer actions.
+   */
+  const renderTimerActions = (running: RunningTimer) => (
+    <div className="flex flex-wrap gap-2">
+      {overlong ? null : (
+        <button
+          className="workbench-button-primary min-h-9 px-4"
+          disabled={pendingAction !== undefined}
+          onClick={() => { void runAction('stop', () => onStopTimer(running), t('timeTracking.timer.stopped')) }}
+          type="button"
+        >
+          {t('timeTracking.timer.stop')}
+        </button>
+      )}
+      <button
+        className="workbench-button-secondary min-h-9 px-4"
+        disabled={pendingAction !== undefined}
+        onClick={() => {
+          if (!window.confirm(t('timeTracking.timer.discardConfirm'))) return
+          void runAction('discard', () => onDiscardTimer(running), t('timeTracking.timer.discarded'))
+        }}
+        type="button"
+      >
+        {t('timeTracking.timer.discard')}
+      </button>
+    </div>
+  )
 
   return (
     <section
@@ -330,14 +366,14 @@ export function WorkItemTimePanel({
           <button className="workbench-button-primary min-h-9 px-3" disabled={pendingAction !== undefined} type="submit">
             {t('timeTracking.estimate.save')}
           </button>
-          <button className="workbench-button-secondary min-h-9 px-3" onClick={() => setIsEditingEstimate(false)} type="button">
+          <button className="workbench-button-secondary min-h-9 px-3" onClick={() => setEstimateEditRevision(undefined)} type="button">
             {t('timeTracking.form.cancel')}
           </button>
           <span className="w-full text-xs text-[var(--workbench-muted)]" id={`${id}-estimate-help`}>{t('timeTracking.estimate.help')}</span>
         </form>
       ) : (
         <div>
-          <button className="workbench-button-secondary min-h-8 px-3" onClick={() => setIsEditingEstimate(true)} type="button">
+          <button className="workbench-button-secondary min-h-8 px-3" onClick={() => setEstimateEditRevision(estimate?.revision ?? 0)} type="button">
             {estimate ? t('timeTracking.estimate.edit') : t('timeTracking.estimate.add')}
           </button>
         </div>
@@ -353,56 +389,44 @@ export function WorkItemTimePanel({
             </span>
           </p>
           {overlong ? <p className="text-xs font-semibold text-fg-red-700">{t('timeTracking.timer.overlong')}</p> : null}
-          {readOnly ? null : (
-            <div className="flex flex-wrap gap-2">
-              {overlong ? null : (
-                <button
-                  className="workbench-button-primary min-h-9 px-4"
-                  disabled={pendingAction !== undefined}
-                  onClick={() => { void runAction('stop', () => onStopTimer(timer), t('timeTracking.timer.stopped')) }}
-                  type="button"
-                >
-                  {t('timeTracking.timer.stop')}
-                </button>
-              )}
-              <button
-                className="workbench-button-secondary min-h-9 px-4"
-                disabled={pendingAction !== undefined}
-                onClick={() => {
-                  if (!window.confirm(t('timeTracking.timer.discardConfirm'))) return
-                  void runAction('discard', () => onDiscardTimer(timer), t('timeTracking.timer.discarded'))
-                }}
-                type="button"
-              >
-                {t('timeTracking.timer.discard')}
-              </button>
-            </div>
-          )}
+          {readOnly ? null : renderTimerActions(timer)}
         </div>
-      ) : readOnly ? null : (
-        <form
-          className="flex min-w-0 flex-wrap items-center gap-3"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const billable = new FormData(event.currentTarget).get('billable') === 'on'
-            void runAction('start', () => onStartTimer(billable), t('timeTracking.timer.started'))
-          }}
-        >
-          <button
-            className="workbench-button-primary min-h-9 px-4"
-            disabled={pendingAction !== undefined || isTimerElsewhere || timer === undefined}
-            type="submit"
-          >
-            {t('timeTracking.timer.start')}
-          </button>
-          <label className="flex items-center gap-2 text-sm font-medium text-[var(--workbench-text)]">
-            <input name="billable" type="checkbox" />
-            {t('timeTracking.form.billable')}
-          </label>
-          {isTimerElsewhere ? (
-            <p className="w-full text-xs font-medium text-[var(--workbench-muted)]">{t('timeTracking.timer.runningElsewhere')}</p>
+      ) : (
+        <>
+          {readOnly ? null : (
+            <form
+              className="flex min-w-0 flex-wrap items-center gap-3"
+              onSubmit={(event) => {
+                event.preventDefault()
+                const billable = new FormData(event.currentTarget).get('billable') === 'on'
+                void runAction('start', () => onStartTimer(billable), t('timeTracking.timer.started'))
+              }}
+            >
+              <button
+                className="workbench-button-primary min-h-9 px-4"
+                disabled={pendingAction !== undefined || isTimerElsewhere || timer === undefined}
+                type="submit"
+              >
+                {t('timeTracking.timer.start')}
+              </button>
+              <label className="flex items-center gap-2 text-sm font-medium text-[var(--workbench-text)]">
+                <input name="billable" type="checkbox" />
+                {t('timeTracking.form.billable')}
+              </label>
+            </form>
+          )}
+          {timer && isTimerElsewhere ? (
+            <div className="grid min-w-0 gap-2 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3" data-testid="work-item-time-elsewhere">
+              <p className="flex flex-wrap items-baseline gap-2 text-xs font-medium text-[var(--workbench-muted)]">
+                <span>{t('timeTracking.timer.runningElsewhere')}</span>
+                <span aria-hidden="true" className="tabular-nums">{formatElapsed(readTimerElapsedMilliseconds(timer.startedAt, now))}</span>
+              </p>
+              {overlong ? <p className="text-xs font-semibold text-fg-red-700">{t('timeTracking.timer.overlong')}</p> : null}
+              {/* The other item may no longer show a time section, so its timer can be stopped from here. */}
+              {renderTimerActions(timer)}
+            </div>
           ) : null}
-        </form>
+        </>
       )}
 
       <div aria-live="polite" role="status">

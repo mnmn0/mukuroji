@@ -77,7 +77,7 @@ export const timeTrackingMessages = {
   'timeTracking.timer.stopped': 'タイマーを停止し、下書きとして記録しました。',
   'timeTracking.timer.discarded': 'タイマーを破棄しました。',
   'timeTracking.timer.overlong': '7 日を超えたタイマーは記録できません。破棄してから手入力してください。',
-  'timeTracking.timer.runningElsewhere': '別のタスクでタイマーが動いています。先にそちらを止めてください。',
+  'timeTracking.timer.runningElsewhere': '別のタスクでタイマーが動いています。ここで停止するか破棄してから、新しいタイマーを開始してください。',
   'timeTracking.timesheet.title': '自分のタイムシート',
   'timeTracking.timesheet.loadError': 'タイムシートを読み込めませんでした。',
   'timeTracking.timesheet.partial': 'この週は一度に表示できる件数を超えているため、一覧と合計が一部だけです。',

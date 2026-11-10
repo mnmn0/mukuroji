@@ -396,7 +396,9 @@ describe('time tracking views', () => {
       />,
     )
     expect(otherTeam).toContain(t('timeTracking.timer.runningElsewhere'))
-    expect(otherTeam).not.toContain('Stop and record')
+    expect(otherTeam).not.toContain('data-testid="work-item-time-running"')
+    // The timer can still be stopped here, in case its own item no longer shows a time section.
+    expect(otherTeam).toMatch(/data-testid="work-item-time-elsewhere"[\s\S]*Stop and record[\s\S]*Discard/u)
   })
 
   test('the timesheet lists the week, rejection reasons, and the week-wide submit', () => {

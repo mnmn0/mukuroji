@@ -77,7 +77,7 @@ export const timeTrackingMessages = {
   'timeTracking.timer.stopped': 'Timer stopped and recorded as a draft.',
   'timeTracking.timer.discarded': 'Timer discarded.',
   'timeTracking.timer.overlong': 'A timer longer than 7 days cannot be recorded. Discard it and add the time manually.',
-  'timeTracking.timer.runningElsewhere': 'A timer is running on another task. Stop it first.',
+  'timeTracking.timer.runningElsewhere': 'A timer is running on another task. Stop or discard it here before starting a new one.',
   'timeTracking.timesheet.title': 'My timesheet',
   'timeTracking.timesheet.loadError': 'The timesheet could not be loaded.',
   'timeTracking.timesheet.partial': 'This week has more entries than can be shown at once, so the list and totals are incomplete.',
