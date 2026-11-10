@@ -96,7 +96,7 @@ describe('task-view surface adapters', () => {
     })).toBe(true)
   })
 
-  test('maps Project state through Team-qualified status identity and retains unrelated fields', () => {
+  test('maps Project state through Team and Type-qualified status identity and retains unrelated fields', () => {
     const definition = createProjectDefinition()
     const state = taskViewDefinitionToProjectState(definition)
 
@@ -112,7 +112,7 @@ describe('task-view surface adapters', () => {
       priorityFilter: 'high',
       searchQuery: 'launch',
       sortOrder: 'due-date-desc',
-      statusFilter: 'core:team:active',
+      statusFilter: 'core:team\u0000default\u0000active',
       workItemTypeFilter: 'all',
     })
 
@@ -120,14 +120,18 @@ describe('task-view surface adapters', () => {
       ...state,
       activeTab: 'calendar',
       searchQuery: '  release  ',
-      statusFilter: 'design:team:review',
+      statusFilter: 'design:team\u0000default\u0000review',
     })
     expect(next).toMatchObject({
       filters: {
         includeArchived: true,
         keyword: 'release',
         relationIds: ['blocks:launch'],
-        workflowStatuses: [{ teamId: 'design:team', statusId: 'review' }],
+        workflowStatuses: [{
+          teamId: 'design:team',
+          workItemTypeId: 'default',
+          statusId: 'review',
+        }],
       },
       layout: {
         mode: 'calendar',
@@ -181,8 +185,24 @@ describe('task-view surface adapters', () => {
       .map((task) => task.id)).toEqual(['bug-active'])
     expect(applyTaskViewDefinitionToTasks([defaultTask, bugTask], {
       ...definition,
-      filters: { workflowStatuses: [{ teamId: 'core:team', statusId: 'active' }] },
-    }).map((task) => task.id)).toEqual(['default-active', 'bug-active'])
+      filters: {
+        workflowStatuses: [{
+          teamId: 'core:team',
+          workItemTypeId: 'default',
+          statusId: 'active',
+        }],
+      },
+    }).map((task) => task.id)).toEqual(['default-active'])
+  })
+
+  test('drops a Project status control value that is not Team and Type-qualified', () => {
+    const definition = createProjectDefinition()
+    const next = projectStateToTaskViewDefinition(definition, {
+      ...taskViewDefinitionToProjectState(definition),
+      statusFilter: 'core:team:review',
+    })
+
+    expect(Object.hasOwn(next.filters, 'workflowStatuses')).toBe(false)
   })
 
   test('matches Work Item Type filters by Team and type identity', () => {
@@ -274,8 +294,8 @@ describe('task-view surface adapters', () => {
         priorities: ['high', 'low'],
         workflowCategories: ['started', 'unstarted'],
         workflowStatuses: [
-          { teamId: 'core:team', statusId: 'active' },
-          { teamId: 'design:team', statusId: 'review' },
+          { teamId: 'core:team', workItemTypeId: 'default', statusId: 'active' },
+          { teamId: 'design:team', workItemTypeId: 'default', statusId: 'review' },
         ],
       },
       layout: {
@@ -305,8 +325,8 @@ describe('task-view surface adapters', () => {
       filters: {
         ...createProjectDefinition().filters,
         workflowStatuses: [
-          { teamId: 'core:team', statusId: 'active' },
-          { teamId: 'design:team', statusId: 'review' },
+          { teamId: 'core:team', workItemTypeId: 'default', statusId: 'active' },
+          { teamId: 'design:team', workItemTypeId: 'default', statusId: 'review' },
         ],
       },
       layout: {
@@ -320,12 +340,12 @@ describe('task-view surface adapters', () => {
     const next = projectStateToTaskViewDefinition(definition, {
       ...taskViewDefinitionToProjectState(definition),
       sortOrder: 'due-date-asc',
-      statusFilter: 'core:team:review-ready',
+      statusFilter: 'core:team\u0000default\u0000review-ready',
     })
 
     expect(next.filters.workflowStatuses).toEqual([
-      { teamId: 'core:team', statusId: 'review-ready' },
-      { teamId: 'design:team', statusId: 'review' },
+      { teamId: 'core:team', workItemTypeId: 'default', statusId: 'review-ready' },
+      { teamId: 'design:team', workItemTypeId: 'default', statusId: 'review' },
     ])
     expect(next.layout.sort).toEqual([
       { direction: 'asc', field: 'dueDate' },
@@ -334,11 +354,20 @@ describe('task-view surface adapters', () => {
   })
 
   test('maps Team state without losing scope qualification or existing custom-field predicates', () => {
+    const projectDefinition = createProjectDefinition()
     const definition = {
-      ...createProjectDefinition(),
+      ...projectDefinition,
       surface: 'team',
       scope: { kind: 'team', teamId: 'core-team' },
-      layout: { ...createProjectDefinition().layout, mode: 'table' },
+      filters: {
+        ...projectDefinition.filters,
+        workflowStatuses: [{
+          teamId: 'core-team',
+          workItemTypeId: 'default',
+          statusId: 'active',
+        }],
+      },
+      layout: { ...projectDefinition.layout, mode: 'table' },
     } satisfies TaskViewDefinition
     const state = taskViewDefinitionToTeamState(definition)
 
@@ -349,7 +378,7 @@ describe('task-view surface adapters', () => {
         customFieldValue: 'high',
       },
       searchQuery: 'launch',
-      statusFilter: 'active',
+      statusFilter: 'core-team\u0000default\u0000active',
       viewMode: 'table',
       workItemTypeFilter: 'all',
     })
@@ -359,10 +388,17 @@ describe('task-view surface adapters', () => {
       viewMode: 'board',
     })
     expect(next.filters.workflowStatuses).toEqual([
-      { teamId: 'core-team', statusId: 'active' },
+      { teamId: 'core-team', workItemTypeId: 'default', statusId: 'active' },
     ])
     expect(next.filters.customFields).toEqual(definition.filters.customFields)
     expect(next.layout.mode).toBe('board')
+
+    const foreignStatusDefinition = { ...definition, filters: projectDefinition.filters }
+    const rescoped = teamStateToTaskViewDefinition(foreignStatusDefinition, {
+      ...taskViewDefinitionToTeamState(foreignStatusDefinition),
+      searchQuery: 'release',
+    })
+    expect(Object.hasOwn(rescoped.filters, 'workflowStatuses')).toBe(false)
   })
 
   test('round-trips type-qualified Team workflow status filters', () => {
@@ -407,8 +443,8 @@ describe('task-view surface adapters', () => {
         ],
         workflowCategories: ['started', 'backlog'],
         workflowStatuses: [
-          { teamId: 'core-team', statusId: 'active' },
-          { teamId: 'core-team', statusId: 'review' },
+          { teamId: 'core-team', workItemTypeId: 'default', statusId: 'active' },
+          { teamId: 'core-team', workItemTypeId: 'default', statusId: 'review' },
         ],
       },
       layout: { ...projectDefinition.layout, mode: 'table' },
@@ -650,7 +686,7 @@ describe('My Tasks task-view filtering', () => {
         projectIds: ['refero'],
         teamIds: ['core-team'],
         workflowCategories: ['started'],
-        workflowStatuses: [{ teamId: 'core-team', statusId: 'active' }],
+        workflowStatuses: [{ teamId: 'core-team', workItemTypeId: 'default', statusId: 'active' }],
       },
       layout: {
         ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board').layout,
@@ -722,16 +758,6 @@ describe('My Tasks task-view filtering', () => {
     } satisfies TaskViewDefinition
 
     expect(filterMyTasksByTaskViewDefinition([childTask], definition)).toEqual([])
-  })
-
-  test('matches legacy status filters only against workflow status IDs', () => {
-    const task = taskViewStoryTasks[0]
-    const definition = {
-      ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board'),
-      filters: { statuses: [task.statusCategory] },
-    } satisfies TaskViewDefinition
-
-    expect(filterMyTasksByTaskViewDefinition([task], definition)).toEqual([])
   })
 
   test('compares date-only upper bounds at day granularity', () => {
@@ -817,8 +843,8 @@ describe('My Tasks task-view filtering', () => {
         priorities: ['high', 'low'],
         relationIds: ['launch'],
         workflowStatuses: [
-          { teamId: 'core-team', statusId: 'active' },
-          { teamId: 'core-team', statusId: 'review' },
+          { teamId: 'core-team', workItemTypeId: 'default', statusId: 'active' },
+          { teamId: 'core-team', workItemTypeId: 'default', statusId: 'review' },
         ],
       },
       layout: {
@@ -898,7 +924,7 @@ function createProjectDefinition(): TaskViewDefinition {
       priorities: ['high'],
       relationIds: ['blocks:launch'],
       workflowCategories: ['started'],
-      workflowStatuses: [{ teamId: 'core:team', statusId: 'active' }],
+      workflowStatuses: [{ teamId: 'core:team', workItemTypeId: 'default', statusId: 'active' }],
     },
     layout: {
       mode: 'board',

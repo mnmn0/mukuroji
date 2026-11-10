@@ -4,9 +4,9 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type ResolvedWorkItemConfiguration,
   type PlanningSnapshot,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import type { TeamIssueDetail } from '../../issues/api'
-import type { CanonicalWorkItem } from '../api/tasks'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'

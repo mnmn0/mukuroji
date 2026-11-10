@@ -14,7 +14,6 @@ import {
   type PlanningEntity,
   type PlanningRevisionInput,
   type PlanningSnapshot,
-  type PlanningStatusUpdateInput,
   type PlanningUpdateCadence,
   type PlanningUpdateTargetSummary,
   type PlanningUpdate,
@@ -3835,35 +3834,6 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       requirePlanningMoveDoesNotInvalidateUpdateCadence(snapshot, entityId, input)
       const response = await workItemDependencies.planning.move(principal.directoryId, entityId, input, workItemState)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
-    } catch (error) {
-      return toPlanningErrorResponse(c, error)
-    }
-  })
-
-  /** Planning entity に member authored status update を追記します。 */
-  routeApp.post('/api/planning/entities/:entityId/status-updates', async (c) => {
-    const accessToken = readBearerAccessToken(c)
-    if (!accessToken) {
-      return c.json({ message: 'Bearer token is required.' }, 401)
-    }
-
-    try {
-      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      requireWorkspaceBusinessWrite(principal)
-      const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
-      const input = await readPlanningJson<PlanningStatusUpdateInput>(c.req)
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
-      const response = await workItemDependencies.planning.addStatusUpdate(
-        principal.directoryId,
-        entityId,
-        input,
-        principal.userKey,
-        workItemState,
-      )
-      return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }

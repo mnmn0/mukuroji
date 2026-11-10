@@ -1,8 +1,11 @@
-import type { WorkItemConfiguration, WorkItemSchedule } from '@mukuroji/contracts'
+import type {
+  WorkItemConfiguration,
+  WorkItemPriority,
+  WorkItemSchedule,
+} from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
-import type { WorkItemPriority } from '../../tasks/api'
 import { formatTaskScheduleRange, taskScheduleModeLabelKeys } from '../../tasks/model/taskSchedule'
 import { WorkItemConfigurationApiError } from '../../work-items/api'
 import {
@@ -27,24 +30,20 @@ export const issuePriorities = ['high', 'medium', 'low'] as const satisfies read
 /**
  * Resolves a Team Issue status filter without conflating equal IDs across Type workflows.
  *
- * @param statusFilter - Current UI value, including a legacy bare status ID.
+ * @param statusFilter - Current UI value: a Type-qualified status key or the all-status sentinel.
  * @param teamId - Team owning the current Issue surface.
  * @param statuses - Type-qualified statuses available to the Team.
- * @returns A valid Type-qualified filter value or the all-status sentinel.
+ * @returns The filter when it names an available status, otherwise the all-status sentinel.
  */
 export function resolveTeamIssueStatusFilter(
   statusFilter: string,
   teamId: string,
   statuses: readonly WorkItemTypeWorkflowStatus[],
 ): string {
-  if (statusFilter === 'all') return 'all'
-  if (statuses.some(({ status, workItemTypeId }) =>
+  return statusFilter !== 'all' && statuses.some(({ status, workItemTypeId }) =>
     createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id) === statusFilter
-  )) return statusFilter
-  const legacyMatches = statuses.filter(({ status }) => status.id === statusFilter)
-  const [legacyMatch] = legacyMatches
-  return legacyMatches.length === 1 && legacyMatch
-    ? createWorkItemTypeWorkflowStatusKey(teamId, legacyMatch.workItemTypeId, legacyMatch.status.id)
+  )
+    ? statusFilter
     : 'all'
 }
 
