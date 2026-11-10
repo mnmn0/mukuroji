@@ -736,11 +736,14 @@ bun --filter cdk cdk deploy Mukuroji \
 - `refero` の Work Item 10 件
 - demo Project 4 件の `PROJECT_MEMBER#<projectId>#<lowercase email>` / `role=manager`（owner を各 demo Project の manager にする）
 
-owner が demo member と同じ email でも最後に manager へ収束します。
+owner の manager row は既存の role を上書きしません。`InitialOwnerEmail` には demo member の email
+（`@example.com`）を使わないでください。同じ email だと owner は demo seed の role のままになり、
+`MUKUROJI_DEMO_DATA=true` の validator が失敗します。
 
-demo data の custom resource は作成時だけ書き込み、削除時には何もしません。demo data を有効にして
-作った stack で後から無効にしても、resource が消えるだけで投入済みの row は残ります。local の Floci
-環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
+`SeedWorkspaceDemoMembers` は stack の作成時と更新時に書き込みます（既存の role と status は保持します）。
+それ以外の demo data の custom resource は作成時だけ書き込みます。どれも削除時には何もしません。
+demo data を有効にして作った stack で後から無効にしても、resource が消えるだけで投入済みの row は
+残ります。local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
