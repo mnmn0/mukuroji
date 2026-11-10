@@ -1,7 +1,10 @@
-import type { WorkflowStatusDefinition, WorkItemConfiguration } from '@mukuroji/contracts'
+import type {
+  WorkflowStatusDefinition,
+  WorkItemConfiguration,
+  WorkItemPriority,
+} from '@mukuroji/contracts'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type TeamIssue } from '../api'
-import type { WorkItemPriority } from '../../tasks/api'
 import {
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,

@@ -1,15 +1,16 @@
 /* eslint-disable react-refresh/only-export-components -- Work Item test ID helpers share this component module. */
 import {
+  type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE,
   type TaskViewDensity,
   type WorkflowStatusDefinition,
   type WorkItemConfiguration,
+  type WorkItemPriority,
 } from '@mukuroji/contracts'
 import { useRef, type DragEvent } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { ViewportAnchorPoint } from '../../shared/lib/viewportAnchor'
-import type { CanonicalWorkItem, WorkItemPriority } from '../../tasks/api'
 import {
   formatCustomFieldValue,
   isCustomFieldApplicable,

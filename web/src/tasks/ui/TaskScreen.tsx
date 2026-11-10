@@ -20,6 +20,8 @@ import {
   type WorkItemScheduleOperation,
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyPatch,
+  type CreateWorkItemInput,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import {
   useCallback,
@@ -162,7 +164,6 @@ type RetainedDetailSnapshot = {
   task: CanonicalWorkItem
 }
 
-import type { CreateWorkItemInput, CanonicalWorkItem } from '../api/tasks'
 import {
   createBulkOperationSelection,
   createBulkProjectOptions,

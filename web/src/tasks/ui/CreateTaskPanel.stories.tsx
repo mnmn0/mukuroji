@@ -1,4 +1,8 @@
-import { DEFAULT_WORK_ITEM_TYPE, type WorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  type CreateWorkItemInput,
+  DEFAULT_WORK_ITEM_TYPE,
+  type WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
@@ -6,7 +10,6 @@ import type { ProjectMember } from '../../projects/api'
 import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
-import type { CreateWorkItemInput } from '../api/tasks'
 import {
   createDefaultDateRangeTaskSchedule,
   createDefaultUnscheduledTaskSchedule,

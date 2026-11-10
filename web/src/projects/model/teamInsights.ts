@@ -1,5 +1,4 @@
-import { deriveWorkItemScheduleDueDate } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../../tasks/api'
+import { type CanonicalWorkItem, deriveWorkItemScheduleDueDate } from '@mukuroji/contracts'
 import {
   createWorkspaceActionQueue,
   filterTasksByTeamProjectIds,

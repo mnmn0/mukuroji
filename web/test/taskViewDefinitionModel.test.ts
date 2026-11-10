@@ -11,8 +11,7 @@ const builtInDefinition = {
   scope: { kind: 'project', projectId: 'project-1', teamId: 'team-1' },
   filters: {
     keyword: 'built in',
-    statuses: ['todo'],
-    workflowStatuses: [{ teamId: 'team-1', statusId: 'todo' }],
+    workflowStatuses: [{ teamId: 'team-1', workItemTypeId: 'task', statusId: 'todo' }],
   },
   layout: {
     mode: 'table',
@@ -117,8 +116,7 @@ describe('task view definition migration and sanitization', () => {
     layoutModes: ['table', 'board'],
     fields: ['title', 'status', 'custom:visible'],
     columns: ['title', 'status'],
-    workflowStatuses: [{ teamId: 'team-1', statusId: 'todo' }],
-    legacyStatusIds: ['todo'],
+    workflowStatuses: [{ teamId: 'team-1', workItemTypeId: 'task', statusId: 'todo' }],
     requiredColumns: ['status'],
     fallback: builtInDefinition,
   } satisfies Parameters<typeof sanitizeTaskViewDefinition>[1]
@@ -128,10 +126,9 @@ describe('task view definition migration and sanitization', () => {
       surface: 'project',
       scope: { kind: 'project', projectId: 'project-1', teamId: 'team-1' },
       filters: {
-        statuses: ['todo', 'removed-status'],
         workflowStatuses: [
-          { teamId: 'team-1', statusId: 'todo' },
-          { teamId: 'team-1', statusId: 'deleted' },
+          { teamId: 'team-1', workItemTypeId: 'task', statusId: 'todo' },
+          { teamId: 'team-1', workItemTypeId: 'task', statusId: 'deleted' },
         ],
         customFields: [
           { fieldId: 'visible', operator: 'equals', value: 'high' },
@@ -153,9 +150,8 @@ describe('task view definition migration and sanitization', () => {
     }, options)
 
     expect(result.didFallback).toBe(false)
-    expect(result.definition.filters.statuses).toEqual(['todo'])
     expect(result.definition.filters.workflowStatuses).toEqual([
-      { teamId: 'team-1', statusId: 'todo' },
+      { teamId: 'team-1', workItemTypeId: 'task', statusId: 'todo' },
     ])
     expect(result.definition.filters.customFields?.map((filter) => filter.fieldId))
       .toEqual(['visible'])
@@ -183,14 +179,14 @@ describe('task view definition migration and sanitization', () => {
     expect(result.warnings.every((warning) => warning.referenceId === undefined)).toBe(true)
   })
 
-  test('keeps legacy status filters broad while checking type-qualified filters exactly', () => {
+  test('checks status filters against the exact Team and Work Item Type workflow', () => {
     const result = sanitizeTaskViewDefinition({
       ...builtInDefinition,
       filters: {
         workflowStatuses: [
-          { teamId: 'team-1', statusId: 'todo' },
           { teamId: 'team-1', workItemTypeId: 'bug', statusId: 'todo' },
           { teamId: 'team-1', workItemTypeId: 'feature', statusId: 'todo' },
+          { teamId: 'team-2', workItemTypeId: 'bug', statusId: 'todo' },
         ],
       },
     }, {
@@ -201,12 +197,22 @@ describe('task view definition migration and sanitization', () => {
     })
 
     expect(result.definition.filters.workflowStatuses).toEqual([
-      { teamId: 'team-1', statusId: 'todo' },
       { teamId: 'team-1', workItemTypeId: 'bug', statusId: 'todo' },
     ])
     expect(result.warnings).toEqual([
       expect.objectContaining({ code: 'deleted-workflow-status', section: 'filter' }),
     ])
+  })
+
+  test('does not interpret unqualified status filters from a stored definition', () => {
+    for (const filters of [
+      { workflowStatuses: [{ teamId: 'team-1', statusId: 'todo' }] },
+      { statuses: ['todo'] },
+    ]) {
+      const result = sanitizeTaskViewDefinition({ ...builtInDefinition, filters }, options)
+
+      expect(result.definition.filters).toEqual(builtInDefinition.filters)
+    }
   })
 
   test('preserves Work Item Type filters while sanitizing saved definitions', () => {
