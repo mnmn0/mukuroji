@@ -140,7 +140,7 @@ purpose を指定しない endpoint は `automation` である。`triage` endpoi
 `triageRouting.teamId` を持ち、payload から Team、Project、owner、SLA を変えることはできない。
 Triage は record key に使える Team ID（英数字で始まり `A-Z a-z 0-9 . _ : -` のみ、200 文字以内）だけを
 扱う。Team / Project の ID は作成時に ASCII 値として採番する（主表示名 `nameJa` が ASCII の英数字だけで書かれて
-いればその slug、次に `nameEn` の slug、どちらも ASCII でなければ `team-<n>` / `project-<n>`）ため、日本語名の Team も
+いればその slug、次に `nameEn` の slug、どちらも ASCII でなければ `team-<12 桁の乱数 hex>` / `project-<12 桁の乱数 hex>`）ため、日本語名の Team も
 この文法に収まり、Triage、Request form の routing、共有からの handoff をそのまま使える。
 この採番より前に作られた非 ASCII の Team ID への routing だけは、作成時に
 `400 AutomationInboundWebhookTriageTeamUnsupported` で拒否する。

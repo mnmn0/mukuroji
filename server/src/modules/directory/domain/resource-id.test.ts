@@ -19,15 +19,33 @@ describe('createDirectoryResourceId', () => {
     expect(createDirectoryResourceId('team', ['開発部 API', 'Dev API'], [])).toBe('dev-api')
   })
 
-  test('numbers the ID by kind when no name is ASCII', () => {
-    expect(createDirectoryResourceId('team', ['開発部', '開発部'], [])).toBe('team-1')
-    expect(createDirectoryResourceId('project', ['新規プロジェクト', '新規プロジェクト'], [])).toBe('project-1')
-    expect(createDirectoryResourceId('team', ['開発部 API', '開発部 API'], [])).toBe('team-1')
-    expect(createDirectoryResourceId('team', ['・・・', '---'], [])).toBe('team-1')
+  test('uses a random kind-prefixed ID when no name is ASCII', () => {
+    const fixedSuffix = () => '0a1b2c3d4e5f'
+
+    expect(createDirectoryResourceId('team', ['開発部', '開発部'], [], fixedSuffix)).toBe('team-0a1b2c3d4e5f')
+    expect(
+      createDirectoryResourceId('project', ['新規プロジェクト', '新規プロジェクト'], [], fixedSuffix),
+    ).toBe('project-0a1b2c3d4e5f')
+    expect(createDirectoryResourceId('team', ['開発部 API', '開発部 API'], [], fixedSuffix)).toBe('team-0a1b2c3d4e5f')
+    expect(createDirectoryResourceId('team', ['・・・', '---'], [], fixedSuffix)).toBe('team-0a1b2c3d4e5f')
+    expect(createDirectoryResourceId('team', ['開発部', '開発部'], [])).toMatch(/^team-[0-9a-f]{12}$/u)
+  })
+
+  test('gives concurrent creations from the same snapshot different fallback IDs', () => {
+    const ids = new Set(
+      Array.from({ length: 50 }, () => createDirectoryResourceId('project', ['新規', '新規'], [])),
+    )
+
+    expect(ids.size).toBe(50)
   })
 
   test('skips IDs already used in the directory', () => {
-    expect(createDirectoryResourceId('team', ['開発部', '開発部'], ['team-1', 'team-2'])).toBe('team-3')
+    const suffixes = ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc']
+    const nextSuffix = () => suffixes.shift() ?? 'dddddddddddd'
+
+    expect(
+      createDirectoryResourceId('team', ['開発部', '開発部'], ['team-aaaaaaaaaaaa', 'team-bbbbbbbbbbbb'], nextSuffix),
+    ).toBe('team-cccccccccccc')
     expect(createDirectoryResourceId('team', ['Core Team', 'Core Team'], ['core-team'])).toBe('core-team-2')
     expect(
       createDirectoryResourceId('team', ['Core Team', 'Core Team'], ['core-team', 'core-team-2']),
@@ -49,6 +67,7 @@ describe('createDirectoryResourceId', () => {
       usedIds.push(id)
       expect(isTriageTeamIdentifier(id)).toBe(true)
     }
-    expect(usedIds).toEqual(['team-1', 'team-2', 'team-3', 'team-4', 'qa'])
+    expect(usedIds.at(-1)).toBe('qa')
+    expect(new Set(usedIds).size).toBe(names.length)
   })
 })
