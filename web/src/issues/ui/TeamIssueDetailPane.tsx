@@ -31,6 +31,8 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
+import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import {
   isCustomFieldApplicable,
   parseCustomFieldFormData,
@@ -1039,6 +1041,19 @@ function IssueDetailContent({
             />
           </>
         )
+      case 'time':
+        return accessToken ? (
+          <WorkItemTimePanelContainer
+            accessToken={accessToken}
+            key={issue.teamId + ':' + issue.id + ':time'}
+            locale={locale}
+            {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
+            readOnly={isIssueReadOnly}
+            teamId={issue.teamId}
+            timesheetHref={createTeamTimeTrackingPath(issue.teamId)}
+            workItemId={issue.id}
+          />
+        ) : null
       case 'activity':
         return collaboration ? (
           <>

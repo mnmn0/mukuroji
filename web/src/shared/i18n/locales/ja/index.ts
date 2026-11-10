@@ -23,6 +23,7 @@ import { codingAgentGuideMessages } from './coding-agent-guide'
 import { collectionsMessages } from './collections'
 import { agentSettingsMessages } from './agent-settings'
 import { factoryBoardMessages } from './factory-board'
+import { timeTrackingMessages } from './time-tracking'
 
 /**
  * Complete Japanese message dictionary assembled from domain modules.
@@ -54,6 +55,7 @@ export const jaMessages = {
   ...collectionsMessages,
   ...agentSettingsMessages,
   ...factoryBoardMessages,
+  ...timeTrackingMessages,
 } as const
 
 /**

@@ -5272,6 +5272,59 @@ test.describe('authenticated task page', () => {
     await expect(issueOwner).toHaveAccessibleDescription(ownerHelp)
   })
 
+  test('Issue #347: Work Item の工数 section でタイマーを開始・停止して記録する', async ({ page }) => {
+    const entries: Record<string, unknown>[] = []
+    let timer: Record<string, unknown> | null = null
+    const idempotencyKeys: string[] = []
+    await page.route((url) => url.pathname.startsWith('/api/time-tracking/timers'), async (route) => {
+      const request = route.request()
+      const key = request.headers()['idempotency-key']
+      if (key) idempotencyKeys.push(key)
+      if (request.method() === 'GET') return route.fulfill({ json: { timer } })
+      if (!timer) return route.fulfill({ status: 404, json: { code: 'RunningTimerNotFound' } })
+      const stopped = timer
+      timer = null
+      const entry = {
+        schemaVersion: 1, id: 'entry-timer', workspaceId: 'workspace-demo', teamId: 'core-team', projectId: 'refero',
+        workItemId: stopped.workItemId, userId: 'demo@example.com', startAt: stopped.startedAt,
+        endAt: new Date(Date.parse(String(stopped.startedAt)) + 25 * 60_000).toISOString(), durationMinutes: 25,
+        billable: false, currency: 'USD', status: 'draft', source: 'timer', revision: 1,
+        createdAt: '2026-11-10T01:00:00.000Z', updatedAt: '2026-11-10T01:00:00.000Z',
+      }
+      entries.push(entry)
+      return route.fulfill({ json: { entry } })
+    })
+    await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') || url.pathname.includes('/time-estimate') || url.pathname === '/api/teams/core-team/timers', async (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const key = request.headers()['idempotency-key']
+      if (key) idempotencyKeys.push(key)
+      if (path === '/api/teams/core-team/timers') {
+        const input = request.postDataJSON()
+        timer = { schemaVersion: 1, id: 'timer-1', workspaceId: 'workspace-demo', teamId: 'core-team', projectId: 'refero', workItemId: input.workItemId, userId: 'demo@example.com', startedAt: new Date(Date.now() - 60_000).toISOString(), billable: input.billable, revision: 1, updatedAt: new Date().toISOString() }
+        return route.fulfill({ status: 201, json: { timer } })
+      }
+      if (path.endsWith('/time-estimate')) return route.fulfill({ json: { estimate: null } })
+      if (path.endsWith('/time-tracking/summary')) {
+        return route.fulfill({ json: { totalMinutes: 25 * entries.length, groups: entries.length ? [{ key: 'wireframe', label: 'wireframe', minutes: 25, billableMinutes: 0, entryCount: 1 }] : [] } })
+      }
+      if (path.endsWith('/time-entries')) return route.fulfill({ json: { entries } })
+      return route.fallback()
+    })
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const panel = page.getByTestId('team-issue-detail-pane').getByTestId('work-item-time-panel')
+    await expect(panel.getByText('このタスクの記録はまだありません。')).toBeVisible()
+    await panel.getByRole('button', { name: 'タイマー開始' }).click()
+    await expect(panel.getByTestId('work-item-time-running')).toContainText('計測中')
+    await panel.getByRole('button', { name: '停止して記録' }).click()
+    await expect(panel.getByRole('status').filter({ hasText: 'タイマーを停止し、下書きとして記録しました。' })).toBeVisible()
+    await expect(panel.getByTestId('time-entry-row')).toContainText('0:25')
+    await expect(panel.getByTestId('time-entry-row')).toContainText('タイマー')
+    await expect(panel.getByTestId('work-item-time-totals')).toContainText('0:25')
+    await expect(panel.getByRole('button', { name: 'タイマー開始' })).toBeEnabled()
+    expect(idempotencyKeys).toHaveLength(2)
+  })
+
   test('Issue #239: 責任者とは別に Contributor を計画して保存する', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workspaceWorkItemConfiguration: {

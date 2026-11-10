@@ -92,7 +92,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'triage' | 'factory' | 'issues' | 'projects' | 'members'
+export type SidebarTeamViewId = 'overview' | 'triage' | 'factory' | 'issues' | 'timesheet' | 'projects' | 'members'
 
 /**
  * 新規作成モーダルで選択できる作成対象です。
@@ -315,6 +315,10 @@ export type SidebarLabels = {
    * Team Factory board view label.
    */
   factoryBoard: string
+  /**
+   * Team time tracking view label.
+   */
+  timeTracking: string
   /**
    * Issue ビューの文言です。
    */
@@ -630,6 +634,7 @@ const defaultLabels: SidebarLabels = {
   teamOverview: 'チーム概要',
   triage: 'Triage',
   factoryBoard: 'Factory board',
+  timeTracking: '工数',
   issues: 'Issues',
   members: 'メンバー',
   projectCount: (count) => `プロジェクト ${count}`,
@@ -2242,6 +2247,13 @@ function CurrentTeamNavigation({
         onClick={() => onSelectTeamView(team.id, 'issues')}
       />
       <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'timesheet'}
+        collapsed={collapsed}
+        icon={ClockIcon}
+        label={labels.timeTracking}
+        onClick={() => onSelectTeamView(team.id, 'timesheet')}
+      />
+      <SubNavButton
         active={isTeamActive && activeTeamViewId === 'projects'}
         collapsed={collapsed}
         icon={ProjectGridIcon}
@@ -2553,6 +2565,21 @@ function UsersIcon({ className }: SidebarIconProps) {
       <circle cx="9.5" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </SvgBase>
+  )
+}
+
+/**
+ * Renders the clock icon used for Team time tracking.
+ *
+ * @param props - Icon class name.
+ * @returns Icon.
+ */
+function ClockIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v4l3 2" />
     </SvgBase>
   )
 }

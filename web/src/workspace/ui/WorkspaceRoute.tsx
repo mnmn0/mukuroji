@@ -220,6 +220,12 @@ const teamFactoryBoardRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'factoryBoard.title',
   descriptionKey: 'factoryBoard.description',
 }
+const teamTimeTrackingRouteMetadata: WorkspaceRouteMetadata = {
+  activeTeamViewId: 'timesheet',
+  eyebrowKey: 'timeTracking.page.eyebrow',
+  titleKey: 'timeTracking.page.title',
+  descriptionKey: 'timeTracking.page.description',
+}
 const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -794,6 +800,15 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...teamFactoryBoardRouteMetadata,
       activeTeamId: decodeWorkspaceRouteParameter(teamFactoryBoardMatch.params.teamId),
+    }
+  }
+
+  const teamTimeTrackingMatch = matchPath('/teams/:teamId/timesheet', pathname)
+
+  if (teamTimeTrackingMatch?.params.teamId) {
+    return {
+      ...teamTimeTrackingRouteMetadata,
+      activeTeamId: decodeWorkspaceRouteParameter(teamTimeTrackingMatch.params.teamId),
     }
   }
 

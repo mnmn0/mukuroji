@@ -1,0 +1,119 @@
+import { useMemo } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router'
+import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
+import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
+import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
+import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
+import type { ProjectDirectoryProject } from '../../projects/api'
+import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
+import { createTranslator } from '../../shared/i18n/i18n'
+import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
+import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
+
+const emptyTeamProjects: ProjectDirectoryProject[] = []
+
+/**
+ * Renders a Team's time tracking: the member's weekly timesheet and the manager's approval queue.
+ *
+ * The view and week live in the URL so a reload or shared link opens the same week.
+ *
+ * @returns Time tracking content inside the Workspace shell.
+ */
+export function TeamTimeTrackingPage() {
+  const workspace = useWorkspaceRouteContext()
+  const teamId = useParams().teamId
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const view: TimeTrackingView = searchParams.get('view') === 'approvals' ? 'approvals' : 'timesheet'
+  const weekStart = resolveWeekStart(searchParams.get('week'))
+  const activeTeam = workspace.teams.find((team) => team.id === teamId)
+  const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
+  const accessToken = enabled ? workspace.accessToken : undefined
+  const workItems = useWorkspaceWorkItems(accessToken, enabled)
+  const projectMembers = useWorkspaceProjectMembers(
+    accessToken,
+    activeTeam?.id,
+    activeTeam?.projects ?? emptyTeamProjects,
+    enabled && view === 'approvals',
+  )
+  const workItemOptions = useMemo(
+    () => (workItems.data ?? [])
+      .filter((item) => item.teamId === teamId && !item.archivedAt)
+      .map((item) => ({ id: item.id, title: item.title }))
+      .sort((left, right) => left.title.localeCompare(right.title)),
+    [teamId, workItems.data],
+  )
+  const workItemTitles = useMemo(
+    () => Object.fromEntries((workItems.data ?? [])
+      .filter((item) => item.teamId === teamId)
+      .map((item) => [item.id, item.title])),
+    [teamId, workItems.data],
+  )
+  const memberNames = useMemo(() => {
+    const names: Record<string, string> = {}
+    for (const access of projectMembers.data?.members ?? []) {
+      names[access.member.id] = access.member.name ?? access.member.email ?? access.member.id
+    }
+    return names
+  }, [projectMembers.data?.members])
+
+  /**
+   * Opens a view and week through the URL.
+   *
+   * @param nextView - View to show.
+   * @param nextWeekStart - Monday of the week to show.
+   */
+  const open = (nextView: TimeTrackingView, nextWeekStart: string) => {
+    void navigate(createTeamTimeTrackingPath(teamId ?? '', nextView, nextWeekStart), { replace: true })
+  }
+
+  /**
+   * Moves the week shown; 0 returns to the current week.
+   *
+   * @param weeks - Weeks to move.
+   */
+  const moveWeek = (weeks: number) => {
+    open(view, weeks === 0 ? resolveWeekStart(null) : shiftWeek(weekStart, weeks))
+  }
+
+  if (!teamId) return null
+
+  return (
+    <WorkspaceRouteContent sessionErrors={[workItems.error, projectMembers.error]}>
+      <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
+        <TimeTrackingViewTabs
+          getHref={(candidate) => createTeamTimeTrackingPath(teamId, candidate, weekStart)}
+          onSelect={(candidate) => open(candidate, weekStart)}
+          t={t}
+          view={view}
+        />
+        {view === 'approvals' ? (
+          <TimeApprovalQueueContainer
+            accessToken={accessToken}
+            key={`${teamId}:approvals`}
+            locale={workspace.locale}
+            memberNames={memberNames}
+            onMoveWeek={moveWeek}
+            teamId={teamId}
+            weekStart={weekStart}
+            workItemTitles={workItemTitles}
+          />
+        ) : (
+          <PersonalTimesheetContainer
+            accessToken={accessToken}
+            key={`${teamId}:timesheet`}
+            locale={workspace.locale}
+            {...(workspace.userKey ? { memberKey: workspace.userKey } : {})}
+            onMoveWeek={moveWeek}
+            teamId={teamId}
+            weekStart={weekStart}
+            workItemOptions={workItemOptions}
+          />
+        )}
+      </div>
+    </WorkspaceRouteContent>
+  )
+}

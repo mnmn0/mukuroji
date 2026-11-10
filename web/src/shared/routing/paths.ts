@@ -359,3 +359,19 @@ export function createTeamTriagePath(teamId: string, entryId?: string) {
 export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
   return `/teams/${encodeURIComponent(teamId)}/${viewId}`
 }
+
+/**
+ * Creates the URL of a Team's time tracking view for one week.
+ *
+ * @param teamId - Team identifier.
+ * @param view - `timesheet` for the member's week or `approvals` for the manager queue.
+ * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week.
+ * @returns Same-origin path.
+ */
+export function createTeamTimeTrackingPath(teamId: string, view: 'timesheet' | 'approvals' = 'timesheet', weekStart?: string) {
+  const query = new URLSearchParams()
+  if (view === 'approvals') query.set('view', 'approvals')
+  if (weekStart) query.set('week', weekStart)
+  const encoded = query.toString()
+  return `/teams/${encodeURIComponent(teamId)}/timesheet${encoded ? `?${encoded}` : ''}`
+}

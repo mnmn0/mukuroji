@@ -2040,7 +2040,7 @@ function readBoundedText(value: unknown, label: string, maxLength: number): stri
 function isWorkItemDetailSectionId(value: unknown): value is WorkItemDetailSectionId {
   return value === 'overview' || value === 'description' || value === 'custom-fields' ||
     value === 'workflow' || value === 'schedule' || value === 'relations' ||
-    value === 'files' || value === 'activity'
+    value === 'files' || value === 'time' || value === 'activity'
 }
 
 function readCustomFieldDefinitions(value: unknown) {

@@ -41,7 +41,8 @@ import {
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
-import { createTeamTriagePath } from '../../shared/routing/paths'
+import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
+import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
 import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
@@ -1333,6 +1334,19 @@ export function TaskDetailPane({
             />
           </>
         )
+      case 'time':
+        return accessToken && task.teamId ? (
+          <WorkItemTimePanelContainer
+            accessToken={accessToken}
+            key={task.teamId + ':' + task.id + ':time'}
+            locale={locale}
+            {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
+            readOnly={isReadOnly}
+            teamId={task.teamId}
+            timesheetHref={createTeamTimeTrackingPath(task.teamId)}
+            workItemId={task.id}
+          />
+        ) : null
       case 'activity':
         return collaboration ? (
           <fieldset className="contents" disabled={isIssueSaving || isBulkOperationPending}>
