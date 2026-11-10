@@ -232,22 +232,26 @@ implements EnterpriseSessionActivityClient {
         ConsistentRead: true,
       }))
       const previous = response.Item
+      const previousLastSeenAt: unknown = previous?.lastSeenAt
       if (
         previous?.workspaceId !== input.workspaceId ||
-        !Number.isSafeInteger(previous.lastSeenAt)
+        typeof previousLastSeenAt !== 'number' ||
+        !Number.isSafeInteger(previousLastSeenAt)
       ) {
         return false
       }
-      const previousExpiresAt = Number.isSafeInteger(previous.expiresAt)
-        ? previous.expiresAt as number
-        : input.expiresAt
+      const storedExpiresAt: unknown = previous.expiresAt
+      const previousExpiresAt =
+        typeof storedExpiresAt === 'number' && Number.isSafeInteger(storedExpiresAt)
+          ? storedExpiresAt
+          : input.expiresAt
       await this.documentClient.send(new PutCommand({
         TableName: this.tableName,
         Item: {
           connectionId: `HTTP_SESSION#${input.workspaceId}#${input.sessionId}`,
           itemType: 'http-session-activity',
           workspaceId: input.workspaceId,
-          lastSeenAt: previous.lastSeenAt as number,
+          lastSeenAt: previousLastSeenAt,
           authenticationMethods: readAuthenticationMethods(previous.authenticationMethods, []),
           expiresAt: Math.max(previousExpiresAt, input.expiresAt),
         },

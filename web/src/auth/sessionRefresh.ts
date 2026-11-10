@@ -18,11 +18,29 @@ const revokeTimeoutMilliseconds = 3_000
 /** Outcome of one refresh attempt. */
 type RefreshOutcome =
   /** The session now holds a fresh access token. */
-  | { status: 'refreshed'; session: AuthSession }
+  | {
+    /** Marks a successful refresh. */
+    status: 'refreshed'
+    /** Stored session with the fresh access token. */
+    session: AuthSession
+  }
   /** The refresh token no longer works; the user has to sign in again. */
-  | { status: 'rejected' }
+  | {
+    /** Marks a refresh the server refused for good. */
+    status: 'rejected'
+  }
   /** The refresh could not reach a verdict, for example offline or a server failure. */
-  | { status: 'unavailable' }
+  | {
+    /** Marks a refresh that may succeed when tried again. */
+    status: 'unavailable'
+  }
+
+/**
+ * Statuses with which the refresh endpoint refuses a session for good: a malformed request
+ * (400), a revoked or expired refresh token (401), a member without access (403), and a
+ * Workspace that now requires SSO (409). Any other failure leaves the session in place.
+ */
+const definitiveRefreshRejections = new Set([400, 401, 403, 409])
 
 /**
  * Refreshes already running in this tab, keyed by refresh token, so requests of one session
@@ -101,12 +119,14 @@ async function requestRefresh(session: AuthSession): Promise<RefreshOutcome> {
     return { status: 'unavailable' }
   }
 
-  if (response.status >= 500 || response.status === 429) {
+  if (!response.ok && !definitiveRefreshRejections.has(response.status)) {
     return { status: 'unavailable' }
   }
   const body: unknown = await response.json().catch(() => undefined)
   const renewed = response.ok ? readRefreshedSession(body, session) : undefined
   if (!renewed) {
+    // A success the client cannot read, for example from a proxy, says nothing about the token.
+    if (response.ok) return { status: 'unavailable' }
     // Only remove the session that was refreshed: another account may be signed in too.
     if (session.refreshToken) removeStoredAuthSession(session.refreshToken)
     return { status: 'rejected' }

@@ -333,3 +333,37 @@ test('never hands one account the refresh of another account running at the same
     `Bearer ${token('other-account', 'access-10')}`,
   ].sort())
 })
+
+test('clears the session when the Workspace now requires SSO', async () => {
+  const session = storeSession()
+  server = (request) => request.url === '/api/auth/refresh'
+    ? Response.json({ code: 'SsoRequired' }, { status: 409 })
+    : Response.json({ message: 'expired' }, { status: 401 })
+
+  const response = await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  })
+
+  expect(response.status).toBe(401)
+  expect(readStoredAuthSession()).toBeNull()
+})
+
+test('keeps the session when the refresh answers with an unreadable success or an unexpected status', async () => {
+  const session = storeSession()
+  let refreshResponse = () => new Response('<html>signed in</html>', { status: 200 })
+  server = (request) => request.url === '/api/auth/refresh'
+    ? refreshResponse()
+    : Response.json({ message: 'expired' }, { status: 401 })
+
+  const malformed = await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  })
+  refreshResponse = () => new Response(null, { status: 404 })
+  const notFound = await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  })
+
+  expect(malformed.status).toBe(503)
+  expect(notFound.status).toBe(503)
+  expect(readStoredAuthSession()).toEqual(session)
+})
