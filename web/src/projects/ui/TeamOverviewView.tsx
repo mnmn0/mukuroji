@@ -1,11 +1,10 @@
-import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import type { CanonicalWorkItem, ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   MetricCard,
   ProgressBar,
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   isOpenWorkItem,
   resolveWorkItemTitle,

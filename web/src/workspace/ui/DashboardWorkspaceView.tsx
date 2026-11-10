@@ -1,4 +1,5 @@
 import type {
+  CanonicalWorkItem,
   FocusQueueResponse,
   PlanningHealth,
   PlanningUpdateState,
@@ -14,7 +15,6 @@ import {
   ProgressBar,
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   calculateWorkItemSummaryProgress,
   createWorkspacePortfolioProjects,

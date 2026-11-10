@@ -2,7 +2,7 @@ import type { KeyboardEvent, ReactNode } from 'react'
 import { ChevronIcon } from '../../shared/ui/icons'
 import { MobileSidebarButton } from '../../shared/ui/sidebar'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { CanonicalWorkItem } from '../api/tasks'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import {
   createTaskSummary,
   taskTabs,

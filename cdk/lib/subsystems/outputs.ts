@@ -128,18 +128,15 @@ export type StackOutputResources = {
   readonly scheduledJobsDlq: sqs.IQueue;
   /** Stream-only tenant lifecycle starter and retention worker. */
   readonly tenantOperationFunction: lambda.IFunction;
-  /** Queued export artifact resource owner. */
-  readonly tenantExportCapabilityFunction: lambda.IFunction;
-  /** Queued access-revocation resource owner. */
-  readonly tenantAccessCapabilityFunction: lambda.IFunction;
-  /** Queued member-anonymization resource owner. */
-  readonly tenantIdentityCapabilityFunction: lambda.IFunction;
-  /** Queued data-deletion resource owner. */
-  readonly tenantDataCapabilityFunction: lambda.IFunction;
-  /** Queued secret-deletion resource owner. */
-  readonly tenantSecretsCapabilityFunction: lambda.IFunction;
-  /** Queued closure-verification resource owner. */
-  readonly tenantVerificationCapabilityFunction: lambda.IFunction;
+  /** Tenant export and closure resource owners, present only when that module is deployed. */
+  readonly tenantLifecycle: {
+    readonly tenantExportCapabilityFunction: lambda.IFunction;
+    readonly tenantAccessCapabilityFunction: lambda.IFunction;
+    readonly tenantIdentityCapabilityFunction: lambda.IFunction;
+    readonly tenantDataCapabilityFunction: lambda.IFunction;
+    readonly tenantSecretsCapabilityFunction: lambda.IFunction;
+    readonly tenantVerificationCapabilityFunction: lambda.IFunction;
+  } | undefined;
   /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.IQueue;
   /** Private bucket holding the built Web assets. */
@@ -344,24 +341,27 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
     value: resources.tenantOperationFunction.functionName,
   });
-  new cdk.CfnOutput(scope, 'TenantExportCapabilityFunctionName', {
-    value: resources.tenantExportCapabilityFunction.functionName,
-  });
-  new cdk.CfnOutput(scope, 'TenantAccessCapabilityFunctionName', {
-    value: resources.tenantAccessCapabilityFunction.functionName,
-  });
-  new cdk.CfnOutput(scope, 'TenantIdentityCapabilityFunctionName', {
-    value: resources.tenantIdentityCapabilityFunction.functionName,
-  });
-  new cdk.CfnOutput(scope, 'TenantDataCapabilityFunctionName', {
-    value: resources.tenantDataCapabilityFunction.functionName,
-  });
-  new cdk.CfnOutput(scope, 'TenantSecretsCapabilityFunctionName', {
-    value: resources.tenantSecretsCapabilityFunction.functionName,
-  });
-  new cdk.CfnOutput(scope, 'TenantVerificationCapabilityFunctionName', {
-    value: resources.tenantVerificationCapabilityFunction.functionName,
-  });
+  const { tenantLifecycle } = resources;
+  if (tenantLifecycle) {
+    new cdk.CfnOutput(scope, 'TenantExportCapabilityFunctionName', {
+      value: tenantLifecycle.tenantExportCapabilityFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TenantAccessCapabilityFunctionName', {
+      value: tenantLifecycle.tenantAccessCapabilityFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TenantIdentityCapabilityFunctionName', {
+      value: tenantLifecycle.tenantIdentityCapabilityFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TenantDataCapabilityFunctionName', {
+      value: tenantLifecycle.tenantDataCapabilityFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TenantSecretsCapabilityFunctionName', {
+      value: tenantLifecycle.tenantSecretsCapabilityFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TenantVerificationCapabilityFunctionName', {
+      value: tenantLifecycle.tenantVerificationCapabilityFunction.functionName,
+    });
+  }
   new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
     value: resources.tenantOperationDlq.queueUrl,
   });

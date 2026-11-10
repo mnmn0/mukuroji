@@ -10,7 +10,7 @@ import {
   parseProjectDirectoryPage,
 } from '../src/projects/model/projectDirectoryView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { CanonicalWorkItem } from '../src/tasks/api/tasks'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { createWorkItemSummaryFromWorkItems } from '../src/work-items/model/workItemSummary'
 

@@ -1,4 +1,5 @@
 import type {
+  CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
   WorkspaceWorkItemListFilter,
 } from '@mukuroji/contracts'
@@ -8,7 +9,6 @@ import {
   useWorkspaceWorkItemSummary,
 } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
 import { useTeamWorkItemConfigurations } from '../../work-items/queries/useWorkItemConfigurations'
 import type { TeamWorkItemConfigurationLoadResult } from '../../work-items/queries/teamWorkItemConfigurations'

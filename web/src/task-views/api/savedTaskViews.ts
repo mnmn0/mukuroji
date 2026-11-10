@@ -78,7 +78,6 @@ const taskViewFilterFields = [
   'entityTypes',
   'assigneeUserIds',
   'creatorUserIds',
-  'statuses',
   'relationIds',
   'customFields',
   'date',
@@ -456,7 +455,6 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
   if (!hasOptionalStringArrayFrom(value.entityTypes, searchEntityTypes)) return false
   if (!hasOptionalStringArray(value.assigneeUserIds)) return false
   if (!hasOptionalStringArray(value.creatorUserIds)) return false
-  if (!hasOptionalStringArray(value.statuses)) return false
   if (!hasOptionalStringArray(value.relationIds)) return false
   if (!hasOptionalStringArray(value.projectIds)) return false
   if (!hasOptionalStringArray(value.teamIds)) return false
@@ -472,8 +470,8 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
     !value.workflowStatuses.every((entry) =>
       isRecord(entry) &&
       typeof entry.teamId === 'string' &&
-      typeof entry.statusId === 'string' &&
-      (entry.workItemTypeId === undefined || typeof entry.workItemTypeId === 'string')
+      typeof entry.workItemTypeId === 'string' &&
+      typeof entry.statusId === 'string'
     )
   )) return false
   if (value.customFields !== undefined && (

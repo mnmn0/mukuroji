@@ -21,6 +21,16 @@ background refresh. Server-side sanitization removes inaccessible or deleted fie
 statuses, relations, Projects, and Teams and returns migration warnings with the
 safe fallback.
 
+## Workflow status filters
+
+A task view references a workflow status only through a `workflowStatuses` entry that
+names its `teamId`, `workItemTypeId`, and `statusId`, because equal status IDs can belong
+to different Team and Work Item Type workflows. Task views do not accept the Workspace
+Search `statuses` list. The API rejects a status filter without its Team and Work Item
+Type with `400 InvalidTaskView`, a stored definition in that shape fails closed with
+`503 InvalidTaskView`, and the Web ignores such a URL override with a migration warning.
+Project and Team status controls use the same qualified key as their option value.
+
 ## Surface support
 
 Project, Team, and My Tasks currently bind their route state to the shared controller.
@@ -60,7 +70,7 @@ idempotency key or orphaned preference from attaching to a new lifecycle.
 Personal and Team default markers include a generation value. Definition scope or
 visibility changes remove obsolete markers in the same transaction, and lazy cleanup
 conditions include the observed generation so a stale reader cannot delete a newer
-default.
+default. A marker without a generation is malformed and fails closed.
 
 ## Authorization boundary
 

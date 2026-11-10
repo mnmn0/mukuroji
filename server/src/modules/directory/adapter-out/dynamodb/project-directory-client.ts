@@ -64,6 +64,7 @@ import {
   createPlanningUpdateProjectTargetRecordKey,
   PLANNING_STORAGE_SCHEMA_VERSION,
 } from '../../../planning'
+import { createDirectoryResourceId } from '../../domain/resource-id'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -1565,8 +1566,9 @@ export class DynamoDbProjectDirectoryClient {
 
     try {
       const items = await this.readValidDirectoryItems(directoryId)
-      const teamId = createUniqueResourceId(
-        names.nameJa,
+      const teamId = createDirectoryResourceId(
+        'team',
+        [names.nameJa, names.nameEn],
         items
           .filter((item) => item.entryType === 'team')
           .map((item) => item.teamId),
@@ -1737,8 +1739,9 @@ export class DynamoDbProjectDirectoryClient {
         }
       }
 
-      const projectId = idempotencyResourceId ?? createUniqueResourceId(
-        names.nameJa,
+      const projectId = idempotencyResourceId ?? createDirectoryResourceId(
+        'project',
+        [names.nameJa, names.nameEn],
         items
           .filter((item): item is ProjectDirectoryProjectItem =>
             item.entryType === 'project'
@@ -3585,40 +3588,6 @@ function readIdempotencyResourceId(value: unknown): string | undefined {
     )
   }
   return value
-}
-
-/**
- * Converts display text into a stable resource identifier stem.
- *
- * @param value - Untrusted display text.
- * @returns A normalized identifier or a timestamp-based fallback.
- */
-function createResourceId(value: string): string {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .normalize('NFKC')
-    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
-    .replace(/^-+|-+$/g, '')
-
-  return normalized || `item-${Date.now()}`
-}
-
-function createUniqueResourceId(value: string, existingIds: Iterable<string>) {
-  const baseId = createResourceId(value)
-  const usedIds = new Set(existingIds)
-
-  if (!usedIds.has(baseId)) {
-    return baseId
-  }
-
-  let suffix = 2
-
-  while (usedIds.has(`${baseId}-${suffix}`)) {
-    suffix += 1
-  }
-
-  return `${baseId}-${suffix}`
 }
 
 function createTeamEntryKey(teamSortOrder: number, teamId: string) {

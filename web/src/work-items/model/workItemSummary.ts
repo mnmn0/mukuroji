@@ -1,8 +1,8 @@
 import type {
+  CanonicalWorkItem,
   WorkItemSummaryBucket,
   WorkItemSummaryResponse,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   isCompletedWorkItem,
   isOpenWorkItem,
