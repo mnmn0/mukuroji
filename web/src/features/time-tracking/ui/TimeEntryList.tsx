@@ -121,7 +121,8 @@ export function TimeEntryList({
             {entry.description ? (
               <p className="whitespace-pre-wrap break-words text-sm text-[var(--workbench-muted)]">{entry.description}</p>
             ) : null}
-            {entry.status === 'rejected' ? (
+            {/* An unloaded or failed history shows no reason rather than claiming none was recorded. */}
+            {entry.status === 'rejected' && reason !== undefined ? (
               <p className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-sm font-medium text-fg-red-700">
                 {t('timeTracking.entry.rejectionReason')}: {reason || t('timeTracking.entry.rejectionReasonMissing')}
               </p>

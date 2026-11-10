@@ -2174,7 +2174,7 @@ async function mockAuthenticatedTaskPage(
 
   // Time tracking reads from the Work Item "time" section start empty; tests that need state override them.
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
-  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|time-tracking\/summary|work-items\/[^/]+\/time-estimate)$/u.test(url.pathname), async (route) => {
+  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|timesheet|time-tracking\/summary|work-items\/[^/]+\/time-estimate)$/u.test(url.pathname), async (route) => {
     if (route.request().method() !== 'GET') {
       await route.fallback()
       return
@@ -2182,6 +2182,7 @@ async function mockAuthenticatedTaskPage(
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/time-entries')) await route.fulfill({ json: { entries: [] } })
     else if (path.endsWith('/time-estimate')) await route.fulfill({ json: { estimate: null } })
+    else if (path.endsWith('/timesheet')) await route.fulfill({ json: { from: '2026-11-10', to: '2026-11-10', timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: true } })
     else await route.fulfill({ json: { totalMinutes: 0, groups: [] } })
   })
 

@@ -33,6 +33,7 @@ import {
   formatElapsed,
   formatMinutes,
   parseHoursInput,
+  resolveLocalInstant,
   resolveWeekStart,
   shiftLocalDate,
   shiftWeek,
@@ -116,6 +117,10 @@ describe('time tracking periods', () => {
     expect(shiftLocalDate('2026-11-30', 1)).toBe('2026-12-01')
     expect(countLocalDaysBetween('2026-11-09', '2026-11-16')).toBe(7)
     expect(countLocalDaysBetween('2026-11-10', '2026-11-09')).toBe(-1)
+    // A timer entry's seconds survive an edit that leaves the fields alone.
+    expect(resolveLocalInstant('2026-11-10T00:00:10.500Z', '2026-11-10', '09:00')).toBe('2026-11-10T00:00:10.500Z')
+    expect(resolveLocalInstant('2026-11-10T00:00:10.500Z', '2026-11-10', '09:05')).toBe('2026-11-10T00:05:00.000Z')
+    expect(resolveLocalInstant(undefined, '2026-11-10', '09:00')).toBe('2026-11-10T00:00:00.000Z')
     expect(createTeamTimeTrackingPath('core team', 'approvals', '2026-11-09')).toBe('/teams/core%20team/timesheet?view=approvals&week=2026-11-09')
   })
 })
@@ -306,6 +311,30 @@ describe('time tracking views', () => {
     expect(html).toContain('Stop and record')
     expect(html).not.toContain('Start timer')
     expect(html).toContain('href="/teams/core-team/timesheet"')
+    // Only Team managers may set the estimate, so a member sees the timer but no estimate controls.
+    expect(html).not.toContain(`>${t('timeTracking.estimate.edit')}<`)
+    const managerHtml = renderToStaticMarkup(
+      <WorkItemTimePanel
+        actualMinutes={540}
+        canEditEstimate
+        entries={[]}
+        estimate={timeTrackingFixtureEstimate}
+        formatters={formatters}
+        now={timeTrackingFixtureNow}
+        onCreateEntry={noop}
+        onDiscardTimer={noop}
+        onRetry={() => undefined}
+        onSaveEstimate={noop}
+        onStartTimer={noop}
+        onStopTimer={noop}
+        onSubmitEntry={noop}
+        onUpdateEntry={noop}
+        t={t}
+        timer={null}
+        workItemId="onboarding"
+      />,
+    )
+    expect(managerHtml).toContain(`>${t('timeTracking.estimate.edit')}<`)
   })
 
   test('a timer on another Work Item blocks starting a second one', () => {

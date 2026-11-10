@@ -4,9 +4,10 @@ import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import type { TimeEntryDraftInput } from '../api/timeEntries'
 import { isTimerOverlong, readTimerElapsedMilliseconds, sortTimeEntries, sumTimeEntryMinutes } from '../model/timeEntryLifecycle'
-import { createTrailingPeriod, formatElapsed, formatMinutes, parseHoursInput, toLocalDateKey } from '../model/timePeriod'
+import { createTrailingPeriod, formatElapsed, formatMinutes, parseHoursInput, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import { useActiveTimer } from '../queries/useActiveTimer'
 import { useRejectionReasons } from '../queries/useRejectionReasons'
+import { useTeamTimesheet } from '../queries/useTeamTimesheet'
 import { useTimeEntries } from '../queries/useTimeEntries'
 import { useTimeEstimate } from '../queries/useTimeEstimate'
 import { useWorkItemActualMinutes } from '../queries/useWorkItemActualMinutes'
@@ -52,6 +53,8 @@ export type WorkItemTimePanelProps = {
   hasLoadError?: boolean
   /** Whether the member may only read. */
   readOnly?: boolean
+  /** Whether the member manages the Team and may set the estimate; only Team managers may. */
+  canEditEstimate?: boolean
   /** Link to the member's timesheet. */
   timesheetHref?: string
   /** Reloads the panel. */
@@ -93,6 +96,10 @@ export type WorkItemTimePanelContainerProps = {
 /**
  * Connects the Work Item time panel to the timer, entry, estimate, and summary APIs.
  *
+ * Setting the estimate needs Team-manager permission. Like the approval queue, the panel reads
+ * that from the Team timesheet's `costsRedacted` flag (one day, shared by every panel of the Team),
+ * and keeps the estimate controls hidden until it is known.
+ *
  * @param props - Work Item and session.
  * @returns Connected panel.
  */
@@ -108,6 +115,7 @@ export function WorkItemTimePanelContainer({
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
   const [period] = useState(() => createTrailingPeriod(ownEntryPeriodDays))
+  const [accessProbe] = useState(() => ({ ...createTrailingPeriod(1), timeZone: resolveBrowserTimeZone() }))
   const timer = useActiveTimer(accessToken)
   const estimate = useTimeEstimate(accessToken, teamId, workItemId)
   const actual = useWorkItemActualMinutes(accessToken, teamId, workItemId)
@@ -118,6 +126,7 @@ export function WorkItemTimePanelContainer({
     [ownEntries.data, workItemId],
   )
   const rejectionReasons = useRejectionReasons(accessToken, entries)
+  const teamAccess = useTeamTimesheet(accessToken, teamId, accessProbe, !readOnly)
   const entryMutations = useTimeEntryMutations(accessToken)
   const timerMutations = useTimerMutations(accessToken)
   const saveEstimate = useTimeEstimateMutation(accessToken, teamId, workItemId)
@@ -130,13 +139,21 @@ export function WorkItemTimePanelContainer({
       entries={entries}
       estimate={estimate.data}
       formatters={formatters}
-      hasLoadError={Boolean(timer.error ?? estimate.error ?? ownEntries.error ?? actual.error)}
+      canEditEstimate={teamAccess.data ? !teamAccess.data.costsRedacted : false}
+      hasLoadError={Boolean(timer.error ?? estimate.error ?? ownEntries.error ?? actual.error ?? rejectionReasons.error ?? teamAccess.error)}
       isLoading={timer.isLoading || estimate.isLoading || ownEntries.isLoading}
       now={now}
       onCreateEntry={(input) => entryMutations.create(teamId, input)}
       onDiscardTimer={(running) => timerMutations.discard(running)}
       onRetry={() => {
-        void Promise.all([timer.mutate(), estimate.mutate(), ownEntries.mutate(), actual.mutate()]).catch(() => undefined)
+        void Promise.all([
+          timer.mutate(),
+          estimate.mutate(),
+          ownEntries.mutate(),
+          actual.mutate(),
+          rejectionReasons.mutate(),
+          teamAccess.mutate(),
+        ]).catch(() => undefined)
       }}
       onSaveEstimate={(minutes) => saveEstimate(minutes, estimate.data?.revision ?? 0)}
       onStartTimer={(billable) => timerMutations.start(teamId, { workItemId, billable })}
@@ -161,6 +178,7 @@ export function WorkItemTimePanelContainer({
  */
 export function WorkItemTimePanel({
   actualMinutes,
+  canEditEstimate = false,
   entries,
   estimate,
   formatters,
@@ -286,7 +304,7 @@ export function WorkItemTimePanel({
       </dl>
       <p className="text-xs font-medium text-[var(--workbench-muted)]">{t('timeTracking.panel.actualHint')}</p>
 
-      {readOnly ? null : isEditingEstimate ? (
+      {readOnly || !canEditEstimate ? null : isEditingEstimate ? (
         <form className="flex min-w-0 flex-wrap items-end gap-2" onSubmit={(event) => { void submitEstimate(event) }}>
           <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-estimate`}>
             {t('timeTracking.estimate.label')}

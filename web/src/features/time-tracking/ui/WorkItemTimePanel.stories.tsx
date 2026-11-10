@@ -20,6 +20,7 @@ const meta = {
     t: createTranslator('ja'),
     formatters: createTimeTrackingFormatters('ja'),
     now: timeTrackingFixtureNow,
+    canEditEstimate: true,
     workItemId: 'onboarding',
     timer: null,
     estimate: timeTrackingFixtureEstimate,

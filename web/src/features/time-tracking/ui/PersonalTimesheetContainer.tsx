@@ -57,12 +57,12 @@ export function PersonalTimesheetContainer({
     <PersonalTimesheet
       entries={entries.data?.entries ?? []}
       formatters={formatters}
-      hasLoadError={Boolean(entries.error)}
+      hasLoadError={Boolean(entries.error ?? rejectionReasons.error)}
       isLoading={entries.isLoading}
       isPartial={entries.data?.complete === false}
       onCreateEntry={(input) => mutations.create(teamId, input)}
       onMoveWeek={onMoveWeek}
-      onRetry={() => { void entries.mutate() }}
+      onRetry={() => { void Promise.all([entries.mutate(), rejectionReasons.mutate()]).catch(() => undefined) }}
       onSubmitEntry={(entry) => mutations.transition(entry, 'submit')}
       onSubmitWeek={() => mutations.transitionPeriod(teamId, 'submit', week)}
       onUpdateEntry={(entry, input) => mutations.update(entry, input)}

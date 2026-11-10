@@ -2,7 +2,7 @@ import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import type { TimeEntryDraftInput } from '../api/timeEntries'
 import { maxTimeEntryMinutes } from '../model/timeEntryLifecycle'
-import { countLocalDaysBetween, shiftLocalDate, toInstantFromLocal, toLocalDateKey, toLocalTimeInput } from '../model/timePeriod'
+import { countLocalDaysBetween, resolveLocalInstant, shiftLocalDate, toLocalDateKey, toLocalTimeInput } from '../model/timePeriod'
 import { describeTimeTrackingFailure, type TimeTrackingTranslator } from './timeTrackingText'
 
 /** A Work Item a member may record time on. */
@@ -87,8 +87,8 @@ export function TimeEntryForm({
       return typeof value === 'string' ? value : ''
     }
     const workItemId = fixedWorkItemId ?? readText('workItemId')
-    const startAt = toInstantFromLocal(readText('date'), readText('start'))
-    const endAt = toInstantFromLocal(readText('endDate'), readText('end'))
+    const startAt = resolveLocalInstant(entry?.startAt, readText('date'), readText('start'))
+    const endAt = resolveLocalInstant(entry?.endAt, readText('endDate'), readText('end'))
     if (!workItemId) {
       setError(t('timeTracking.form.workItemRequired'))
       return

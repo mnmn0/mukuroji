@@ -126,6 +126,22 @@ export function toInstantFromLocal(date: string, time: string): string | undefin
 }
 
 /**
+ * Reads an instant from local date and time fields, keeping the stored one when they were left unchanged.
+ *
+ * Timer entries carry seconds that minute-resolution inputs cannot show, so rebuilding an
+ * untouched endpoint would shorten the recorded time or make a sub-minute entry invalid.
+ *
+ * @param original - Stored instant of the entry being edited, if any.
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param time - Local `HH:MM` time.
+ * @returns ISO instant, or undefined when the fields are invalid.
+ */
+export function resolveLocalInstant(original: string | undefined, date: string, time: string): string | undefined {
+  if (original && toLocalDateKey(original) === date && toLocalTimeInput(original) === time) return original
+  return toInstantFromLocal(date, time)
+}
+
+/**
  * Normalizes any local date to the Monday that starts its week.
  *
  * @param value - Local `YYYY-MM-DD` date; invalid text falls back to `today`.
