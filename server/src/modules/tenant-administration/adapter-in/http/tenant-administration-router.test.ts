@@ -299,3 +299,87 @@ test('returns short-lived download locations for a completed export', async () =
     },
   })
 })
+
+test('refuses lifecycle requests when the export and closure workers are not deployed', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  const lifecycleCalls: string[] = []
+  client.requestExport = async () => {
+    lifecycleCalls.push('export')
+    return createOperation()
+  }
+  client.requestClosure = async () => {
+    lifecycleCalls.push('closure')
+    return { ...createOperation(), kind: 'closure' }
+  }
+  client.pauseOperation = async () => {
+    lifecycleCalls.push('pause')
+    return { ...createOperation(), status: 'paused' }
+  }
+  client.resumeOperation = async () => {
+    lifecycleCalls.push('resume')
+    return { ...createOperation(), status: 'running' }
+  }
+  client.verifyClosure = async () => {
+    lifecycleCalls.push('verify')
+    return { ...createOperation(), kind: 'closure', status: 'verified' }
+  }
+  let downloads = 0
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'admin-1' }
+    },
+    requireAdministration() {},
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        downloads += 1
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    lifecycleOperationsDeployed: () => false,
+    mapError(_context, error) {
+      return error instanceof TenantAdministrationError
+        ? Response.json({ code: error.code }, { status: error.status })
+        : Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+  const headers = {
+    Authorization: 'Bearer token-1',
+    'Content-Type': 'application/json',
+  }
+  const requests: Array<[string, RequestInit]> = [
+    ['/api/tenant/exports', { method: 'POST', headers, body: JSON.stringify({ format: 'jsonl' }) }],
+    ['/api/tenant/closures', { method: 'POST', headers, body: JSON.stringify({}) }],
+    ['/api/tenant/operations/operation-1/download', { headers }],
+    ['/api/tenant/operations/operation-1/pause', { method: 'POST', headers }],
+    ['/api/tenant/operations/operation-1/resume', { method: 'POST', headers }],
+    ['/api/tenant/operations/operation-1/verify', { method: 'POST', headers }],
+  ]
+
+  for (const [path, init] of requests) {
+    const response = await router.request(path, init)
+    expect({ path, status: response.status, body: await response.json() }).toEqual({
+      path,
+      status: 503,
+      body: { code: 'TenantLifecycleNotDeployed' },
+    })
+  }
+  expect(lifecycleCalls).toEqual([])
+  expect(downloads).toBe(0)
+
+  const administration = await router.request('/api/tenant/administration', { headers })
+  expect(administration.status).toBe(200)
+  const operation = await router.request('/api/tenant/operations/operation-1', { headers })
+  expect(operation.status).toBe(200)
+})

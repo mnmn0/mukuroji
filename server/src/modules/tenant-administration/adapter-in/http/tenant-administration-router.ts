@@ -53,6 +53,32 @@ export type TenantAdministrationRouterDependencies<
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Converts authentication and domain failures to the repository response shape. */
   mapError(context: Context, error: unknown): Response
+  /**
+   * Reports whether this deployment runs the tenant export and closure workers.
+   *
+   * When it returns false, the routes that start, advance, or download a lifecycle operation
+   * refuse the request instead of recording an operation no worker would run. Omitted means the
+   * workers are deployed.
+   */
+  lifecycleOperationsDeployed?(): boolean
+}
+
+/**
+ * Refuses a lifecycle request when this deployment has no export or closure workers.
+ *
+ * @param dependencies - Route dependencies that report the deployed modules.
+ * @throws TenantAdministrationError with status 503 when the workers are absent.
+ */
+function requireLifecycleOperationsDeployed(
+  dependencies: { lifecycleOperationsDeployed?(): boolean },
+): void {
+  if (dependencies.lifecycleOperationsDeployed?.() === false) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantLifecycleNotDeployed',
+      'Tenant export and closure are not deployed in this environment.',
+    )
+  }
 }
 
 /**
@@ -118,6 +144,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      requireLifecycleOperationsDeployed(dependencies)
       await ensureTenantInitialized(principal, dependencies)
       const input = readTenantExportInput(await dependencies.readJson(context.req))
       return context.json({
@@ -137,6 +164,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      requireLifecycleOperationsDeployed(dependencies)
       await ensureTenantInitialized(principal, dependencies)
       const input = readTenantClosureInput(await dependencies.readJson(context.req))
       return context.json({
@@ -171,6 +199,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      requireLifecycleOperationsDeployed(dependencies)
       const operation = await dependencies.client.getOperation(
         principal.directoryId,
         readOperationId(context.req.param('operationId')),
@@ -188,6 +217,7 @@ export function createTenantAdministrationRouter<
       try {
         const principal = await requirePrincipal(context, dependencies)
         dependencies.requireAdministration(principal)
+        requireLifecycleOperationsDeployed(dependencies)
         const operationId = readOperationId(context.req.param('operationId'))
         const operation = action === 'pause'
           ? await dependencies.client.pauseOperation(principal.directoryId, principal.userKey, operationId)
