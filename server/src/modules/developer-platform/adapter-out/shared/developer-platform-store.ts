@@ -700,6 +700,16 @@ type PutRecordCondition = {
   expectedVersion?: number
 }
 
+/** 書き込みと同じ transaction で、書き換えずに状態だけを確かめる別 row です。 */
+type RecordConditionCheck = {
+  /** 確かめる row の Workspace ID です。 */
+  workspaceId: string
+  /** 確かめる row の record key です。 */
+  recordKey: string
+  /** Row が満たすべき条件です。 */
+  condition: PutRecordCondition
+}
+
 /** Developer platform lifecycle を audit/Webhook outbox event に変換する入力です。 */
 type PlatformAuditEventInput = {
   /** Event を所有する Workspace ID です。 */
@@ -840,7 +850,7 @@ abstract class DeveloperPlatformStorageKernel {
     auditPut: AuditTransactWriteItem,
   ): Promise<boolean>
 
-  /** Credential domain/auth rows、optional receipt と audit event を原子的に保存します。 */
+  /** Credential domain/auth rows、optional receipt と audit event を原子的に保存し、条件 row も同時に確かめます。 */
   protected abstract putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,
@@ -848,6 +858,7 @@ abstract class DeveloperPlatformStorageKernel {
     authDelete?: CredentialAuthRecordDelete,
     completion?: PreparedIdempotencyCompletionRecord,
     auditPut?: AuditTransactWriteItem,
+    conditionCheck?: RecordConditionCheck,
   ): Promise<boolean>
 
   /** OAuth app 利用記録、token domain/auth rows を原子的に保存します。 */
@@ -979,6 +990,7 @@ abstract class DeveloperPlatformStorageKernel {
     idempotency: IdempotencyMutationToken | undefined,
     response: unknown,
     auditPut?: AuditTransactWriteItem,
+    conditionCheck?: RecordConditionCheck,
   ) {
     const completion = idempotency
       ? await this.prepareIdempotencyCompletionRecord(
@@ -994,6 +1006,7 @@ abstract class DeveloperPlatformStorageKernel {
       authDelete,
       completion,
       auditPut,
+      conditionCheck,
     )
   }
 
@@ -1426,6 +1439,9 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       secretDigest,
       toEpochSeconds(expiresAt),
     )
+    const policyCheck = request.issuance === 'personal'
+      ? await this.requirePersonalIssuancePolicyCheck(workspaceId)
+      : undefined
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
     const auditPut = this.createApiKeyAuditPut(apiKey, workspaceId, {
       eventType: 'api-key.created',
@@ -1444,10 +1460,40 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       request.idempotency,
       { status: 201, body: result },
       auditPut,
+      policyCheck,
     )) {
       throw persistenceConflict()
     }
     return result
+  }
+
+  /**
+   * 自分用 API key の発行・再発行が今の policy で許されることを確かめ、
+   * policy row がその間に変わらないことを書き込みと同じ transaction で確かめる条件を返します。
+   */
+  private async requirePersonalIssuancePolicyCheck(
+    workspaceId: string,
+  ): Promise<RecordConditionCheck> {
+    const record = await this.getRecord(workspaceId, PERSONAL_CREDENTIAL_POLICY_RECORD_KEY)
+    if (!record) {
+      return {
+        workspaceId,
+        recordKey: PERSONAL_CREDENTIAL_POLICY_RECORD_KEY,
+        condition: { ifAbsent: true },
+      }
+    }
+    const policy = readRecordValue<PersonalCredentialPolicy>(record, 'credential-policy')
+    if (policy.selfIssuanceEnabled !== true) {
+      throw forbidden(
+        'PersonalCredentialIssuanceDisabled',
+        'Personal API keys are disabled for this Workspace.',
+      )
+    }
+    return {
+      workspaceId,
+      recordKey: PERSONAL_CREDENTIAL_POLICY_RECORD_KEY,
+      condition: { expectedVersion: record.version },
+    }
   }
 
   /** Workspace の secret を含まない API key summary を返します。 */
@@ -1557,6 +1603,9 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       secretDigest,
       apiKey.expiresAt ? toEpochSeconds(apiKey.expiresAt) : undefined,
     )
+    const policyCheck = current.issuance === 'personal'
+      ? await this.requirePersonalIssuancePolicyCheck(workspaceId)
+      : undefined
     const result = { apiKey: clone(apiKey), secret } satisfies ApiKeySecretResult
     const auditPut = this.createApiKeyAuditPut(apiKey, workspaceId, {
       eventType: 'api-key.rotated',
@@ -1575,6 +1624,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       request.idempotency,
       { status: 200, body: result },
       auditPut,
+      policyCheck,
     )
     if (!saved) throw persistenceConflict()
     return result
@@ -5054,6 +5104,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     authDelete?: CredentialAuthRecordDelete,
     completion?: PreparedIdempotencyCompletionRecord,
     _auditPut?: AuditTransactWriteItem,
+    conditionCheck?: RecordConditionCheck,
   ) {
     const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
     const currentRecord = this.records.get(recordKey)
@@ -5062,6 +5113,16 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
       condition.expectedVersion !== undefined &&
       currentRecord?.version !== condition.expectedVersion
     ) return false
+    if (conditionCheck) {
+      const checkedRecord = this.records.get(
+        createMemoryKey(conditionCheck.workspaceId, conditionCheck.recordKey),
+      )
+      if (conditionCheck.condition.ifAbsent && checkedRecord) return false
+      if (
+        conditionCheck.condition.expectedVersion !== undefined &&
+        checkedRecord?.version !== conditionCheck.condition.expectedVersion
+      ) return false
+    }
 
     const authWriteKey = authWrite
       ? createMemoryKey(authWrite.record.workspaceId, authWrite.record.recordKey)
@@ -6136,6 +6197,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     authDelete?: CredentialAuthRecordDelete,
     completion?: PreparedIdempotencyCompletionRecord,
     auditPut?: AuditTransactWriteItem,
+    conditionCheck?: RecordConditionCheck,
   ) {
     const recordCondition = condition.ifAbsent
       ? {
@@ -6219,6 +6281,29 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
               )]
             : []),
           ...(auditPut ? [auditPut] : []),
+          ...(conditionCheck
+            ? [{
+                ConditionCheck: {
+                  TableName: this.tableName,
+                  Key: {
+                    workspaceId: conditionCheck.workspaceId,
+                    recordKey: conditionCheck.recordKey,
+                  },
+                  ...(conditionCheck.condition.ifAbsent
+                    ? {
+                        ConditionExpression:
+                          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+                      }
+                    : {
+                        ConditionExpression: '#version = :expectedVersion',
+                        ExpressionAttributeNames: { '#version': 'version' },
+                        ExpressionAttributeValues: {
+                          ':expectedVersion': conditionCheck.condition.expectedVersion,
+                        },
+                      }),
+                },
+              }]
+            : []),
         ],
       }))
       return true

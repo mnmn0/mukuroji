@@ -4716,3 +4716,89 @@ describe('API key audit', () => {
     expect(serialized).not.toContain(rotated.secret)
   })
 })
+
+describe('personal credential policy guard', () => {
+  const expiresAt = new Date(START.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString()
+
+  test('refuses personal issuance and rotation once self-issuance is off', async () => {
+    const { client } = createClient()
+    const personal = await client.createApiKey({
+      workspaceId: 'workspace-policy',
+      createdByUserId: 'member-1',
+      input: { name: 'Agent', scopes: ['work-items:read'], expiresAt },
+      issuance: 'personal',
+    })
+    await client.updatePersonalCredentialPolicy({
+      workspaceId: 'workspace-policy',
+      updatedByUserId: 'admin-1',
+      input: { selfIssuanceEnabled: false },
+    })
+
+    await expect(client.createApiKey({
+      workspaceId: 'workspace-policy',
+      createdByUserId: 'member-1',
+      input: { name: 'Agent 2', scopes: ['work-items:read'], expiresAt },
+      issuance: 'personal',
+    })).rejects.toMatchObject({ status: 403, code: 'PersonalCredentialIssuanceDisabled' })
+    await expect(client.rotateApiKey({
+      workspaceId: 'workspace-policy',
+      apiKeyId: personal.apiKey.id,
+      expiresAt,
+      actorUserId: 'member-1',
+    })).rejects.toMatchObject({ status: 403, code: 'PersonalCredentialIssuanceDisabled' })
+    await expect(client.createApiKey({
+      workspaceId: 'workspace-policy',
+      createdByUserId: 'admin-1',
+      input: { name: 'Integration', scopes: ['work-items:read'], expiresAt },
+      issuance: 'workspace',
+    })).resolves.toMatchObject({ apiKey: { issuance: 'workspace' } })
+  })
+
+  test('fails personal issuance when the policy turns off before the write commits', async () => {
+    const memory = createMemoryDocumentClient()
+    let disableBeforeNextWrite = false
+    const documentClient = {
+      async send(command: Parameters<DynamoDBDocumentClient['send']>[0]) {
+        if (command.constructor.name === 'TransactWriteCommand' && disableBeforeNextWrite) {
+          disableBeforeNextWrite = false
+          await client.updatePersonalCredentialPolicy({
+            workspaceId: 'workspace-race',
+            updatedByUserId: 'admin-1',
+            input: { selfIssuanceEnabled: false },
+          })
+        }
+        return memory.documentClient.send(command)
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbDeveloperPlatformStorage(
+      'DeveloperPlatformTable',
+      documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(31)),
+      () => START,
+      'LookupKeyIndex',
+    )
+    const issue = (name: string) => client.createApiKey({
+      workspaceId: 'workspace-race',
+      createdByUserId: 'member-1',
+      input: { name, scopes: ['work-items:read'], expiresAt },
+      issuance: 'personal',
+    })
+
+    disableBeforeNextWrite = true
+    await expect(issue('Before policy row')).rejects.toMatchObject({
+      status: 409,
+      code: 'DeveloperPlatformConcurrentMutation',
+    })
+    await client.updatePersonalCredentialPolicy({
+      workspaceId: 'workspace-race',
+      updatedByUserId: 'admin-1',
+      input: { selfIssuanceEnabled: true },
+    })
+    disableBeforeNextWrite = true
+    await expect(issue('With policy row')).rejects.toMatchObject({
+      status: 409,
+      code: 'DeveloperPlatformConcurrentMutation',
+    })
+    await expect(client.listApiKeys('workspace-race')).resolves.toEqual([])
+  })
+})

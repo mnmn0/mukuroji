@@ -84,56 +84,59 @@ export function AgentConnectionPanelContainer({
 
   /**
    * Runs one mutation, retrying with the same idempotency key after a transient failure,
-   * then reloads the member's tokens.
+   * applies its result, then reloads the member's tokens. The operation stays busy until
+   * the reload finishes, so the form cannot submit again with stale values.
    *
    * @param operationKey - Logical mutation key.
    * @param fingerprint - Payload fingerprint for the logical mutation.
    * @param request - API call.
-   * @returns The API result, or undefined when it failed.
+   * @param onSuccess - Applies the API result before the reload.
    */
   async function runMutation<TResult>(
     operationKey: string,
     fingerprint: string,
     request: Parameters<typeof requestRunner.run<TResult>>[2],
+    onSuccess?: (result: TResult) => void,
   ) {
     setBusyOperation(operationKey)
     setHasOperationError(false)
     try {
-      return await requestRunner.run(
+      const result = await requestRunner.run(
         operationKey,
         fingerprint,
         request,
         shouldRetainDeveloperPlatformMutationContext,
       )
+      onSuccess?.(result)
     } catch {
       setHasOperationError(true)
-      return undefined
+    }
+    try {
+      await mutate()
+    } catch {
+      // The load error is shown by the query state.
     } finally {
       setBusyOperation(undefined)
-      try {
-        await mutate()
-      } catch {
-        // The load error is shown by the query state.
-      }
     }
   }
 
   /** Issues a token with the form values and keeps its secret until dismissed. */
   async function issue() {
     const input = { name: form.name.trim(), expiresAt: toLocalEndOfDayIso(form.expiryDate) }
-    const result = await runMutation('issue', JSON.stringify(input), (context) =>
-      createPersonalApiKey(accessToken, input, context))
-    if (!result) return
-    setIssuedToken({ name: result.apiKey.name, secret: result.secret })
-    setForm({ name: '', expiryDate: expiryBounds.defaultValue })
+    await runMutation('issue', JSON.stringify(input), (context) =>
+      createPersonalApiKey(accessToken, input, context), (result) => {
+      setIssuedToken({ name: result.apiKey.name, secret: result.secret })
+      setForm({ name: '', expiryDate: expiryBounds.defaultValue })
+    })
   }
 
   /** Reissues a token with the form expiry. */
   async function rotate(apiKey: ApiKeySummary) {
     const input = { expiresAt: toLocalEndOfDayIso(form.expiryDate) }
-    const result = await runMutation(`rotate:${apiKey.id}`, JSON.stringify(input), (context) =>
-      rotatePersonalApiKey(accessToken, apiKey.id, input, context))
-    if (result) setIssuedToken({ name: result.apiKey.name, secret: result.secret })
+    await runMutation(`rotate:${apiKey.id}`, JSON.stringify(input), (context) =>
+      rotatePersonalApiKey(accessToken, apiKey.id, input, context), (result) => {
+      setIssuedToken({ name: result.apiKey.name, secret: result.secret })
+    })
   }
 
   /** Revokes a token. */
