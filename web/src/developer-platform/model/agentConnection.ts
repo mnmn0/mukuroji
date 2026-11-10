@@ -196,12 +196,13 @@ function toDateInputValue(date: Date) {
 /**
  * Returns the default and latest expiry dates a member can choose for a personal key.
  *
- * The latest date stays one day inside the server limit, because the chosen date
- * expires at the end of that local day.
+ * A chosen date expires at the end of that local day, so the latest date is the last one
+ * whose local end of day is still within the server's fixed lifetime from `now`. Deriving
+ * it from that absolute deadline keeps daylight-saving changes from pushing it past the limit.
  *
  * @param now - Current time.
  * @param maxLifetimeDays - Server limit in days.
- * @returns Date-input values for the default (30 days or the limit) and the maximum.
+ * @returns Date-input values for the default (30 days or the latest), the minimum, and the maximum.
  */
 export function resolvePersonalKeyExpiryBounds(
   now: Date,
@@ -212,10 +213,16 @@ export function resolvePersonalKeyExpiryBounds(
     date.setDate(date.getDate() + days)
     return toDateInputValue(date)
   }
-  const latestDays = Math.max(1, maxLifetimeDays - 1)
+  const deadline = now.getTime() + maxLifetimeDays * 24 * 60 * 60 * 1_000
+  const latest = new Date(deadline)
+  latest.setHours(23, 59, 59, 999)
+  if (latest.getTime() > deadline) latest.setDate(latest.getDate() - 1)
+  const min = addDays(1)
+  const max = toDateInputValue(latest) < min ? min : toDateInputValue(latest)
+  const thirtyDays = addDays(30)
   return {
-    min: addDays(1),
-    defaultValue: addDays(Math.min(30, latestDays)),
-    max: addDays(latestDays),
+    min,
+    defaultValue: thirtyDays < max ? thirtyDays : max,
+    max,
   }
 }

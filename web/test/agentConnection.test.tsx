@@ -9,6 +9,7 @@ import {
   resolvePersonalKeyExpiryBounds,
   type AgentConnectionSettings,
 } from '../src/developer-platform/model/agentConnection'
+import { toLocalEndOfDayIso } from '../src/developer-platform/model/credentials'
 import {
   AgentConnectionPanel,
   type AgentConnectionPanelProps,
@@ -87,6 +88,22 @@ describe('agent connection snippets', () => {
   test('keeps the selectable expiry inside the server lifetime limit', () => {
     const bounds = resolvePersonalKeyExpiryBounds(new Date(2026, 10, 10, 9, 0), 90)
     expect(bounds).toEqual({ min: '2026-11-11', defaultValue: '2026-12-10', max: '2027-02-07' })
+  })
+
+  test('keeps the latest expiry inside the limit across a daylight-saving fallback', () => {
+    const previousTimeZone = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      // 00:30 EDT on 5 August; the 90-day deadline falls at 23:30 EST on 2 November.
+      const now = new Date('2026-08-05T04:30:00.000Z')
+      const bounds = resolvePersonalKeyExpiryBounds(now, 90)
+      expect(bounds.max).toBe('2026-11-01')
+      expect(Date.parse(toLocalEndOfDayIso(bounds.max)))
+        .toBeLessThanOrEqual(now.getTime() + 90 * 24 * 60 * 60 * 1_000)
+    } finally {
+      if (previousTimeZone === undefined) delete process.env.TZ
+      else process.env.TZ = previousTimeZone
+    }
   })
 })
 

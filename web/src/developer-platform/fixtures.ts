@@ -1,6 +1,7 @@
 import type {
   ApiProblem,
   ImportDryRunReport,
+  PersonalCredentialAdministration,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import type { DeveloperPlatformResources } from './api'
@@ -620,10 +621,6 @@ export const developerPlatformResourcesFixture = {
       lastUsedAt: '2026-07-18T02:10:00.000Z',
     },
   ],
-  personalCredentials: {
-    policy: { selfIssuanceEnabled: true },
-    personalApiKeyIds: ['api-key-agent-tanaka'],
-  },
   oauthApps: [
     {
       id: 'oauth-reporting',
@@ -871,3 +868,11 @@ export const importDryRunErrorDeveloperPlatformResourcesFixture = {
     },
   ],
 } satisfies DeveloperPlatformResources
+
+/**
+ * Administrator view of member-issued agent keys for the main fixture.
+ */
+export const personalCredentialAdministrationFixture = {
+  policy: { selfIssuanceEnabled: true },
+  personalApiKeyIds: ['api-key-agent-tanaka'],
+} satisfies PersonalCredentialAdministration

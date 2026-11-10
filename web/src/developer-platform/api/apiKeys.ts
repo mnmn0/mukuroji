@@ -4,6 +4,7 @@ import type {
   CreateApiKeyInput,
   CreatePersonalApiKeyInput,
   PersonalAgentCredentialOverview,
+  PersonalCredentialAdministration,
   PersonalCredentialPolicy,
   RotatePersonalApiKeyInput,
   UpdatePersonalCredentialPolicyInput,
@@ -155,6 +156,19 @@ export function revokePersonalApiKey(
       headers: createMutationHeaders(mutationContext),
       method: 'DELETE',
     },
+  )
+}
+
+/**
+ * Member による自分用 API key 発行の policy と、発行済みの自分用 API key の ID を取得します。管理者だけが実行できます。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @returns Policy と自分用 API key の ID です。
+ */
+export function getPersonalCredentialAdministration(accessToken: string) {
+  return requestJson<PersonalCredentialAdministration>(
+    '/developer/credential-policy',
+    accessToken,
   )
 }
 

@@ -13,6 +13,7 @@ import {
   deliveryFailureDeveloperPlatformResourcesFixture,
   developerPlatformLabelsFixture,
   developerPlatformResourcesFixture,
+  personalCredentialAdministrationFixture,
   developerSyncConflictsFixture,
   emptyDeveloperPlatformResourcesFixture,
   importDryRunErrorDeveloperPlatformResourcesFixture,
@@ -103,6 +104,7 @@ const meta = {
     ],
     labels: developerPlatformLabelsFixture,
     resources: developerPlatformResourcesFixture,
+    personalCredentials: personalCredentialAdministrationFixture,
     onCommitImport: async () =>
       developerPlatformResourcesFixture.imports[0],
     onConnectConnector: async () => undefined,

@@ -3,6 +3,7 @@ import { fn } from 'storybook/test'
 import {
   developerPlatformLabelsFixture,
   developerPlatformResourcesFixture,
+  personalCredentialAdministrationFixture,
   emptyDeveloperPlatformResourcesFixture,
   readOnlyDeveloperPlatformResourcesFixture,
 } from '../fixtures'
@@ -40,6 +41,8 @@ const meta = {
     onRevokeOAuthApp: fn(),
     onRotateApiKey: fn(),
     onRotateOAuthApp: fn(),
+    personalCredentials: personalCredentialAdministrationFixture,
+    onChangePersonalCredentialPolicy: fn(),
   },
 } satisfies Meta<typeof CredentialsSection>
 

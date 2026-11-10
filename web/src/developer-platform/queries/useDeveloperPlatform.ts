@@ -1,6 +1,7 @@
 import type { CursorPage, WorkItemSyncConflict } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
+import { getPersonalCredentialAdministration } from '../api/apiKeys'
 import { getDeveloperPlatformResources } from '../api/overview'
 import { listDeveloperSyncConflicts } from '../api/syncConflicts'
 
@@ -33,6 +34,26 @@ export function useDeveloperPlatformResources(
     ...query,
     key,
   }
+}
+
+/**
+ * 管理者向けに、member による自分用 API key 発行の policy と発行済み key の ID を取得します。
+ *
+ * @param accessToken - Developer Platform API の access token です。
+ * @param enabled - Query を実行するかどうかです。
+ * @returns Policy と自分用 API key ID の SWR state です。
+ */
+export function usePersonalCredentialAdministration(
+  accessToken: string | undefined,
+  enabled = true,
+) {
+  return useSWR(
+    accessToken && enabled
+      ? ['developer-personal-credentials', accessToken] as const
+      : null,
+    ([, token]) => getPersonalCredentialAdministration(token),
+    developerPlatformQueryConfig,
+  )
 }
 
 /**

@@ -62,11 +62,10 @@ import { WebhooksSection } from './WebhooksSection'
  * Aggregate data and action callbacks accepted by the pure Developer Platform panel.
  */
 export type DeveloperPlatformPanelProps = {
-  /** Developer Platform aggregate resources, with member-issued key administration when loaded. */
-  resources?: DeveloperPlatformOverview & {
-    /** Policy and IDs of member-issued agent keys. */
-    personalCredentials?: PersonalCredentialAdministration
-  }
+  /** Developer Platform aggregate resources. */
+  resources?: DeveloperPlatformOverview
+  /** Policy and IDs of member-issued agent keys; omitted hides the policy control and badges. */
+  personalCredentials?: PersonalCredentialAdministration
   /** Connector synchronization conflicts loaded across available pages. */
   syncConflicts?: WorkItemSyncConflict[]
   /** Whether the first synchronization-conflict page is loading. */
@@ -173,6 +172,7 @@ export function DeveloperPlatformPanel({
   labels,
   loadErrorMessage,
   resources,
+  personalCredentials,
   syncConflicts = [],
   syncConflictsErrorMessage,
   syncConflictsHasMore,
@@ -644,7 +644,7 @@ export function DeveloperPlatformPanel({
               formatDateTime={formatDateTime}
               labels={labels}
               oauthApps={resources.oauthApps}
-              personalCredentials={resources.personalCredentials}
+              personalCredentials={personalCredentials}
               onChangePersonalCredentialPolicy={
                 onChangePersonalCredentialPolicy
                   ? (selfIssuanceEnabled) =>

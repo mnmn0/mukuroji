@@ -7,6 +7,7 @@ import {
   developerSyncConflictsFixture,
   developerPlatformResourcesFixture,
   multipleConnectorAccountsDeveloperPlatformResourcesFixture,
+  personalCredentialAdministrationFixture,
 } from '../src/developer-platform/fixtures'
 
 describe('DeveloperPlatformPanel connector management', () => {
@@ -120,6 +121,7 @@ describe('DeveloperPlatformPanel personal agent keys', () => {
       <DeveloperPlatformPanel
         labels={developerPlatformLabelsFixture}
         resources={developerPlatformResourcesFixture}
+        personalCredentials={personalCredentialAdministrationFixture}
         onChangePersonalCredentialPolicy={async () => undefined}
         onRevokeApiKey={async () => undefined}
         onRotateApiKey={async () => {

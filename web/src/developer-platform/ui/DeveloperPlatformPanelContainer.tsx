@@ -44,6 +44,7 @@ import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformM
 import {
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,
+  usePersonalCredentialAdministration,
 } from '../queries/useDeveloperPlatform'
 import { DeveloperPlatformPanel } from './DeveloperPlatformPanelView'
 import type {
@@ -106,6 +107,10 @@ export function DeveloperPlatformPanelContainer({
     isLoading,
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
+  const {
+    data: personalCredentials,
+    mutate: mutatePersonalCredentials,
+  } = usePersonalCredentialAdministration(mutationSession.accessToken)
   const {
     data: syncConflictPages,
     error: syncConflictError,
@@ -215,6 +220,7 @@ export function DeveloperPlatformPanelContainer({
       labels={labels}
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
+      personalCredentials={personalCredentials}
       syncConflicts={syncConflicts}
       syncConflictsErrorMessage={
         !hasLoadedSyncConflictPage && syncConflictError
@@ -445,6 +451,7 @@ export function DeveloperPlatformPanelContainer({
               context,
             ),
         )
+        await mutatePersonalCredentials()
       }}
       onRotateApiKey={(apiKeyId) =>
         runMutation(

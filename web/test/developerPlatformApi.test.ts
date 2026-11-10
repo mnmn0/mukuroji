@@ -19,6 +19,7 @@ import {
   dryRunDeveloperImport,
   exportDeveloperWorkItems,
   getDeveloperPlatformResources,
+  getPersonalCredentialAdministration,
   listDeveloperExternalLinks,
   listDeveloperSyncConflicts,
   replayDeveloperWebhookDelivery,
@@ -39,6 +40,7 @@ import {
 } from '../src/shared/api/mutationHeaders'
 import {
   developerPlatformResourcesFixture,
+  personalCredentialAdministrationFixture,
   issuedApiKeySecretFixture,
 } from '../src/developer-platform/fixtures'
 
@@ -89,29 +91,26 @@ describe('Developer Platform API', () => {
   })
 
   test('gets the aggregate resource with Bearer authorization', async () => {
-    const { personalCredentials, ...overview } = developerPlatformResourcesFixture
-    const requests: Array<{ url: string; init: RequestInit }> = []
-    globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-      requests.push({ url, init })
-      return new Response(
-        JSON.stringify(url.endsWith('/credential-policy') ? personalCredentials : overview),
-        { headers: { 'Content-Type': 'application/json' }, status: 200 },
-      )
-    }) as typeof fetch
+    const requests = installFetchRecorder(
+      developerPlatformResourcesFixture,
+    )
 
     await expect(
       getDeveloperPlatformResources('access-token'),
     ).resolves.toEqual(developerPlatformResourcesFixture)
-    expect(requests.map(({ url }) => url)).toEqual([
-      '/api/developer',
-      '/api/developer/credential-policy',
-    ])
-    for (const request of requests) {
-      expect(request.init.headers).toMatchObject({
-        Authorization: 'Bearer access-token',
-      })
-    }
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe('/api/developer')
+    expect(requests[0]?.init.headers).toMatchObject({
+      Authorization: 'Bearer access-token',
+    })
+  })
+
+  test('gets the personal credential policy and member-issued key IDs separately', async () => {
+    const requests = installFetchRecorder(personalCredentialAdministrationFixture)
+
+    await expect(getPersonalCredentialAdministration('access-token'))
+      .resolves.toEqual(personalCredentialAdministrationFixture)
+    expect(requests.map(({ url }) => url)).toEqual(['/api/developer/credential-policy'])
   })
 
   test('creates, rotates, and revokes encoded API keys with stable mutation headers', async () => {
