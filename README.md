@@ -378,9 +378,10 @@ owner-only の root `.env` から読み込みます。
 へ複製せず、local backend deploy と `server:dev` が root `.env` の安定値を共有します。
 これら2つの Enterprise secret は ready hook や Floci コンテナへ渡しません。
 
-CDK stack も同じタスクデータと指定した Workspace 用の
-チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
-DynamoDB に idempotent に seed し、CloudFront の `/api` 経由で取得できます。
+CDK stack は指定した Workspace 用の Workspace metadata と初期 active owner を DynamoDB に
+idempotent に seed し、CloudFront の `/api` 経由で取得できます。ローカルと同じ demo の
+タスクデータとチーム/プロジェクト階層は、`-c mukuroji:demoData=true` を付けて deploy した
+場合だけ seed します（[cdk/README.md](cdk/README.md) の「Demo data」）。
 AWS 環境で確認する場合は以下の順に実行し、最後に `bun run web:deploy` で Web を
 出力された `WebUrl` へ配信してください。次の例は既存の user pool を使う場合です。stack に
 user pool を作らせる場合は `COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` を空にし、
@@ -569,7 +570,7 @@ ISSUE_ID=<IssueId> \
 bun run issues:check-dynamodb
 ```
 
-CDK stack の demo seed は stack 作成時だけ、`WorkItemsTableName` が指す canonical store へ
+CDK stack の demo seed は `-c mukuroji:demoData=true` のとき stack 作成時だけ、`WorkItemsTableName` が指す canonical store へ
 `schemaVersion=2`, `revision=1` で投入します。手動 seed はローカル Floci 専用で、canonical store
 だけを対象とし、既存 row は conditional write で保持します。
 

@@ -70,6 +70,13 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * only reconciles audit retention. Off unless the composition root turns it on.
    */
   readonly tenantLifecycleEnabled?: boolean;
+  /**
+   * Seeds demo members (`@example.com`), two Teams, four Projects, and ten Work Items when the
+   * stack is created, and makes the initial owner a manager of the demo Projects. For trial and
+   * development environments; a company Workspace starts with only its owner. Off unless the
+   * composition root turns it on.
+   */
+  readonly demoDataEnabled?: boolean;
 }>;
 
 /**
@@ -89,6 +96,7 @@ export class MukurojiStack extends cdk.Stack {
     const connectorsEnabled = props?.connectorsEnabled ?? false;
     const requestEmailEnabled = props?.requestEmailEnabled ?? false;
     const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
+    const demoDataEnabled = props?.demoDataEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameterInputs = buildStackParameters(this, {
@@ -299,6 +307,7 @@ export class MukurojiStack extends cdk.Stack {
     buildBootstrapResources(this, {
       dataStores,
       parameters,
+      demoDataEnabled,
     });
     const { connectorChannels } = workerChannels;
     const { connectorRuntimeSecret } = dataStores;
