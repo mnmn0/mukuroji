@@ -1,6 +1,5 @@
 import * as iam from 'aws-cdk-lib/aws-iam'
 import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb'
-import type * as lambda from 'aws-cdk-lib/aws-lambda'
 
 /**
  * Grants only the attribute-restricted Planning revision-fence update used by canonical Work Item writes.
@@ -9,13 +8,13 @@ import type * as lambda from 'aws-cdk-lib/aws-lambda'
  * required by the META revision fence; callers cannot use this statement for ordinary writes.
  *
  * @param planningTable - Planning table containing the isolated revision-fence rows.
- * @param target - Lambda that increments the canonical Work Item revision fence.
+ * @param target - Lambda or role that increments the canonical Work Item revision fence.
  */
 export function grantPlanningRevisionFenceAccess(
   planningTable: dynamodb.ITable,
-  target: lambda.Function,
+  target: iam.IGrantable,
 ): void {
-  target.addToRolePolicy(new iam.PolicyStatement({
+  target.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
     actions: ['dynamodb:UpdateItem'],
     resources: [planningTable.tableArn],
     conditions: {

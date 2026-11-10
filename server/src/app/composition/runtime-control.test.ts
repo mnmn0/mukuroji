@@ -229,6 +229,45 @@ test('constructs an AppConfig provider for an exact production scope', async () 
   })
 })
 
+test('accepts a surface listed among several configured scopes', async () => {
+  const environment = {
+    AWS_REGION: 'ap-northeast-1',
+    NODE_ENV: 'production',
+    MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID: 'application',
+    MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID: 'environment',
+    MUKUROJI_RUNTIME_CONTROL_APPCONFIG_CONFIGURATION_PROFILE_ID: 'profile',
+    MUKUROJI_RUNTIME_CONTROL_SCOPE: 'triage-schedule,analytics-schedule',
+  }
+  const client = {
+    async startConfigurationSession() {
+      return { initialConfigurationToken: 'initial-token' }
+    },
+    async getLatestConfiguration() {
+      return {
+        configuration: new TextEncoder().encode(
+          '{"schemaVersion":1,"revision":3,"mode":"enabled"}',
+        ),
+        nextPollConfigurationToken: 'next-token',
+        nextPollIntervalInSeconds: 15,
+      }
+    },
+  }
+
+  const listed = createProductionRuntimeControlProvider('analytics-schedule', {
+    client,
+    environment,
+    now: () => 0,
+  })
+  const unlisted = createProductionRuntimeControlProvider('agent-run-triage', {
+    client,
+    environment,
+    now: () => 0,
+  })
+
+  expect(await listed.getSnapshot()).toMatchObject({ mode: 'enabled', status: 'current' })
+  expect(await unlisted.getSnapshot()).toEqual({ mode: 'disabled', status: 'unavailable' })
+})
+
 test('blocks a delegate before invocation and records one bounded decision', async () => {
   let delegateCalls = 0
   const observations: RuntimeControlObservation[] = []

@@ -6,16 +6,18 @@ import {
   COGNITO_USER_POOL_CLIENT_ID_VALUE,
   COGNITO_USER_POOL_ID_VALUE,
   WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
+  SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
   expectQueueRequiresSsl,
   findApiRuntimeConfigurationSource,
+  findScheduledJobPolicy,
+  findScheduledJobsFunctionLogicalId,
   synthesizedTemplate,
 } from './test-support';
 
 test('Slack notifications use the sparse due queue with bounded execution and recipient-secret access', () => {
   const template = synthesizedTemplate;
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Delivers opted-in Inbox notifications to recipient-bound Slack destinations.',
-    Timeout: 300,
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
     TracingConfig: { Mode: 'Active' },
     Environment: { Variables: Match.objectLike({
       NOTIFICATIONS_TABLE_NAME: { Ref: 'NotificationsTable76DCFC6C' },
@@ -23,23 +25,16 @@ test('Slack notifications use the sparse due queue with bounded execution and re
       REQUEST_INTAKE_TABLE_NAME: Match.anyValue(),
       COLLABORATION_TABLE_NAME: Match.anyValue(),
       FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
-      MUKUROJI_RUNTIME_CONTROL_SCOPE: 'notification-schedule',
+      MUKUROJI_RUNTIME_CONTROL_SCOPE: Match.stringLikeRegexp('(^|,)notification-schedule(,|$)'),
     }) },
   });
-  template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'rate(1 minute)',
-    Targets: Match.arrayWith([Match.objectLike({ Arn: { 'Fn::GetAtt': ['SlackNotificationFunctionE618FDB5', 'Arn'] } })]),
-  });
+  // The shared Lambda is not retried, so a Slack failure never sends a message twice.
   template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
-    FunctionName: { Ref: 'SlackNotificationFunctionE618FDB5' },
+    FunctionName: { Ref: findScheduledJobsFunctionLogicalId(template) },
     MaximumRetryAttempts: 0,
     DestinationConfig: { OnFailure: { Destination: Match.anyValue() } },
   });
-  const policies = template.findResources('AWS::IAM::Policy');
-  const slackPolicies = Object.entries(policies).filter(([id]) => id.startsWith('SlackNotificationFunction'));
-  expect(slackPolicies).toHaveLength(1);
-  const statements: unknown = slackPolicies[0]?.[1].Properties?.PolicyDocument?.Statement;
-  if (!Array.isArray(statements)) throw new Error('Slack worker policy statements are missing.');
+  const { statements } = findScheduledJobPolicy(template, 'SlackNotification');
   const dynamoStatements = statements.filter((statement: unknown) => {
     if (!statement || typeof statement !== 'object') return false;
     const action: unknown = Reflect.get(statement, 'Action');
@@ -79,7 +74,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
       ],
     },
   ]));
-  const serialized = JSON.stringify(slackPolicies);
+  const serialized = JSON.stringify(statements);
   expect(serialized).toContain('secretsmanager:GetSecretValue');
   expect(serialized).toContain('mukuroji/automation-webhooks/*/slack/*');
   expect(serialized).not.toContain('secretsmanager:PutSecretValue');
@@ -89,10 +84,10 @@ test('Slack notifications use the sparse due queue with bounded execution and re
     Dimensions: [{ Name: 'Channel', Value: 'Slack' }],
     Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
   });
-  const slackLogs = Object.entries(template.findResources('AWS::Logs::LogGroup'))
-    .filter(([id]) => id.startsWith('SlackNotificationLogGroup'));
-  expect(slackLogs).toHaveLength(1);
-  expect(slackLogs[0]?.[1]).toMatchObject({
+  const scheduledJobsLogs = Object.entries(template.findResources('AWS::Logs::LogGroup'))
+    .filter(([id]) => id.startsWith('ScheduledJobsLogGroup'));
+  expect(scheduledJobsLogs).toHaveLength(1);
+  expect(scheduledJobsLogs[0]?.[1]).toMatchObject({
     Properties: { RetentionInDays: 90 }, DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain',
   });
 });
@@ -427,8 +422,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   }
 
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description:
-      'Creates permission-safe in-app analytics snapshot delivery receipts on deterministic schedule occurrences.',
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
     Environment: {
       Variables: Match.objectLike({
         ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
@@ -446,33 +440,14 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
   });
-  template.hasResourceProperties('AWS::Events::Rule', {
-    Description: 'Checks due saved analytics reports every five minutes.',
-    ScheduleExpression: 'rate(5 minutes)',
-    State: 'ENABLED',
-  });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription: 'Detects analytics snapshot delivery failures after asynchronous retries.',
-    MetricName: 'ApproximateNumberOfMessagesVisible',
-    Namespace: 'AWS/SQS',
-    Threshold: 1,
-  });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription:
-      'Detects failures while Lambda delivers analytics schedule failures to the DLQ.',
-    MetricName: 'DestinationDeliveryFailures',
-    Namespace: 'AWS/Lambda',
-    Threshold: 1,
-    TreatMissingData: 'notBreaching',
-  });
-  template.hasOutput('AnalyticsScheduleDlqUrl', {});
 
   const schedulePolicies = Object.entries(resources)
     .filter(([logicalId, resource]) =>
-      logicalId.startsWith('AnalyticsScheduleFunctionServiceRole') &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+      logicalId.startsWith('AnalyticsScheduleJobPolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::ManagedPolicy'
     )
     .map(([, resource]) => resource);
+  expect(schedulePolicies).toHaveLength(1);
   const serializedSchedulePolicies = JSON.stringify(schedulePolicies);
 
   expect(serializedSchedulePolicies).toContain(analyticsTableLogicalId);
@@ -551,7 +526,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   );
 
   expect(auditStreamMappings.some((resource) =>
-    JSON.stringify(resource).includes('AnalyticsScheduleFunction')
+    JSON.stringify(resource).includes(findScheduledJobsFunctionLogicalId(template))
   )).toBe(false);
 });
 
@@ -1904,11 +1879,10 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   const template = synthesizedTemplate;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description:
-      'Emits deterministic notifications and applies due Customer retention redaction.',
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
-    Timeout: 300,
+    Timeout: 900,
     Environment: {
       Variables: Match.objectLike({
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
@@ -1929,49 +1903,15 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
         Destination: Match.anyValue(),
       },
     },
-    MaximumRetryAttempts: 2,
+    MaximumRetryAttempts: 0,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 29);
+  template.resourceCountIs('AWS::SQS::Queue', 24);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
   });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription:
-      'Detects notification schedule failures after asynchronous retries, including scan page limit exhaustion.',
-    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
-    DatapointsToAlarm: 1,
-    EvaluationPeriods: 1,
-    MetricName: 'ApproximateNumberOfMessagesVisible',
-    Namespace: 'AWS/SQS',
-    Period: 300,
-    Statistic: 'Maximum',
-    Threshold: 1,
-    TreatMissingData: 'notBreaching',
-  });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription:
-      'Detects failures while Lambda delivers notification schedule failures to the DLQ.',
-    MetricName: 'DestinationDeliveryFailures',
-    Namespace: 'AWS/Lambda',
-    Threshold: 1,
-    TreatMissingData: 'notBreaching',
-  });
-  template.hasResourceProperties('AWS::Events::Rule', {
-    Description:
-      'Checks canonical Work Items and Planning update targets for scheduled notifications.',
-    ScheduleExpression: 'rate(1 hour)',
-    State: 'ENABLED',
-    Targets: Match.arrayWith([
-      Match.objectLike({
-        Arn: Match.anyValue(),
-        Id: Match.anyValue(),
-      }),
-    ]),
-  });
-
   const schedulePolicy = Object.entries(template.toJSON().Resources).find(([logicalId]) =>
-    logicalId.startsWith('NotificationScheduleFunctionServiceRoleDefaultPolicy')
+    logicalId.startsWith('NotificationScheduleJobPolicy')
   )?.[1];
   const serializedSchedulePolicy = JSON.stringify(schedulePolicy);
   const scheduleStatements = (
@@ -2000,7 +1940,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   expect(serializedSchedulePolicy).toContain('dynamodb:Query');
   expect(serializedSchedulePolicy).toContain('dynamodb:UpdateItem');
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
-  expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
+  expect(serializedSchedulePolicy).not.toContain('sqs:SendMessage');
   expect(planningUpdateStatement?.Condition).toEqual({
     'ForAllValues:StringEquals': {
       'dynamodb:Attributes': [
@@ -2022,7 +1962,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
       ],
     },
   });
-  template.hasOutput('NotificationScheduleDlqUrl', {});
+  template.hasOutput('ScheduledJobsDlqUrl', {});
 });
 
 test('application Lambdas emit active X-Ray traces and critical DLQs survive replacement', () => {
@@ -2031,17 +1971,13 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 31);
+  }, 26);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
     'AiAssistanceObservabilityDlq',
     'AutomationEventDlq',
-    'AutomationScheduleDlq',
-    'AnalyticsScheduleDlq',
-    'NotificationScheduleDlq',
-    'TriageScheduleDlq',
-    'AgentRunTriageDlq',
+    'ScheduledJobsDlq',
     'EnterpriseScimGroupJobDlq',
     'EnterpriseIdentityMaintenanceDlq',
     'TenantOperationDlq',
@@ -2725,7 +2661,7 @@ test('triage schedule wakes due entries through a narrow indexed worker', () => 
     template.toJSON().Outputs.RequestIntakeTableName?.Value?.Ref;
   const functionEntry = Object.entries(resources).find(([, resource]) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
-      'Processes due Triage snooze and SLA wake-ups with revision-fenced receipts.'
+      SCHEDULED_JOBS_FUNCTION_DESCRIPTION
   );
 
   expect(typeof requestTableLogicalId).toBe('string');
@@ -2733,19 +2669,19 @@ test('triage schedule wakes due entries through a narrow indexed worker', () => 
   if (typeof requestTableLogicalId !== 'string' || !functionEntry) {
     throw new Error('Triage schedule infrastructure was not synthesized.');
   }
-  const [functionLogicalId, scheduleFunction] = functionEntry;
+  const [, scheduleFunction] = functionEntry;
   expect(scheduleFunction).toEqual(expect.objectContaining({
     Type: 'AWS::Lambda::Function',
     Properties: expect.objectContaining({
       Handler: 'index.handler',
-      MemorySize: 512,
+      MemorySize: 1024,
       Runtime: 'nodejs22.x',
-      Timeout: 300,
+      Timeout: 900,
       Environment: expect.objectContaining({
         Variables: expect.objectContaining({
           AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
           AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
-          MUKUROJI_RUNTIME_ROLE: 'triage-schedule-worker',
+          MUKUROJI_RUNTIME_ROLE: 'scheduled-jobs-worker',
           REQUEST_INTAKE_TABLE_NAME: { Ref: requestTableLogicalId },
           TRIAGE_SCHEDULE_BATCH_SIZE: '100',
           TRIAGE_WAKE_INDEX_NAME: 'triage-wake-index',
@@ -2755,27 +2691,8 @@ test('triage schedule wakes due entries through a narrow indexed worker', () => 
     }),
   }));
 
-  const roleLogicalId = (
-    scheduleFunction as {
-      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } };
-    }
-  ).Properties?.Role?.['Fn::GetAtt']?.[0];
-  expect(typeof roleLogicalId).toBe('string');
-  if (typeof roleLogicalId !== 'string') {
-    throw new Error('Triage schedule execution role was not synthesized.');
-  }
-  const policies = Object.values(resources).filter((resource) =>
-    (resource as { Type?: string }).Type === 'AWS::IAM::Policy' &&
-    ((resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? [])
-      .some((role) => (role as { Ref?: string }).Ref === roleLogicalId)
-  );
-  const statements = policies.flatMap((policy) => {
-    const value = (policy as {
-      Properties?: { PolicyDocument?: { Statement?: unknown } };
-    }).Properties?.PolicyDocument?.Statement;
-    return Array.isArray(value) ? value as Array<Record<string, unknown>> : [];
-  });
-  const serializedPolicies = JSON.stringify(policies);
+  const { statements } = findScheduledJobPolicy(template, 'TriageSchedule');
+  const serializedPolicies = JSON.stringify(statements);
   const queryStatement = statements.find((statement) =>
     statement.Action === 'dynamodb:Query'
   );
@@ -2837,58 +2754,6 @@ test('triage schedule wakes due entries through a narrow indexed worker', () => 
   ]) {
     expect(serializedPolicies).not.toContain(forbiddenResource);
   }
-
-  const eventInvokeConfig = Object.values(resources).find((resource) =>
-    (resource as { Type?: string }).Type === 'AWS::Lambda::EventInvokeConfig' &&
-    (resource as { Properties?: { FunctionName?: { Ref?: string } } })
-      .Properties?.FunctionName?.Ref === functionLogicalId
-  ) as {
-    Properties?: {
-      DestinationConfig?: { OnFailure?: { Destination?: { 'Fn::GetAtt'?: string[] } } };
-      MaximumRetryAttempts?: number;
-    };
-  } | undefined;
-  expect(eventInvokeConfig?.Properties?.MaximumRetryAttempts).toBe(2);
-  const queueLogicalId = eventInvokeConfig?.Properties?.DestinationConfig
-    ?.OnFailure?.Destination?.['Fn::GetAtt']?.[0];
-  expect(typeof queueLogicalId).toBe('string');
-  if (typeof queueLogicalId !== 'string') {
-    throw new Error('Triage schedule DLQ destination was not synthesized.');
-  }
-  expect(resources[queueLogicalId]).toEqual(expect.objectContaining({
-    Type: 'AWS::SQS::Queue',
-    DeletionPolicy: 'Retain',
-    UpdateReplacePolicy: 'Retain',
-    Properties: expect.objectContaining({
-      MessageRetentionPeriod: 14 * 24 * 60 * 60,
-      SqsManagedSseEnabled: true,
-    }),
-  }));
-  expectQueueRequiresSsl(template, 'TriageScheduleDlq');
-
-  template.hasResourceProperties('AWS::Events::Rule', {
-    Description: 'Checks due Triage snooze and SLA wake-ups every minute.',
-    ScheduleExpression: 'rate(1 minute)',
-    State: 'ENABLED',
-  });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription:
-      'Detects Triage wake processing failures after asynchronous retries.',
-    MetricName: 'ApproximateNumberOfMessagesVisible',
-    Namespace: 'AWS/SQS',
-    Threshold: 1,
-    TreatMissingData: 'notBreaching',
-  });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription:
-      'Detects failures while Lambda delivers Triage schedule failures to the DLQ.',
-    MetricName: 'DestinationDeliveryFailures',
-    Namespace: 'AWS/Lambda',
-    Threshold: 1,
-    TreatMissingData: 'notBreaching',
-  });
-  template.hasOutput('TriageScheduleFunctionName', {});
-  template.hasOutput('TriageScheduleDlqUrl', {});
 });
 
 test('automation workers consume the audit outbox and run recurring schedules with DLQs', () => {
@@ -2921,10 +2786,10 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     },
   });
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Materializes timezone-aware recurring Work Items with durable receipts.',
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
-    Timeout: 300,
+    Timeout: 900,
     Environment: {
       Variables: Match.objectLike({
         AUTOMATION_TABLE_NAME: { Ref: 'AutomationTableE3D67F0D' },
@@ -2935,7 +2800,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         COGNITO_CLIENT_ID: COGNITO_USER_POOL_CLIENT_ID_VALUE,
         COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
-        MUKUROJI_RUNTIME_ROLE: 'automation-schedule-worker',
+        MUKUROJI_RUNTIME_ROLE: 'scheduled-jobs-worker',
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
@@ -2962,32 +2827,20 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       OnFailure: { Destination: Match.anyValue() },
     },
   });
-  template.hasResourceProperties('AWS::Events::Rule', {
-    Description: 'Checks timezone-aware recurring Work definitions every minute.',
-    ScheduleExpression: 'rate(1 minute)',
-    State: 'ENABLED',
-  });
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     AlarmDescription: 'Detects automation outbox records that exhausted stream retries.',
     MetricName: 'ApproximateNumberOfMessagesVisible',
     Namespace: 'AWS/SQS',
     Threshold: 1,
   });
-  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-    AlarmDescription: 'Detects recurring Work materialization failures after asynchronous retries.',
-    MetricName: 'ApproximateNumberOfMessagesVisible',
-    Namespace: 'AWS/SQS',
-    Threshold: 1,
-  });
   template.hasOutput('AutomationEventDlqUrl', {});
-  template.hasOutput('AutomationScheduleDlqUrl', {});
 
   const resources = template.toJSON().Resources;
   const eventPolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationEventFunctionServiceRoleDefaultPolicy')
   )?.[1];
   const schedulePolicy = Object.entries(resources).find(([logicalId]) =>
-    logicalId.startsWith('AutomationScheduleFunctionServiceRoleDefaultPolicy')
+    logicalId.startsWith('AutomationScheduleJobPolicy')
   )?.[1];
   const eventConditionCheckPolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationEventTransactWritePolicy')
@@ -3139,7 +2992,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     expect(serialized).toContain('mukuroji/automation-webhooks/');
   }
   const scheduleFunction = Object.entries(resources).find(([logicalId, resource]) =>
-    logicalId.startsWith('AutomationScheduleFunction') &&
+    logicalId === findScheduledJobsFunctionLogicalId(template) &&
     (resource as { Type?: string }).Type === 'AWS::Lambda::Function'
   )?.[1] as {
     Properties?: { Environment?: { Variables?: Record<string, unknown> } };
@@ -3182,30 +3035,25 @@ test('agent run triage files failed and stalled runs through a narrow scheduled 
     ]),
   });
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Files failed and stalled Agent Runs of opted-in Teams to Triage, one entry per run.',
-    Timeout: 300,
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
     Environment: {
       Variables: Match.objectLike({
-        MUKUROJI_RUNTIME_ROLE: 'agent-run-triage-worker',
-        MUKUROJI_RUNTIME_CONTROL_SCOPE: 'agent-run-triage',
+        AGENT_RUNS_TABLE_NAME: Match.anyValue(),
+        MUKUROJI_RUNTIME_CONTROL_SCOPE: Match.stringLikeRegexp('(^|,)agent-run-triage(,|$)'),
         TRIAGE_WAKE_SHARD_COUNT: '8',
       }),
     },
   });
-  template.hasResourceProperties('AWS::Events::Rule', {
-    Description: 'Files failed and stalled Agent Runs to Triage every minute.',
-    ScheduleExpression: 'rate(1 minute)',
-  });
-  template.hasResourceProperties('AWS::IAM::Policy', {
-    PolicyDocument: {
-      Statement: Match.arrayWith([
-        Match.objectLike({
-          Action: 'dynamodb:Query',
-          Resource: Match.arrayWith([
-            Match.objectLike({ 'Fn::Join': Match.arrayWith([Match.arrayWith(['/index/AgentRunTriageIndex'])]) }),
-          ]),
+  const { statements } = findScheduledJobPolicy(template, 'AgentRunTriage');
+  expect(statements).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      Action: 'dynamodb:Query',
+      Resource: expect.arrayContaining([
+        expect.objectContaining({
+          'Fn::Join': expect.arrayContaining([expect.arrayContaining(['/index/AgentRunTriageIndex'])]),
         }),
       ]),
-    },
-  });
+    }),
+  ]));
+  expect(JSON.stringify(statements)).not.toContain('dynamodb:Scan');
 });

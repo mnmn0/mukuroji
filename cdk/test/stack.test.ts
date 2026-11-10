@@ -7,6 +7,7 @@ import './restore-drill.suite';
 import './security-iam-api.suite';
 import './api-environment-budget.suite';
 import './workers-observability.suite';
+import './scheduled-jobs.suite';
 import './bootstrap.suite';
 import './runtime-controls.suite';
 import './web-distribution.suite';

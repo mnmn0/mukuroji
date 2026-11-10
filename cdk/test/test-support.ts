@@ -205,3 +205,40 @@ export const COGNITO_USER_POOL_CLIENT_ID_VALUE = {
     { Ref: 'CognitoUserPoolClientId' },
   ],
 } as const;
+
+/** Description of the Lambda that runs every periodic job. */
+export const SCHEDULED_JOBS_FUNCTION_DESCRIPTION =
+  'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, and notification jobs.';
+
+/**
+ * Finds the logical ID of the Lambda that runs every periodic job.
+ *
+ * @param template Synthesized stack template.
+ * @returns The function's logical ID.
+ */
+export function findScheduledJobsFunctionLogicalId(template: Template): string {
+  const entry = Object.entries(template.findResources('AWS::Lambda::Function', {
+    Properties: { Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION },
+  }))[0];
+  if (!entry) throw new Error('The scheduled jobs Lambda was not synthesized.');
+  return entry[0];
+}
+
+/**
+ * Lists the statements of one periodic job's own IAM policy on the shared role.
+ *
+ * @param template Synthesized stack template.
+ * @param jobId PascalCase job ID, such as `AnalyticsSchedule`.
+ * @returns The policy's logical ID and statements.
+ */
+export function findScheduledJobPolicy(
+  template: Template,
+  jobId: string,
+): { logicalId: string; statements: Array<Record<string, unknown>> } {
+  const entry = Object.entries(template.findResources('AWS::IAM::ManagedPolicy'))
+    .find(([logicalId]) => logicalId.startsWith(`${jobId}JobPolicy`));
+  if (!entry) throw new Error(`The ${jobId} job policy was not synthesized.`);
+  const statements: unknown = entry[1].Properties?.PolicyDocument?.Statement;
+  if (!Array.isArray(statements)) throw new Error(`The ${jobId} job policy has no statements.`);
+  return { logicalId: entry[0], statements: statements as Array<Record<string, unknown>> };
+}
