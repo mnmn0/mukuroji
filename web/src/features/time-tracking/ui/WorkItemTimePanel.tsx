@@ -136,8 +136,8 @@ export function WorkItemTimePanelContainer({
   const entryMutations = useTimeEntryMutations(accessToken)
   const timerMutations = useTimerMutations(accessToken)
   const saveEstimate = useTimeEstimateMutation(accessToken, teamId, workItemId)
-  const isTimerOnItem = timer.data?.teamId === teamId && timer.data.workItemId === workItemId
-  const now = useNow(isTimerOnItem)
+  // Tick whenever a timer runs, here or elsewhere, so its elapsed time and the 7-day limit stay current.
+  const now = useNow(Boolean(timer.data))
 
   return (
     <WorkItemTimePanel
