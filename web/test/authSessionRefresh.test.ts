@@ -348,7 +348,7 @@ test('clears the session when the Workspace now requires SSO', async () => {
   expect(readStoredAuthSession()).toBeNull()
 })
 
-test('keeps the session when the refresh answers with an unreadable success or an unexpected status', async () => {
+test('keeps the session when the refresh answer does not come from the API', async () => {
   const session = storeSession()
   let refreshResponse = () => new Response('<html>signed in</html>', { status: 200 })
   server = (request) => request.url === '/api/auth/refresh'
@@ -362,8 +362,19 @@ test('keeps the session when the refresh answers with an unreadable success or a
   const notFound = await fetchTarget.fetch('/api/workspace', {
     headers: { Authorization: `Bearer ${session.accessToken}` },
   })
+  // A firewall or gateway in front of the API refuses without the API's error code.
+  refreshResponse = () => new Response('<html>Request blocked</html>', { status: 403 })
+  const blocked = await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  })
+  refreshResponse = () => Response.json({ message: 'Forbidden' }, { status: 403 })
+  const gateway = await fetchTarget.fetch('/api/workspace', {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+  })
 
   expect(malformed.status).toBe(503)
   expect(notFound.status).toBe(503)
+  expect(blocked.status).toBe(503)
+  expect(gateway.status).toBe(503)
   expect(readStoredAuthSession()).toEqual(session)
 })

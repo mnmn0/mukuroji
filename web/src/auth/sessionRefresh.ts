@@ -38,7 +38,8 @@ type RefreshOutcome =
 /**
  * Statuses with which the refresh endpoint refuses a session for good: a malformed request
  * (400), a revoked or expired refresh token (401), a member without access (403), and a
- * Workspace that now requires SSO (409). Any other failure leaves the session in place.
+ * Workspace that now requires SSO (409). They count only when the API itself answered with an
+ * error code; any other failure, such as a 403 page from a firewall, leaves the session in place.
  */
 const definitiveRefreshRejections = new Set([400, 401, 403, 409])
 
@@ -125,8 +126,9 @@ async function requestRefresh(session: AuthSession): Promise<RefreshOutcome> {
   const body: unknown = await response.json().catch(() => undefined)
   const renewed = response.ok ? readRefreshedSession(body, session) : undefined
   if (!renewed) {
-    // A success the client cannot read, for example from a proxy, says nothing about the token.
-    if (response.ok) return { status: 'unavailable' }
+    // A success the client cannot read, or an error without the API's error code, comes from
+    // somewhere on the way, such as a proxy or a firewall, and says nothing about the token.
+    if (response.ok || !hasApiErrorCode(body)) return { status: 'unavailable' }
     // Only remove the session that was refreshed: another account may be signed in too.
     if (session.refreshToken) removeStoredAuthSession(session.refreshToken)
     return { status: 'rejected' }
@@ -138,6 +140,16 @@ async function requestRefresh(session: AuthSession): Promise<RefreshOutcome> {
   replaceStoredAuthSession(renewed)
   recordReplacedAccessToken(session.accessToken, renewed.accessToken)
   return { status: 'refreshed', session: renewed }
+}
+
+/**
+ * Checks whether an error body is one the API wrote, which always names an error code.
+ *
+ * @param body - Parsed response body.
+ * @returns Whether the body carries a non-empty `code`.
+ */
+function hasApiErrorCode(body: unknown) {
+  return isRecord(body) && typeof body.code === 'string' && body.code !== ''
 }
 
 /**
