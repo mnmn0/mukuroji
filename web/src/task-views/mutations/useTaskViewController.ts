@@ -53,11 +53,9 @@ export type TaskViewControllerCapabilities = {
   fields: readonly string[]
   /** Layout modes implemented by the consuming surface. */
   layoutModes: readonly TaskViewLayoutMode[]
-  /** Legacy status identifiers visible to a single-Team surface. */
-  legacyStatusIds?: readonly string[]
   /** Columns that must remain visible after migration. */
   requiredColumns?: readonly string[]
-  /** Team-qualified workflow statuses visible to the current viewer. */
+  /** Team and Work Item Type-qualified workflow statuses visible to the current viewer. */
   workflowStatuses: readonly TaskViewWorkflowStatusFilter[]
 }
 
@@ -717,7 +715,6 @@ function createSanitizeOptions(
     fallback,
     fields: input.capabilities.fields,
     layoutModes: input.capabilities.layoutModes,
-    legacyStatusIds: input.capabilities.legacyStatusIds,
     requiredColumns: input.capabilities.requiredColumns,
     workflowStatuses: input.capabilities.workflowStatuses,
   }

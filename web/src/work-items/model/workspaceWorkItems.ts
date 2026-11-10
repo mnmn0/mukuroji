@@ -1,11 +1,11 @@
 import {
+  type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemScheduleDueDate,
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import { taskScheduleInstantToLocalDate } from '../../tasks/model/taskSchedule'
 import {
   isCompletedWorkItem,

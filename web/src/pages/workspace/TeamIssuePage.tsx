@@ -74,7 +74,6 @@ import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRe
 import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
-  resolveConfiguredWorkflowStatuses,
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import {
@@ -432,9 +431,6 @@ export function TeamIssuePage() {
     status,
     workItemTypeId,
   }) => ({ statusId: status.id, teamId, workItemTypeId }))
-  const taskViewLegacyStatusIds = resolveConfiguredWorkflowStatuses(taskViewConfiguration).map(
-    (status) => status.id,
-  )
   const taskViewController = useTaskViewController({
     accessToken,
     builtInDefinition: builtInTaskViewDefinition,
@@ -442,7 +438,6 @@ export function TeamIssuePage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['table', 'board'],
-      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },

@@ -2,6 +2,8 @@ import type {
   BulkOperation,
   BulkOperationPreview,
   BulkOperationRequest,
+  CanonicalWorkItem,
+  CreateWorkItemInput,
   CuratedContextSourceKind,
   ResolvedWorkItemConfiguration,
   TaskViewScope,
@@ -79,10 +81,6 @@ import {
 } from '../../shared/routing/paths'
 import { useReportWorkspaceSidebarRouteState } from '../../shared/ui/sidebar'
 import {
-  type CreateWorkItemInput,
-  type CanonicalWorkItem,
-} from '../../tasks/api'
-import {
   createProjectUsersPageKey,
   mergeProjectUsers,
   resolveCurrentUserProjectKey,
@@ -118,7 +116,6 @@ import {
   useTeamWorkItemConfigurations,
 } from '../../work-items/queries/useWorkItemConfigurations'
 import {
-  resolveConfiguredWorkflowStatuses,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
   resolveWorkItemTypeWorkflowStatuses,
@@ -508,13 +505,6 @@ export function TaskPage() {
       ),
     [workItemConfigurationLoadResult.configurationsByTeam],
   )
-  const taskViewLegacyStatusIds = useMemo(
-    () => [...new Set(Object.values(workItemConfigurationLoadResult.configurationsByTeam)
-      .flatMap((resolved) =>
-        resolveConfiguredWorkflowStatuses(resolved.configuration).map((status) => status.id)
-      ))],
-    [workItemConfigurationLoadResult.configurationsByTeam],
-  )
   const taskViewFields = useMemo(
     () => [
       ...standardTaskViewFields,
@@ -546,7 +536,6 @@ export function TaskPage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['table', 'board', 'gantt', 'calendar'],
-      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
