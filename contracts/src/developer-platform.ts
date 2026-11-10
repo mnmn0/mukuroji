@@ -304,7 +304,7 @@ export type PersonalAgentCredentialOverview = {
    */
   maxLifetimeDays: number
   /**
-   * 現在の member が作成した API key です。管理者が作成した Workspace 用 key も含みます。
+   * 現在の member が自分用に発行した API key です。管理者が作成した Workspace 用 key は含みません。
    */
   apiKeys: ApiKeySummary[]
 }
