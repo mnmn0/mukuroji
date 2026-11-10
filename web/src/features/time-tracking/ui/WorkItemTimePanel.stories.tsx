@@ -22,6 +22,7 @@ const meta = {
     now: timeTrackingFixtureNow,
     canEditEstimate: true,
     workItemId: 'onboarding',
+    teamId: 'core-team',
     timer: null,
     estimate: timeTrackingFixtureEstimate,
     actualMinutes: 540,

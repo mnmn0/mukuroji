@@ -308,6 +308,7 @@ describe('time tracking views', () => {
         onSubmitEntry={noop}
         onUpdateEntry={noop}
         t={t}
+        teamId="core-team"
         timer={timeTrackingFixtureTimer}
         timesheetHref="/teams/core-team/timesheet"
         workItemId="onboarding"
@@ -339,6 +340,7 @@ describe('time tracking views', () => {
         onSubmitEntry={noop}
         onUpdateEntry={noop}
         t={t}
+        teamId="core-team"
         timer={null}
         workItemId="onboarding"
       />,
@@ -363,6 +365,7 @@ describe('time tracking views', () => {
         onSubmitEntry={noop}
         onUpdateEntry={noop}
         t={t}
+        teamId="core-team"
         timer={timeTrackingFixtureTimer}
         workItemId="pricing"
       />,
@@ -370,6 +373,30 @@ describe('time tracking views', () => {
     expect(html).toContain(t('timeTracking.timer.runningElsewhere'))
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*type="submit">Start timer<\/button>/u)
     expect(html).toContain('Not set')
+    // Work Item identifiers are only unique within a Team: the same identifier in another Team is another item.
+    const otherTeam = renderToStaticMarkup(
+      <WorkItemTimePanel
+        actualMinutes={0}
+        entries={[]}
+        estimate={null}
+        formatters={formatters}
+        now={timeTrackingFixtureNow}
+        onCreateEntry={noop}
+        onDiscardTimer={noop}
+        onRetry={() => undefined}
+        onSaveEstimate={noop}
+        onStartTimer={noop}
+        onStopTimer={noop}
+        onSubmitEntry={noop}
+        onUpdateEntry={noop}
+        t={t}
+        teamId="design-team"
+        timer={timeTrackingFixtureTimer}
+        workItemId={timeTrackingFixtureTimer.workItemId}
+      />,
+    )
+    expect(otherTeam).toContain(t('timeTracking.timer.runningElsewhere'))
+    expect(otherTeam).not.toContain('Stop and record')
   })
 
   test('the timesheet lists the week, rejection reasons, and the week-wide submit', () => {

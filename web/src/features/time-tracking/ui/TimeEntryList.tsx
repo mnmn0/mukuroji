@@ -51,7 +51,9 @@ export function TimeEntryList({
   workItemOptions,
   workItemTitles,
 }: TimeEntryListProps) {
-  const [editingEntryId, setEditingEntryId] = useState<string>()
+  // The entry as it was when editing began; saving sends its revision so a change made elsewhere
+  // in the meantime comes back as a revision conflict instead of being overwritten.
+  const [editingEntry, setEditingEntry] = useState<TimeEntry>()
   const [pendingEntryId, setPendingEntryId] = useState<string>()
   const [failure, setFailure] = useState<{ entryId: string; message: string }>()
 
@@ -78,17 +80,17 @@ export function TimeEntryList({
       {entries.map((entry) => {
         const editable = isTimeEntryEditable(entry)
         const reason = rejectionReasons[entry.id]
-        if (editingEntryId === entry.id && onUpdate) {
+        if (editingEntry?.id === entry.id && onUpdate) {
           return (
             <li className="min-w-0" key={entry.id}>
               <TimeEntryForm
-                defaultDate={toLocalDateKey(entry.startAt)}
-                entry={entry}
-                {...(workItemOptions ? { workItemOptions } : { fixedWorkItemId: entry.workItemId })}
-                onCancel={() => setEditingEntryId(undefined)}
+                defaultDate={toLocalDateKey(editingEntry.startAt)}
+                entry={editingEntry}
+                {...(workItemOptions ? { workItemOptions } : { fixedWorkItemId: editingEntry.workItemId })}
+                onCancel={() => setEditingEntry(undefined)}
                 onSave={async (input) => {
-                  await onUpdate(entry, input)
-                  setEditingEntryId(undefined)
+                  await onUpdate(editingEntry, input)
+                  setEditingEntry(undefined)
                 }}
                 t={t}
               />
@@ -134,7 +136,7 @@ export function TimeEntryList({
                     aria-label={`${t('timeTracking.entry.edit')} ${formatters.date(entry.startAt)} ${formatters.time(entry.startAt)}`}
                     className="workbench-button-secondary min-h-8 px-3"
                     disabled={pendingEntryId !== undefined}
-                    onClick={() => setEditingEntryId(entry.id)}
+                    onClick={() => setEditingEntry(entry)}
                     type="button"
                   >
                     {t('timeTracking.entry.edit')}

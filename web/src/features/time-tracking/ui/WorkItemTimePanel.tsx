@@ -37,6 +37,10 @@ export type WorkItemTimePanelProps = {
   now: Date
   /** Work Item shown by the panel. */
   workItemId: string
+  /** Team that owns the Work Item; Work Item identifiers are only unique within a Team. */
+  teamId: string
+  /** Today's local date, the default for a new entry; falls back to the date of `now`. */
+  today?: string
   /** Running timer of the member, `null` when none runs, undefined while loading. */
   timer: RunningTimer | null | undefined
   /** Estimate, `null` when unset, undefined while loading. */
@@ -165,7 +169,9 @@ export function WorkItemTimePanelContainer({
       readOnly={readOnly}
       rejectionReasons={rejectionReasons.data}
       t={t}
+      teamId={teamId}
       timer={timer.data}
+      today={today}
       {...(timesheetHref ? { timesheetHref } : {})}
       workItemId={workItemId}
     />
@@ -198,8 +204,10 @@ export function WorkItemTimePanel({
   readOnly = false,
   rejectionReasons,
   t,
+  teamId,
   timer,
   timesheetHref,
+  today,
   workItemId,
 }: WorkItemTimePanelProps) {
   const id = useId()
@@ -207,7 +215,7 @@ export function WorkItemTimePanel({
   const [isEditingEstimate, setIsEditingEstimate] = useState(false)
   const [pendingAction, setPendingAction] = useState<'start' | 'stop' | 'discard' | 'estimate'>()
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
-  const isTimerOnItem = timer?.workItemId === workItemId
+  const isTimerOnItem = timer?.teamId === teamId && timer.workItemId === workItemId
   const isTimerElsewhere = Boolean(timer) && !isTimerOnItem
   const overlong = timer ? isTimerOverlong(timer.startedAt, now) : false
   const ownMinutes = sumTimeEntryMinutes(entries)
@@ -415,7 +423,7 @@ export function WorkItemTimePanel({
         </div>
         {isCreating ? (
           <TimeEntryForm
-            defaultDate={toLocalDateKey(now)}
+            defaultDate={today ?? toLocalDateKey(now)}
             fixedWorkItemId={workItemId}
             onCancel={() => setIsCreating(false)}
             onSave={async (input) => {
