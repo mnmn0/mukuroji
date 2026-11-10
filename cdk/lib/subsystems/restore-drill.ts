@@ -1552,6 +1552,28 @@ export function buildRestoreDrill(
     1,
   );
 
+  new cdk.CfnOutput(scope, 'RestoreDrillStateMachineArn', {
+    value: workflow.stateMachineArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillCleanupStateMachineArn', {
+    value: cleanupWorkflow.stateMachineArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillEvidenceBucketName', {
+    value: evidenceBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillScratchBucketName', {
+    value: scratchBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillStateTableName', {
+    value: stateTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillCleanupApprovalPolicyArn', {
+    value: cleanupApprovalPolicy.managedPolicyArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillScheduleDlqUrl', {
+    value: scheduleDlq.queueUrl,
+  });
+
   return {
     cleanupApprovalPolicy,
     cleanupRole,
