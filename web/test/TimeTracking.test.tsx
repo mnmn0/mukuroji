@@ -32,7 +32,9 @@ import {
   createWeekPeriod,
   formatElapsed,
   formatMinutes,
+  createTrailingPeriod,
   parseHoursInput,
+  readLocalNoon,
   resolveLocalInstant,
   resolveWeekStart,
   shiftLocalDate,
@@ -117,6 +119,8 @@ describe('time tracking periods', () => {
     expect(shiftLocalDate('2026-11-30', 1)).toBe('2026-12-01')
     expect(countLocalDaysBetween('2026-11-09', '2026-11-16')).toBe(7)
     expect(countLocalDaysBetween('2026-11-10', '2026-11-09')).toBe(-1)
+    // The Work Item panel's window is rebuilt from the local date, ending at the next midnight.
+    expect(createTrailingPeriod(1, readLocalNoon('2026-11-11'))).toEqual({ from: '2026-11-10T15:00:00.000Z', to: '2026-11-11T15:00:00.000Z' })
     // A timer entry's seconds survive an edit that leaves the fields alone.
     expect(resolveLocalInstant('2026-11-10T00:00:10.500Z', '2026-11-10', '09:00')).toBe('2026-11-10T00:00:10.500Z')
     expect(resolveLocalInstant('2026-11-10T00:00:10.500Z', '2026-11-10', '09:05')).toBe('2026-11-10T00:05:00.000Z')
@@ -146,6 +150,11 @@ describe('time tracking model', () => {
       ['2026-11-11', ['overnight'], 60],
       ['2026-11-12', [], 60],
     ])
+    // A one-minute timer across midnight counts once, as a whole minute, like the server timesheet.
+    const sliver = createTimeEntryFixture({ id: 'sliver', startAt: '2026-11-11T14:59:40.000Z', endAt: '2026-11-11T15:00:20.000Z', durationMinutes: 1 })
+    const sliverRows = buildTimeEntryWeekRows([sliver], week.days)
+    expect(Object.values(sliverRows[0]?.minutesByDate ?? {}).sort()).toEqual([0, 1])
+    expect(sumTimeEntryMinutesInDays([sliver], week.days)).toBe(1)
     // 23:00 Sunday to 02:00 Monday: each week counts its own part, and the next week still lists the entry.
     const acrossWeeks = createTimeEntryFixture({ id: 'across-weeks', startAt: '2026-11-15T14:00:00.000Z', endAt: '2026-11-15T17:00:00.000Z', durationMinutes: 180 })
     const nextWeek = createWeekPeriod(shiftWeek(timeTrackingFixtureWeekStart, 1))

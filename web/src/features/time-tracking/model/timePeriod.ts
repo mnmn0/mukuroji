@@ -69,6 +69,19 @@ export function readLocalDayRange(date: string): { from: number; to: number } | 
 }
 
 /**
+ * Returns local noon of a date, a safe instant inside the day for range helpers.
+ *
+ * @param date - Local `YYYY-MM-DD` date; invalid text falls back to now.
+ * @returns Date at local noon.
+ */
+export function readLocalNoon(date: string): Date {
+  const day = parseLocalDate(date)
+  if (!day) return new Date()
+  day.setHours(12, 0, 0, 0)
+  return day
+}
+
+/**
  * Moves a local date by whole days.
  *
  * @param date - Local `YYYY-MM-DD` date.

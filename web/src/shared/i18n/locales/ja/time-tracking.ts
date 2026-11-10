@@ -3,6 +3,8 @@ export const timeTrackingMessages = {
   'timeTracking.page.eyebrow': '工数',
   'timeTracking.page.title': '工数とタイムシート',
   'timeTracking.page.description': '週ごとの工数を記録して提出し、マネージャーが承認・ロックします。',
+  'timeTracking.page.lookupError': 'タスクやメンバーの名前を読み込めませんでした。工数を記録するタスクを選ぶには再読み込みしてください。',
+  'timeTracking.page.lookupRetry': 'タスクを再読み込み',
   'timeTracking.view.navigation': '工数の表示',
   'timeTracking.view.timesheet': '自分のタイムシート',
   'timeTracking.view.approvals': '承認',

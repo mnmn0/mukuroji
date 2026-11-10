@@ -179,6 +179,26 @@ test.describe('Time tracking', () => {
     await expect(page.getByRole('button', { name: 'Approve all submitted this week' })).toHaveCount(0)
   })
 
+  test('shows a failed task lookup and recovers on retry', async ({ page }) => {
+    await mockTimeTracking(page)
+    let failures = 1
+    await page.route((url) => url.pathname === '/api/work-items', async (route) => {
+      if (failures > 0) {
+        failures -= 1
+        await route.fulfill({ status: 503, json: { message: 'Unavailable' } })
+        return
+      }
+      await route.fallback()
+    })
+    await page.goto('/teams/core-team/timesheet')
+    const alert = page.getByRole('alert').filter({ hasText: 'Tasks and member names could not be loaded.' })
+    await expect(alert).toBeVisible()
+    await alert.getByRole('button', { name: 'Reload tasks' }).click()
+    await expect(alert).toHaveCount(0)
+    await page.getByRole('button', { name: 'Add manually' }).click()
+    await expect(page.getByRole('form', { name: 'Add time' }).getByLabel('Task')).toContainText('Update the pricing page')
+  })
+
   test('works at phone width', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await mockTimeTracking(page)

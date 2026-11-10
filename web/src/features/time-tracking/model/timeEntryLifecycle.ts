@@ -1,5 +1,5 @@
 import type { TimeEntry, TimeEntryStatus } from '@mukuroji/contracts'
-import { readLocalDayRange } from './timePeriod'
+import { readLocalDayRange, shiftLocalDate, toLocalDateKey } from './timePeriod'
 
 /** Longest interval the API accepts for one entry or timer, in minutes. */
 export const maxTimeEntryMinutes = 7 * 24 * 60
@@ -70,12 +70,14 @@ export function sumTimeEntryMinutes(entries: readonly Pick<TimeEntry, 'durationM
 /**
  * Splits an entry's minutes across the local dates its interval covers.
  *
- * The recorded duration is shared out in proportion to the time on each date, so an entry that
- * crosses midnight counts on both days and the parts add up to its recorded minutes.
+ * Like the server timesheet, each date first gets the whole minutes inside it and the minutes
+ * left over go to the dates with the largest fractions, so every part is a whole number and the
+ * parts across all covered dates add up to the recorded minutes. An entry that crosses midnight
+ * therefore counts on both days.
  *
  * @param entry - Entry to split.
- * @param days - Local dates to split across.
- * @returns Minutes keyed by each listed date the entry overlaps.
+ * @param days - Local dates to report.
+ * @returns Whole minutes keyed by each listed date the entry overlaps, zero for a sliver under a minute.
  */
 export function splitTimeEntryMinutesByDay(
   entry: Pick<TimeEntry, 'startAt' | 'endAt' | 'durationMinutes'>,
@@ -83,14 +85,34 @@ export function splitTimeEntryMinutesByDay(
 ): Map<string, number> {
   const start = Date.parse(entry.startAt)
   const end = Date.parse(entry.endAt)
-  const span = end - start
   const minutesByDate = new Map<string, number>()
-  if (!(span > 0)) return minutesByDate
-  for (const date of days) {
+  if (!(end > start)) return minutesByDate
+  const segments: Array<{ date: string; rawMinutes: number; minutes: number }> = []
+  const lastDate = toLocalDateKey(new Date(end - 1))
+  // An entry spans at most seven days, so the walk is short; the bound guards bad input.
+  for (let date: string | undefined = toLocalDateKey(new Date(start)), steps = 0; date && date <= lastDate && steps < 10; date = shiftLocalDate(date, 1), steps += 1) {
     const range = readLocalDayRange(date)
-    if (!range) continue
+    if (!range) break
     const overlap = Math.min(end, range.to) - Math.max(start, range.from)
-    if (overlap > 0) minutesByDate.set(date, entry.durationMinutes * overlap / span)
+    if (overlap > 0) segments.push({ date, rawMinutes: overlap / 60_000, minutes: Math.floor(overlap / 60_000) })
+  }
+  const rawTotal = segments.reduce((total, segment) => total + segment.rawMinutes, 0)
+  // Scale to the recorded minutes, which the server rounds from the exact interval.
+  const scale = rawTotal > 0 ? entry.durationMinutes / rawTotal : 0
+  for (const segment of segments) {
+    segment.rawMinutes *= scale
+    segment.minutes = Math.floor(segment.rawMinutes)
+  }
+  let remaining = entry.durationMinutes - segments.reduce((total, segment) => total + segment.minutes, 0)
+  for (const segment of [...segments].sort((left, right) =>
+    (right.rawMinutes - Math.floor(right.rawMinutes)) - (left.rawMinutes - Math.floor(left.rawMinutes)))) {
+    if (remaining <= 0) break
+    segment.minutes += 1
+    remaining -= 1
+  }
+  const listed = new Set(days)
+  for (const segment of segments) {
+    if (listed.has(segment.date)) minutesByDate.set(segment.date, segment.minutes)
   }
   return minutesByDate
 }

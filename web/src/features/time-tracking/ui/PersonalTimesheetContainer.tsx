@@ -1,13 +1,14 @@
 import { useMemo } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
-import { createWeekPeriod, toLocalDateKey } from '../model/timePeriod'
+import { createWeekPeriod } from '../model/timePeriod'
 import { useTimeEntryMutations } from '../mutations/useTimeEntryMutations'
 import { useRejectionReasons } from '../queries/useRejectionReasons'
 import { useTimeEntries } from '../queries/useTimeEntries'
 import { PersonalTimesheet } from './PersonalTimesheet'
 import type { TimeEntryWorkItemOption } from './TimeEntryForm'
 import { createTimeTrackingFormatters } from './timeTrackingText'
+import { useLocalToday } from './useNow'
 
 /** Props of the member's timesheet connected to the API. */
 export type PersonalTimesheetContainerProps = {
@@ -45,6 +46,7 @@ export function PersonalTimesheetContainer({
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
   const week = useMemo(() => createWeekPeriod(weekStart), [weekStart])
+  const today = useLocalToday()
   const entries = useTimeEntries(accessToken, teamId, week, memberKey ? { userId: memberKey } : {})
   const rejectionReasons = useRejectionReasons(accessToken, entries.data?.entries ?? [])
   const mutations = useTimeEntryMutations(accessToken)
@@ -68,7 +70,7 @@ export function PersonalTimesheetContainer({
       onUpdateEntry={(entry, input) => mutations.update(entry, input)}
       {...(rejectionReasons.data ? { rejectionReasons: rejectionReasons.data } : {})}
       t={t}
-      today={toLocalDateKey(new Date())}
+      today={today}
       week={week}
       workItemOptions={workItemOptions}
       workItemTitles={workItemTitles}

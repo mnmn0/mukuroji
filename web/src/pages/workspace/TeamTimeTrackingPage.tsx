@@ -52,6 +52,8 @@ export function TeamTimeTrackingPage() {
       .map((item) => [item.id, item.title])),
     [teamId, workItems.data],
   )
+  // Without Work Items the entry form has nothing to pick, so a failed lookup is shown, not treated as empty.
+  const lookupError = workItems.error ?? projectMembers.error
   const memberNames = useMemo(() => {
     const names: Record<string, string> = {}
     for (const access of projectMembers.data?.members ?? []) {
@@ -90,6 +92,18 @@ export function TeamTimeTrackingPage() {
           t={t}
           view={view}
         />
+        {lookupError ? (
+          <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+            <span>{t('timeTracking.page.lookupError')}</span>
+            <button
+              className="workbench-button-secondary min-h-8 px-3"
+              onClick={() => { void Promise.all([workItems.mutate(), projectMembers.mutate()]).catch(() => undefined) }}
+              type="button"
+            >
+              {t('timeTracking.page.lookupRetry')}
+            </button>
+          </div>
+        ) : null}
         {view === 'approvals' ? (
           <TimeApprovalQueueContainer
             accessToken={accessToken}

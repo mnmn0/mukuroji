@@ -3,6 +3,8 @@ export const timeTrackingMessages = {
   'timeTracking.page.eyebrow': 'Time',
   'timeTracking.page.title': 'Time and timesheets',
   'timeTracking.page.description': 'Record and submit your week; Team managers approve and lock it.',
+  'timeTracking.page.lookupError': 'Tasks and member names could not be loaded. Reload them to choose a task to record time on.',
+  'timeTracking.page.lookupRetry': 'Reload tasks',
   'timeTracking.view.navigation': 'Time tracking views',
   'timeTracking.view.timesheet': 'My timesheet',
   'timeTracking.view.approvals': 'Approvals',

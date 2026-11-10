@@ -4,7 +4,7 @@ import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import type { TimeEntryDraftInput } from '../api/timeEntries'
 import { isTimerOverlong, readTimerElapsedMilliseconds, sortTimeEntries, sumTimeEntryMinutes } from '../model/timeEntryLifecycle'
-import { createTrailingPeriod, formatElapsed, formatMinutes, parseHoursInput, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
+import { createTrailingPeriod, formatElapsed, formatMinutes, parseHoursInput, readLocalNoon, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import { useActiveTimer } from '../queries/useActiveTimer'
 import { useRejectionReasons } from '../queries/useRejectionReasons'
 import { useTeamTimesheet } from '../queries/useTeamTimesheet'
@@ -22,7 +22,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
-import { useNow } from './useNow'
+import { useLocalToday, useNow } from './useNow'
 
 /** Days of the member's own entries listed under a Work Item. */
 const ownEntryPeriodDays = 90
@@ -114,8 +114,10 @@ export function WorkItemTimePanelContainer({
 }: WorkItemTimePanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
-  const [period] = useState(() => createTrailingPeriod(ownEntryPeriodDays))
-  const [accessProbe] = useState(() => ({ ...createTrailingPeriod(1), timeZone: resolveBrowserTimeZone() }))
+  // The windows end at the next local midnight and move forward with the date.
+  const today = useLocalToday()
+  const period = useMemo(() => createTrailingPeriod(ownEntryPeriodDays, readLocalNoon(today)), [today])
+  const accessProbe = useMemo(() => ({ ...createTrailingPeriod(1, readLocalNoon(today)), timeZone: resolveBrowserTimeZone() }), [today])
   const timer = useActiveTimer(accessToken)
   const estimate = useTimeEstimate(accessToken, teamId, workItemId)
   const actual = useWorkItemActualMinutes(accessToken, teamId, workItemId)
