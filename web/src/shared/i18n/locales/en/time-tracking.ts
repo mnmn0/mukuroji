@@ -81,6 +81,7 @@ export const timeTrackingMessages = {
   'timeTracking.timesheet.title': 'My timesheet',
   'timeTracking.timesheet.loadError': 'The timesheet could not be loaded.',
   'timeTracking.timesheet.partial': 'This week has more entries than can be shown at once, so the list and totals are incomplete.',
+  'timeTracking.timesheet.noWritableItems': 'There are no tasks in this Team you can record time against. Ask a Project manager for member access.',
   'timeTracking.timesheet.empty': 'No time has been recorded this week.',
   'timeTracking.timesheet.weekTotal': 'Week total',
   'timeTracking.timesheet.total': 'Total',

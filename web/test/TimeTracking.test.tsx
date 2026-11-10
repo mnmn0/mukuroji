@@ -44,6 +44,11 @@ import {
 } from '../src/features/time-tracking/model/timePeriod'
 import { classifyTimeTrackingFailure, shouldRetainTimeTrackingMutation } from '../src/features/time-tracking/model/timeTrackingFailure'
 import { PersonalTimesheet } from '../src/features/time-tracking/ui/PersonalTimesheet'
+import {
+  canRecordTimeOnWorkItem,
+  readViewerProjectRoles,
+} from '../src/features/time-tracking/model/workItemWriteAccess'
+import type { TeamProjectMemberAccess } from '../src/projects/model/teamInsights'
 import { TimeApprovalQueue } from '../src/features/time-tracking/ui/TimeApprovalQueue'
 import { TimeEntryForm } from '../src/features/time-tracking/ui/TimeEntryForm'
 import { WorkItemTimePanel } from '../src/features/time-tracking/ui/WorkItemTimePanel'
@@ -525,6 +530,54 @@ describe('time tracking views', () => {
     expect(html).toMatch(/name="endDate"[^>]*value="2026-11-12"/)
     expect(html).toMatch(/name="start"[^>]*value="23:00"/)
     expect(html).toMatch(/name="end"[^>]*value="01:00"/)
+  })
+
+  test('offers only Work Items the viewer may record time against', () => {
+    const access = (projectId: string, id: string, role: 'manager' | 'member' | 'viewer'): TeamProjectMemberAccess => ({
+      projectId,
+      projectName: projectId,
+      member: { id, email: id, role, updatedAt: '2026-11-01T00:00:00.000Z', workspaceStatus: 'active' },
+    })
+    const roles = readViewerProjectRoles([
+      access('alpha', 'Demo@Example.com', 'member'),
+      access('beta', 'demo@example.com', 'viewer'),
+      access('gamma', 'other@example.com', 'manager'),
+    ], 'demo@example.com')
+    const member = { canMutate: true, isSystemAdmin: false, userKey: 'demo@example.com' }
+    expect(canRecordTimeOnWorkItem({ assignedProjectId: 'alpha' }, member, roles)).toBe(true)
+    expect(canRecordTimeOnWorkItem({ assignedProjectId: 'beta' }, member, roles)).toBe(false)
+    expect(canRecordTimeOnWorkItem({ assignedProjectId: 'gamma' }, member, roles)).toBe(false)
+    expect(canRecordTimeOnWorkItem({}, member, roles)).toBe(true)
+    const viewerOnly = readViewerProjectRoles([access('beta', 'demo@example.com', 'viewer')], 'demo@example.com')
+    expect(canRecordTimeOnWorkItem({}, member, viewerOnly)).toBe(false)
+    expect(canRecordTimeOnWorkItem({ assignedProjectId: 'beta' }, { ...member, isSystemAdmin: true }, new Map())).toBe(true)
+    expect(canRecordTimeOnWorkItem({ assignedProjectId: 'alpha' }, { ...member, canMutate: false, isSystemAdmin: true }, roles)).toBe(false)
+  })
+
+  test('disables manual entry when no Work Item accepts time', () => {
+    const week = createWeekPeriod(timeTrackingFixtureWeekStart)
+    const render = (isLoadingWorkItemOptions: boolean) => renderToStaticMarkup(
+      <PersonalTimesheet
+        entries={[]}
+        formatters={formatters}
+        isLoadingWorkItemOptions={isLoadingWorkItemOptions}
+        onCreateEntry={noop}
+        onMoveWeek={() => undefined}
+        onRetry={() => undefined}
+        onSubmitEntry={noop}
+        onSubmitWeek={async () => ({ count: 0, failedEntryIds: [], partialFailure: false, entries: [] })}
+        onUpdateEntry={noop}
+        t={t}
+        today="2026-11-10"
+        week={week}
+        workItemOptions={[]}
+        workItemTitles={{}}
+      />,
+    )
+    const ready = render(false)
+    expect(ready).toMatch(/<button[^>]*disabled=""[^>]*>Add manually</)
+    expect(ready).toContain(t('timeTracking.timesheet.noWritableItems'))
+    expect(render(true)).not.toContain(t('timeTracking.timesheet.noWritableItems'))
   })
 
   test('the default Work Item type includes the time section before activity', () => {

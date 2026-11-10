@@ -81,6 +81,7 @@ export const timeTrackingMessages = {
   'timeTracking.timesheet.title': '自分のタイムシート',
   'timeTracking.timesheet.loadError': 'タイムシートを読み込めませんでした。',
   'timeTracking.timesheet.partial': 'この週は一度に表示できる件数を超えているため、一覧と合計が一部だけです。',
+  'timeTracking.timesheet.noWritableItems': 'このチームには時間を記録できるタスクがありません。プロジェクトのマネージャーにメンバー権限を依頼してください。',
   'timeTracking.timesheet.empty': 'この週の記録はまだありません。',
   'timeTracking.timesheet.weekTotal': '週の合計',
   'timeTracking.timesheet.total': '合計',

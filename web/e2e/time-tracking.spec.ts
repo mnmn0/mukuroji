@@ -199,6 +199,19 @@ test.describe('Time tracking', () => {
     await expect(page.getByRole('form', { name: 'Add time' }).getByLabel('Task')).toContainText('Update the pricing page')
   })
 
+  test('does not offer manual entry to a Project viewer', async ({ page }) => {
+    await mockTimeTracking(page)
+    await page.route((url) => /^\/api\/projects\/[^/]+\/members$/u.test(url.pathname), (route) => {
+      const projectId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
+      return route.fulfill({ json: { projectId, members: [
+        { id: 'demo@example.com', email: 'demo@example.com', name: 'Demo Member', role: 'viewer', updatedAt: '2026-11-01T00:00:00.000Z' },
+      ] } })
+    })
+    await page.goto('/teams/core-team/timesheet')
+    await expect(page.getByTestId('timesheet-no-writable-items')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add manually' })).toBeDisabled()
+  })
+
   test('works at phone width', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await mockTimeTracking(page)

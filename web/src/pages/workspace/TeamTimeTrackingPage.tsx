@@ -4,6 +4,10 @@ import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/Pers
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import {
+  canRecordTimeOnWorkItem,
+  readViewerProjectRoles,
+} from '../../features/time-tracking/model/workItemWriteAccess'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
@@ -33,19 +37,33 @@ export function TeamTimeTrackingPage() {
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
   const workItems = useWorkspaceWorkItems(accessToken, enabled)
+  const writer = useMemo(() => ({
+    canMutate: workspace.canMutateTeamConfiguration,
+    isSystemAdmin: workspace.isSystemAdmin ?? false,
+    ...(workspace.userKey ? { userKey: workspace.userKey } : {}),
+  }), [workspace.canMutateTeamConfiguration, workspace.isSystemAdmin, workspace.userKey])
+  // Members give approver names, and the viewer's own Project roles decide which tasks accept time.
+  const needsViewerRoles = writer.canMutate && !writer.isSystemAdmin
   const projectMembers = useWorkspaceProjectMembers(
     accessToken,
     activeTeam?.id,
     activeTeam?.projects ?? emptyTeamProjects,
-    enabled && view === 'approvals',
+    enabled && (view === 'approvals' || needsViewerRoles),
   )
+  const viewerProjectRoles = useMemo(
+    () => readViewerProjectRoles(projectMembers.data?.members ?? [], writer.userKey),
+    [projectMembers.data?.members, writer.userKey],
+  )
+  // Only tasks the server would accept are offered, so a manual entry is never refused for access.
   const workItemOptions = useMemo(
     () => (workItems.data ?? [])
       .filter((item) => item.teamId === teamId && !item.archivedAt)
+      .filter((item) => canRecordTimeOnWorkItem(item, writer, viewerProjectRoles))
       .map((item) => ({ id: item.id, title: item.title }))
       .sort((left, right) => left.title.localeCompare(right.title)),
-    [teamId, workItems.data],
+    [teamId, viewerProjectRoles, workItems.data, writer],
   )
+  const isLoadingWorkItemOptions = workItems.isLoading || (needsViewerRoles && projectMembers.isLoading)
   const workItemTitles = useMemo(
     () => Object.fromEntries((workItems.data ?? [])
       .filter((item) => item.teamId === teamId)
@@ -53,7 +71,7 @@ export function TeamTimeTrackingPage() {
     [teamId, workItems.data],
   )
   // Without Work Items the entry form has nothing to pick, so a failed lookup is shown, not treated as empty.
-  const lookupError = workItems.error ?? projectMembers.error
+  const lookupError = workItems.error ?? projectMembers.error ?? projectMembers.data?.errors[0]
   const memberNames = useMemo(() => {
     const names: Record<string, string> = {}
     for (const access of projectMembers.data?.members ?? []) {
@@ -124,7 +142,9 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
+            isLoadingWorkItemOptions={isLoadingWorkItemOptions}
             workItemOptions={workItemOptions}
+            workItemTitles={workItemTitles}
           />
         )}
       </div>

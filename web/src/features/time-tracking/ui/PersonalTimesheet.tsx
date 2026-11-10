@@ -37,8 +37,10 @@ export type PersonalTimesheetProps = {
   isPartial?: boolean
   /** Whether the read failed. */
   hasLoadError?: boolean
-  /** Work Items offered when recording time. */
+  /** Work Items the member may record time against. */
   workItemOptions: readonly TimeEntryWorkItemOption[]
+  /** Whether the offered Work Items are still being resolved. */
+  isLoadingWorkItemOptions?: boolean
   /** Work Item titles keyed by identifier. */
   workItemTitles: Readonly<Record<string, string>>
   /** Latest rejection reason keyed by entry identifier. */
@@ -80,6 +82,7 @@ export function PersonalTimesheet({
   today,
   week,
   workItemOptions,
+  isLoadingWorkItemOptions = false,
   workItemTitles,
 }: PersonalTimesheetProps) {
   const id = useId()
@@ -134,7 +137,7 @@ export function PersonalTimesheet({
         <div className="flex flex-wrap gap-2">
           <button
             className="workbench-button-secondary min-h-9 px-3"
-            disabled={isCreating}
+            disabled={isCreating || workItemOptions.length === 0}
             onClick={() => setIsCreating(true)}
             type="button"
           >
@@ -150,6 +153,12 @@ export function PersonalTimesheet({
           </button>
         </div>
       </div>
+
+      {!isLoadingWorkItemOptions && workItemOptions.length === 0 ? (
+        <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="timesheet-no-writable-items">
+          {t('timeTracking.timesheet.noWritableItems')}
+        </p>
+      ) : null}
 
       <div aria-live="polite" role="status">
         {message?.tone === 'status' ? <p className="text-sm font-medium text-[var(--workbench-muted)]">{message.text}</p> : null}

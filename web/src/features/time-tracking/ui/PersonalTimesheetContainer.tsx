@@ -22,8 +22,12 @@ export type PersonalTimesheetContainerProps = {
   weekStart: string
   /** Display locale. */
   locale: Locale
-  /** Work Items of the Team offered when recording time. */
+  /** Work Items of the Team the member may record time against. */
   workItemOptions: readonly TimeEntryWorkItemOption[]
+  /** Whether the offered Work Items are still being resolved. */
+  isLoadingWorkItemOptions?: boolean
+  /** Titles of every Team Work Item, including ones the member can no longer record against. */
+  workItemTitles: Readonly<Record<string, string>>
   /** Moves the week; 0 returns to the current week. */
   onMoveWeek: (weeks: number) => void
 }
@@ -36,12 +40,14 @@ export type PersonalTimesheetContainerProps = {
  */
 export function PersonalTimesheetContainer({
   accessToken,
+  isLoadingWorkItemOptions = false,
   locale,
   memberKey,
   onMoveWeek,
   teamId,
   weekStart,
   workItemOptions,
+  workItemTitles,
 }: PersonalTimesheetContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
@@ -50,10 +56,6 @@ export function PersonalTimesheetContainer({
   const entries = useTimeEntries(accessToken, teamId, week, memberKey ? { userId: memberKey } : {})
   const rejectionReasons = useRejectionReasons(accessToken, entries.data?.entries ?? [])
   const mutations = useTimeEntryMutations(accessToken)
-  const workItemTitles = useMemo(
-    () => Object.fromEntries(workItemOptions.map((option) => [option.id, option.title])),
-    [workItemOptions],
-  )
 
   return (
     <PersonalTimesheet
@@ -61,6 +63,7 @@ export function PersonalTimesheetContainer({
       formatters={formatters}
       hasLoadError={Boolean(entries.error ?? rejectionReasons.error)}
       isLoading={entries.isLoading}
+      isLoadingWorkItemOptions={isLoadingWorkItemOptions}
       isPartial={entries.data?.complete === false}
       onCreateEntry={(input) => mutations.create(teamId, input)}
       onMoveWeek={onMoveWeek}
