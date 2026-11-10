@@ -6,9 +6,29 @@ import type {
   BatchResponse,
   DynamoStreamEvent,
 } from '../infrastructure/aws/dynamodb-stream'
+import {
+  readServerEnvironment,
+  type ServerEnvironment,
+} from '../infrastructure/config/server-config'
 import type {
   AuditProjectionBatchProcessor,
 } from '../modules/audit/adapter-in/events/audit-projection'
+
+/**
+ * Returns whether the deployment includes the connector projection.
+ *
+ * The stack sets `CONNECTOR_SYNC_ENABLED=false` when the optional connectors
+ * module, and so its sync queue, is not deployed. Any other value, including an
+ * unset variable in local runtimes, keeps the projection.
+ *
+ * @param environment - Runtime environment that carries the deployment flag.
+ * @returns Whether Audit events fan out to the connector projection.
+ */
+export function isConnectorProjectionEnabled(
+  environment: ServerEnvironment = readServerEnvironment(),
+): boolean {
+  return environment.CONNECTOR_SYNC_ENABLED !== 'false'
+}
 
 /**
  * Constructs the Audit projection fan-out after runtime admission.
@@ -28,7 +48,9 @@ async function createProductionAuditProjectionHandler(
   ] = await Promise.all([
     import('../modules/audit/adapter-in/events/audit-projection'),
     import('./collaboration-projection-handler'),
-    import('./connector-handler'),
+    isConnectorProjectionEnabled()
+      ? import('./connector-handler')
+      : Promise.resolve(undefined),
     import('../app/composition/webhook'),
   ])
   const webhookProjectionHandler =
@@ -39,7 +61,7 @@ async function createProductionAuditProjectionHandler(
     [
       collaborationProjection.handler,
       webhookProjectionHandler,
-      connectorProjection.auditProjectionHandler,
+      ...(connectorProjection ? [connectorProjection.auditProjectionHandler] : []),
     ],
   )
 }

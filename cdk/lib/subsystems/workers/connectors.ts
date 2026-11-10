@@ -75,8 +75,7 @@ export function buildConnectorWorkers(
   const {
     auditEventsTable,
     connectorRuntimeSecret,
-    developerPlatformConnectorKey,
-    developerPlatformStateKey,
+    developerPlatformKey,
     developerPlatformTable,
     enterpriseIdentityTable,
     planningTable,
@@ -95,11 +94,17 @@ export function buildConnectorWorkers(
     enterpriseIdentityTokenHashSecret,
     systemAdminGroups,
   } = input.parameters;
+  const { connectorChannels } = input.workerChannels;
+  if (!connectorRuntimeSecret || !connectorChannels) {
+    throw new Error(
+      'Connector workers require the connector runtime secret and queues of the connectors module.',
+    );
+  }
   const {
     connectorPollDlq,
     connectorSyncDlq,
     connectorSyncQueue,
-  } = input.workerChannels;
+  } = connectorChannels;
   const {
     depsLockFilePath,
     projectRoot,
@@ -141,11 +146,9 @@ export function buildConnectorWorkers(
         CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
           connectorRuntimeSecret.secretArn,
         CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
-        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
-          developerPlatformConnectorKey.keyArn,
+        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: developerPlatformKey.keyArn,
         DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
-        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID:
-          developerPlatformStateKey.keyArn,
+        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
@@ -198,7 +201,7 @@ export function buildConnectorWorkers(
   }));
   workItemConfigurationTable.grants.readData(connectorSyncFunction);
   restrictKmsGrantToDeveloperPlatformPurpose(
-    developerPlatformConnectorKey.grants.actions(
+    developerPlatformKey.grants.actions(
       connectorSyncFunction,
       'kms:Decrypt',
       'kms:GenerateDataKey',
@@ -206,7 +209,7 @@ export function buildConnectorWorkers(
     'connector',
   );
   restrictKmsGrantToDeveloperPlatformPurpose(
-    developerPlatformStateKey.grants.actions(
+    developerPlatformKey.grants.actions(
       connectorSyncFunction,
       'kms:Decrypt',
       'kms:GenerateDataKey',

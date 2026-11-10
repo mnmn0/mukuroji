@@ -207,17 +207,17 @@ const expectedDataConfiguration = {
   ),
   CUSTOMERS_TABLE_NAME: base64(ref('CustomersTableB554B793')),
   DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: base64(
-    getAtt('DeveloperPlatformConnectorKey7AD18512', 'Arn'),
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
   ),
   DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: base64('LookupKeyIndex'),
   DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: base64(
-    getAtt('DeveloperPlatformStateKey5AAD6FB8', 'Arn'),
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
   ),
   DEVELOPER_PLATFORM_TABLE_NAME: base64(
     ref('DeveloperPlatformTable772E085C'),
   ),
   DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: base64(
-    getAtt('DeveloperPlatformWebhookKey6B581CD4', 'Arn'),
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
   ),
   DOCUMENTS_TABLE_NAME: base64(ref('DocumentsTable7E808EE5')),
   ENTERPRISE_IDENTITY_TABLE_NAME: base64(
