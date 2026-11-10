@@ -714,9 +714,33 @@ Bootstrap は次を同一 `WorkspaceDirectoryId` partition に冪等投入しま
 - `WORKSPACE#METADATA` / `workspace-metadata`
 - `WORKSPACE_MEMBER#<lowercase email>` / `workspace-member` / `role=owner`
 - `EMAIL_ALIAS#<lowercase email>` / `email-alias`
-- seed project 4 件の `PROJECT_MEMBER#<projectId>#<lowercase email>` / `role=manager`
 
-owner が demo member と同じ email でも最後に manager へ収束します。Workspace owner row 自体は既存 RBAC の global system-admin 判定には使いません。
+Workspace owner row 自体は既存 RBAC の global system-admin 判定には使いません。Team と Project は
+投入しないので、owner が system-admin として最初の Team を画面から作ります。
+
+#### Demo data
+
+既定の deploy は demo data を投入しません。試用や開発用の環境で demo data が欲しい場合だけ、
+CDK context で有効にします。
+
+```sh
+bun --filter cdk cdk deploy Mukuroji \
+  -c mukuroji:demoData=true \
+  ...
+```
+
+有効にすると、stack 作成時に次も投入します。
+
+- demo member 5 人（`sato@example.com` など 4 人が `member`、`viewer@example.com` が `guest`、いずれも `active`）
+- Team 2 件（`core-team`・`design-team`）と Project 4 件（`refero`・`product-roadmap`・`shared-launch`・`brand-refresh`）
+- `refero` の Work Item 10 件
+- demo Project 4 件の `PROJECT_MEMBER#<projectId>#<lowercase email>` / `role=manager`（owner を各 demo Project の manager にする）
+
+owner が demo member と同じ email でも最後に manager へ収束します。
+
+demo data の custom resource は作成時だけ書き込み、削除時には何もしません。demo data を有効にして
+作った stack で後から無効にしても、resource が消えるだけで投入済みの row は残ります。local の Floci
+環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
@@ -738,7 +762,9 @@ bash scripts/validate-workspace-bootstrap.sh
 
 `prepare-workspace-cognito.sh` は2つの client と external IdP contract を検証します。Bootstrap
 validator は Cognito pool/password client、owner status/email、両 custom attribute、
-Workspace metadata/owner/alias、全 seed project の manager row を consistent read で照合します。
+Workspace metadata/owner/alias を consistent read で照合します。`-c mukuroji:demoData=true` で
+deploy した stack では `MUKUROJI_DEMO_DATA=true` を付けて実行すると、demo Project 4 件の manager row
+も照合します。
 
 次に owner の新しい Cognito access token を用意し、CloudFront 経由と HTTP API 直接の経路がすべて `200` かつ同じ Workspace response を返すことを確認します。古い token は group / identity 更新前の session を表す可能性があるため再利用しません。
 
@@ -800,7 +826,7 @@ VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 
 CDK は canonical Work Item store として `WorkItemsTable` を作成し、table 名を `WorkItemsTableName` output で公開します。API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
 
-Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
+Demo data を有効にした場合、demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
 
 Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を CloudFront 経由と API Gateway 直接の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
 

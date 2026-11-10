@@ -4,7 +4,11 @@ import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { RESTORE_DRILL_CONTEXT_KEY, readStackModuleProps } from '../bin/stack-modules';
+import {
+  DEMO_DATA_CONTEXT_KEY,
+  RESTORE_DRILL_CONTEXT_KEY,
+  readStackModuleProps,
+} from '../bin/stack-modules';
 import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 
 /**
@@ -80,4 +84,57 @@ test('ignores restore drill context the composition root did not pass to the sta
   );
 
   expect(template.toJSON().Parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
+});
+
+/** Logical ID prefixes of the custom resources that only demo deployments create. */
+const DEMO_SEED_PREFIXES = [
+  'SeedWorkItems',
+  'SeedProjectDirectory',
+  'SeedDemoProjectOwnerAccess',
+  'SeedWorkspaceDemoMembers',
+] as const;
+
+/**
+ * Lists the demo seed custom resources in a template.
+ *
+ * @param template - Synthesized template to search.
+ * @returns Logical IDs of the demo seed custom resources and their policies.
+ */
+function findDemoSeedLogicalIds(template: Template): string[] {
+  return Object.keys(template.toJSON().Resources)
+    .filter((id) => DEMO_SEED_PREFIXES.some((prefix) => id.startsWith(prefix)));
+}
+
+test('seeds only the Workspace and its owner by default', () => {
+  const { template } = defaultStack;
+  const payloads = JSON.stringify(template.findResources('Custom::AWS'));
+
+  expect(findDemoSeedLogicalIds(template)).toEqual([]);
+  // The owner still gets the Workspace metadata, owner, and email alias rows.
+  expect(payloads).toContain('workspace-bootstrap');
+  expect(payloads).toContain('workspace-access-seed');
+  expect(payloads).not.toContain('@example.com');
+  expect(payloads).not.toContain('PROJECT_MEMBER#');
+  expect(payloads).not.toContain('core-team');
+});
+
+test('turns the demo data on through CDK context', () => {
+  const { template, errors } = synthesizeDefaultStack({ [DEMO_DATA_CONTEXT_KEY]: 'true' });
+  const payloads = JSON.stringify(template.findResources('Custom::AWS'));
+
+  expect(errors).toEqual([]);
+  for (const prefix of DEMO_SEED_PREFIXES) {
+    expect(findDemoSeedLogicalIds(template).some((id) => id.startsWith(prefix))).toBe(true);
+  }
+  expect(payloads).toContain('sato@example.com');
+  expect(payloads).toContain('PROJECT_MEMBER#refero#');
+});
+
+test('ignores demo data context the composition root did not pass to the stack', () => {
+  const { template } = synthesizeDefaultStack(
+    { [DEMO_DATA_CONTEXT_KEY]: true },
+    { demoDataEnabled: false },
+  );
+
+  expect(findDemoSeedLogicalIds(template)).toEqual([]);
 });

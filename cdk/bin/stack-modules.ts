@@ -4,8 +4,11 @@ import type { MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 /** Context key that turns on the optional restore drill. */
 export const RESTORE_DRILL_CONTEXT_KEY = 'mukuroji:restoreDrill';
 
+/** Context key that seeds the demo members, Teams, Projects, and Work Items. */
+export const DEMO_DATA_CONTEXT_KEY = 'mukuroji:demoData';
+
 /** Optional-module switches the stack receives through its Props. */
-type StackModuleProps = Pick<MukurojiStackProps, 'restoreDrillEnabled'>;
+type StackModuleProps = Pick<MukurojiStackProps, 'restoreDrillEnabled' | 'demoDataEnabled'>;
 
 /**
  * Reads a boolean CDK context value given in `cdk.json` or as `-c key=true`.
@@ -30,5 +33,6 @@ function readBooleanContext(scope: Construct, key: string): boolean {
 export function readStackModuleProps(app: Construct): StackModuleProps {
   return {
     restoreDrillEnabled: readBooleanContext(app, RESTORE_DRILL_CONTEXT_KEY),
+    demoDataEnabled: readBooleanContext(app, DEMO_DATA_CONTEXT_KEY),
   };
 }

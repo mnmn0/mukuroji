@@ -22,7 +22,7 @@ export const WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID =
  * @returns The synthesized CloudFormation template.
  */
 export function createTemplate(
-  props: MukurojiStackProps = { restoreDrillEnabled: true },
+  props: MukurojiStackProps = { restoreDrillEnabled: true, demoDataEnabled: true },
 ): Template {
   const app = new cdk.App({
     context: {
