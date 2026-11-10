@@ -3,6 +3,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { expect } from '@jest/globals';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
+import { ALL_STACK_MODULE_PROPS } from '../bin/stack-modules';
 import { MukurojiStack, type MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 
 /** Stable logical ID of the single API runtime-configuration secret. */
@@ -22,7 +23,7 @@ export const WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID =
  * @returns The synthesized CloudFormation template.
  */
 export function createTemplate(
-  props: MukurojiStackProps = { restoreDrillEnabled: true },
+  props: MukurojiStackProps = ALL_STACK_MODULE_PROPS,
 ): Template {
   const app = new cdk.App({
     context: {

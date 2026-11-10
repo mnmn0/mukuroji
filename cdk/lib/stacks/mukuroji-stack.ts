@@ -46,6 +46,17 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * days. Off unless the composition root turns it on.
    */
   readonly restoreDrillEnabled?: boolean;
+  /**
+   * Deploys the external connector sync and poll workers, their queues, and the connector runtime
+   * secret. Without it the audit projection does not dispatch connector sync. Off unless the
+   * composition root turns it on.
+   */
+  readonly connectorsEnabled?: boolean;
+  /**
+   * Deploys the request email ingestion Lambda that an external mail relay invokes. Off unless the
+   * composition root turns it on.
+   */
+  readonly requestEmailEnabled?: boolean;
 }>;
 
 /**
@@ -62,9 +73,15 @@ export class MukurojiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: MukurojiStackProps) {
     super(scope, id, props);
     const restoreDrillEnabled = props?.restoreDrillEnabled ?? false;
+    const connectorsEnabled = props?.connectorsEnabled ?? false;
+    const requestEmailEnabled = props?.requestEmailEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
-    const parameterInputs = buildStackParameters(this, { restoreDrillEnabled });
+    const parameterInputs = buildStackParameters(this, {
+      restoreDrillEnabled,
+      connectorsEnabled,
+      requestEmailEnabled,
+    });
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
@@ -111,7 +128,7 @@ export class MukurojiStack extends cdk.Stack {
       })
       : undefined;
 
-    const workerChannels = buildWorkerChannels(this);
+    const workerChannels = buildWorkerChannels(this, connectorsEnabled);
     const apiRuntime = buildApiRuntime(this, {
       dataStores,
       fileStorage,
@@ -194,13 +211,15 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
-    buildConnectorWorkers(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-      workerChannels,
-    });
+    if (connectorsEnabled) {
+      buildConnectorWorkers(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+        workerChannels,
+      });
+    }
     buildSlackNotificationWorker(this, {
       dataStores,
       lambdaBuildPaths,
@@ -213,12 +232,14 @@ export class MukurojiStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
-    const requestEmailWorker = buildRequestEmailWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
+    const requestEmailWorker = requestEmailEnabled
+      ? buildRequestEmailWorker(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+      })
+      : undefined;
     const triageScheduleWorker = buildTriageScheduleWorker(this, {
       dataStores,
       lambdaBuildPaths,
@@ -267,7 +288,13 @@ export class MukurojiStack extends cdk.Stack {
       dataStores,
       parameters,
     });
+    const { connectorChannels } = workerChannels;
+    const { connectorRuntimeSecret } = dataStores;
     buildStackOutputs(this, {
+      connectors: connectorChannels && connectorRuntimeSecret
+        ? { ...connectorChannels, connectorRuntimeSecret }
+        : undefined,
+      requestEmail: requestEmailWorker,
       ...dataStores,
       ...fileStorage,
       ...crossDomainIntegrity,
@@ -279,7 +306,6 @@ export class MukurojiStack extends cdk.Stack {
       ...aiAssistanceObservabilityWorker,
       ...automationWorkers,
       ...scheduleWorkers,
-      ...requestEmailWorker,
       ...triageScheduleWorker,
       ...tenantOperationWorker,
       ...runtimeControls,
