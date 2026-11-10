@@ -4,6 +4,9 @@ import type { MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
 /** Context key that turns on the optional restore drill. */
 export const RESTORE_DRILL_CONTEXT_KEY = 'mukuroji:restoreDrill';
 
+/** Context key that seeds the demo members, Teams, Projects, and Work Items. */
+export const DEMO_DATA_CONTEXT_KEY = 'mukuroji:demoData';
+
 /** Context key that turns on the optional external connector workers. */
 export const CONNECTORS_CONTEXT_KEY = 'mukuroji:connectors';
 
@@ -13,7 +16,7 @@ export const REQUEST_EMAIL_CONTEXT_KEY = 'mukuroji:requestEmail';
 /** Optional-module switches the stack receives through its Props. */
 type StackModuleProps = Pick<
   MukurojiStackProps,
-  'restoreDrillEnabled' | 'connectorsEnabled' | 'requestEmailEnabled'
+  'restoreDrillEnabled' | 'connectorsEnabled' | 'requestEmailEnabled' | 'demoDataEnabled'
 >;
 
 /** Module switches that deploy every optional module, for full-coverage synthesis and checks. */
@@ -21,6 +24,7 @@ export const ALL_STACK_MODULE_PROPS: StackModuleProps = {
   restoreDrillEnabled: true,
   connectorsEnabled: true,
   requestEmailEnabled: true,
+  demoDataEnabled: true,
 };
 
 /**
@@ -48,5 +52,6 @@ export function readStackModuleProps(app: Construct): StackModuleProps {
     restoreDrillEnabled: readBooleanContext(app, RESTORE_DRILL_CONTEXT_KEY),
     connectorsEnabled: readBooleanContext(app, CONNECTORS_CONTEXT_KEY),
     requestEmailEnabled: readBooleanContext(app, REQUEST_EMAIL_CONTEXT_KEY),
+    demoDataEnabled: readBooleanContext(app, DEMO_DATA_CONTEXT_KEY),
   };
 }

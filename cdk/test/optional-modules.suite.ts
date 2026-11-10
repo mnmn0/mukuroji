@@ -6,6 +6,7 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import {
   CONNECTORS_CONTEXT_KEY,
+  DEMO_DATA_CONTEXT_KEY,
   REQUEST_EMAIL_CONTEXT_KEY,
   RESTORE_DRILL_CONTEXT_KEY,
   readStackModuleProps,
@@ -44,6 +45,25 @@ function synthesizeDefaultStack(
     .filter((message) => message.level === 'error')
     .map((message) => String(message.entry.data));
   return { template, errors };
+}
+
+/** Logical ID prefixes of the custom resources that only demo deployments create. */
+const DEMO_SEED_PREFIXES = [
+  'SeedWorkItems',
+  'SeedProjectDirectory',
+  'SeedDemoProjectOwnerAccess',
+  'SeedWorkspaceDemoMembers',
+] as const;
+
+/**
+ * Lists the demo seed custom resources in a template.
+ *
+ * @param template - Synthesized template to search.
+ * @returns Logical IDs of the demo seed custom resources and their policies.
+ */
+function findDemoSeedLogicalIds(template: Template): string[] {
+  return Object.keys(template.toJSON().Resources)
+    .filter((id) => DEMO_SEED_PREFIXES.some((prefix) => id.startsWith(prefix)));
 }
 
 describe('default deployment without optional modules', () => {
@@ -122,6 +142,18 @@ describe('default deployment without optional modules', () => {
   test('passes cdk-nag with every optional module left out', () => {
     expect(errors).toEqual([]);
   });
+
+  test('seeds only the Workspace and its owner', () => {
+    const payloads = JSON.stringify(template.findResources('Custom::AWS'));
+
+    expect(findDemoSeedLogicalIds(template)).toEqual([]);
+    // The owner still gets the Workspace metadata, owner, and email alias rows.
+    expect(payloads).toContain('workspace-bootstrap');
+    expect(payloads).toContain('workspace-access-seed');
+    expect(payloads).not.toContain('@example.com');
+    expect(payloads).not.toContain('PROJECT_MEMBER#');
+    expect(payloads).not.toContain('core-team');
+  });
 });
 
 describe('optional modules selected through CDK context', () => {
@@ -154,12 +186,25 @@ describe('optional modules selected through CDK context', () => {
     template.hasOutput('RequestEmailIngestionFunctionName', {});
   });
 
+  test('turns the demo data on', () => {
+    const { template, errors } = synthesizeDefaultStack({ [DEMO_DATA_CONTEXT_KEY]: 'true' });
+    const payloads = JSON.stringify(template.findResources('Custom::AWS'));
+
+    expect(errors).toEqual([]);
+    for (const prefix of DEMO_SEED_PREFIXES) {
+      expect(findDemoSeedLogicalIds(template).some((id) => id.startsWith(prefix))).toBe(true);
+    }
+    expect(payloads).toContain('sato@example.com');
+    expect(payloads).toContain('PROJECT_MEMBER#refero#');
+  });
+
   test('ignores module context the composition root did not pass to the stack', () => {
     const { template } = synthesizeDefaultStack(
       {
         [RESTORE_DRILL_CONTEXT_KEY]: 'true',
         [CONNECTORS_CONTEXT_KEY]: 'true',
         [REQUEST_EMAIL_CONTEXT_KEY]: 'true',
+        [DEMO_DATA_CONTEXT_KEY]: 'true',
       },
       {},
     );
@@ -168,5 +213,6 @@ describe('optional modules selected through CDK context', () => {
     expect(parameters.RestoreDrillCleanupApproverRoleArn).toBeUndefined();
     expect(parameters.ConnectorRuntimeConfiguration).toBeUndefined();
     expect(parameters.RequestEmailWebhookSecret).toBeUndefined();
+    expect(findDemoSeedLogicalIds(template)).toEqual([]);
   });
 });

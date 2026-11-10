@@ -233,13 +233,16 @@ assert_equal "$(read_directory_attribute "$alias_key" 'memberKey')" "$NORMALIZED
 assert_equal "$(read_directory_attribute "$alias_key" 'email')" "$NORMALIZED_OWNER_EMAIL" "email alias"
 assert_equal "$(read_directory_attribute "$alias_key" 'username')" "$INITIAL_OWNER_USERNAME" "email alias username"
 
-for project_id in refero product-roadmap shared-launch brand-refresh; do
-  project_member_key="PROJECT_MEMBER#$project_id#$NORMALIZED_OWNER_EMAIL"
-  assert_equal "$(read_directory_attribute "$project_member_key" 'entryType')" "project-member" "initial owner project member type ($project_id)"
-  assert_equal "$(read_directory_attribute "$project_member_key" 'memberKey')" "$NORMALIZED_OWNER_EMAIL" "initial owner project member key ($project_id)"
-  assert_equal "$(read_directory_attribute "$project_member_key" 'role')" "manager" "initial owner project role ($project_id)"
-  assert_present "$(read_directory_attribute "$project_member_key" 'createdAt')" "initial owner project createdAt ($project_id)"
-  assert_present "$(read_directory_attribute "$project_member_key" 'updatedAt')" "initial owner project updatedAt ($project_id)"
-done
+# A stack deployed with `-c mukuroji:demoData=true` also makes the owner a manager of the demo Projects.
+if [[ "${MUKUROJI_DEMO_DATA:-false}" == "true" ]]; then
+  for project_id in refero product-roadmap shared-launch brand-refresh; do
+    project_member_key="PROJECT_MEMBER#$project_id#$NORMALIZED_OWNER_EMAIL"
+    assert_equal "$(read_directory_attribute "$project_member_key" 'entryType')" "project-member" "initial owner project member type ($project_id)"
+    assert_equal "$(read_directory_attribute "$project_member_key" 'memberKey')" "$NORMALIZED_OWNER_EMAIL" "initial owner project member key ($project_id)"
+    assert_equal "$(read_directory_attribute "$project_member_key" 'role')" "manager" "initial owner project role ($project_id)"
+    assert_present "$(read_directory_attribute "$project_member_key" 'createdAt')" "initial owner project createdAt ($project_id)"
+    assert_present "$(read_directory_attribute "$project_member_key" 'updatedAt')" "initial owner project updatedAt ($project_id)"
+  done
+fi
 
-echo "Workspace bootstrap OK: userPoolId=$COGNITO_USER_POOL_ID clientId=$COGNITO_USER_POOL_CLIENT_ID table=$PROJECT_DIRECTORY_TABLE_NAME workspaceDirectoryId=$MUKUROJI_WORKSPACE_DIRECTORY_ID owner=$NORMALIZED_OWNER_EMAIL"
+echo "Workspace bootstrap OK: userPoolId=$COGNITO_USER_POOL_ID clientId=$COGNITO_USER_POOL_CLIENT_ID table=$PROJECT_DIRECTORY_TABLE_NAME workspaceDirectoryId=$MUKUROJI_WORKSPACE_DIRECTORY_ID owner=$NORMALIZED_OWNER_EMAIL demoData=${MUKUROJI_DEMO_DATA:-false}"

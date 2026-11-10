@@ -4,6 +4,7 @@ import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import {
   createCanonicalWorkItemTransactItems,
+  createDemoProjectOwnerAccessTransactItems,
   createIdempotentAwsCustomResourceProps,
   createCreateOnlyBootstrapAwsCustomResourceProps,
   createProjectDirectoryTransactItems,
@@ -22,11 +23,13 @@ export interface BootstrapResourcesInput {
   readonly dataStores: DataStoreResources;
   /** Stack parameters used to validate Cognito and identify the initial workspace owner. */
   readonly parameters: StackParameters;
+  /** Seeds the demo members, Teams, Projects, and Work Items in addition to the owner. */
+  readonly demoDataEnabled: boolean;
 }
 
 /**
- * Builds Cognito validation, create-only table seeds, and idempotent
- * workspace-access seed custom resources.
+ * Builds Cognito validation, the Workspace metadata and owner bootstrap, and, for demo
+ * deployments, the create-only demo table seeds.
  *
  * @param scope Stack scope used directly to preserve existing construct paths.
  * @param input Shared parameters and data stores consumed by bootstrap operations.
@@ -185,6 +188,77 @@ export function buildBootstrapResources(
 
   updateInitialOwnerAttributes.node.addDependency(validateCognitoClient);
 
+  const seedWorkspaceAccessCall: customResources.AwsSdkCall = {
+    service: 'DynamoDB',
+    action: 'transactWriteItems',
+    parameters: {
+      TransactItems: createWorkspaceAccessTransactItems(
+        workspaceAccessTable.tableName,
+        workspaceDirectoryId.valueAsString,
+        initialOwnerEmail.valueAsString,
+      ),
+    },
+    physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed'),
+  };
+  const seedWorkspaceAccess = new customResources.AwsCustomResource(
+    scope,
+    'SeedWorkspaceAccess',
+    createIdempotentAwsCustomResourceProps(
+      seedWorkspaceAccessCall,
+      customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['dynamodb:UpdateItem'],
+          resources: [workspaceAccessTable.tableArn],
+          conditions: {
+            'ForAnyValue:StringEquals': {
+              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+            },
+          },
+        }),
+      ]),
+    ),
+  );
+  seedWorkspaceAccess.node.addDependency(workspaceAccessTable);
+
+  const bootstrapWorkspaceCall: customResources.AwsSdkCall = {
+    service: 'DynamoDB',
+    action: 'transactWriteItems',
+    parameters: {
+      TransactItems: createWorkspaceBootstrapTransactItems(
+        projectDirectoryTable.tableName,
+        workspaceDirectoryId.valueAsString,
+        initialOwnerEmail.valueAsString,
+        initialOwnerUsername.valueAsString,
+      ),
+    },
+    physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap'),
+  };
+  const bootstrapWorkspace = new customResources.AwsCustomResource(
+    scope,
+    'BootstrapWorkspace',
+    createCreateOnlyBootstrapAwsCustomResourceProps(
+      bootstrapWorkspaceCall,
+      customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['dynamodb:UpdateItem'],
+          resources: [projectDirectoryTable.tableArn],
+          conditions: {
+            'ForAnyValue:StringEquals': {
+              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+            },
+          },
+        }),
+      ]),
+    ),
+  );
+
+  bootstrapWorkspace.node.addDependency(projectDirectoryTable);
+  bootstrapWorkspace.node.addDependency(updateInitialOwnerAttributes);
+
+  if (!input.demoDataEnabled) {
+    return;
+  }
+
   const seedCanonicalWorkItemsCall: customResources.AwsSdkCall = {
     service: 'DynamoDB',
     action: 'transactWriteItems',
@@ -250,68 +324,26 @@ export function buildBootstrapResources(
   seedProjectDirectory.node.addDependency(projectDirectoryTable);
   seedCanonicalWorkItems.node.addDependency(seedProjectDirectory);
 
-  const seedWorkspaceAccessCall: customResources.AwsSdkCall = {
+  const seedDemoProjectOwnerAccessCall: customResources.AwsSdkCall = {
     service: 'DynamoDB',
     action: 'transactWriteItems',
     parameters: {
-      TransactItems: createWorkspaceAccessTransactItems(
-        workspaceAccessTable.tableName,
-        workspaceDirectoryId.valueAsString,
-        initialOwnerEmail.valueAsString,
-      ),
-    },
-    physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed'),
-  };
-  const seedWorkspaceAccess = new customResources.AwsCustomResource(
-    scope,
-    'SeedWorkspaceAccess',
-    createIdempotentAwsCustomResourceProps(
-      seedWorkspaceAccessCall,
-      customResources.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({
-          actions: ['dynamodb:UpdateItem'],
-          resources: [workspaceAccessTable.tableArn],
-          conditions: {
-            'ForAnyValue:StringEquals': {
-              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
-            },
-          },
-        }),
-      ]),
-    ),
-  );
-  seedWorkspaceAccess.node.addDependency(workspaceAccessTable);
-
-  const bootstrapWorkspaceCall: customResources.AwsSdkCall = {
-    service: 'DynamoDB',
-    action: 'transactWriteItems',
-    parameters: {
-      TransactItems: createWorkspaceBootstrapTransactItems(
+      TransactItems: createDemoProjectOwnerAccessTransactItems(
         projectDirectoryTable.tableName,
         workspaceDirectoryId.valueAsString,
         initialOwnerEmail.valueAsString,
-        initialOwnerUsername.valueAsString,
       ),
     },
-    physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap'),
+    physicalResourceId: customResources.PhysicalResourceId.of('demo-project-owner-access-seed'),
   };
-  const bootstrapWorkspace = new customResources.AwsCustomResource(
+  const seedDemoProjectOwnerAccess = new customResources.AwsCustomResource(
     scope,
-    'BootstrapWorkspace',
+    'SeedDemoProjectOwnerAccess',
     createCreateOnlyBootstrapAwsCustomResourceProps(
-      bootstrapWorkspaceCall,
+      seedDemoProjectOwnerAccessCall,
       customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
-          actions: ['dynamodb:UpdateItem'],
-          resources: [projectDirectoryTable.tableArn],
-          conditions: {
-            'ForAnyValue:StringEquals': {
-              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
-            },
-          },
-        }),
-        new iam.PolicyStatement({
-          actions: ['dynamodb:PutItem'],
+          actions: ['dynamodb:UpdateItem', 'dynamodb:PutItem'],
           resources: [projectDirectoryTable.tableArn],
           conditions: {
             'ForAnyValue:StringEquals': {
@@ -323,8 +355,9 @@ export function buildBootstrapResources(
     ),
   );
 
-  bootstrapWorkspace.node.addDependency(seedProjectDirectory);
-  bootstrapWorkspace.node.addDependency(updateInitialOwnerAttributes);
+  // The owner's manager rows land after the demo Projects and the owner's Workspace rows.
+  seedDemoProjectOwnerAccess.node.addDependency(seedProjectDirectory);
+  seedDemoProjectOwnerAccess.node.addDependency(bootstrapWorkspace);
 
   const seedWorkspaceDemoMembersCall: customResources.AwsSdkCall = {
     service: 'DynamoDB',
