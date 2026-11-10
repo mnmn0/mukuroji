@@ -67,7 +67,7 @@
     "@aws-sdk/client-dynamodb-streams": "3.1057.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
+    "@playwright/test": "^1.65.0",
     "dependency-cruiser": "^18.1.0",
     "knip": "^6.27.0",
     "oxlint": "^1.70.0",
