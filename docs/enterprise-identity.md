@@ -277,6 +277,26 @@ enablement、external session lifetime 上限、許可 guest domain を version 
   guest membership expiry と自動 deactivation scheduler はなく、guest の時間制限は
   `maximumSessionLifetimeMinutes` による session 上限です。
 
+### Session refresh と sign-out
+
+Cognito の access token は 60 分で切れますが、Web は期限の 1 分前と API の `401` で
+`POST /api/auth/refresh`（body に `refreshToken`、`Authorization` に更新前の access token）を呼び、
+操作を中断せずに token を更新します。Refresh token の有効期間は 30 日（stack が作る password
+client の設定）で、「ログイン状態を保持」を選ぶと localStorage に残り、選ばないと tab を閉じた時点で
+破棄されます。
+
+- 更新後の access token も Cognito は元の `auth_time` を持つので、session lifetime は最初の
+  sign-in から数えたままです。
+- Server は更新前の token の `SHA-256(access-token)` record（最終操作時刻と MFA/SSO assurance）を
+  更新後の token の session ID へ引き継ぎます。Refresh は操作として数えないので、idle timeout も
+  従来どおり効きます。引き継ぐのは `sub`、app client、`origin_jti` が一致する同じ sign-in の
+  token だけで、別の sign-in の assurance は借りられません。
+- Password login の session は、更新時に domain が SSO 必須になっていれば `409 SsoRequired` で
+  再ログインを求めます。Deactivate された member は更新時に拒否されます。
+- Sign-out は `POST /api/auth/logout` で refresh token を Cognito の RevokeToken で失効させます。
+  同じ refresh token から発行された access token も失効するので、sign-out 後は再開できません。
+- Break-glass activation は access token ごとに結び付くので、更新後の token には引き継ぎません。
+
 IP policy の誤設定に備えて、保存前に caller の現在 IP への影響を preview します。ただし
 break-glass を一般 policy の迂回経路にはせず、後述の短時間 activation と監査を必須にします。
 

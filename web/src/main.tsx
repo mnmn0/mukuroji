@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './app/App'
 import { startAppServiceWorker } from './app/pwa/appServiceWorker'
+import { installAuthSessionFetch } from './auth/sessionRefresh'
 import { startAppInstallPrompt } from './shared/lib/pwa/installPrompt'
 import {
   applyFontSizePreference,
@@ -13,6 +14,7 @@ import {
   getInitialThemePreference,
 } from './shared/lib/preferences/theme'
 
+installAuthSessionFetch()
 applyFontSizePreference(getInitialFontSizePreference())
 applyThemePreference(getInitialThemePreference())
 startAppServiceWorker()

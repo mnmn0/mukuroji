@@ -67,3 +67,39 @@ test('uses token authentication time as first-request idle baseline', async () =
     authenticationMethods: ['pwd'],
   })).rejects.toMatchObject({ code: 'EnterpriseSessionIdleTimeout' })
 })
+
+test('continues a refreshed session without advancing its last activity', async () => {
+  const client = new InMemoryEnterpriseSessionActivityClient()
+  await client.recordAuthenticationAssurance({
+    workspaceId: 'workspace-1',
+    sessionId: 'session-before-refresh',
+    authenticationMethods: ['SOFTWARE_TOKEN_MFA'],
+    authenticatedAt: 1_000,
+    expiresAt: 4_600,
+  })
+
+  await expect(client.continueSession({
+    workspaceId: 'workspace-1',
+    previousSessionId: 'session-before-refresh',
+    sessionId: 'session-after-refresh',
+    expiresAt: 8_200,
+  })).resolves.toBe(true)
+  await expect(client.continueSession({
+    workspaceId: 'workspace-2',
+    previousSessionId: 'session-before-refresh',
+    sessionId: 'session-in-other-workspace',
+    expiresAt: 8_200,
+  })).resolves.toBe(false)
+
+  expect(await client.getAuthenticationMethods('workspace-1', 'session-after-refresh'))
+    .toEqual(['SOFTWARE_TOKEN_MFA'])
+  await expect(client.validateAndTouch({
+    workspaceId: 'workspace-1',
+    sessionId: 'session-after-refresh',
+    authenticatedAt: 1_000,
+    now: 1_000 + 61 * 60,
+    idleTimeoutMinutes: 60,
+    sessionLifetimeMinutes: 480,
+    authenticationMethods: [],
+  })).rejects.toMatchObject({ code: 'EnterpriseSessionIdleTimeout' })
+})

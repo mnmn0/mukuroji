@@ -43,6 +43,20 @@ export type EnterpriseSessionAssuranceInput = {
 }
 
 /**
+ * Token refresh 後の access token へ session の activity と assurance を引き継ぐ入力です。
+ */
+export type EnterpriseSessionContinuationInput = {
+  /** Workspace ごとに分離された session scope です。 */
+  workspaceId: string
+  /** 更新前の access token の SHA-256 session identifier です。 */
+  previousSessionId: string
+  /** 更新後の access token の SHA-256 session identifier です。 */
+  sessionId: string
+  /** 更新後の access token の expiry epoch seconds です。 */
+  expiresAt: number
+}
+
+/**
  * Session activity store の最小契約です。
  */
 export interface EnterpriseSessionActivityClient {
@@ -52,6 +66,16 @@ export interface EnterpriseSessionActivityClient {
   recordAuthenticationAssurance(input: EnterpriseSessionAssuranceInput): Promise<void>
   /** Access token digest に結び付いた server-verified method を返します。 */
   getAuthenticationMethods(workspaceId: string, sessionId: string): Promise<string[]>
+  /**
+   * 更新前の access token の last activity と assurance を、更新後の access token に引き継ぎます。
+   *
+   * @remarks
+   * Refresh は利用者の操作ではないので last activity を進めません。Idle timeout と
+   * MFA/SSO assurance は更新前の session と同じ状態で評価されます。
+   *
+   * @returns 引き継いだ record があれば true、更新前の record がなければ false です。
+   */
+  continueSession?(input: EnterpriseSessionContinuationInput): Promise<boolean>
 }
 
 /**
@@ -197,6 +221,49 @@ implements EnterpriseSessionActivityClient {
       )
     }
   }
+
+  /** 更新前の access token の activity と assurance を更新後の access token へ引き継ぎます。 */
+  async continueSession(input: EnterpriseSessionContinuationInput) {
+    validateContinuationInput(input)
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { connectionId: `HTTP_SESSION#${input.workspaceId}#${input.previousSessionId}` },
+        ConsistentRead: true,
+      }))
+      const previous = response.Item
+      if (
+        previous?.workspaceId !== input.workspaceId ||
+        !Number.isSafeInteger(previous.lastSeenAt)
+      ) {
+        return false
+      }
+      const previousExpiresAt = Number.isSafeInteger(previous.expiresAt)
+        ? previous.expiresAt as number
+        : input.expiresAt
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: {
+          connectionId: `HTTP_SESSION#${input.workspaceId}#${input.sessionId}`,
+          itemType: 'http-session-activity',
+          workspaceId: input.workspaceId,
+          lastSeenAt: previous.lastSeenAt as number,
+          authenticationMethods: readAuthenticationMethods(previous.authenticationMethods, []),
+          expiresAt: Math.max(previousExpiresAt, input.expiresAt),
+        },
+        ConditionExpression: 'attribute_not_exists(connectionId)',
+      }))
+      return true
+    } catch (error) {
+      if (isConditionalWriteError(error)) return true
+      throw new EnterpriseSessionActivityError(
+        503,
+        'EnterpriseSessionActivityUnavailable',
+        'Session activity could not be continued.',
+        { cause: error },
+      )
+    }
+  }
 }
 
 /**
@@ -252,6 +319,22 @@ implements EnterpriseSessionActivityClient {
     return [...(this.sessions.get(
       `${requireText(workspaceId, 'Workspace ID')}\0${requireText(sessionId, 'Session ID')}`,
     )?.authenticationMethods ?? [])]
+  }
+
+
+  /** 更新前の access token の activity と assurance を更新後の access token へ引き継ぎます。 */
+  async continueSession(input: EnterpriseSessionContinuationInput) {
+    validateContinuationInput(input)
+    const previous = this.sessions.get(`${input.workspaceId}\0${input.previousSessionId}`)
+    if (!previous) return false
+    const key = `${input.workspaceId}\0${input.sessionId}`
+    if (!this.sessions.has(key)) {
+      this.sessions.set(key, {
+        lastSeenAt: previous.lastSeenAt,
+        authenticationMethods: [...previous.authenticationMethods],
+      })
+    }
+    return true
   }
 }
 
@@ -310,6 +393,24 @@ function validateAssuranceInput(input: EnterpriseSessionAssuranceInput) {
       503,
       'EnterpriseSessionAssuranceInvalid',
       'Authentication assurance is invalid.',
+    )
+  }
+}
+
+/**
+ * Validates a session continuation request before any store access.
+ *
+ * @param input - Continuation input from the token refresh route.
+ */
+function validateContinuationInput(input: EnterpriseSessionContinuationInput) {
+  requireText(input.workspaceId, 'Workspace ID')
+  requireText(input.previousSessionId, 'Previous session ID')
+  requireText(input.sessionId, 'Session ID')
+  if (!Number.isSafeInteger(input.expiresAt) || input.previousSessionId === input.sessionId) {
+    throw new EnterpriseSessionActivityError(
+      403,
+      'EnterpriseSessionDenied',
+      'Session continuation context is invalid.',
     )
   }
 }
