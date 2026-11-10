@@ -5,7 +5,14 @@ import {
 } from '../infrastructure/runtime/runtime-control'
 import {
   createAuditProjectionEntrypoint,
+  isConnectorProjectionEnabled,
 } from './audit-projection-handler'
+
+test('skips the connector projection only when the deployment turns it off', () => {
+  expect(isConnectorProjectionEnabled({ CONNECTOR_SYNC_ENABLED: 'false' })).toBe(false)
+  expect(isConnectorProjectionEnabled({ CONNECTOR_SYNC_ENABLED: 'true' })).toBe(true)
+  expect(isConnectorProjectionEnabled({})).toBe(true)
+})
 
 test('blocks Audit fan-out before constructing downstream projections', async () => {
   let fanOutConstructionCount = 0

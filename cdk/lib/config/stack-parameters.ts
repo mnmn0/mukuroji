@@ -106,8 +106,8 @@ export interface StackParameters {
   readonly systemAdminGroups: cdk.CfnParameter;
   /** Audit event retention period in days. */
   readonly auditRetentionDays: cdk.CfnParameter;
-  /** Secret JSON configuration loaded by connector runtimes. */
-  readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /** Secret JSON configuration loaded by connector runtimes, declared only with the connectors module. */
+  readonly connectorRuntimeConfiguration: cdk.CfnParameter | undefined;
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
   /**
@@ -137,8 +137,8 @@ export interface StackParameters {
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Web Push VAPID public key; empty disables push subscriptions. */
   readonly webPushVapidPublicKey: cdk.CfnParameter;
-  /** Secret authenticating request intake email Webhooks. */
-  readonly requestEmailWebhookSecret: cdk.CfnParameter;
+  /** Secret authenticating request intake email Webhooks, declared only with the request email module. */
+  readonly requestEmailWebhookSecret: cdk.CfnParameter | undefined;
   /** Secret used to hash public request and reply tokens. */
   readonly requestTokenHashSecret: cdk.CfnParameter;
   /** Secret CloudFront sends so the API trusts its viewer-address header. */
@@ -196,7 +196,11 @@ export type ResolvedUserIdentityKey =
 /** Synthesis-time choices that decide which optional parameters exist. */
 export type StackParameterOptions = Readonly<{
   /** Whether the stack deploys the optional restore drill and needs its approver role. */
-  readonly restoreDrillEnabled: boolean;
+  readonly restoreDrillEnabled?: boolean;
+  /** Whether the stack deploys the connector workers and needs their runtime configuration. */
+  readonly connectorsEnabled?: boolean;
+  /** Whether the stack deploys request email ingestion and needs its Webhook secret. */
+  readonly requestEmailEnabled?: boolean;
 }>;
 
 /** Stack parameters before the Cognito user pool is resolved. */
@@ -207,13 +211,16 @@ export type StackParameterInputs = Omit<StackParameters, ResolvedUserIdentityKey
  *
  * Cognito identifiers are resolved by the stack, because a blank pool ID makes it create the pool.
  *
+ * Parameters used only by an optional module are declared only when that module is
+ * deployed, so a default deployment does not have to supply them.
+ *
  * @param stack - Stack that directly owns the parameters and validation rules.
  * @param options - Optional modules whose parameters the stack needs.
  * @returns Parameters and derived values consumed by the stack subsystems.
  */
 export function buildStackParameters(
   stack: cdk.Stack,
-  options: StackParameterOptions = { restoreDrillEnabled: false },
+  options: StackParameterOptions = {},
 ): StackParameterInputs {
   const alarmPrimaryTopicName = new cdk.CfnParameter(
     stack,
@@ -312,17 +319,15 @@ export function buildStackParameters(
     minValue: 1,
     description: 'Number of days immutable audit events are retained before DynamoDB TTL expiry.',
   });
-  const connectorRuntimeConfiguration = new cdk.CfnParameter(
-    stack,
-    'ConnectorRuntimeConfiguration',
-    {
+  const connectorRuntimeConfiguration = options.connectorsEnabled === true
+    ? new cdk.CfnParameter(stack, 'ConnectorRuntimeConfiguration', {
       type: 'String',
       default: '{}',
       noEcho: true,
       description:
         'Secret JSON object whose string properties are loaded as connector runtime environment variables.',
-    },
-  );
+    })
+    : undefined;
   const workspaceAuditPseudonymKey = new cdk.CfnParameter(
     stack,
     'WorkspaceAuditPseudonymKey',
@@ -336,20 +341,16 @@ export function buildStackParameters(
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
     },
   );
-  const restoreDrillCleanupApproverRoleArn = !options.restoreDrillEnabled
-    ? undefined
-    : new cdk.CfnParameter(
-    stack,
-    'RestoreDrillCleanupApproverRoleArn',
-    {
+  const restoreDrillCleanupApproverRoleArn = options.restoreDrillEnabled === true
+    ? new cdk.CfnParameter(stack, 'RestoreDrillCleanupApproverRoleArn', {
       type: 'String',
       allowedPattern: buildRestoreDrillApproverRoleArnPattern(stack),
       constraintDescription:
         'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN in the supported deployment partition.',
       description:
         'Existing data-owner IAM role exclusively authorized to create and admit immutable restore-drill cleanup approvals.',
-    },
-  );
+    })
+    : undefined;
   const apiRuntimeConfigurationRevision = new cdk.CfnParameter(
     stack,
     'ApiRuntimeConfigurationRevision',
@@ -558,13 +559,15 @@ export function buildStackParameters(
     description:
       'VAPID application server public key browsers use to subscribe to Web Push. Empty disables push subscriptions.',
   });
-  const requestEmailWebhookSecret = new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
-    type: 'String',
-    minLength: 32,
-    maxLength: 256,
-    noEcho: true,
-    description: 'Secret used to authenticate request intake email envelopes.',
-  });
+  const requestEmailWebhookSecret = options.requestEmailEnabled === true
+    ? new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
+      type: 'String',
+      minLength: 32,
+      maxLength: 256,
+      noEcho: true,
+      description: 'Secret used to authenticate request intake email envelopes.',
+    })
+    : undefined;
   const requestTokenHashSecret = new cdk.CfnParameter(stack, 'RequestTokenHashSecret', {
     type: 'String',
     minLength: 32,

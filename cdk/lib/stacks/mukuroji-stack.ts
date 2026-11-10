@@ -24,19 +24,26 @@ import {
   buildAiAssistanceObservabilityWorker,
 } from '../subsystems/workers/ai-assistance-observability';
 import { buildAuditProjectionWorker } from '../subsystems/workers/audit-projection';
-import { buildAutomationWorkers } from '../subsystems/workers/automation';
+import {
+  buildAutomationWorkers,
+  defineAutomationScheduleJob,
+} from '../subsystems/workers/automation';
 import { buildWorkerChannels } from '../subsystems/workers/channels';
 import { buildConnectorWorkers } from '../subsystems/workers/connectors';
 import { buildEnterpriseIdentityWorkers } from '../subsystems/workers/enterprise-identity';
 import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
-import { buildScheduleWorkers } from '../subsystems/workers/schedules';
-import { buildSlackNotificationWorker } from '../subsystems/workers/slack-notifications';
+import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
+import {
+  defineAnalyticsScheduleJob,
+  defineNotificationScheduleJob,
+} from '../subsystems/workers/schedules';
+import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
 import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
-import { buildTriageScheduleWorker } from '../subsystems/workers/triage';
+import { defineTriageScheduleJob } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
 import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
-import { buildAgentRunTriageWorker } from '../subsystems/workers/agent-run-triage';
+import { defineAgentRunTriageJob } from '../subsystems/workers/agent-run-triage';
 
 /** Stack configuration, including the optional modules the stack deploys. */
 export type MukurojiStackProps = cdk.StackProps & Readonly<{
@@ -46,6 +53,17 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * days. Off unless the composition root turns it on.
    */
   readonly restoreDrillEnabled?: boolean;
+  /**
+   * Deploys the external connector sync and poll workers, their queues, and the connector runtime
+   * secret. Without it the audit projection does not dispatch connector sync. Off unless the
+   * composition root turns it on.
+   */
+  readonly connectorsEnabled?: boolean;
+  /**
+   * Deploys the request email ingestion Lambda that an external mail relay invokes. Off unless the
+   * composition root turns it on.
+   */
+  readonly requestEmailEnabled?: boolean;
   /**
    * Seeds demo members (`@example.com`), two Teams, four Projects, and ten Work Items when the
    * stack is created, and makes the initial owner a manager of the demo Projects. For trial and
@@ -69,10 +87,16 @@ export class MukurojiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: MukurojiStackProps) {
     super(scope, id, props);
     const restoreDrillEnabled = props?.restoreDrillEnabled ?? false;
+    const connectorsEnabled = props?.connectorsEnabled ?? false;
+    const requestEmailEnabled = props?.requestEmailEnabled ?? false;
     const demoDataEnabled = props?.demoDataEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
-    const parameterInputs = buildStackParameters(this, { restoreDrillEnabled });
+    const parameterInputs = buildStackParameters(this, {
+      restoreDrillEnabled,
+      connectorsEnabled,
+      requestEmailEnabled,
+    });
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
@@ -119,7 +143,7 @@ export class MukurojiStack extends cdk.Stack {
       })
       : undefined;
 
-    const workerChannels = buildWorkerChannels(this);
+    const workerChannels = buildWorkerChannels(this, connectorsEnabled);
     const apiRuntime = buildApiRuntime(this, {
       dataStores,
       fileStorage,
@@ -202,42 +226,35 @@ export class MukurojiStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
-    buildConnectorWorkers(this, {
-      dataStores,
+    if (connectorsEnabled) {
+      buildConnectorWorkers(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+        workerChannels,
+      });
+    }
+    const requestEmailWorker = requestEmailEnabled
+      ? buildRequestEmailWorker(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+      })
+      : undefined;
+    // The order matches server/src/handlers/scheduled-jobs-handler.ts.
+    const scheduledJobs = buildScheduledJobsWorker(this, {
       lambdaBuildPaths,
-      parameters,
       runtimeControls,
-      workerChannels,
-    });
-    buildSlackNotificationWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
-    const scheduleWorkers = buildScheduleWorkers(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
-    const requestEmailWorker = buildRequestEmailWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
-    const triageScheduleWorker = buildTriageScheduleWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
-    });
-    buildAgentRunTriageWorker(this, {
-      dataStores,
-      lambdaBuildPaths,
-      parameters,
-      runtimeControls,
+      jobs: [
+        defineAutomationScheduleJob(this, { dataStores, fileStorage, parameters }),
+        defineTriageScheduleJob({ dataStores, parameters }),
+        defineAgentRunTriageJob({ dataStores, parameters }),
+        defineSlackNotificationJob(this, { dataStores, parameters }),
+        defineAnalyticsScheduleJob({ dataStores, parameters }),
+        defineNotificationScheduleJob({ dataStores, parameters }),
+      ],
     });
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
@@ -276,7 +293,13 @@ export class MukurojiStack extends cdk.Stack {
       parameters,
       demoDataEnabled,
     });
+    const { connectorChannels } = workerChannels;
+    const { connectorRuntimeSecret } = dataStores;
     buildStackOutputs(this, {
+      connectors: connectorChannels && connectorRuntimeSecret
+        ? { ...connectorChannels, connectorRuntimeSecret }
+        : undefined,
+      requestEmail: requestEmailWorker,
       ...dataStores,
       ...fileStorage,
       ...crossDomainIntegrity,
@@ -287,9 +310,7 @@ export class MukurojiStack extends cdk.Stack {
       ...auditProjection,
       ...aiAssistanceObservabilityWorker,
       ...automationWorkers,
-      ...scheduleWorkers,
-      ...requestEmailWorker,
-      ...triageScheduleWorker,
+      ...scheduledJobs,
       ...tenantOperationWorker,
       ...runtimeControls,
       workspaceDirectoryId: parameters.workspaceDirectoryId,

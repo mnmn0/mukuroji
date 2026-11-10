@@ -10,7 +10,8 @@ The drill is an optional module and is not deployed by default. Enable it with
 the CDK context value `mukuroji:restoreDrill=true` and pass the
 `RestoreDrillCleanupApproverRoleArn` parameter. The evidence bucket uses a
 400-day Object Lock in COMPLIANCE mode, so enable the drill only when that
-retention is acceptable.
+retention is acceptable. [Optional modules](../cdk/README.md#optional-modules)
+lists every module that a default stack leaves out.
 
 ## Recovery objectives
 
