@@ -173,6 +173,9 @@ describe('time tracking model', () => {
     const sliverRows = buildTimeEntryWeekRows([sliver], week.days)
     expect(Object.values(sliverRows[0]?.minutesByDate ?? {}).sort()).toEqual([0, 1])
     expect(sumTimeEntryMinutesInDays([sliver], week.days)).toBe(1)
+    // 23:58:00 to 00:00:01 records 3 minutes; like the server, the floor-left minute goes to the larger elapsed fraction.
+    const roundedUp = createTimeEntryFixture({ id: 'rounded-up', startAt: '2026-11-11T14:58:00.000Z', endAt: '2026-11-11T15:00:01.000Z', durationMinutes: 3 })
+    expect(buildTimeEntryWeekRows([roundedUp], week.days)[0]?.minutesByDate).toMatchObject({ '2026-11-11': 2, '2026-11-12': 1 })
     // 23:00 Sunday to 02:00 Monday: each week counts its own part, and the next week still lists the entry.
     const acrossWeeks = createTimeEntryFixture({ id: 'across-weeks', startAt: '2026-11-15T14:00:00.000Z', endAt: '2026-11-15T17:00:00.000Z', durationMinutes: 180 })
     const nextWeek = createWeekPeriod(shiftWeek(timeTrackingFixtureWeekStart, 1))

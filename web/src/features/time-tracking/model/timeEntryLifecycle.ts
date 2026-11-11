@@ -96,13 +96,8 @@ export function splitTimeEntryMinutesByDay(
     const overlap = Math.min(end, range.to) - Math.max(start, range.from)
     if (overlap > 0) segments.push({ date, rawMinutes: overlap / 60_000, minutes: Math.floor(overlap / 60_000) })
   }
-  const rawTotal = segments.reduce((total, segment) => total + segment.rawMinutes, 0)
-  // Scale to the recorded minutes, which the server rounds from the exact interval.
-  const scale = rawTotal > 0 ? entry.durationMinutes / rawTotal : 0
-  for (const segment of segments) {
-    segment.rawMinutes *= scale
-    segment.minutes = Math.floor(segment.rawMinutes)
-  }
+  // The recorded minutes are rounded from the exact interval; as on the server, the minutes left
+  // after flooring each day's elapsed time go to the days with the largest elapsed fractions.
   let remaining = entry.durationMinutes - segments.reduce((total, segment) => total + segment.minutes, 0)
   for (const segment of [...segments].sort((left, right) =>
     (right.rawMinutes - Math.floor(right.rawMinutes)) - (left.rawMinutes - Math.floor(left.rawMinutes)))) {
