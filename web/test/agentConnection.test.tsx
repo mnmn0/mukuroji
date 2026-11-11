@@ -156,6 +156,21 @@ function render(overrides: Partial<AgentConnectionPanelProps> = {}) {
   )
 }
 
+/**
+ * Computes the accessible names of buttons that use `aria-labelledby` in static markup.
+ *
+ * @param html - Markup rendered by `renderToStaticMarkup`.
+ * @returns Each labelled button's name, built from the text of the referenced elements.
+ */
+function accessibleButtonNames(html: string): string[] {
+  const textById = new Map(
+    Array.from(html.matchAll(/<(?:span|button)[^>]*\sid="([^"]+)"[^>]*>([^<]*)<\/(?:span|button)>/gu))
+      .map((match) => [match[1], match[2]]),
+  )
+  return Array.from(html.matchAll(/<button[^>]*\saria-labelledby="([^"]+)"/gu))
+    .map((match) => match[1].split(' ').map((id) => textById.get(id) ?? '').join(' '))
+}
+
 describe('agent connection view', () => {
   test('shows the member ID, origin, and a configuration without any secret', () => {
     const html = render()
@@ -185,12 +200,19 @@ describe('agent connection view', () => {
     expect(html).not.toContain('data-testid="agent-connection-panel"')
   })
 
-  test('describes each key action with the name of the key it changes', () => {
-    const html = render()
-    const nameId = /<span class="break-all" id="([^"]+)">Laptop<\/span>/u.exec(html)?.[1]
-    expect(nameId).toBeDefined()
-    expect(html).toMatch(new RegExp(`<button aria-describedby="${nameId}"[^>]*>期限を更新して再発行</button>`, 'u'))
-    expect(html).toMatch(new RegExp(`<button aria-describedby="${nameId}"[^>]*>失効</button>`, 'u'))
+  test('names each key action with the key it changes', () => {
+    const html = render({
+      overview: {
+        ...overview,
+        apiKeys: [...overview.apiKeys, { ...overview.apiKeys[0], id: 'key-2', name: 'Desktop' }],
+      },
+    })
+    expect(accessibleButtonNames(html)).toEqual([
+      '期限を更新して再発行 Laptop',
+      '失効 Laptop',
+      '期限を更新して再発行 Desktop',
+      '失効 Desktop',
+    ])
   })
 
   test('links the download step to the release that holds mcp.mjs', () => {

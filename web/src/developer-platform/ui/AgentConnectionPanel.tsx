@@ -333,6 +333,8 @@ function PersonalKeyRow(
 ) {
   const { t, apiKey, overview, busyOperation, formatDateTime } = props
   const nameId = useId()
+  const rotateId = useId()
+  const revokeId = useId()
   const statusKey: MessageKey = apiKey.status === 'active'
     ? 'agents.connect.status.active'
     : apiKey.status === 'expired'
@@ -361,9 +363,10 @@ function PersonalKeyRow(
         <div className="flex flex-wrap gap-2">
           {overview.canIssue ? (
             <button
-              aria-describedby={nameId}
+              aria-labelledby={`${rotateId} ${nameId}`}
               className="workbench-button-secondary min-h-9 px-3 text-xs disabled:opacity-50"
               disabled={Boolean(busyOperation) || !props.form.expiryDate}
+              id={rotateId}
               onClick={() => props.onRotate(apiKey)}
               type="button"
             >
@@ -371,9 +374,10 @@ function PersonalKeyRow(
             </button>
           ) : null}
           <button
-            aria-describedby={nameId}
+            aria-labelledby={`${revokeId} ${nameId}`}
             className="workbench-button-secondary min-h-9 px-3 text-xs disabled:opacity-50"
             disabled={Boolean(busyOperation)}
+            id={revokeId}
             onClick={() => props.onRevoke(apiKey)}
             type="button"
           >
