@@ -45,7 +45,9 @@ export function getAuthSession() {
     return null
   }
 
-  if (session.expiresAt <= Date.now()) {
+  // An expired access token is still a live session while a refresh token can renew it; the
+  // authenticated fetch refreshes it before the next API request.
+  if (session.expiresAt <= Date.now() && !session.refreshToken) {
     clearAuthSession()
     return null
   }
@@ -54,13 +56,124 @@ export function getAuthSession() {
 }
 
 /**
- * Checks, without side effects, that a stored unexpired session still holds this token.
+ * Reads the stored authentication session as it is, without expiry checks or side effects.
+ *
+ * @returns The stored session, or `null` when nothing valid is stored.
+ */
+export function readStoredAuthSession(): AuthSession | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return readSession(window.localStorage) ?? readSession(window.sessionStorage)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Finds the stored session that a token belongs to.
+ *
+ * A tab may hold a session-only sign-in in sessionStorage while another tab remembers a
+ * different account in localStorage, so the session is matched by its account rather than
+ * by which storage wins.
+ *
+ * @param accessToken - Access token the caller holds, possibly replaced by a refresh since.
+ * @returns The matching stored session, or `null` when none matches.
+ */
+export function findStoredAuthSession(accessToken: string): AuthSession | null {
+  if (typeof window === 'undefined') return null
+  try {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      const session = readSession(storage)
+      if (session && isSameAuthSessionToken(session.accessToken, accessToken)) return session
+    }
+  } catch {
+    // Storage access can throw in restricted contexts; the caller then has no stored session.
+  }
+  return null
+}
+
+/**
+ * Replaces a stored session with its refreshed version, in the storage it already uses.
+ *
+ * Unlike {@link saveAuthSession}, this leaves the other storage alone, so a refresh of a
+ * session-only sign-in never removes another account remembered in localStorage.
+ *
+ * @param session - Refreshed session.
+ */
+export function replaceStoredAuthSession(session: AuthSession) {
+  try {
+    const storage = session.remember ? window.localStorage : window.sessionStorage
+    storage.setItem(storageKey, JSON.stringify(session))
+  } catch {
+    // The refreshed token still serves this tab's requests when storage refuses the write.
+  }
+}
+
+/**
+ * Removes the stored session that holds a refresh token, leaving any other sign-in in place.
+ *
+ * @param refreshToken - Refresh token of the session to remove.
+ */
+export function removeStoredAuthSession(refreshToken: string) {
+  let removed = false
+  try {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      if (readSession(storage)?.refreshToken === refreshToken) {
+        storage.removeItem(storageKey)
+        removed = true
+      }
+    }
+  } catch {
+    // Nothing more can be removed when storage access fails.
+  }
+  if (removed) void clearAppBadgeAndNotifyTabs()
+}
+
+/**
+ * Checks whether two access tokens belong to the same signed-in account on this device.
+ *
+ * A refresh replaces the access token, while pages keep the token they read when they
+ * mounted. Tokens of one account share their subject, so either token can stand for the
+ * session. Tokens that are not JWTs (the local Cognito emulator) only match themselves or
+ * a token this tab replaced by refreshing.
+ *
+ * @param left - First access token.
+ * @param right - Second access token.
+ * @returns Whether both tokens stand for the same signed-in account.
+ */
+export function isSameAuthSessionToken(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false
+  if (left === right) return true
+  if (replacedAccessTokens.get(left) === right || replacedAccessTokens.get(right) === left) return true
+  const leftSubject = readAccessTokenSubject(left)
+  return leftSubject !== undefined && leftSubject === readAccessTokenSubject(right)
+}
+
+/**
+ * Records that this tab replaced an access token by refreshing it.
+ *
+ * @param previousAccessToken - Access token before the refresh.
+ * @param accessToken - Access token after the refresh.
+ */
+export function recordReplacedAccessToken(previousAccessToken: string, accessToken: string) {
+  for (const [replaced, replacement] of replacedAccessTokens) {
+    if (replacement === previousAccessToken) replacedAccessTokens.set(replaced, accessToken)
+  }
+  replacedAccessTokens.set(previousAccessToken, accessToken)
+}
+
+/** Access tokens this tab replaced by refreshing, mapped to their current replacement. */
+const replacedAccessTokens = new Map<string, string>()
+
+/**
+ * Checks, without side effects, that storage still holds a usable session for this token.
  *
  * A tab keeps its token in memory, so another tab's sign-out of a shared remembered
- * session is visible only in storage.
+ * session is visible only in storage. A refresh in any tab replaces the stored token, so a
+ * session of the same account counts as the same session.
  *
  * @param accessToken - Token the caller is using.
- * @returns Whether storage still holds an unexpired session with that token.
+ * @returns Whether storage still holds a usable session of that token's account.
  */
 export function hasStoredAuthSession(accessToken: string): boolean {
   if (typeof window === 'undefined') return false
@@ -68,7 +181,9 @@ export function hasStoredAuthSession(accessToken: string): boolean {
   // not hide this tab's session-only token in sessionStorage.
   return [window.localStorage, window.sessionStorage].some((storage) => {
     const session = readSession(storage)
-    return session !== null && session.accessToken === accessToken && session.expiresAt > Date.now()
+    return session !== null &&
+      isSameAuthSessionToken(session.accessToken, accessToken) &&
+      (session.expiresAt > Date.now() || Boolean(session.refreshToken))
   })
 }
 
