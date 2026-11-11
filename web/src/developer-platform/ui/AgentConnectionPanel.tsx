@@ -76,7 +76,12 @@ export type AgentConnectionPanelProps = {
   /** Current issuance form values. */
   form: PersonalKeyForm
   /** Earliest and latest selectable expiry dates. */
-  expiryBounds: { min: string; max: string }
+  expiryBounds: {
+    /** Earliest selectable expiry date, as `YYYY-MM-DD`. */
+    min: string
+    /** Latest selectable expiry date, as `YYYY-MM-DD`. */
+    max: string
+  }
   /** Key of the mutation in progress, if any. */
   busyOperation?: string
   /** Whether the last mutation failed. */
