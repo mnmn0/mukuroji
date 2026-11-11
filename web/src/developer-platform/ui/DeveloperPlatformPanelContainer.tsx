@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import {
   createMutationFingerprint,
@@ -38,6 +38,10 @@ import {
   flattenDeveloperSyncConflicts,
   replaceResolvedSyncConflictPages,
 } from '../model/connectors'
+import {
+  applySavedPersonalCredentialPolicy,
+  type SavedPersonalCredentialPolicy,
+} from '../model/credentials'
 import type { DeveloperExportFormat } from '../model/transfers'
 import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
@@ -114,6 +118,12 @@ export function DeveloperPlatformPanelContainer({
     isValidating: isPersonalCredentialsValidating,
     mutate: mutatePersonalCredentials,
   } = usePersonalCredentialAdministration(mutationSession.accessToken)
+  const [savedPersonalCredentialPolicy, setSavedPersonalCredentialPolicy] =
+    useState<SavedPersonalCredentialPolicy>()
+  const displayedPersonalCredentials = applySavedPersonalCredentialPolicy(
+    personalCredentials,
+    savedPersonalCredentialPolicy,
+  )
   // The key list and the personal-key classification load separately. While either reloads, or after the
   // classification failed to reload, a newly listed personal key may be missing from it, so rotation stays hidden.
   const personalCredentialsPending =
@@ -236,7 +246,7 @@ export function DeveloperPlatformPanelContainer({
       labels={labels}
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
-      personalCredentials={personalCredentials}
+      personalCredentials={displayedPersonalCredentials}
       personalCredentialsPending={personalCredentialsPending}
       personalCredentialsLoadError={Boolean(personalCredentialsError)}
       onRetryPersonalCredentials={() => {
@@ -474,11 +484,9 @@ export function DeveloperPlatformPanelContainer({
               context,
             ),
         )
-        // Keep the saved policy on screen even if reloading the classification failed; the key IDs stay as loaded.
-        await mutatePersonalCredentials(
-          (current) => (current ? { ...current, policy } : current),
-          { revalidate: false },
-        )
+        // Writing to the SWR cache would clear a reload error and show Rotate again, so the saved policy is
+        // kept beside the classification it was saved over until a newer classification loads.
+        setSavedPersonalCredentialPolicy({ policy, basis: personalCredentials })
       }}
       onRotateApiKey={(apiKeyId) =>
         runMutation(
