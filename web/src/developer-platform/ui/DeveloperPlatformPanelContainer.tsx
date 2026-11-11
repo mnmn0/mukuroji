@@ -105,13 +105,19 @@ export function DeveloperPlatformPanelContainer({
     data: resources,
     error,
     isLoading,
+    isValidating: isResourcesValidating,
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
   const {
     data: personalCredentials,
     error: personalCredentialsError,
+    isValidating: isPersonalCredentialsValidating,
     mutate: mutatePersonalCredentials,
   } = usePersonalCredentialAdministration(mutationSession.accessToken)
+  // The key list and the personal-key classification load separately. While either reloads, a newly
+  // listed personal key may be missing from the classification, so rotation stays hidden until both settle.
+  const personalCredentialsPending =
+    !personalCredentials || isPersonalCredentialsValidating || isResourcesValidating
   const {
     data: syncConflictPages,
     error: syncConflictError,
@@ -135,17 +141,23 @@ export function DeveloperPlatformPanelContainer({
       syncConflictPages.length < syncConflictPageCount,
   )
 
-  /** Refreshes the aggregate resource without starting a second request. */
+  /** Refreshes the aggregate resource and the personal-key classification together. */
   const refresh = async () => {
     if (!resourceKey) {
       return
     }
 
-    await mutateCache(
-      resourceKey,
-      () => getDeveloperPlatformResources(mutationSession.accessToken),
-      { revalidate: false },
-    )
+    await Promise.all([
+      mutateCache(
+        resourceKey,
+        () => getDeveloperPlatformResources(mutationSession.accessToken),
+        { revalidate: false },
+      ),
+      // Reload the classification with the key list so a key another member issued meanwhile is marked personal.
+      mutatePersonalCredentials().catch(() => {
+        // The classification error stays visible with its retry action.
+      }),
+    ])
     mutationRequestRunner.discardRetainedContexts()
   }
 
@@ -222,7 +234,7 @@ export function DeveloperPlatformPanelContainer({
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
       personalCredentials={personalCredentials}
-      personalCredentialsPending={!personalCredentials}
+      personalCredentialsPending={personalCredentialsPending}
       personalCredentialsLoadError={Boolean(personalCredentialsError)}
       onRetryPersonalCredentials={() => {
         void mutatePersonalCredentials().catch(() => {
