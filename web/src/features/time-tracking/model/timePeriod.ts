@@ -125,7 +125,7 @@ export function toLocalTimeInput(instant: string): string {
  *
  * @param date - Local `YYYY-MM-DD` date.
  * @param time - Local `HH:MM` time.
- * @returns ISO instant, or undefined when either part is invalid.
+ * @returns ISO instant, or undefined when either part is invalid or the time does not exist locally.
  */
 export function toInstantFromLocal(date: string, time: string): string | undefined {
   const day = parseLocalDate(date)
@@ -135,6 +135,8 @@ export function toInstantFromLocal(date: string, time: string): string | undefin
   const minutes = Number(match[2])
   if (hours > 23 || minutes > 59) return undefined
   day.setHours(hours, minutes, 0, 0)
+  // A time skipped by a daylight-saving jump is moved silently, so it is rejected instead.
+  if (formatLocalDate(day) !== date || day.getHours() !== hours || day.getMinutes() !== minutes) return undefined
   return day.toISOString()
 }
 

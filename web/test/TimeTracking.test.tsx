@@ -109,6 +109,14 @@ describe('time tracking periods', () => {
   test('converts local inputs and formats durations', () => {
     expect(toInstantFromLocal('2026-11-10', '09:30')).toBe('2026-11-10T00:30:00.000Z')
     expect(toInstantFromLocal('2026-02-30', '09:30')).toBeUndefined()
+    process.env.TZ = 'America/New_York'
+    try {
+      expect(toInstantFromLocal('2026-03-08', '02:15')).toBeUndefined()
+      expect(toInstantFromLocal('2026-03-08', '03:15')).toBe('2026-03-08T07:15:00.000Z')
+      expect(toInstantFromLocal('2026-11-01', '01:30')).toBeDefined()
+    } finally {
+      process.env.TZ = 'Asia/Tokyo'
+    }
     expect(toInstantFromLocal('2026-11-10', '24:00')).toBeUndefined()
     expect(toLocalDateKey('2026-11-09T15:30:00.000Z')).toBe('2026-11-10')
     expect(formatMinutes(90)).toBe('1:30')
