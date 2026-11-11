@@ -1631,3 +1631,36 @@ test('reads every Floci Cognito group page for current membership', async () => 
     }
   })
 })
+
+test('refreshes and revokes tokens with the issuing app client', async () => {
+  const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const sdkClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      commands.push({ name: command.constructor.name, input: command.input })
+      return command.constructor.name === 'InitiateAuthCommand'
+        ? { AuthenticationResult: { AccessToken: 'refreshed-access-token', ExpiresIn: 3600 } }
+        : {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+
+  await expect(client.refreshTokens('refresh-token')).resolves.toMatchObject({
+    AuthenticationResult: { AccessToken: 'refreshed-access-token' },
+  })
+  await client.revokeRefreshToken('sso-refresh-token', 'mukuroji-sso-client')
+
+  expect(commands).toEqual([
+    {
+      name: 'InitiateAuthCommand',
+      input: {
+        AuthFlow: 'REFRESH_TOKEN_AUTH',
+        ClientId: 'mukuroji-client',
+        AuthParameters: { REFRESH_TOKEN: 'refresh-token' },
+      },
+    },
+    {
+      name: 'RevokeTokenCommand',
+      input: { Token: 'sso-refresh-token', ClientId: 'mukuroji-sso-client' },
+    },
+  ])
+})

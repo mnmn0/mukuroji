@@ -31,6 +31,7 @@ import {
   InitiateAuthCommand,
   ListUsersCommand,
   RespondToAuthChallengeCommand,
+  RevokeTokenCommand,
 } from '@aws-sdk/client-cognito-identity-provider'
 
 /**
@@ -480,6 +481,20 @@ export type CognitoClient = {
    */
   getUser(accessToken: string): Promise<GetUserResponse>
   /**
+   * refresh token で access token と ID token を更新します（REFRESH_TOKEN_AUTH）。
+   *
+   * @param refreshToken - 更新に使う Cognito refresh token です。
+   * @param clientId - refresh token を発行した app client です。省略時は password client です。
+   */
+  refreshTokens?(refreshToken: string, clientId?: string): Promise<InitiateAuthResponse>
+  /**
+   * refresh token と、それから発行された access token を Cognito で失効させます。
+   *
+   * @param refreshToken - 失効させる Cognito refresh token です。
+   * @param clientId - refresh token を発行した app client です。省略時は password client です。
+   */
+  revokeRefreshToken?(refreshToken: string, clientId?: string): Promise<void>
+  /**
    * Cognito user pool から user 一覧を page 単位で取得します。
    */
   listUsers(input: ListCognitoUsersInput): Promise<CognitoUsersResponse>
@@ -671,6 +686,54 @@ export class AwsCognitoClient implements CognitoClient {
         Session: response.Session,
         ChallengeParameters: response.ChallengeParameters,
       }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * REFRESH_TOKEN_AUTH flow で access token と ID token を更新します。
+   *
+   * @param refreshToken - 更新に使う Cognito refresh token です。
+   * @param clientId - refresh token を発行した app client です。省略時は password client です。
+   * @returns Cognito の認証結果です。refresh token rotation が無効なら RefreshToken は含みません。
+   */
+  async refreshTokens(refreshToken: string, clientId?: string): Promise<InitiateAuthResponse> {
+    const configuration = this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new InitiateAuthCommand({
+        AuthFlow: 'REFRESH_TOKEN_AUTH',
+        ClientId: clientId ?? configuration.clientId,
+        AuthParameters: {
+          REFRESH_TOKEN: refreshToken,
+        },
+      }))
+
+      return {
+        AuthenticationResult: response.AuthenticationResult,
+        ChallengeName: response.ChallengeName,
+        Session: response.Session,
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * refresh token と、それから発行された access token を失効させます。
+   *
+   * @param refreshToken - 失効させる Cognito refresh token です。
+   * @param clientId - refresh token を発行した app client です。省略時は password client です。
+   */
+  async revokeRefreshToken(refreshToken: string, clientId?: string): Promise<void> {
+    const configuration = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new RevokeTokenCommand({
+        Token: refreshToken,
+        ClientId: clientId ?? configuration.clientId,
+      }))
     } catch (error) {
       throw toCognitoSdkError(error)
     }
@@ -1355,6 +1418,36 @@ export class FlociCognitoClient implements CognitoClient {
       },
       ClientId: await this.resolveClientId(),
       Session: session,
+    })
+  }
+
+  /**
+   * REFRESH_TOKEN_AUTH flow で access token と ID token を更新します。
+   *
+   * @param refreshToken - 更新に使う Cognito refresh token です。
+   * @param clientId - refresh token を発行した app client です。省略時は password client です。
+   * @returns Cognito の認証結果です。
+   */
+  async refreshTokens(refreshToken: string, clientId?: string) {
+    return this.request<InitiateAuthResponse>('InitiateAuth', {
+      AuthFlow: 'REFRESH_TOKEN_AUTH',
+      ClientId: clientId ?? await this.resolveClientId(),
+      AuthParameters: {
+        REFRESH_TOKEN: refreshToken,
+      },
+    })
+  }
+
+  /**
+   * refresh token と、それから発行された access token を失効させます。
+   *
+   * @param refreshToken - 失効させる Cognito refresh token です。
+   * @param clientId - refresh token を発行した app client です。省略時は password client です。
+   */
+  async revokeRefreshToken(refreshToken: string, clientId?: string) {
+    await this.request<Record<string, never>>('RevokeToken', {
+      Token: refreshToken,
+      ClientId: clientId ?? await this.resolveClientId(),
     })
   }
 

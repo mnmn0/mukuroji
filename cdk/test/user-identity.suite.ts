@@ -45,6 +45,16 @@ test('creates the user pool and password client only when the Cognito IDs are bl
       GenerateSecret: false,
       PreventUserExistenceErrors: 'ENABLED',
       AllowedOAuthFlowsUserPoolClient: false,
+      // Sessions refresh for up to 30 days, and sign-out revokes the refresh token.
+      AccessTokenValidity: 60,
+      IdTokenValidity: 60,
+      RefreshTokenValidity: 43200,
+      TokenValidityUnits: {
+        AccessToken: 'minutes',
+        IdToken: 'minutes',
+        RefreshToken: 'minutes',
+      },
+      EnableTokenRevocation: true,
     }),
   });
 });

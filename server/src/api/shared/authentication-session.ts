@@ -25,6 +25,14 @@ import { getEnv } from './runtime-config'
 import { decodeJwtPayload, readNumericClaim, readUserAttribute } from './token-claims'
 
 /**
+ * Links a refreshed token set to the access token it replaces.
+ */
+export type AuthenticationSessionContinuation = {
+  /** Access token the client used before the refresh; it may already be expired. */
+  previousAccessToken: string
+}
+
+/**
  * Builds the login response for a completed Cognito authentication.
  *
  * @param tokens - Cognito token set.
@@ -32,6 +40,7 @@ import { decodeJwtPayload, readNumericClaim, readUserAttribute } from './token-c
  * @param requestBody - Login request body.
  * @param requestAuditContext - Audit context of the login request.
  * @param verifiedAuthenticationMethods - Authentication methods verified for the session.
+ * @param continuation - Previous access token when the token set came from a refresh.
  * @returns The HTTP response carrying the session tokens.
  */
 export async function createAuthenticationResponse(
@@ -40,6 +49,7 @@ export async function createAuthenticationResponse(
   requestBody: Readonly<Record<string, unknown>>,
   requestAuditContext?: MutationAuditContext,
   verifiedAuthenticationMethods: readonly string[] = [],
+  continuation?: AuthenticationSessionContinuation,
 ) {
   if (!tokens.AccessToken) {
     throw new CognitoServiceError(
@@ -89,10 +99,20 @@ export async function createAuthenticationResponse(
         ...verifiedAuthenticationMethods,
       ]),
     ]
-    if (authenticationMethods.length > 0) {
+    const sessionId = createHash('sha256').update(tokens.AccessToken).digest('base64url')
+    const continued = continuation
+      ? await continueAuthenticationSession(
+        principal.directoryId,
+        continuation.previousAccessToken,
+        claims,
+        sessionId,
+        expiresAt,
+      )
+      : false
+    if (!continued && authenticationMethods.length > 0) {
       await workspaceDependencies.enterpriseSessionActivity.recordAuthenticationAssurance({
         workspaceId: principal.directoryId,
-        sessionId: createHash('sha256').update(tokens.AccessToken).digest('base64url'),
+        sessionId,
         authenticationMethods,
         authenticatedAt,
         expiresAt,
@@ -107,6 +127,63 @@ export async function createAuthenticationResponse(
     expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
     tokenType: tokens.TokenType ?? 'Bearer',
   }
+}
+
+/**
+ * Carries the idle activity and MFA/SSO assurance of the replaced access token to its refresh.
+ *
+ * The previous token is read without signature verification, so it is only trusted to name
+ * a stored record: its digest must match a record the server wrote, and its subject, app
+ * client and `origin_jti` must equal those of the new token that Cognito just issued. Cognito
+ * keeps `origin_jti` across refreshes of one sign-in, so a token from another sign-in of the
+ * same user cannot lend its assurance.
+ *
+ * @param workspaceId - Workspace that scopes the session record.
+ * @param previousAccessToken - Access token the client used before the refresh.
+ * @param claims - Claims of the refreshed access token.
+ * @param sessionId - Session identifier of the refreshed access token.
+ * @param expiresAt - Expiry epoch seconds of the refreshed access token.
+ * @returns Whether a previous record was carried over.
+ */
+async function continueAuthenticationSession(
+  workspaceId: string,
+  previousAccessToken: string,
+  claims: CognitoAccessTokenClaims | undefined,
+  sessionId: string,
+  expiresAt: number,
+) {
+  const continueSession = workspaceDependencies.enterpriseSessionActivity.continueSession
+  const previousClaims = decodeJwtPayload<CognitoAccessTokenClaims>(previousAccessToken)
+  if (
+    !continueSession ||
+    !claims ||
+    !previousClaims ||
+    previousClaims.token_use !== 'access' ||
+    !isSameClaimText(previousClaims.sub, claims.sub) ||
+    !isSameClaimText(previousClaims.client_id, claims.client_id) ||
+    !isSameClaimText(previousClaims.origin_jti, claims.origin_jti)
+  ) {
+    return false
+  }
+  const previousSessionId = createHash('sha256').update(previousAccessToken).digest('base64url')
+  if (previousSessionId === sessionId) return false
+  return await continueSession.call(workspaceDependencies.enterpriseSessionActivity, {
+    workspaceId,
+    previousSessionId,
+    sessionId,
+    expiresAt,
+  })
+}
+
+/**
+ * Checks that two token claims are the same non-empty string.
+ *
+ * @param left - Claim of the first token.
+ * @param right - Claim of the second token.
+ * @returns Whether both claims are equal non-empty strings.
+ */
+function isSameClaimText(left: unknown, right: unknown) {
+  return typeof left === 'string' && left.length > 0 && left === right
 }
 
 /**
