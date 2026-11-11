@@ -108,11 +108,12 @@ export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): 
   if (settings.client === 'claude-code') {
     const continuation = windows ? ' `\n  ' : ' \\\n  '
     const words = [
-      'claude mcp add --scope user --transport stdio',
+      // The name comes before `--env`: the option takes several values and would read the name as one of them.
+      `claude mcp add --scope user --transport stdio ${MCP_SERVER_NAME}`,
       ...environment.map(([name, value]) => `--env ${quoteShellWord(`${name}=${value}`, settings.shell)}`),
       // Single quotes keep the shell from expanding the variable; Claude Code expands it at start-up.
       "--env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}'",
-      `${MCP_SERVER_NAME} -- node ${quoteShellWord(scriptPath, settings.shell)}`,
+      `-- node ${quoteShellWord(scriptPath, settings.shell)}`,
     ]
     return {
       location: windows ? 'PowerShell' : 'Terminal',

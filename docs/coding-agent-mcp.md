@@ -99,15 +99,17 @@ Releaseへ添付するときは、build後に `server/dist` で
 Claude Code（`--scope user` は全プロジェクト、`--scope project` はリポジトリの `.mcp.json` に保存します）:
 
 ```sh
-claude mcp add --scope user --transport stdio \
+claude mcp add --scope user --transport stdio mukuroji-tasks \
   --env MUKUROJI_MCP_URL=https://your-mukuroji.example.com \
   --env MUKUROJI_MCP_TEAM_ID=your-team-id \
   --env MUKUROJI_MCP_ASSIGNEE_ID=your-workspace-member-id \
   --env MUKUROJI_MCP_AGENT_NAME=claude-code \
   --env MUKUROJI_MCP_RUNTIME=claude-code \
   --env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}' \
-  mukuroji-tasks -- node /absolute/path/to/mcp.mjs
+  -- node /absolute/path/to/mcp.mjs
 ```
+
+サーバー名（`mukuroji-tasks`）は `--env` より前に書きます。`--env` は複数の値を受け取るため、後ろに書いた名前も環境変数として読まれ、登録に失敗します。
 
 Claude Codeは `command`、`args`、`env` の `${VAR}` を起動時の環境変数で展開します。
 共有する `.mcp.json` には `"MUKUROJI_MCP_TOKEN": "${MUKUROJI_MCP_TOKEN}"` の形だけを置きます。

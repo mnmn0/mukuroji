@@ -34,12 +34,13 @@ describe('agent connection snippets', () => {
 
   test('fills Claude Code, Codex, and Kiro configurations without the token value', () => {
     const claude = buildAgentConnectionSnippet(settings).content
-    expect(claude).toContain('claude mcp add --scope user --transport stdio')
+    expect(claude).toContain('claude mcp add --scope user --transport stdio mukuroji-tasks \\\n')
     expect(claude).toContain('--env MUKUROJI_MCP_ASSIGNEE_ID=taro@example.com')
     expect(claude).toContain('--env MUKUROJI_MCP_TEAM_ID=team-core')
     expect(claude).toContain('--env MUKUROJI_MCP_RUNTIME=claude-code')
     expect(claude).toContain("--env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}'")
-    expect(claude).toContain('mukuroji-tasks -- node /Users/taro/mukuroji/mcp.mjs')
+    expect(claude).toContain("--env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}' \\\n  -- node /Users/taro/mukuroji/mcp.mjs")
+    expect(claude.indexOf('mukuroji-tasks')).toBeLessThan(claude.indexOf('--env'))
     expect(claude).toContain(' \\\n  ')
 
     const codex = buildAgentConnectionSnippet({ ...settings, client: 'codex' })
