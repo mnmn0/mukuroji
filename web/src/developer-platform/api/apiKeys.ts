@@ -2,6 +2,12 @@ import type {
   ApiKeyOneTimeSecretOutput,
   ApiKeySummary,
   CreateApiKeyInput,
+  CreatePersonalApiKeyInput,
+  PersonalAgentCredentialOverview,
+  PersonalCredentialAdministration,
+  PersonalCredentialPolicy,
+  RotatePersonalApiKeyInput,
+  UpdatePersonalCredentialPolicyInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
@@ -75,8 +81,119 @@ export function revokeDeveloperApiKey(
   )
 }
 
+/**
+ * Fetches the current member's own agent connection details and personal API keys.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @returns The member ID, whether issuance is allowed, the policy, and the member's personal API keys.
+ */
+export function getPersonalAgentConnection(accessToken: string) {
+  return requestJson<PersonalAgentCredentialOverview>(
+    '/developer/me/agent-connection',
+    accessToken,
+  )
+}
+
+/**
+ * Issues a personal API key for a coding agent.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param input - Key name, expiry, and scopes.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The secret, shown only once, and the API key metadata.
+ */
+export function createPersonalApiKey(
+  accessToken: string,
+  input: CreatePersonalApiKeyInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<ApiKeyOneTimeSecretOutput>(
+    '/developer/me/api-keys',
+    accessToken,
+    createJsonMutation('POST', input, mutationContext),
+  )
+}
+
+/**
+ * Rotates a personal API key's secret with a new expiry.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param apiKeyId - ID of the API key to rotate.
+ * @param input - The new expiry.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The new one-time secret and the API key metadata.
+ */
+export function rotatePersonalApiKey(
+  accessToken: string,
+  apiKeyId: string,
+  input: RotatePersonalApiKeyInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<ApiKeyOneTimeSecretOutput>(
+    `/developer/me/api-keys/${encodeURIComponent(apiKeyId)}/rotate`,
+    accessToken,
+    createJsonMutation('POST', input, mutationContext),
+  )
+}
+
+/**
+ * Revokes a personal API key.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param apiKeyId - ID of the API key to revoke.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The API key metadata after revocation.
+ */
+export function revokePersonalApiKey(
+  accessToken: string,
+  apiKeyId: string,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<ApiKeySummary>(
+    `/developer/me/api-keys/${encodeURIComponent(apiKeyId)}`,
+    accessToken,
+    {
+      headers: createMutationHeaders(mutationContext),
+      method: 'DELETE',
+    },
+  )
+}
+
+/**
+ * Fetches the member self-issuance policy and the IDs of issued personal API keys. Administrators only.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @returns The policy and the personal API key IDs.
+ */
+export function getPersonalCredentialAdministration(accessToken: string) {
+  return requestJson<PersonalCredentialAdministration>(
+    '/developer/credential-policy',
+    accessToken,
+  )
+}
+
+/**
+ * Changes the member self-issuance policy for personal API keys. Administrators only.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param input - Whether members may issue personal API keys.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The updated policy.
+ */
+export function updatePersonalCredentialPolicy(
+  accessToken: string,
+  input: UpdatePersonalCredentialPolicyInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<PersonalCredentialPolicy>(
+    '/developer/credential-policy',
+    accessToken,
+    createJsonMutation('PUT', input, mutationContext),
+  )
+}
+
 function createJsonMutation(
-  method: 'PATCH' | 'POST',
+  method: 'PATCH' | 'POST' | 'PUT',
   body: unknown,
   mutationContext: MutationRequestContext,
 ): RequestInit {

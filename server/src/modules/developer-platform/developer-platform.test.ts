@@ -4641,3 +4641,170 @@ describe('request safety primitives', () => {
       .toBeInstanceOf(LocalAesGcmSecretProtector)
   })
 })
+
+describe('API key audit', () => {
+  /** Returns the audit outbox items written by DynamoDB transactions so far. */
+  function readAuditItems(commands: Array<{ name: string; input: Record<string, unknown> }>) {
+    return commands
+      .filter(({ name }) => name === 'TransactWriteCommand')
+      .flatMap(({ input }) => input.TransactItems as Array<{
+        Put?: { TableName?: string; Item: Record<string, unknown> }
+      }>)
+      .filter(({ Put }) => Put?.TableName === 'AuditEventsTable')
+      .map(({ Put }) => Put?.Item ?? {})
+  }
+
+  test('records issuance, rotation, revocation, and policy changes without secrets', async () => {
+    const memory = createMemoryDocumentClient()
+    const client = new DynamoDbDeveloperPlatformStorage(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(31)),
+      () => START,
+      'LookupKeyIndex',
+      'AuditEventsTable',
+    )
+    const expiresAt = new Date(START.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString()
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-audit',
+      createdByUserId: 'member-1',
+      input: { name: 'Agent', scopes: ['work-items:read', 'work-items:write'], expiresAt },
+      issuance: 'personal',
+    })
+    const rotatedExpiry = new Date(START.getTime() + 60 * 24 * 60 * 60 * 1_000).toISOString()
+    const rotated = await client.rotateApiKey({
+      workspaceId: 'workspace-audit',
+      apiKeyId: created.apiKey.id,
+      expiresAt: rotatedExpiry,
+      actorUserId: 'member-1',
+    })
+    expect(rotated.apiKey.expiresAt).toBe(rotatedExpiry)
+    await client.revokeApiKey({
+      workspaceId: 'workspace-audit',
+      apiKeyId: created.apiKey.id,
+      actorUserId: 'admin-1',
+    })
+    await client.revokeApiKey({
+      workspaceId: 'workspace-audit',
+      apiKeyId: created.apiKey.id,
+      actorUserId: 'admin-1',
+    })
+    await expect(client.updatePersonalCredentialPolicy({
+      workspaceId: 'workspace-audit',
+      updatedByUserId: 'admin-1',
+      input: { selfIssuanceEnabled: false },
+    })).resolves.toMatchObject({ selfIssuanceEnabled: false, updatedByUserId: 'admin-1' })
+    await expect(client.getPersonalCredentialPolicy('workspace-audit'))
+      .resolves.toMatchObject({ selfIssuanceEnabled: false })
+    await expect(client.getPersonalCredentialPolicy('workspace-unset'))
+      .resolves.toEqual({ selfIssuanceEnabled: true })
+
+    const audits = readAuditItems(memory.commands)
+    expect(audits.map((item) => item.eventType)).toEqual([
+      'api-key.created',
+      'api-key.rotated',
+      'api-key.revoked',
+      'credential-policy.updated',
+    ])
+    expect(audits[0]).toMatchObject({
+      entityType: 'api-key',
+      entityId: created.apiKey.id,
+      metadata: expect.objectContaining({ ownerUserId: 'member-1', issuance: 'personal' }),
+    })
+    const serialized = JSON.stringify(audits)
+    expect(serialized).not.toContain(created.secret)
+    expect(serialized).not.toContain(rotated.secret)
+  })
+})
+
+describe('personal credential policy guard', () => {
+  const expiresAt = new Date(START.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString()
+
+  test('refuses personal issuance and rotation once self-issuance is off', async () => {
+    const { client } = createClient()
+    const personal = await client.createApiKey({
+      workspaceId: 'workspace-policy',
+      createdByUserId: 'member-1',
+      input: { name: 'Agent', scopes: ['work-items:read'], expiresAt },
+      issuance: 'personal',
+    })
+    await client.updatePersonalCredentialPolicy({
+      workspaceId: 'workspace-policy',
+      updatedByUserId: 'admin-1',
+      input: { selfIssuanceEnabled: false },
+    })
+
+    await expect(client.createApiKey({
+      workspaceId: 'workspace-policy',
+      createdByUserId: 'member-1',
+      input: { name: 'Agent 2', scopes: ['work-items:read'], expiresAt },
+      issuance: 'personal',
+    })).rejects.toMatchObject({ status: 403, code: 'PersonalCredentialIssuanceDisabled' })
+    await expect(client.rotateApiKey({
+      workspaceId: 'workspace-policy',
+      apiKeyId: personal.apiKey.id,
+      expiresAt,
+      actorUserId: 'member-1',
+    })).rejects.toMatchObject({ status: 403, code: 'PersonalCredentialIssuanceDisabled' })
+    await expect(client.createApiKey({
+      workspaceId: 'workspace-policy',
+      createdByUserId: 'admin-1',
+      input: { name: 'Integration', scopes: ['work-items:read'], expiresAt },
+      issuance: 'workspace',
+    })).resolves.toMatchObject({ apiKey: { name: 'Integration' } })
+    await expect(client.listPersonalApiKeys('workspace-policy'))
+      .resolves.toEqual([expect.objectContaining({ id: personal.apiKey.id })])
+    await expect(client.listPersonalApiKeys('workspace-policy', 'admin-1')).resolves.toEqual([])
+    const [listed] = await client.listApiKeys('workspace-policy')
+    expect(listed).not.toHaveProperty('issuance')
+  })
+
+  test('fails personal issuance when the policy turns off before the write commits', async () => {
+    const memory = createMemoryDocumentClient()
+    let disableBeforeNextWrite = false
+    const documentClient = {
+      /** Disables the policy right before the next transaction when the test asks for it, then sends the command. */
+      async send(command: Parameters<DynamoDBDocumentClient['send']>[0]) {
+        if (command.constructor.name === 'TransactWriteCommand' && disableBeforeNextWrite) {
+          disableBeforeNextWrite = false
+          await client.updatePersonalCredentialPolicy({
+            workspaceId: 'workspace-race',
+            updatedByUserId: 'admin-1',
+            input: { selfIssuanceEnabled: false },
+          })
+        }
+        return memory.documentClient.send(command)
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbDeveloperPlatformStorage(
+      'DeveloperPlatformTable',
+      documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(31)),
+      () => START,
+      'LookupKeyIndex',
+    )
+    const issue = (name: string) => client.createApiKey({
+      workspaceId: 'workspace-race',
+      createdByUserId: 'member-1',
+      input: { name, scopes: ['work-items:read'], expiresAt },
+      issuance: 'personal',
+    })
+
+    disableBeforeNextWrite = true
+    await expect(issue('Before policy row')).rejects.toMatchObject({
+      status: 409,
+      code: 'DeveloperPlatformConcurrentMutation',
+    })
+    await client.updatePersonalCredentialPolicy({
+      workspaceId: 'workspace-race',
+      updatedByUserId: 'admin-1',
+      input: { selfIssuanceEnabled: true },
+    })
+    disableBeforeNextWrite = true
+    await expect(issue('With policy row')).rejects.toMatchObject({
+      status: 409,
+      code: 'DeveloperPlatformConcurrentMutation',
+    })
+    await expect(client.listApiKeys('workspace-race')).resolves.toEqual([])
+  })
+})

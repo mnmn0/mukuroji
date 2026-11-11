@@ -7,6 +7,7 @@ import {
   developerSyncConflictsFixture,
   developerPlatformResourcesFixture,
   multipleConnectorAccountsDeveloperPlatformResourcesFixture,
+  personalCredentialAdministrationFixture,
 } from '../src/developer-platform/fixtures'
 
 describe('DeveloperPlatformPanel connector management', () => {
@@ -111,5 +112,51 @@ describe('DeveloperPlatformPanel connector management', () => {
 
     expect(html).toContain('Product project')
     expect(html).not.toContain('Operations project')
+  })
+})
+
+describe('DeveloperPlatformPanel personal agent keys', () => {
+  test('lets an administrator turn off member-issued keys and marks personal keys', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        personalCredentials={personalCredentialAdministrationFixture}
+        onChangePersonalCredentialPolicy={async () => undefined}
+        onRevokeApiKey={async () => undefined}
+        onRotateApiKey={async () => {
+          throw new Error('not used')
+        }}
+      />,
+    )
+
+    expect(html).toContain('data-testid="personal-credential-policy"')
+    expect(html).toContain('Member-issued agent keys')
+    expect(html).toContain('Turn off')
+    expect(html).toContain('Personal')
+    expect(html).toContain('Claude Code (laptop)')
+  })
+
+  test('hides API key rotation until member-issued keys are known and offers a retry', () => {
+    const render = (pending: boolean, loadError: boolean) => renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        personalCredentialsPending={pending}
+        personalCredentialsLoadError={loadError}
+        onRetryPersonalCredentials={() => undefined}
+        onRevokeApiKey={async () => undefined}
+        onRotateApiKey={async () => {
+          throw new Error('not used')
+        }}
+      />,
+    )
+    const rotateLabel = `>${developerPlatformLabelsFixture.actions.rotate}<`
+
+    const failed = render(true, true)
+    expect(failed).toContain('data-testid="personal-credential-policy-error"')
+    expect(failed).toContain(developerPlatformLabelsFixture.retry)
+    expect(failed).not.toContain(rotateLabel)
+    expect(render(false, false)).toContain(rotateLabel)
   })
 })

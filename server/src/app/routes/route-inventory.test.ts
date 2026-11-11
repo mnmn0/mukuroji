@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(451)
-  expect(new Set(inventory).size).toBe(447)
+  expect(inventory).toHaveLength(457)
+  expect(new Set(inventory).size).toBe(453)
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
@@ -51,8 +51,14 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('GET /api/developer/me/agent-connection')
+  expect(inventory).toContain('POST /api/developer/me/api-keys')
+  expect(inventory).toContain('POST /api/developer/me/api-keys/:apiKeyId/rotate')
+  expect(inventory).toContain('DELETE /api/developer/me/api-keys/:apiKeyId')
+  expect(inventory).toContain('GET /api/developer/credential-policy')
+  expect(inventory).toContain('PUT /api/developer/credential-policy')
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '05887806c3c85cf7e7cc09e28fb7028dd55c2e0e0f40c86810cf40330e29de69',
+    'd29a8dc114c4244e1027786a95cf34bc439d272449c16a0d1f98a9019a202afa',
   )
 })

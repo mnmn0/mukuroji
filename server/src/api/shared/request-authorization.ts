@@ -561,6 +561,11 @@ const enterpriseRoutePermissionRules = [
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
   { method: 'GET', pathPattern: '/api/projects*', permission: 'projects.read' },
   { method: '*', pathPattern: '/api/projects*', permission: 'projects.write' },
+  // A member's own agent credentials: reading and revoking change nothing shared, while
+  // issuing or rotating hands out work item access, so it needs work item write access.
+  { method: 'GET', pathPattern: '/api/developer/me/*', permission: 'workspace.read' },
+  { method: 'DELETE', pathPattern: '/api/developer/me/api-keys/:apiKeyId', permission: 'workspace.read' },
+  { method: 'POST', pathPattern: '/api/developer/me/api-keys*', permission: 'work-items.write' },
   { method: '*', pathPattern: '/api/developer*', permission: 'workspace.manage' },
   {
     method: 'GET',

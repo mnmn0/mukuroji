@@ -2,6 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import type {
   ApiScope,
   DeveloperPlatformOverview,
+  PersonalCredentialAdministration,
   ImportDryRunReport,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
@@ -63,6 +64,14 @@ import { WebhooksSection } from './WebhooksSection'
 export type DeveloperPlatformPanelProps = {
   /** Developer Platform aggregate resources. */
   resources?: DeveloperPlatformOverview
+  /** Policy and IDs of member-issued agent keys; omitted hides the policy control and badges. */
+  personalCredentials?: PersonalCredentialAdministration
+  /** Whether member-issued keys are still unknown, which hides API key rotation. */
+  personalCredentialsPending?: boolean
+  /** Whether the member-issued key administration data failed to load. */
+  personalCredentialsLoadError?: boolean
+  /** Retries loading the member-issued key administration data. */
+  onRetryPersonalCredentials?: () => void
   /** Connector synchronization conflicts loaded across available pages. */
   syncConflicts?: WorkItemSyncConflict[]
   /** Whether the first synchronization-conflict page is loading. */
@@ -99,6 +108,8 @@ export type DeveloperPlatformPanelProps = {
   onRotateApiKey?: (apiKeyId: string) => Promise<IssuedApiKeySecret>
   /** Revokes an API key. */
   onRevokeApiKey?: (apiKeyId: string) => Promise<void>
+  /** Allows or turns off member-issued agent keys. */
+  onChangePersonalCredentialPolicy?: (selfIssuanceEnabled: boolean) => Promise<void>
   /** Creates an OAuth application and returns its one-time client secret. */
   onCreateOAuthApp?: (
     input: CreateDeveloperOAuthAppInput,
@@ -167,6 +178,10 @@ export function DeveloperPlatformPanel({
   labels,
   loadErrorMessage,
   resources,
+  personalCredentials,
+  personalCredentialsPending,
+  personalCredentialsLoadError,
+  onRetryPersonalCredentials,
   syncConflicts = [],
   syncConflictsErrorMessage,
   syncConflictsHasMore,
@@ -188,6 +203,7 @@ export function DeveloperPlatformPanel({
   onRevokeApiKey,
   onRevokeOAuthApp,
   onRevokeWebhook,
+  onChangePersonalCredentialPolicy,
   onRotateApiKey,
   onRotateOAuthApp,
   onRotateWebhook,
@@ -637,6 +653,19 @@ export function DeveloperPlatformPanel({
               formatDateTime={formatDateTime}
               labels={labels}
               oauthApps={resources.oauthApps}
+              personalCredentials={personalCredentials}
+              personalCredentialsPending={personalCredentialsPending}
+              personalCredentialsLoadError={personalCredentialsLoadError}
+              onRetryPersonalCredentials={onRetryPersonalCredentials}
+              onChangePersonalCredentialPolicy={
+                onChangePersonalCredentialPolicy
+                  ? (selfIssuanceEnabled) =>
+                      void runAction(
+                        'personal-credential-policy',
+                        () => onChangePersonalCredentialPolicy(selfIssuanceEnabled),
+                      )
+                  : undefined
+              }
               onCreateApiKey={
                 onCreateApiKey ? () => openEditor('api-key') : undefined
               }

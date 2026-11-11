@@ -19,6 +19,7 @@ import {
   dryRunDeveloperImport,
   exportDeveloperWorkItems,
   getDeveloperPlatformResources,
+  getPersonalCredentialAdministration,
   listDeveloperExternalLinks,
   listDeveloperSyncConflicts,
   replayDeveloperWebhookDelivery,
@@ -39,6 +40,7 @@ import {
 } from '../src/shared/api/mutationHeaders'
 import {
   developerPlatformResourcesFixture,
+  personalCredentialAdministrationFixture,
   issuedApiKeySecretFixture,
 } from '../src/developer-platform/fixtures'
 
@@ -101,6 +103,14 @@ describe('Developer Platform API', () => {
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
     })
+  })
+
+  test('gets the personal credential policy and member-issued key IDs separately', async () => {
+    const requests = installFetchRecorder(personalCredentialAdministrationFixture)
+
+    await expect(getPersonalCredentialAdministration('access-token'))
+      .resolves.toEqual(personalCredentialAdministrationFixture)
+    expect(requests.map(({ url }) => url)).toEqual(['/api/developer/credential-policy'])
   })
 
   test('creates, rotates, and revokes encoded API keys with stable mutation headers', async () => {
