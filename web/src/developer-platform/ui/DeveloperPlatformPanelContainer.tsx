@@ -114,10 +114,13 @@ export function DeveloperPlatformPanelContainer({
     isValidating: isPersonalCredentialsValidating,
     mutate: mutatePersonalCredentials,
   } = usePersonalCredentialAdministration(mutationSession.accessToken)
-  // The key list and the personal-key classification load separately. While either reloads, a newly
-  // listed personal key may be missing from the classification, so rotation stays hidden until both settle.
+  // The key list and the personal-key classification load separately. While either reloads, or after the
+  // classification failed to reload, a newly listed personal key may be missing from it, so rotation stays hidden.
   const personalCredentialsPending =
-    !personalCredentials || isPersonalCredentialsValidating || isResourcesValidating
+    !personalCredentials ||
+    Boolean(personalCredentialsError) ||
+    isPersonalCredentialsValidating ||
+    isResourcesValidating
   const {
     data: syncConflictPages,
     error: syncConflictError,
@@ -461,7 +464,7 @@ export function DeveloperPlatformPanelContainer({
         )
       }
       onChangePersonalCredentialPolicy={async (selfIssuanceEnabled) => {
-        await runMutation(
+        const policy = await runMutation(
           `developer-credential-policy:${selfIssuanceEnabled}`,
           String(selfIssuanceEnabled),
           (context) =>
@@ -471,7 +474,11 @@ export function DeveloperPlatformPanelContainer({
               context,
             ),
         )
-        await mutatePersonalCredentials()
+        // Keep the saved policy on screen even if reloading the classification failed; the key IDs stay as loaded.
+        await mutatePersonalCredentials(
+          (current) => (current ? { ...current, policy } : current),
+          { revalidate: false },
+        )
       }}
       onRotateApiKey={(apiKeyId) =>
         runMutation(
