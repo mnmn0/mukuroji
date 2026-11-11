@@ -82,6 +82,12 @@ export function TimeEntryForm({
     event.preventDefault()
     if (isSaving) return
     const data = new FormData(event.currentTarget)
+    /**
+     * Reads one text field of the submitted form.
+     *
+     * @param name - Field name.
+     * @returns The field text, or an empty string when it is missing or not text.
+     */
     const readText = (name: string) => {
       const value = data.get(name)
       return typeof value === 'string' ? value : ''
@@ -98,8 +104,12 @@ export function TimeEntryForm({
       return
     }
     const minutes = (Date.parse(endAt) - Date.parse(startAt)) / 60_000
-    if (minutes <= 0 || minutes > maxTimeEntryMinutes) {
+    if (minutes <= 0) {
       setError(t('timeTracking.form.endBeforeStart'))
+      return
+    }
+    if (minutes > maxTimeEntryMinutes) {
+      setError(t('timeTracking.form.tooLong'))
       return
     }
     setError(undefined)

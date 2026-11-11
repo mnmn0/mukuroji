@@ -72,7 +72,16 @@ afterAll(() => {
 })
 
 /** One request seen by the fetch mock. */
-type RecordedRequest = { url: string; method: string; headers: Headers; body: unknown }
+type RecordedRequest = {
+  /** Request URL as passed to fetch. */
+  url: string
+  /** HTTP method, `GET` when omitted. */
+  method: string
+  /** Request headers. */
+  headers: Headers
+  /** Parsed JSON body, or undefined when the body is not a string. */
+  body: unknown
+}
 
 /**
  * Replaces fetch with one that answers every request with the same JSON body.
@@ -582,6 +591,40 @@ describe('time tracking views', () => {
     expect(ready).toMatch(/<button[^>]*disabled=""[^>]*>Add manually</)
     expect(ready).toContain(t('timeTracking.timesheet.noWritableItems'))
     expect(render(true)).not.toContain(t('timeTracking.timesheet.noWritableItems'))
+  })
+
+  test('shows a partial own-entry list and hides estimate controls until the estimate loads', () => {
+    const render = (props: { estimate?: typeof timeTrackingFixtureEstimate; isPartial?: boolean; hasLoadError?: boolean }) => renderToStaticMarkup(
+      <WorkItemTimePanel
+        actualMinutes={540}
+        canEditEstimate
+        entries={[]}
+        estimate={props.estimate}
+        formatters={formatters}
+        hasLoadError={props.hasLoadError ?? false}
+        isPartial={props.isPartial ?? false}
+        now={timeTrackingFixtureNow}
+        onCreateEntry={noop}
+        onDiscardTimer={noop}
+        onRetry={() => undefined}
+        onSaveEstimate={noop}
+        onStartTimer={noop}
+        onStopTimer={noop}
+        onSubmitEntry={noop}
+        onUpdateEntry={noop}
+        t={t}
+        teamId="core-team"
+        timer={null}
+        workItemId="onboarding"
+      />,
+    )
+    const loading = render({ isPartial: true })
+    expect(loading).toContain(t('timeTracking.panel.partial'))
+    expect(loading).not.toContain(t('timeTracking.estimate.add'))
+    expect(loading).not.toContain(t('timeTracking.estimate.edit'))
+    expect(render({ estimate: timeTrackingFixtureEstimate })).toContain(t('timeTracking.estimate.edit'))
+    const failed = render({ estimate: timeTrackingFixtureEstimate, hasLoadError: true })
+    expect(failed).not.toContain(t('timeTracking.panel.empty'))
   })
 
   test('the default Work Item type includes the time section before activity', () => {

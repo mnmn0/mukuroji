@@ -185,7 +185,7 @@ export function TimeApprovalQueue({
               <form className="grid min-w-0 gap-2" onSubmit={(event) => { void submitRejection(event, entry) }}>
                 <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-reason-${entry.id}`}>
                   {t('timeTracking.approval.reason')}
-                  <textarea className="workbench-input min-h-16 w-full min-w-0 px-3 py-2" id={`${id}-reason-${entry.id}`} maxLength={4000} name="reason" required />
+                  <textarea autoFocus className="workbench-input min-h-16 w-full min-w-0 px-3 py-2" id={`${id}-reason-${entry.id}`} maxLength={4000} name="reason" required />
                 </label>
                 <div className="flex flex-wrap gap-2">
                   <button className="workbench-button-primary min-h-8 px-3" disabled={pendingKey !== undefined} type="submit">

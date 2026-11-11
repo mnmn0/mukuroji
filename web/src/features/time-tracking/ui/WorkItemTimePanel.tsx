@@ -55,6 +55,8 @@ export type WorkItemTimePanelProps = {
   isLoading?: boolean
   /** Whether a read failed. */
   hasLoadError?: boolean
+  /** Whether the member has more entries in the window than were read, so the list is partial. */
+  isPartial?: boolean
   /** Whether the member may only read. */
   readOnly?: boolean
   /** Whether the member manages the Team and may set the estimate; only Team managers may. */
@@ -126,7 +128,8 @@ export function WorkItemTimePanelContainer({
   const estimate = useTimeEstimate(accessToken, teamId, workItemId)
   const actual = useWorkItemActualMinutes(accessToken, teamId, workItemId)
   // Managers would otherwise read every member's entries; the panel lists the member's own.
-  const ownEntries = useTimeEntries(accessToken, teamId, period, memberKey ? { userId: memberKey } : {})
+  // Without the member key the read would return every member's entries, so it waits for it.
+  const ownEntries = useTimeEntries(accessToken, teamId, period, memberKey ? { userId: memberKey } : {}, Boolean(memberKey))
   const entries = useMemo(
     () => sortTimeEntries((ownEntries.data?.entries ?? []).filter((entry) => entry.workItemId === workItemId)).reverse(),
     [ownEntries.data, workItemId],
@@ -148,6 +151,7 @@ export function WorkItemTimePanelContainer({
       canEditEstimate={teamAccess.data ? !teamAccess.data.costsRedacted : false}
       hasLoadError={Boolean(timer.error ?? estimate.error ?? ownEntries.error ?? actual.error ?? rejectionReasons.error ?? teamAccess.error)}
       isLoading={timer.isLoading || estimate.isLoading || ownEntries.isLoading}
+      isPartial={ownEntries.data?.complete === false}
       now={now}
       onCreateEntry={(input) => entryMutations.create(teamId, input)}
       onDiscardTimer={(running) => timerMutations.discard(running)}
@@ -192,6 +196,7 @@ export function WorkItemTimePanel({
   formatters,
   hasLoadError = false,
   isLoading = false,
+  isPartial = false,
   now,
   onCreateEntry,
   onDiscardTimer,
@@ -350,14 +355,14 @@ export function WorkItemTimePanel({
       </dl>
       <p className="text-xs font-medium text-[var(--workbench-muted)]">{t('timeTracking.panel.actualHint')}</p>
 
-      {readOnly || !canEditEstimate ? null : isEditingEstimate ? (
+      {readOnly || !canEditEstimate || estimate === undefined ? null : isEditingEstimate ? (
         <form className="flex min-w-0 flex-wrap items-end gap-2" onSubmit={(event) => { void submitEstimate(event) }}>
           <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-estimate`}>
             {t('timeTracking.estimate.label')}
             <input
               aria-describedby={`${id}-estimate-help`}
               className="workbench-input h-9 w-32 px-3"
-              defaultValue={estimate ? String(estimate.estimateMinutes / 60) : ''}
+              defaultValue={estimate ? formatMinutes(estimate.estimateMinutes) : ''}
               id={`${id}-estimate`}
               inputMode="decimal"
               name="estimateHours"
@@ -458,8 +463,13 @@ export function WorkItemTimePanel({
             t={t}
           />
         ) : null}
+        {isPartial ? (
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800" role="alert">
+            {t('timeTracking.panel.partial')}
+          </p>
+        ) : null}
         {entries.length === 0 && !isLoading ? (
-          <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('timeTracking.panel.empty')}</p>
+          hasLoadError ? null : <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('timeTracking.panel.empty')}</p>
         ) : (
           <TimeEntryList
             entries={entries}
