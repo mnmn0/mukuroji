@@ -101,6 +101,10 @@ export type CognitoAccessTokenClaims = {
    * Cognito token の用途です。
    */
   token_use?: unknown
+  /**
+   * 同じ sign-in から refresh で発行された token が共有する Cognito の origin JWT ID です。
+   */
+  origin_jti?: unknown
 }
 
 /**
