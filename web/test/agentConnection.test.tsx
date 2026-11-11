@@ -185,6 +185,14 @@ describe('agent connection view', () => {
     expect(html).not.toContain('data-testid="agent-connection-panel"')
   })
 
+  test('describes each key action with the name of the key it changes', () => {
+    const html = render()
+    const nameId = /<span class="break-all" id="([^"]+)">Laptop<\/span>/u.exec(html)?.[1]
+    expect(nameId).toBeDefined()
+    expect(html).toMatch(new RegExp(`<button aria-describedby="${nameId}"[^>]*>期限を更新して再発行</button>`, 'u'))
+    expect(html).toMatch(new RegExp(`<button aria-describedby="${nameId}"[^>]*>失効</button>`, 'u'))
+  })
+
   test('links the download step to the release that holds mcp.mjs', () => {
     expect(render()).toContain('href="https://github.com/mnmn0/mukuroji/releases/latest"')
   })
@@ -196,7 +204,7 @@ describe('agent connection view', () => {
     expect(html).toContain('管理者がメンバーによる token の発行を停止しています')
     expect(html).not.toContain('type="date"')
     expect(html).not.toContain('期限を更新して再発行')
-    expect(html).toContain('失効')
+    expect(html).toMatch(/<button[^>]*>失効<\/button>/u)
   })
 
   test('explains when the member role cannot edit work items', () => {

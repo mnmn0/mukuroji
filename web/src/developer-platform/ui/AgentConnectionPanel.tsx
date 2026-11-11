@@ -332,6 +332,7 @@ function PersonalKeyRow(
   props: AgentConnectionPanelProps & { overview: PersonalAgentCredentialOverview; apiKey: ApiKeySummary },
 ) {
   const { t, apiKey, overview, busyOperation, formatDateTime } = props
+  const nameId = useId()
   const statusKey: MessageKey = apiKey.status === 'active'
     ? 'agents.connect.status.active'
     : apiKey.status === 'expired'
@@ -341,7 +342,7 @@ function PersonalKeyRow(
     <li className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] p-3">
       <div className="min-w-0">
         <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-          <span className="break-all">{apiKey.name}</span>
+          <span className="break-all" id={nameId}>{apiKey.name}</span>
           <span className={apiKey.status === 'active' ? 'workbench-badge-success' : 'workbench-badge'}>{t(statusKey)}</span>
         </p>
         <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--workbench-muted)]">
@@ -360,6 +361,7 @@ function PersonalKeyRow(
         <div className="flex flex-wrap gap-2">
           {overview.canIssue ? (
             <button
+              aria-describedby={nameId}
               className="workbench-button-secondary min-h-9 px-3 text-xs disabled:opacity-50"
               disabled={Boolean(busyOperation) || !props.form.expiryDate}
               onClick={() => props.onRotate(apiKey)}
@@ -369,6 +371,7 @@ function PersonalKeyRow(
             </button>
           ) : null}
           <button
+            aria-describedby={nameId}
             className="workbench-button-secondary min-h-9 px-3 text-xs disabled:opacity-50"
             disabled={Boolean(busyOperation)}
             onClick={() => props.onRevoke(apiKey)}
