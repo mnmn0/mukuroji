@@ -79,7 +79,10 @@ describe('agent connection snippets', () => {
     expect(buildAgentConnectionSnippet({ ...windows, mcpPath: '' }).content)
       .toContain('C:\\Users\\you\\mukuroji\\mcp.mjs')
     expect(buildTokenEnvironmentCommand('powershell', 'mk_key_abc'))
-      .toBe("[Environment]::SetEnvironmentVariable('MUKUROJI_MCP_TOKEN', 'mk_key_abc', 'User')")
+      .toBe([
+        "[Environment]::SetEnvironmentVariable('MUKUROJI_MCP_TOKEN', 'mk_key_abc', 'User')",
+        "$env:MUKUROJI_MCP_TOKEN = 'mk_key_abc'",
+      ].join('\n'))
     expect(buildTokenEnvironmentCommand('posix', 'mk_key_abc')).toBe('export MUKUROJI_MCP_TOKEN=mk_key_abc')
     expect(buildChecksumCommand('powershell')).toContain('Get-FileHash .\\mcp.mjs -Algorithm SHA256')
     expect(buildChecksumCommand('posix')).toBe('shasum -a 256 -c mcp.mjs.sha256')
@@ -167,6 +170,23 @@ describe('agent connection view', () => {
     const html = render({ issuedToken: { name: 'Laptop', secret: 'mk_key_secret_value' } })
     expect(html).toContain('data-testid="issued-agent-token"')
     expect(html).toContain('export MUKUROJI_MCP_TOKEN=mk_key_secret_value')
+  })
+
+  test('keeps the one-time token visible when reloading the overview fails', () => {
+    const html = render({ hasLoadError: true, issuedToken: { name: 'Laptop', secret: 'mk_key_secret_value' } })
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('data-testid="issued-agent-token"')
+    expect(html).toContain('mk_key_secret_value')
+  })
+
+  test('replaces the steps with the load error only before the first load', () => {
+    const html = render({ hasLoadError: true, overview: undefined })
+    expect(html).toContain('role="alert"')
+    expect(html).not.toContain('data-testid="agent-connection-panel"')
+  })
+
+  test('links the download step to the release that holds mcp.mjs', () => {
+    expect(render()).toContain('href="https://github.com/mnmn0/mukuroji/releases/latest"')
   })
 
   test('explains why issuance is blocked and hides the form', () => {

@@ -6,6 +6,7 @@ import {
   buildAgentConnectionSnippet,
   buildChecksumCommand,
   buildTokenEnvironmentCommand,
+  MCP_RELEASE_URL,
   type AgentConnectionClient,
   type AgentConnectionShell,
 } from '../model/agentConnection'
@@ -116,19 +117,13 @@ export function AgentConnectionPanel(props: AgentConnectionPanelProps) {
       </p>
     )
   }
-  if (hasLoadError || !overview) {
-    return (
-      <div className="workbench-panel flex flex-wrap items-center justify-between gap-3 p-5" role="alert">
-        <p className="text-sm text-[var(--workbench-text)]">{t('agents.connect.loadError')}</p>
-        <button className="workbench-button-secondary min-h-10 px-4" onClick={props.onRetry} type="button">
-          {t('agents.connect.retry')}
-        </button>
-      </div>
-    )
+  if (!overview) {
+    return <LoadErrorAlert onRetry={props.onRetry} t={t} />
   }
 
   return (
     <div className="grid min-w-0 gap-5" data-testid="agent-connection-panel">
+      {hasLoadError ? <LoadErrorAlert onRetry={props.onRetry} t={t} /> : null}
       {props.hasOperationError ? (
         <p className="rounded-lg border border-tone-f2c94c bg-tone-fff8e1 p-3 text-sm text-fg-amber-800" role="alert">
           {t('agents.connect.operationError')}
@@ -140,6 +135,26 @@ export function AgentConnectionPanel(props: AgentConnectionPanelProps) {
       <Step number={4} title={t('agents.connect.verifyTitle')}>
         <p className="text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.connect.verifyDescription')}</p>
       </Step>
+    </div>
+  )
+}
+
+/**
+ * Renders the load error with a retry button.
+ *
+ * It replaces the page only before the first load succeeds; after that it sits above the
+ * loaded steps, so a one-time token from a finished action stays visible.
+ *
+ * @param props - Translator and retry action.
+ * @returns The load error alert.
+ */
+function LoadErrorAlert(props: Pick<AgentConnectionPanelProps, 't' | 'onRetry'>) {
+  return (
+    <div className="workbench-panel flex flex-wrap items-center justify-between gap-3 p-5" role="alert">
+      <p className="text-sm text-[var(--workbench-text)]">{props.t('agents.connect.loadError')}</p>
+      <button className="workbench-button-secondary min-h-10 px-4" onClick={props.onRetry} type="button">
+        {props.t('agents.connect.retry')}
+      </button>
     </div>
   )
 }
@@ -178,6 +193,14 @@ function DownloadStep({ t, choices, onChoicesChange }: AgentConnectionPanelProps
   return (
     <Step number={1} title={t('agents.connect.downloadTitle')}>
       <p className="text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.connect.downloadDescription')}</p>
+      <a
+        className="w-fit text-sm font-medium text-[var(--workbench-primary)] underline underline-offset-2"
+        href={MCP_RELEASE_URL}
+        rel="noreferrer"
+        target="_blank"
+      >
+        {t('agents.connect.downloadLink')}
+      </a>
       <ShellPicker choices={choices} onChoicesChange={onChoicesChange} t={t} />
       <CopyBlock label={t('agents.connect.checksumLabel')} t={t} value={buildChecksumCommand(choices.shell)} />
       {choices.shell === 'posix' ? (

@@ -150,8 +150,14 @@ export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): 
   }
 }
 
+/** Page that lists the published `mcp.mjs` release files. */
+export const MCP_RELEASE_URL = 'https://github.com/mnmn0/mukuroji/releases/latest'
+
 /**
  * Builds the command that stores the token in the member's user environment.
+ *
+ * On PowerShell it also sets the token in the current session, because a user-scope update
+ * reaches only processes started afterwards, not the shell that ran it.
  *
  * @param shell - Shell family.
  * @param token - One-time secret; omitted writes a placeholder.
@@ -159,9 +165,14 @@ export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): 
  */
 export function buildTokenEnvironmentCommand(shell: AgentConnectionShell, token?: string) {
   const value = token ?? '<token>'
-  return shell === 'powershell'
-    ? `[Environment]::SetEnvironmentVariable('MUKUROJI_MCP_TOKEN', '${value.replaceAll("'", "''")}', 'User')`
-    : `export MUKUROJI_MCP_TOKEN=${quoteShellWord(value, shell)}`
+  if (shell === 'powershell') {
+    const quoted = `'${value.replaceAll("'", "''")}'`
+    return [
+      `[Environment]::SetEnvironmentVariable('MUKUROJI_MCP_TOKEN', ${quoted}, 'User')`,
+      `$env:MUKUROJI_MCP_TOKEN = ${quoted}`,
+    ].join('\n')
+  }
+  return `export MUKUROJI_MCP_TOKEN=${quoteShellWord(value, shell)}`
 }
 
 /**
