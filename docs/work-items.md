@@ -138,10 +138,56 @@ Web は list/detail response の revision を mutation body に含める。`Work
 ## Read model
 
 - Team list/detail と project list は同じ canonical store を読む。
-- `GET /api/work-items` は現在ユーザーが閲覧できる active Team の canonical Work Item を集約し、project 未割当も返す。
+- `GET /api/work-items` は現在ユーザーが閲覧できる active Team の canonical Work Item を集約し、project 未割当も返す。詳細は次の「Workspace 横断の読み取り」を参照する。
 - board、calendar、gantt、Workspace Home、My Tasks、Inbox、reports は canonical response と解決済み configuration を共有する。
 - `/api/teams/{teamId}/issues` と `/api/projects/{projectId}/issues` は canonical store を参照する API alias である。
 - 新規 Workspace と demo seed は最初から strict canonical schema の Work Item だけを作成する。
+
+## Workspace 横断の読み取り
+
+閲覧できる Work Item が数千件、Team が数十あっても Home、Dashboard、My Tasks、Focus、Planning、Project 一覧が開けるように、Workspace 横断の読み取りは次の 3 種類に分けている。
+
+| 読み取り | 用途 | 上限（超えると `413 WorkItemListLimitExceeded`） |
+| --- | --- | --- |
+| `GET /api/work-items?limit=…&cursor=…` | 画面に必要な範囲だけを読む（My Tasks、Team 概要、Team メンバー） | 1 page 最大 200 件。page 数の上限なし |
+| `GET /api/work-items/summary` | 件数と進捗だけを使う画面（Home、Dashboard、Project 一覧） | 評価 20,000 件、Team 100 |
+| server 内部の全件読み取り | Focus、Planning snapshot、AI assistance | 保持 10,000 件、Team 100 |
+
+どの読み取りも Team partition を最大 8 並列、1 回 500 件ずつ base table の強整合 Query で最後まで読む。以前の「全体 200 件、Team 20、partition あたり 1,000 件」の上限は、`limit` も `cursor` も付けない旧来の `GET /api/work-items` の 200 件だけを残している。
+
+### `GET /api/work-items` の page と filter
+
+- `limit`（1〜200、既定 100）または `cursor` を付けると `{ workItems, nextCursor? }` を返す。`nextCursor` が無くなるまで同じ filter で読み続ける。
+- 1 request が評価する row は 2,000 件まで（archive 済みなど filter で落ちる row も数える）なので、絞り込みが強いと `workItems` が `limit` 未満（0 件もある）でも `nextCursor` が付く。件数が少ないことを終端と見なさない。
+- 順序は Team ID、次に Work Item ID。cursor は filter と `includeArchived` に結び付いており、別の filter で使うと `400 InvalidWorkItemPageCursor` になる。
+- filter はどれも閲覧できる範囲を狭めるだけで広げない。
+  - `involvement=mine`: 責任者（`assigneeUserId`）または Contributor が自分の Work Item
+  - `teamId`: その Team の partition だけを読む
+  - `projectId`: その Project に割り当てた Work Item
+  - `statusCategory`: 繰り返し指定またはカンマ区切り（`backlog` / `unstarted` / `started` / `completed` / `canceled`）
+  - `open=true`: completed と canceled を除く
+- 不正な値は `400 InvalidWorkItemListQuery` / `InvalidWorkItemPageLimit`。
+
+### `GET /api/work-items/summary`
+
+Team と Project ごとの bucket（Project 未割当は `projectId` なし）に `total`、`open`、`completed`、`highPriorityOpen`、`overdueOpen`、`attentionOpen`、`inReview`、`assignees` を返し、`totals` に全体の `total` / `open` / `completed` を返す。archive 済みは数えない。期限切れは各 Work Item の schedule の timezone で今日より前の期限を指す。Work Item 本体は返さないので response は Work Item 数に比例して大きくならない。
+
+### 既存の `{ workItems }` client の移行手順
+
+`limit` も `cursor` も付けない request は互換のために残しているが、閲覧できる Work Item が 200 件を超えると `413` になる。移行は次の順で行う。
+
+1. 件数や進捗だけを使っているなら `GET /api/work-items/summary` に置き換える。
+2. 一覧が必要なら、画面の範囲に合う filter（`involvement=mine`、`teamId` など）を付ける。
+3. `limit=200` を付け、`nextCursor` が返る間は `cursor=<nextCursor>` を付けて同じ filter で読み続ける。response の `workItems` を連結したものが従来の `workItems` に当たる。
+4. `413 WorkItemListLimitExceeded` は「範囲を絞る必要がある」という意味なので、generic error ではなく原因を表示する。Web は `tasks.error.limitExceeded` を表示し、API の message を「原因」として併記する。
+
+Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/src/issues/queries/workspaceWorkItemLoader.ts`）は 3 の手順を実装しており、集めた Work Item が 10,000 件を超えると同じ `413` 相当の error にする。絞り込みが強いと空の page が続くので、page 数では打ち切らない（同じ `nextCursor` が返る、または 500 page を超えたときだけ読み取り停止の error にする）。
+
+### まだ残している上限
+
+- `GET /api/teams/{teamId}/issues` と `GET /api/projects/{projectId}/issues` は cursor を持たず全件を返す。
+- Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
+- Work Item 作成は ID と `sortOrder` を決めるために Team partition 全件を読む。
 
 ## 運用
 

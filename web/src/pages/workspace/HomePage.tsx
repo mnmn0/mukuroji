@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useWorkspaceFocusOverview } from '../../features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
-import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
+import { useWorkspaceWorkItemSummaryData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
   WorkspaceFocusLoadNotice,
   WorkspaceTaskLoadNotice,
@@ -19,7 +19,7 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 export function HomePage() {
   const workspace = useWorkspaceRouteContext()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const workItems = useWorkspaceWorkItemData(
+  const workItems = useWorkspaceWorkItemSummaryData(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
     workspace.teams,
@@ -31,22 +31,23 @@ export function HomePage() {
   const summary = useMemo(
     () => createWorkspaceSummary(
       workspace.teams,
-      workItems.tasks,
+      workItems.summary,
       focus.blockedCount,
     ),
-    [focus.blockedCount, workItems.tasks, workspace.teams],
+    [focus.blockedCount, workItems.summary, workspace.teams],
   )
   return (
     <WorkspaceRouteContent
       isLoading={workItems.isLoading || focus.isLoading}
       sessionErrors={[
-        workItems.workItemsError,
+        workItems.summaryError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
         <WorkspaceTaskLoadNotice
+          error={workItems.summaryError}
           failedProjectCount={workItems.failedProjectCount}
           t={t}
         />

@@ -22,10 +22,16 @@ export function TeamOverviewPage() {
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const activeTeam = workspace.teams.find((team) => team.id === params.teamId)
   const projects = activeTeam?.projects ?? emptyTeamProjects
+  const teamWorkItemFilter = useMemo(
+    () => (activeTeam ? { teamId: activeTeam.id } : {}),
+    [activeTeam],
+  )
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
-    workspace.canLoadWorkspaceData,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam),
     workspace.teams,
+    false,
+    teamWorkItemFilter,
   )
   const projectMembers = useWorkspaceProjectMembers(
     workspace.accessToken,
@@ -45,7 +51,11 @@ export function TeamOverviewPage() {
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <WorkspaceTaskLoadNotice failedProjectCount={workItems.failedProjectCount} t={t} />
+        <WorkspaceTaskLoadNotice
+          error={workItems.workItemsError}
+          failedProjectCount={workItems.failedProjectCount}
+          t={t}
+        />
         <TeamOverviewView
           isTeamProjectMembersLoading={Boolean(
             projectMembers.key && projectMembers.isLoading,

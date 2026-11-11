@@ -36,6 +36,7 @@ import {
 } from '../../workspace/ui/WorkspaceRoute'
 import type { WorkspaceRouteContextValue } from '../../workspace/ui/WorkspaceRouteProvider'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
+import { createWorkItemSummaryFromWorkItems } from '../../work-items/model/workItemSummary'
 
 const t = createTranslator('ja')
 const englishTranslator = createTranslator('en')
@@ -48,6 +49,10 @@ const storyTasks: CanonicalWorkItem[] = referoTaskFixtures.map((task) => ({
       ? 'active'
       : task.workflowStatusId,
 }))
+const storyWorkItemSummary = createWorkItemSummaryFromWorkItems(
+  storyTasks,
+  new Date('2026-06-10T00:00:00.000Z'),
+)
 const onOpenMyTaskAction = fn()
 const onOpenMyTaskActionMenu = fn()
 
@@ -554,9 +559,9 @@ export const DashboardRoute: Story = {
       planningUpdateTargets={storyPlanningUpdateTargets}
       summary={storySummary}
       t={t}
-      tasks={storyTasks}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
+      workItemSummary={storyWorkItemSummary}
     />
   ),
 }
@@ -572,9 +577,9 @@ export const DashboardRouteMobile: Story = {
       focusQueue={focusQueueResponseFixture}
       summary={storySummary}
       t={t}
-      tasks={storyTasks}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
+      workItemSummary={storyWorkItemSummary}
     />
   ),
 }
@@ -586,9 +591,9 @@ export const DashboardRouteFocusUnavailable: Story = {
       isFocusUnavailable
       summary={{ ...storySummary, blocked: 0 }}
       t={t}
-      tasks={storyTasks}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
+      workItemSummary={storyWorkItemSummary}
     />
   ),
 }

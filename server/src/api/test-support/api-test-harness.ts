@@ -1477,6 +1477,8 @@ function configureFakeProjectClients(
     teamIssueCount?: number
     /** Team Issue fake の先頭に置く閲覧不可 Work Item 数です。 */
     inaccessibleTeamIssueCount?: number
+    /** Team Issue fake の先頭に置く archive 済み Work Item 数です。 */
+    archivedTeamIssueCount?: number
     unassignedIssue?: boolean
     workspaceRole?: WorkspaceRole
     workspaceReconcileFailures?: number
@@ -1551,7 +1553,12 @@ function configureFakeProjectClients(
       teamId: string
       readOptions?: TeamIssueDetailReadOptions
     }>,
-    issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
+    issueReads: [] as Array<{
+      directoryId: string
+      limit?: number
+      teamId: string
+      startAfterIssueId?: string
+    }>,
     publicIssuePageReads: [] as Array<{
       directoryId: string
       teamId: string
@@ -1680,6 +1687,9 @@ function configureFakeProjectClients(
       priority: 'high' as const,
       createdAt: '2026-06-08T00:00:00.000Z',
       updatedAt: '2026-06-08T00:00:00.000Z',
+      ...(index < (options.archivedTeamIssueCount ?? 0)
+        ? { archivedAt: '2026-06-08T00:00:00.000Z', archivedBy: 'demo@example.com' }
+        : {}),
       source: 'dynamodb' as const,
     }))
 
@@ -2450,12 +2460,42 @@ function configureFakeProjectClients(
           directoryId,
           teamId,
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
+          ...(readOptions?.startAfterIssueId === undefined
+            ? {}
+            : { startAfterIssueId: readOptions.startAfterIssueId }),
         })
 
-        const issues = createFakeTeamIssues(teamId)
+        // The fake partition is ordered by array position, like the base table is by Work Item ID.
+        const partition = createFakeTeamIssues(teamId)
+        const startIndex = readOptions?.startAfterIssueId === undefined
+          ? 0
+          : partition.findIndex((issue) => issue.id === readOptions.startAfterIssueId) + 1
+        const remaining = partition.slice(startIndex)
+        if (readOptions?.limit === undefined) {
+          return { teamId, issues: remaining }
+        }
+        if (readOptions.limitEvaluatedRows) {
+          const evaluated = remaining.slice(0, readOptions.limit)
+          const lastEvaluated = evaluated.at(-1)
+          return {
+            teamId,
+            issues: readOptions.includeArchived
+              ? evaluated
+              : evaluated.filter((issue) => issue.archivedAt === undefined),
+            evaluatedCount: evaluated.length,
+            ...(remaining.length > readOptions.limit && lastEvaluated
+              ? { nextStartAfterIssueId: lastEvaluated.id }
+              : {}),
+          }
+        }
+        const issues = remaining.slice(0, readOptions.limit)
+        const lastIssue = issues.at(-1)
         return {
           teamId,
-          issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),
+          issues,
+          ...(readOptions.consistentRead && remaining.length > readOptions.limit && lastIssue
+            ? { nextStartAfterIssueId: lastIssue.id }
+            : {}),
         }
       },
       async getPublicWorkItemPage(directoryId, teamId, readOptions) {

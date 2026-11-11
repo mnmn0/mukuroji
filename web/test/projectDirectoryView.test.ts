@@ -12,6 +12,20 @@ import {
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
+import { createWorkItemSummaryFromWorkItems } from '../src/work-items/model/workItemSummary'
+
+/** Builds directory rows from Work Item fixtures through the same counts the server returns. */
+function createRowsFromTasks(
+  teams: readonly ProjectDirectoryTeam[],
+  tasks: readonly CanonicalWorkItem[],
+  isProjectQuickAccess?: Parameters<typeof createProjectDirectoryRows>[2],
+) {
+  return createProjectDirectoryRows(
+    teams,
+    createWorkItemSummaryFromWorkItems(tasks, new Date('2026-06-10T00:00:00.000Z')),
+    isProjectQuickAccess,
+  )
+}
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')
 
@@ -70,7 +84,7 @@ describe('Project directory model', () => {
       statusCategory: 'started',
       teamId: 'design-team',
     })
-    const rows = createProjectDirectoryRows(
+    const rows = createRowsFromTasks(
       projectDirectoryFixtures,
       [coreCompleted, designAttention],
       (item) => item.projectId === 'brand-refresh' || (
@@ -98,7 +112,7 @@ describe('Project directory model', () => {
   })
 
   test('combines search, Team, status, assignee, and quick-access filters', () => {
-    const rows = createProjectDirectoryRows(
+    const rows = createRowsFromTasks(
       projectDirectoryFixtures,
       [
         createTask({
@@ -132,7 +146,7 @@ describe('Project directory model', () => {
   })
 
   test('collects unique assignee options and recognizes unassigned Projects', () => {
-    const rows = createProjectDirectoryRows(projectDirectoryFixtures, [
+    const rows = createRowsFromTasks(projectDirectoryFixtures, [
       createTask({
         assignedProjectId: 'refero',
         assigneeName: 'Zed',
@@ -155,7 +169,7 @@ describe('Project directory model', () => {
   })
 
   test('bounds the 20-by-20 acceptance fixture to fifty rows per page', () => {
-    const rows = createProjectDirectoryRows(createLargeProjectDirectory(), [])
+    const rows = createRowsFromTasks(createLargeProjectDirectory(), [])
     const firstPage = paginateProjectDirectoryRows(rows, 1)
     const lastPage = paginateProjectDirectoryRows(rows, 999)
 

@@ -11,7 +11,11 @@ import type {
   WorkItemRelation,
   WorkItemTriageContextSnapshot,
   WorkItemTypeChangePreview,
+  WorkItemSummaryResponse,
+  WorkspaceWorkItemListFilter,
+  WorkspaceWorkItemPage,
 } from '@mukuroji/contracts'
+import { WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import {
   isConfirmWorkItemScheduleChangeResponse,
@@ -108,16 +112,6 @@ type ProjectIssuesResponse = {
 }
 
 /**
- * Workspace 全体の Work Item 一覧レスポンスです。
- */
-type WorkspaceWorkItemsResponse = {
-  /**
-   * 未割り当てを含む Workspace 内の Work Item 一覧です。
-   */
-  workItems: TeamIssue[]
-}
-
-/**
  * Issue 作成 API が返す response body です。
  */
 type CreateTeamIssueResponse = {
@@ -204,23 +198,69 @@ export async function getProjectIssuesPage(
   return response
 }
 
+/** Options of one Workspace Work Item page request. */
+export type WorkspaceWorkItemPageRequest = {
+  /** Whether archived Work Items should be included. */
+  includeArchived?: boolean
+  /** Server-side filter that narrows the Work Items the viewer can read. */
+  filter?: WorkspaceWorkItemListFilter
+  /** Page size, up to the contract maximum. */
+  limit?: number
+  /** Cursor returned by the previous page. */
+  cursor?: string
+}
+
 /**
- * Loads the Workspace-wide Work Item projection, including unassigned items.
+ * Loads one page of the Workspace-wide Work Item projection.
  *
  * @param accessToken - Bearer token for the Work Item API.
- * @param includeArchived - Whether archived Work Items should be included.
- * @returns Workspace Work Items visible to the current viewer.
+ * @param request - Filter, archive option, page size, and cursor.
+ * @returns The page and the cursor of the next one.
  */
-export async function getWorkspaceWorkItems(
+export async function getWorkspaceWorkItemPage(
   accessToken: string,
-  includeArchived = false,
+  request: WorkspaceWorkItemPageRequest = {},
 ) {
-  const response = await requestJson<WorkspaceWorkItemsResponse>(
-    createWorkItemListUrl(`${issuesApiBaseUrl}/work-items`, includeArchived),
+  return requestJson<WorkspaceWorkItemPage<TeamIssue>>(
+    createWorkspaceWorkItemPageUrl(request),
     accessToken,
   )
+}
 
-  return response.workItems
+/**
+ * Loads Work Item counts per Team and Project for Workspace dashboards.
+ *
+ * @param accessToken - Bearer token for the Work Item API.
+ * @returns Totals and per-bucket counts computed by the server.
+ */
+export async function getWorkspaceWorkItemSummary(accessToken: string) {
+  return requestJson<WorkItemSummaryResponse>(
+    `${issuesApiBaseUrl}/work-items/summary`,
+    accessToken,
+  )
+}
+
+/**
+ * Builds the paged Workspace Work Item list URL.
+ *
+ * @param request - Filter, archive option, page size, and cursor.
+ * @returns The list URL with only the parameters that are set.
+ */
+function createWorkspaceWorkItemPageUrl(request: WorkspaceWorkItemPageRequest): string {
+  const searchParams = new URLSearchParams({
+    limit: String(request.limit ?? WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT),
+  })
+  const filter = request.filter ?? {}
+  if (request.includeArchived) searchParams.set('includeArchived', 'true')
+  if (filter.involvement) searchParams.set('involvement', filter.involvement)
+  if (filter.teamId) searchParams.set('teamId', filter.teamId)
+  if (filter.projectId) searchParams.set('projectId', filter.projectId)
+  for (const category of filter.statusCategories ?? []) {
+    searchParams.append('statusCategory', category)
+  }
+  if (filter.openOnly) searchParams.set('open', 'true')
+  if (request.cursor) searchParams.set('cursor', request.cursor)
+  return `${issuesApiBaseUrl}/work-items?${searchParams.toString()}`
 }
 
 /**

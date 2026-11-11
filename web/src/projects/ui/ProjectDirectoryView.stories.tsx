@@ -20,11 +20,12 @@ import {
 } from '../model/projectQuickAccess'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { createWorkItemSummaryFromWorkItems } from '../../work-items/model/workItemSummary'
 import { ProjectDirectoryView } from './ProjectDirectoryView'
 
 const defaultRows = createProjectDirectoryRows(
   projectDirectoryFixtures,
-  referoTaskFixtures,
+  createWorkItemSummaryFromWorkItems(referoTaskFixtures, new Date('2026-06-10T00:00:00.000Z')),
   (item) => item.projectId === 'refero' || item.projectId === 'brand-refresh',
 )
 const defaultAssigneeOptions = createProjectDirectoryAssigneeOptions(defaultRows)
@@ -177,7 +178,7 @@ function LargeProjectDirectoryStory() {
   const rows = useMemo(
     () => createProjectDirectoryRows(
       teams,
-      [],
+      createWorkItemSummaryFromWorkItems([], new Date('2026-06-10T00:00:00.000Z')),
       (item) => isProjectInQuickAccess(quickAccessItems, item),
     ),
     [quickAccessItems, teams],

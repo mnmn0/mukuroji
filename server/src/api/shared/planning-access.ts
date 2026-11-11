@@ -19,7 +19,6 @@ import {
 import {
   createWorkItemDependencyKey,
   isTeamIssueNotFoundError,
-  type TeamIssueResponseItem,
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import {
@@ -35,10 +34,8 @@ import {
   type PlanningWorkItemState,
 } from '../../modules/planning'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
-import { WORK_ITEMS_TEAM_READ_LIMIT } from './constants'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import {
-  getEffectiveProjectAccessList,
   type ProjectPrincipal,
   requireProjectPermission,
   requireTeamPermission,
@@ -50,13 +47,15 @@ import {
 import { getEnv } from './runtime-config'
 import { stableDigestStringify } from './value-guards'
 import {
-  addAggregateWorkItem,
   createWorkItemAuthorizationSnapshot,
-  createWorkItemListLimitExceededError,
   loadAuthorizedTeamIssue,
-  readCanonicalTeamIssuesForAggregate,
   type WorkItemsResponse,
 } from './work-item-access'
+import {
+  readAllAccessibleWorkItems,
+  resolveAccessibleWorkItemTeamContexts,
+  type WorkItemAggregateReadScope,
+} from './work-item-aggregate-read'
 import {
   projectAccessAllows,
   type TeamPermissionContext,
@@ -454,15 +453,13 @@ export function requiresCurrentPlanningUpdateTarget(notification: NotificationIt
 }
 
 /** Optional Team/Project envelope used to bound a canonical Work Item read. */
-export type PlanningWorkItemReadScope = {
-  /** Team whose Work Item partition should be read. */
-  teamId?: string
-  /** Project whose assigned Work Items should be retained. */
-  projectId?: string
-}
+export type PlanningWorkItemReadScope = WorkItemAggregateReadScope
 
 /**
  * Reads every Work Item the principal can access across its Teams.
+ *
+ * Team partitions are read in parallel and fully paged; the in-memory result is bounded by
+ * the aggregate item limit instead of the 200-item response limit of the legacy list API.
  *
  * @param principal - Authenticated Workspace principal.
  * @param includeArchived - Whether archived Work Items are included.
@@ -474,57 +471,13 @@ export async function readAccessibleWorkItems(
   includeArchived = false,
   scope?: PlanningWorkItemReadScope,
 ): Promise<WorkItemsResponse> {
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  const projectAccesses = principal.isSystemAdmin
-    ? undefined
-    : await getEffectiveProjectAccessList(principal)
-  const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
-  const selectedTeams = scope?.teamId === undefined
-    ? directory.teams
-    : directory.teams.filter((team) => team.id === scope.teamId)
-  const contexts: TeamPermissionContext[] = selectedTeams.flatMap((team) => {
-    if (principal.isSystemAdmin) {
-      return [{ team, directory } satisfies TeamPermissionContext]
-    }
-
-    const teamProjectIds = new Set(team.projects.map((project) => project.id))
-    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId) &&
-      (scope?.projectId === undefined || access.projectId === scope.projectId)
-    )
-    if (
-      !authorizedTeamIds.has(team.id) &&
-      !teamProjectAccesses.some((access) => projectAccessAllows(access, 'viewer'))
-    ) {
-      return []
-    }
-
-    return [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
+  const contexts = await resolveAccessibleWorkItemTeamContexts(principal, scope)
+  const workItems = await readAllAccessibleWorkItems(principal, contexts, {
+    includeArchived,
+    ...(scope?.projectId === undefined ? {} : { filter: { projectId: scope.projectId } }),
   })
-  if (contexts.length > WORK_ITEMS_TEAM_READ_LIMIT) {
-    throw createWorkItemListLimitExceededError(
-      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} accessible Teams.`,
-    )
-  }
 
-  const workItemsById = new Map<string, TeamIssueResponseItem>()
-
-  for (const context of contexts) {
-    const response = await readCanonicalTeamIssuesForAggregate(
-      principal.directoryId,
-      context,
-      principal,
-      includeArchived,
-    )
-    for (const workItem of response.issues) {
-      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
-        continue
-      }
-      addAggregateWorkItem(workItemsById, workItem)
-    }
-  }
-
-  return { workItems: [...workItemsById.values()] }
+  return { workItems }
 }
 
 /**
