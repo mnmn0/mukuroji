@@ -249,6 +249,21 @@ test('rejects an oversized Work Item aggregate instead of returning a silent par
   ])
 })
 
+test('stops the legacy unpaged read once it passes the 200-item limit', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 1200,
+  })
+
+  const response = await app.request('/api/work-items', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(413)
+  expect(calls.issueReads).toEqual([
+    { directoryId: 'user#demo@example.com', limit: 500, teamId: 'core-team' },
+  ])
+})
+
 test('rejects Work Item aggregate Team fan-out beyond the hard cap before item reads', async () => {
   const additionalTeams = Array.from({ length: 100 }, (_, teamIndex) => ({
     id: `team-${teamIndex}`,

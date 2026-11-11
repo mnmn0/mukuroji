@@ -168,7 +168,9 @@ import {
   toCollaborationErrorResponse,
   toWorkItemConfigurationErrorResponse,
 } from '../shared/collaboration-access'
+import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
 import {
+  ASSIGNEE_PROFILE_READ_CONCURRENCY,
   WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY,
   WORK_ITEMS_RESPONSE_LIMIT,
 } from '../shared/constants'
@@ -253,7 +255,6 @@ import {
   createWorkItemIdempotencyTransaction,
   filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
-  createWorkItemListLimitExceededError,
   normalizeTeamIssueInput,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
@@ -3064,8 +3065,11 @@ async function readAssigneeProfiles(assigneeIds: readonly string[]) {
   const profiles = new Map<string, CognitoUserProfile>()
   const userIds = new Set(assigneeIds.filter(Boolean))
 
-  await Promise.all(
-    Array.from(userIds).map(async (userId) => {
+  // A Workspace summary can name hundreds of assignees, so Cognito reads are bounded.
+  await mapInOrderWithConcurrency(
+    Array.from(userIds),
+    ASSIGNEE_PROFILE_READ_CONCURRENCY,
+    async (userId) => {
       try {
         profiles.set(userId, await authenticationDependencies.cognito.getUserProfile(userId))
       } catch (error) {
@@ -3073,7 +3077,7 @@ async function readAssigneeProfiles(assigneeIds: readonly string[]) {
           console.warn('Failed to hydrate issue assignee from Cognito:', error)
         }
       }
-    }),
+    },
   )
 
   return profiles
@@ -4008,15 +4012,12 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
         })
       }
+      // The legacy unpaged response stops reading as soon as it passes its 200-item limit.
       const workItems = await readAllAccessibleWorkItems(principal, contexts, {
         includeArchived,
         filter: query.filter,
+        maxItems: WORK_ITEMS_RESPONSE_LIMIT,
       })
-      if (workItems.length > WORK_ITEMS_RESPONSE_LIMIT) {
-        throw createWorkItemListLimitExceededError(
-          `Workspace has more than ${WORK_ITEMS_RESPONSE_LIMIT} accessible Work Items.`,
-        )
-      }
       return c.json(await hydrateWorkItemsResponse({ workItems }, principal.directoryId))
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)

@@ -205,13 +205,43 @@ describe('canonical Work Item API', () => {
     ])
   })
 
-  test('fails closed when a Workspace Work Item read never runs out of pages', async () => {
+  test('fails closed when a Workspace Work Item read repeats its cursor', async () => {
     installFetchRecorder({ workItems: [], nextCursor: 'again' })
+
+    await expect(loadWorkspaceWorkItems('access-token')).rejects.toMatchObject({
+      status: 503,
+      code: 'WorkItemListReadStalled',
+    })
+  })
+
+  test('keeps following empty filtered pages until the server runs out of rows', async () => {
+    const workItem = createWorkItem({ id: 'mine' })
+    let page = 0
+    installSequentialFetch(() => {
+      page += 1
+      return page <= 60
+        ? { workItems: [], nextCursor: `cursor-${page}` }
+        : { workItems: [workItem] }
+    })
+
+    await expect(loadWorkspaceWorkItems('access-token', false, { involvement: 'mine' }))
+      .resolves.toEqual([workItem])
+    expect(page).toBe(61)
+  })
+
+  test('fails closed once a Workspace Work Item read passes 10,000 items', async () => {
+    const workItems = Array.from({ length: 200 }, () => createWorkItem())
+    let page = 0
+    installSequentialFetch(() => {
+      page += 1
+      return { workItems, nextCursor: `cursor-${page}` }
+    })
 
     await expect(loadWorkspaceWorkItems('access-token')).rejects.toMatchObject({
       status: 413,
       code: 'WorkItemListLimitExceeded',
     })
+    expect(page).toBe(51)
   })
 
   test('opts task-view list endpoints into archived Work Items through URL queries', async () => {
@@ -542,6 +572,13 @@ function createDefaultTestSchedule(dueDate: string): WorkItemSchedule {
     dueDate,
     mode: 'due-date',
   }
+}
+
+function installSequentialFetch(nextResponseBody: () => unknown) {
+  globalThis.fetch = (async () => new Response(JSON.stringify(nextResponseBody()), {
+    headers: { 'Content-Type': 'application/json' },
+    status: 200,
+  })) as typeof fetch
 }
 
 function installFetchRecorder(responseBody: unknown) {

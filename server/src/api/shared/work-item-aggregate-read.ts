@@ -121,18 +121,23 @@ export async function resolveAccessibleWorkItemTeamContexts(
  * Reads every accessible Work Item that matches the filter into memory.
  *
  * Team partitions are read in parallel and fully paged. The result keeps Team ID order, then
- * Work Item ID order. More than {@link WORK_ITEMS_AGGREGATE_ITEM_LIMIT} matches fail closed.
+ * Work Item ID order. More than `maxItems` (at most {@link WORK_ITEMS_AGGREGATE_ITEM_LIMIT})
+ * matches fail closed as soon as the read passes the limit.
  *
  * @param principal - Authenticated Workspace principal.
  * @param contexts - Readable Team contexts.
- * @param options - Archive option and server-side filter.
+ * @param options - Archive option, server-side filter, and an optional lower item limit.
  * @returns Matching Work Items.
  */
 export async function readAllAccessibleWorkItems(
   principal: ProjectPrincipal,
   contexts: readonly TeamPermissionContext[],
-  options: { includeArchived: boolean; filter?: WorkItemAggregateFilter },
+  options: { includeArchived: boolean; filter?: WorkItemAggregateFilter; maxItems?: number },
 ): Promise<TeamIssueResponseItem[]> {
+  const maxItems = Math.min(
+    options.maxItems ?? WORK_ITEMS_AGGREGATE_ITEM_LIMIT,
+    WORK_ITEMS_AGGREGATE_ITEM_LIMIT,
+  )
   let matchedCount = 0
   const perTeam = await mapInOrderWithConcurrency(
     contexts,
@@ -144,9 +149,9 @@ export async function readAllAccessibleWorkItems(
           if (options.filter && !matchesWorkItemAggregateFilter(issue, options.filter)) continue
           matches.push(issue)
           matchedCount += 1
-          if (matchedCount > WORK_ITEMS_AGGREGATE_ITEM_LIMIT) {
+          if (matchedCount > maxItems) {
             throw createWorkItemListLimitExceededError(
-              `Workspace has more than ${WORK_ITEMS_AGGREGATE_ITEM_LIMIT} accessible Work Items.`,
+              `Workspace has more than ${maxItems} accessible Work Items.`,
             )
           }
         }

@@ -45,6 +45,9 @@ export const WORK_ITEMS_AGGREGATE_READ_CONCURRENCY = 8
  */
 export const WORK_ITEMS_PAGE_SCAN_BUDGET = 2_000
 
+/** Work Item 応答の担当者 profile を Cognito から同時に読む最大数です。 */
+export const ASSIGNEE_PROFILE_READ_CONCURRENCY = 8
+
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 export const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 
