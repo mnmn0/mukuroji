@@ -469,7 +469,8 @@ export function WorkItemTimePanel({
           </p>
         ) : null}
         {entries.length === 0 && !isLoading ? (
-          hasLoadError ? null : <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('timeTracking.panel.empty')}</p>
+          // A failed or partial read cannot tell that the task has no entries.
+          hasLoadError || isPartial ? null : <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('timeTracking.panel.empty')}</p>
         ) : (
           <TimeEntryList
             entries={entries}

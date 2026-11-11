@@ -594,7 +594,7 @@ describe('time tracking views', () => {
   })
 
   test('shows a partial own-entry list and hides estimate controls until the estimate loads', () => {
-    const render = (props: { estimate?: typeof timeTrackingFixtureEstimate; isPartial?: boolean; hasLoadError?: boolean }) => renderToStaticMarkup(
+    const render = (props: { estimate?: typeof timeTrackingFixtureEstimate | null; isPartial?: boolean; hasLoadError?: boolean }) => renderToStaticMarkup(
       <WorkItemTimePanel
         actualMinutes={540}
         canEditEstimate
@@ -620,6 +620,8 @@ describe('time tracking views', () => {
     )
     const loading = render({ isPartial: true })
     expect(loading).toContain(t('timeTracking.panel.partial'))
+    expect(loading).not.toContain(t('timeTracking.panel.empty'))
+    expect(render({ estimate: null })).toContain(t('timeTracking.panel.empty'))
     expect(loading).not.toContain(t('timeTracking.estimate.add'))
     expect(loading).not.toContain(t('timeTracking.estimate.edit'))
     expect(render({ estimate: timeTrackingFixtureEstimate })).toContain(t('timeTracking.estimate.edit'))
