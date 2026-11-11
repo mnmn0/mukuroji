@@ -82,10 +82,10 @@ export function revokeDeveloperApiKey(
 }
 
 /**
- * 現在の member 自身の agent 接続情報と自分用 API key を取得します。
+ * Fetches the current member's own agent connection details and personal API keys.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @returns Member ID、発行可否、policy、自分用 API key です。
+ * @param accessToken - Access token for the Authorization header.
+ * @returns The member ID, whether issuance is allowed, the policy, and the member's personal API keys.
  */
 export function getPersonalAgentConnection(accessToken: string) {
   return requestJson<PersonalAgentCredentialOverview>(
@@ -95,12 +95,12 @@ export function getPersonalAgentConnection(accessToken: string) {
 }
 
 /**
- * Coding agent 用の自分用 API key を発行します。
+ * Issues a personal API key for a coding agent.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @param input - Key 名、有効期限、scope です。
- * @param mutationContext - Retry でも共有する mutation header context です。
- * @returns 一度だけ表示できる secret と API key metadata です。
+ * @param accessToken - Access token for the Authorization header.
+ * @param input - Key name, expiry, and scopes.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The secret, shown only once, and the API key metadata.
  */
 export function createPersonalApiKey(
   accessToken: string,
@@ -115,13 +115,13 @@ export function createPersonalApiKey(
 }
 
 /**
- * 自分用 API key の secret を新しい有効期限で rotation します。
+ * Rotates a personal API key's secret with a new expiry.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @param apiKeyId - Rotation 対象 API key ID です。
- * @param input - 新しい有効期限です。
- * @param mutationContext - Retry でも共有する mutation header context です。
- * @returns 新しい one-time secret と API key metadata です。
+ * @param accessToken - Access token for the Authorization header.
+ * @param apiKeyId - ID of the API key to rotate.
+ * @param input - The new expiry.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The new one-time secret and the API key metadata.
  */
 export function rotatePersonalApiKey(
   accessToken: string,
@@ -137,12 +137,12 @@ export function rotatePersonalApiKey(
 }
 
 /**
- * 自分用 API key を失効します。
+ * Revokes a personal API key.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @param apiKeyId - 失効する API key ID です。
- * @param mutationContext - Retry でも共有する mutation header context です。
- * @returns 失効後の API key metadata です。
+ * @param accessToken - Access token for the Authorization header.
+ * @param apiKeyId - ID of the API key to revoke.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The API key metadata after revocation.
  */
 export function revokePersonalApiKey(
   accessToken: string,
@@ -160,10 +160,10 @@ export function revokePersonalApiKey(
 }
 
 /**
- * Member による自分用 API key 発行の policy と、発行済みの自分用 API key の ID を取得します。管理者だけが実行できます。
+ * Fetches the member self-issuance policy and the IDs of issued personal API keys. Administrators only.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @returns Policy と自分用 API key の ID です。
+ * @param accessToken - Access token for the Authorization header.
+ * @returns The policy and the personal API key IDs.
  */
 export function getPersonalCredentialAdministration(accessToken: string) {
   return requestJson<PersonalCredentialAdministration>(
@@ -173,12 +173,12 @@ export function getPersonalCredentialAdministration(accessToken: string) {
 }
 
 /**
- * Member による自分用 API key 発行の policy を変更します。管理者だけが実行できます。
+ * Changes the member self-issuance policy for personal API keys. Administrators only.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @param input - 自分用 API key の発行を許可するかどうかです。
- * @param mutationContext - Retry でも共有する mutation header context です。
- * @returns 変更後の policy です。
+ * @param accessToken - Access token for the Authorization header.
+ * @param input - Whether members may issue personal API keys.
+ * @param mutationContext - Mutation header context shared across retries.
+ * @returns The updated policy.
  */
 export function updatePersonalCredentialPolicy(
   accessToken: string,

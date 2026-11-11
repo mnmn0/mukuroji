@@ -853,7 +853,7 @@ abstract class DeveloperPlatformStorageKernel {
     auditPut: AuditTransactWriteItem,
   ): Promise<boolean>
 
-  /** Credential domain/auth rows、optional receipt と audit event を原子的に保存し、条件 row も同時に確かめます。 */
+  /** Atomically saves credential domain/auth rows, an optional receipt, and an audit event while checking the condition rows. */
   protected abstract putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,
@@ -1471,8 +1471,8 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
   }
 
   /**
-   * 自分用 API key の発行・再発行が今の policy で許されることを確かめ、
-   * policy row がその間に変わらないことを書き込みと同じ transaction で確かめる条件を返します。
+   * Confirms the current policy allows issuing or rotating a personal API key, and returns a condition that
+   * checks in the same transaction as the write that the policy row has not changed meanwhile.
    */
   private async requirePersonalIssuancePolicyCheck(
     workspaceId: string,
@@ -1531,7 +1531,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return sortByCreatedAt(apiKeys)
   }
 
-  /** Member が自分用に発行した API key を、owner を指定すればその member の分だけ返します。 */
+  /** Returns member-issued personal API keys, limited to one member when an owner is given. */
   async listPersonalApiKeys(workspaceIdValue: string, ownerUserId?: string) {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const personalIds = new Set(
@@ -1710,7 +1710,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return clone(apiKey)
   }
 
-  /** Workspace の自分用 API key policy を返します。未設定なら発行を許可します。 */
+  /** Returns the Workspace personal API key policy; self-issuance is allowed when none is stored. */
   async getPersonalCredentialPolicy(workspaceIdValue: string): Promise<PersonalCredentialPolicy> {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const record = await this.getRecord(workspaceId, PERSONAL_CREDENTIAL_POLICY_RECORD_KEY)
@@ -1722,7 +1722,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return clone(policy)
   }
 
-  /** Workspace の自分用 API key policy を置換し、変更を audit に記録します。 */
+  /** Replaces the Workspace personal API key policy and records the change in the audit outbox. */
   async updatePersonalCredentialPolicy(
     request: UpdatePersonalCredentialPolicyRequest,
   ): Promise<PersonalCredentialPolicy> {
@@ -1772,7 +1772,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return clone(policy)
   }
 
-  /** API key lifecycle を secret なしで audit outbox event にします。 */
+  /** Builds an audit outbox event for an API key lifecycle change without its secret. */
   protected createApiKeyAuditPut(
     apiKey: ApiKeySummary,
     record: DeveloperPlatformRecord,
@@ -5113,7 +5113,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     return this.putRecord(record, condition)
   }
 
-  /** Credential domain/auth rows と receipt を同じ memory commit にします。Audit は emit しません。 */
+  /** Commits credential domain/auth rows and the receipt in one memory commit; audit events are not emitted. */
   protected async putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,
@@ -6206,7 +6206,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     }
   }
 
-  /** Credential domain/auth rows、receipt と audit event を DynamoDB transaction で保存します。 */
+  /** Saves credential domain/auth rows, the receipt, and the audit event in one DynamoDB transaction. */
   protected async putCredentialRecord(
     record: DeveloperPlatformRecord,
     condition: PutRecordCondition,

@@ -1297,9 +1297,11 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
         async listApiKeys() {
           return []
         },
+        /** Allows member self-issuance so the connection overview can load. */
         async getPersonalCredentialPolicy() {
           return { selfIssuanceEnabled: true }
         },
+        /** Returns no personal API keys for the member. */
         async listPersonalApiKeys() {
           return []
         },

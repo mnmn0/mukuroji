@@ -37,11 +37,11 @@ export function useDeveloperPlatformResources(
 }
 
 /**
- * 管理者向けに、member による自分用 API key 発行の policy と発行済み key の ID を取得します。
+ * Fetches, for administrators, the member self-issuance policy and the IDs of issued personal API keys.
  *
- * @param accessToken - Developer Platform API の access token です。
- * @param enabled - Query を実行するかどうかです。
- * @returns Policy と自分用 API key ID の SWR state です。
+ * @param accessToken - Access token for the Developer Platform API.
+ * @param enabled - Whether to run the query.
+ * @returns SWR state holding the policy and the personal API key IDs.
  */
 export function usePersonalCredentialAdministration(
   accessToken: string | undefined,

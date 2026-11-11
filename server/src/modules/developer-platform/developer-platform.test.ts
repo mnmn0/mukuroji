@@ -4763,6 +4763,7 @@ describe('personal credential policy guard', () => {
     const memory = createMemoryDocumentClient()
     let disableBeforeNextWrite = false
     const documentClient = {
+      /** Disables the policy right before the next transaction when the test asks for it, then sends the command. */
       async send(command: Parameters<DynamoDBDocumentClient['send']>[0]) {
         if (command.constructor.name === 'TransactWriteCommand' && disableBeforeNextWrite) {
           disableBeforeNextWrite = false
