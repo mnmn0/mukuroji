@@ -417,7 +417,27 @@ async function authenticateDeveloperManagement(
       canImport: canAdminister,
       canExport: canAdminister,
     },
+    personalCredentialEligibility: resolvePersonalCredentialEligibility(principal),
   }
+}
+
+/**
+ * Decides whether a member's own access lets them issue a personal API key. It mirrors the
+ * `work-items.write` rule that guards issuance in Enterprise-managed Workspaces.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @returns Eligibility before the Workspace policy is applied.
+ */
+function resolvePersonalCredentialEligibility(
+  principal: WorkspacePrincipal,
+): NonNullable<DeveloperManagementPrincipal['personalCredentialEligibility']> {
+  if (principal.isSystemAdmin) return 'eligible'
+  if (principal.workspaceRole === 'guest') return 'guest'
+  if (
+    principal.enterprisePermissions !== undefined &&
+    !hasEnterpriseWorkspacePermission(principal, 'work-items.write')
+  ) return 'missing-permission'
+  return 'eligible'
 }
 
 async function resolveStableWorkItemAuthorization<T>(

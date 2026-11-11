@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import {
   createMutationFingerprint,
@@ -8,6 +8,7 @@ import {
   createDeveloperApiKey,
   revokeDeveloperApiKey,
   rotateDeveloperApiKey,
+  updatePersonalCredentialPolicy,
 } from '../api/apiKeys'
 import {
   connectDeveloperConnector,
@@ -37,12 +38,17 @@ import {
   flattenDeveloperSyncConflicts,
   replaceResolvedSyncConflictPages,
 } from '../model/connectors'
+import {
+  applySavedPersonalCredentialPolicy,
+  type SavedPersonalCredentialPolicy,
+} from '../model/credentials'
 import type { DeveloperExportFormat } from '../model/transfers'
 import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
 import {
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,
+  usePersonalCredentialAdministration,
 } from '../queries/useDeveloperPlatform'
 import { DeveloperPlatformPanel } from './DeveloperPlatformPanelView'
 import type {
@@ -103,8 +109,28 @@ export function DeveloperPlatformPanelContainer({
     data: resources,
     error,
     isLoading,
+    isValidating: isResourcesValidating,
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
+  const {
+    data: personalCredentials,
+    error: personalCredentialsError,
+    isValidating: isPersonalCredentialsValidating,
+    mutate: mutatePersonalCredentials,
+  } = usePersonalCredentialAdministration(mutationSession.accessToken)
+  const [savedPersonalCredentialPolicy, setSavedPersonalCredentialPolicy] =
+    useState<SavedPersonalCredentialPolicy>()
+  const displayedPersonalCredentials = applySavedPersonalCredentialPolicy(
+    personalCredentials,
+    savedPersonalCredentialPolicy,
+  )
+  // The key list and the personal-key classification load separately. While either reloads, or after the
+  // classification failed to reload, a newly listed personal key may be missing from it, so rotation stays hidden.
+  const personalCredentialsPending =
+    !personalCredentials ||
+    Boolean(personalCredentialsError) ||
+    isPersonalCredentialsValidating ||
+    isResourcesValidating
   const {
     data: syncConflictPages,
     error: syncConflictError,
@@ -128,17 +154,23 @@ export function DeveloperPlatformPanelContainer({
       syncConflictPages.length < syncConflictPageCount,
   )
 
-  /** Refreshes the aggregate resource without starting a second request. */
+  /** Refreshes the aggregate resource and the personal-key classification together. */
   const refresh = async () => {
     if (!resourceKey) {
       return
     }
 
-    await mutateCache(
-      resourceKey,
-      () => getDeveloperPlatformResources(mutationSession.accessToken),
-      { revalidate: false },
-    )
+    await Promise.all([
+      mutateCache(
+        resourceKey,
+        () => getDeveloperPlatformResources(mutationSession.accessToken),
+        { revalidate: false },
+      ),
+      // Reload the classification with the key list so a key another member issued meanwhile is marked personal.
+      mutatePersonalCredentials().catch(() => {
+        // The classification error stays visible with its retry action.
+      }),
+    ])
     mutationRequestRunner.discardRetainedContexts()
   }
 
@@ -214,6 +246,14 @@ export function DeveloperPlatformPanelContainer({
       labels={labels}
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
+      personalCredentials={displayedPersonalCredentials}
+      personalCredentialsPending={personalCredentialsPending}
+      personalCredentialsLoadError={Boolean(personalCredentialsError)}
+      onRetryPersonalCredentials={() => {
+        void mutatePersonalCredentials().catch(() => {
+          // The query error stays visible with its retry action.
+        })
+      }}
       syncConflicts={syncConflicts}
       syncConflictsErrorMessage={
         !hasLoadedSyncConflictPage && syncConflictError
@@ -433,6 +473,21 @@ export function DeveloperPlatformPanelContainer({
           },
         )
       }
+      onChangePersonalCredentialPolicy={async (selfIssuanceEnabled) => {
+        const policy = await runMutation(
+          `developer-credential-policy:${selfIssuanceEnabled}`,
+          String(selfIssuanceEnabled),
+          (context) =>
+            updatePersonalCredentialPolicy(
+              mutationSession.accessToken,
+              { selfIssuanceEnabled },
+              context,
+            ),
+        )
+        // Writing to the SWR cache would clear a reload error and show Rotate again, so the saved policy is
+        // kept beside the classification it was saved over until a newer classification loads.
+        setSavedPersonalCredentialPolicy({ policy, basis: personalCredentials })
+      }}
       onRotateApiKey={(apiKeyId) =>
         runMutation(
           `developer-api-key:rotate:${apiKeyId}`,

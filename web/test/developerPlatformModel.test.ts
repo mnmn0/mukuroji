@@ -9,7 +9,10 @@ import {
   parseConflictMergedValues,
   replaceResolvedSyncConflictPages,
 } from '../src/developer-platform/model/connectors'
-import { toLocalEndOfDayIso } from '../src/developer-platform/model/credentials'
+import {
+  applySavedPersonalCredentialPolicy,
+  toLocalEndOfDayIso,
+} from '../src/developer-platform/model/credentials'
 import {
   formatConnectorProviderName,
   interpolate,
@@ -229,5 +232,35 @@ describe('Developer Platform connector authorization', () => {
     ).toBe(
       '/workspace?developerSection=connectors&filter=open#details',
     )
+  })
+})
+
+describe('saved personal credential policy', () => {
+  const loaded = {
+    policy: { selfIssuanceEnabled: true },
+    personalApiKeyIds: ['key-1'],
+  }
+
+  test('shows the saved policy while the classification has not reloaded', () => {
+    expect(applySavedPersonalCredentialPolicy(loaded, {
+      policy: { selfIssuanceEnabled: false },
+      basis: loaded,
+    })).toEqual({ policy: { selfIssuanceEnabled: false }, personalApiKeyIds: ['key-1'] })
+  })
+
+  test('uses a newer classification as loaded', () => {
+    const reloaded = { policy: { selfIssuanceEnabled: true }, personalApiKeyIds: ['key-1', 'key-2'] }
+    expect(applySavedPersonalCredentialPolicy(reloaded, {
+      policy: { selfIssuanceEnabled: false },
+      basis: loaded,
+    })).toBe(reloaded)
+  })
+
+  test('keeps the classification when nothing was saved or loaded', () => {
+    expect(applySavedPersonalCredentialPolicy(loaded, undefined)).toBe(loaded)
+    expect(applySavedPersonalCredentialPolicy(undefined, {
+      policy: { selfIssuanceEnabled: false },
+      basis: undefined,
+    })).toBeUndefined()
   })
 })

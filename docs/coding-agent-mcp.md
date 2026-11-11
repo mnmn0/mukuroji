@@ -17,13 +17,14 @@ MCPプロセスは公開APIへ接続するクライアントとして動作す�
 受け取ったエージェントは `get_configuration`、`get_task`、`list_progress` で最新情報を確認し、
 以下の着手・進捗報告・完了手順を使います。
 
+設定の「agent を接続」（`/settings/agent-connection`）では、自分用のtokenを発行し、origin・選択したTeam・自分のmember ID・runtime・`mcp.mjs` のpathを埋めたClaude Code / Codex / Kiroの設定例と、Windowsの手順・checksumの確認コマンドをコピーできます。
 アプリのヘルプ（`/help#coding-agent`）には、秘密情報を含まない接続設定例と作業手順があります。
 設定例のパス・URL・IDを実際の値に置き換え、tokenはクライアントの秘密情報設定または環境変数で渡します。
 
 ## 接続
 
 1. Agent Run APIを含むMukurojiサーバーを用意します。Agent Runは新しい `AgentRunsTable` に保存するため、既存環境への反映にはCDKのデプロイが必要です。既存データの移行はありません。
-2. WorkspaceのDeveloper設定から `work-items:read` と `work-items:write` を持つAPIキーを作成します。キー所有者には対象Team/Projectへの閲覧・編集権限が必要です。OAuth access tokenも利用できますが、このMCPはtokenの自動更新を行いません。
+2. 設定の「agent を接続」で自分用のtokenを発行します（下の「自分用token」）。管理者がWorkspaceのDeveloper設定で作成した `work-items:read` と `work-items:write` を持つAPIキーも使えます。どちらもキー所有者として動くため、対象Team/Projectへの閲覧・編集権限が必要です。OAuth access tokenも利用できますが、このMCPはtokenの自動更新を行いません。
 3. エージェントが担当する既存WorkspaceメンバーのIDとTeam IDを指定します。`ASSIGNEE_ID` は任意のエージェント名ではありません。表示用のエージェント名は `AGENT_NAME` で別途指定します。`start_task`、`heartbeat`、`finish_run` はcredentialの所有者とタスクの担当者が一致する場合だけ成功するため、`ASSIGNEE_ID` にはキー所有者自身のメンバーIDを指定します。
 4. リポジトリルートで `bun install --frozen-lockfile` を実行し、MCPクライアントに次の起動設定を登録します。
 
@@ -69,6 +70,15 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
 同じマシン・同じOSユーザーで同じruntimeを複数起動する場合は、プロセスごとに異なる `INSTANCE_ID` を指定してください。
 
+### 自分用token
+
+- Guest以外のactiveなメンバーは、`work-items:read` / `work-items:write` に限ったtokenを自分で発行・再発行（rotate）・失効できます。有効期限は必須で、発行・再発行から最長90日です。
+- tokenは発行・再発行の応答で1回だけ表示されます。再発行と失効は即時に効き、古いtokenは次のrequestから `401` になります。期限切れも同様です。メンバーがWorkspaceから外れると、失効しなくてもそのtokenは `403` で使えなくなります。
+- 管理者はDeveloper設定のAPIキー一覧で全メンバーのtoken（「個人用」と表示）を確認・失効でき、「メンバーによる agent 用キーの発行」でメンバーの発行・再発行を止められます。止めても発行済みのtokenは残るため、必要なら一覧から失効します。メンバー自身の失効は止めている間もできます。発行・再発行の途中でpolicyが変わった場合は、その発行・再発行を `409` で失敗させます。
+- Enterprise Identityでroleを割り当てているWorkspaceでは、自分のtokenの確認と失効に `workspace.read`、発行と再発行に `work-items.write` のpermissionが要ります（標準のmember roleはどちらも持ちます）。
+- 発行・再発行・失効とpolicyの変更はauditに記録します（`api-key.created` / `api-key.rotated` / `api-key.revoked` / `credential-policy.updated`）。secretは記録しません。
+- API: `GET /api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`POST /api/developer/me/api-keys/{apiKeyId}/rotate`（新しい `expiresAt` が必須）、`DELETE /api/developer/me/api-keys/{apiKeyId}`、管理者用の `GET` / `PUT /api/developer/credential-policy`（`GET` はpolicyと、メンバーが自分用に発行したAPIキーのIDを返します）。既存のAPIキー応答（`ApiKeySummary`）の形は変えていません。いずれもCognitoのBearer tokenで呼びます。
+
 ### 配布版 `mcp.mjs`
 
 リポジトリを手元に置かずに使う場合は、GitHub Releaseに添付された `mcp.mjs`、`mcp.mjs.LICENSES.txt`、
@@ -89,15 +99,17 @@ Releaseへ添付するときは、build後に `server/dist` で
 Claude Code（`--scope user` は全プロジェクト、`--scope project` はリポジトリの `.mcp.json` に保存します）:
 
 ```sh
-claude mcp add --scope user --transport stdio \
+claude mcp add --scope user --transport stdio mukuroji-tasks \
   --env MUKUROJI_MCP_URL=https://your-mukuroji.example.com \
   --env MUKUROJI_MCP_TEAM_ID=your-team-id \
   --env MUKUROJI_MCP_ASSIGNEE_ID=your-workspace-member-id \
   --env MUKUROJI_MCP_AGENT_NAME=claude-code \
   --env MUKUROJI_MCP_RUNTIME=claude-code \
   --env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}' \
-  mukuroji-tasks -- node /absolute/path/to/mcp.mjs
+  -- node /absolute/path/to/mcp.mjs
 ```
+
+サーバー名（`mukuroji-tasks`）は `--env` より前に書きます。`--env` は複数の値を受け取るため、後ろに書いた名前も環境変数として読まれ、登録に失敗します。
 
 Claude Codeは `command`、`args`、`env` の `${VAR}` を起動時の環境変数で展開します。
 共有する `.mcp.json` には `"MUKUROJI_MCP_TOKEN": "${MUKUROJI_MCP_TOKEN}"` の形だけを置きます。

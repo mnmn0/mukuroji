@@ -65,7 +65,7 @@ export function CodingAgentGuide({ t }: CodingAgentGuideProps) {
             <li className="pl-1">
               <h4 className="text-sm font-semibold text-[var(--workbench-text)]">{t('agents.guide.credentialsTitle')}</h4>
               <p className="mt-1 text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.guide.credentialsDescription')}</p>
-              <Link className="mt-2 inline-flex min-h-[44px] items-center text-sm font-semibold text-[var(--workbench-primary-text)] underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2" to="/settings">
+              <Link className="mt-2 inline-flex min-h-[44px] items-center text-sm font-semibold text-[var(--workbench-primary-text)] underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2" to="/settings/agent-connection">
                 {t('agents.guide.openSettings')}
               </Link>
             </li>
