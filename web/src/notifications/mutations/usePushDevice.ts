@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { clearAuthSession, readAccessTokenSubject } from '../../auth/session'
+import { revokeStoredAuthSession } from '../../auth/sessionRefresh'
 import {
   decodeBase64Url,
   matchesApplicationServerKey,
@@ -340,28 +341,37 @@ function isRegistrationRefusal(error: unknown): boolean {
  * navigates once it settles, so this device's push registration is removed with the token
  * being discarded before the session is cleared and the page can go away. The wait is bounded,
  * so a slow service worker or network never blocks signing out. Expiry-driven session cleanup
- * keeps calling `clearAuthSession`.
+ * keeps calling `clearAuthSession`. The refresh token is revoked on the server in the same
+ * bounded wait, so the signed-out session cannot be resumed with it.
  *
  * @param accessToken - Access token of the session being signed out, if known.
  * @param cleanup - Push cleanup; defaults to removing this device's subscription.
  * @param waitMilliseconds - Longest wait for the cleanup.
+ * @param revoke - Server-side sign-out of the account holding `accessToken`; defaults to
+ * revoking its stored refresh token.
  * @returns A promise that settles once the session is cleared.
  */
 export async function signOutWithPushCleanup(
   accessToken: string | undefined,
   cleanup: (accessToken: string | undefined) => Promise<void> = disconnectPushDeviceOnSignOut,
   waitMilliseconds = signOutPushCleanupWaitMilliseconds,
+  revoke: (accessToken: string | undefined) => Promise<void> = revokeStoredAuthSession,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
+  let revoking: Promise<void> | undefined
+  /** Starts the server-side sign-out once; it reads the stored session before it is cleared. */
+  const startRevoke = () => (revoking ??= revoke(accessToken))
   try {
     await Promise.race([
-      cleanup(accessToken),
+      // The push cleanup still needs a valid access token, so the revocation waits for it.
+      cleanup(accessToken).catch(() => undefined).then(startRevoke),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, waitMilliseconds)
       }),
     ])
   } finally {
     if (timer !== undefined) clearTimeout(timer)
+    void startRevoke()
     clearAuthSession()
   }
 }

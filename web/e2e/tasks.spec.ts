@@ -1045,10 +1045,18 @@ async function mockAuthenticatedTaskPage(
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
     const projectWorkItems = Object.values(taskResponsesByProject).flat()
+    const workItems = [...projectWorkItems, ...Object.values(teamIssuesByTeam).flat()]
+
+    if (new URL(route.request().url()).pathname.endsWith('/work-items/summary')) {
+      await route.fulfill({
+        json: createMockWorkItemSummary(workItems),
+      })
+      return
+    }
 
     await route.fulfill({
       json: {
-        workItems: [...projectWorkItems, ...Object.values(teamIssuesByTeam).flat()],
+        workItems,
       },
     })
   })
@@ -13411,3 +13419,69 @@ test('未認証の場合はログイン画面へ戻す', async ({ page }) => {
   await expect(page).toHaveURL('/?returnTo=%2Fprojects%2Frefero%2Fissues')
   await expect(page.getByRole('heading', { name: 'ログイン' })).toBeVisible()
 })
+
+/**
+ * Counts mock Work Items like `GET /api/work-items/summary` for the E2E API stub.
+ *
+ * @param workItems - Mock canonical Work Items visible to the viewer.
+ * @returns Summary totals and one bucket per Team and Project.
+ */
+function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
+  const today = new Date().toISOString().slice(0, 10)
+  const buckets = new Map<string, {
+    teamId: string
+    projectId?: string
+    total: number
+    open: number
+    completed: number
+    highPriorityOpen: number
+    overdueOpen: number
+    attentionOpen: number
+    inReview: number
+    assignees: Array<{ id: string; label: string }>
+  }>()
+  for (const workItem of workItems) {
+    if (workItem.archivedAt !== undefined) continue
+    const key = `${workItem.teamId}\0${workItem.assignedProjectId ?? ''}`
+    const bucket = buckets.get(key) ?? {
+      teamId: workItem.teamId,
+      ...(workItem.assignedProjectId ? { projectId: workItem.assignedProjectId } : {}),
+      total: 0,
+      open: 0,
+      completed: 0,
+      highPriorityOpen: 0,
+      overdueOpen: 0,
+      attentionOpen: 0,
+      inReview: 0,
+      assignees: [],
+    }
+    buckets.set(key, bucket)
+    const open = workItem.statusCategory !== 'completed' && workItem.statusCategory !== 'canceled'
+    const highPriority = open && workItem.priority === 'high'
+    const overdue = open && workItem.dueDate < today
+    bucket.total += 1
+    if (workItem.statusCategory === 'completed') bucket.completed += 1
+    if (workItem.workflowStatusId === 'review') bucket.inReview += 1
+    if (open) bucket.open += 1
+    if (highPriority) bucket.highPriorityOpen += 1
+    if (overdue) bucket.overdueOpen += 1
+    if (highPriority || overdue) bucket.attentionOpen += 1
+    const assigneeId = workItem.assigneeUserId.trim()
+    if (assigneeId && !bucket.assignees.some((assignee) => assignee.id === assigneeId)) {
+      bucket.assignees.push({
+        id: assigneeId,
+        label: workItem.assigneeName ?? workItem.assigneeEmail ?? assigneeId,
+      })
+    }
+  }
+  const summaryBuckets = [...buckets.values()]
+  return {
+    generatedAt: new Date().toISOString(),
+    totals: {
+      total: summaryBuckets.reduce((sum, bucket) => sum + bucket.total, 0),
+      open: summaryBuckets.reduce((sum, bucket) => sum + bucket.open, 0),
+      completed: summaryBuckets.reduce((sum, bucket) => sum + bucket.completed, 0),
+    },
+    buckets: summaryBuckets,
+  }
+}

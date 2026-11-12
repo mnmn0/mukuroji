@@ -16,7 +16,7 @@ import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
-import { clearAuthSession, getAuthSession } from '../../auth/session'
+import { clearAuthSession, getAuthSession, isSameAuthSessionToken } from '../../auth/session'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
   type FileArtifactScope,
@@ -1170,7 +1170,7 @@ export function TaskPage() {
     /** Returns whether this create request still owns the active scope and session. */
     const isCurrentCreateOperation = () =>
       createTaskScopeGenerationRef.current === operationScopeGeneration &&
-      getAuthSession()?.accessToken === operationAccessToken
+      isSameAuthSessionToken(getAuthSession()?.accessToken, operationAccessToken)
     /** Builds the routed detail URL for a confirmed Work Item in this create scope. */
     const createNavigationPath = (createdTask: CanonicalWorkItem) => preserveTaskViewUrlState(
       createProjectIssuesPath(targetProjectId, targetTeamId, createdTask.id),

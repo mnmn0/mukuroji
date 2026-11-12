@@ -90,6 +90,10 @@ export const appRoutes: RouteObject[] = [
                     lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
                   },
                   {
+                    path: '/settings/agent-connection',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/AgentConnectionPage')).AgentConnectionPage),
+                  },
+                  {
                     path: '/settings/security',
                     lazy: lazyPage(async () => (await import('../pages/workspace/EnterpriseSecurityPage')).EnterpriseSecurityPage),
                   },

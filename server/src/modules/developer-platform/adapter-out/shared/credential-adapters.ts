@@ -9,6 +9,7 @@ import type {
   RevokeOAuthAppRequest,
   RotateApiKeyRequest,
   RotateOAuthClientSecretRequest,
+  UpdatePersonalCredentialPolicyRequest,
 } from '../../application/ports'
 
 /** Focused adapter that exposes only API key operations from a storage implementation. */
@@ -31,6 +32,11 @@ export class ApiKeyAdapter implements ApiKeyPort {
     return this.#source.listApiKeys(workspaceId)
   }
 
+  /** Lists self-issued API keys. */
+  listPersonalApiKeys(workspaceId: string, ownerUserId?: string) {
+    return this.#source.listPersonalApiKeys(workspaceId, ownerUserId)
+  }
+
   /** Rotates an API key. */
   rotateApiKey(request: RotateApiKeyRequest) {
     return this.#source.rotateApiKey(request)
@@ -44,6 +50,16 @@ export class ApiKeyAdapter implements ApiKeyPort {
   /** Authenticates an API key. */
   authenticateApiKey(request: AuthenticateCredentialRequest) {
     return this.#source.authenticateApiKey(request)
+  }
+
+  /** Reads the personal credential policy. */
+  getPersonalCredentialPolicy(workspaceId: string) {
+    return this.#source.getPersonalCredentialPolicy(workspaceId)
+  }
+
+  /** Replaces the personal credential policy. */
+  updatePersonalCredentialPolicy(request: UpdatePersonalCredentialPolicyRequest) {
+    return this.#source.updatePersonalCredentialPolicy(request)
   }
 }
 

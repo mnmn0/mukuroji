@@ -1297,6 +1297,14 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
         async listApiKeys() {
           return []
         },
+        /** Allows member self-issuance so the connection overview can load. */
+        async getPersonalCredentialPolicy() {
+          return { selfIssuanceEnabled: true }
+        },
+        /** Returns no personal API keys for the member. */
+        async listPersonalApiKeys() {
+          return []
+        },
       } as never,
     })
     const authorization = `Bearer ${createAccessToken([], {
@@ -1329,6 +1337,17 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
     expect(workspaceMemberDeveloperAccess.status).toBe(403)
     expect(await workspaceMemberDeveloperAccess.json()).toMatchObject({
       code: 'forbidden',
+    })
+    const workspaceMemberAgentConnection = await app.request(
+      '/api/developer/me/agent-connection',
+      { headers: { Authorization: authorization } },
+    )
+    expect({
+      status: workspaceMemberAgentConnection.status,
+      body: await workspaceMemberAgentConnection.json(),
+    }).toMatchObject({
+      status: 200,
+      body: { canIssue: true, apiKeys: [] },
     })
 
     const workspaceMemberSharedWrite = await patchReport(

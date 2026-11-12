@@ -22,7 +22,7 @@ describe('Coding agent connection guide', () => {
       <MemoryRouter><HelpWorkspaceView t={t} /></MemoryRouter>,
     )
     expect(html).toContain('id="coding-agent"')
-    expect(html).toContain('href="/settings"')
+    expect(html).toContain('href="/settings/agent-connection"')
     expect(html).toContain('work-items:read')
     expect(html).toContain('work-items:write')
     expect(html).toContain('start_task')

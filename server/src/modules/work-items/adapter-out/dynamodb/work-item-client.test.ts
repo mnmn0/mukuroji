@@ -399,6 +399,138 @@ test('DynamoDB Team Work Item reads can use the strongly consistent base table',
   }])
 })
 
+test('DynamoDB consistent Team Work Item reads resume after a Work Item ID', async () => {
+  const createStoredItem = (issueId: string) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    sortOrder: 10,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  })
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {
+        Items: [createStoredItem('item-b'), createStoredItem('item-c')],
+        LastEvaluatedKey: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'item-c' },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.getTeamIssues('workspace-1', 'core-team', {
+    consistentRead: true,
+    limit: 2,
+    startAfterIssueId: 'item-a',
+  })
+
+  expect(response.issues.map((issue) => issue.id)).toEqual(['item-b', 'item-c'])
+  expect(response.nextStartAfterIssueId).toBe('item-c')
+  expect(sentInputs).toEqual([{
+    TableName: 'WorkItemsTable',
+    ConsistentRead: true,
+    KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+    ExpressionAttributeValues: {
+      ':directoryTeamId': 'workspace-1#team#core-team',
+    },
+    ExclusiveStartKey: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'item-a' },
+    Limit: 2,
+  }])
+  await expect(client.getTeamIssues('workspace-1', 'core-team', {
+    limit: 2,
+    startAfterIssueId: 'item-a',
+  })).rejects.toMatchObject({ code: 'InvalidWorkItemListRead' })
+})
+
+test('DynamoDB Team Work Item read can bound evaluated rows including archived rows', async () => {
+  const createStoredItem = (issueId: string, archived: boolean) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    sortOrder: 10,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    ...(archived
+      ? { archivedAt: '2026-07-12T00:00:00.000Z', archivedBy: 'demo@example.com' }
+      : {}),
+  })
+  const pages = [
+    {
+      Items: [createStoredItem('item-a', true), createStoredItem('item-b', false)],
+      LastEvaluatedKey: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'item-b' },
+    },
+    {
+      Items: [createStoredItem('item-c', true)],
+      LastEvaluatedKey: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'item-c' },
+    },
+  ]
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return pages.shift()
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.getTeamIssues('workspace-1', 'core-team', {
+    consistentRead: true,
+    limit: 3,
+    limitEvaluatedRows: true,
+  })
+
+  expect(response.issues.map((issue) => issue.id)).toEqual(['item-b'])
+  expect(response.evaluatedCount).toBe(3)
+  expect(response.nextStartAfterIssueId).toBe('item-c')
+  expect(sentInputs.map((input) => input.Limit)).toEqual([3, 1])
+  await expect(client.getTeamIssues('workspace-1', 'core-team', {
+    limit: 3,
+    limitEvaluatedRows: true,
+  })).rejects.toMatchObject({ code: 'InvalidWorkItemListRead' })
+})
+
 test('DynamoDB Team Work Item detail rejects a malformed body on non-comment events', async () => {
   const canonicalWorkItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,

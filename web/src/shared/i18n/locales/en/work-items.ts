@@ -350,6 +350,8 @@ export const workItemsMessages = {
   'tasks.count': '{count} tasks',
   'tasks.empty': 'No tasks are available yet.',
   'tasks.error.loading': 'Failed to load the task list',
+  'tasks.error.limitExceeded': 'Too many Work Items to load in this view. Open a Team or Project view to narrow the range.',
+  'tasks.error.reason': 'Cause: {reason}',
   'tasks.error.loadingCount': 'Could not load task lists for {count} projects. Showing the tasks that loaded.',
   'tasks.row.selected': 'Row selected',
   'tasks.status.in-progress': 'In progress',

@@ -1220,6 +1220,38 @@
         ],
         "type": "object"
       },
+      "CreatePersonalApiKeyInput": {
+        "additionalProperties": false,
+        "properties": {
+          "expiresAt": {
+            "description": "必須です。発行から最長 90 日です。",
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "enum": [
+                "work-items:read",
+                "work-items:write"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "name",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
       "CreatePublicExternalWorkItemLinkInput": {
         "additionalProperties": false,
         "properties": {
@@ -2139,6 +2171,96 @@
         ],
         "type": "object"
       },
+      "PersonalAgentCredentialOverview": {
+        "additionalProperties": false,
+        "properties": {
+          "apiKeys": {
+            "items": {
+              "$ref": "#/components/schemas/ApiKeySummary"
+            },
+            "type": "array"
+          },
+          "canIssue": {
+            "type": "boolean"
+          },
+          "issuanceBlockedReason": {
+            "enum": [
+              "guest",
+              "missing-permission",
+              "policy-disabled"
+            ],
+            "type": "string"
+          },
+          "maxLifetimeDays": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "memberId": {
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PersonalCredentialPolicy"
+          },
+          "scopes": {
+            "items": {
+              "enum": [
+                "work-items:read",
+                "work-items:write"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "memberId",
+          "canIssue",
+          "policy",
+          "scopes",
+          "maxLifetimeDays",
+          "apiKeys"
+        ],
+        "type": "object"
+      },
+      "PersonalCredentialAdministration": {
+        "additionalProperties": false,
+        "properties": {
+          "personalApiKeyIds": {
+            "description": "Member が自分用に発行した API key の ID です。",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PersonalCredentialPolicy"
+          }
+        },
+        "required": [
+          "policy",
+          "personalApiKeyIds"
+        ],
+        "type": "object"
+      },
+      "PersonalCredentialPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "selfIssuanceEnabled": {
+            "type": "boolean"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "updatedByUserId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "selfIssuanceEnabled"
+        ],
+        "type": "object"
+      },
       "PreviewPublicWorkItemTypeChangeRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2622,6 +2744,20 @@
         },
         "type": "object"
       },
+      "RotatePersonalApiKeyInput": {
+        "additionalProperties": false,
+        "properties": {
+          "expiresAt": {
+            "description": "必須です。rotation から最長 90 日です。",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expiresAt"
+        ],
+        "type": "object"
+      },
       "StartAgentRunRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2741,6 +2877,18 @@
         },
         "required": [
           "syncDirection"
+        ],
+        "type": "object"
+      },
+      "UpdatePersonalCredentialPolicyInput": {
+        "additionalProperties": false,
+        "properties": {
+          "selfIssuanceEnabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "selfIssuanceEnabled"
         ],
         "type": "object"
       },
@@ -4749,6 +4897,156 @@
         ]
       }
     },
+    "/api/developer/credential-policy": {
+      "get": {
+        "description": "管理者だけが呼べます。",
+        "operationId": "getPersonalCredentialPolicy",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalCredentialAdministration"
+                }
+              }
+            },
+            "description": "現在の policy と、member が自分用に発行した API key の ID です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "メンバーによる API key 発行の policy と自分用 key を取得する",
+        "tags": [
+          "API Key Management"
+        ]
+      },
+      "put": {
+        "description": "管理者だけが呼べます。停止しても発行済みの key は失効しません。",
+        "operationId": "updatePersonalCredentialPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePersonalCredentialPolicyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalCredentialPolicy"
+                }
+              }
+            },
+            "description": "変更後の policy です。",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "メンバーによる API key 発行を許可または停止する",
+        "tags": [
+          "API Key Management"
+        ]
+      }
+    },
     "/api/developer/exports": {
       "get": {
         "operationId": "listManagedWorkItemExportPage",
@@ -5633,6 +5931,357 @@
         "summary": "Work Item import error report を取得する",
         "tags": [
           "Import and Export"
+        ]
+      }
+    },
+    "/api/developer/me/agent-connection": {
+      "get": {
+        "description": "member ID、発行できるかどうか、Workspace policy、自分が発行した key を返します。",
+        "operationId": "getPersonalAgentConnection",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalAgentCredentialOverview"
+                }
+              }
+            },
+            "description": "現在の member の agent 接続情報です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "自分の agent 接続情報と自分用 API key を取得する",
+        "tags": [
+          "Personal Agent Credentials"
+        ]
+      }
+    },
+    "/api/developer/me/api-keys": {
+      "post": {
+        "description": "Guest 以外の active member が work-items:read / write に限った自分用 key を発行します。平文 secret はこの response で一度だけ返します。",
+        "operationId": "createPersonalApiKey",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePersonalApiKeyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyOneTimeSecretOutput"
+                }
+              }
+            },
+            "description": "API key と一度限りの secret です。",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/PragmaNoCache"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "自分用の coding agent API key を発行する",
+        "tags": [
+          "Personal Agent Credentials"
+        ]
+      }
+    },
+    "/api/developer/me/api-keys/{apiKeyId}": {
+      "delete": {
+        "operationId": "revokePersonalApiKey",
+        "parameters": [
+          {
+            "description": "API key resource ID です。",
+            "in": "path",
+            "name": "apiKeyId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeySummary"
+                }
+              }
+            },
+            "description": "Revoke 済み API key metadata です。",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "自分用 API key を失効する",
+        "tags": [
+          "Personal Agent Credentials"
+        ]
+      }
+    },
+    "/api/developer/me/api-keys/{apiKeyId}/rotate": {
+      "post": {
+        "description": "自分が発行した key の旧 secret を失効し、新しい平文 secret をこの response で一度だけ返します。",
+        "operationId": "rotatePersonalApiKey",
+        "parameters": [
+          {
+            "description": "API key resource ID です。",
+            "in": "path",
+            "name": "apiKeyId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotatePersonalApiKeyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyOneTimeSecretOutput"
+                }
+              }
+            },
+            "description": "Rotation 後の API key と一度限りの secret です。",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/CacheControlNoStore"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/PragmaNoCache"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "自分用 API key を新しい期限で rotation する",
+        "tags": [
+          "Personal Agent Credentials"
         ]
       }
     },
@@ -10021,6 +10670,10 @@
     {
       "description": "Coding agent claims, leases, and Team Agent settings",
       "name": "Agent Runs"
+    },
+    {
+      "description": "Member が自分の coding agent 用 credential を発行・管理します。",
+      "name": "Personal Agent Credentials"
     }
   ]
 }

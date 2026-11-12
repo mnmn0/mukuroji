@@ -124,6 +124,12 @@ const enterpriseSecurityRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'security.page.title',
   descriptionKey: 'security.page.description',
 }
+const agentConnectionRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'settings',
+  eyebrowKey: 'agents.connect.eyebrow',
+  titleKey: 'agents.connect.title',
+  descriptionKey: 'agents.connect.description',
+}
 const teamOverviewRouteMetadata: WorkspaceRouteMetadata = {
   activeTeamViewId: 'overview',
   eyebrowKey: 'workspace.teamOverview.eyebrow',
@@ -685,6 +691,10 @@ function resolveWorkspaceRouteMetadata(
 ): WorkspaceRouteMetadata | undefined {
   if (matchPath('/settings/security', pathname)) {
     return enterpriseSecurityRouteMetadata
+  }
+
+  if (matchPath('/settings/agent-connection', pathname)) {
+    return agentConnectionRouteMetadata
   }
 
   if (matchPath('/dashboard', pathname)) {

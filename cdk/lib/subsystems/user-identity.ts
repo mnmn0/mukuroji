@@ -81,6 +81,16 @@ export function buildUserIdentity(
     disableOAuth: true,
     generateSecret: false,
     preventUserExistenceErrors: true,
+    // The Web refreshes the access token before it expires, so one sign-in lasts as long as the
+    // refresh token while the user keeps working. "Keep me signed in" keeps the tokens in
+    // localStorage across browser restarts; without it they live only in the tab's
+    // sessionStorage. A Workspace security policy can still end a session earlier through its
+    // session lifetime and idle timeout. Sign-out revokes the refresh token, which needs
+    // revocation enabled.
+    accessTokenValidity: cdk.Duration.minutes(60),
+    idTokenValidity: cdk.Duration.minutes(60),
+    refreshTokenValidity: cdk.Duration.days(30),
+    enableTokenRevocation: true,
   });
   for (const resource of [userPool, userPoolClient]) {
     (resource.node.defaultChild as cdk.CfnResource).cfnOptions.condition = userPoolCreated;

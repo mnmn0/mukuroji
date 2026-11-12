@@ -13,7 +13,10 @@ import {
   WorkspaceAccessError,
   type WorkspaceInvitation,
 } from '../../modules/workspace-access/workspace-access'
-import { EnterpriseIdentityError } from '../../modules/enterprise-identity'
+import {
+  EnterpriseIdentityError,
+  EnterpriseSessionActivityError,
+} from '../../modules/enterprise-identity'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createAuthenticationResponse } from '../shared/authentication-session'
@@ -22,8 +25,11 @@ import {
   isEnterpriseSsoConfigured,
   toEnterpriseIdentityErrorResponse,
   validateConfiguredCognitoAccessToken,
+  type CognitoAccessTokenClaims,
 } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
+import { getEnv } from '../shared/runtime-config'
+import { decodeJwtPayload, readUserAttribute } from '../shared/token-claims'
 import {
   canWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -80,6 +86,91 @@ type LoginRequestBody = {
    */
   password?: unknown
 }
+
+/**
+ * Session の更新と sign-out が受け取る request body です。
+ */
+type RefreshTokenRequestBody = {
+  /** Login または SSO 交換で受け取った Cognito refresh token です。 */
+  refreshToken?: unknown
+}
+
+/** Refresh token として受け付ける最大文字数です。Cognito の token は数 KB に収まります。 */
+const maxRefreshTokenLength = 16_384
+
+/**
+ * Reads a refresh token from a request body field.
+ *
+ * @param value - Untrusted request body value.
+ * @returns The trimmed token, or an empty string when it is missing or too long.
+ */
+function readRefreshToken(value: unknown) {
+  const token = typeof value === 'string' ? value.trim() : ''
+  return token.length <= maxRefreshTokenLength ? token : ''
+}
+
+/**
+ * Picks the Cognito app client that issued a session's refresh token.
+ *
+ * Refresh and revocation must name the issuing client. A session from enterprise SSO carries
+ * the SSO client's ID in its access token; every other session belongs to the password client.
+ * The access token is read without verification, so it can only choose between the two
+ * configured clients, and Cognito rejects a refresh token sent with the wrong one.
+ *
+ * @param accessToken - Access token of the session, possibly expired.
+ * @returns The SSO client ID for an SSO session, or undefined for the password client.
+ */
+function resolveSessionClientId(accessToken: string | undefined) {
+  const ssoClientId = getEnv('COGNITO_SSO_CLIENT_ID')?.trim()
+  if (!ssoClientId || !accessToken) return undefined
+  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
+  return claims?.client_id === ssoClientId ? ssoClientId : undefined
+}
+
+/**
+ * Maps a failed session refresh to a response the Web can act on.
+ *
+ * @param c - Hono request context.
+ * @param error - Error raised by the refresh.
+ * @returns The HTTP error response.
+ */
+function toRefreshErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError && error.code === 'NotAuthorizedException') {
+    return c.json({
+      code: 'RefreshTokenRejected' as const,
+      message: 'The session can no longer be refreshed. Sign in again.',
+    }, 401)
+  }
+  if (error instanceof WorkspaceAccessError) {
+    return toWorkspaceAccessErrorResponse(c, error)
+  }
+  if (error instanceof ProjectDataError) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (error instanceof EnterpriseIdentityError) {
+    return toEnterpriseIdentityErrorResponse(c, error)
+  }
+  if (error instanceof EnterpriseSessionActivityError) {
+    return c.json({ code: error.code, message: error.message }, error.status === 403 ? 403 : 503)
+  }
+  if (error instanceof CognitoServiceError && retryableCognitoRefreshErrors.has(error.code)) {
+    // Cognito reports throttling as HTTP 400; the refresh token is still valid, so the Web must
+    // retry later instead of discarding the session.
+    c.header('Retry-After', '5')
+    return c.json({
+      code: 'AuthenticationRefreshThrottled' as const,
+      message: 'Session refresh is temporarily unavailable. Try again shortly.',
+    }, 429)
+  }
+  return toAuthErrorResponse(c, error)
+}
+
+/** Cognito error codes that leave the refresh token valid and are worth retrying. */
+const retryableCognitoRefreshErrors = new Set([
+  'TooManyRequestsException',
+  'LimitExceededException',
+  'InternalErrorException',
+])
 
 function toSupportedMfaChallenge(response: InitiateAuthResponse, email: string) {
   const challenge = readCognitoMfaChallengeName(response.ChallengeName)
@@ -446,6 +537,127 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
       if (error instanceof WorkspaceAccessError) {
         return toWorkspaceAccessErrorResponse(c, error)
       }
+      return toAuthErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Refresh token で session の access token を更新する endpoint です。
+   *
+   * @remarks
+   * Body の `refreshToken` は必須です。`Authorization: Bearer <更新前の access token>` は
+   * 期限切れでもよく、SSO session の app client の判別と、idle activity・MFA/SSO assurance の
+   * 引き継ぎに使います。Cognito は更新後の token にも元の `auth_time` を入れるので、
+   * Enterprise policy の最大 session 時間は最初の sign-in から数えたままです。
+   * 応答は login と同じ形で、Cognito が refresh token を rotate しない限り `refreshToken` は
+   * 含みません。Refresh token が失効・期限切れなら 401 `RefreshTokenRejected` を返します。
+   */
+  routeApp.post('/api/auth/refresh', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    const body = await readJson<RefreshTokenRequestBody>(c.req)
+    const refreshToken = readRefreshToken(body?.refreshToken)
+
+    if (!refreshToken) {
+      return c.json({
+        code: 'InvalidRefreshRequest' as const,
+        message: 'Refresh token is required.',
+      }, 400)
+    }
+
+    const cognito = authenticationDependencies.cognito
+    if (!cognito.refreshTokens) {
+      return c.json({
+        code: 'AuthenticationRefreshUnavailable' as const,
+        message: 'Session refresh is not available.',
+      }, 503)
+    }
+
+    const previousAccessToken = readBearerAccessToken(c)
+    const ssoClientId = resolveSessionClientId(previousAccessToken)
+
+    try {
+      const response = await cognito.refreshTokens(refreshToken, ssoClientId)
+      const tokens = response.AuthenticationResult
+
+      if (!tokens?.AccessToken) {
+        return c.json({
+          code: 'UnsupportedAuthenticationChallenge' as const,
+          message: response.ChallengeName
+            ? `Unsupported Cognito challenge: ${response.ChallengeName}`
+            : 'Cognito did not return an access token.',
+        }, 409)
+      }
+
+      if (!ssoClientId && isEnterpriseSsoConfigured()) {
+        // A password session must not outlive a domain switching to enforced SSO.
+        const user = await cognito.getUser(tokens.AccessToken)
+        const email = readUserAttribute(user, 'email')?.trim()
+        const discovery = email
+          ? await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+          : undefined
+        if (discovery) {
+          return c.json({
+            code: 'SsoRequired' as const,
+            message: 'Single sign-on is required for this email domain.',
+            provider: {
+              id: discovery.provider.providerId,
+              kind: discovery.provider.kind,
+              displayName: discovery.provider.displayName,
+            },
+            ssoStartPath: '/api/auth/sso/start' as const,
+          }, 409)
+        }
+      }
+
+      return c.json(await createAuthenticationResponse(
+        tokens,
+        c,
+        {},
+        undefined,
+        [],
+        previousAccessToken ? { previousAccessToken } : undefined,
+      ))
+    } catch (error) {
+      return toRefreshErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Refresh token を Cognito で失効させる sign-out endpoint です。
+   *
+   * @remarks
+   * Body の `refreshToken` は必須です。Cognito の RevokeToken は refresh token と、それから
+   * 発行された access token をすべて失効させるので、sign-out 後は refresh token で session を
+   * 再開できず、残った access token も API で拒否されます。SSO session は
+   * `Authorization: Bearer <access token>` から SSO の app client を判別します。成功時は 204 です。
+   */
+  routeApp.post('/api/auth/logout', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    const body = await readJson<RefreshTokenRequestBody>(c.req)
+    const refreshToken = readRefreshToken(body?.refreshToken)
+
+    if (!refreshToken) {
+      return c.json({
+        code: 'InvalidRefreshRequest' as const,
+        message: 'Refresh token is required.',
+      }, 400)
+    }
+
+    const cognito = authenticationDependencies.cognito
+    if (!cognito.revokeRefreshToken) {
+      return c.json({
+        code: 'AuthenticationRevocationUnavailable' as const,
+        message: 'Session revocation is not available.',
+      }, 503)
+    }
+
+    try {
+      await cognito.revokeRefreshToken(
+        refreshToken,
+        resolveSessionClientId(readBearerAccessToken(c)),
+      )
+      return c.body(null, 204)
+    } catch (error) {
       return toAuthErrorResponse(c, error)
     }
   })

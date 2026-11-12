@@ -350,6 +350,8 @@ export const workItemsMessages = {
   'tasks.count': '{count}件のタスク',
   'tasks.empty': '表示できるタスクはまだありません。',
   'tasks.error.loading': 'タスク一覧を取得できませんでした',
+  'tasks.error.limitExceeded': '表示できる Work Item の上限を超えたため読み込めませんでした。Team や Project の画面で範囲を絞って開いてください。',
+  'tasks.error.reason': '原因: {reason}',
   'tasks.error.loadingCount': '{count}件のプロジェクトでタスク一覧を取得できませんでした。取得できたタスクを表示しています。',
   'tasks.row.selected': '行を選択済み',
   'tasks.status.in-progress': '進行中',

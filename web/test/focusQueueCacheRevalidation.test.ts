@@ -16,6 +16,7 @@ describe('Focus cache revalidation', () => {
     }
 
     expect(isFocusAffectedCacheKey(['workspace-work-items', 'token'], scope)).toBe(true)
+    expect(isFocusAffectedCacheKey(['workspace-work-item-summary', 'token'], scope)).toBe(true)
     expect(isFocusAffectedCacheKey(['team-issues', 'token', 'team-a'], scope)).toBe(true)
     expect(isFocusAffectedCacheKey([
       'project-relation-candidates',

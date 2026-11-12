@@ -1,9 +1,12 @@
+import { TeamIssuesApiError } from '../../issues/api/errors'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
 /**
  * Inputs for the non-blocking Workspace Work Item load notice.
  */
 export type WorkspaceTaskLoadNoticeProps = {
+  /** Error that stopped the Work Item read, used to explain the cause. */
+  error?: unknown
   /** Number of Projects whose Work Item projection is unavailable. */
   failedProjectCount: number
   /** Localized message resolver. */
@@ -13,10 +16,14 @@ export type WorkspaceTaskLoadNoticeProps = {
 /**
  * Displays a partial Work Item load error without hiding available route content.
  *
- * @param props - Failure count and localized message resolver.
+ * A list that is too large to load gets its own explanation of how to narrow it; other failures
+ * show the reason the API returned.
+ *
+ * @param props - Load error, failure count, and localized message resolver.
  * @returns An alert when at least one Project failed, otherwise null.
  */
 export function WorkspaceTaskLoadNotice({
+  error,
   failedProjectCount,
   t,
 }: WorkspaceTaskLoadNoticeProps) {
@@ -24,14 +31,27 @@ export function WorkspaceTaskLoadNotice({
     return null
   }
 
+  const isLimitExceeded = error instanceof TeamIssuesApiError &&
+    error.code === 'WorkItemListLimitExceeded'
+  const reason = error instanceof Error && error.message ? error.message : undefined
+
   return (
-    <p
+    <div
       className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
       data-testid="workspace-task-partial-error"
       role="alert"
     >
-      {t('tasks.error.loading')} ({failedProjectCount})
-    </p>
+      <p>
+        {isLimitExceeded
+          ? t('tasks.error.limitExceeded')
+          : `${t('tasks.error.loading')} (${failedProjectCount})`}
+      </p>
+      {reason ? (
+        <p className="mt-1 text-xs font-medium" data-testid="workspace-task-error-reason">
+          {t('tasks.error.reason').replace('{reason}', reason)}
+        </p>
+      ) : null}
+    </div>
   )
 }
 

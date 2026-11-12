@@ -112,9 +112,20 @@ async function mockWorkspaceSessionApis(
     })
   })
 
-  await page.route('**/api/work-items', async (route) => {
+  await page.route('**/api/work-items**', async (route) => {
     if (options.workItemsFailure) {
       await fulfillWorkspaceApiFailure(route, options.workItemsFailure)
+      return
+    }
+
+    if (new URL(route.request().url()).pathname.endsWith('/work-items/summary')) {
+      await route.fulfill({
+        json: {
+          generatedAt: '2026-06-10T00:00:00.000Z',
+          totals: { total: 0, open: 0, completed: 0 },
+          buckets: [],
+        },
+      })
       return
     }
 

@@ -316,6 +316,8 @@ export function createDeveloperPlatformLabels(
       connectAgain: ja ? '新しく再接続' : 'Connect again',
       chooseResolution: ja ? '解決方法を選択' : 'Choose a resolution',
       createApiKey: ja ? 'API key を作成' : 'Create API key',
+      disablePersonalCredentials: ja ? '発行を停止' : 'Turn off',
+      enablePersonalCredentials: ja ? '発行を許可' : 'Allow',
       createOAuthApp: ja ? 'OAuth app を登録' : 'Register OAuth app',
       createWebhook: ja ? 'Webhook を追加' : 'Add webhook',
       disconnect: ja ? '切断' : 'Disconnect',
@@ -383,6 +385,9 @@ export function createDeveloperPlatformLabels(
     },
     headings: {
       apiKeys: 'API keys',
+      personalCredentials: ja
+        ? 'メンバーによる agent 用キーの発行'
+        : 'Member-issued agent keys',
       apiKeysEmpty: ja ? 'API key はまだありません' : 'No API keys yet',
       connectors: ja ? 'Connector catalog' : 'Connector catalog',
       connectorSearchEmpty: ja
@@ -411,6 +416,15 @@ export function createDeveloperPlatformLabels(
         : 'No webhook subscriptions yet',
     },
     helpText: {
+      personalCredentials: ja
+        ? 'Guest 以外のメンバーが「agent を接続」画面で work-items:read / write に限った自分用キー（最長 90 日）を発行できます。止めても発行済みのキーは残るため、必要なら下の一覧から失効してください。'
+        : 'Members other than guests can issue their own key, limited to work-items:read / write and at most 90 days, from the Connect an agent page. Turning this off keeps issued keys, so revoke them from the list below when needed.',
+      personalCredentialsEnabled: ja ? '許可しています' : 'Allowed',
+      personalCredentialsDisabled: ja ? '停止しています' : 'Turned off',
+      personalCredentialsLoadError: ja
+        ? 'メンバーによる agent 用キーの設定を読み込めませんでした。読み込めるまで、キーの再発行は表示しません。'
+        : 'Member-issued agent key settings could not be loaded. Rotation stays hidden until they load.',
+      personalKey: ja ? '個人用' : 'Personal',
       apiKeys: ja
         ? '自動化ごとに名前と最小 scope を付けます。完全な key はこの一覧に表示しません。'
         : 'Use a named, scoped key for each automation. The complete key is never shown in this ledger.',
