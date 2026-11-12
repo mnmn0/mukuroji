@@ -39,7 +39,10 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
   await page.route('**/api/teams/projects**', (route) => route.fulfill({ json: { teams: projectDirectoryFixtures } }))
   await page.route('**/api/projects/quick-access', (route) => route.fulfill({ json: { items: [], revision: 0 } }))
   await page.route('**/api/notifications/unread-count', (route) => route.fulfill({ json: { unreadCount: 0 } }))
-  await page.route((url) => url.pathname === '/api/work-items', (route) => route.fulfill({ json: { workItems } }))
+  // An unfiltered read stands in for a Workspace too large to list, so the page must ask for its Team only.
+  await page.route((url) => url.pathname === '/api/work-items', (route) => new URL(route.request().url()).searchParams.get('teamId') === 'core-team'
+    ? route.fulfill({ json: { workItems } })
+    : route.fulfill({ status: 413, json: { code: 'WorkItemListLimitExceeded', message: 'Too many Work Items.' } }))
   await page.route((url) => /^\/api\/projects\/[^/]+\/members$/u.test(url.pathname), (route) => {
     const projectId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     return route.fulfill({ json: { projectId, members: [

@@ -34,7 +34,9 @@ export function TeamTimeTrackingPage() {
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
-  const workItems = useWorkspaceWorkItems(accessToken, enabled)
+  // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
+  const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
+  const workItems = useWorkspaceWorkItems(accessToken, enabled, false, teamWorkItemFilter)
   const projectMembers = useWorkspaceProjectMembers(
     accessToken,
     activeTeam?.id,
