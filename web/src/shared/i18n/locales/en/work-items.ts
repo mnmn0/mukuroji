@@ -592,6 +592,7 @@ export const workItemsMessages = {
   'workItems.configuration.section.schedule': 'Schedule',
   'workItems.configuration.section.relations': 'Relations',
   'workItems.configuration.section.files': 'Files',
+  'workItems.configuration.section.time': 'Time tracking',
   'workItems.configuration.section.activity': 'Activity',
   'workItems.owner.label': 'Accountable owner',
   'workItems.owner.help': 'The one person accountable for the outcome. Share the work through contributors.',

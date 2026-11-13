@@ -592,6 +592,7 @@ export const workItemsMessages = {
   'workItems.configuration.section.schedule': 'Schedule',
   'workItems.configuration.section.relations': 'Relations',
   'workItems.configuration.section.files': 'Files',
+  'workItems.configuration.section.time': '工数',
   'workItems.configuration.section.activity': 'Activity',
   'workItems.owner.label': '責任者',
   'workItems.owner.help': '結果に最終責任を持つ 1 人です。作業の分担は Contributor に設定します。',

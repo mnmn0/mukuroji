@@ -701,6 +701,7 @@ const workItemDetailSectionIds = [
   'schedule',
   'relations',
   'files',
+  'time',
   'activity',
 ] as const satisfies readonly WorkItemDetailSectionId[]
 
@@ -712,6 +713,7 @@ const workItemDetailSectionLabelKeys: Record<WorkItemDetailSectionId, MessageKey
   schedule: 'workItems.configuration.section.schedule',
   relations: 'workItems.configuration.section.relations',
   files: 'workItems.configuration.section.files',
+  time: 'workItems.configuration.section.time',
   activity: 'workItems.configuration.section.activity',
 }
 

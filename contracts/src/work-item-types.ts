@@ -16,6 +16,7 @@ export type WorkItemDetailSectionId =
   | 'schedule'
   | 'relations'
   | 'files'
+  | 'time'
   | 'activity'
 
 /**
@@ -66,6 +67,7 @@ export const DEFAULT_WORK_ITEM_TYPE: WorkItemType = {
     'schedule',
     'relations',
     'files',
+    'time',
     'activity',
   ],
   allowedChildTypeIds: [DEFAULT_WORK_ITEM_TYPE_ID],

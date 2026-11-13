@@ -716,6 +716,7 @@ export const workspaceMessages = {
   'sidebar.teamOverview': 'Team overview',
   'sidebar.triage': 'Triage',
   'sidebar.factoryBoard': 'Factory board',
+  'sidebar.timeTracking': 'Time',
   'sidebar.issues': 'Issues',
   'sidebar.members': 'Members',
   'sidebar.projectCount': '{count} projects',
