@@ -710,6 +710,8 @@ test('DynamoDB sort-order pages never resume at a Work Item the caller cannot re
   expect(firstPage.issues.map((issue) => issue.id)).toEqual(['visible-a'])
   expect(firstPage.nextPosition).toEqual({ kind: 'after-sort-order', sortOrder: 30 })
   expect(JSON.stringify(firstPage)).not.toContain('secret')
+  // DynamoDB reads no more than the bound, then at most the allowance for the shared sort order.
+  expect(sentInputs.map((input) => input.Limit)).toEqual([3, 100])
 
   sentInputs.length = 0
   const secondPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
@@ -730,8 +732,60 @@ test('DynamoDB sort-order pages never resume at a Work Item the caller cannot re
     },
     ExclusiveStartKey: undefined,
     ScanIndexForward: true,
-    Limit: 500,
+    Limit: 3,
   }])
+})
+
+test('DynamoDB sort-order pages fail instead of reading an unbounded shared sort order', async () => {
+  const createHiddenItem = (issueId: string, sortOrder: number) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    sortOrder,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    archivedAt: '2026-07-12T00:00:00.000Z',
+    archivedBy: 'demo@example.com',
+  })
+  const sentLimits: unknown[] = []
+  let issued = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentLimits.push(command.input.Limit)
+      const limit = Number(command.input.Limit)
+      // Every row shares one sort order and is archived, so the bound never finds a boundary.
+      const items = Array.from({ length: limit }, () => createHiddenItem(`hidden-${issued++}`, 10))
+      return { Items: items, LastEvaluatedKey: { opaque: issued } }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 2,
+    maxEvaluatedRows: 2,
+  })).rejects.toMatchObject({ status: 503, code: 'WorkItemListReadStalled' })
+  expect(sentLimits).toEqual([2, 100])
+  expect(issued).toBe(102)
 })
 
 test('DynamoDB Team Work Item detail rejects a malformed body on non-comment events', async () => {

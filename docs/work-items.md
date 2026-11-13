@@ -191,7 +191,7 @@ Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/sr
 - 順序は並び順の GSI（Team は `TeamIssueSortOrderIndex`、Project は `AssignedProjectIssueIndex`）の `sortOrder`。cursor が指す位置は「page が返した最後の Work Item の直後」か「ある `sortOrder` 以下をすべて評価し終えた境界」のどちらかで、返していない Work Item（archive 済み・別 type・閲覧できない Project のもの）の ID は cursor に入らない。server は呼び出し元の directory で GSI の key を組み立て直し、cursor に directory や DynamoDB の key は入らない。
 - DynamoDB は 1 回の Query で最大 500 row を読み、1 row ずつ評価する。page が埋まった時点で返した Work Item の直後から再開するので、除外される row が続いても Query は数回で済む。
 - cursor は Team / Project の ID、`includeArchived`、`workItemTypeId` に結び付いており、別の一覧や条件で使うと `400 InvalidWorkItemPageCursor` になる。Team の一覧では別 Team の Work Item を指す cursor も拒否する。
-- 1 request が評価する row は 2,000 件まで。archive 済み・別 type・閲覧できない Project の Work Item は評価後に除くので、`issues` が `limit` 未満（0 件もある）でも `nextCursor` が付くことがある。2,000 件目が返さない Work Item だった場合は、同じ `sortOrder` の row を読み終えてから境界の cursor を返す（同じ `sortOrder` の row が 4,000 件を超えると `503 WorkItemListReadStalled`）。
+- 1 request が評価する row は 2,000 件まで。archive 済み・別 type・閲覧できない Project の Work Item は評価後に除くので、`issues` が `limit` 未満（0 件もある）でも `nextCursor` が付くことがある。2,000 件目が返さない Work Item だった場合は、同じ `sortOrder` の row を読み終えてから境界の cursor を返す（この読み切りで評価する row は 100 件までで、超えると `503 WorkItemListReadStalled`）。Query の `Limit` は残りの評価予算を超えない。
 - page をまたいで読む間に並び順を変えると、同じ Work Item が 2 回返る・1 回も返らないことがある。Web は Team ID と Work Item ID で重複を 1 件にまとめ（上限の 10,000 件も重複を除いて数える）、変更後に一覧を読み直す。
 - `limit` も `cursor` も付けない旧来の request は互換のために残しているが、閲覧できる Work Item が 1,000 件を超えると `413 WorkItemListLimitExceeded` になる。移行手順は `GET /api/work-items` と同じく、`limit=200` を付けて `nextCursor` を追う。
 

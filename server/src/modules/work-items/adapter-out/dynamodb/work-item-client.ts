@@ -725,7 +725,8 @@ export type SortedWorkItemPageReadOptions = {
    * Rows DynamoDB evaluates before the page stops early, including rows the filters drop.
    *
    * When the bound is reached on a dropped row, the read continues through the rows that share
-   * its sort order, so the next page can resume without naming the dropped row.
+   * its sort order (at most 100 more rows), so the next page can resume without naming the
+   * dropped row.
    */
   maxEvaluatedRows: number
   /** Where to resume. Omit for the first page. */
@@ -1837,6 +1838,11 @@ export class DynamoDbTeamIssuesClient {
 
     try {
       for (;;) {
+        // Never read past the evaluated-row bound, plus the allowance for one sort order.
+        const readableRows = (finishingSortOrder === undefined
+          ? maxEvaluatedRows
+          : maxEvaluatedRows + SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE) - evaluatedCount
+        if (readableRows <= 0) throw createSortedWorkItemPageStalledError()
         const response = await this.documentClient.send(
           new QueryCommand({
             TableName: this.issueTableName,
@@ -1854,7 +1860,7 @@ export class DynamoDbTeamIssuesClient {
             },
             ExclusiveStartKey: exclusiveStartKey,
             ScanIndexForward: true,
-            Limit: SORTED_WORK_ITEM_PAGE_QUERY_LIMIT,
+            Limit: Math.min(SORTED_WORK_ITEM_PAGE_QUERY_LIMIT, readableRows),
           }),
         )
         const rows = (response.Items ?? []).map(toTeamIssueItem)
@@ -1866,13 +1872,6 @@ export class DynamoDbTeamIssuesClient {
                 issues,
                 nextPosition: { kind: 'after-sort-order', sortOrder: finishingSortOrder },
               }
-            }
-            if (evaluatedCount >= maxEvaluatedRows * 2) {
-              throw new ProjectDataError(
-                503,
-                'WorkItemListReadStalled',
-                'Too many Work Items share one sort order to continue the list.',
-              )
             }
           }
           evaluatedCount += 1
@@ -4790,6 +4789,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Rows one sort-order page Query reads at a time. */
 const SORTED_WORK_ITEM_PAGE_QUERY_LIMIT = 500
+
+/**
+ * Rows a page may evaluate past its bound to finish the sort order the bound ended on.
+ *
+ * New Work Items take a sort order from the Team's current count, so a few can share one; a
+ * group larger than this fails with `503 WorkItemListReadStalled` instead of reading without end.
+ */
+const SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE = 100
+
+/**
+ * Creates the error for a shared sort order larger than the page can finish.
+ *
+ * @returns The 503 project data error.
+ */
+function createSortedWorkItemPageStalledError(): ProjectDataError {
+  return new ProjectDataError(
+    503,
+    'WorkItemListReadStalled',
+    'Too many Work Items share one sort order to continue the list.',
+  )
+}
 
 /**
  * Creates the error for a page start position outside the requested Team partition.
