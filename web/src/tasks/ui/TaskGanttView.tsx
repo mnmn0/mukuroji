@@ -59,6 +59,9 @@ import {
   TaskViewHeading,
 } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
+import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
+import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
+import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRendering'
 
 const GANTT_DAY_WIDTH = 42
 const GANTT_TABLE_WIDTH = 360
@@ -268,14 +271,20 @@ export function TaskGanttView({
     ]),
     [dependencyRows, rows],
   )
+  // Thousands of rows are rendered in steps; connectors are laid out for rendered rows only.
+  const {
+    renderedItems: renderedRows,
+    hiddenCount: hiddenRowCount,
+    showMore: showMoreRows,
+  } = useIncrementalRender(rows, TASK_TABLE_RENDER_STEP)
   const dependencyLayout = useMemo(
     () => createGanttDependencyLayout(
       dependencyRows,
-      rows,
+      renderedRows,
       timelineColumns,
       projectTaskKeys,
     ),
-    [dependencyRows, projectTaskKeys, rows, timelineColumns],
+    [dependencyRows, projectTaskKeys, renderedRows, timelineColumns],
   )
   const [dragChange, setDragChange] = useState<GanttDragChange>()
   const dragChangeRef = useRef<GanttDragChange | undefined>(undefined)
@@ -628,7 +637,7 @@ export function TaskGanttView({
                 </div>
               </div>
             ) : null}
-          {rows.map((row) => {
+          {renderedRows.map((row) => {
             const taskKey = createTaskKey(row.task)
             const isBusy = busyTaskKey === taskKey
             const bar = createGanttBar(row.schedule, timelineColumns)
@@ -839,11 +848,20 @@ export function TaskGanttView({
               </article>
             )
           })}
+            {hiddenRowCount > 0 ? (
+              <div className="sticky left-0 p-3" style={{ width: `${GANTT_TABLE_WIDTH}px` }}>
+                <ShowMoreItemsButton
+                  label={formatShowMoreLabel(t, TASK_TABLE_RENDER_STEP, hiddenRowCount)}
+                  onShowMore={showMoreRows}
+                  testId="task-gantt-show-more"
+                />
+              </div>
+            ) : null}
             <svg
               aria-hidden="true"
               className="pointer-events-none absolute top-0 z-[1] overflow-visible"
               data-testid="task-gantt-connector-overlay"
-              height={dependencyLayout.externalLaneHeight + rows.length * GANTT_ROW_HEIGHT}
+              height={dependencyLayout.externalLaneHeight + renderedRows.length * GANTT_ROW_HEIGHT}
               style={{ left: `${GANTT_TABLE_WIDTH}px` }}
               width={timelineColumns.length * GANTT_DAY_WIDTH}
             >

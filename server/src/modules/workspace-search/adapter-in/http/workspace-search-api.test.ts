@@ -333,13 +333,32 @@ test('Work Item collection endpoints strictly propagate includeArchived and pres
             : response.issues,
         }
       },
-      async getProjectIssues(directoryId, projectId, options) {
-        includeArchivedReads.push(options?.includeArchived ?? false)
-        const response = await baseTeamIssues.getProjectIssues(directoryId, projectId, options)
+      async getTeamIssuePage(directoryId, teamId, options) {
+        includeArchivedReads.push(options.includeArchived ?? false)
+        const response = await baseTeamIssues.getTeamIssuePage(directoryId, teamId, options)
         const source = response.issues[0]
         return {
           ...response,
-          issues: options?.includeArchived && source
+          issues: options.includeArchived && source
+            ? [
+                ...response.issues,
+                {
+                  ...source,
+                  id: `archived-${teamId}`,
+                  archivedAt: '2026-08-08T00:00:00.000Z',
+                  archivedBy: 'demo@example.com',
+                },
+              ]
+            : response.issues,
+        }
+      },
+      async getProjectIssuePage(directoryId, projectId, options) {
+        includeArchivedReads.push(options.includeArchived ?? false)
+        const response = await baseTeamIssues.getProjectIssuePage(directoryId, projectId, options)
+        const source = response.issues[0]
+        return {
+          ...response,
+          issues: options.includeArchived && source
             ? [
                 ...response.issues,
                 {

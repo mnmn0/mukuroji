@@ -58,6 +58,11 @@ import {
   TaskWorkItemTypeBadge,
 } from './TaskViewPrimitives'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
+import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
+import {
+  formatShowMoreLabel,
+  TASK_BOARD_COLUMN_RENDER_STEP,
+} from '../model/taskListRendering'
 
 /** Resolves a localized task-board message. */
 type TaskBoardTranslator = (key: MessageKey) => string
@@ -134,6 +139,7 @@ export function TaskBoardView({
   const [draggedTaskKey, setDraggedTaskKey] = useState<string>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string>()
   const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const [columnRenderLimits, setColumnRenderLimits] = useState<Readonly<Record<string, number>>>({})
   const unavailableTasks = tasks.filter((task) =>
     configurationFailedTeamIds.includes(task.teamId),
   )
@@ -268,6 +274,16 @@ export function TaskBoardView({
         const orderedStatusTasks = subgroups.length > 0
           ? subgroups.flatMap((group) => group.items)
           : statusTasks
+        // Long columns render their cards in steps; the selected card always stays rendered.
+        const selectedCardIndex = selectedDetailTaskKey
+          ? orderedStatusTasks.findIndex((task) => createTaskKey(task) === selectedDetailTaskKey)
+          : -1
+        const columnRenderLimit = Math.max(
+          columnRenderLimits[column.key] ?? TASK_BOARD_COLUMN_RENDER_STEP,
+          selectedCardIndex + 1,
+        )
+        const renderedStatusTasks = orderedStatusTasks.slice(0, columnRenderLimit)
+        const hiddenCardCount = orderedStatusTasks.length - renderedStatusTasks.length
         const subgroupByFirstTaskKey = new Map<string, (typeof subgroups)[number]>()
         for (const group of subgroups) {
           const firstTask = group.items[0]
@@ -336,7 +352,7 @@ export function TaskBoardView({
             </div>
             <div className={`grid ${cardGap}`}>
               {statusTasks.length > 0 ? (
-                orderedStatusTasks.map((task) => {
+                renderedStatusTasks.map((task) => {
                   const taskKey = createTaskKey(task)
                   const schedule = resolveTaskSchedule(task)
                   const scheduleRange = formatTaskScheduleRange(schedule)
@@ -610,7 +626,17 @@ export function TaskBoardView({
                     </article>
                     </Fragment>
                   )
-                })
+                }).concat(hiddenCardCount > 0 ? [
+                  <ShowMoreItemsButton
+                    key="show-more"
+                    label={formatShowMoreLabel(t, TASK_BOARD_COLUMN_RENDER_STEP, hiddenCardCount)}
+                    onShowMore={() => setColumnRenderLimits((current) => ({
+                      ...current,
+                      [column.key]: columnRenderLimit + TASK_BOARD_COLUMN_RENDER_STEP,
+                    }))}
+                    testId={`project-task-show-more-${createProjectStatusTestToken(column.key)}`}
+                  />,
+                ] : [])
               ) : (
                 <p className="rounded-md border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
                   {t('tasks.board.empty')}

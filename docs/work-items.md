@@ -183,9 +183,31 @@ Team と Project ごとの bucket（Project 未割当は `projectId` なし）�
 
 Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/src/issues/queries/workspaceWorkItemLoader.ts`）は 3 の手順を実装しており、集めた Work Item が 10,000 件を超えると同じ `413` 相当の error にする。絞り込みが強いと空の page が続くので、page 数では打ち切らない（同じ `nextCursor` が返る、または 500 page を超えたときだけ読み取り停止の error にする）。
 
+## Team / Project の一覧
+
+`GET /api/teams/{teamId}/issues` と `GET /api/projects/{projectId}/issues` も 1 response の件数に上限がある。
+
+- `limit`（1〜200、既定 100）または `cursor` を付けると、Team は `{ teamId, issues, nextCursor? }`、Project は `{ projectId, issues, canReadCustomerImpact, nextCursor? }` を返す。`nextCursor` が無くなるまで同じ条件で読み続ける。
+- 順序は並び順の GSI（Team は `TeamIssueSortOrderIndex`、Project は `AssignedProjectIssueIndex`）の `sortOrder`。cursor は最後に評価した Work Item の `sortOrder`・Team ID・Work Item ID を持ち、server が呼び出し元の directory で GSI の key を組み立て直す。cursor に directory や DynamoDB の key は入らない。
+- cursor は Team / Project の ID、`includeArchived`、`workItemTypeId` に結び付いており、別の一覧や条件で使うと `400 InvalidWorkItemPageCursor` になる。Team の一覧では別 Team の Work Item を指す cursor も拒否する。
+- 1 request が評価する row は 2,000 件まで。archive 済み・別 type・閲覧できない Project の Work Item は評価後に除くので、`issues` が `limit` 未満（0 件もある）でも `nextCursor` が付くことがある。
+- page をまたいで読む間に並び順を変えると、同じ Work Item が 2 回返る・1 回も返らないことがある。Web は Team ID と Work Item ID で重複を許容し、変更後に一覧を読み直す。
+- `limit` も `cursor` も付けない旧来の request は互換のために残しているが、閲覧できる Work Item が 1,000 件を超えると `413 WorkItemListLimitExceeded` になる。移行手順は `GET /api/work-items` と同じく、`limit=200` を付けて `nextCursor` を追う。
+
+Web の `loadTeamIssues` / `loadProjectIssues`（`web/src/issues/queries/scopedWorkItemLoader.ts`）は `limit=200` で cursor を最後まで追い、`loadWorkspaceWorkItems` と同じく 10,000 件を超えると `413`、cursor が進まないと `503 WorkItemListReadStalled` 相当の error にする。Team / Project 画面はこの 2 つを原因付きで表示する（`tasks.error.scopeLimitExceeded` / `tasks.error.readStalled` と `tasks.error.reason`）。
+
+### 大きな一覧の表示
+
+読み込んだ Work Item は検索・絞り込み・並び替え・件数表示のすべてに使い、描画だけを段階的に行う。
+
+- テーブル（Team / Project）と期限順リストは最初の 200 行、ボードは列ごとに最初の 50 枚を描画し、「さらに N 件を表示（未表示 M 件）」で同じ件数ずつ追加する。
+- 詳細を開いている Work Item と、Team テーブルでキーボード focus がある行は、段階表示の範囲外でも描画する。
+- 期限順リストの依存関係の線は、描画済みの行の間だけに引く。
+- 期限カレンダーは日付ごとに表示するので段階表示しない。
+- 2,000 件の Team / Project で、本番 build の初回表示とボード・期限順・期限カレンダー・テーブルの切り替えはそれぞれ約 2 秒以内（`web/e2e/tasks.spec.ts` の Issue #458 の test で、cursor の読み切りと段階表示を確認している）。
+
 ### まだ残している上限
 
-- `GET /api/teams/{teamId}/issues` と `GET /api/projects/{projectId}/issues` は cursor を持たず全件を返す。
 - Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
 - Work Item 作成は ID と `sortOrder` を決めるために Team partition 全件を読む。
 

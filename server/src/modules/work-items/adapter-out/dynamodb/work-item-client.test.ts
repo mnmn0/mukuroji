@@ -531,6 +531,125 @@ test('DynamoDB Team Work Item read can bound evaluated rows including archived r
   })).rejects.toMatchObject({ code: 'InvalidWorkItemListRead' })
 })
 
+test('DynamoDB sort-order pages resume from the last evaluated row and bound evaluated rows', async () => {
+  const createStoredItem = (issueId: string, sortOrder: number, archived = false) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#launch',
+    teamId: 'core-team',
+    assignedProjectId: 'launch',
+    issueId,
+    sortOrder,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    ...(archived
+      ? { archivedAt: '2026-07-12T00:00:00.000Z', archivedBy: 'demo@example.com' }
+      : {}),
+  })
+  const responses = [
+    {
+      Items: [createStoredItem('item-b', 20, true), createStoredItem('item-c', 30)],
+      LastEvaluatedKey: { opaque: 'first' },
+    },
+    {
+      Items: [createStoredItem('item-d', 40)],
+      LastEvaluatedKey: { opaque: 'second' },
+    },
+    {
+      Items: [createStoredItem('item-e', 50)],
+    },
+  ]
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return responses.shift()
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const teamPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 2,
+    maxEvaluatedRows: 3,
+    startAfter: { sortOrder: 10, teamId: 'core-team', issueId: 'item-a' },
+  })
+
+  expect(teamPage.issues.map((issue) => issue.id)).toEqual(['item-c', 'item-d'])
+  expect(teamPage.nextPosition).toEqual({ sortOrder: 40, teamId: 'core-team', issueId: 'item-d' })
+  expect(sentInputs).toEqual([
+    {
+      TableName: 'WorkItemsTable',
+      IndexName: 'TeamIssueSortOrderIndex',
+      KeyConditionExpression: '#partition = :partition',
+      ExpressionAttributeNames: { '#partition': 'directoryTeamId' },
+      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core-team' },
+      ExclusiveStartKey: {
+        directoryTeamId: 'workspace-1#team#core-team',
+        sortOrder: 10,
+        issueId: 'item-a',
+      },
+      ScanIndexForward: true,
+      Limit: 2,
+    },
+    {
+      TableName: 'WorkItemsTable',
+      IndexName: 'TeamIssueSortOrderIndex',
+      KeyConditionExpression: '#partition = :partition',
+      ExpressionAttributeNames: { '#partition': 'directoryTeamId' },
+      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core-team' },
+      ExclusiveStartKey: { opaque: 'first' },
+      ScanIndexForward: true,
+      Limit: 1,
+    },
+  ])
+
+  sentInputs.length = 0
+  const projectPage = await client.getProjectIssuePage('workspace-1', 'launch', {
+    limit: 5,
+    maxEvaluatedRows: 5,
+    startAfter: { sortOrder: 40, teamId: 'other-team', issueId: 'item-d' },
+  })
+  expect(projectPage).toEqual({
+    issues: [expect.objectContaining({ id: 'item-e' })],
+  })
+  expect(sentInputs[0]).toMatchObject({
+    IndexName: 'AssignedProjectIssueIndex',
+    ExpressionAttributeNames: { '#partition': 'directoryProjectId' },
+    ExpressionAttributeValues: { ':partition': 'workspace-1#project#launch' },
+    ExclusiveStartKey: {
+      directoryProjectId: 'workspace-1#project#launch',
+      sortOrder: 40,
+      directoryTeamId: 'workspace-1#team#other-team',
+      issueId: 'item-d',
+    },
+  })
+
+  await expect(client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 2,
+    maxEvaluatedRows: 3,
+    startAfter: { sortOrder: 10, teamId: 'other-team', issueId: 'item-a' },
+  })).rejects.toMatchObject({ status: 400, code: 'InvalidWorkItemPageCursor' })
+})
+
 test('DynamoDB Team Work Item detail rejects a malformed body on non-comment events', async () => {
   const canonicalWorkItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,

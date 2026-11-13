@@ -1035,7 +1035,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         projectId,
-        issues: [...projectIssues, ...assignedIssues],
+        ...createMockWorkItemListPage(route.request().url(), [...projectIssues, ...assignedIssues]),
       },
     })
   })
@@ -1478,7 +1478,10 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         teamId,
-        issues: [...projectIssues, ...(teamIssuesByTeam[teamId] ?? [])],
+        ...createMockWorkItemListPage(
+          route.request().url(),
+          [...projectIssues, ...(teamIssuesByTeam[teamId] ?? [])],
+        ),
       },
     })
   })
@@ -13485,3 +13488,147 @@ function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
     buckets: summaryBuckets,
   }
 }
+
+/**
+ * Serves one page of a mock Team or Project Work Item list like the cursor API does.
+ *
+ * Requests without `limit` and `cursor` get the legacy complete list. The mock cursor is the
+ * offset of the next page.
+ *
+ * @param requestUrl - URL of the intercepted list request.
+ * @param issues - Complete mock list in sort order.
+ * @returns The page and the cursor of the next one.
+ */
+function createMockWorkItemListPage(requestUrl: string, issues: readonly TeamIssue[]) {
+  const searchParams = new URL(requestUrl).searchParams
+  const limit = searchParams.get('limit')
+  const cursor = searchParams.get('cursor')
+  if (limit === null && cursor === null) return { issues }
+  const pageSize = Number(limit ?? '100')
+  const offset = Number(cursor ?? '0')
+  const nextOffset = offset + pageSize
+  return {
+    issues: issues.slice(offset, nextOffset),
+    ...(nextOffset < issues.length ? { nextCursor: String(nextOffset) } : {}),
+  }
+}
+
+test.describe('Issue #458: 2,000 件の Team / Project 一覧', () => {
+  /**
+   * Creates 2,000 synthetic Project Work Items from the Refero fixtures.
+   *
+   * @returns Work Items whose IDs and titles carry their index.
+   */
+  function createSyntheticTasks() {
+    return Array.from({ length: 2_000 }, (_, index) => {
+      const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
+      return { ...fixture, id: `synthetic-${index}`, title: `Synthetic task ${index}` }
+    })
+  }
+
+  test('Project の一覧を cursor で読み切り、段階表示・検索・ビュー切り替えができる', async ({ page }) => {
+    test.setTimeout(120_000)
+    await mockAuthenticatedTaskPage(page, createSyntheticTasks())
+    const listRequests: string[] = []
+    page.on('request', (request) => {
+      const url = new URL(request.url())
+      if (request.method() === 'GET' && url.pathname === '/api/projects/refero/issues') {
+        listRequests.push(url.search)
+      }
+    })
+
+    await page.goto('/projects/refero/issues')
+
+    await expect(page.getByTestId('task-table-show-more')).toBeVisible({ timeout: 60_000 })
+    expect(listRequests).toHaveLength(10)
+    expect(listRequests[0]).toBe('?limit=200&includeArchived=true')
+    expect(listRequests[1]).toBe('?limit=200&includeArchived=true&cursor=200')
+    const renderedRows = page.locator('tr[data-testid^="task-row-synthetic-"]')
+    await expect(renderedRows).toHaveCount(200)
+    const showMore = page.getByTestId('task-table-show-more')
+    await expect(showMore).toHaveText('さらに 200 件を表示（未表示 1800 件）')
+    await showMore.click()
+    await expect(renderedRows).toHaveCount(400)
+    await expect(showMore).toHaveText('さらに 200 件を表示（未表示 1600 件）')
+
+    // Search runs over every loaded Work Item, not only the rendered rows. The last Work Item
+    // copied from the first fixture is open and visible under the default filters.
+    const lastIndex = Math.floor(1_999 / referoTaskFixtures.length) * referoTaskFixtures.length
+    const searchbox = page.getByRole('searchbox', { name: '検索...' })
+    await searchbox.fill(`Synthetic task ${lastIndex}`)
+    await expect(searchbox).toHaveValue(`Synthetic task ${lastIndex}`)
+    await expect(page.getByTestId(`task-row-synthetic-${lastIndex}`)).toBeVisible({ timeout: 15_000 })
+    await expect(showMore).toHaveCount(0)
+    await searchbox.clear()
+    await expect(renderedRows).toHaveCount(400)
+
+    const tablist = page.getByRole('tablist').first()
+    for (const [name, showMoreSelector] of [
+      ['ボード', '[data-testid^="project-task-show-more-"]'],
+      ['期限順', '[data-testid="task-gantt-show-more"]'],
+      ['期限カレンダー', undefined],
+    ] as const) {
+      const tab = tablist.getByRole('tab', { name, exact: true })
+      await tab.click()
+      await expect(tab).toHaveAttribute('aria-selected', 'true', { timeout: 30_000 })
+      if (showMoreSelector) {
+        await expect(page.locator(showMoreSelector).first()).toBeVisible({ timeout: 30_000 })
+      }
+    }
+  })
+
+  test('詳細を開いた行が段階表示の範囲外でも一覧に残る', async ({ page }) => {
+    test.setTimeout(120_000)
+    await mockAuthenticatedTaskPage(page, createSyntheticTasks())
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=synthetic-1500')
+
+    await expect(page.getByTestId('task-row-synthetic-1500')).toHaveCount(1, { timeout: 60_000 })
+    const renderedRowCount = await page.locator('tr[data-testid^="task-row-synthetic-"]').count()
+    expect(renderedRowCount).toBeGreaterThanOrEqual(200)
+    await expect(page.getByTestId('task-table-show-more')).toHaveText(
+      `さらに 200 件を表示（未表示 ${2_000 - renderedRowCount} 件）`,
+    )
+  })
+
+  test('Team の一覧を cursor で読み切り、テーブルとボードを段階表示する', async ({ page }) => {
+    test.setTimeout(120_000)
+    await mockAuthenticatedTaskPage(page, createSyntheticTasks())
+
+    await page.goto('/teams/core-team/issues')
+
+    await expect(page.getByTestId('team-issues-count')).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByTestId('team-issues-count')).toContainText('2000')
+    const renderedRows = page.locator('[data-testid^="issue-row-synthetic-"]')
+    await expect(renderedRows).toHaveCount(200)
+    await page.getByTestId('team-issue-table-show-more').click()
+    await expect(renderedRows).toHaveCount(400)
+
+    const boardViewButton = page.getByRole('button', { name: 'ボード', exact: true })
+    await boardViewButton.click()
+    await expect(boardViewButton).toHaveAttribute('aria-pressed', 'true', { timeout: 30_000 })
+    await expect(page.locator('[data-testid^="team-issue-show-more-"]').first()).toBeVisible()
+  })
+
+  test('一覧の上限を超えたときは原因を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    await page.route(/.*\/api\/projects\/refero\/issues(?:\?.*)?$/u, async (route) => {
+      await route.fulfill({
+        status: 413,
+        json: {
+          code: 'WorkItemListLimitExceeded',
+          message: 'More than 10000 Work Items match this view.',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues')
+
+    await expect(page.getByTestId('tasks-error')).toContainText(
+      'この一覧の Work Item が多すぎるため読み込めませんでした。',
+    )
+    await expect(page.getByTestId('tasks-error')).toContainText(
+      '原因: More than 10000 Work Items match this view.',
+    )
+  })
+})

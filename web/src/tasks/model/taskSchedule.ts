@@ -355,6 +355,39 @@ export function deriveTaskScheduleDueDate(schedule: WorkItemSchedule): string {
 }
 
 /**
+ * ISO date formatters keyed by IANA timezone.
+ *
+ * Creating an `Intl.DateTimeFormat` is far slower than formatting with one, and list views
+ * convert an instant once per Work Item, so each timezone's formatter is created once.
+ */
+const taskScheduleDateFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/**
+ * Returns the cached ISO date formatter for a timezone.
+ *
+ * @param timeZone - IANA timezone of the schedule calendar policy.
+ * @returns A formatter producing Gregorian year, month, and day parts in that timezone.
+ * @throws RangeError when the timezone is not a valid IANA identifier.
+ */
+function readTaskScheduleDateFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = taskScheduleDateFormatters.get(timeZone)
+  if (cached) return cached
+  let formatter: Intl.DateTimeFormat
+  try {
+    formatter = new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
+      day: '2-digit',
+      month: '2-digit',
+      timeZone,
+      year: 'numeric',
+    })
+  } catch {
+    throw new RangeError('Task schedule timezone must be a valid IANA identifier.')
+  }
+  taskScheduleDateFormatters.set(timeZone, formatter)
+  return formatter
+}
+
+/**
  * Maps an absolute instant to the local ISO date defined by a schedule policy.
  *
  * @param instant - Absolute instant to map without using the browser's local timezone.
@@ -369,17 +402,7 @@ export function taskScheduleInstantToLocalDate(
     throw new RangeError('Task schedule instant must be a valid date.')
   }
 
-  let parts: Intl.DateTimeFormatPart[]
-  try {
-    parts = new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
-      day: '2-digit',
-      month: '2-digit',
-      timeZone: policy.timeZone,
-      year: 'numeric',
-    }).formatToParts(instant)
-  } catch {
-    throw new RangeError('Task schedule timezone must be a valid IANA identifier.')
-  }
+  const parts = readTaskScheduleDateFormatter(policy.timeZone).formatToParts(instant)
 
   const year = readTaskScheduleDatePart(parts, 'year')
   const month = readTaskScheduleDatePart(parts, 'month')

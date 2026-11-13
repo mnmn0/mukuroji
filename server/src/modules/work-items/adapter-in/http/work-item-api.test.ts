@@ -190,9 +190,111 @@ test('loads only canonical team-owned Work Items after team access is confirmed'
       assigneeEmail: 'sato@example.com',
     }),
   ])
-  expect(calls.issueReads).toEqual([
-    { directoryId: 'user#demo@example.com', teamId: 'core-team' },
+  expect(calls.issuePageReads).toEqual([
+    { directoryId: 'user#demo@example.com', kind: 'team', id: 'core-team', limit: 200 },
   ])
+})
+
+test('pages a Team Work Item list with a cursor bound to the Team and filters', async () => {
+  const calls = configureFakeProjectClients(true, {
+    taskAssigneeUserId: 'sato@example.com',
+    teamIssueCount: 5,
+    inaccessibleTeamIssueCount: 1,
+  })
+  const headers = { Authorization: 'Bearer test-token' }
+
+  const firstResponse = await app.request('/api/teams/core-team/issues?limit=2', { headers })
+  expect(firstResponse.status).toBe(200)
+  const first = await firstResponse.json()
+  // The first row is in a Project the caller cannot read, so the page holds one Work Item.
+  expect(first.teamId).toBe('core-team')
+  expect(first.issues.map((issue: { id: string }) => issue.id)).toEqual(['work-item-1'])
+  expect(first.issues[0]).toMatchObject({ assigneeEmail: 'sato@example.com' })
+  expect(typeof first.nextCursor).toBe('string')
+  expect(JSON.stringify(first)).not.toContain('directoryTeamId')
+
+  const secondResponse = await app.request(
+    `/api/teams/core-team/issues?limit=2&cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  const second = await secondResponse.json()
+  expect(second.issues.map((issue: { id: string }) => issue.id)).toEqual([
+    'work-item-2',
+    'work-item-3',
+  ])
+  const thirdResponse = await app.request(
+    `/api/teams/core-team/issues?limit=2&cursor=${encodeURIComponent(second.nextCursor)}`,
+    { headers },
+  )
+  const third = await thirdResponse.json()
+  expect(third.issues.map((issue: { id: string }) => issue.id)).toEqual(['work-item-4'])
+  expect(third.nextCursor).toBeUndefined()
+  expect(calls.issuePageReads.map((read) => read.startAfterIssueId)).toEqual([
+    undefined,
+    'work-item-1',
+    'work-item-3',
+  ])
+
+  const otherFilter = await app.request(
+    `/api/teams/core-team/issues?includeArchived=true&cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  expect(otherFilter.status).toBe(400)
+  expect(await otherFilter.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+  const malformed = await app.request('/api/teams/core-team/issues?cursor=not-a-cursor', {
+    headers,
+  })
+  expect(malformed.status).toBe(400)
+  expect(await malformed.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+  for (const limit of ['0', '201', 'abc']) {
+    const invalidLimit = await app.request(`/api/teams/core-team/issues?limit=${limit}`, {
+      headers,
+    })
+    expect(invalidLimit.status).toBe(400)
+    expect(await invalidLimit.json()).toMatchObject({ code: 'InvalidWorkItemPageLimit' })
+  }
+})
+
+test('rejects a Project page cursor issued for another Project', async () => {
+  configureFakeProjectClients(true, {
+    canonicalProjectIssueIds: ['item-a', 'item-b', 'item-c'],
+  })
+  const headers = { Authorization: 'Bearer test-token' }
+
+  const firstResponse = await app.request('/api/projects/refero/issues?limit=2', { headers })
+  expect(firstResponse.status).toBe(200)
+  const first = await firstResponse.json()
+  expect(first).toMatchObject({ projectId: 'refero', canReadCustomerImpact: expect.any(Boolean) })
+  expect(first.issues.map((issue: { id: string }) => issue.id)).toEqual(['item-a', 'item-b'])
+  const secondResponse = await app.request(
+    `/api/projects/refero/issues?limit=2&cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  const second = await secondResponse.json()
+  expect(second.issues.map((issue: { id: string }) => issue.id)).toEqual(['item-c'])
+  expect(second.nextCursor).toBeUndefined()
+
+  const crossTeam = await app.request(
+    `/api/teams/core-team/issues?cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  expect(crossTeam.status).toBe(400)
+  expect(await crossTeam.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+})
+
+test('fails a legacy Team list request above the legacy item limit instead of truncating it', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 1_001 })
+  const headers = { Authorization: 'Bearer test-token' }
+
+  const legacy = await app.request('/api/teams/core-team/issues', { headers })
+  expect(legacy.status).toBe(413)
+  expect(await legacy.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
+
+  const paged = await app.request('/api/teams/core-team/issues?limit=200', { headers })
+  expect(paged.status).toBe(200)
+  const page = await paged.json()
+  expect(page.issues).toHaveLength(200)
+  expect(typeof page.nextCursor).toBe('string')
 })
 
 test('loads all accessible canonical Work Items including unassigned items', async () => {

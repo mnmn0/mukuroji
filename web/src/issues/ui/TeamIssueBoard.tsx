@@ -6,6 +6,11 @@ import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam } from '../../projects/api'
 import { TaskWorkItemTypeBadge } from '../../tasks/ui/TaskViewPrimitives'
+import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
+import {
+  formatShowMoreLabel,
+  TASK_BOARD_COLUMN_RENDER_STEP,
+} from '../../tasks/model/taskListRendering'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
   resolveWorkItemDependencySummary,
@@ -102,6 +107,7 @@ export function IssueBoard({
   const [draggedIssueId, setDraggedIssueId] = useState<string>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string>()
   const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [columnRenderLimits, setColumnRenderLimits] = useState<Readonly<Record<string, number>>>({})
   /** Checks the Board callback and the current issue-specific write scope together. */
   const canMoveIssue = (issue: TeamIssue) => Boolean(
     !isAiOperationPending && onMoveIssueStatus && (canMoveIssueStatus?.(issue) ?? true),
@@ -273,6 +279,16 @@ export function IssueBoard({
             }
           }
           if (primaryCardGroups.length === 0) orderedColumnIssues.push(...columnIssues)
+          // Long columns render their cards in steps; the selected card always stays rendered.
+          const selectedCardIndex = selectedIssueId
+            ? orderedColumnIssues.findIndex((issue) => issue.id === selectedIssueId)
+            : -1
+          const columnRenderLimit = Math.max(
+            columnRenderLimits[columnKey] ?? TASK_BOARD_COLUMN_RENDER_STEP,
+            selectedCardIndex + 1,
+          )
+          const renderedColumnIssues = orderedColumnIssues.slice(0, columnRenderLimit)
+          const hiddenCardCount = orderedColumnIssues.length - renderedColumnIssues.length
 
           return (
             <div
@@ -331,7 +347,7 @@ export function IssueBoard({
               </div>
               <div className={`grid ${cardListSpacing}`}>
                 {columnIssues.length > 0 ? (
-                  orderedColumnIssues.map((issue) => {
+                  renderedColumnIssues.map((issue) => {
                     const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
                     const focusedForAction = focusedIssueKey === issueKey
                     const selectedForAction = selectedIssueKeys.includes(issueKey)
@@ -518,7 +534,17 @@ export function IssueBoard({
                       </article>
                       </Fragment>
                     )
-                  })
+                  }).concat(hiddenCardCount > 0 ? [
+                    <ShowMoreItemsButton
+                      key="show-more"
+                      label={formatShowMoreLabel(t, TASK_BOARD_COLUMN_RENDER_STEP, hiddenCardCount)}
+                      onShowMore={() => setColumnRenderLimits((current) => ({
+                        ...current,
+                        [columnKey]: columnRenderLimit + TASK_BOARD_COLUMN_RENDER_STEP,
+                      }))}
+                      testId={`team-issue-show-more-${statusTestToken}`}
+                    />,
+                  ] : [])
                 ) : (
                   <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
                     {t('tasks.board.empty')}

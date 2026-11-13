@@ -77,6 +77,9 @@ import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
   type CreateTeamIssueRequestBody,
+  type SortedWorkItemPage,
+  type SortedWorkItemPageReadOptions,
+  type TeamIssueResponseItem,
   type TeamIssueDetailReadOptions,
   type TeamIssuesClient,
   type UpdateTeamIssueRequestBody,
@@ -737,6 +740,52 @@ function createDocumentFake(
 }
 
 /**
+ * Reads one sort-order page from fake Work Items ordered by array position.
+ *
+ * Each fake Work Item's sort order is its position times ten, like newly created Work Items.
+ *
+ * @param partition - Fake Work Items in sort order.
+ * @param readOptions - Page size, evaluated-row bound, start position, and filters.
+ * @returns The page and where the next page starts.
+ */
+function readFakeSortedPage(
+  partition: readonly TeamIssueResponseItem[],
+  readOptions: SortedWorkItemPageReadOptions,
+): SortedWorkItemPage {
+  const startIndex = readOptions.startAfter === undefined
+    ? 0
+    : partition.findIndex((issue) =>
+        issue.teamId === readOptions.startAfter?.teamId &&
+        issue.id === readOptions.startAfter.issueId
+      ) + 1
+  const issues: TeamIssueResponseItem[] = []
+  let index = startIndex
+  let evaluated = 0
+  while (
+    index < partition.length &&
+    issues.length < readOptions.limit &&
+    evaluated < readOptions.maxEvaluatedRows
+  ) {
+    const issue = partition[index]!
+    index += 1
+    evaluated += 1
+    if (!readOptions.includeArchived && issue.archivedAt !== undefined) continue
+    if (
+      readOptions.workItemTypeId !== undefined &&
+      (issue.workItemTypeId ?? 'task') !== readOptions.workItemTypeId
+    ) continue
+    issues.push(issue)
+  }
+  const last = partition[index - 1]
+  return {
+    issues,
+    ...(index < partition.length && last
+      ? { nextPosition: { sortOrder: index * 10, teamId: last.teamId, issueId: last.id } }
+      : {}),
+  }
+}
+
+/**
  * Creates a complete Team Issues test double whose unconfigured methods fail immediately.
  *
  * @param overrides - Methods exercised by the calling test.
@@ -755,6 +804,8 @@ function createTeamIssuesFake(
     getTeamIssues: unsupported,
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
+    getTeamIssuePage: unsupported,
+    getProjectIssuePage: unsupported,
     getTeamIssueDetail: unsupported,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
@@ -1586,6 +1637,13 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     projectIssueReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
+    issuePageReads: [] as Array<{
+      directoryId: string
+      kind: 'team' | 'project'
+      id: string
+      limit: number
+      startAfterIssueId?: string
+    }>,
     projectQuickAccessReads: [] as Array<{
       consistentRead?: boolean
       directoryId: string
@@ -1654,6 +1712,60 @@ function configureFakeProjectClients(
     createdAt: '2026-07-11T00:00:00.000Z',
     updatedAt: '2026-07-11T00:00:00.000Z',
   })
+  /**
+   * Builds the fake Work Items assigned to one Project.
+   *
+   * @param projectId - Project the Work Items are assigned to.
+   * @returns The fake Project Work Items in sort order.
+   */
+  const createFakeProjectIssues = (projectId: string) => {
+    const issues = options.canonicalProjectIssueIds
+      ? options.canonicalProjectIssueIds.map((issueId, index) => ({
+          schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+          revision: 1,
+          id: issueId,
+          teamId: 'core-team',
+          assignedProjectId: projectId,
+          title: `Canonical Work Item ${index}`,
+          assigneeUserId: 'sato@example.com',
+          creatorMemberKey: 'demo@example.com',
+          workflowSchemaVersion: 1 as const,
+          workflowStatusId: 'in-progress',
+          statusCategory: 'started' as const,
+          customFieldValues: {},
+          relationIds: [],
+          dueDate: '2026-06-18',
+          schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+          priority: 'high' as const,
+          createdAt: '2026-06-08T00:00:00.000Z',
+          updatedAt: '2026-06-08T00:00:00.000Z',
+          source: 'dynamodb' as const,
+        }))
+      : [
+          {
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: 1,
+            id: 'onboarding-friction',
+            teamId: 'core-team',
+            assignedProjectId: projectId,
+            title: '初回オンボーディングの離脱要因を減らす',
+            assigneeUserId: 'sato@example.com',
+            creatorMemberKey: 'demo@example.com',
+            workflowSchemaVersion: 1 as const,
+            workflowStatusId: 'in-progress',
+            statusCategory: 'started' as const,
+            customFieldValues: {},
+            relationIds: [],
+            dueDate: '2026-06-18',
+            schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+            priority: 'high' as const,
+            createdAt: '2026-06-08T00:00:00.000Z',
+            updatedAt: '2026-06-08T00:00:00.000Z',
+            source: 'dynamodb' as const,
+          },
+        ]
+    return issues
+  }
   const createFakeTeamIssues = (teamId: string) =>
     Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -2509,6 +2621,26 @@ function configureFakeProjectClients(
           issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
         }
       },
+      async getTeamIssuePage(directoryId, teamId, readOptions) {
+        calls.issuePageReads.push({
+          directoryId,
+          kind: 'team',
+          id: teamId,
+          limit: readOptions.limit,
+          ...(readOptions.startAfter ? { startAfterIssueId: readOptions.startAfter.issueId } : {}),
+        })
+        return readFakeSortedPage(createFakeTeamIssues(teamId), readOptions)
+      },
+      async getProjectIssuePage(directoryId, projectId, readOptions) {
+        calls.issuePageReads.push({
+          directoryId,
+          kind: 'project',
+          id: projectId,
+          limit: readOptions.limit,
+          ...(readOptions.startAfter ? { startAfterIssueId: readOptions.startAfter.issueId } : {}),
+        })
+        return readFakeSortedPage(createFakeProjectIssues(projectId), readOptions)
+      },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({
           directoryId,
@@ -2516,51 +2648,7 @@ function configureFakeProjectClients(
           ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
         })
 
-        const issues = options.canonicalProjectIssueIds
-          ? options.canonicalProjectIssueIds.map((issueId, index) => ({
-              schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-              revision: 1,
-              id: issueId,
-              teamId: 'core-team',
-              assignedProjectId: projectId,
-              title: `Canonical Work Item ${index}`,
-              assigneeUserId: 'sato@example.com',
-              creatorMemberKey: 'demo@example.com',
-              workflowSchemaVersion: 1 as const,
-              workflowStatusId: 'in-progress',
-              statusCategory: 'started' as const,
-              customFieldValues: {},
-              relationIds: [],
-              dueDate: '2026-06-18',
-              schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
-              priority: 'high' as const,
-              createdAt: '2026-06-08T00:00:00.000Z',
-              updatedAt: '2026-06-08T00:00:00.000Z',
-              source: 'dynamodb' as const,
-            }))
-          : [
-              {
-                schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-                revision: 1,
-                id: 'onboarding-friction',
-                teamId: 'core-team',
-                assignedProjectId: projectId,
-                title: '初回オンボーディングの離脱要因を減らす',
-                assigneeUserId: 'sato@example.com',
-                creatorMemberKey: 'demo@example.com',
-                workflowSchemaVersion: 1 as const,
-                workflowStatusId: 'in-progress',
-                statusCategory: 'started' as const,
-                customFieldValues: {},
-                relationIds: [],
-                dueDate: '2026-06-18',
-                schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
-                priority: 'high' as const,
-                createdAt: '2026-06-08T00:00:00.000Z',
-                updatedAt: '2026-06-08T00:00:00.000Z',
-                source: 'dynamodb' as const,
-              },
-            ]
+        const issues = createFakeProjectIssues(projectId)
         return {
           projectId,
           issues: readOptions?.limit === undefined ? issues : issues.slice(0, readOptions.limit),

@@ -65,6 +65,7 @@ import {
   useTeamIssueDetail,
   useTeamIssues,
 } from '../../issues/queries/useWorkItems'
+import { describeScopedWorkItemListError } from '../../issues/model/workItemListError'
 import { useProjectCustomerImpact } from '../../customers/queries/useCustomers'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
@@ -767,6 +768,11 @@ export function TaskPage() {
 
     if (!taskError) {
       return undefined
+    }
+
+    const listErrorMessage = describeScopedWorkItemListError(taskError, t)
+    if (listErrorMessage) {
+      return listErrorMessage
     }
 
     const message = taskError instanceof Error ? taskError.message : 'tasks.error.loading'

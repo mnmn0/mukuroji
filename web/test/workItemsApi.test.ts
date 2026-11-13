@@ -7,12 +7,15 @@ import {
 } from '@mukuroji/contracts'
 import {
   confirmTeamIssueSchedule,
-  getProjectIssues,
-  getTeamIssues,
   previewTeamIssueSchedule,
   TeamIssuesApiError,
   updateTeamIssue,
 } from '../src/issues/api'
+import { describeScopedWorkItemListError } from '../src/issues/model/workItemListError'
+import {
+  loadProjectIssues,
+  loadTeamIssues,
+} from '../src/issues/queries/scopedWorkItemLoader'
 import { loadWorkspaceWorkItems } from '../src/issues/queries/workspaceWorkItemLoader'
 import {
   isCanonicalWorkItem,
@@ -248,18 +251,89 @@ describe('canonical Work Item API', () => {
     const workItem = createWorkItem({ archivedAt: '2026-08-09T00:00:00.000Z' })
 
     let requests = installFetchRecorder({ issues: [workItem], teamId: 'core team' })
-    await expect(getTeamIssues('core team', 'access-token', true)).resolves.toEqual([workItem])
-    expect(requests[0]?.url).toBe('/api/teams/core%20team/issues?includeArchived=true')
+    await expect(loadTeamIssues('core team', 'access-token', true)).resolves.toEqual([workItem])
+    expect(requests[0]?.url).toBe('/api/teams/core%20team/issues?limit=200&includeArchived=true')
 
     requests = installFetchRecorder({ issues: [workItem], projectId: 'launch / plan' })
-    await expect(getProjectIssues('launch / plan', 'access-token', true)).resolves.toEqual([workItem])
+    await expect(loadProjectIssues('launch / plan', 'access-token', true)).resolves.toEqual({
+      projectId: 'launch / plan',
+      issues: [workItem],
+    })
     expect(requests[0]?.url).toBe(
-      '/api/projects/launch%20%2F%20plan/issues?includeArchived=true',
+      '/api/projects/launch%20%2F%20plan/issues?limit=200&includeArchived=true',
     )
 
     requests = installFetchRecorder({ workItems: [workItem] })
     await expect(loadWorkspaceWorkItems('access-token', true)).resolves.toEqual([workItem])
     expect(requests[0]?.url).toBe('/api/work-items?limit=200&includeArchived=true')
+  })
+
+  test('follows Team and Project page cursors and keeps the Project capability', async () => {
+    const pages = [
+      { teamId: 'core-team', issues: [createWorkItem({ id: 'item-a' })], nextCursor: 'cursor-1' },
+      { teamId: 'core-team', issues: [], nextCursor: 'cursor-2' },
+      // A reorder between page reads can return a Work Item again; the later copy wins.
+      {
+        teamId: 'core-team',
+        issues: [createWorkItem({ id: 'item-b' }), createWorkItem({ id: 'item-a', revision: 4 })],
+      },
+    ]
+    const requests: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
+      return new Response(JSON.stringify(pages.shift()), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }) as typeof fetch
+
+    const issues = await loadTeamIssues('core-team', 'access-token')
+    expect(issues.map((issue) => [issue.id, issue.revision])).toEqual([['item-a', 4], ['item-b', 3]])
+    expect(requests).toEqual([
+      '/api/teams/core-team/issues?limit=200',
+      '/api/teams/core-team/issues?limit=200&cursor=cursor-1',
+      '/api/teams/core-team/issues?limit=200&cursor=cursor-2',
+    ])
+
+    let projectPage = 0
+    installSequentialFetch(() => {
+      projectPage += 1
+      return projectPage === 1
+        ? {
+            projectId: 'launch',
+            issues: [createWorkItem({ id: 'item-a' })],
+            canReadCustomerImpact: true,
+            nextCursor: 'cursor-1',
+          }
+        : { projectId: 'launch', issues: [createWorkItem({ id: 'item-b' })], canReadCustomerImpact: true }
+    })
+    const project = await loadProjectIssues('launch', 'access-token')
+    expect(project.issues.map((issue) => issue.id)).toEqual(['item-a', 'item-b'])
+    expect(project.canReadCustomerImpact).toBeTrue()
+  })
+
+  test('fails a Team list read that repeats its cursor instead of showing a partial list', async () => {
+    installSequentialFetch(() => ({ teamId: 'core-team', issues: [], nextCursor: 'same' }))
+
+    await expect(loadTeamIssues('core-team', 'access-token')).rejects.toMatchObject({
+      status: 503,
+      code: 'WorkItemListReadStalled',
+    })
+  })
+
+  test('describes list limit and stalled reads with their cause', () => {
+    const t = (key: string) => key === 'tasks.error.reason' ? 'Cause: {reason}' : key
+
+    expect(describeScopedWorkItemListError(
+      new TeamIssuesApiError(413, 'More than 10000 Work Items match this view.', 'WorkItemListLimitExceeded'),
+      t,
+    )).toBe('tasks.error.scopeLimitExceeded Cause: More than 10000 Work Items match this view.')
+    expect(describeScopedWorkItemListError(
+      new TeamIssuesApiError(503, '', 'WorkItemListReadStalled'),
+      t,
+    )).toBe('tasks.error.readStalled')
+    expect(describeScopedWorkItemListError(new TeamIssuesApiError(500, 'boom'), t)).toBeUndefined()
+    expect(describeScopedWorkItemListError(new Error('boom'), t)).toBeUndefined()
   })
 
   test('sends expectedRevision with stable mutation headers', async () => {
