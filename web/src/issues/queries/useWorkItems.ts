@@ -3,16 +3,16 @@ import useSWR from 'swr'
 import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
 import { useMemo } from 'react'
 import {
-  getProjectIssuesPage,
   getTeamIssueDetail,
-  getTeamIssues,
   getWorkspaceWorkItemSummary,
 } from '../api/workItems'
 import { TeamIssuesApiError } from '../api/errors'
+import {
+  loadProjectIssues,
+  loadTeamIssues,
+  type ProjectIssueList as ProjectIssuesPage,
+} from './scopedWorkItemLoader'
 import { loadWorkspaceWorkItems } from './workspaceWorkItemLoader'
-
-/** Complete Project issue response stored in the SWR cache. */
-type ProjectIssuesPage = Awaited<ReturnType<typeof getProjectIssuesPage>>
 
 /** Project issue list exposed to existing optimistic cache mutations. */
 type ProjectIssueList = ProjectIssuesPage['issues']
@@ -70,7 +70,7 @@ export function useTeamIssues(
   const query = useSWR(
     key,
     ([, token, currentTeamId, shouldIncludeArchived]) =>
-      getTeamIssues(currentTeamId, token, shouldIncludeArchived),
+      loadTeamIssues(currentTeamId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
 
@@ -103,7 +103,7 @@ export function useProjectIssues(
   const query = useSWR(
     key,
     ([, token, currentProjectId, shouldIncludeArchived]) =>
-      getProjectIssuesPage(currentProjectId, token, shouldIncludeArchived),
+      loadProjectIssues(currentProjectId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
 

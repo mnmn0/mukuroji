@@ -5,6 +5,12 @@ import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam } from '../../projects/api'
 import { TaskWorkItemTypeBadge } from '../../tasks/ui/TaskViewPrimitives'
+import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
+import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
+import {
+  formatShowMoreLabel,
+  TASK_TABLE_RENDER_STEP,
+} from '../../tasks/model/taskListRendering'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
   resolveWorkItemDependencySummary,
@@ -100,6 +106,50 @@ export function IssueTable({
         presentation.groupDirection,
       )
     : undefined
+
+  const groupedRows = groups?.map((group) => ({
+    group,
+    subgroups: presentation?.subgroupBy
+      ? groupTaskViewItems(
+          group.items,
+          presentation.subgroupBy,
+          (issue, field) => resolveTeamIssueGroupValue(
+            issue,
+            field,
+            configuration,
+            activeTeam,
+            t,
+          ),
+          presentation.subgroupDirection,
+        )
+      : undefined,
+  }))
+  // Thousands of rows are rendered in steps; groups keep counting every Work Item.
+  const displayOrderedIssues = groupedRows
+    ? groupedRows.flatMap(({ group, subgroups }) =>
+        subgroups ? subgroups.flatMap((subgroup) => subgroup.items) : group.items
+      )
+    : issues
+  const {
+    renderedItems: renderedIssues,
+    hiddenCount: hiddenIssueCount,
+    showMore: showMoreIssues,
+  } = useIncrementalRender(
+    displayOrderedIssues,
+    TASK_TABLE_RENDER_STEP,
+    // The selected and keyboard-focused rows always stay rendered.
+    displayOrderedIssues.reduce((requiredIndex, issue, index) =>
+      issue.id === selectedIssueId ||
+        createTaskViewItemKey(issue.teamId, issue.id) === focusedIssueKey
+        ? index
+        : requiredIndex, -1),
+  )
+  const renderedIssueIds = hiddenIssueCount > 0
+    ? new Set(renderedIssues.map((issue) => issue.id))
+    : undefined
+  /** Keeps only the rows inside the rendered prefix of the display order. */
+  const keepRendered = (items: readonly TeamIssue[]) =>
+    renderedIssueIds ? items.filter((issue) => renderedIssueIds.has(issue.id)) : items
 
   /** Renders one Team Issue row under its current table presentation. */
   const renderIssueRow = (issue: TeamIssue) => {
@@ -283,33 +333,38 @@ export function IssueTable({
           </thead>
           <tbody>
             {issues.length > 0 ? (
-              groups ? groups.map((group) => {
-                const subgroups = presentation?.subgroupBy
-                  ? groupTaskViewItems(
-                      group.items,
-                      presentation.subgroupBy,
-                      (issue, field) => resolveTeamIssueGroupValue(
-                        issue,
-                        field,
-                        configuration,
-                        activeTeam,
-                        t,
-                      ),
-                      presentation.subgroupDirection,
-                    )
-                  : undefined
-                return (
-                  <Fragment key={group.key}>
-                    <IssueTableGroupRow columnCount={tableColumnPlacements.length} count={group.items.length} label={group.label} />
-                    {subgroups ? subgroups.map((subgroup) => (
-                      <Fragment key={`${group.key}:${subgroup.key}`}>
-                        <IssueTableGroupRow columnCount={tableColumnPlacements.length} count={subgroup.items.length} label={subgroup.label} secondary />
-                        {subgroup.items.map(renderIssueRow)}
-                      </Fragment>
-                    )) : group.items.map(renderIssueRow)}
-                  </Fragment>
-                )
-              }) : issues.map(renderIssueRow)
+              <>
+                {groupedRows ? groupedRows.map(({ group, subgroups }) => {
+                  const renderedGroupItems = keepRendered(group.items)
+                  if (renderedGroupItems.length === 0) return null
+                  return (
+                    <Fragment key={group.key}>
+                      <IssueTableGroupRow columnCount={tableColumnPlacements.length} count={group.items.length} label={group.label} />
+                      {subgroups ? subgroups.map((subgroup) => {
+                        const renderedSubgroupItems = keepRendered(subgroup.items)
+                        if (renderedSubgroupItems.length === 0) return null
+                        return (
+                          <Fragment key={`${group.key}:${subgroup.key}`}>
+                            <IssueTableGroupRow columnCount={tableColumnPlacements.length} count={subgroup.items.length} label={subgroup.label} secondary />
+                            {renderedSubgroupItems.map(renderIssueRow)}
+                          </Fragment>
+                        )
+                      }) : renderedGroupItems.map(renderIssueRow)}
+                    </Fragment>
+                  )
+                }) : renderedIssues.map(renderIssueRow)}
+                {hiddenIssueCount > 0 ? (
+                  <tr>
+                    <td className="px-5 py-3" colSpan={tableColumnPlacements.length}>
+                      <ShowMoreItemsButton
+                        label={formatShowMoreLabel(t, TASK_TABLE_RENDER_STEP, hiddenIssueCount)}
+                        onShowMore={showMoreIssues}
+                        testId="team-issue-table-show-more"
+                      />
+                    </td>
+                  </tr>
+                ) : null}
+              </>
             ) : (
               <tr>
                 <td className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]" colSpan={tableColumnPlacements.length} data-testid="team-issues-empty">

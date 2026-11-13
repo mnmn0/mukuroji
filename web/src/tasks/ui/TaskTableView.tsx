@@ -72,6 +72,12 @@ import {
   TaskViewPlusIcon,
 } from './TaskViewPrimitives'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
+import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
+import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
+import {
+  formatShowMoreLabel,
+  TASK_TABLE_RENDER_STEP,
+} from '../model/taskListRendering'
 
 /** Resolves a localized task-table message. */
 type TaskTableTranslator = (key: MessageKey) => string
@@ -435,6 +441,48 @@ export function TaskTableView({
     )
   }
 
+  // Rows look up their index and selection by key; scanning `tasks` per row is quadratic.
+  const rowIndexByTaskKey = new Map(tasks.map((task, index) => [createTaskKey(task), index]))
+  const selectedTaskKeySet = new Set(selectedTaskKeys)
+  const groupedRows = groupedTasks?.map((group) => ({
+    group,
+    subgroups: presentation?.subgroupBy
+      ? groupTaskViewItems(
+          group.items,
+          presentation.subgroupBy,
+          (task, field) => resolveProjectTaskGroupValue(
+            task,
+            field,
+            configurationsByTeam,
+            configuration,
+            t,
+            teams,
+          ),
+          presentation.subgroupDirection,
+        )
+      : undefined,
+  }))
+  // Thousands of rows are rendered in steps; groups keep counting every Work Item.
+  const displayOrderedTasks = groupedRows
+    ? groupedRows.flatMap(({ group, subgroups }) =>
+        subgroups ? subgroups.flatMap((subgroup) => subgroup.items) : group.items
+      )
+    : tasks
+  const selectedDetailDisplayIndex = selectedDetailTaskKey
+    ? displayOrderedTasks.findIndex((task) => createTaskKey(task) === selectedDetailTaskKey)
+    : -1
+  const {
+    renderedItems: renderedTasks,
+    hiddenCount: hiddenTaskCount,
+    showMore: showMoreTasks,
+  } = useIncrementalRender(displayOrderedTasks, TASK_TABLE_RENDER_STEP, selectedDetailDisplayIndex)
+  const renderedTaskKeys = hiddenTaskCount > 0
+    ? new Set(renderedTasks.map(createTaskKey))
+    : undefined
+  /** Keeps only the rows inside the rendered prefix of the display order. */
+  const keepRendered = (items: readonly CanonicalWorkItem[]) =>
+    renderedTaskKeys ? items.filter((task) => renderedTaskKeys.has(createTaskKey(task))) : items
+
   /** Renders one configured row while preserving its index in the complete result set. */
   const renderTaskRow = (task: CanonicalWorkItem) => (
     <TaskTableRow
@@ -454,7 +502,7 @@ export function TaskTableView({
       personLabels={personLabels}
       presentation={presentation}
       projectId={projectId}
-      rowIndex={tasks.findIndex((candidate) => createTaskKey(candidate) === createTaskKey(task))}
+      rowIndex={rowIndexByTaskKey.get(createTaskKey(task)) ?? -1}
       onTaskSelectionChange={onTaskSelectionChange}
       onSelectTask={onSelectTask}
       onTaskActionMenuOpen={onTaskActionMenuOpen}
@@ -462,7 +510,7 @@ export function TaskTableView({
       onUpdateTask={onUpdateTask}
       canMutateTask={canMutateTask}
       selectedForDetail={selectedDetailTaskKey === createTaskKey(task)}
-      selected={selectedTaskKeys.includes(createTaskKey(task))}
+      selected={selectedTaskKeySet.has(createTaskKey(task))}
       selectionReadOnly={selectionReadOnly}
       t={t}
       task={task}
@@ -576,43 +624,47 @@ export function TaskTableView({
                   </td>
                 </tr>
               ) : tasks.length > 0 ? (
-                groupedTasks ? groupedTasks.map((group) => {
-                  const subgroups = presentation?.subgroupBy
-                    ? groupTaskViewItems(
-                        group.items,
-                        presentation.subgroupBy,
-                        (task, field) => resolveProjectTaskGroupValue(
-                          task,
-                          field,
-                          configurationsByTeam,
-                          configuration,
-                          t,
-                          teams,
-                        ),
-                        presentation.subgroupDirection,
-                      )
-                    : undefined
-                  return (
-                    <Fragment key={group.key}>
-                      <TaskTableGroupRow
-                        columnCount={tableColumnCount}
-                        count={group.items.length}
-                        label={group.label}
-                      />
-                      {subgroups ? subgroups.map((subgroup) => (
-                        <Fragment key={`${group.key}:${subgroup.key}`}>
-                          <TaskTableGroupRow
-                            columnCount={tableColumnCount}
-                            count={subgroup.items.length}
-                            label={subgroup.label}
-                            secondary
-                          />
-                          {subgroup.items.map(renderTaskRow)}
-                        </Fragment>
-                      )) : group.items.map(renderTaskRow)}
-                    </Fragment>
-                  )
-                }) : tasks.map(renderTaskRow)
+                <>
+                  {groupedRows ? groupedRows.map(({ group, subgroups }) => {
+                    const renderedGroupItems = keepRendered(group.items)
+                    if (renderedGroupItems.length === 0) return null
+                    return (
+                      <Fragment key={group.key}>
+                        <TaskTableGroupRow
+                          columnCount={tableColumnCount}
+                          count={group.items.length}
+                          label={group.label}
+                        />
+                        {subgroups ? subgroups.map((subgroup) => {
+                          const renderedSubgroupItems = keepRendered(subgroup.items)
+                          if (renderedSubgroupItems.length === 0) return null
+                          return (
+                            <Fragment key={`${group.key}:${subgroup.key}`}>
+                              <TaskTableGroupRow
+                                columnCount={tableColumnCount}
+                                count={subgroup.items.length}
+                                label={subgroup.label}
+                                secondary
+                              />
+                              {renderedSubgroupItems.map(renderTaskRow)}
+                            </Fragment>
+                          )
+                        }) : renderedGroupItems.map(renderTaskRow)}
+                      </Fragment>
+                    )
+                  }) : renderedTasks.map(renderTaskRow)}
+                  {hiddenTaskCount > 0 ? (
+                    <tr>
+                      <td className="px-5 py-3" colSpan={tableColumnCount}>
+                        <ShowMoreItemsButton
+                          label={formatShowMoreLabel(t, TASK_TABLE_RENDER_STEP, hiddenTaskCount)}
+                          onShowMore={showMoreTasks}
+                          testId="task-table-show-more"
+                        />
+                      </td>
+                    </tr>
+                  ) : null}
+                </>
               ) : (
                 <tr>
                   <td

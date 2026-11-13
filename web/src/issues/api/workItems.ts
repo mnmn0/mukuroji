@@ -3,9 +3,11 @@ import type {
   ConfirmWorkItemScheduleChangeInput,
   CreateWorkItemInput,
   CustomerImpactSignal,
+  ProjectWorkItemListPage,
   PreviewWorkItemScheduleInput,
   PreviewWorkItemTypeChangeInput,
   ResolvedWorkItemConfiguration,
+  TeamWorkItemListPage,
   UpdateWorkItemInput,
   WorkItemPatch,
   WorkItemRelation,
@@ -15,7 +17,10 @@ import type {
   WorkspaceWorkItemListFilter,
   WorkspaceWorkItemPage,
 } from '@mukuroji/contracts'
-import { WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT } from '@mukuroji/contracts'
+import {
+  SCOPED_WORK_ITEM_PAGE_MAX_LIMIT,
+  WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import {
   isConfirmWorkItemScheduleChangeResponse,
@@ -82,36 +87,6 @@ export type UpdateTeamIssueInput = WorkItemPatch
 export type UpdateTeamIssueRequest = UpdateWorkItemInput
 
 /**
- * Lambda が DynamoDB から取得して返すチーム Issue 一覧レスポンスです。
- */
-type TeamIssuesResponse = {
-  /**
-   * 取得対象の team ID です。
-   */
-  teamId: string
-  /**
-   * チーム所有 Issue 一覧です。
-   */
-  issues: TeamIssue[]
-}
-
-/**
- * Lambda が DynamoDB から取得して返すプロジェクト Issue 一覧レスポンスです。
- */
-type ProjectIssuesResponse = {
-  /**
-   * 取得対象の project ID です。
-   */
-  projectId: string
-  /**
-   * プロジェクトにアサインされた Issue 一覧です。
-   */
-  issues: TeamIssue[]
-  /** Whether Customer impact may be requested for this Project resource. */
-  canReadCustomerImpact?: boolean
-}
-
-/**
  * Issue 作成 API が返す response body です。
  */
 type CreateTeamIssueResponse = {
@@ -133,69 +108,58 @@ type UpdateTeamIssueResponse = {
 
 const issuesApiBaseUrl = resolveApiBaseUrl()
 
+/** Options of one Team or Project Work Item page request. */
+export type ScopedWorkItemPageRequest = {
+  /** Whether archived Work Items should be included. */
+  includeArchived?: boolean
+  /** Page size, up to the contract maximum. */
+  limit?: number
+  /** Cursor returned by the previous page. */
+  cursor?: string
+}
+
 /**
- * Loads Team-owned Work Items through the canonical list endpoint.
+ * Loads one page of a Team's Work Items in the Team's sort order.
  *
  * @param teamId - Team whose Work Items should be loaded.
- * @param accessToken - Optional bearer token for the Work Item API.
- * @param includeArchived - Whether archived Work Items should be included.
- * @returns Team-owned Work Items visible to the current viewer.
+ * @param accessToken - Bearer token for the Work Item API.
+ * @param request - Archive option, page size, and cursor.
+ * @returns The page and the cursor of the next one.
  */
-export async function getTeamIssues(
+export async function getTeamIssuesPage(
   teamId: string,
-  accessToken?: string,
-  includeArchived = false,
+  accessToken: string,
+  request: ScopedWorkItemPageRequest = {},
 ) {
-  const response = await requestJson<TeamIssuesResponse>(
-    createWorkItemListUrl(
+  return requestJson<TeamWorkItemListPage<TeamIssue>>(
+    createScopedWorkItemPageUrl(
       `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues`,
-      includeArchived,
+      request,
     ),
     accessToken,
   )
-
-  return response.issues
 }
 
 /**
- * Loads Work Items assigned to one Project through the canonical list endpoint.
+ * Loads one page of the Work Items assigned to a Project, with its Customer capability.
  *
  * @param projectId - Project whose assigned Work Items should be loaded.
- * @param accessToken - Optional bearer token for the Work Item API.
- * @param includeArchived - Whether archived Work Items should be included.
- * @returns Project-assigned Work Items visible to the current viewer.
- */
-export async function getProjectIssues(
-  projectId: string,
-  accessToken?: string,
-  includeArchived = false,
-) {
-  const response = await getProjectIssuesPage(projectId, accessToken, includeArchived)
-  return response.issues
-}
-
-/**
- * Loads a Project Work Item page together with its resource-scoped Customer capability.
- *
- * @param projectId - Project whose assigned Work Items should be loaded.
- * @param accessToken - Optional bearer token for the Work Item API.
- * @param includeArchived - Whether archived Work Items should be included.
- * @returns Project-assigned Work Items and the Customer impact capability.
+ * @param accessToken - Bearer token for the Work Item API.
+ * @param request - Archive option, page size, and cursor.
+ * @returns The page, the Customer impact capability, and the cursor of the next page.
  */
 export async function getProjectIssuesPage(
   projectId: string,
-  accessToken?: string,
-  includeArchived = false,
-): Promise<ProjectIssuesResponse> {
-  const response = await requestJson<ProjectIssuesResponse>(
-    createWorkItemListUrl(
+  accessToken: string,
+  request: ScopedWorkItemPageRequest = {},
+) {
+  return requestJson<ProjectWorkItemListPage<TeamIssue>>(
+    createScopedWorkItemPageUrl(
       `${issuesApiBaseUrl}/projects/${encodeURIComponent(projectId)}/issues`,
-      includeArchived,
+      request,
     ),
     accessToken,
   )
-
-  return response
 }
 
 /** Options of one Workspace Work Item page request. */
@@ -264,15 +228,18 @@ function createWorkspaceWorkItemPageUrl(request: WorkspaceWorkItemPageRequest): 
 }
 
 /**
- * Appends the archived-list opt-in without changing legacy active-only request URLs.
+ * Builds a paged Team or Project Work Item list URL.
  *
- * @param url - Canonical Work Item list URL.
- * @param includeArchived - Whether archived rows should be requested.
- * @returns The original URL or its archived-inclusive query variant.
+ * @param url - Canonical Team or Project Work Item list URL.
+ * @param request - Archive option, page size, and cursor.
+ * @returns The list URL with only the parameters that are set.
  */
-function createWorkItemListUrl(url: string, includeArchived: boolean): string {
-  if (!includeArchived) return url
-  const searchParams = new URLSearchParams({ includeArchived: 'true' })
+function createScopedWorkItemPageUrl(url: string, request: ScopedWorkItemPageRequest): string {
+  const searchParams = new URLSearchParams({
+    limit: String(request.limit ?? SCOPED_WORK_ITEM_PAGE_MAX_LIMIT),
+  })
+  if (request.includeArchived) searchParams.set('includeArchived', 'true')
+  if (request.cursor) searchParams.set('cursor', request.cursor)
   return `${url}?${searchParams.toString()}`
 }
 
