@@ -724,9 +724,9 @@ export type SortedWorkItemPageReadOptions = {
   /**
    * Rows DynamoDB evaluates before the page stops early, including rows the filters drop.
    *
-   * When the bound is reached on a dropped row, the read continues through the rows that share
-   * its sort order (at most 100 more rows), so the next page can resume without naming the
-   * dropped row.
+   * Up to 100 rows of it (at most half) are reserved: when the rest of the bound ends on a
+   * dropped row, the read finishes the rows that share its sort order within the reserve, so
+   * the next page can resume without naming the dropped row.
    */
   maxEvaluatedRows: number
   /** Where to resume. Omit for the first page. */
@@ -1824,6 +1824,13 @@ export class DynamoDbTeamIssuesClient {
     const { options } = input
     const limit = Math.max(1, Math.floor(options.limit))
     const maxEvaluatedRows = Math.max(limit, Math.floor(options.maxEvaluatedRows))
+    // The bound includes the rows reserved for finishing one sort order, so a page never
+    // evaluates more than `maxEvaluatedRows` in total.
+    const tieAllowance = Math.min(
+      SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE,
+      Math.floor(maxEvaluatedRows / 2),
+    )
+    const primaryEvaluatedRows = maxEvaluatedRows - tieAllowance
     const startAfter = options.startAfter
     const sortOrderFloor = startAfter?.kind === 'after-sort-order'
       ? startAfter.sortOrder
@@ -1840,8 +1847,8 @@ export class DynamoDbTeamIssuesClient {
       for (;;) {
         // Never read past the evaluated-row bound, plus the allowance for one sort order.
         const readableRows = (finishingSortOrder === undefined
-          ? maxEvaluatedRows
-          : maxEvaluatedRows + SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE) - evaluatedCount
+          ? primaryEvaluatedRows
+          : maxEvaluatedRows) - evaluatedCount
         if (readableRows <= 0) throw createSortedWorkItemPageStalledError()
         const response = await this.documentClient.send(
           new QueryCommand({
@@ -1881,7 +1888,7 @@ export class DynamoDbTeamIssuesClient {
             (options.isReadable?.(issue) ?? true)
           if (returned) {
             issues.push(issue)
-            if (issues.length >= limit || evaluatedCount >= maxEvaluatedRows) {
+            if (issues.length >= limit || evaluatedCount >= primaryEvaluatedRows) {
               return isLastRow
                 ? { issues }
                 : {
@@ -1894,7 +1901,7 @@ export class DynamoDbTeamIssuesClient {
                     },
                   }
             }
-          } else if (evaluatedCount >= maxEvaluatedRows && finishingSortOrder === undefined) {
+          } else if (evaluatedCount >= primaryEvaluatedRows && finishingSortOrder === undefined) {
             finishingSortOrder = item.sortOrder
           }
         }
@@ -4791,10 +4798,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const SORTED_WORK_ITEM_PAGE_QUERY_LIMIT = 500
 
 /**
- * Rows a page may evaluate past its bound to finish the sort order the bound ended on.
+ * Rows of the evaluated-row bound reserved for finishing the sort order the rest ended on.
  *
- * New Work Items take a sort order from the Team's current count, so a few can share one; a
- * group larger than this fails with `503 WorkItemListReadStalled` instead of reading without end.
+ * Capped at half the bound. New Work Items take a sort order from the Team's current count, so
+ * a few can share one; a group larger than this fails with `503 WorkItemListReadStalled` instead
+ * of reading past the bound.
  */
 const SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE = 100
 

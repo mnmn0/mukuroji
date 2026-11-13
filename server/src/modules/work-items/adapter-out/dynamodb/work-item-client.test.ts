@@ -667,19 +667,12 @@ test('DynamoDB sort-order pages never resume at a Work Item the caller cannot re
   })
   const responses: Array<{ Items: unknown[]; LastEvaluatedKey?: Record<string, unknown> }> = [
     {
-      Items: [
-        createStoredItem('visible-a', 10, 'open'),
-        createStoredItem('secret-b', 20, 'private'),
-        createStoredItem('secret-c', 30, 'private'),
-      ],
+      Items: [createStoredItem('visible-a', 10, 'open'), createStoredItem('secret-b', 20, 'private')],
       LastEvaluatedKey: { opaque: 'first' },
     },
     {
-      // A second row shares the sort order where the bound ended; it is finished first.
-      Items: [
-        createStoredItem('secret-d', 30, 'private'),
-        createStoredItem('visible-e', 40, 'open'),
-      ],
+      // Another row shares the sort order where the bound ended; the reserve finishes it.
+      Items: [createStoredItem('secret-c', 20, 'private'), createStoredItem('visible-e', 40, 'open')],
       LastEvaluatedKey: { opaque: 'second' },
     },
     {
@@ -702,22 +695,23 @@ test('DynamoDB sort-order pages never resume at a Work Item the caller cannot re
   )
   const isReadable = (issue: { assignedProjectId?: string }) => issue.assignedProjectId === 'open'
 
+  // A bound of 4 evaluates 2 rows normally and keeps 2 for finishing a shared sort order.
   const firstPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
     limit: 3,
-    maxEvaluatedRows: 3,
+    maxEvaluatedRows: 4,
     isReadable,
   })
   expect(firstPage.issues.map((issue) => issue.id)).toEqual(['visible-a'])
-  expect(firstPage.nextPosition).toEqual({ kind: 'after-sort-order', sortOrder: 30 })
+  expect(firstPage.nextPosition).toEqual({ kind: 'after-sort-order', sortOrder: 20 })
   expect(JSON.stringify(firstPage)).not.toContain('secret')
-  // DynamoDB reads no more than the bound, then at most the allowance for the shared sort order.
-  expect(sentInputs.map((input) => input.Limit)).toEqual([3, 100])
+  // DynamoDB never reads past the bound, reserve included.
+  expect(sentInputs.map((input) => input.Limit)).toEqual([2, 2])
 
   sentInputs.length = 0
   const secondPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
     limit: 3,
-    maxEvaluatedRows: 3,
-    startAfter: { kind: 'after-sort-order', sortOrder: 30 },
+    maxEvaluatedRows: 4,
+    startAfter: { kind: 'after-sort-order', sortOrder: 20 },
     isReadable,
   })
   expect(secondPage).toEqual({ issues: [expect.objectContaining({ id: 'visible-e' })] })
@@ -728,15 +722,15 @@ test('DynamoDB sort-order pages never resume at a Work Item the caller cannot re
     ExpressionAttributeNames: { '#partition': 'directoryTeamId', '#sortOrder': 'sortOrder' },
     ExpressionAttributeValues: {
       ':partition': 'workspace-1#team#core-team',
-      ':sortOrder': 30,
+      ':sortOrder': 20,
     },
     ExclusiveStartKey: undefined,
     ScanIndexForward: true,
-    Limit: 3,
+    Limit: 2,
   }])
 })
 
-test('DynamoDB sort-order pages fail instead of reading an unbounded shared sort order', async () => {
+test('DynamoDB sort-order pages fail instead of reading past the bound for a shared sort order', async () => {
   const createHiddenItem = (issueId: string, sortOrder: number) => ({
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -781,11 +775,12 @@ test('DynamoDB sort-order pages fail instead of reading an unbounded shared sort
   )
 
   await expect(client.getTeamIssuePage('workspace-1', 'core-team', {
-    limit: 2,
-    maxEvaluatedRows: 2,
+    limit: 200,
+    maxEvaluatedRows: 2_000,
   })).rejects.toMatchObject({ status: 503, code: 'WorkItemListReadStalled' })
-  expect(sentLimits).toEqual([2, 100])
-  expect(issued).toBe(102)
+  // 1,900 rows normally, then the 100-row reserve; never more than the 2,000-row bound.
+  expect(sentLimits).toEqual([500, 500, 500, 400, 100])
+  expect(issued).toBe(2_000)
 })
 
 test('DynamoDB Team Work Item detail rejects a malformed body on non-comment events', async () => {
