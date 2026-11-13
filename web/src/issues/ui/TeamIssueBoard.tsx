@@ -279,13 +279,19 @@ export function IssueBoard({
             }
           }
           if (primaryCardGroups.length === 0) orderedColumnIssues.push(...columnIssues)
-          // Long columns render their cards in steps; the selected card always stays rendered.
-          const selectedCardIndex = selectedIssueId
-            ? orderedColumnIssues.findIndex((issue) => issue.id === selectedIssueId)
-            : -1
+          // Long columns render their cards in steps; the selected and keyboard-focused cards
+          // always stay rendered.
+          const requiredCardIndex = orderedColumnIssues.reduce(
+            (requiredIndex, issue, index) =>
+              issue.id === selectedIssueId ||
+                createTaskViewItemKey(issue.teamId, issue.id) === focusedIssueKey
+                ? index
+                : requiredIndex,
+            -1,
+          )
           const columnRenderLimit = Math.max(
             columnRenderLimits[columnKey] ?? TASK_BOARD_COLUMN_RENDER_STEP,
-            selectedCardIndex + 1,
+            requiredCardIndex + 1,
           )
           const renderedColumnIssues = orderedColumnIssues.slice(0, columnRenderLimit)
           const hiddenCardCount = orderedColumnIssues.length - renderedColumnIssues.length

@@ -188,10 +188,11 @@ Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/sr
 `GET /api/teams/{teamId}/issues` と `GET /api/projects/{projectId}/issues` も 1 response の件数に上限がある。
 
 - `limit`（1〜200、既定 100）または `cursor` を付けると、Team は `{ teamId, issues, nextCursor? }`、Project は `{ projectId, issues, canReadCustomerImpact, nextCursor? }` を返す。`nextCursor` が無くなるまで同じ条件で読み続ける。
-- 順序は並び順の GSI（Team は `TeamIssueSortOrderIndex`、Project は `AssignedProjectIssueIndex`）の `sortOrder`。cursor は最後に評価した Work Item の `sortOrder`・Team ID・Work Item ID を持ち、server が呼び出し元の directory で GSI の key を組み立て直す。cursor に directory や DynamoDB の key は入らない。
+- 順序は並び順の GSI（Team は `TeamIssueSortOrderIndex`、Project は `AssignedProjectIssueIndex`）の `sortOrder`。cursor が指す位置は「page が返した最後の Work Item の直後」か「ある `sortOrder` 以下をすべて評価し終えた境界」のどちらかで、返していない Work Item（archive 済み・別 type・閲覧できない Project のもの）の ID は cursor に入らない。server は呼び出し元の directory で GSI の key を組み立て直し、cursor に directory や DynamoDB の key は入らない。
+- DynamoDB は 1 回の Query で最大 500 row を読み、1 row ずつ評価する。page が埋まった時点で返した Work Item の直後から再開するので、除外される row が続いても Query は数回で済む。
 - cursor は Team / Project の ID、`includeArchived`、`workItemTypeId` に結び付いており、別の一覧や条件で使うと `400 InvalidWorkItemPageCursor` になる。Team の一覧では別 Team の Work Item を指す cursor も拒否する。
-- 1 request が評価する row は 2,000 件まで。archive 済み・別 type・閲覧できない Project の Work Item は評価後に除くので、`issues` が `limit` 未満（0 件もある）でも `nextCursor` が付くことがある。
-- page をまたいで読む間に並び順を変えると、同じ Work Item が 2 回返る・1 回も返らないことがある。Web は Team ID と Work Item ID で重複を許容し、変更後に一覧を読み直す。
+- 1 request が評価する row は 2,000 件まで。archive 済み・別 type・閲覧できない Project の Work Item は評価後に除くので、`issues` が `limit` 未満（0 件もある）でも `nextCursor` が付くことがある。2,000 件目が返さない Work Item だった場合は、同じ `sortOrder` の row を読み終えてから境界の cursor を返す（同じ `sortOrder` の row が 4,000 件を超えると `503 WorkItemListReadStalled`）。
+- page をまたいで読む間に並び順を変えると、同じ Work Item が 2 回返る・1 回も返らないことがある。Web は Team ID と Work Item ID で重複を 1 件にまとめ（上限の 10,000 件も重複を除いて数える）、変更後に一覧を読み直す。
 - `limit` も `cursor` も付けない旧来の request は互換のために残しているが、閲覧できる Work Item が 1,000 件を超えると `413 WorkItemListLimitExceeded` になる。移行手順は `GET /api/work-items` と同じく、`limit=200` を付けて `nextCursor` を追う。
 
 Web の `loadTeamIssues` / `loadProjectIssues`（`web/src/issues/queries/scopedWorkItemLoader.ts`）は `limit=200` で cursor を最後まで追い、`loadWorkspaceWorkItems` と同じく 10,000 件を超えると `413`、cursor が進まないと `503 WorkItemListReadStalled` 相当の error にする。Team / Project 画面はこの 2 つを原因付きで表示する（`tasks.error.scopeLimitExceeded` / `tasks.error.readStalled` と `tasks.error.reason`）。
@@ -201,7 +202,7 @@ Web の `loadTeamIssues` / `loadProjectIssues`（`web/src/issues/queries/scopedW
 読み込んだ Work Item は検索・絞り込み・並び替え・件数表示のすべてに使い、描画だけを段階的に行う。
 
 - テーブル（Team / Project）と期限順リストは最初の 200 行、ボードは列ごとに最初の 50 枚を描画し、「さらに N 件を表示（未表示 M 件）」で同じ件数ずつ追加する。
-- 詳細を開いている Work Item と、Team テーブルでキーボード focus がある行は、段階表示の範囲外でも描画する。
+- 詳細を開いている Work Item と、Team のテーブル・ボードでキーボード focus がある行・カードは、段階表示の範囲外でも描画する。
 - 期限順リストの依存関係の線は、描画済みの行の間だけに引く。
 - 期限カレンダーは日付ごとに表示するので段階表示しない。
 - 2,000 件の Team / Project で、本番 build の初回表示とボード・期限順・期限カレンダー・テーブルの切り替えはそれぞれ約 2 秒以内（`web/e2e/tasks.spec.ts` の Issue #458 の test で、cursor の読み切りと段階表示を確認している）。

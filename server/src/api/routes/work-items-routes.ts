@@ -4251,15 +4251,15 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         includeArchived,
         ...(workItemTypeId ? { workItemTypeId } : {}),
       } satisfies ScopedWorkItemListScope
-      const keepReadable = (issues: TeamIssueResponseItem[]) =>
-        filterAccessibleTeamIssues(issues, principal, context)
+      const isReadable = (issue: TeamIssueResponseItem) =>
+        filterAccessibleTeamIssues([issue], principal, context).length > 0
 
       if (pageQuery.paged) {
         const page = await readScopedWorkItemPage(
           principal.directoryId,
           scope,
           pageQuery,
-          keepReadable,
+          isReadable,
         )
         const hydrated = await hydrateTeamIssuesResponse({
           teamId: context.team.id,
@@ -4277,7 +4277,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         issues: await readScopedWorkItemsWithinLegacyLimit(
           principal.directoryId,
           scope,
-          keepReadable,
+          isReadable,
         ),
       }))
     } catch (error) {

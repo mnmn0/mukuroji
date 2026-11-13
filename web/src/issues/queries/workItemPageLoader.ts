@@ -23,36 +23,50 @@ type CursorPage = {
   nextCursor?: string
 }
 
+/** Minimal identity of a Work Item collected from cursor pages. */
+type PagedWorkItem = {
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Team-local Work Item ID. */
+  id: string
+}
+
 /**
  * Follows page cursors until the last page and returns the collected Work Items.
+ *
+ * A sort-order change between page reads can return a Work Item twice. Each Work Item is kept
+ * once, at its first position with its latest copy, and only distinct Work Items count toward
+ * the item limit.
  *
  * @param readPage - Reads the page that starts at `cursor`, or the first page.
  * @param readItems - Returns the Work Items of one page.
  * @param onPage - Optional callback that receives each page, for example to keep capabilities.
- * @returns Every Work Item of every page, in page order.
+ * @returns Every distinct Work Item of every page, in first-seen order.
  * @throws TeamIssuesApiError `413 WorkItemListLimitExceeded` above {@link WORK_ITEM_LIST_MAX_ITEMS},
  *   or `503 WorkItemListReadStalled` when the cursor repeats or the read never ends.
  */
-export async function loadAllWorkItemPages<TPage extends CursorPage, TItem>(
+export async function loadAllWorkItemPages<TPage extends CursorPage, TItem extends PagedWorkItem>(
   readPage: (cursor: string | undefined) => Promise<TPage>,
   readItems: (page: TPage) => readonly TItem[],
   onPage?: (page: TPage) => void,
 ): Promise<TItem[]> {
-  const items: TItem[] = []
+  const itemsByKey = new Map<string, TItem>()
   let cursor: string | undefined
 
   for (let page = 0; page < WORK_ITEM_LIST_MAX_PAGES; page += 1) {
     const response = await readPage(cursor)
     onPage?.(response)
-    items.push(...readItems(response))
-    if (items.length > WORK_ITEM_LIST_MAX_ITEMS) {
+    for (const item of readItems(response)) {
+      itemsByKey.set(`${item.teamId}\u0000${item.id}`, item)
+    }
+    if (itemsByKey.size > WORK_ITEM_LIST_MAX_ITEMS) {
       throw new TeamIssuesApiError(
         413,
         `More than ${WORK_ITEM_LIST_MAX_ITEMS} Work Items match this view.`,
         'WorkItemListLimitExceeded',
       )
     }
-    if (!response.nextCursor) return items
+    if (!response.nextCursor) return [...itemsByKey.values()]
     if (response.nextCursor === cursor) throw createWorkItemListStalledError()
     cursor = response.nextCursor
   }

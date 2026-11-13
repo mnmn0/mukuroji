@@ -46,15 +46,15 @@ export type ScopedWorkItemPage = {
 /** Decoded cursor of a Team or Project page. */
 type ScopedWorkItemPageCursor = {
   /** Cursor schema version. */
-  v: 1
+  v: 2
   /** Fingerprint of the list scope and filters the cursor was issued for. */
   f: string
-  /** Sort-order key of the last evaluated Work Item. */
+  /** Sort-order key the next page starts after. */
   s: number
-  /** Team that owns the last evaluated Work Item. */
-  t: string
-  /** Team-local ID of the last evaluated Work Item. */
-  i: string
+  /** Team of the last returned Work Item. Absent when the page ended on a sort-order boundary. */
+  t?: string
+  /** ID of the last returned Work Item. Absent when the page ended on a sort-order boundary. */
+  i?: string
 }
 
 /**
@@ -87,20 +87,21 @@ export function readScopedWorkItemPageQuery(
  * @param directoryId - Caller's Workspace directory.
  * @param scope - Team or Project list and its filters.
  * @param query - Page size and cursor.
- * @param keepReadable - Drops Work Items the caller may not read.
+ * @param isReadable - Drops Work Items the caller may not read. A dropped Work Item never
+ *   appears in the cursor.
  * @returns The page and the cursor of the next one.
  */
 export async function readScopedWorkItemPage(
   directoryId: string,
   scope: ScopedWorkItemListScope,
   query: Pick<ScopedWorkItemPageQuery, 'limit' | 'cursor'>,
-  keepReadable: (issues: TeamIssueResponseItem[]) => TeamIssueResponseItem[] = (issues) => issues,
+  isReadable?: (issue: TeamIssueResponseItem) => boolean,
 ): Promise<ScopedWorkItemPage> {
   const fingerprint = createScopedWorkItemPageFingerprint(scope)
   const startAfter = decodeScopedWorkItemPageCursor(query.cursor, fingerprint)
-  const page = await readSortedPage(directoryId, scope, query.limit, startAfter)
+  const page = await readSortedPage(directoryId, scope, query.limit, startAfter, isReadable)
   return {
-    issues: keepReadable(page.issues),
+    issues: page.issues,
     ...(page.nextPosition
       ? { nextCursor: encodeScopedWorkItemPageCursor(page.nextPosition, fingerprint) }
       : {}),
@@ -112,7 +113,7 @@ export async function readScopedWorkItemPage(
  *
  * @param directoryId - Caller's Workspace directory.
  * @param scope - Team or Project list and its filters.
- * @param keepReadable - Drops Work Items the caller may not read.
+ * @param isReadable - Drops Work Items the caller may not read.
  * @returns Every readable Work Item of the list.
  * @throws ProjectDataError `413 WorkItemListLimitExceeded` when more than
  *   {@link SCOPED_WORK_ITEM_LEGACY_MAX_ITEMS} Work Items are readable.
@@ -120,7 +121,7 @@ export async function readScopedWorkItemPage(
 export async function readScopedWorkItemsWithinLegacyLimit(
   directoryId: string,
   scope: ScopedWorkItemListScope,
-  keepReadable: (issues: TeamIssueResponseItem[]) => TeamIssueResponseItem[] = (issues) => issues,
+  isReadable?: (issue: TeamIssueResponseItem) => boolean,
 ): Promise<TeamIssueResponseItem[]> {
   const issues: TeamIssueResponseItem[] = []
   let startAfter: SortedWorkItemPagePosition | undefined
@@ -130,8 +131,9 @@ export async function readScopedWorkItemsWithinLegacyLimit(
       scope,
       SCOPED_WORK_ITEM_PAGE_MAX_LIMIT,
       startAfter,
+      isReadable,
     )
-    issues.push(...keepReadable(page.issues))
+    issues.push(...page.issues)
     if (issues.length > SCOPED_WORK_ITEM_LEGACY_MAX_ITEMS) {
       throw new ProjectDataError(
         413,
@@ -152,6 +154,7 @@ export async function readScopedWorkItemsWithinLegacyLimit(
  * @param scope - Team or Project list and its filters.
  * @param limit - Largest number of Work Items to return.
  * @param startAfter - Position to resume after.
+ * @param isReadable - Drops Work Items the caller may not read.
  * @returns The page and where the next page starts.
  */
 function readSortedPage(
@@ -159,8 +162,10 @@ function readSortedPage(
   scope: ScopedWorkItemListScope,
   limit: number,
   startAfter: SortedWorkItemPagePosition | undefined,
+  isReadable: ((issue: TeamIssueResponseItem) => boolean) | undefined,
 ): Promise<SortedWorkItemPage> {
   const options = {
+    ...(isReadable ? { isReadable } : {}),
     limit,
     maxEvaluatedRows: WORK_ITEMS_PAGE_SCAN_BUDGET,
     includeArchived: scope.includeArchived,
@@ -210,7 +215,7 @@ function createScopedWorkItemPageFingerprint(scope: ScopedWorkItemListScope): st
 /**
  * Encodes the position after which the next page starts.
  *
- * @param position - Last evaluated Work Item.
+ * @param position - Last returned Work Item, or the last fully evaluated sort order.
  * @param fingerprint - Fingerprint of the list scope and filters.
  * @returns Opaque cursor string.
  */
@@ -218,13 +223,9 @@ function encodeScopedWorkItemPageCursor(
   position: SortedWorkItemPagePosition,
   fingerprint: string,
 ): string {
-  const cursor: ScopedWorkItemPageCursor = {
-    v: 1,
-    f: fingerprint,
-    s: position.sortOrder,
-    t: position.teamId,
-    i: position.issueId,
-  }
+  const cursor: ScopedWorkItemPageCursor = position.kind === 'after-item'
+    ? { v: 2, f: fingerprint, s: position.sortOrder, t: position.teamId, i: position.issueId }
+    : { v: 2, f: fingerprint, s: position.sortOrder }
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
 
@@ -249,15 +250,21 @@ function decodeScopedWorkItemPageCursor(
   if (
     typeof parsed !== 'object' ||
     parsed === null ||
-    !('v' in parsed) || parsed.v !== 1 ||
+    !('v' in parsed) || parsed.v !== 2 ||
     !('f' in parsed) || parsed.f !== fingerprint ||
-    !('s' in parsed) || typeof parsed.s !== 'number' || !Number.isFinite(parsed.s) ||
-    !('t' in parsed) || typeof parsed.t !== 'string' || !parsed.t ||
-    !('i' in parsed) || typeof parsed.i !== 'string' || !parsed.i
+    !('s' in parsed) || typeof parsed.s !== 'number' || !Number.isFinite(parsed.s)
   ) {
     throw invalidScopedWorkItemPageCursor()
   }
-  return { sortOrder: parsed.s, teamId: parsed.t, issueId: parsed.i }
+  const teamId = 't' in parsed ? parsed.t : undefined
+  const issueId = 'i' in parsed ? parsed.i : undefined
+  if (teamId === undefined && issueId === undefined) {
+    return { kind: 'after-sort-order', sortOrder: parsed.s }
+  }
+  if (typeof teamId !== 'string' || !teamId || typeof issueId !== 'string' || !issueId) {
+    throw invalidScopedWorkItemPageCursor()
+  }
+  return { kind: 'after-item', sortOrder: parsed.s, teamId, issueId }
 }
 
 /**

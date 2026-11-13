@@ -206,9 +206,12 @@ test('pages a Team Work Item list with a cursor bound to the Team and filters', 
   const firstResponse = await app.request('/api/teams/core-team/issues?limit=2', { headers })
   expect(firstResponse.status).toBe(200)
   const first = await firstResponse.json()
-  // The first row is in a Project the caller cannot read, so the page holds one Work Item.
+  // The first row is in a Project the caller cannot read, so it is skipped, not returned.
   expect(first.teamId).toBe('core-team')
-  expect(first.issues.map((issue: { id: string }) => issue.id)).toEqual(['work-item-1'])
+  expect(first.issues.map((issue: { id: string }) => issue.id)).toEqual([
+    'work-item-1',
+    'work-item-2',
+  ])
   expect(first.issues[0]).toMatchObject({ assigneeEmail: 'sato@example.com' })
   expect(typeof first.nextCursor).toBe('string')
   expect(JSON.stringify(first)).not.toContain('directoryTeamId')
@@ -219,20 +222,13 @@ test('pages a Team Work Item list with a cursor bound to the Team and filters', 
   )
   const second = await secondResponse.json()
   expect(second.issues.map((issue: { id: string }) => issue.id)).toEqual([
-    'work-item-2',
     'work-item-3',
+    'work-item-4',
   ])
-  const thirdResponse = await app.request(
-    `/api/teams/core-team/issues?limit=2&cursor=${encodeURIComponent(second.nextCursor)}`,
-    { headers },
-  )
-  const third = await thirdResponse.json()
-  expect(third.issues.map((issue: { id: string }) => issue.id)).toEqual(['work-item-4'])
-  expect(third.nextCursor).toBeUndefined()
+  expect(second.nextCursor).toBeUndefined()
   expect(calls.issuePageReads.map((read) => read.startAfterIssueId)).toEqual([
     undefined,
-    'work-item-1',
-    'work-item-3',
+    'work-item-2',
   ])
 
   const otherFilter = await app.request(
@@ -253,6 +249,29 @@ test('pages a Team Work Item list with a cursor bound to the Team and filters', 
     expect(invalidLimit.status).toBe(400)
     expect(await invalidLimit.json()).toMatchObject({ code: 'InvalidWorkItemPageLimit' })
   }
+})
+
+test('never names an unreadable Work Item in a Team page cursor', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 2_002, inaccessibleTeamIssueCount: 2_001 })
+  const headers = { Authorization: 'Bearer test-token' }
+
+  const firstResponse = await app.request('/api/teams/core-team/issues?limit=200', { headers })
+  expect(firstResponse.status).toBe(200)
+  const first = await firstResponse.json()
+  // The 2,000-row budget ends on unreadable rows: the page is empty but continues.
+  expect(first.issues).toEqual([])
+  expect(typeof first.nextCursor).toBe('string')
+  const decodedCursor = Buffer.from(first.nextCursor, 'base64url').toString('utf8')
+  expect(decodedCursor).not.toContain('work-item-')
+  expect(decodedCursor).not.toContain('onboarding-friction')
+
+  const secondResponse = await app.request(
+    `/api/teams/core-team/issues?limit=200&cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  const second = await secondResponse.json()
+  expect(second.issues.map((issue: { id: string }) => issue.id)).toEqual(['work-item-2001'])
+  expect(second.nextCursor).toBeUndefined()
 })
 
 test('rejects a Project page cursor issued for another Project', async () => {

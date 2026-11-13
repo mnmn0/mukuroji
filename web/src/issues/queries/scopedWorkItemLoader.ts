@@ -29,14 +29,14 @@ export async function loadTeamIssues(
   accessToken: string,
   includeArchived = false,
 ): Promise<TeamIssue[]> {
-  return dedupeWorkItems(await loadAllWorkItemPages(
+  return loadAllWorkItemPages(
     (cursor) => getTeamIssuesPage(teamId, accessToken, {
       includeArchived,
       limit: SCOPED_WORK_ITEM_PAGE_MAX_LIMIT,
       ...(cursor ? { cursor } : {}),
     }),
     (page) => page.issues,
-  ))
+  )
 }
 
 /**
@@ -68,23 +68,7 @@ export async function loadProjectIssues(
   )
   return {
     projectId,
-    issues: dedupeWorkItems(issues),
+    issues,
     ...(canReadCustomerImpact === undefined ? {} : { canReadCustomerImpact }),
   }
-}
-
-/**
- * Drops repeated Work Items that a sort-order change between page reads can return twice.
- *
- * The first position is kept and the later copy wins, because it was read after the change.
- *
- * @param issues - Work Items collected from every page.
- * @returns Each Work Item once, in first-seen order.
- */
-function dedupeWorkItems(issues: readonly TeamIssue[]): TeamIssue[] {
-  const byKey = new Map<string, TeamIssue>()
-  for (const issue of issues) {
-    byKey.set(`${issue.teamId}\u0000${issue.id}`, issue)
-  }
-  return [...byKey.values()]
 }

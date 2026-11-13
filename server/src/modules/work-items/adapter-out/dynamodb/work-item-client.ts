@@ -693,32 +693,49 @@ export type PublicWorkItemPageReadOptions = {
 }
 
 /**
- * Position of one Work Item in a sort-order index, used to resume a Team or Project page.
+ * Where a Team or Project page resumes in a sort-order index.
  *
- * The position names only the Work Item; the adapter rebuilds the DynamoDB key with the
- * caller's own directory, so a position cannot reach another Workspace.
+ * A position never names a Work Item the page did not return, so a continuation cannot reveal
+ * a filtered or unreadable Work Item. The adapter rebuilds the DynamoDB key with the caller's
+ * own directory, so a position cannot reach another Workspace.
  */
-export type SortedWorkItemPagePosition = {
-  /** Sort-order index key of the last evaluated Work Item. */
-  sortOrder: number
-  /** Team that owns the last evaluated Work Item. */
-  teamId: string
-  /** Team-local ID of the last evaluated Work Item. */
-  issueId: string
-}
+export type SortedWorkItemPagePosition =
+  | {
+      /** Resumes right after a Work Item the previous page returned. */
+      kind: 'after-item'
+      /** Sort-order index key of that Work Item. */
+      sortOrder: number
+      /** Team that owns that Work Item. */
+      teamId: string
+      /** Team-local ID of that Work Item. */
+      issueId: string
+    }
+  | {
+      /** Resumes after every row whose sort order is at most `sortOrder`. */
+      kind: 'after-sort-order'
+      /** Largest sort-order key the previous page fully evaluated. */
+      sortOrder: number
+    }
 
 /** Bounded read options of one Team or Project Work Item page in sort order. */
 export type SortedWorkItemPageReadOptions = {
   /** Largest number of Work Items the page returns. */
   limit: number
-  /** Largest number of rows DynamoDB evaluates, including rows the filters drop. */
+  /**
+   * Rows DynamoDB evaluates before the page stops early, including rows the filters drop.
+   *
+   * When the bound is reached on a dropped row, the read continues through the rows that share
+   * its sort order, so the next page can resume without naming the dropped row.
+   */
   maxEvaluatedRows: number
-  /** Resumes after this Work Item. Omit for the first page. */
+  /** Where to resume. Omit for the first page. */
   startAfter?: SortedWorkItemPagePosition
   /** Whether archived Work Items are returned. */
   includeArchived?: boolean
   /** Stable Work Item Type filter. */
   workItemTypeId?: string
+  /** Drops Work Items the caller may not read. Dropped rows never become a resume position. */
+  isReadable?: (issue: TeamIssueResponseItem) => boolean
 }
 
 /** One Team or Project Work Item page read in sort order. */
@@ -1731,7 +1748,7 @@ export class DynamoDbTeamIssuesClient {
     options: SortedWorkItemPageReadOptions,
   ): Promise<SortedWorkItemPage> {
     await this.ensureLocalTables()
-    if (options.startAfter !== undefined && options.startAfter.teamId !== teamId) {
+    if (options.startAfter?.kind === 'after-item' && options.startAfter.teamId !== teamId) {
       throw invalidSortedWorkItemPagePosition()
     }
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
@@ -1781,11 +1798,13 @@ export class DynamoDbTeamIssuesClient {
    * Queries a sort-order index until the page is full, the evaluated-row bound is reached, or
    * the partition ends.
    *
-   * Each Query asks for at most the rows still missing from the page, so the page never
-   * overflows and the last evaluated row is always where the next page starts.
+   * Rows are read in chunks and evaluated one by one, so a page costs a few Queries even when
+   * most rows are filtered out. The page stops on a returned Work Item whenever it can. When the
+   * evaluated-row bound ends on a dropped row, the read finishes that row's sort order and
+   * resumes after it, so the continuation names no dropped Work Item.
    *
    * @param input - Index, partition, start-key builder, and read options.
-   * @returns The page and the position after the last evaluated row.
+   * @returns The page and where the next page starts.
    */
   private async querySortedIssuePage(input: {
     /** Sort-order index to query. */
@@ -1794,63 +1813,98 @@ export class DynamoDbTeamIssuesClient {
     partitionAttribute: 'directoryTeamId' | 'directoryProjectId'
     /** Partition key value, already bound to the caller's directory. */
     partitionValue: string
-    /** Builds the full index and table key of a start position. */
-    toExclusiveStartKey: (position: SortedWorkItemPagePosition) => Record<string, unknown>
+    /** Builds the full index and table key after a returned Work Item. */
+    toExclusiveStartKey: (
+      position: Extract<SortedWorkItemPagePosition, { kind: 'after-item' }>,
+    ) => Record<string, unknown>
     /** Page read options. */
     options: SortedWorkItemPageReadOptions
   }): Promise<SortedWorkItemPage> {
     const { options } = input
     const limit = Math.max(1, Math.floor(options.limit))
     const maxEvaluatedRows = Math.max(limit, Math.floor(options.maxEvaluatedRows))
-    const items: TeamIssueItem[] = []
+    const startAfter = options.startAfter
+    const sortOrderFloor = startAfter?.kind === 'after-sort-order'
+      ? startAfter.sortOrder
+      : undefined
+    const issues: TeamIssueResponseItem[] = []
     let evaluatedCount = 0
-    let lastEvaluated: TeamIssueItem | undefined
-    let exclusiveStartKey: Record<string, unknown> | undefined = options.startAfter
-      ? input.toExclusiveStartKey(options.startAfter)
+    // Set once the evaluated-row bound ends on a dropped row; that sort order is then finished.
+    let finishingSortOrder: number | undefined
+    let exclusiveStartKey: Record<string, unknown> | undefined = startAfter?.kind === 'after-item'
+      ? input.toExclusiveStartKey(startAfter)
       : undefined
 
     try {
-      while (items.length < limit && evaluatedCount < maxEvaluatedRows) {
+      for (;;) {
         const response = await this.documentClient.send(
           new QueryCommand({
             TableName: this.issueTableName,
             IndexName: input.indexName,
-            KeyConditionExpression: '#partition = :partition',
-            ExpressionAttributeNames: { '#partition': input.partitionAttribute },
-            ExpressionAttributeValues: { ':partition': input.partitionValue },
+            KeyConditionExpression: sortOrderFloor === undefined
+              ? '#partition = :partition'
+              : '#partition = :partition AND #sortOrder > :sortOrder',
+            ExpressionAttributeNames: {
+              '#partition': input.partitionAttribute,
+              ...(sortOrderFloor === undefined ? {} : { '#sortOrder': 'sortOrder' }),
+            },
+            ExpressionAttributeValues: {
+              ':partition': input.partitionValue,
+              ...(sortOrderFloor === undefined ? {} : { ':sortOrder': sortOrderFloor }),
+            },
             ExclusiveStartKey: exclusiveStartKey,
             ScanIndexForward: true,
-            Limit: Math.min(limit - items.length, maxEvaluatedRows - evaluatedCount),
+            Limit: SORTED_WORK_ITEM_PAGE_QUERY_LIMIT,
           }),
         )
         const rows = (response.Items ?? []).map(toTeamIssueItem)
-        evaluatedCount += rows.length
-        lastEvaluated = rows.at(-1) ?? lastEvaluated
-        items.push(...rows
-          .filter((item) => options.includeArchived || item.archivedAt === undefined)
-          .filter((item) => matchesWorkItemTypeFilter(item, options.workItemTypeId)))
-        exclusiveStartKey = response.LastEvaluatedKey
-        if (!exclusiveStartKey) {
-          return { issues: items.map(toTeamIssueResponseItem) }
+        for (const [index, item] of rows.entries()) {
+          const isLastRow = index === rows.length - 1 && response.LastEvaluatedKey === undefined
+          if (finishingSortOrder !== undefined) {
+            if (item.sortOrder !== finishingSortOrder) {
+              return {
+                issues,
+                nextPosition: { kind: 'after-sort-order', sortOrder: finishingSortOrder },
+              }
+            }
+            if (evaluatedCount >= maxEvaluatedRows * 2) {
+              throw new ProjectDataError(
+                503,
+                'WorkItemListReadStalled',
+                'Too many Work Items share one sort order to continue the list.',
+              )
+            }
+          }
+          evaluatedCount += 1
+          const issue = toTeamIssueResponseItem(item)
+          const returned = (options.includeArchived || item.archivedAt === undefined) &&
+            matchesWorkItemTypeFilter(item, options.workItemTypeId) &&
+            (options.isReadable?.(issue) ?? true)
+          if (returned) {
+            issues.push(issue)
+            if (issues.length >= limit || evaluatedCount >= maxEvaluatedRows) {
+              return isLastRow
+                ? { issues }
+                : {
+                    issues,
+                    nextPosition: {
+                      kind: 'after-item',
+                      sortOrder: item.sortOrder,
+                      teamId: item.teamId,
+                      issueId: item.issueId,
+                    },
+                  }
+            }
+          } else if (evaluatedCount >= maxEvaluatedRows && finishingSortOrder === undefined) {
+            finishingSortOrder = item.sortOrder
+          }
         }
+        if (!response.LastEvaluatedKey) return { issues }
+        exclusiveStartKey = response.LastEvaluatedKey
       }
     } catch (error) {
       if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
-    }
-
-    // The last evaluated row is the resume point even when every row was filtered out.
-    return {
-      issues: items.map(toTeamIssueResponseItem),
-      ...(lastEvaluated
-        ? {
-            nextPosition: {
-              sortOrder: lastEvaluated.sortOrder,
-              teamId: lastEvaluated.teamId,
-              issueId: lastEvaluated.issueId,
-            },
-          }
-        : {}),
     }
   }
 
@@ -4733,6 +4787,9 @@ function createUniqueResourceId(value: string, existingIds: Iterable<string>) {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+/** Rows one sort-order page Query reads at a time. */
+const SORTED_WORK_ITEM_PAGE_QUERY_LIMIT = 500
 
 /**
  * Creates the error for a page start position outside the requested Team partition.

@@ -233,11 +233,15 @@ describe('canonical Work Item API', () => {
   })
 
   test('fails closed once a Workspace Work Item read passes 10,000 items', async () => {
-    const workItems = Array.from({ length: 200 }, () => createWorkItem())
     let page = 0
     installSequentialFetch(() => {
       page += 1
-      return { workItems, nextCursor: `cursor-${page}` }
+      return {
+        workItems: Array.from({ length: 200 }, (_, index) =>
+          createWorkItem({ id: `item-${page}-${index}` })
+        ),
+        nextCursor: `cursor-${page}`,
+      }
     })
 
     await expect(loadWorkspaceWorkItems('access-token')).rejects.toMatchObject({
@@ -310,6 +314,25 @@ describe('canonical Work Item API', () => {
     const project = await loadProjectIssues('launch', 'access-token')
     expect(project.issues.map((issue) => issue.id)).toEqual(['item-a', 'item-b'])
     expect(project.canReadCustomerImpact).toBeTrue()
+  })
+
+  test('counts only distinct Work Items toward the 10,000-item limit', async () => {
+    let page = 0
+    installSequentialFetch(() => {
+      page += 1
+      return {
+        teamId: 'core-team',
+        issues: page <= 50
+          ? Array.from({ length: 200 }, (_, index) => createWorkItem({ id: `item-${page}-${index}` }))
+          // A reorder returns one Work Item again on the last page.
+          : [createWorkItem({ id: 'item-1-0', revision: 4 })],
+        ...(page <= 50 ? { nextCursor: `cursor-${page}` } : {}),
+      }
+    })
+
+    const issues = await loadTeamIssues('core-team', 'access-token')
+    expect(issues).toHaveLength(10_000)
+    expect(issues[0]).toMatchObject({ id: 'item-1-0', revision: 4 })
   })
 
   test('fails a Team list read that repeats its cursor instead of showing a partial list', async () => {

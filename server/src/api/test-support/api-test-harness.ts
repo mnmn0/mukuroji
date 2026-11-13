@@ -20,6 +20,9 @@ import {
   type WorkItemSchedule,
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemTypeKey,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -742,7 +745,9 @@ function createDocumentFake(
 /**
  * Reads one sort-order page from fake Work Items ordered by array position.
  *
- * Each fake Work Item's sort order is its position times ten, like newly created Work Items.
+ * Each fake Work Item's sort order is its position times ten, so no two share a sort order.
+ * Like the DynamoDB adapter, the page stops on a returned Work Item, or after a fully evaluated
+ * sort order when the evaluated-row bound ends on a dropped row.
  *
  * @param partition - Fake Work Items in sort order.
  * @param readOptions - Page size, evaluated-row bound, start position, and filters.
@@ -752,37 +757,62 @@ function readFakeSortedPage(
   partition: readonly TeamIssueResponseItem[],
   readOptions: SortedWorkItemPageReadOptions,
 ): SortedWorkItemPage {
-  const startIndex = readOptions.startAfter === undefined
+  const startAfter = readOptions.startAfter
+  const startIndex = startAfter === undefined
     ? 0
-    : partition.findIndex((issue) =>
-        issue.teamId === readOptions.startAfter?.teamId &&
-        issue.id === readOptions.startAfter.issueId
-      ) + 1
+    : startAfter.kind === 'after-sort-order'
+      ? startAfter.sortOrder / 10 + 1
+      : partition.findIndex((issue) =>
+          issue.teamId === startAfter.teamId && issue.id === startAfter.issueId
+        ) + 1
   const issues: TeamIssueResponseItem[] = []
-  let index = startIndex
   let evaluated = 0
-  while (
-    index < partition.length &&
-    issues.length < readOptions.limit &&
-    evaluated < readOptions.maxEvaluatedRows
-  ) {
+  for (let index = startIndex; index < partition.length; index += 1) {
     const issue = partition[index]!
-    index += 1
     evaluated += 1
-    if (!readOptions.includeArchived && issue.archivedAt !== undefined) continue
-    if (
-      readOptions.workItemTypeId !== undefined &&
-      (issue.workItemTypeId ?? 'task') !== readOptions.workItemTypeId
-    ) continue
-    issues.push(issue)
+    const returned = (readOptions.includeArchived || issue.archivedAt === undefined) &&
+      matchesFakeWorkItemTypeFilter(issue, readOptions.workItemTypeId) &&
+      (readOptions.isReadable?.(issue) ?? true)
+    if (returned) issues.push(issue)
+    const isLast = index === partition.length - 1
+    if (returned && (issues.length >= readOptions.limit || evaluated >= readOptions.maxEvaluatedRows)) {
+      return isLast
+        ? { issues }
+        : {
+            issues,
+            nextPosition: {
+              kind: 'after-item',
+              sortOrder: index * 10,
+              teamId: issue.teamId,
+              issueId: issue.id,
+            },
+          }
+    }
+    if (!returned && evaluated >= readOptions.maxEvaluatedRows) {
+      return isLast
+        ? { issues }
+        : { issues, nextPosition: { kind: 'after-sort-order', sortOrder: index * 10 } }
+    }
   }
-  const last = partition[index - 1]
-  return {
-    issues,
-    ...(index < partition.length && last
-      ? { nextPosition: { sortOrder: index * 10, teamId: last.teamId, issueId: last.id } }
-      : {}),
-  }
+  return { issues }
+}
+
+/**
+ * Matches a fake Work Item against a Work Item Type filter like the DynamoDB adapter does.
+ *
+ * @param issue - Fake Work Item.
+ * @param filter - Plain type ID, Team-qualified type key, or nothing.
+ * @returns Whether the Work Item passes the filter.
+ */
+function matchesFakeWorkItemTypeFilter(
+  issue: TeamIssueResponseItem,
+  filter: string | undefined,
+): boolean {
+  if (!filter) return true
+  const workItemTypeId = issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  return readSearchWorkItemTypeKey(filter)
+    ? createSearchWorkItemTypeKey(issue.teamId, workItemTypeId) === filter
+    : workItemTypeId === filter
 }
 
 /**
@@ -2627,7 +2657,9 @@ function configureFakeProjectClients(
           kind: 'team',
           id: teamId,
           limit: readOptions.limit,
-          ...(readOptions.startAfter ? { startAfterIssueId: readOptions.startAfter.issueId } : {}),
+          ...(readOptions.startAfter?.kind === 'after-item'
+            ? { startAfterIssueId: readOptions.startAfter.issueId }
+            : {}),
         })
         return readFakeSortedPage(createFakeTeamIssues(teamId), readOptions)
       },
@@ -2637,7 +2669,9 @@ function configureFakeProjectClients(
           kind: 'project',
           id: projectId,
           limit: readOptions.limit,
-          ...(readOptions.startAfter ? { startAfterIssueId: readOptions.startAfter.issueId } : {}),
+          ...(readOptions.startAfter?.kind === 'after-item'
+            ? { startAfterIssueId: readOptions.startAfter.issueId }
+            : {}),
         })
         return readFakeSortedPage(createFakeProjectIssues(projectId), readOptions)
       },
