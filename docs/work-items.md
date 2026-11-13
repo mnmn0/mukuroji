@@ -208,6 +208,7 @@ Web の `loadTeamIssues` / `loadProjectIssues`（`web/src/issues/queries/scopedW
 
 ### まだ残している上限
 
+- Web の Team / Project 画面は、表示に使う範囲（期限カレンダーの月、期限順の期間など）ではなく一覧全体を cursor で読み切る。1 一覧 10,000 件を超えると読み込めない。期間で絞って読む API は無い。
 - Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
 - Work Item 作成は ID と `sortOrder` を決めるために Team partition 全件を読む。
 
