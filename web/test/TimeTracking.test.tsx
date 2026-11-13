@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { listTimeEntries, transitionTimeEntry, transitionTimesheet, updateTimeEntry } from '../src/features/time-tracking/api/timeEntries'
@@ -53,22 +53,31 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../src/shared/routing/paths'
 
 const originalFetch = globalThis.fetch
-// The local-date assertions below are written for Japan time; restore the zone for later files.
+// The local-date assertions below are written for Japan time. The zone is set in `beforeAll`
+// rather than at module scope because Bun may evaluate every test file before running any test,
+// and a module-scope TZ change would then leak into other files' timezone-sensitive tests.
 const originalTimeZone = process.env.TZ
-process.env.TZ = 'Asia/Tokyo'
+// Bun 1.3 keeps the last zone, and ignores later TZ changes, after `delete process.env.TZ`;
+// restore an explicit zone name instead so later files can still switch zones.
+const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 const t = createTranslator('en')
-const formatters = createTimeTrackingFormatters('en')
-const week = createWeekPeriod(timeTrackingFixtureWeekStart)
+let formatters: ReturnType<typeof createTimeTrackingFormatters>
+let week: ReturnType<typeof createWeekPeriod>
 const workItemTitles = Object.fromEntries(timeTrackingFixtureWorkItems.map((item) => [item.id, item.title]))
 const noop = async () => undefined
+
+beforeAll(() => {
+  process.env.TZ = 'Asia/Tokyo'
+  formatters = createTimeTrackingFormatters('en')
+  week = createWeekPeriod(timeTrackingFixtureWeekStart)
+})
 
 afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
 afterAll(() => {
-  if (originalTimeZone === undefined) delete process.env.TZ
-  else process.env.TZ = originalTimeZone
+  process.env.TZ = originalTimeZone ?? systemTimeZone
 })
 
 /** One request seen by the fetch mock. */

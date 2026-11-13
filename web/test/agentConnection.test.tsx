@@ -96,6 +96,8 @@ describe('agent connection snippets', () => {
 
   test('keeps the latest expiry inside the limit across a daylight-saving fallback', () => {
     const previousTimeZone = process.env.TZ
+    // Bun 1.3 ignores later TZ changes after `delete process.env.TZ`, so restore an explicit zone.
+    const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
     process.env.TZ = 'America/New_York'
     try {
       // 00:30 EDT on 5 August; the 90-day deadline falls at 23:30 EST on 2 November.
@@ -105,8 +107,7 @@ describe('agent connection snippets', () => {
       expect(Date.parse(toLocalEndOfDayIso(bounds.max)))
         .toBeLessThanOrEqual(now.getTime() + 90 * 24 * 60 * 60 * 1_000)
     } finally {
-      if (previousTimeZone === undefined) delete process.env.TZ
-      else process.env.TZ = previousTimeZone
+      process.env.TZ = previousTimeZone ?? systemTimeZone
     }
   })
 })
