@@ -344,6 +344,20 @@ describe('canonical Work Item API', () => {
     })
   })
 
+  test('fails a list read whose cursors go round in a cycle', async () => {
+    let page = 0
+    installSequentialFetch(() => {
+      page += 1
+      return { teamId: 'core-team', issues: [], nextCursor: page % 2 === 1 ? 'cursor-a' : 'cursor-b' }
+    })
+
+    await expect(loadTeamIssues('core-team', 'access-token')).rejects.toMatchObject({
+      status: 503,
+      code: 'WorkItemListReadStalled',
+    })
+    expect(page).toBe(3)
+  })
+
   test('describes list limit and stalled reads with their cause', () => {
     const t = (key: string) => key === 'tasks.error.reason' ? 'Cause: {reason}' : key
 

@@ -181,7 +181,7 @@ Team と Project ごとの bucket（Project 未割当は `projectId` なし）�
 3. `limit=200` を付け、`nextCursor` が返る間は `cursor=<nextCursor>` を付けて同じ filter で読み続ける。response の `workItems` を連結したものが従来の `workItems` に当たる。
 4. `413 WorkItemListLimitExceeded` は「範囲を絞る必要がある」という意味なので、generic error ではなく原因を表示する。Web は `tasks.error.limitExceeded` を表示し、API の message を「原因」として併記する。
 
-Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/src/issues/queries/workspaceWorkItemLoader.ts`）は 3 の手順を実装しており、集めた Work Item が 10,000 件を超えると同じ `413` 相当の error にする。絞り込みが強いと空の page が続くので、page 数では打ち切らない（同じ `nextCursor` が返る、または 500 page を超えたときだけ読み取り停止の error にする）。
+Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/src/issues/queries/workspaceWorkItemLoader.ts`）は 3 の手順を実装しており、集めた Work Item が 10,000 件を超えると同じ `413` 相当の error にする。絞り込みが強いと空の page が続くので、page 数では打ち切らない（一度返った `nextCursor` がまた返る、または 500 page を超えたときだけ読み取り停止の error にする）。
 
 ## Team / Project の一覧
 

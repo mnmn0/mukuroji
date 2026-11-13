@@ -43,7 +43,7 @@ type PagedWorkItem = {
  * @param onPage - Optional callback that receives each page, for example to keep capabilities.
  * @returns Every distinct Work Item of every page, in first-seen order.
  * @throws TeamIssuesApiError `413 WorkItemListLimitExceeded` above {@link WORK_ITEM_LIST_MAX_ITEMS},
- *   or `503 WorkItemListReadStalled` when the cursor repeats or the read never ends.
+ *   or `503 WorkItemListReadStalled` when a cursor comes back or the read never ends.
  */
 export async function loadAllWorkItemPages<TPage extends CursorPage, TItem extends PagedWorkItem>(
   readPage: (cursor: string | undefined) => Promise<TPage>,
@@ -51,6 +51,7 @@ export async function loadAllWorkItemPages<TPage extends CursorPage, TItem exten
   onPage?: (page: TPage) => void,
 ): Promise<TItem[]> {
   const itemsByKey = new Map<string, TItem>()
+  const seenCursors = new Set<string>()
   let cursor: string | undefined
 
   for (let page = 0; page < WORK_ITEM_LIST_MAX_PAGES; page += 1) {
@@ -67,7 +68,9 @@ export async function loadAllWorkItemPages<TPage extends CursorPage, TItem exten
       )
     }
     if (!response.nextCursor) return [...itemsByKey.values()]
-    if (response.nextCursor === cursor) throw createWorkItemListStalledError()
+    // A cursor seen before means the read is going round in a cycle.
+    if (seenCursors.has(response.nextCursor)) throw createWorkItemListStalledError()
+    seenCursors.add(response.nextCursor)
     cursor = response.nextCursor
   }
 
