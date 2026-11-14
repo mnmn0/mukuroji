@@ -2345,7 +2345,7 @@ test('loads only canonical project execution Work Items', async () => {
   expect(body.issues.map((issue: { id: string }) => issue.id)).toEqual([
     'onboarding-friction',
   ])
-  expect(calls.projectIssueReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+  expect(calls.issuePageReads).toEqual([
+    { directoryId: 'user#demo@example.com', kind: 'project', id: 'refero', limit: 200 },
   ])
 })

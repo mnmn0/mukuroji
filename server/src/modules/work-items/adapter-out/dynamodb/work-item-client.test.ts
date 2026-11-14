@@ -531,6 +531,258 @@ test('DynamoDB Team Work Item read can bound evaluated rows including archived r
   })).rejects.toMatchObject({ code: 'InvalidWorkItemListRead' })
 })
 
+test('DynamoDB sort-order pages read in chunks and resume after a returned Work Item', async () => {
+  const createStoredItem = (issueId: string, sortOrder: number, archived = false) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#launch',
+    teamId: 'core-team',
+    assignedProjectId: 'launch',
+    issueId,
+    sortOrder,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    ...(archived
+      ? { archivedAt: '2026-07-12T00:00:00.000Z', archivedBy: 'demo@example.com' }
+      : {}),
+  })
+  const responses: Array<{ Items: unknown[]; LastEvaluatedKey?: Record<string, unknown> }> = []
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return responses.shift()
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  // One Query fills the page even when rows before the last returned one are archived.
+  responses.push({
+    Items: [
+      createStoredItem('item-b', 20, true),
+      createStoredItem('item-c', 30),
+      createStoredItem('item-d', 40),
+      createStoredItem('item-e', 50),
+    ],
+    LastEvaluatedKey: { opaque: 'more' },
+  })
+  const teamPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 2,
+    maxEvaluatedRows: 2_000,
+    startAfter: { kind: 'after-item', sortOrder: 10, teamId: 'core-team', issueId: 'item-a' },
+  })
+  expect(teamPage.issues.map((issue) => issue.id)).toEqual(['item-c', 'item-d'])
+  expect(teamPage.nextPosition).toEqual({
+    kind: 'after-item',
+    sortOrder: 40,
+    teamId: 'core-team',
+    issueId: 'item-d',
+  })
+  expect(sentInputs).toEqual([{
+    TableName: 'WorkItemsTable',
+    IndexName: 'TeamIssueSortOrderIndex',
+    KeyConditionExpression: '#partition = :partition',
+    ExpressionAttributeNames: { '#partition': 'directoryTeamId' },
+    ExpressionAttributeValues: { ':partition': 'workspace-1#team#core-team' },
+    ExclusiveStartKey: {
+      directoryTeamId: 'workspace-1#team#core-team',
+      sortOrder: 10,
+      issueId: 'item-a',
+    },
+    ScanIndexForward: true,
+    Limit: 500,
+  }])
+
+  // The last row of the partition ends the list without a continuation.
+  sentInputs.length = 0
+  responses.push({ Items: [createStoredItem('item-e', 50)] })
+  const projectPage = await client.getProjectIssuePage('workspace-1', 'launch', {
+    limit: 5,
+    maxEvaluatedRows: 5,
+    startAfter: { kind: 'after-item', sortOrder: 40, teamId: 'other-team', issueId: 'item-d' },
+  })
+  expect(projectPage).toEqual({ issues: [expect.objectContaining({ id: 'item-e' })] })
+  expect(sentInputs[0]).toMatchObject({
+    IndexName: 'AssignedProjectIssueIndex',
+    ExpressionAttributeNames: { '#partition': 'directoryProjectId' },
+    ExpressionAttributeValues: { ':partition': 'workspace-1#project#launch' },
+    ExclusiveStartKey: {
+      directoryProjectId: 'workspace-1#project#launch',
+      sortOrder: 40,
+      directoryTeamId: 'workspace-1#team#other-team',
+      issueId: 'item-d',
+    },
+  })
+
+  await expect(client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 2,
+    maxEvaluatedRows: 3,
+    startAfter: { kind: 'after-item', sortOrder: 10, teamId: 'other-team', issueId: 'item-a' },
+  })).rejects.toMatchObject({ status: 400, code: 'InvalidWorkItemPageCursor' })
+})
+
+test('DynamoDB sort-order pages never resume at a Work Item the caller cannot read', async () => {
+  const createStoredItem = (issueId: string, sortOrder: number, assignedProjectId: string) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: `workspace-1#project#${assignedProjectId}`,
+    teamId: 'core-team',
+    assignedProjectId,
+    issueId,
+    sortOrder,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  })
+  const responses: Array<{ Items: unknown[]; LastEvaluatedKey?: Record<string, unknown> }> = [
+    {
+      Items: [createStoredItem('visible-a', 10, 'open'), createStoredItem('secret-b', 20, 'private')],
+      LastEvaluatedKey: { opaque: 'first' },
+    },
+    {
+      // Another row shares the sort order where the bound ended; the reserve finishes it.
+      Items: [createStoredItem('secret-c', 20, 'private'), createStoredItem('visible-e', 40, 'open')],
+      LastEvaluatedKey: { opaque: 'second' },
+    },
+    {
+      Items: [createStoredItem('visible-e', 40, 'open')],
+    },
+  ]
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return responses.shift()
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const isReadable = (issue: { assignedProjectId?: string }) => issue.assignedProjectId === 'open'
+
+  // A bound of 4 evaluates 2 rows normally and keeps 2 for finishing a shared sort order.
+  const firstPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 3,
+    maxEvaluatedRows: 4,
+    isReadable,
+  })
+  expect(firstPage.issues.map((issue) => issue.id)).toEqual(['visible-a'])
+  expect(firstPage.nextPosition).toEqual({ kind: 'after-sort-order', sortOrder: 20 })
+  expect(JSON.stringify(firstPage)).not.toContain('secret')
+  // DynamoDB never reads past the bound, reserve included.
+  expect(sentInputs.map((input) => input.Limit)).toEqual([2, 2])
+
+  sentInputs.length = 0
+  const secondPage = await client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 3,
+    maxEvaluatedRows: 4,
+    startAfter: { kind: 'after-sort-order', sortOrder: 20 },
+    isReadable,
+  })
+  expect(secondPage).toEqual({ issues: [expect.objectContaining({ id: 'visible-e' })] })
+  expect(sentInputs).toEqual([{
+    TableName: 'WorkItemsTable',
+    IndexName: 'TeamIssueSortOrderIndex',
+    KeyConditionExpression: '#partition = :partition AND #sortOrder > :sortOrder',
+    ExpressionAttributeNames: { '#partition': 'directoryTeamId', '#sortOrder': 'sortOrder' },
+    ExpressionAttributeValues: {
+      ':partition': 'workspace-1#team#core-team',
+      ':sortOrder': 20,
+    },
+    ExclusiveStartKey: undefined,
+    ScanIndexForward: true,
+    Limit: 2,
+  }])
+})
+
+test('DynamoDB sort-order pages fail instead of reading past the bound for a shared sort order', async () => {
+  const createHiddenItem = (issueId: string, sortOrder: number) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    sortOrder,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    archivedAt: '2026-07-12T00:00:00.000Z',
+    archivedBy: 'demo@example.com',
+  })
+  const sentLimits: unknown[] = []
+  let issued = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentLimits.push(command.input.Limit)
+      const limit = Number(command.input.Limit)
+      // Every row shares one sort order and is archived, so the bound never finds a boundary.
+      const items = Array.from({ length: limit }, () => createHiddenItem(`hidden-${issued++}`, 10))
+      return { Items: items, LastEvaluatedKey: { opaque: issued } }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssuePage('workspace-1', 'core-team', {
+    limit: 200,
+    maxEvaluatedRows: 2_000,
+  })).rejects.toMatchObject({ status: 503, code: 'WorkItemListReadStalled' })
+  // 1,900 rows normally, then the 100-row reserve; never more than the 2,000-row bound.
+  expect(sentLimits).toEqual([500, 500, 500, 400, 100])
+  expect(issued).toBe(2_000)
+})
+
 test('DynamoDB Team Work Item detail rejects a malformed body on non-comment events', async () => {
   const canonicalWorkItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,

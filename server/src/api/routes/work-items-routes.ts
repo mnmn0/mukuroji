@@ -27,6 +27,8 @@ import {
   type WorkItemScheduleImpact,
   type WorkItemScheduleOperation,
   type EnterprisePermissionId,
+  type ProjectWorkItemListPage,
+  type TeamWorkItemListPage,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -258,6 +260,12 @@ import {
   normalizeTeamIssueInput,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
+import {
+  readScopedWorkItemPage,
+  readScopedWorkItemPageQuery,
+  readScopedWorkItemsWithinLegacyLimit,
+  type ScopedWorkItemListScope,
+} from '../shared/scoped-work-item-page'
 import {
   readAccessibleWorkItemPage,
   readAllAccessibleWorkItems,
@@ -2351,25 +2359,6 @@ async function hydrateUpdateTeamIssueResponse(response: UpdateTeamIssueResponse)
   } satisfies UpdateTeamIssueResponse
 }
 
-async function readTeamIssues(
-  directoryId: string,
-  context: TeamPermissionContext,
-  principal: ProjectPrincipal,
-  includeArchived = false,
-  workItemTypeId?: string,
-) {
-  const storedIssues = await workItemDependencies.teamIssues.getTeamIssues(
-    directoryId,
-    context.team.id,
-    { includeArchived, ...(workItemTypeId ? { workItemTypeId } : {}) },
-  )
-
-  return {
-    teamId: context.team.id,
-    issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
-  } satisfies TeamIssuesResponse
-}
-
 /**
  * Recomputes one schedule preview from stable Planning data and strongly read endpoint schedules.
  *
@@ -3036,19 +3025,6 @@ function compareWorkItemScheduleEvaluationRevisions(
   right: WorkItemScheduleEvaluationRevision,
 ) {
   return createWorkItemDependencyKey(left).localeCompare(createWorkItemDependencyKey(right))
-}
-
-async function readProjectIssues(
-  directoryId: string,
-  projectId: string,
-  includeArchived = false,
-  workItemTypeId?: string,
-) {
-  return workItemDependencies.teamIssues.getProjectIssues(
-    directoryId,
-    projectId,
-    { includeArchived, ...(workItemTypeId ? { workItemTypeId } : {}) },
-  )
 }
 
 async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
@@ -4268,14 +4244,42 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
       const workItemTypeId = readOptionalWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
-
-      return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(
-        principal.directoryId,
-        context,
-        principal,
+      const pageQuery = readScopedWorkItemPageQuery((name) => c.req.query(name))
+      const scope = {
+        kind: 'team',
+        id: context.team.id,
         includeArchived,
-        workItemTypeId,
-      )))
+        ...(workItemTypeId ? { workItemTypeId } : {}),
+      } satisfies ScopedWorkItemListScope
+      const isReadable = (issue: TeamIssueResponseItem) =>
+        filterAccessibleTeamIssues([issue], principal, context).length > 0
+
+      if (pageQuery.paged) {
+        const page = await readScopedWorkItemPage(
+          principal.directoryId,
+          scope,
+          pageQuery,
+          isReadable,
+        )
+        const hydrated = await hydrateTeamIssuesResponse({
+          teamId: context.team.id,
+          issues: page.issues,
+        })
+        return c.json({
+          teamId: hydrated.teamId,
+          issues: hydrated.issues,
+          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        } satisfies TeamWorkItemListPage<TeamIssueResponseItem>)
+      }
+
+      return c.json(await hydrateTeamIssuesResponse({
+        teamId: context.team.id,
+        issues: await readScopedWorkItemsWithinLegacyLimit(
+          principal.directoryId,
+          scope,
+          isReadable,
+        ),
+      }))
     } catch (error) {
       if (error instanceof CognitoServiceError) {
         return toCognitoDirectoryErrorResponse(c, error)
@@ -5603,12 +5607,33 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
       const workItemTypeId = readOptionalProjectWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
 
-      const response = await hydrateProjectIssuesResponse(
-        await readProjectIssues(principal.directoryId, projectId, includeArchived, workItemTypeId),
-      )
+      const pageQuery = readScopedWorkItemPageQuery((name) => c.req.query(name))
+      const scope = {
+        kind: 'project',
+        id: projectId,
+        includeArchived,
+        ...(workItemTypeId ? { workItemTypeId } : {}),
+      } satisfies ScopedWorkItemListScope
+      const canReadCustomerImpact = hasCustomerReadAccess(principal, { projectId })
+
+      if (pageQuery.paged) {
+        const page = await readScopedWorkItemPage(principal.directoryId, scope, pageQuery)
+        const hydrated = await hydrateProjectIssuesResponse({ projectId, issues: page.issues })
+        return c.json({
+          projectId,
+          issues: hydrated.issues,
+          canReadCustomerImpact,
+          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        } satisfies ProjectWorkItemListPage<TeamIssueResponseItem>)
+      }
+
+      const response = await hydrateProjectIssuesResponse({
+        projectId,
+        issues: await readScopedWorkItemsWithinLegacyLimit(principal.directoryId, scope),
+      })
       return c.json({
         ...response,
-        canReadCustomerImpact: hasCustomerReadAccess(principal, { projectId }),
+        canReadCustomerImpact,
       })
     } catch (error) {
       if (error instanceof CognitoServiceError) {

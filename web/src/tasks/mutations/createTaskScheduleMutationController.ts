@@ -11,12 +11,12 @@ import type { KeyedMutator } from 'swr'
 import type { CurrentUser } from '../../auth/api'
 import {
   confirmTeamIssueSchedule,
-  getProjectIssues,
   getTeamIssueDetail,
   previewTeamIssueSchedule,
   TeamIssuesApiError,
   type TeamIssueDetail,
 } from '../../issues/api'
+import { loadProjectIssues } from '../../issues/queries/scopedWorkItemLoader'
 import { getPlanningSnapshot } from '../../planning/api/snapshot'
 import type { PlanningAccessSnapshot } from '../../planning/model/permissions'
 import { createWorkItemDependencyMutationController } from '../../planning/mutations/createWorkItemDependencyMutationController'
@@ -227,7 +227,9 @@ export function createTaskScheduleMutationController({
     )
     /** Fetches and publishes the Project list only after it observes committed revisions. */
     const refreshProjectTasks = () => refreshScheduleConfirmationCache(
-      () => guardEnterpriseSession(getProjectIssues(projectId, token, true)),
+      () => guardEnterpriseSession(
+        loadProjectIssues(projectId, token, true).then((list) => list.issues),
+      ),
       (refreshedTasks) => assertConfirmedScheduleRevisionsObserved(
         refreshedTasks,
         response.workItems.filter((item) => item.assignedProjectId === projectId),

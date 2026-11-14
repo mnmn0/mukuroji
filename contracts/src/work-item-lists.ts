@@ -89,3 +89,48 @@ export type WorkItemSummaryResponse = {
   /** One bucket per Team and Project that has at least one Work Item. */
   buckets: WorkItemSummaryBucket[]
 }
+
+/** Largest `limit` accepted by a paged Team or Project Work Item list request. */
+export const SCOPED_WORK_ITEM_PAGE_MAX_LIMIT = 200
+
+/** Page size used when a paged Team or Project Work Item list request omits `limit`. */
+export const SCOPED_WORK_ITEM_PAGE_DEFAULT_LIMIT = 100
+
+/**
+ * Largest number of Work Items a legacy Team or Project list request returns.
+ *
+ * A request without `limit` and `cursor` that matches more Work Items fails with
+ * `413 WorkItemListLimitExceeded` instead of returning an unbounded response.
+ */
+export const SCOPED_WORK_ITEM_LEGACY_MAX_ITEMS = 1_000
+
+/** One page of `GET /api/teams/:teamId/issues` when the request carries `limit` or `cursor`. */
+export type TeamWorkItemListPage<TWorkItem extends CanonicalWorkItem = CanonicalWorkItem> = {
+  /** Team whose Work Items were read. */
+  teamId: string
+  /**
+   * Work Items in this page, in the Team's manual sort order.
+   *
+   * A page can hold fewer than `limit` items, or none, while `nextCursor` is still set,
+   * because archived, other-type, and inaccessible Work Items are dropped after a bounded read.
+   */
+  issues: TWorkItem[]
+  /** Opaque cursor for the next page. Absent once every matching Work Item was returned. */
+  nextCursor?: string
+}
+
+/** One page of `GET /api/projects/:projectId/issues` when the request carries `limit` or `cursor`. */
+export type ProjectWorkItemListPage<TWorkItem extends CanonicalWorkItem = CanonicalWorkItem> = {
+  /** Project whose assigned Work Items were read. */
+  projectId: string
+  /**
+   * Work Items in this page, in the Project's sort order.
+   *
+   * A page can hold fewer than `limit` items, or none, while `nextCursor` is still set.
+   */
+  issues: TWorkItem[]
+  /** Whether the caller may request Customer impact for this Project resource. */
+  canReadCustomerImpact?: boolean
+  /** Opaque cursor for the next page. Absent once every matching Work Item was returned. */
+  nextCursor?: string
+}

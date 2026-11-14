@@ -692,6 +692,61 @@ export type PublicWorkItemPageReadOptions = {
   accessibleProjectIds?: readonly string[]
 }
 
+/**
+ * Where a Team or Project page resumes in a sort-order index.
+ *
+ * A position never names a Work Item the page did not return, so a continuation cannot reveal
+ * a filtered or unreadable Work Item. The adapter rebuilds the DynamoDB key with the caller's
+ * own directory, so a position cannot reach another Workspace.
+ */
+export type SortedWorkItemPagePosition =
+  | {
+      /** Resumes right after a Work Item the previous page returned. */
+      kind: 'after-item'
+      /** Sort-order index key of that Work Item. */
+      sortOrder: number
+      /** Team that owns that Work Item. */
+      teamId: string
+      /** Team-local ID of that Work Item. */
+      issueId: string
+    }
+  | {
+      /** Resumes after every row whose sort order is at most `sortOrder`. */
+      kind: 'after-sort-order'
+      /** Largest sort-order key the previous page fully evaluated. */
+      sortOrder: number
+    }
+
+/** Bounded read options of one Team or Project Work Item page in sort order. */
+export type SortedWorkItemPageReadOptions = {
+  /** Largest number of Work Items the page returns. */
+  limit: number
+  /**
+   * Rows DynamoDB evaluates before the page stops early, including rows the filters drop.
+   *
+   * Up to 100 rows of it (at most half) are reserved: when the rest of the bound ends on a
+   * dropped row, the read finishes the rows that share its sort order within the reserve, so
+   * the next page can resume without naming the dropped row.
+   */
+  maxEvaluatedRows: number
+  /** Where to resume. Omit for the first page. */
+  startAfter?: SortedWorkItemPagePosition
+  /** Whether archived Work Items are returned. */
+  includeArchived?: boolean
+  /** Stable Work Item Type filter. */
+  workItemTypeId?: string
+  /** Drops Work Items the caller may not read. Dropped rows never become a resume position. */
+  isReadable?: (issue: TeamIssueResponseItem) => boolean
+}
+
+/** One Team or Project Work Item page read in sort order. */
+export type SortedWorkItemPage = {
+  /** Work Items of the page, in sort order. */
+  issues: TeamIssueResponseItem[]
+  /** Where the next page starts. Absent once the index has no more rows. */
+  nextPosition?: SortedWorkItemPagePosition
+}
+
 /** TeamIssueUpdatedAtIndex の page cursor payload です。 */
 type PublicWorkItemPageCursor = {
   /** Cursor schema version です。 */
@@ -1148,6 +1203,32 @@ export type TeamIssuesClient = {
     projectId: string,
     options?: WorkItemListReadOptions,
   ): Promise<ProjectIssuesResponse>
+  /**
+   * Reads one bounded page of a Team's Work Items in the Team's manual sort order.
+   *
+   * @param directoryId - Workspace directory that owns the Team.
+   * @param teamId - Team whose Work Items are read.
+   * @param options - Page size, evaluated-row bound, start position, and filters.
+   * @returns The page and where the next page starts.
+   */
+  getTeamIssuePage(
+    directoryId: string,
+    teamId: string,
+    options: SortedWorkItemPageReadOptions,
+  ): Promise<SortedWorkItemPage>
+  /**
+   * Reads one bounded page of the Work Items assigned to a Project in sort order.
+   *
+   * @param directoryId - Workspace directory that owns the Project.
+   * @param projectId - Project whose assigned Work Items are read.
+   * @param options - Page size, evaluated-row bound, start position, and filters.
+   * @returns The page and where the next page starts.
+   */
+  getProjectIssuePage(
+    directoryId: string,
+    projectId: string,
+    options: SortedWorkItemPageReadOptions,
+  ): Promise<SortedWorkItemPage>
   /**
    * DynamoDB から Issue 詳細と活動履歴を取得します。
    */
@@ -1650,6 +1731,185 @@ export class DynamoDbTeamIssuesClient {
         throw error
       }
 
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads one bounded page of a Team's Work Items through `TeamIssueSortOrderIndex`.
+   *
+   * @param directoryId - Workspace directory that owns the Team.
+   * @param teamId - Team whose Work Items are read.
+   * @param options - Page size, evaluated-row bound, start position, and filters.
+   * @returns The page and where the next page starts.
+   */
+  async getTeamIssuePage(
+    directoryId: string,
+    teamId: string,
+    options: SortedWorkItemPageReadOptions,
+  ): Promise<SortedWorkItemPage> {
+    await this.ensureLocalTables()
+    if (options.startAfter?.kind === 'after-item' && options.startAfter.teamId !== teamId) {
+      throw invalidSortedWorkItemPagePosition()
+    }
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    return this.querySortedIssuePage({
+      indexName: 'TeamIssueSortOrderIndex',
+      partitionAttribute: 'directoryTeamId',
+      partitionValue: directoryTeamId,
+      toExclusiveStartKey: (position) => ({
+        directoryTeamId,
+        sortOrder: position.sortOrder,
+        issueId: position.issueId,
+      }),
+      options,
+    })
+  }
+
+  /**
+   * Reads one bounded page of a Project's Work Items through `AssignedProjectIssueIndex`.
+   *
+   * @param directoryId - Workspace directory that owns the Project.
+   * @param projectId - Project whose assigned Work Items are read.
+   * @param options - Page size, evaluated-row bound, start position, and filters.
+   * @returns The page and where the next page starts.
+   */
+  async getProjectIssuePage(
+    directoryId: string,
+    projectId: string,
+    options: SortedWorkItemPageReadOptions,
+  ): Promise<SortedWorkItemPage> {
+    await this.ensureLocalTables()
+    const directoryProjectId = createDirectoryProjectId(directoryId, projectId)
+    return this.querySortedIssuePage({
+      indexName: 'AssignedProjectIssueIndex',
+      partitionAttribute: 'directoryProjectId',
+      partitionValue: directoryProjectId,
+      toExclusiveStartKey: (position) => ({
+        directoryProjectId,
+        sortOrder: position.sortOrder,
+        directoryTeamId: createDirectoryTeamId(directoryId, position.teamId),
+        issueId: position.issueId,
+      }),
+      options,
+    })
+  }
+
+  /**
+   * Queries a sort-order index until the page is full, the evaluated-row bound is reached, or
+   * the partition ends.
+   *
+   * Rows are read in chunks and evaluated one by one, so a page costs a few Queries even when
+   * most rows are filtered out. The page stops on a returned Work Item whenever it can. When the
+   * evaluated-row bound ends on a dropped row, the read finishes that row's sort order and
+   * resumes after it, so the continuation names no dropped Work Item.
+   *
+   * @param input - Index, partition, start-key builder, and read options.
+   * @returns The page and where the next page starts.
+   */
+  private async querySortedIssuePage(input: {
+    /** Sort-order index to query. */
+    indexName: 'TeamIssueSortOrderIndex' | 'AssignedProjectIssueIndex'
+    /** Partition key attribute of the index. */
+    partitionAttribute: 'directoryTeamId' | 'directoryProjectId'
+    /** Partition key value, already bound to the caller's directory. */
+    partitionValue: string
+    /** Builds the full index and table key after a returned Work Item. */
+    toExclusiveStartKey: (
+      position: Extract<SortedWorkItemPagePosition, { kind: 'after-item' }>,
+    ) => Record<string, unknown>
+    /** Page read options. */
+    options: SortedWorkItemPageReadOptions
+  }): Promise<SortedWorkItemPage> {
+    const { options } = input
+    const limit = Math.max(1, Math.floor(options.limit))
+    const maxEvaluatedRows = Math.max(limit, Math.floor(options.maxEvaluatedRows))
+    // The bound includes the rows reserved for finishing one sort order, so a page never
+    // evaluates more than `maxEvaluatedRows` in total.
+    const tieAllowance = Math.min(
+      SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE,
+      Math.floor(maxEvaluatedRows / 2),
+    )
+    const primaryEvaluatedRows = maxEvaluatedRows - tieAllowance
+    const startAfter = options.startAfter
+    const sortOrderFloor = startAfter?.kind === 'after-sort-order'
+      ? startAfter.sortOrder
+      : undefined
+    const issues: TeamIssueResponseItem[] = []
+    let evaluatedCount = 0
+    // Set once the evaluated-row bound ends on a dropped row; that sort order is then finished.
+    let finishingSortOrder: number | undefined
+    let exclusiveStartKey: Record<string, unknown> | undefined = startAfter?.kind === 'after-item'
+      ? input.toExclusiveStartKey(startAfter)
+      : undefined
+
+    try {
+      for (;;) {
+        // Never read past the evaluated-row bound, plus the allowance for one sort order.
+        const readableRows = (finishingSortOrder === undefined
+          ? primaryEvaluatedRows
+          : maxEvaluatedRows) - evaluatedCount
+        if (readableRows <= 0) throw createSortedWorkItemPageStalledError()
+        const response = await this.documentClient.send(
+          new QueryCommand({
+            TableName: this.issueTableName,
+            IndexName: input.indexName,
+            KeyConditionExpression: sortOrderFloor === undefined
+              ? '#partition = :partition'
+              : '#partition = :partition AND #sortOrder > :sortOrder',
+            ExpressionAttributeNames: {
+              '#partition': input.partitionAttribute,
+              ...(sortOrderFloor === undefined ? {} : { '#sortOrder': 'sortOrder' }),
+            },
+            ExpressionAttributeValues: {
+              ':partition': input.partitionValue,
+              ...(sortOrderFloor === undefined ? {} : { ':sortOrder': sortOrderFloor }),
+            },
+            ExclusiveStartKey: exclusiveStartKey,
+            ScanIndexForward: true,
+            Limit: Math.min(SORTED_WORK_ITEM_PAGE_QUERY_LIMIT, readableRows),
+          }),
+        )
+        const rows = (response.Items ?? []).map(toTeamIssueItem)
+        for (const [index, item] of rows.entries()) {
+          const isLastRow = index === rows.length - 1 && response.LastEvaluatedKey === undefined
+          if (finishingSortOrder !== undefined) {
+            if (item.sortOrder !== finishingSortOrder) {
+              return {
+                issues,
+                nextPosition: { kind: 'after-sort-order', sortOrder: finishingSortOrder },
+              }
+            }
+          }
+          evaluatedCount += 1
+          const issue = toTeamIssueResponseItem(item)
+          const returned = (options.includeArchived || item.archivedAt === undefined) &&
+            matchesWorkItemTypeFilter(item, options.workItemTypeId) &&
+            (options.isReadable?.(issue) ?? true)
+          if (returned) {
+            issues.push(issue)
+            if (issues.length >= limit || evaluatedCount >= primaryEvaluatedRows) {
+              return isLastRow
+                ? { issues }
+                : {
+                    issues,
+                    nextPosition: {
+                      kind: 'after-item',
+                      sortOrder: item.sortOrder,
+                      teamId: item.teamId,
+                      issueId: item.issueId,
+                    },
+                  }
+            }
+          } else if (evaluatedCount >= primaryEvaluatedRows && finishingSortOrder === undefined) {
+            finishingSortOrder = item.sortOrder
+          }
+        }
+        if (!response.LastEvaluatedKey) return { issues }
+        exclusiveStartKey = response.LastEvaluatedKey
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
     }
   }
@@ -4532,6 +4792,44 @@ function createUniqueResourceId(value: string, existingIds: Iterable<string>) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Rows one sort-order page Query reads at a time. */
+const SORTED_WORK_ITEM_PAGE_QUERY_LIMIT = 500
+
+/**
+ * Rows of the evaluated-row bound reserved for finishing the sort order the rest ended on.
+ *
+ * Capped at half the bound. New Work Items take a sort order from the Team's current count, so
+ * a few can share one; a group larger than this fails with `503 WorkItemListReadStalled` instead
+ * of reading past the bound.
+ */
+const SORTED_WORK_ITEM_PAGE_TIE_ALLOWANCE = 100
+
+/**
+ * Creates the error for a shared sort order larger than the page can finish.
+ *
+ * @returns The 503 project data error.
+ */
+function createSortedWorkItemPageStalledError(): ProjectDataError {
+  return new ProjectDataError(
+    503,
+    'WorkItemListReadStalled',
+    'Too many Work Items share one sort order to continue the list.',
+  )
+}
+
+/**
+ * Creates the error for a page start position outside the requested Team partition.
+ *
+ * @returns The 400 project data error the API returns for an invalid cursor.
+ */
+function invalidSortedWorkItemPagePosition(): ProjectDataError {
+  return new ProjectDataError(
+    400,
+    'InvalidWorkItemPageCursor',
+    'Work Item page cursor is invalid or was issued for different filters.',
+  )
 }
 
 function createDirectoryTeamId(directoryId: string, teamId: string) {

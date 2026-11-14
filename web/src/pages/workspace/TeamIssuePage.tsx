@@ -38,6 +38,7 @@ import {
   updateTeamIssue,
 } from '../../issues/api'
 import { useTeamIssueDetail, useTeamIssues } from '../../issues/queries/useWorkItems'
+import { describeScopedWorkItemListError } from '../../issues/model/workItemListError'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
   applyIssueCollaborationTabToSearchParams,
@@ -386,9 +387,11 @@ export function TeamIssuePage() {
     Boolean(user && isProjectDirectoryLoading) ||
     Boolean(user && isIssuesLoading) ||
     Boolean(user && isWorkItemConfigurationLoading)
-  const issueErrorMessage = currentUserErrorAction?.kind === 'stay' || issueError
+  const issueErrorMessage = currentUserErrorAction?.kind === 'stay'
     ? t('issues.error.loading')
-    : undefined
+    : issueError
+      ? describeScopedWorkItemListError(issueError, t) ?? t('issues.error.loading')
+      : undefined
   const detailErrorMessage = detailError
     ? t('issues.error.detail')
     : undefined
