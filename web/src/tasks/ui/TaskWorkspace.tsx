@@ -69,6 +69,7 @@ import {
   type TaskSortOrder,
   type TaskTab,
 } from '../model/taskView'
+import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
 import { TaskBoardView } from './TaskBoardView'
 import { TaskCalendarView } from './TaskCalendarView'
@@ -82,6 +83,8 @@ const priorityFilterOptions: readonly PriorityFilter[] = ['all', ...taskPrioriti
 
 /** Props accepted by the task view workspace. */
 export type TaskWorkspaceProps = {
+  /** Visible calendar and Gantt periods. Without it, both layouts span every loaded schedule. */
+  scheduleWindowNavigation?: TaskScheduleWindowNavigation
   /** Currently active task view. */
   activeTab: TaskTab
   /** Unfiltered tasks used to derive complete filter options. */
@@ -281,6 +284,7 @@ export type TaskWorkspaceProps = {
  */
 export function TaskWorkspace({
   activeTab,
+  scheduleWindowNavigation,
   allTasks,
   bulkProjectOptions,
   bulkTaskActionEpoch,
@@ -761,6 +765,12 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          {...(scheduleWindowNavigation
+            ? {
+                onWindowStartMonthChange: scheduleWindowNavigation.onGanttStartMonthChange,
+                windowStartMonth: scheduleWindowNavigation.ganttStartMonth,
+              }
+            : {})}
         />
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
@@ -773,6 +783,12 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          {...(scheduleWindowNavigation
+            ? {
+                month: scheduleWindowNavigation.calendarMonth,
+                onMonthChange: scheduleWindowNavigation.onCalendarMonthChange,
+              }
+            : {})}
         />
       ) : null}
     </div>

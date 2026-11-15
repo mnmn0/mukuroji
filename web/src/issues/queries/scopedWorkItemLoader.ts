@@ -1,4 +1,7 @@
-import { SCOPED_WORK_ITEM_PAGE_MAX_LIMIT } from '@mukuroji/contracts'
+import {
+  SCOPED_WORK_ITEM_PAGE_MAX_LIMIT,
+  type ScopedWorkItemScheduleFilter,
+} from '@mukuroji/contracts'
 import {
   getProjectIssuesPage,
   getTeamIssuesPage,
@@ -39,24 +42,41 @@ export async function loadTeamIssues(
   )
 }
 
+/** Inclusive local date window of a windowed Project read. */
+export type ProjectIssueScheduleWindow = {
+  /** Inclusive first local date in `YYYY-MM-DD` form. */
+  from: string
+  /** Inclusive last local date in `YYYY-MM-DD` form. */
+  to: string
+}
+
 /**
- * Loads every Work Item assigned to one Project by following page cursors.
+ * Loads the Work Items assigned to one Project by following page cursors.
+ *
+ * Without `scheduleWindow`, every Work Item of the Project is read. With it, only the Work
+ * Items whose schedule touches the window are read, together with the unscheduled Work Items
+ * in a second cursor read, so a calendar or Gantt never reads the rest of the Project. Each of
+ * the two reads has its own item limit.
  *
  * @param projectId - Project whose assigned Work Items should be loaded.
  * @param accessToken - Bearer token for the Work Item API.
  * @param includeArchived - Whether archived Work Items should be included.
+ * @param scheduleWindow - Optional visible period of a calendar or Gantt.
  * @returns The Work Items and the Customer impact capability of the last page.
  */
 export async function loadProjectIssues(
   projectId: string,
   accessToken: string,
   includeArchived = false,
+  scheduleWindow?: ProjectIssueScheduleWindow,
 ): Promise<ProjectIssueList> {
   let canReadCustomerImpact: boolean | undefined
-  const issues = await loadAllWorkItemPages(
+  /** Reads every page of one Project list filter. */
+  const loadFilteredIssues = (scheduleFilter?: ScopedWorkItemScheduleFilter) => loadAllWorkItemPages(
     (cursor) => getProjectIssuesPage(projectId, accessToken, {
       includeArchived,
       limit: SCOPED_WORK_ITEM_PAGE_MAX_LIMIT,
+      ...(scheduleFilter ? { scheduleFilter } : {}),
       ...(cursor ? { cursor } : {}),
     }),
     (page) => page.issues,
@@ -66,9 +86,32 @@ export async function loadProjectIssues(
       }
     },
   )
+  const issues = scheduleWindow
+    ? mergeProjectIssueReads(await Promise.all([
+        loadFilteredIssues({ kind: 'window', from: scheduleWindow.from, to: scheduleWindow.to }),
+        loadFilteredIssues({ kind: 'unscheduled' }),
+      ]))
+    : await loadFilteredIssues()
   return {
     projectId,
     issues,
     ...(canReadCustomerImpact === undefined ? {} : { canReadCustomerImpact }),
   }
+}
+
+/**
+ * Joins the windowed and unscheduled reads, keeping each Work Item once.
+ *
+ * A schedule change between the two reads can return one Work Item from both; the later copy
+ * wins at the first position.
+ *
+ * @param reads - Work Items of each read, in read order.
+ * @returns Distinct Work Items in first-seen order.
+ */
+function mergeProjectIssueReads(reads: readonly (readonly TeamIssue[])[]): TeamIssue[] {
+  const issuesByKey = new Map<string, TeamIssue>()
+  for (const issue of reads.flat()) {
+    issuesByKey.set(`${issue.teamId}\u0000${issue.id}`, issue)
+  }
+  return [...issuesByKey.values()]
 }

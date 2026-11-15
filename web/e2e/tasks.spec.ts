@@ -6,6 +6,7 @@ import {
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   AUTOMATION_SCHEMA_VERSION,
   FOCUS_SCHEMA_VERSION,
+  matchesScopedWorkItemScheduleFilter,
   PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -3327,6 +3328,18 @@ async function dragScheduleCard(page: Page, source: Locator, target: Locator): P
   }
 }
 
+/**
+ * Fixes the browser clock inside the June 2026 schedule fixtures.
+ *
+ * The Project calendar opens on the current month and the Gantt on a period starting at it,
+ * so tests that use the June fixtures open those periods by fixing today.
+ *
+ * @param page - Browser page whose clock is fixed.
+ */
+async function setScheduleFixtureClock(page: Page) {
+  await page.clock.setFixedTime(new Date('2026-06-05T03:00:00.000Z'))
+}
+
 const ganttDropBottomOffset = 12
 
 /**
@@ -4064,6 +4077,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #190: filter で隠れた同一 Project endpoint を外部扱いしない', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     const dependency = {
       id: 'dependency-filtered-local',
       predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
@@ -4090,6 +4104,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #190: 依存先への日程波及を preview 後の confirm で一括保存する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     const dependency = {
       id: 'dependency-wireframe-brand',
       predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
@@ -4142,6 +4157,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #190: confirm 後の GET 失敗でも全日程を成功状態へ反映する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     const dependency = {
       id: 'dependency-wireframe-brand-refresh-failure',
       predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
@@ -4204,6 +4220,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #190: dependency conflict preview は Gantt と Calendar で Cancel に focus する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     const dependency = {
       id: 'dependency-wireframe-brand-conflict',
       predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
@@ -4262,6 +4279,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #190: 外部 Project 依存の connector と lead/lag を示し両端管理者以外は参照専用にする', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     const externalIssue = createStoredTeamIssue({
       assignedProjectId: 'product-roadmap',
       dueDate: '2026-06-08',
@@ -4390,6 +4408,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Gantt はキーボード移動を事前確認し undo・redo・resize できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
@@ -4473,6 +4492,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Gantt は既存 bar と重なる日へ pointer drag で移動・短縮できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
@@ -4515,6 +4535,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Gantt は未計画 row の明示日付から bar を作成し再読込後も保持する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
@@ -4551,6 +4572,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Calendar は日付と未計画 bucket の間を drag and drop できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
@@ -4605,6 +4627,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
@@ -4641,6 +4664,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: schedule preview の permission error は理由を表示し更新しない', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       forbiddenSchedulePreviewIssueKeys: [
         createIssueCollaborationKey('core-team', 'wireframe'),
@@ -4665,6 +4689,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: schedule の revision conflict は optimistic 表示を戻して理由を示す', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       revisionConflictIssueKeys: [createIssueCollaborationKey('core-team', 'wireframe')],
     })
@@ -5212,6 +5237,7 @@ test.describe('authenticated task page', () => {
       { key: 'gantt', tabName: '期限順', opener: 'gantt' },
     ]) {
       test(`${viewport.label} ${taskView.key} のキーボード詳細遷移は同じ開く操作へフォーカスを戻す`, async ({ page }) => {
+        await setScheduleFixtureClock(page)
         await page.setViewportSize({ width: viewport.width, height: viewport.height })
         await page.goto('/projects/refero/issues')
         await page.getByRole('tab', { name: taskView.tabName, exact: true }).click()
@@ -5775,6 +5801,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Gantt の bar を Table 再表示後に閉じると新しい bar へフォーカスを戻す', async ({ page }) => {
+    await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
     await page.getByTestId('task-detail-close').click()
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -13493,16 +13520,27 @@ function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
  * Serves one page of a mock Team or Project Work Item list like the cursor API does.
  *
  * Requests without `limit` and `cursor` get the legacy complete list. The mock cursor is the
- * offset of the next page.
+ * offset of the next page. `scheduledFrom` / `scheduledTo` and `unscheduled=true` narrow the
+ * list as the server does.
  *
  * @param requestUrl - URL of the intercepted list request.
- * @param issues - Complete mock list in sort order.
+ * @param allIssues - Complete mock list in sort order.
  * @returns The page and the cursor of the next one.
  */
-function createMockWorkItemListPage(requestUrl: string, issues: readonly TeamIssue[]) {
+function createMockWorkItemListPage(requestUrl: string, allIssues: readonly TeamIssue[]) {
   const searchParams = new URL(requestUrl).searchParams
   const limit = searchParams.get('limit')
   const cursor = searchParams.get('cursor')
+  const scheduledFrom = searchParams.get('scheduledFrom')
+  const scheduledTo = searchParams.get('scheduledTo')
+  const scheduleFilter = scheduledFrom && scheduledTo
+    ? { kind: 'window' as const, from: scheduledFrom, to: scheduledTo }
+    : searchParams.get('unscheduled') === 'true'
+      ? { kind: 'unscheduled' as const }
+      : undefined
+  const issues = scheduleFilter
+    ? allIssues.filter((issue) => matchesScopedWorkItemScheduleFilter(issue.schedule, scheduleFilter))
+    : allIssues
   if (limit === null && cursor === null) return { issues }
   const pageSize = Number(limit ?? '100')
   const offset = Number(cursor ?? '0')
@@ -13630,5 +13668,122 @@ test.describe('Issue #458: 2,000 件の Team / Project 一覧', () => {
     await expect(page.getByTestId('tasks-error')).toContainText(
       '原因: More than 10000 Work Items match this view.',
     )
+  })
+})
+
+test.describe('Issue #463: 10,000 件を超える Project の期限カレンダーとガント', () => {
+  /** Number of synthetic Project Work Items, above the 10,000-item complete-list limit. */
+  const syntheticTaskCount = 12_000
+
+  /**
+   * Creates synthetic Project Work Items with deadlines spread over two years.
+   *
+   * Every 40th Work Item is unscheduled.
+   *
+   * @returns Work Items whose IDs carry their index.
+   */
+  function createDatedSyntheticTasks() {
+    return Array.from({ length: syntheticTaskCount }, (_, index) => {
+      const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
+      const dueDate = createSyntheticDueDate(index)
+      return {
+        ...fixture,
+        id: `dated-${index}`,
+        title: `Dated task ${index}`,
+        dueDate: dueDate ?? '',
+        schedule: dueDate
+          ? { calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY, mode: 'due-date' as const, dueDate }
+          : { calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY, mode: 'unscheduled' as const },
+      }
+    })
+  }
+
+  /**
+   * Returns the deadline of one synthetic Work Item.
+   *
+   * @param index - Synthetic Work Item index.
+   * @returns A date between 2025-12-01 and 2027-11-30, or `undefined` when unscheduled.
+   */
+  function createSyntheticDueDate(index: number) {
+    if (index % 40 === 0) return undefined
+    const time = Date.UTC(2025, 11, 1) + (index % 730) * 86_400_000
+    return new Date(time).toISOString().slice(0, 10)
+  }
+
+  test('表示期間と期限なしの Work Item だけを読み、全件読み取りを行わない', async ({ page }) => {
+    test.setTimeout(180_000)
+    await page.clock.setFixedTime(new Date('2026-11-15T03:00:00.000Z'))
+    const tasks = createDatedSyntheticTasks()
+    await mockAuthenticatedTaskPage(page, tasks)
+    const listRequests: URLSearchParams[] = []
+    await page.route(/.*\/api\/projects\/refero\/issues(?:\?.*)?$/u, async (route) => {
+      const searchParams = new URL(route.request().url()).searchParams
+      listRequests.push(searchParams)
+      if (!searchParams.has('scheduledFrom') && searchParams.get('unscheduled') !== 'true') {
+        // The complete list of this Project is above the client's 10,000-item limit.
+        await route.fulfill({
+          status: 413,
+          json: {
+            code: 'WorkItemListLimitExceeded',
+            message: 'More than 10000 Work Items match this view.',
+          },
+        })
+        return
+      }
+      await route.fallback()
+    })
+    const novemberIndex = tasks.findIndex((task) => task.dueDate === '2026-11-10')
+    const decemberIndex = tasks.findIndex((task) => task.dueDate === '2026-12-10')
+    const unscheduledIndex = tasks.findIndex((task) => task.schedule.mode === 'unscheduled')
+
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('tasks-error')).toContainText('原因: More than 10000 Work Items')
+    const tablist = page.getByRole('tablist').first()
+    await tablist.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(page.getByTestId(`task-calendar-item-dated-${novemberIndex}`)).toBeVisible({
+      timeout: 60_000,
+    })
+
+    // A reload opens the calendar directly, so its first list read is already windowed.
+    listRequests.length = 0
+    await page.reload()
+    const monthNavigation = page.getByTestId('task-calendar-month-navigation')
+    await expect(monthNavigation.getByTestId('task-calendar-month-navigation-period')).toHaveText(
+      '2026-11-01 – 2026-11-30',
+      { timeout: 60_000 },
+    )
+    await expect(page.getByTestId(`task-calendar-item-dated-${novemberIndex}`)).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.getByTestId(`task-calendar-item-dated-${unscheduledIndex}`)).toBeVisible()
+    await expect(page.getByTestId('tasks-error')).toHaveCount(0)
+
+    await monthNavigation.getByRole('button', { name: '次の月', exact: true }).click()
+    await expect(page.getByTestId(`task-calendar-item-dated-${decemberIndex}`)).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.getByTestId(`task-calendar-item-dated-${novemberIndex}`)).toHaveCount(0)
+
+    await tablist.getByRole('tab', { name: '期限順', exact: true }).click()
+    await expect(
+      page.getByTestId('task-gantt-period-navigation').getByTestId('task-gantt-period-navigation-period'),
+    ).toHaveText('2026-11-01 – 2027-01-31', { timeout: 60_000 })
+    await expect(page.getByTestId(`task-gantt-bar-dated-${novemberIndex}`)).toBeAttached({
+      timeout: 60_000,
+    })
+    await expect(page.getByTestId('tasks-error')).toHaveCount(0)
+
+    const windows = listRequests.map((searchParams) =>
+      searchParams.get('unscheduled') === 'true'
+        ? 'unscheduled'
+        : `${searchParams.get('scheduledFrom')}..${searchParams.get('scheduledTo')}`
+    )
+    expect(windows).not.toContain('null..null')
+    expect(new Set(windows)).toEqual(new Set([
+      'unscheduled',
+      '2026-11-01..2026-11-30',
+      '2026-12-01..2026-12-31',
+      '2026-11-01..2027-01-31',
+    ]))
   })
 })

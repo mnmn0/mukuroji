@@ -1,5 +1,5 @@
 import type { WorkspaceWorkItemListFilter } from '@mukuroji/contracts'
-import useSWR from 'swr'
+import useSWR, { useSWRConfig } from 'swr'
 import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
 import { useMemo } from 'react'
 import {
@@ -11,6 +11,7 @@ import {
   loadProjectIssues,
   loadTeamIssues,
   type ProjectIssueList as ProjectIssuesPage,
+  type ProjectIssueScheduleWindow,
 } from './scopedWorkItemLoader'
 import { loadWorkspaceWorkItems } from './workspaceWorkItemLoader'
 
@@ -86,6 +87,9 @@ export function useTeamIssues(
  * @param includeArchived - Whether the Project query includes archived Work Items.
  * @param selectedTeamId - Optional Team identity from the routed Work Item.
  * @param selectedIssueId - Optional Work Item identity from the route.
+ * @param scheduleWindow - Optional visible calendar or Gantt period. When set, only the Work
+ *   Items touching it and the unscheduled Work Items are read. The routed Work Item is still
+ *   added from its detail when it lies outside the period.
  * @returns Project Work Item 一覧の SWR state です。
  */
 export function useProjectIssues(
@@ -95,17 +99,31 @@ export function useProjectIssues(
   includeArchived = false,
   selectedTeamId?: string,
   selectedIssueId?: string,
+  scheduleWindow?: ProjectIssueScheduleWindow,
 ) {
   const key = accessToken && projectId && enabled
-    ? ['project-issues', accessToken, projectId, includeArchived] as const
+    ? [
+        'project-issues',
+        accessToken,
+        projectId,
+        includeArchived,
+        scheduleWindow?.from ?? null,
+        scheduleWindow?.to ?? null,
+      ] as const
     : null
 
   const query = useSWR(
     key,
-    ([, token, currentProjectId, shouldIncludeArchived]) =>
-      loadProjectIssues(currentProjectId, token, shouldIncludeArchived),
+    ([, token, currentProjectId, shouldIncludeArchived, from, to]) =>
+      loadProjectIssues(
+        currentProjectId,
+        token,
+        shouldIncludeArchived,
+        from !== null && to !== null ? { from, to } : undefined,
+      ),
     workItemQueryConfig,
   )
+  const { mutate: mutateCache } = useSWRConfig()
 
   const selectedDetailQuery = useTeamIssueDetail(
     accessToken,
@@ -184,6 +202,11 @@ export function useProjectIssues(
     const response = data === undefined && options === undefined
       ? await query.mutate()
       : await query.mutate(responseData, responseOptions)
+    // The same Project is also cached for the whole list and other calendar or Gantt periods.
+    // Revalidating them clears their request deduplication, so the next layout reads fresh data.
+    void mutateCache((candidate: unknown) =>
+      isOtherProjectIssueListKey(candidate, key)
+    )
     return response?.issues
   }
 
@@ -194,6 +217,23 @@ export function useProjectIssues(
     mutate: mutateProjectIssues,
     key,
   }
+}
+
+/**
+ * Decides whether a cache key is another list of the same Project as `currentKey`.
+ *
+ * @param candidate - Cache key supplied by the global mutator.
+ * @param currentKey - Key of the Project list that was changed.
+ * @returns Whether the candidate caches the same Project for another archive option or period.
+ */
+function isOtherProjectIssueListKey(
+  candidate: unknown,
+  currentKey: readonly unknown[] | null,
+): boolean {
+  if (!currentKey || !Array.isArray(candidate) || candidate[0] !== 'project-issues') return false
+  return candidate[1] === currentKey[1] &&
+    candidate[2] === currentKey[2] &&
+    candidate.some((part, index) => part !== currentKey[index])
 }
 
 /**

@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useState } from 'react'
 import { expect, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -54,5 +55,22 @@ export const FilteredLocalDependency: Story = {
 
     await expect(dependency).not.toHaveTextContent(t('workItems.dependencies.external'))
     await expect(canvas.queryByTestId('task-gantt-external-lane')).not.toBeInTheDocument()
+  },
+}
+
+/** Gantt that shows one three-month period and moves it a month at a time. */
+export const PeriodWindow: Story = {
+  args: {
+    windowStartMonth: '2026-06',
+  },
+  render: function PeriodWindowStory(args) {
+    const [windowStartMonth, setWindowStartMonth] = useState(args.windowStartMonth ?? '2026-06')
+    return (
+      <TaskGanttView
+        {...args}
+        onWindowStartMonthChange={setWindowStartMonth}
+        windowStartMonth={windowStartMonth}
+      />
+    )
   },
 }

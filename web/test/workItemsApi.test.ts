@@ -316,6 +316,50 @@ describe('canonical Work Item API', () => {
     expect(project.canReadCustomerImpact).toBeTrue()
   })
 
+  test('reads only the visible schedule window and the unscheduled Work Items of a Project', async () => {
+    const requests: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      requests.push(url)
+      const searchParams = new URL(url, 'http://localhost').searchParams
+      const body = searchParams.get('unscheduled') === 'true'
+        ? {
+            projectId: 'launch',
+            issues: [createWorkItem({ id: 'unscheduled' }), createWorkItem({ id: 'moved', revision: 5 })],
+            canReadCustomerImpact: false,
+          }
+        : searchParams.get('cursor')
+          ? { projectId: 'launch', issues: [createWorkItem({ id: 'moved' })], canReadCustomerImpact: false }
+          : {
+              projectId: 'launch',
+              issues: [createWorkItem({ id: 'in-window' })],
+              canReadCustomerImpact: false,
+              nextCursor: 'cursor-1',
+            }
+      return new Response(JSON.stringify(body), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }) as typeof fetch
+
+    const project = await loadProjectIssues('launch', 'access-token', true, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+    })
+    // A Work Item returned by both reads is kept once, with the later copy.
+    expect(project.issues.map((issue) => [issue.id, issue.revision])).toEqual([
+      ['in-window', 3],
+      ['moved', 5],
+      ['unscheduled', 3],
+    ])
+    expect(project.canReadCustomerImpact).toBeFalse()
+    expect(requests.toSorted()).toEqual([
+      '/api/projects/launch/issues?limit=200&includeArchived=true&scheduledFrom=2026-11-01&scheduledTo=2026-11-30',
+      '/api/projects/launch/issues?limit=200&includeArchived=true&scheduledFrom=2026-11-01&scheduledTo=2026-11-30&cursor=cursor-1',
+      '/api/projects/launch/issues?limit=200&includeArchived=true&unscheduled=true',
+    ])
+  })
+
   test('counts only distinct Work Items toward the 10,000-item limit', async () => {
     let page = 0
     installSequentialFetch(() => {

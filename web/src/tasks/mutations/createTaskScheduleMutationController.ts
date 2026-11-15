@@ -24,6 +24,7 @@ import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { applyConfirmedSchedulesToTasks } from '../model/scheduleConfirmation'
+import { isTaskScheduleInWindow, type TaskScheduleWindow } from '../model/taskScheduleWindow'
 import {
   refreshScheduleConfirmationCache,
   revalidateScheduleConfirmationCachesBestEffort,
@@ -51,6 +52,13 @@ export type TaskScheduleMutationControllerOptions = {
   planningAccess: PlanningAccessSnapshot
   /** Latest authoritative Planning snapshot. */
   planningSnapshot?: PlanningSnapshot
+  /**
+   * Visible calendar or Gantt period of the Project list cache, when the list is windowed.
+   *
+   * The refresh after a confirmation then reads the same period, and only expects confirmed
+   * Work Items that still belong to it.
+   */
+  scheduleWindow?: TaskScheduleWindow
   /** Resolves localized fallback messages. */
   t: (key: MessageKey) => string
   /** Authenticated user whose endpoint authority is checked before mutations. */
@@ -98,6 +106,7 @@ export function createTaskScheduleMutationController({
   planningAccess,
   planningSnapshot,
   projectId,
+  scheduleWindow,
   t,
   user,
 }: TaskScheduleMutationControllerOptions): TaskScheduleMutationController {
@@ -228,11 +237,16 @@ export function createTaskScheduleMutationController({
     /** Fetches and publishes the Project list only after it observes committed revisions. */
     const refreshProjectTasks = () => refreshScheduleConfirmationCache(
       () => guardEnterpriseSession(
-        loadProjectIssues(projectId, token, true).then((list) => list.issues),
+        loadProjectIssues(projectId, token, true, scheduleWindow).then((list) => list.issues),
       ),
       (refreshedTasks) => assertConfirmedScheduleRevisionsObserved(
         refreshedTasks,
-        response.workItems.filter((item) => item.assignedProjectId === projectId),
+        response.workItems.filter((item) =>
+          item.assignedProjectId === projectId &&
+          // A windowed list only holds the period's Work Items and the unscheduled ones.
+          (!scheduleWindow || item.schedule.mode === 'unscheduled' ||
+            isTaskScheduleInWindow(item.schedule, scheduleWindow))
+        ),
         'Project Work Item list',
       ),
       (refreshedTasks) => mutateProjectTasks(refreshedTasks, { revalidate: false }),

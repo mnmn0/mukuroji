@@ -29,6 +29,8 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   type CanonicalWorkItem,
   createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   DEFAULT_WORK_ITEM_TYPE,
 } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../../planning/planning'
@@ -299,6 +301,85 @@ test('rejects a Project page cursor issued for another Project', async () => {
   )
   expect(crossTeam.status).toBe(400)
   expect(await crossTeam.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+})
+
+test('reads only the Project Work Items whose schedule touches the requested window', async () => {
+  const calendarPolicy = DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY
+  configureFakeProjectClients(true, {
+    canonicalProjectIssueIds: ['before', 'due-inside', 'range-across', 'unscheduled', 'after'],
+    canonicalProjectIssueSchedules: {
+      before: createDefaultDueDateWorkItemSchedule('2026-10-31'),
+      'due-inside': createDefaultDueDateWorkItemSchedule('2026-11-01'),
+      'range-across': {
+        calendarPolicy,
+        mode: 'date-range',
+        startDate: '2026-10-20',
+        endDate: '2026-11-03',
+        durationDays: 11,
+      },
+      unscheduled: createDefaultUnscheduledWorkItemSchedule(),
+      after: createDefaultDueDateWorkItemSchedule('2026-12-01'),
+    },
+  })
+  const headers = { Authorization: 'Bearer test-token' }
+  const window = 'scheduledFrom=2026-11-01&scheduledTo=2026-11-30'
+
+  const firstResponse = await app.request(`/api/projects/refero/issues?limit=1&${window}`, {
+    headers,
+  })
+  expect(firstResponse.status).toBe(200)
+  const first = await firstResponse.json()
+  expect(first.issues.map((issue: { id: string }) => issue.id)).toEqual(['due-inside'])
+  // A dropped out-of-window Work Item never becomes the resume position.
+  expect(Buffer.from(first.nextCursor, 'base64url').toString('utf8')).not.toContain('before')
+  const secondResponse = await app.request(
+    `/api/projects/refero/issues?limit=200&${window}&cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  const second = await secondResponse.json()
+  expect(second.issues.map((issue: { id: string }) => issue.id)).toEqual(['range-across'])
+  expect(second.nextCursor).toBeUndefined()
+
+  const otherWindow = await app.request(
+    `/api/projects/refero/issues?scheduledFrom=2026-11-02&scheduledTo=2026-11-30&cursor=${
+      encodeURIComponent(first.nextCursor)
+    }`,
+    { headers },
+  )
+  expect(otherWindow.status).toBe(400)
+  expect(await otherWindow.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+
+  const unscheduled = await app.request('/api/projects/refero/issues?limit=200&unscheduled=true', {
+    headers,
+  })
+  expect((await unscheduled.json()).issues.map((issue: { id: string }) => issue.id)).toEqual([
+    'unscheduled',
+  ])
+})
+
+test('rejects malformed schedule windows on Team and Project lists', async () => {
+  configureFakeProjectClients(true)
+  const headers = { Authorization: 'Bearer test-token' }
+  for (const query of [
+    'scheduledFrom=2026-11-01',
+    'scheduledTo=2026-11-30',
+    'scheduledFrom=2026-02-30&scheduledTo=2026-03-01',
+    'scheduledFrom=2026-11-30&scheduledTo=2026-11-01',
+    'scheduledFrom=2026-01-01&scheduledTo=2027-02-05',
+    'scheduledFrom=2026-11-01&scheduledTo=2026-11-30&unscheduled=true',
+    'unscheduled=yes',
+  ]) {
+    for (const path of ['/api/teams/core-team/issues', '/api/projects/refero/issues']) {
+      const response = await app.request(`${path}?limit=10&${query}`, { headers })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'InvalidWorkItemScheduleWindow' })
+    }
+  }
+  const widest = await app.request(
+    '/api/teams/core-team/issues?limit=10&scheduledFrom=2026-01-01&scheduledTo=2027-02-04',
+    { headers },
+  )
+  expect(widest.status).toBe(200)
 })
 
 test('fails a legacy Team list request above the legacy item limit instead of truncating it', async () => {

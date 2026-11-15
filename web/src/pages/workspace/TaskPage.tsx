@@ -90,6 +90,12 @@ import {
 import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
 import { createTaskMutationController } from '../../tasks/mutations/createTaskMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
+import {
+  createTaskCalendarMonthWindow,
+  createTaskGanttWindow,
+  getCurrentTaskMonth,
+  type TaskScheduleWindowLayout,
+} from '../../tasks/model/taskScheduleWindow'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
   createBuiltInTaskViewDefinition,
@@ -284,20 +290,46 @@ export function TaskPage() {
   )
   const canAccessTriage = workspaceAccess?.currentMember.status === 'active' &&
     workspaceAccess.currentMember.role !== 'guest'
+  // The calendar and Gantt read only their visible period, so the list waits until the
+  // effective task-view layout is known instead of first reading the whole Project.
+  const [projectListLayout, setProjectListLayout] = useState<{
+    /** Whether the effective task-view layout has been resolved once. */
+    resolved: boolean
+    /** Windowed layout currently shown, if any. */
+    windowLayout?: TaskScheduleWindowLayout
+  }>({ resolved: false })
+  const [calendarMonth, setCalendarMonth] = useState(() => getCurrentTaskMonth())
+  const [ganttStartMonth, setGanttStartMonth] = useState(() => getCurrentTaskMonth())
+  const scheduleWindowNavigation = useMemo(() => ({
+    calendarMonth,
+    ganttStartMonth,
+    onCalendarMonthChange: setCalendarMonth,
+    onGanttStartMonthChange: setGanttStartMonth,
+  }), [calendarMonth, ganttStartMonth])
+  const projectScheduleWindow = useMemo(() => {
+    if (projectListLayout.windowLayout === 'calendar') {
+      return createTaskCalendarMonthWindow(calendarMonth)
+    }
+    if (projectListLayout.windowLayout === 'gantt') return createTaskGanttWindow(ganttStartMonth)
+    return undefined
+  }, [calendarMonth, ganttStartMonth, projectListLayout.windowLayout])
   const {
     data: projectIssues = emptyTeamIssues,
     error: taskError,
-    isLoading: isProjectTasksLoading,
+    isLoading: isProjectListLoading,
     mutate: mutateProjectTasks,
     canReadCustomerImpact,
   } = useProjectIssues(
     accessToken,
     projectId,
-    Boolean(user && !currentUserError),
+    Boolean(user && !currentUserError && projectListLayout.resolved),
     true,
     selectedTeamId,
     selectedIssueId,
+    projectScheduleWindow,
   )
+  const isProjectTasksLoading = isProjectListLoading ||
+    Boolean(user && !currentUserError && !projectListLayout.resolved)
   const {
     data: projectCustomerImpact,
     error: projectCustomerImpactError,
@@ -548,6 +580,21 @@ export function TaskPage() {
     searchParams,
     surface: 'project',
   })
+  const effectiveLayoutMode = taskViewController.effectiveDefinition.layout.mode
+  const isTaskViewLayoutLoading = taskViewController.isLoading
+  const resolvedWindowLayout = effectiveLayoutMode === 'calendar' || effectiveLayoutMode === 'gantt'
+    ? effectiveLayoutMode
+    : undefined
+  // Adjusts the list layout while rendering, so the first list request already uses it.
+  if (
+    !isTaskViewLayoutLoading &&
+    (!projectListLayout.resolved || projectListLayout.windowLayout !== resolvedWindowLayout)
+  ) {
+    setProjectListLayout({
+      resolved: true,
+      ...(resolvedWindowLayout ? { windowLayout: resolvedWindowLayout } : {}),
+    })
+  }
   const taskViewFieldOptions = useMemo(
     () => [
       { id: 'title', label: t('tasks.create.title') },
@@ -758,6 +805,7 @@ export function TaskPage() {
     planningAccess,
     planningSnapshot,
     projectId,
+    ...(projectScheduleWindow ? { scheduleWindow: projectScheduleWindow } : {}),
     t,
     user,
   })
@@ -1738,6 +1786,7 @@ export function TaskPage() {
   return (
     <TaskScreen
       key={taskScopeKey}
+      scheduleWindowNavigation={scheduleWindowNavigation}
       aiAssistanceEnabled={aiPlanningAssistanceEnabled}
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
