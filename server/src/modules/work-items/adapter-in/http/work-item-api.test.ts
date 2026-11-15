@@ -25,6 +25,7 @@ import {
   DynamoDbCollaborationClient,
 } from '../../../collaboration/collaboration'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { createHash } from 'node:crypto'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   type CanonicalWorkItem,
@@ -348,6 +349,27 @@ test('reads only the Project Work Items whose schedule touches the requested win
   )
   expect(otherWindow.status).toBe(400)
   expect(await otherWindow.json()).toMatchObject({ code: 'InvalidWorkItemPageCursor' })
+
+  // An unfiltered cursor keeps the fingerprint it had before schedule filters existed.
+  const unfilteredFirst = await (await app.request('/api/projects/refero/issues?limit=1', {
+    headers,
+  })).json()
+  const unfilteredCursor = JSON.parse(
+    Buffer.from(unfilteredFirst.nextCursor, 'base64url').toString('utf8'),
+  )
+  expect(unfilteredCursor.f).toBe(
+    createHash('sha256')
+      .update(JSON.stringify(['project', 'refero', false, null]))
+      .digest('base64url')
+      .slice(0, 16),
+  )
+
+  // A filtered cursor cannot continue the unfiltered list.
+  const unfiltered = await app.request(
+    `/api/projects/refero/issues?limit=200&cursor=${encodeURIComponent(first.nextCursor)}`,
+    { headers },
+  )
+  expect(unfiltered.status).toBe(400)
 
   const unscheduled = await app.request('/api/projects/refero/issues?limit=200&unscheduled=true', {
     headers,

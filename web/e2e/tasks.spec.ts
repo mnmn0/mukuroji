@@ -4176,6 +4176,8 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
     const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+    await expect(wireframeBar).toBeVisible()
+    const projectIssueReadsBeforeConfirm = requestCounts.projectIssues.refero ?? 0
 
     await wireframeBar.focus()
     await page.keyboard.press('ArrowRight')
@@ -4184,7 +4186,11 @@ test.describe('authenticated task page', () => {
 
     await preview.getByRole('button', { name: '適用', exact: true }).click()
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
-    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
+    // The Gantt period is read as the window and the unscheduled Work Items. The first refresh
+    // of the two fails once and is retried.
+    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(
+      projectIssueReadsBeforeConfirm + 4,
+    )
 
     const wireframeRow = page.locator('article').filter({
       has: page.getByTestId('task-gantt-bar-wireframe'),

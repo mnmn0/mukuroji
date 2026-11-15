@@ -390,7 +390,8 @@ export function TaskCalendarView({
       >
         {calendar.days.map((day) => (
           <div
-            className="min-h-[210px] border-b border-r border-tone-e4e7ec p-3 transition-colors"
+            // A month shows every date, so empty dates stay short and the month stays scannable.
+            className={`${month && day.entries.length === 0 ? 'min-h-[72px]' : 'min-h-[210px]'} border-b border-r border-tone-e4e7ec p-3 transition-colors`}
             data-testid={`task-calendar-day-${day.date}`}
             key={day.date}
             onDragOver={(event) => {

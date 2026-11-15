@@ -263,14 +263,18 @@ function readScopedWorkItemPageLimit(value: string | undefined): number {
  * @returns A short digest.
  */
 function createScopedWorkItemPageFingerprint(scope: ScopedWorkItemListScope): string {
+  const scheduleFilter = scope.scheduleFilter
   const canonical = JSON.stringify([
     scope.kind,
     scope.id,
     scope.includeArchived,
     scope.workItemTypeId ?? null,
-    scope.scheduleFilter?.kind === 'window'
-      ? ['window', scope.scheduleFilter.from, scope.scheduleFilter.to]
-      : scope.scheduleFilter?.kind ?? null,
+    // Appended only for a schedule filter, so cursors of unfiltered lists keep their value.
+    ...(scheduleFilter
+      ? [scheduleFilter.kind === 'window'
+          ? ['window', scheduleFilter.from, scheduleFilter.to]
+          : scheduleFilter.kind]
+      : []),
   ])
   return createHash('sha256').update(canonical).digest('base64url').slice(0, 16)
 }
