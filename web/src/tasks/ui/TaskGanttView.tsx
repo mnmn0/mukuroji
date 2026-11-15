@@ -902,7 +902,10 @@ export function TaskGanttView({
                     </div>
                   ) : (
                     <span className="absolute left-3 top-9 z-[1] rounded border border-dashed border-tone-98a2b3 bg-surface px-2 py-1 text-xs font-semibold text-fg-667085">
-                      {t('tasks.calendar.empty')}
+                      {/* A scheduled row without a bar lies outside the visible period. */}
+                      {row.schedule.mode === 'unscheduled'
+                        ? t('tasks.calendar.empty')
+                        : t('tasks.gantt.outsideWindow')}
                     </span>
                   )}
                 </div>

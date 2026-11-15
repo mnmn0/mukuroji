@@ -282,6 +282,7 @@ export const workItemsMessages = {
   'tasks.gantt.currentPeriod': '今月から',
   'tasks.gantt.nextPeriod': '1 か月後',
   'tasks.gantt.periodNavigation': 'ガントの表示期間',
+  'tasks.gantt.outsideWindow': '表示期間外',
   'tasks.scheduleWindow.range': '{from} – {to}',
   'tasks.scheduleWindow.note': 'この期間に予定がある Work Item と、予定のない Work Item だけを読み込んでいます。',
   'tasks.file.column.name': 'ファイル名',

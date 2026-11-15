@@ -282,6 +282,7 @@ export const workItemsMessages = {
   'tasks.gantt.currentPeriod': 'From this month',
   'tasks.gantt.nextPeriod': 'Next month',
   'tasks.gantt.periodNavigation': 'Gantt period',
+  'tasks.gantt.outsideWindow': 'Outside this period',
   'tasks.scheduleWindow.range': '{from} – {to}',
   'tasks.scheduleWindow.note': 'Only Work Items scheduled in this period and Work Items without a schedule are loaded.',
   'tasks.file.column.name': 'File name',

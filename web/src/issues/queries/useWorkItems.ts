@@ -102,16 +102,11 @@ export function useProjectIssues(
   scheduleWindow?: ProjectIssueScheduleWindow,
 ) {
   const key = accessToken && projectId && enabled
-    ? [
-        'project-issues',
-        accessToken,
-        projectId,
-        includeArchived,
-        scheduleWindow?.from ?? null,
-        scheduleWindow?.to ?? null,
-      ] as const
+    ? createProjectIssuesKey(accessToken, projectId, includeArchived, scheduleWindow)
     : null
 
+  // Moving to another period or layout keeps the previous list on screen while the next one
+  // loads, so the page does not fall back to its loading state and unmount open forms.
   const query = useSWR(
     key,
     ([, token, currentProjectId, shouldIncludeArchived, from, to]) =>
@@ -121,7 +116,7 @@ export function useProjectIssues(
         shouldIncludeArchived,
         from !== null && to !== null ? { from, to } : undefined,
       ),
-    workItemQueryConfig,
+    { ...workItemQueryConfig, keepPreviousData: true },
   )
   const { mutate: mutateCache } = useSWRConfig()
 
@@ -210,13 +205,60 @@ export function useProjectIssues(
     return response?.issues
   }
 
+  /**
+   * Publishes a list to the cache of the period it was read for, not the current period.
+   *
+   * @param readWindow - Period the list was read for, or `undefined` for the whole Project.
+   * @param issues - Refreshed Work Items of that period.
+   * @returns The cache update.
+   */
+  const publishProjectIssues = (
+    readWindow: ProjectIssueScheduleWindow | undefined,
+    issues: ProjectIssueList,
+  ) => {
+    if (!accessToken || !projectId) return Promise.resolve(undefined)
+    return mutateCache(
+      createProjectIssuesKey(accessToken, projectId, includeArchived, readWindow),
+      (current?: ProjectIssuesPage) => createProjectIssuesPage(projectId, issues, current),
+      { revalidate: false },
+    )
+  }
+
   return {
     ...query,
     data: reconciledIssues,
+    // The previous list stays visible while another period loads; only a first load is loading.
+    isLoading: query.isLoading && query.data === undefined,
     canReadCustomerImpact: query.data?.canReadCustomerImpact === true,
     mutate: mutateProjectIssues,
+    publishIssues: publishProjectIssues,
     key,
   }
+}
+
+/**
+ * Creates the SWR key of one Project Work Item list.
+ *
+ * @param accessToken - Work Item API access token.
+ * @param projectId - Project whose Work Items are listed.
+ * @param includeArchived - Whether archived Work Items are included.
+ * @param scheduleWindow - Optional visible calendar or Gantt period.
+ * @returns The cache key, distinct per archive option and period.
+ */
+function createProjectIssuesKey(
+  accessToken: string,
+  projectId: string,
+  includeArchived: boolean,
+  scheduleWindow: ProjectIssueScheduleWindow | undefined,
+) {
+  return [
+    'project-issues',
+    accessToken,
+    projectId,
+    includeArchived,
+    scheduleWindow?.from ?? null,
+    scheduleWindow?.to ?? null,
+  ] as const
 }
 
 /**

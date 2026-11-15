@@ -13764,10 +13764,15 @@ test.describe('Issue #463: 10,000 件を超える Project の期限カレンダ�
     await expect(page.getByTestId(`task-calendar-item-dated-${unscheduledIndex}`)).toBeVisible()
     await expect(page.getByTestId('tasks-error')).toHaveCount(0)
 
+    // A create form in progress survives moving to a period that still has to load.
+    await page.getByRole('button', { name: 'この日に追加: 2026-11-20', exact: true }).click()
+    const createTitle = page.locator('input[name="title"]').first()
+    await createTitle.fill('月をまたいで残る下書き')
     await monthNavigation.getByRole('button', { name: '次の月', exact: true }).click()
     await expect(page.getByTestId(`task-calendar-item-dated-${decemberIndex}`)).toBeVisible({
       timeout: 60_000,
     })
+    await expect(createTitle).toHaveValue('月をまたいで残る下書き')
     await expect(page.getByTestId(`task-calendar-item-dated-${novemberIndex}`)).toHaveCount(0)
 
     await tablist.getByRole('tab', { name: '期限順', exact: true }).click()

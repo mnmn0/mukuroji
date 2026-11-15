@@ -329,6 +329,7 @@ export function TaskPage() {
     error: taskError,
     isLoading: isProjectListLoading,
     mutate: mutateProjectTasks,
+    publishIssues: publishProjectTasks,
     canReadCustomerImpact,
   } = useProjectIssues(
     accessToken,
@@ -795,6 +796,7 @@ export function TaskPage() {
     planningAccess,
     planningSnapshot,
     projectId,
+    publishProjectTasks,
     ...(projectScheduleWindow ? { scheduleWindow: projectScheduleWindow } : {}),
     t,
     user,

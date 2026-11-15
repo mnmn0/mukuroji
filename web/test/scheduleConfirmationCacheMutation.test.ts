@@ -1,13 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 import { mutate } from 'swr'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import {
   assertConfirmedScheduleRevisionsObserved,
+  findConfirmedItemsMovedOutOfList,
 } from '../src/tasks/mutations/createTaskScheduleMutationController'
 import {
   refreshScheduleConfirmationCache,
   revalidateScheduleConfirmationCachesBestEffort,
 } from '../src/tasks/mutations/scheduleConfirmationCache'
 import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
+import { taskViewStoryTasks } from '../src/tasks/ui/TaskView.stories.fixtures'
 
 describe('schedule confirmation cache revalidation', () => {
   test('rejects an old 200 projection until every Team-qualified revision is observed', () => {
@@ -109,5 +112,56 @@ describe('schedule confirmation cache revalidation', () => {
     expect(observedErrors).toEqual([])
     expect(readCount).toBe(3)
     await expect(mutate(cacheKey)).resolves.toEqual({ revision: 2 })
+  })
+
+  test('excuses only confirmed items that a newer revision moved out of a windowed list', async () => {
+    const confirmed = (id: string) => ({
+      assignedProjectId: 'launch',
+      dueDate: '2026-11-10',
+      id,
+      revision: 6,
+      schedule: createDefaultDueDateTaskSchedule('2026-11-10'),
+      teamId: 'core-team',
+    })
+    const current: Record<string, Pick<CanonicalWorkItem, 'assignedProjectId' | 'revision' | 'schedule'>> = {
+      // Moved to December by a later update.
+      'moved-later': {
+        assignedProjectId: 'launch',
+        revision: 7,
+        schedule: createDefaultDueDateTaskSchedule('2026-12-10'),
+      },
+      // Still in November: the list is stale, not the item.
+      'stale-list': {
+        assignedProjectId: 'launch',
+        revision: 6,
+        schedule: createDefaultDueDateTaskSchedule('2026-11-10'),
+      },
+      // Moved to another Project by a later update.
+      reassigned: {
+        assignedProjectId: 'other',
+        revision: 8,
+        schedule: createDefaultDueDateTaskSchedule('2026-11-10'),
+      },
+    }
+    const reads: string[] = []
+    const movedAway = await findConfirmedItemsMovedOutOfList({
+      expected: ['listed', 'moved-later', 'stale-list', 'reassigned'].map(confirmed),
+      listedTasks: [{ id: 'listed', teamId: 'core-team' }],
+      projectId: 'launch',
+      readCurrent: async (item) => {
+        reads.push(item.id)
+        const state = current[item.id]
+        if (!state) throw new Error(`Unexpected detail read: ${item.id}`)
+        const base: CanonicalWorkItem = taskViewStoryTasks[0]!
+        return { ...base, id: item.id, teamId: item.teamId, ...state }
+      },
+      scheduleWindow: { from: '2026-11-01', to: '2026-11-30' },
+    })
+
+    expect(reads).toEqual(['moved-later', 'stale-list', 'reassigned'])
+    expect([...movedAway]).toEqual([
+      JSON.stringify(['core-team', 'moved-later']),
+      JSON.stringify(['core-team', 'reassigned']),
+    ])
   })
 })
