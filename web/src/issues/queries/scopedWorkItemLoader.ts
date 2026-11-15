@@ -102,16 +102,19 @@ export async function loadProjectIssues(
 /**
  * Joins the windowed and unscheduled reads, keeping each Work Item once.
  *
- * A schedule change between the two reads can return one Work Item from both; the later copy
- * wins at the first position.
+ * A schedule change while the two reads run can return one Work Item from both, and the reads
+ * finish in either order. The copy with the higher revision wins at the first position, so an
+ * item scheduled meanwhile never returns to the unscheduled bucket with a stale revision.
  *
  * @param reads - Work Items of each read, in read order.
- * @returns Distinct Work Items in first-seen order.
+ * @returns Distinct Work Items in first-seen order, each at its newest revision.
  */
 function mergeProjectIssueReads(reads: readonly (readonly TeamIssue[])[]): TeamIssue[] {
   const issuesByKey = new Map<string, TeamIssue>()
   for (const issue of reads.flat()) {
-    issuesByKey.set(`${issue.teamId}\u0000${issue.id}`, issue)
+    const key = `${issue.teamId}\u0000${issue.id}`
+    const current = issuesByKey.get(key)
+    if (!current || issue.revision > current.revision) issuesByKey.set(key, issue)
   }
   return [...issuesByKey.values()]
 }

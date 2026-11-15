@@ -17,6 +17,7 @@ import {
   type TaskViewController,
   type UseTaskViewControllerInput,
 } from '../src/task-views/mutations/useTaskViewController'
+import { resolveTaskViewLayoutMode } from '../src/task-views/model/taskViewBaseSelection'
 import {
   parseTaskViewUrlState,
   updateTaskViewUrlState,
@@ -760,6 +761,34 @@ function createDefinition(keyword: string, mode: TaskViewDefinition['layout']['m
     },
   }
 }
+
+describe('resolveTaskViewLayoutMode', () => {
+  test('follows URL override, explicit view, personal default, Team default, then built-in', () => {
+    const team = createSavedView('team-view', 'team', 'board', { isDefault: true, defaultSource: 'team' })
+    const personal = createSavedView('personal-view', 'mine', 'calendar', {
+      isDefault: true,
+      defaultSource: 'personal',
+    })
+    const gantt = createSavedView('gantt-view', 'gantt', 'gantt', { isDefault: false })
+    const savedViews = [team, personal, gantt]
+
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews: [] })).toBe('table')
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews: [team] })).toBe('board')
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews })).toBe('calendar')
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews, viewId: 'gantt-view' }))
+      .toBe('gantt')
+    expect(resolveTaskViewLayoutMode({
+      builtInMode: 'table',
+      savedViews,
+      viewId: BUILT_IN_TASK_VIEW_ID,
+    })).toBe('table')
+    expect(resolveTaskViewLayoutMode({
+      builtInMode: 'table',
+      override: { layout: { mode: 'board' } },
+      savedViews,
+    })).toBe('board')
+  })
+})
 
 /** Creates a saved Project view with configurable default metadata. */
 function createSavedView(

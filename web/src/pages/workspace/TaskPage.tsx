@@ -107,6 +107,7 @@ import {
 } from '../../task-views/model/taskViewSurfaceState'
 import { preserveTaskViewUrlState } from '../../task-views/model/taskViewUrlState'
 import { useTaskViewController } from '../../task-views/mutations/useTaskViewController'
+import { useEffectiveTaskViewLayoutMode } from '../../task-views/queries/useEffectiveTaskViewLayoutMode'
 import { TaskViewToolbar } from '../../task-views/ui/TaskViewToolbar'
 import {
   createTaskViewOption,
@@ -290,14 +291,26 @@ export function TaskPage() {
   )
   const canAccessTriage = workspaceAccess?.currentMember.status === 'active' &&
     workspaceAccess.currentMember.role !== 'guest'
+  const taskViewScope = useMemo<TaskViewScope>(
+    () => selectedTeamId
+      ? { kind: 'project', projectId, teamId: selectedTeamId }
+      : { kind: 'project', projectId },
+    [projectId, selectedTeamId],
+  )
   // The calendar and Gantt read only their visible period, so the list waits until the
   // effective task-view layout is known instead of first reading the whole Project.
-  const [projectListLayout, setProjectListLayout] = useState<{
-    /** Whether the effective task-view layout has been resolved once. */
-    resolved: boolean
-    /** Windowed layout currently shown, if any. */
-    windowLayout?: TaskScheduleWindowLayout
-  }>({ resolved: false })
+  const projectListLayoutMode = useEffectiveTaskViewLayoutMode({
+    accessToken,
+    builtInMode: 'table',
+    enabled: Boolean(accessToken && user && !currentUserError),
+    scope: taskViewScope,
+    searchParams,
+    surface: 'project',
+  })
+  const projectListWindowLayout: TaskScheduleWindowLayout | undefined =
+    projectListLayoutMode === 'calendar' || projectListLayoutMode === 'gantt'
+      ? projectListLayoutMode
+      : undefined
   const [calendarMonth, setCalendarMonth] = useState(() => getCurrentTaskMonth())
   const [ganttStartMonth, setGanttStartMonth] = useState(() => getCurrentTaskMonth())
   const scheduleWindowNavigation = useMemo(() => ({
@@ -307,12 +320,10 @@ export function TaskPage() {
     onGanttStartMonthChange: setGanttStartMonth,
   }), [calendarMonth, ganttStartMonth])
   const projectScheduleWindow = useMemo(() => {
-    if (projectListLayout.windowLayout === 'calendar') {
-      return createTaskCalendarMonthWindow(calendarMonth)
-    }
-    if (projectListLayout.windowLayout === 'gantt') return createTaskGanttWindow(ganttStartMonth)
+    if (projectListWindowLayout === 'calendar') return createTaskCalendarMonthWindow(calendarMonth)
+    if (projectListWindowLayout === 'gantt') return createTaskGanttWindow(ganttStartMonth)
     return undefined
-  }, [calendarMonth, ganttStartMonth, projectListLayout.windowLayout])
+  }, [calendarMonth, ganttStartMonth, projectListWindowLayout])
   const {
     data: projectIssues = emptyTeamIssues,
     error: taskError,
@@ -322,14 +333,14 @@ export function TaskPage() {
   } = useProjectIssues(
     accessToken,
     projectId,
-    Boolean(user && !currentUserError && projectListLayout.resolved),
+    Boolean(user && !currentUserError && projectListLayoutMode !== undefined),
     true,
     selectedTeamId,
     selectedIssueId,
     projectScheduleWindow,
   )
   const isProjectTasksLoading = isProjectListLoading ||
-    Boolean(user && !currentUserError && !projectListLayout.resolved)
+    Boolean(user && !currentUserError && projectListLayoutMode === undefined)
   const {
     data: projectCustomerImpact,
     error: projectCustomerImpactError,
@@ -506,12 +517,6 @@ export function TaskPage() {
     ? workItemConfigurationLoadResult.configurationsByTeam[selectedWorkItemTeamId]
     : undefined
   const failedConfigurationTeamIds = workItemConfigurationLoadResult.failedTeamIds
-  const taskViewScope = useMemo<TaskViewScope>(
-    () => selectedTeamId
-      ? { kind: 'project', projectId, teamId: selectedTeamId }
-      : { kind: 'project', projectId },
-    [projectId, selectedTeamId],
-  )
   const taskViewCustomFields = useMemo(() => {
     const fieldsById = new Map<string, string>()
     for (const resolved of Object.values(
@@ -580,21 +585,6 @@ export function TaskPage() {
     searchParams,
     surface: 'project',
   })
-  const effectiveLayoutMode = taskViewController.effectiveDefinition.layout.mode
-  const isTaskViewLayoutLoading = taskViewController.isLoading
-  const resolvedWindowLayout = effectiveLayoutMode === 'calendar' || effectiveLayoutMode === 'gantt'
-    ? effectiveLayoutMode
-    : undefined
-  // Adjusts the list layout while rendering, so the first list request already uses it.
-  if (
-    !isTaskViewLayoutLoading &&
-    (!projectListLayout.resolved || projectListLayout.windowLayout !== resolvedWindowLayout)
-  ) {
-    setProjectListLayout({
-      resolved: true,
-      ...(resolvedWindowLayout ? { windowLayout: resolvedWindowLayout } : {}),
-    })
-  }
   const taskViewFieldOptions = useMemo(
     () => [
       { id: 'title', label: t('tasks.create.title') },

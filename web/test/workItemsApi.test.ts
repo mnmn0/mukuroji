@@ -325,14 +325,22 @@ describe('canonical Work Item API', () => {
       const body = searchParams.get('unscheduled') === 'true'
         ? {
             projectId: 'launch',
-            issues: [createWorkItem({ id: 'unscheduled' }), createWorkItem({ id: 'moved', revision: 5 })],
+            issues: [
+              createWorkItem({ id: 'unscheduled' }),
+              createWorkItem({ id: 'moved', revision: 5 }),
+              // Scheduled while the reads ran: the windowed read has its newer revision.
+              createWorkItem({ id: 'scheduled-meanwhile', revision: 2 }),
+            ],
             canReadCustomerImpact: false,
           }
         : searchParams.get('cursor')
           ? { projectId: 'launch', issues: [createWorkItem({ id: 'moved' })], canReadCustomerImpact: false }
           : {
               projectId: 'launch',
-              issues: [createWorkItem({ id: 'in-window' })],
+              issues: [
+                createWorkItem({ id: 'in-window' }),
+                createWorkItem({ id: 'scheduled-meanwhile', revision: 4 }),
+              ],
               canReadCustomerImpact: false,
               nextCursor: 'cursor-1',
             }
@@ -346,9 +354,10 @@ describe('canonical Work Item API', () => {
       from: '2026-11-01',
       to: '2026-11-30',
     })
-    // A Work Item returned by both reads is kept once, with the later copy.
+    // A Work Item returned by both reads is kept once, at its newest revision.
     expect(project.issues.map((issue) => [issue.id, issue.revision])).toEqual([
       ['in-window', 3],
+      ['scheduled-meanwhile', 4],
       ['moved', 5],
       ['unscheduled', 3],
     ])

@@ -14,6 +14,8 @@ const savedTaskViewsQueryConfig = {
  * @param surface - Product surface consuming the definitions.
  * @param scope - Route and permission boundary for eligible definitions.
  * @param enabled - Whether authenticated loading is enabled.
+ * @param keepPreviousData - Whether the previous scope's collection stays visible while the
+ *   next scope loads.
  * @returns SWR state for the permission-filtered saved task-view collection.
  */
 export function useSavedTaskViews(
@@ -21,6 +23,7 @@ export function useSavedTaskViews(
   surface: TaskViewSurface,
   scope: TaskViewScope,
   enabled = true,
+  keepPreviousData = false,
 ) {
   const scopeKey = JSON.stringify(scope)
   const key = accessToken && enabled
@@ -30,6 +33,6 @@ export function useSavedTaskViews(
   return useSWR(
     key,
     ([, token]) => getSavedTaskViews(token, { scope, surface }),
-    savedTaskViewsQueryConfig,
+    keepPreviousData ? { ...savedTaskViewsQueryConfig, keepPreviousData } : savedTaskViewsQueryConfig,
   )
 }
