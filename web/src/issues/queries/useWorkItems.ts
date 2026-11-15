@@ -119,6 +119,8 @@ export function useProjectIssues(
     { ...workItemQueryConfig, keepPreviousData: true },
   )
   const { mutate: mutateCache } = useSWRConfig()
+  // The previous list is kept only for the same Project, never shown for another one.
+  const listData = query.data?.projectId === projectId ? query.data : undefined
 
   const selectedDetailQuery = useTeamIssueDetail(
     accessToken,
@@ -131,7 +133,7 @@ export function useProjectIssues(
     ? undefined
     : selectedDetailQuery.data?.issue
   const reconciledIssues = useMemo(() => {
-    const issues = query.data?.issues
+    const issues = listData?.issues
     if (!issues || !selectedTeamId || !selectedIssueId || !selectedDetailIssue) {
       return issues
     }
@@ -164,7 +166,7 @@ export function useProjectIssues(
   }, [
     includeArchived,
     projectId,
-    query.data?.issues,
+    listData?.issues,
     selectedDetailIssue,
     selectedIssueId,
     selectedTeamId,
@@ -228,8 +230,8 @@ export function useProjectIssues(
     ...query,
     data: reconciledIssues,
     // The previous list stays visible while another period loads; only a first load is loading.
-    isLoading: query.isLoading && query.data === undefined,
-    canReadCustomerImpact: query.data?.canReadCustomerImpact === true,
+    isLoading: Boolean(key) && listData === undefined && query.error === undefined,
+    canReadCustomerImpact: listData?.canReadCustomerImpact === true,
     mutate: mutateProjectIssues,
     publishIssues: publishProjectIssues,
     key,
