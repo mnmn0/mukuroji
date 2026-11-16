@@ -38,9 +38,9 @@ Live graph の row 数（`ENTITY#`、`DEPENDENCY#`、`WORK_ITEM_DEPENDENCY#`、`
 - 読み取りは容量より大きい 25,000 row / 32 MB を安全上限とし、これを超えた場合だけ `413 PlanningReadLimitExceeded` で fail-closed にします。書き込みが容量で止まるため、通常の運用で読み取りが失敗することはありません
 - Snapshot は `capacity: { level, liveRowCount, liveRowCapacity, warningRowCount }` を返します。`level` は 16,000 row 以上で `warning`、20,000 row 以上で `full` です。値は Workspace 全体の row 数で、entity ID や scope を含まないため、Planning を読めるすべての member に返します
 - Planning 画面はヘッダーに使用量（`計画データの使用量: n / 20,000 行`）を常に表示し、`warning` では注意、`full` では row を増やす変更が保存できないことを案内します
-- 100 Project・link 済み Work Item 5,000 件（約 5,500 row、閲覧可能な Work Item 5,000 件）の Workspace で snapshot は約 3.1 MB に収まることを `planning.test.ts` で確認しています。閲覧可能な Work Item が 1 万件近い場合は snapshot が 4 MB を超えるため、snapshot に載せる Work Item を link 済みと依存の端点に絞る作業を Issue #459 で行います
+- 100 Project・link 済み Work Item 5,000 件（約 5,500 row、閲覧可能な Work Item 5,000 件）の Workspace で snapshot は約 3.1 MB に収まることを `planning.test.ts` で確認しています。閲覧可能な Work Item が 1 万件近い場合や、長い description を持つ entity が数千件ある場合は、row 数が容量内でも snapshot が 4 MB を超えて `413 PlanningSnapshotSizeLimitExceeded` になります。Snapshot に載せる Work Item を link 済みと依存の端点に絞る作業は Issue #459 で行います
 
-DynamoDB client は、デコード済みの graph を META の `revision` と `updatedAt` が一致する間だけ Lambda の memory 上で再利用します（最大 8 Workspace、LRU）。`UPDATE_TARGET#` 以外の graph row は `META` の revision CAS と同じ transaction でしか書かれないため、強整合 read した `META` が一致すれば内容も一致します。`UPDATE_TARGET#` row は通知 schedule worker が `META` を進めずに due-index 属性を更新するので、cache hit 時も毎回強整合 Query で読み直し、Initiative entity との整合を再検証します。Cache した graph は deep freeze し、読み取り側が共有 state を変更できないようにしています（in-memory client も同じく freeze した state を返し、テストで変更を検出します）。
+DynamoDB client は、デコード済みの graph を META の `revision` と `updatedAt` が一致する間だけ Lambda の memory 上で再利用します（最大 8 Workspace、LRU）。`UPDATE_TARGET#` 以外の graph row は `META` の revision CAS と同じ transaction でしか書かれないため、強整合 read した `META` が一致すれば内容も一致します。`UPDATE_TARGET#` row は通知 schedule worker が `META` を進めずに due-index 属性を更新するので、cache hit 時も毎回強整合 Query で読み直し、Initiative entity との整合を再検証します。Tenant 削除は Planning row を `META` を進めずに消しますが、revocation の後に実行されるため、削除中の Workspace の Planning を読める principal はいません。Cache した graph は deep freeze し、読み取り側が共有 state を変更できないようにしています（in-memory client も同じく freeze した state を返し、テストで変更を検出します）。
 
 #### 容量に近づいたときの運用手順
 
