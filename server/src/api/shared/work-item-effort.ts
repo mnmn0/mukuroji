@@ -1,5 +1,6 @@
 import { isWorkItemEffortMinutes, isWorkItemProgressPercent } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
+import type { WorkItemDependencies } from '../../app/composition/app-dependencies'
 import { workItemDependencies } from './app-dependencies'
 import { WORK_ITEMS_AGGREGATE_ITEM_LIMIT, WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE } from './constants'
 import { stableDigestStringify } from './value-guards'
@@ -77,24 +78,40 @@ export type TeamWorkItemEffort = {
   remainingEffortMinutes?: number
 }
 
+/** Which Work Items {@link listTeamWorkItemEffort} reads. */
+export type TeamWorkItemEffortReadOptions = {
+  /**
+   * Also reads archived Work Items. Time reports set it, because archiving finished work must not
+   * drop its estimate while its recorded time still counts; capacity planning leaves it unset.
+   */
+  includeArchived?: boolean
+}
+
 /**
- * Reads the estimate and remaining effort of every unarchived Work Item in a Team that has one.
+ * Reads the estimate and remaining effort of every Work Item in a Team that has one.
  *
  * This is a server-side read for Team reports whose callers already authorized the Team; it reads
  * the Team partition page by page and fails closed past {@link WORK_ITEMS_AGGREGATE_ITEM_LIMIT} rows.
  *
  * @param directoryId - Workspace (directory) identifier.
  * @param teamId - Team identifier.
+ * @param options - Whether archived Work Items are read too; they are left out by default.
+ * @param teamIssues - Work Item reader; the request's Work Item dependencies by default.
  * @returns One entry per Work Item with an estimate, recorded remaining effort, or terminal status.
  */
-export async function listTeamWorkItemEffort(directoryId: string, teamId: string): Promise<TeamWorkItemEffort[]> {
+export async function listTeamWorkItemEffort(
+  directoryId: string,
+  teamId: string,
+  options: TeamWorkItemEffortReadOptions = {},
+  teamIssues: Pick<WorkItemDependencies['teamIssues'], 'getTeamIssues'> = workItemDependencies.teamIssues,
+): Promise<TeamWorkItemEffort[]> {
   const result: TeamWorkItemEffort[] = []
   let evaluated = 0
   let startAfterIssueId: string | undefined
   do {
-    const response = await workItemDependencies.teamIssues.getTeamIssues(directoryId, teamId, {
+    const response = await teamIssues.getTeamIssues(directoryId, teamId, {
       limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
-      includeArchived: false,
+      includeArchived: options.includeArchived === true,
       limitEvaluatedRows: true,
       ...(startAfterIssueId ? { startAfterIssueId } : {}),
     })

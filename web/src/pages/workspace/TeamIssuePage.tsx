@@ -432,6 +432,7 @@ export function TeamIssuePage() {
     ...taskViewBuiltInFields,
     ...taskViewCustomFields.map((field) => `custom:${field.id}`),
   ]
+  const taskViewSortFields = [...taskViewFields, ...WORK_ITEM_EFFORT_COLUMN_FIELDS]
   const taskViewWorkflowStatuses = resolveWorkItemTypeWorkflowStatuses(taskViewConfiguration).map(({
     status,
     workItemTypeId,
@@ -442,6 +443,8 @@ export function TeamIssuePage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
+      // Effort values sort but do not group, because they have no shared buckets.
+      sortFields: taskViewSortFields,
       layoutModes: ['table', 'board'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
@@ -729,9 +732,8 @@ export function TeamIssuePage() {
       label: field.name,
     })),
   ]
-  const taskViewGroupOptions = taskViewFieldOptions.filter(
-    (option) => option.id !== 'customFields' && !isWorkItemEffortColumnField(option.id),
-  )
+  const taskViewSortOptions = taskViewFieldOptions.filter((option) => option.id !== 'customFields')
+  const taskViewGroupOptions = taskViewSortOptions.filter((option) => !isWorkItemEffortColumnField(option.id))
   const taskViewOptions = taskViewController.views.map(createTaskViewOption)
   const selectedTaskView = taskViewController.activeSavedView
     ? createTaskViewOption(taskViewController.activeSavedView)
@@ -745,6 +747,7 @@ export function TeamIssuePage() {
       columnOptions={taskViewFieldOptions}
       errorMessage={taskViewController.errorMessage}
       groupOptions={taskViewGroupOptions}
+      sortOptions={taskViewSortOptions}
       isDirty={taskViewController.isDirty}
       isSaving={taskViewController.isSaving}
       migrationWarnings={taskViewController.migrationWarnings.map(

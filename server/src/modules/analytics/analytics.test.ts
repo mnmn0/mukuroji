@@ -1153,6 +1153,33 @@ describe('Analytics metric engine', () => {
     })).toThrow('Only throughput and velocity widgets can be weighted by effort.')
   })
 
+  test('simulates effort in whole minutes so rounding the reported hours cannot add a day', () => {
+    const estimated = (id: string, overrides: Partial<CanonicalWorkItem> = {}) => createWorkItem(id, {
+      schedule: { ...createDefaultDueDateWorkItemSchedule('2026-03-10'), plannedEffortMinutes: 100 },
+      dueDate: '2026-03-10',
+      ...overrides,
+    })
+    const first = estimated('minutes-1')
+    const second = estimated('minutes-2')
+    const open = estimated('minutes-open', { statusCategory: 'started', workflowStatusId: 'status-started' })
+    const completion = (item: CanonicalWorkItem, at: string) => createAuditEvent(
+      `${item.id}-complete`, item, at, [{ field: 'statusCategory', before: 'started', after: 'completed' }],
+    )
+    const { forecast } = createTestAnalyticsSnapshot({
+      workItems: [first, second, open],
+      events: [completion(first, '2026-03-02T12:00:00.000Z'), completion(second, '2026-03-03T12:00:00.000Z')],
+      query: createQuery([], {
+        filter: { period: { from: '2026-03-02T00:00:00.000Z', to: '2026-03-03T23:59:59.999Z' } },
+        asOf: '2026-03-03T23:59:59.999Z',
+        forecastWeighting: 'effort',
+      }),
+    })
+    // Each day completed 100 minutes and 100 minutes remain, so every scenario finishes on the next day.
+    expect(forecast).toMatchObject({ remainingEffortHours: 1.667, dailyThroughput: 1.667 })
+    expect(forecast.p50).toBe(forecast.p95)
+    expect(forecast.p95).toBe('2026-03-04T23:59:59.999Z')
+  })
+
   test('rewinds the estimate, remaining effort, and status before deriving historical remaining effort', () => {
     const schedule = (minutes: number) => ({ ...createDefaultDueDateWorkItemSchedule('2026-03-10'), plannedEffortMinutes: minutes })
     // Today the item is completed with a larger estimate and a recorded remaining effort, all set after `asOf`.

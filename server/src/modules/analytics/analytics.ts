@@ -2440,12 +2440,13 @@ function createForecast(
       : []
   )
   const effortWeighted = normalized.query.forecastWeighting === 'effort'
+  // Effort is simulated in whole minutes, so rounding the reported hours cannot shift a scenario by a day.
   const completionWeights = effortWeighted
     ? facts.flatMap((fact) =>
         fact.completionAt !== undefined &&
         fact.completionAt >= normalized.periodFrom &&
         fact.completionAt <= normalized.periodTo
-          ? [{ at: fact.completionAt, weight: effortHours(fact.state.plannedEffortMinutes) }]
+          ? [{ at: fact.completionAt, weight: fact.state.plannedEffortMinutes ?? 0 }]
           : []
       )
     : completionTimes.map((at) => ({ at, weight: 1 }))
@@ -2453,10 +2454,12 @@ function createForecast(
     fact.state.statusCategory !== 'completed' && fact.state.statusCategory !== 'canceled'
   )
   const remainingWorkItems = openFacts.length
-  const remainingEffortHours = roundMetric(
-    openFacts.reduce((sum, fact) => sum + effortHours(deriveAnalyticsRemainingEffortMinutes(fact.state)), 0),
+  const remainingEffortMinutes = openFacts.reduce(
+    (sum, fact) => sum + (deriveAnalyticsRemainingEffortMinutes(fact.state) ?? 0),
+    0,
   )
-  const remainingAmount = effortWeighted ? remainingEffortHours : remainingWorkItems
+  const remainingEffortHours = roundMetric(effortHours(remainingEffortMinutes))
+  const remainingAmount = effortWeighted ? remainingEffortMinutes : remainingWorkItems
   const dailyBuckets = createCalendarBuckets(
     normalized.periodFrom,
     normalized.periodTo,
@@ -2470,7 +2473,7 @@ function createForecast(
   )
   const completedAmount = completionWeights.reduce((sum, completion) => sum + completion.weight, 0)
   const rawDailyThroughput = completedAmount / Math.max(1, dailyBuckets.length)
-  const dailyThroughput = roundMetric(rawDailyThroughput)
+  const dailyThroughput = roundMetric(effortWeighted ? effortHours(rawDailyThroughput) : rawDailyThroughput)
   const confidence = roundMetric(Math.min(1, completionTimes.length / 20))
   const completionDayScenarios = completionTimes.length >= 2 && rawDailyThroughput > 0
     ? createEmpiricalCompletionDayScenarios(dailyCompletionCounts, remainingAmount)

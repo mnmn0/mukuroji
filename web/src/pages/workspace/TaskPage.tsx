@@ -592,6 +592,10 @@ export function TaskPage() {
     ],
     [taskViewCustomFields],
   )
+  const taskViewSortFields = useMemo(
+    () => [...taskViewFields, ...WORK_ITEM_EFFORT_COLUMN_FIELDS],
+    [taskViewFields],
+  )
   const builtInTaskViewDefinition = useMemo(
     () => createBuiltInTaskViewDefinition(
       'project',
@@ -607,6 +611,8 @@ export function TaskPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
+      // Effort values sort but do not group, because they have no shared buckets.
+      sortFields: taskViewSortFields,
       layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
@@ -642,9 +648,13 @@ export function TaskPage() {
     ],
     [t, taskViewCustomFields],
   )
-  const taskViewGroupOptions = useMemo(
-    () => taskViewFieldOptions.filter((option) => option.id !== 'customFields' && !isWorkItemEffortColumnField(option.id)),
+  const taskViewSortOptions = useMemo(
+    () => taskViewFieldOptions.filter((option) => option.id !== 'customFields'),
     [taskViewFieldOptions],
+  )
+  const taskViewGroupOptions = useMemo(
+    () => taskViewSortOptions.filter((option) => !isWorkItemEffortColumnField(option.id)),
+    [taskViewSortOptions],
   )
   const taskViewTeams = useMemo(
     () => {
@@ -1774,6 +1784,7 @@ export function TaskPage() {
       columnOptions={taskViewFieldOptions}
       errorMessage={taskViewController.errorMessage}
       groupOptions={taskViewGroupOptions}
+      sortOptions={taskViewSortOptions}
       isDirty={taskViewController.isDirty}
       isSaving={taskViewController.isSaving}
       migrationWarnings={taskViewController.migrationWarnings.map(

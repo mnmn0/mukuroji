@@ -179,6 +179,27 @@ describe('task view definition migration and sanitization', () => {
     expect(result.warnings.every((warning) => warning.referenceId === undefined)).toBe(true)
   })
 
+  test('keeps sort-only fields in sorting while grouping still uses the shared field list', () => {
+    const result = sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      layout: {
+        ...builtInDefinition.layout,
+        group: { field: 'estimate', direction: 'asc' },
+        sort: [{ field: 'estimate', direction: 'desc' }, { field: 'title', direction: 'asc' }],
+      },
+    }, { ...options, sortFields: [...options.fields, 'estimate'] })
+
+    expect(result.definition.layout.sort).toEqual([
+      { field: 'estimate', direction: 'desc' },
+      { field: 'title', direction: 'asc' },
+    ])
+    expect(result.definition.layout.group).toBeUndefined()
+    expect(sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      layout: { ...builtInDefinition.layout, sort: [{ field: 'estimate', direction: 'desc' }] },
+    }, options).definition.layout.sort).toEqual([])
+  })
+
   test('checks status filters against the exact Team and Work Item Type workflow', () => {
     const result = sanitizeTaskViewDefinition({
       ...builtInDefinition,

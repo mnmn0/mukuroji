@@ -351,7 +351,8 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
       ...(idempotency ? { idempotency } : {}),
       estimates: {
         async listPlannedEffort(workspaceId, teamId) {
-          return new Map((await listTeamWorkItemEffort(workspaceId, teamId)).flatMap((effort) =>
+          // Archived Work Items keep their estimate, because their recorded time still counts in reports.
+          return new Map((await listTeamWorkItemEffort(workspaceId, teamId, { includeArchived: true })).flatMap((effort) =>
             effort.plannedEffortMinutes === undefined ? [] : [[effort.workItemId, effort.plannedEffortMinutes] as const]
           ))
         },

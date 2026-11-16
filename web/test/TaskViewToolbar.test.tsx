@@ -208,6 +208,33 @@ describe('TaskViewToolbar', () => {
     expect(html).toContain('方向')
     expect(html).not.toContain(t('taskViews.keyboard'))
   })
+
+  test('offers sort-only fields in the sort rules but not in grouping', () => {
+    const html = renderToStaticMarkup(
+      <TaskViewSettingsPanel
+        columnOptions={[{ id: 'title', label: 'タスク名' }]}
+        groupOptions={[{ id: 'priority', label: '優先度' }, { id: 'dueDate', label: '期限' }]}
+        onChange={() => undefined}
+        requiredColumnIds={['title']}
+        settings={{ ...settings, groupBy: undefined, sort: [{ direction: 'desc', field: 'estimate' }] }}
+        sortOptions={[
+          { id: 'priority', label: '優先度' },
+          { id: 'dueDate', label: '期限' },
+          { id: 'estimate', label: '見積' },
+        ]}
+        supportsColumnLayoutMetadata={false}
+        supportsEmptyGroups={false}
+        supportsKeyboardSelection={false}
+        supportsLayoutPresentation
+        supportsSubtasks={false}
+        t={t}
+      />,
+    )
+
+    // Grouping and subgrouping list two fields each; only the sort rule lists the estimate.
+    expect(html.match(/value="estimate"/g)?.length).toBe(1)
+    expect(html.match(/value="priority"/g)?.length).toBe(3)
+  })
 })
 
 /** Renders the toolbar with inert callbacks and focused per-test overrides. */

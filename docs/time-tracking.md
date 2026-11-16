@@ -4,7 +4,7 @@ Time tracking is scoped by Workspace and Team. A time entry references a canonic
 
 `draft → submitted → approved → locked`
 
-Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Budget changes also append a shared audit event in the same transaction. Estimates are not stored here: the canonical estimate is the Work Item's `schedule.plannedEffortMinutes` (see [Work Items](work-items.md#estimate-remaining-effort-and-progress)), and summaries and timesheets read it from the Work Items. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
+Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Budget changes also append a shared audit event in the same transaction. Estimates are not stored here: the canonical estimate is the Work Item's `schedule.plannedEffortMinutes` (see [Work Items](work-items.md#estimate-remaining-effort-and-progress)), and summaries and timesheets read it from the Work Items, including archived ones, so archiving finished work keeps its estimate next to its recorded time. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
 
 ## HTTP surface
 

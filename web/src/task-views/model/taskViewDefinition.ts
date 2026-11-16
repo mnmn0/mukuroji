@@ -155,6 +155,8 @@ export type TaskViewSanitizeOptions = {
   layoutModes: readonly TaskViewLayoutMode[]
   /** Canonical layout field references available for grouping and sorting. */
   fields: readonly string[]
+  /** Field references available for sorting only; `fields` applies when omitted. */
+  sortFields?: readonly string[]
   /** Field references available as visible columns. */
   columns: readonly string[]
   /** Team and Work Item Type-qualified workflow statuses visible to the current viewer. */
@@ -561,7 +563,7 @@ function sanitizeTaskViewSort(
       warnings.push(createMigrationWarning('invalid-layout', 'sort', 'removed'))
       return []
     }
-    if (!options.fields.includes(candidate.field)) {
+    if (!(options.sortFields ?? options.fields).includes(candidate.field)) {
       warnings.push(createMigrationWarning(
         'deleted-custom-field',
         'sort',
