@@ -4681,6 +4681,29 @@ test.describe('authenticated task page', () => {
     expect(roadmapListRequests[0]).toBe('?limit=200&includeArchived=true')
   })
 
+  test('Issue #463: 期限カレンダーでも teamId なしの issueId リンクで期間外の Work Item を開ける', async ({ page }) => {
+    // The June fixtures lie outside the September calendar that opens by default.
+    await page.clock.setFixedTime(new Date('2026-09-15T03:00:00.000Z'))
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(page.getByTestId('task-calendar-month-navigation-period')).toHaveText(
+      '2026-09-01 – 2026-09-30',
+    )
+    const calendarUrl = new URL(page.url())
+    calendarUrl.searchParams.delete('teamId')
+    calendarUrl.searchParams.set('issueId', 'wireframe')
+
+    await page.goto(`${calendarUrl.pathname}${calendarUrl.search}`)
+
+    await expect(page.getByTestId('task-calendar-month-navigation-period')).toHaveText(
+      '2026-09-01 – 2026-09-30',
+    )
+    await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toHaveValue(
+      '新しいランディングページのワイヤーフレーム作成',
+    )
+    await expect(page.getByTestId('task-calendar-item-wireframe')).toHaveCount(0)
+  })
+
   test('Issue #463: 表示中の月の外へ移したカードの後は月ナビゲーションへフォーカスを移す', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')

@@ -239,6 +239,52 @@ export function useProjectIssues(
 }
 
 /**
+ * Finds the Work Items that an `issueId` link without `teamId` can mean, outside of any list.
+ *
+ * A calendar or Gantt list holds only its visible period, so it cannot tell which Team owns a
+ * routed Work Item outside that period, or whether two Teams use the same local ID. Each Team
+ * that has the Project is asked for the ID directly; a Work Item counts when it is assigned to
+ * the Project. A missing or unreadable Work Item of one Team is not a match.
+ *
+ * @param accessToken - Work Item API access token.
+ * @param projectId - Project the link points into.
+ * @param issueId - Team-local Work Item ID from the link.
+ * @param teamIds - Teams that have the Project.
+ * @param enabled - Whether the lookup runs, normally only for a windowed list.
+ * @returns SWR state whose data lists every matching Work Item.
+ */
+export function useProjectIssueLinkCandidates(
+  accessToken: string | undefined,
+  projectId: string | undefined,
+  issueId: string | undefined,
+  teamIds: readonly string[],
+  enabled: boolean,
+) {
+  const key = accessToken && projectId && issueId && enabled && teamIds.length > 0
+    ? ['project-issue-link-candidates', accessToken, projectId, issueId, ...teamIds] as const
+    : null
+  return useSWR(
+    key,
+    async ([, token, currentProjectId, currentIssueId, ...candidateTeamIds]) => {
+      const issues = await Promise.all(candidateTeamIds.map(async (teamId) => {
+        try {
+          return (await getTeamIssueDetail(teamId, currentIssueId, token)).issue
+        } catch (error) {
+          if (error instanceof TeamIssuesApiError && (error.status === 403 || error.status === 404)) {
+            return undefined
+          }
+          throw error
+        }
+      }))
+      return issues.filter((issue): issue is NonNullable<typeof issue> =>
+        issue !== undefined && issue.assignedProjectId === currentProjectId
+      )
+    },
+    workItemQueryConfig,
+  )
+}
+
+/**
  * Creates the SWR key of one Project Work Item list.
  *
  * @param accessToken - Work Item API access token.

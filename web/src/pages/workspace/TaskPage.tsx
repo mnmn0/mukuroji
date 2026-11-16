@@ -61,6 +61,7 @@ import {
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
 import {
+  useProjectIssueLinkCandidates,
   useProjectIssues,
   useTeamIssueDetail,
   useTeamIssues,
@@ -326,7 +327,7 @@ export function TaskPage() {
     return undefined
   }, [calendarMonth, ganttStartMonth, projectListWindowLayout])
   const {
-    data: projectIssues = emptyTeamIssues,
+    data: projectListIssues = emptyTeamIssues,
     error: taskError,
     isLoading: isProjectListLoading,
     mutate: mutateProjectTasks,
@@ -442,6 +443,29 @@ export function TaskPage() {
   )
   const projectUsersNextToken =
     activeProjectUsersExtraPage ? activeProjectUsersExtraPage.nextToken : projectUsersFirstPage?.nextToken
+  const projectTeamIds = useMemo(
+    () => teams
+      .filter((team) => team.projects.some((project) => project.id === projectId))
+      .map((team) => team.id),
+    [projectId, teams],
+  )
+  // A windowed list cannot resolve an `issueId` link without `teamId` outside its period, so the
+  // Work Items such a link can mean are looked up per Team and added to the list.
+  const { data: issueLinkCandidates } = useProjectIssueLinkCandidates(
+    accessToken,
+    projectId,
+    selectedIssueId,
+    projectTeamIds,
+    Boolean(user && !currentUserError && projectScheduleWindow && selectedIssueId && !selectedTeamId),
+  )
+  const projectIssues = useMemo(() => {
+    if (!projectScheduleWindow || !issueLinkCandidates?.length) return projectListIssues
+    const listedKeys = new Set(projectListIssues.map((issue) => `${issue.teamId}\u0000${issue.id}`))
+    const missing = issueLinkCandidates.filter((issue) =>
+      !listedKeys.has(`${issue.teamId}\u0000${issue.id}`)
+    )
+    return missing.length > 0 ? [...projectListIssues, ...missing] : projectListIssues
+  }, [issueLinkCandidates, projectListIssues, projectScheduleWindow])
   const projectUsersErrorMessage = projectUsersError
     ? t('workspace.permissions.usersError')
     : undefined
