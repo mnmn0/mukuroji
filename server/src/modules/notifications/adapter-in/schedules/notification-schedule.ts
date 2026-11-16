@@ -1179,6 +1179,9 @@ function scheduledNotificationCandidateReason(stage: ScheduledNotificationReason
 /**
  * Creates the short Inbox summary for a scheduled Work Item stage.
  *
+ * Reminder stages name the absolute due date instead of a countdown, because quiet hours,
+ * digests, and retries can deliver them on a later calendar day than the scan.
+ *
  * @param candidate - Work Item stage and its day offsets.
  * @returns English summary stored on the audit event.
  */
@@ -1188,13 +1191,14 @@ function createScheduledNotificationSummary(candidate: ScheduledNotificationCand
     case 'due':
       return `Work Item "${candidate.title}" is due today.`
     case 'due-soon':
-      return `Work Item "${candidate.title}" is due in ${candidate.daysUntilDue ?? 0} day(s).`
+      return `Work Item "${candidate.title}" is due on ${candidate.dueDate}.`
     case 'overdue':
       return `Work Item "${candidate.title}" is overdue.`
     case 'overdue-reminder':
-      return `Work Item "${candidate.title}" is still overdue (${overdueDays} days).`
+      return `Work Item "${candidate.title}" was due on ${candidate.dueDate} and is still overdue.`
     case 'overdue-escalation':
-      return `Work Item "${candidate.title}" has been overdue for ${overdueDays} days.`
+      // Escalations are delivered only while at least this overdue, so the lower bound holds.
+      return `Work Item "${candidate.title}" was due on ${candidate.dueDate} and has been overdue for at least ${overdueDays} days.`
     case 'stale':
       return `Work Item "${candidate.title}" is in progress and has not been updated since ${(candidate.workItemUpdatedAt ?? '').slice(0, 10)}.`
   }

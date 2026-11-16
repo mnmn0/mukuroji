@@ -481,7 +481,7 @@ describe('notification schedule handler', () => {
     expect(puts[0]?.input.Item).toMatchObject({
       eventType: 'work-item.due-soon',
       entityId: 'team/core-team/issue/in-three-days',
-      summary: 'Work Item "Release checklist" is due in 3 day(s).',
+      summary: 'Work Item "Release checklist" is due on 2026-07-15.',
       metadata: {
         dueDate: '2026-07-15',
         notificationCandidates: [{ memberKey: 'member@example.com', reason: 'due-soon' }],
@@ -521,7 +521,7 @@ describe('notification schedule handler', () => {
     expect(firstReminder).toMatchObject({
       eventType: 'work-item.overdue-reminder',
       action: 'overdue-reminder',
-      summary: 'Work Item "Release checklist" is still overdue (7 days).',
+      summary: 'Work Item "Release checklist" was due on 2026-07-12 and is still overdue.',
       metadata: {
         repetition: 1,
         notificationCandidates: [{ memberKey: 'member@example.com', reason: 'overdue' }],
@@ -579,7 +579,7 @@ describe('notification schedule handler', () => {
     expect(escalations).toHaveLength(2)
     expect(escalations[0]).toMatchObject({
       entityId: 'team/core-team/issue/release-checklist',
-      summary: 'Work Item "Release checklist" has been overdue for 7 days.',
+      summary: 'Work Item "Release checklist" was due on 2026-07-05 and has been overdue for at least 7 days.',
       metadata: {
         projectId: 'platform',
         dueDate: '2026-07-05',
