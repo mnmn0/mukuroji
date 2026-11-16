@@ -320,6 +320,11 @@ describe('collaboration projection pure helpers', () => {
       .toBeUndefined()
     expect(refreshScheduledNotificationEvent(stale, { ...scope, statusCategory: 'unstarted' }))
       .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, localDate: '2026-07-15' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
+    // Delivered after the due date passed: the overdue reminder covers it instead.
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, localDate: '2026-07-16' }))
+      .toBeUndefined()
     expect(refreshScheduledNotificationEvent(escalation, scope)?.notificationCandidates)
       .toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
     expect(refreshScheduledNotificationEvent(escalation, { ...scope, statusCategory: 'completed' }))

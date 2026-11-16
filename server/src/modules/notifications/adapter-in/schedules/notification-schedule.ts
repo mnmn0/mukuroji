@@ -28,6 +28,7 @@ import {
   workItemScheduleInstantToLocalDate,
 } from '../../../work-items'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
+import type { ScheduledProjectManagerReader } from '../../application/ports/project-manager-reader'
 
 /**
  * Work Item notification stages emitted by the schedule. Each stage maps to the audit event type
@@ -125,6 +126,8 @@ export type NotificationScheduleRunOptions = {
   prepareCustomerCompletionNotifications?: CustomerCompletionPreparationHandler
   /** Reminder thresholds; omitted fields use {@link DEFAULT_WORK_ITEM_REMINDER_POLICY}. */
   reminderPolicy?: Partial<WorkItemReminderPolicy>
+  /** Resolves Project managers for overdue escalation; without it no escalation is emitted. */
+  projectManagerReader?: ScheduledProjectManagerReader
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -283,11 +286,13 @@ const maximumPlanningNotificationOffsetHours = 24 * 365
  *
  * @param documentClient DocumentClient used by the schedule.
  * @param prepareCustomerCompletionNotifications Optional durable Customer preparation handler.
+ * @param projectManagerReader Optional Project manager reader for overdue escalation.
  * @returns An EventBridge-compatible notification schedule handler.
  */
 export function createNotificationScheduleHandler(
   documentClient: NotificationScheduleDocumentClient,
   prepareCustomerCompletionNotifications?: CustomerCompletionPreparationHandler,
+  projectManagerReader?: ScheduledProjectManagerReader,
 ) {
   return async (
     event: NotificationScheduleEvent = {},
@@ -318,6 +323,7 @@ export function createNotificationScheduleHandler(
       ...(prepareCustomerCompletionNotifications
         ? { prepareCustomerCompletionNotifications }
         : {}),
+      ...(projectManagerReader ? { projectManagerReader } : {}),
       reminderPolicy: {
         dueSoonDays: readPositiveIntegerEnvironment(
           'NOTIFICATION_DUE_SOON_DAYS',
@@ -364,7 +370,10 @@ export async function runNotificationSchedule(
     100_000,
   )
   const reminderPolicy = normalizeWorkItemReminderPolicy(options.reminderPolicy)
-  const projectManagersByWorkspace = new Map<string, Promise<ReadonlyMap<string, string[]>>>()
+  const projectManagersByWorkspace = new Map<
+    string,
+    Promise<ReadonlyMap<string, readonly string[]>>
+  >()
   const result: NotificationScheduleResult = {
     scannedItems: 0,
     emittedEvents: 0,
@@ -427,17 +436,12 @@ export async function runNotificationSchedule(
       }
       const evaluation = evaluateScheduledWorkItemNotifications(item, now, reminderPolicy)
       const candidates = [...evaluation.candidates]
-      if (evaluation.escalation?.projectId && options.projectDirectoryTableName) {
+      const managerReader = options.projectManagerReader
+      if (evaluation.escalation?.projectId && managerReader) {
         const escalation = evaluation.escalation
         let managers = projectManagersByWorkspace.get(escalation.workspaceId)
         if (!managers) {
-          managers = readScheduledProjectManagers(
-            options,
-            requireText(options.projectDirectoryTableName, 'Project Directory table name'),
-            escalation.workspaceId,
-            scanPageSize,
-            maxScanPages,
-          )
+          managers = managerReader.readActiveProjectManagers(escalation.workspaceId)
           projectManagersByWorkspace.set(escalation.workspaceId, managers)
         }
         const recipients = ((await managers).get(escalation.projectId ?? '') ?? [])
@@ -914,8 +918,9 @@ export function parseUtcDateOnly(value: unknown): string | undefined {
  * Evaluates every scheduled notification stage for one Work Item at the schedule instant.
  *
  * Dates use the Work Item schedule's local calendar. The owner gets `due-soon` within the
- * configured window, `due` on the due date, `overdue` on the first overdue run, and
- * `overdue-reminder` once per reminder interval after that. A started Work Item that is not
+ * configured window, `due` on the due date, `overdue` once per due date (its deterministic key makes
+ * later runs duplicates), and `overdue-reminder` once per reminder interval after that. Archived
+ * Work Items get nothing. A started Work Item that is not
  * overdue and has not been updated for the stale window gets one `stale` reminder per window.
  * Project managers are resolved by the caller for the escalation stage.
  *
@@ -937,7 +942,11 @@ export function evaluateScheduledWorkItemNotifications(
   }
 
   const assigneeMemberKey = item.assigneeUserId.toLowerCase()
-  if (!assigneeMemberKey || !isActiveWorkflowStatusCategory(item.statusCategory)) {
+  if (
+    item.archivedAt !== undefined ||
+    !assigneeMemberKey ||
+    !isActiveWorkflowStatusCategory(item.statusCategory)
+  ) {
     return { candidates: [] }
   }
 
@@ -963,9 +972,12 @@ export function evaluateScheduledWorkItemNotifications(
     } else if (daysUntilDue < 0) {
       const overdueDays = -daysUntilDue
       const repetition = Math.floor(overdueDays / policy.overdueReminderIntervalDays)
-      candidates.push(repetition === 0
-        ? { ...base, dueDate, reason: 'overdue', daysUntilDue }
-        : { ...base, dueDate, reason: 'overdue-reminder', daysUntilDue, repetition })
+      // The initial overdue event keeps its once-per-due-date key on every run, so an item first
+      // scanned long after its due date still emits it for Automation overdue triggers.
+      candidates.push({ ...base, dueDate, reason: 'overdue', daysUntilDue })
+      if (repetition > 0) {
+        candidates.push({ ...base, dueDate, reason: 'overdue-reminder', daysUntilDue, repetition })
+      }
       if (overdueDays >= policy.overdueEscalationDays && base.projectId) {
         escalation = { ...base, dueDate, reason: 'overdue-escalation', daysUntilDue }
       }
@@ -1030,63 +1042,6 @@ function normalizeWorkItemReminderPolicy(
     ),
     staleStartedDays: normalizePositiveInteger(merged.staleStartedDays, 'Stale started days', 365),
   }
-}
-
-/**
- * Reads the current managers of every active Project in one Workspace directory partition.
- *
- * @param options - Schedule dependencies.
- * @param tableName - Canonical Project Directory table name.
- * @param workspaceId - Canonical Workspace ID.
- * @param pageSize - Directory query page size.
- * @param maxPages - Directory query safety bound.
- * @returns Sorted manager member keys keyed by active Project ID.
- * @throws Error when the directory exceeds the page bound.
- */
-async function readScheduledProjectManagers(
-  options: NotificationScheduleRunOptions,
-  tableName: string,
-  workspaceId: string,
-  pageSize: number,
-  maxPages: number,
-): Promise<ReadonlyMap<string, string[]>> {
-  const activeProjectIds = new Set<string>()
-  const managers = new Map<string, Set<string>>()
-  let exclusiveStartKey: Record<string, unknown> | undefined
-  let pages = 0
-  do {
-    if (pages >= maxPages) {
-      throw new Error(
-        `Work Item escalation Project lookup exceeded the configured ${maxPages} page limit.`,
-      )
-    }
-    const response = await options.documentClient.send(new QueryCommand({
-      TableName: tableName,
-      KeyConditionExpression: 'directoryId = :directoryId',
-      ExpressionAttributeValues: { ':directoryId': workspaceId },
-      ConsistentRead: true,
-      Limit: pageSize,
-      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-    }))
-    pages += 1
-    for (const item of response.Items ?? []) {
-      if (item.entryType === 'project' && item.archivedAt === undefined) {
-        activeProjectIds.add(requireText(item.projectId, 'Project directory project ID'))
-      }
-      if (item.entryType === 'project-member' && item.role === 'manager') {
-        const projectId = requireText(item.projectId, 'Project member project ID')
-        const memberKey = normalizeMemberKey(item.memberKey, 'Project member key')
-        const projectManagers = managers.get(projectId) ?? new Set<string>()
-        projectManagers.add(memberKey)
-        managers.set(projectId, projectManagers)
-      }
-    }
-    exclusiveStartKey = response.LastEvaluatedKey
-  } while (exclusiveStartKey)
-
-  return new Map([...managers]
-    .filter(([projectId]) => activeProjectIds.has(projectId))
-    .map(([projectId, memberKeys]) => [projectId, [...memberKeys].sort()]))
 }
 
 /** 期限通知の対象となる非終端 workflow category か判定します。 */

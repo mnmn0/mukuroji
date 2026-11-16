@@ -246,6 +246,7 @@ export const workspaceMessages = {
   'workspace.inbox.event.status': 'Status update',
   'workspace.inbox.event.due': 'Due date',
   'workspace.inbox.event.overdue': 'Overdue',
+  'workspace.inbox.event.overdueReminder': 'Still overdue',
   'workspace.inbox.event.approval': 'Approval',
   'workspace.inbox.event.automation': 'Automation failure',
   'workspace.inbox.event.update': 'Update',

@@ -20,7 +20,7 @@ import {
 import type { EnterpriseIdentitySnapshot, EnterprisePermissionId, TriageEntry } from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
-import { isCanonicalWorkItemRecord } from '../../../work-items'
+import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
   resolveEnterpriseDirectoryPrincipal,
@@ -299,6 +299,8 @@ export type CurrentWorkItemNotificationScope = {
   statusCategory?: string
   /** Current Work Item `updatedAt` timestamp. */
   updatedAt?: string
+  /** Today in the Work Item schedule's local calendar at read time, as `YYYY-MM-DD`. */
+  localDate?: string
 }
 
 /** Projection 時に強整合 read した Planning update target scope です。 */
@@ -1432,7 +1434,7 @@ export function createNotificationProjectionItem(
  * Revalidates a scheduled Work Item notification against the current Work Item row.
  *
  * Every stage requires the Work Item to still be open with the same due date (or, for a stale
- * reminder, still started with the same `updatedAt`). Owner stages are re-pointed at the current
+ * reminder, still started with the same `updatedAt` and not yet overdue). Owner stages are re-pointed at the current
  * owner and dropped when ownership changed. Escalation keeps its manager candidates; the caller
  * filters them by current Project manager role.
  *
@@ -1463,7 +1465,9 @@ export function refreshScheduledNotificationEvent(
     if (
       scope.statusCategory !== 'started' ||
       !event.workItemUpdatedAt ||
-      readTimestamp(scope.updatedAt) !== event.workItemUpdatedAt
+      readTimestamp(scope.updatedAt) !== event.workItemUpdatedAt ||
+      // Overdue reminders take over once the item passes its due date, as in the schedule.
+      (scope.dueDate !== undefined && scope.localDate !== undefined && scope.dueDate < scope.localDate)
     ) {
       return undefined
     }
@@ -2324,6 +2328,7 @@ async function readCurrentWorkItemScope(
     dueDate: normalizeStoredDateOnly(item.dueDate),
     statusCategory: item.statusCategory,
     updatedAt: item.updatedAt,
+    localDate: workItemScheduleInstantToLocalDate(new Date(), item.schedule.calendarPolicy),
   }
 }
 

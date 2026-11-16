@@ -1,4 +1,5 @@
 import {
+  createDynamoDbProjectManagerReader,
   createNotificationScheduleHandler,
 } from '../../modules/notifications'
 import {
@@ -9,6 +10,7 @@ import {
   DynamoDbCustomerClient,
   type CustomerRetentionClient,
 } from '../../modules/customers'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 import type {
   NotificationScheduleEvent,
   NotificationScheduleResult,
@@ -48,6 +50,9 @@ export function createRetentionAwareNotificationScheduleHandler(
 export function createProductionNotificationScheduleHandler() {
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const customerClient = new DynamoDbCustomerClient({ documentClient })
+  const projectDirectoryTableName =
+    loadServerConfig().environment.PROJECT_DIRECTORY_TABLE_NAME?.trim()
+  if (!projectDirectoryTableName) throw new Error('PROJECT_DIRECTORY_TABLE_NAME is required.')
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
     async ({ workspaceId, teamId, workItemId }) => {
@@ -58,6 +63,10 @@ export function createProductionNotificationScheduleHandler() {
         'system:customer-completion-schedule',
       )
     },
+    createDynamoDbProjectManagerReader({
+      documentClient,
+      tableName: projectDirectoryTableName,
+    }),
   )
   return createRetentionAwareNotificationScheduleHandler(
     customerClient,

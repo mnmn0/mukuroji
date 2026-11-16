@@ -18,6 +18,7 @@ import {
   createPlanningUpdateNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,
 } from '../../../planning'
+import { createDynamoDbProjectManagerReader } from '../../adapter-out/dynamodb/project-manager-reader'
 
 /** Creates a canonical Project update target row for schedule tests. */
 function createPlanningProjectUpdateTarget(
@@ -480,19 +481,29 @@ describe('notification schedule handler', () => {
         ? { Items: [createWorkItem({ assignedProjectId: undefined, directoryProjectId: undefined })] }
         : {})
       await runNotificationSchedule(createRunOptions(recording.client, { now: new Date(now) }))
-      return recording.commands
+      const events = recording.commands
         .filter(({ name }) => name === 'PutCommand')
         .map(({ input }) => input.Item as Record<string, unknown>)
+      return {
+        overdue: events.filter((event) => event.eventType === 'work-item.overdue'),
+        reminders: events.filter((event) => event.eventType === 'work-item.overdue-reminder'),
+      }
     }
 
-    const [firstOverdue] = await run('2026-07-13T09:00:00.000Z')
-    const [sixDays] = await run('2026-07-18T09:00:00.000Z')
-    const [firstReminder] = await run('2026-07-19T09:00:00.000Z')
-    const [sameWeek] = await run('2026-07-25T09:00:00.000Z')
-    const [secondReminder] = await run('2026-07-26T09:00:00.000Z')
+    const first = await run('2026-07-13T09:00:00.000Z')
+    const sixDays = await run('2026-07-18T09:00:00.000Z')
+    const sevenDays = await run('2026-07-19T09:00:00.000Z')
+    const [firstReminder] = sevenDays.reminders
+    const [sameWeek] = (await run('2026-07-25T09:00:00.000Z')).reminders
+    const [secondReminder] = (await run('2026-07-26T09:00:00.000Z')).reminders
 
-    expect(firstOverdue).toMatchObject({ eventType: 'work-item.overdue' })
-    expect(sixDays?.eventId).toBe(firstOverdue?.eventId)
+    expect(first.overdue).toHaveLength(1)
+    expect(first.reminders).toHaveLength(0)
+    expect(sixDays.reminders).toHaveLength(0)
+    // The initial overdue event is attempted on every run with one key, so retries dedupe it.
+    for (const later of [sixDays, sevenDays]) {
+      expect(later.overdue.map((event) => event.eventId)).toEqual([first.overdue[0]?.eventId])
+    }
     expect(firstReminder).toMatchObject({
       eventType: 'work-item.overdue-reminder',
       action: 'overdue-reminder',
@@ -538,7 +549,10 @@ describe('notification schedule handler', () => {
     })
 
     await runNotificationSchedule(createRunOptions(recording.client, {
-      projectDirectoryTableName: 'ProjectDirectoryTable',
+      projectManagerReader: createDynamoDbProjectManagerReader({
+        documentClient: recording.client,
+        tableName: 'ProjectDirectoryTable',
+      }),
     }))
     const events = recording.commands
       .filter(({ name }) => name === 'PutCommand')
@@ -559,7 +573,46 @@ describe('notification schedule handler', () => {
     expect(events.filter((event) => event.eventType === 'work-item.overdue-reminder'))
       .toHaveLength(2)
     expect(events.filter((event) => event.eventType === 'work-item.overdue'))
-      .toHaveLength(1)
+      .toHaveLength(3)
+  })
+
+  test('emits the initial overdue event for a Work Item first scanned long after its due date', async () => {
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? { Items: [createWorkItem({ assignedProjectId: undefined, directoryProjectId: undefined, dueDate: '2026-06-20' })] }
+      : {})
+
+    await runNotificationSchedule(createRunOptions(recording.client))
+    const events = recording.commands
+      .filter(({ name }) => name === 'PutCommand')
+      .map(({ input }) => input.Item as Record<string, unknown>)
+
+    expect(events.map((event) => event.eventType)).toEqual([
+      'work-item.overdue',
+      'work-item.overdue-reminder',
+    ])
+    expect(events[1]).toMatchObject({ metadata: { repetition: 3 } })
+  })
+
+  test('skips archived Work Items for every scheduled stage', async () => {
+    const archived = {
+      archivedAt: '2026-07-05T09:00:00.000Z',
+      archivedBy: 'member@example.com',
+      updatedAt: '2026-07-05T09:00:00.000Z',
+    }
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? {
+          Items: [
+            createWorkItem({ issueId: 'archived-due', dueDate: '2026-07-12', ...archived }),
+            createWorkItem({ issueId: 'archived-overdue', dueDate: '2026-06-20', ...archived }),
+            createWorkItem({ issueId: 'archived-stale', dueDate: '2026-08-31', ...archived }),
+          ],
+        }
+      : {})
+
+    const result = await runNotificationSchedule(createRunOptions(recording.client))
+
+    expect(result).toMatchObject({ emittedEvents: 0, skippedItems: 3 })
+    expect(recording.commands.filter(({ name }) => name === 'PutCommand')).toHaveLength(0)
   })
 
   test('reminds the owner of a started Work Item that has not been updated', async () => {

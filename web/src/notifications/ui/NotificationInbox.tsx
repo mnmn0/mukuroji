@@ -453,6 +453,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.includes('escalation')) {
     return 'workspace.inbox.event.escalation'
   }
+  if (normalizedEventType.includes('overdue-reminder')) {
+    return 'workspace.inbox.event.overdueReminder'
+  }
   if (normalizedEventType.includes('overdue')) {
     return 'workspace.inbox.event.overdue'
   }
@@ -552,6 +555,7 @@ function resolveEventToneClassName(eventType: string) {
   if (
     eventKey === 'workspace.inbox.event.automation' ||
     eventKey === 'workspace.inbox.event.overdue' ||
+    eventKey === 'workspace.inbox.event.overdueReminder' ||
     eventKey === 'workspace.inbox.event.escalation'
   ) {
     return 'border-red-200 bg-red-50 text-fg-red-700'
