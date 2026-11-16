@@ -144,6 +144,12 @@ export const taskViewStoryPlanningSnapshot = {
     title: task.title,
   })),
   criticalPath: { entityIds: [], slackByEntityId: {}, totalDurationDays: 0 },
+  capacity: {
+    level: 'normal',
+    liveRowCount: 24,
+    liveRowCapacity: 20_000,
+    warningRowCount: 16_000,
+  },
   workItemDependencySummary: {
     affectedMilestoneIds: [],
     affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],

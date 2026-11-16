@@ -70,6 +70,10 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     moveToRoot: t('issues.project.unassigned'),
     move: t('planning.action.move'),
     readOnly: t('planning.readOnly'),
+    capacityUsage: (used, capacity) =>
+      `${t('planning.capacity.usage')}: ${used.toLocaleString(locale)} / ${capacity.toLocaleString(locale)} ${t('planning.capacity.rows')}`,
+    capacityWarning: t('planning.capacity.warning'),
+    capacityFull: t('planning.capacity.full'),
     portfolioTitle: t('planning.view.portfolio'),
     portfolioDescription: t('planning.description'),
     entity: t('planning.field.title'),

@@ -180,6 +180,135 @@ function rowsForPlanningRecordPrefixQuery(
 }
 
 /**
+ * Creates one stored entity row for large-Workspace persistence tests.
+ *
+ * @param id - Entity identifier.
+ * @param type - Entity type.
+ * @param overrides - Scope, hierarchy, and type-specific fields.
+ * @returns A canonical ENTITY row.
+ */
+function createScaleEntityRow(
+  id: string,
+  type: PlanningEntityType,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: `ENTITY#${id}`,
+    entryType: 'planning-entity',
+    id,
+    type,
+    title: id,
+    ownerMemberKey: 'owner@example.com',
+    status: 'active',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-08-01', endDate: '2026-08-14' },
+    forecast: { startDate: '2026-08-01', endDate: '2026-08-14' },
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    ...overrides,
+  }
+}
+
+/**
+ * Creates a goal hierarchy plus Work Item links so the live graph has an exact row count.
+ *
+ * @param rowCount - Total live graph rows, including the four hierarchy entities.
+ * @returns Canonical ENTITY and LINK rows.
+ */
+function createGoalLinkRows(rowCount: number): Record<string, unknown>[] {
+  return [
+    createScaleEntityRow('portfolio-1', 'portfolio'),
+    createScaleEntityRow('roadmap-1', 'roadmap', { parentId: 'portfolio-1' }),
+    createScaleEntityRow('initiative-1', 'initiative', { parentId: 'roadmap-1' }),
+    createScaleEntityRow('goal-1', 'goal', { parentId: 'initiative-1' }),
+    ...Array.from({ length: rowCount - 4 }, (_, index) => ({
+      workspaceId: 'workspace-1',
+      recordKey: `LINK#team-1#item-${index}`,
+      entryType: 'planning-work-item-link',
+      teamId: 'team-1',
+      workItemId: `item-${index}`,
+      goalIds: ['goal-1'],
+      createdAt: NOW.toISOString(),
+    })),
+  ]
+}
+
+/**
+ * Creates a DynamoDB Planning client over an in-memory table stored at revision 1.
+ *
+ * @param rows - Live graph rows of `workspace-1`.
+ * @returns The client, its mutable rows, and every transaction it wrote.
+ */
+function createFakePlanningTable(rows: Record<string, unknown>[]) {
+  let meta: Record<string, unknown> = {
+    workspaceId: 'FENCE#workspace-1',
+    recordKey: 'META',
+    entryType: 'planning-meta',
+    schemaVersion: 1,
+    revision: 1,
+    updatedAt: NOW.toISOString(),
+  }
+  const writes: Record<string, unknown>[] = []
+  const documentClient = {
+    async send(command: {
+      /** AWS SDK command constructor. */
+      constructor: { name: string }
+      /** AWS SDK command input. */
+      input: Record<string, unknown>
+    }) {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key
+        return typeof key === 'object' && key !== null && 'workspaceId' in key &&
+          key.workspaceId === 'FENCE#workspace-1'
+          ? { Item: meta }
+          : {}
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: rowsForPlanningRecordPrefixQuery(command.input, rows) }
+      }
+      writes.push(command.input)
+      const items = command.input.TransactItems
+      if (!Array.isArray(items)) throw new Error('Expected a transaction.')
+      for (const item of items) {
+        if (typeof item !== 'object' || item === null) continue
+        if ('Put' in item && typeof item.Put === 'object' && item.Put !== null && 'Item' in item.Put) {
+          const written = item.Put.Item
+          if (typeof written !== 'object' || written === null || !('recordKey' in written)) continue
+          if (written.recordKey === 'META') {
+            meta = { ...written }
+            continue
+          }
+          const index = rows.findIndex((row) => row.recordKey === written.recordKey)
+          if (index >= 0) rows.splice(index, 1, { ...written })
+          else rows.push({ ...written })
+        }
+        if (
+          'Delete' in item && typeof item.Delete === 'object' && item.Delete !== null &&
+          'Key' in item.Delete && typeof item.Delete.Key === 'object' && item.Delete.Key !== null &&
+          'recordKey' in item.Delete.Key
+        ) {
+          const recordKey = item.Delete.Key.recordKey
+          const index = rows.findIndex((row) => row.recordKey === recordKey)
+          if (index >= 0) rows.splice(index, 1)
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbPlanningClient(
+    'PlanningTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    () => NOW,
+  )
+  return { client, rows, writes }
+}
+
+/**
  * Creates an inclusive date-range schedule for dependency graph tests.
  *
  * @param startDate - Inclusive local start date.
@@ -2690,11 +2819,11 @@ describe('planning persistence', () => {
       !prefix.startsWith('UPDATE_REACTION#')
     )).toBeTrue()
     expect(graphQueries.map((command) => command.input.Limit)).toEqual([
-      2_000,
-      1_999,
-      1_999,
-      1_999,
-      1_999,
+      25_001,
+      25_000,
+      25_000,
+      25_000,
+      25_000,
     ])
     for (const command of graphQueries) {
       expect(command.input).toMatchObject({
@@ -3751,35 +3880,146 @@ describe('planning persistence', () => {
     ])
   })
 
-  test('rejects a mutation that would make a Workspace unreadable', async () => {
-    let transactionCalls = 0
-    const storedAtLimit = [
-      {
-        workspaceId: 'workspace-1',
-        recordKey: 'META',
-        entryType: 'planning-meta',
-        schemaVersion: 1,
-        revision: 1,
-        updatedAt: NOW.toISOString(),
-      },
-      ...Array.from({ length: 1_999 }, (_, index) => ({
-        workspaceId: 'workspace-1',
-        recordKey: `ENTITY#portfolio-${index}`,
-        entryType: 'planning-entity',
-        id: `portfolio-${index}`,
-        type: 'portfolio',
-        title: `Portfolio ${index}`,
-        ownerMemberKey: 'owner@example.com',
-        status: 'planned',
-        health: 'on-track',
-        risk: 'none',
-        progressMode: 'automatic',
-        baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
-        forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
-        createdAt: NOW.toISOString(),
-        updatedAt: NOW.toISOString(),
-      })),
-    ]
+  test('rejects only row-adding mutations once the live capacity is reached', async () => {
+    const { client, rows, writes } = createFakePlanningTable(createGoalLinkRows(20_000))
+    const snapshot = await client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(snapshot.capacity).toEqual({
+      level: 'full',
+      liveRowCount: 20_000,
+      liveRowCapacity: 20_000,
+      warningRowCount: 16_000,
+    })
+
+    await expect(client.create(
+      'workspace-1',
+      createEntityInput('portfolio-over-capacity', 'portfolio', 1),
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ status: 413, code: 'PlanningCapacityExceeded' })
+    expect(writes).toHaveLength(0)
+
+    const updated = await client.update('workspace-1', 'portfolio-1', {
+      expectedRevision: 1,
+      patch: { title: 'Still editable at capacity' },
+    }, EMPTY_WORK_ITEMS)
+    expect(updated.planning.capacity.liveRowCount).toBe(20_000)
+    expect(writes).toHaveLength(1)
+
+    const link = rows.find((row) => row.entryType === 'planning-work-item-link')
+    if (typeof link?.teamId !== 'string' || typeof link.workItemId !== 'string') {
+      throw new Error('Expected a stored link.')
+    }
+    const unlinked = await client.deleteWorkItemLink(
+      'workspace-1',
+      link.teamId,
+      link.workItemId,
+      { expectedRevision: 2 },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(unlinked.planning.capacity).toMatchObject({ level: 'warning', liveRowCount: 19_999 })
+  })
+
+  test('reports the warning level from the warning threshold', async () => {
+    const below = createFakePlanningTable(createGoalLinkRows(15_999)).client
+    expect((await below.get('workspace-1', EMPTY_WORK_ITEMS)).capacity.level).toBe('normal')
+    const at = createFakePlanningTable(createGoalLinkRows(16_000)).client
+    expect((await at.get('workspace-1', EMPTY_WORK_ITEMS)).capacity.level).toBe('warning')
+  })
+
+  test('serves a Workspace with 100 Projects and 5,000 linked Work Items', async () => {
+    const rows: Record<string, unknown>[] = [createScaleEntityRow('portfolio-1', 'portfolio')]
+    const workItems: PlanningWorkItemSummary[] = []
+    for (let teamIndex = 0; teamIndex < 10; teamIndex += 1) {
+      const teamId = `team-${teamIndex}`
+      rows.push(createScaleEntityRow(`roadmap-${teamIndex}`, 'roadmap', {
+        teamId,
+        parentId: 'portfolio-1',
+      }))
+      for (let cycleIndex = 0; cycleIndex < 6; cycleIndex += 1) {
+        rows.push(createScaleEntityRow(`cycle-${teamIndex}-${cycleIndex}`, 'cycle', {
+          teamId,
+          cadence: { unit: 'week', count: 2 },
+          capacity: 1_000,
+          carryOverPolicy: 'move-incomplete',
+        }))
+      }
+      for (let projectIndex = 0; projectIndex < 10; projectIndex += 1) {
+        const projectId = `project-${teamIndex}-${projectIndex}`
+        const initiativeId = `initiative-${teamIndex}-${projectIndex}`
+        rows.push(createScaleEntityRow(initiativeId, 'initiative', {
+          teamId,
+          projectId,
+          parentId: `roadmap-${teamIndex}`,
+        }))
+        for (let milestoneIndex = 0; milestoneIndex < 3; milestoneIndex += 1) {
+          rows.push(createScaleEntityRow(
+            `milestone-${teamIndex}-${projectIndex}-${milestoneIndex}`,
+            'milestone',
+            {
+              teamId,
+              projectId,
+              parentId: initiativeId,
+              baseline: { startDate: '2026-08-14', endDate: '2026-08-14' },
+              forecast: { startDate: '2026-08-14', endDate: '2026-08-14' },
+            },
+          ))
+        }
+        for (let itemIndex = 0; itemIndex < 50; itemIndex += 1) {
+          const workItemId = `item-${projectIndex}-${itemIndex}`
+          rows.push({
+            workspaceId: 'workspace-1',
+            recordKey: `LINK#${teamId}#${workItemId}`,
+            entryType: 'planning-work-item-link',
+            teamId,
+            workItemId,
+            projectId,
+            cycleId: `cycle-${teamIndex}-${itemIndex % 6}`,
+            milestoneId: `milestone-${teamIndex}-${projectIndex}-${itemIndex % 3}`,
+            goalIds: [],
+            createdAt: NOW.toISOString(),
+          })
+          workItems.push(createWorkItem(workItemId, 'started', {
+            teamId,
+            projectId,
+            title: `Deliver increment ${itemIndex} of ${projectId}`,
+          }))
+        }
+      }
+    }
+    const { client, writes } = createFakePlanningTable(rows)
+
+    const snapshot = await client.get('workspace-1', { workItems })
+    expect(snapshot.workItemLinks).toHaveLength(5_000)
+    expect(snapshot.capacity).toMatchObject({ level: 'normal', liveRowCount: 5_471 })
+    expect(Buffer.byteLength(JSON.stringify(snapshot), 'utf8')).toBeLessThan(4_000_000)
+    const milestone = getEntity(snapshot.entities, 'milestone-0-0-0')
+    expect(milestone.linkedWorkItemCount).toBe(17)
+
+    const relinked = await client.putWorkItemLink('workspace-1', {
+      teamId: 'team-0',
+      workItemId: 'item-0-0',
+      projectId: 'project-0-0',
+      cycleId: 'cycle-0-1',
+      goalIds: [],
+      expectedRevision: 1,
+    }, { workItems })
+    expect(relinked.planning.workItemLinks).toHaveLength(5_000)
+    expect(writes).toHaveLength(1)
+  })
+
+  test('fails closed when a live graph read exceeds the hard read bound', async () => {
+    const meta = {
+      workspaceId: 'FENCE#workspace-1',
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 1,
+      updatedAt: NOW.toISOString(),
+    }
+    const links = Array.from({ length: 25_001 }, (_, index) => ({
+      workspaceId: 'workspace-1',
+      recordKey: `LINK#team-1#item-${index}`,
+      entryType: 'planning-work-item-link',
+    }))
     const documentClient = {
       async send(command: {
         /** AWS SDK command constructor. */
@@ -3787,21 +4027,11 @@ describe('planning persistence', () => {
         /** AWS SDK command input. */
         input: Record<string, unknown>
       }) {
-        if (command.constructor.name === 'GetCommand') {
-          const key = command.input.Key
-          if (
-            typeof key === 'object' && key !== null &&
-            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
-          ) {
-            return { Item: { ...storedAtLimit[0], workspaceId: 'FENCE#workspace-1' } }
-          }
-          return {}
-        }
+        if (command.constructor.name === 'GetCommand') return { Item: meta }
         if (command.constructor.name === 'QueryCommand') {
-          return { Items: rowsForPlanningRecordPrefixQuery(command.input, storedAtLimit) }
+          return { Items: rowsForPlanningRecordPrefixQuery(command.input, links) }
         }
-        transactionCalls += 1
-        return {}
+        throw new Error('Unexpected write.')
       },
     } as unknown as DynamoDBDocumentClient
     const client = new DynamoDbPlanningClient(
@@ -3812,12 +4042,65 @@ describe('planning persistence', () => {
       () => NOW,
     )
 
-    await expect(client.create(
-      'workspace-1',
-      createEntityInput('portfolio-over-limit', 'portfolio', 1),
-      EMPTY_WORK_ITEMS,
-    )).rejects.toMatchObject({ status: 413, code: 'PlanningReadLimitExceeded' })
-    expect(transactionCalls).toBe(0)
+    await expect(client.get('workspace-1', EMPTY_WORK_ITEMS))
+      .rejects.toMatchObject({ status: 413, code: 'PlanningReadLimitExceeded' })
+  })
+
+  test('reuses a graph read at the same META revision and re-reads update targets', async () => {
+    const queriedPrefixes: string[] = []
+    let meta = {
+      workspaceId: 'FENCE#workspace-1',
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 1,
+      updatedAt: NOW.toISOString(),
+    }
+    const rows: Record<string, unknown>[] = [createStoredCycle('cycle-1')]
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'GetCommand') return { Item: meta }
+        if (command.constructor.name === 'QueryCommand') {
+          const values = command.input.ExpressionAttributeValues
+          if (
+            typeof values === 'object' && values !== null &&
+            ':recordPrefix' in values && typeof values[':recordPrefix'] === 'string'
+          ) {
+            queriedPrefixes.push(values[':recordPrefix'])
+          }
+          return { Items: rowsForPlanningRecordPrefixQuery(command.input, rows) }
+        }
+        throw new Error('Unexpected write.')
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    const first = await client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(queriedPrefixes).toHaveLength(5)
+    queriedPrefixes.length = 0
+
+    rows.push({ ...createStoredCycle('cycle-2'), title: 'Written without a META change' })
+    const cached = await client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(queriedPrefixes).toEqual(['UPDATE_TARGET#'])
+    expect(cached.entities).toEqual(first.entities)
+    queriedPrefixes.length = 0
+
+    meta = { ...meta, revision: 2, updatedAt: '2026-07-16T09:05:00.000Z' }
+    const refreshed = await client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(queriedPrefixes).toHaveLength(5)
+    expect(refreshed.revision).toBe(2)
+    expect(refreshed.entities.map((entity) => entity.id)).toEqual(['cycle-1', 'cycle-2'])
   })
 
   test('rejects a multibyte identifier that exceeds the DynamoDB record key limit', async () => {

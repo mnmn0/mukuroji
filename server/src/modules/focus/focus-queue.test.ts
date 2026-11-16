@@ -1181,6 +1181,12 @@ function createPlanningSnapshot(
       affectedProjects: [],
       affectedMilestoneIds: [],
     },
+    capacity: {
+      level: 'normal',
+      liveRowCount: entities.length + dependencies.length + links.length,
+      liveRowCapacity: 20_000,
+      warningRowCount: 16_000,
+    },
     updatedAt: '2026-08-09T09:00:00.000Z',
   }
 }

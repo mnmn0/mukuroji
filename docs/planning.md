@@ -28,7 +28,28 @@ Planning client は FENCE `META` だけを強整合 read し、row がなけれ�
 
 すべての mutation は snapshot の `expectedRevision` を必須とし、認可に使った snapshot と mutation の revision を一致させたうえで、`META` の revision CAS と対象 row を同じ DynamoDB transaction で更新します。Stale write は `409 PlanningRevisionConflict` で拒否し、階層、dependency、link の部分更新を残しません。Canonical Work Item projection は強整合 read で取得します。Workspace member の role / status 更新と Planning scope が参照する Team / Project の archive は、事前検査した `META` revision を directory mutation と同じ transaction で一つ進めます。並行する Planning create / move とは一方だけが成功し、競合側は最新 snapshot で再検査します。
 
-1 Workspace の graph projection は metadata を含め 2,000 row、1 row は安全余裕を含む 300 KB、1 transaction は 100 item / 3 MB、API snapshot は4 MBを上限とします。Versioned update、comment、reaction は graph snapshot に展開せず、target-prefix の cursor API で取得します。Graph read は META の強整合 read を前後 barrier にし、mutable graph の5 prefixだけを強整合 Queryするため、増え続ける update history / annotation rowを物理的に走査しません。Entity description は UTF-8 で 20 KB までです。Project / Initiative report は entity に埋め込まず、versioned update を正本にします。上限超過は commit 前に `413` で拒否し、response だけ失敗して revision が進む状態を作りません。
+1 row は安全余裕を含む 300 KB、1 transaction は 100 item / 3 MB、API snapshot は4 MBを上限とします。Versioned update、comment、reaction は graph snapshot に展開せず、target-prefix の cursor API で取得します。Graph read は META の強整合 read を前後 barrier にし、mutable graph の5 prefixだけを強整合 Queryするため、増え続ける update history / annotation rowを物理的に走査しません。Entity description は UTF-8 で 20 KB までです。Project / Initiative report は entity に埋め込まず、versioned update を正本にします。上限超過は commit 前に `413` で拒否し、response だけ失敗して revision が進む状態を作りません。
+
+### Live graph の容量
+
+Live graph の row 数（`ENTITY#`、`DEPENDENCY#`、`WORK_ITEM_DEPENDENCY#`、`LINK#`、`UPDATE_TARGET#` の合計。`META` は含みません）は、1 Workspace あたり 20,000 row を容量とします（Issue #369 で 2,000 row から変更）。
+
+- 容量を超えて row を **増やす** mutation だけを `413 PlanningCapacityExceeded` で拒否します。Row 数を増やさない mutation（既存 entity の編集、link や dependency の解除、move、archive）は容量を超えていても受け付けるので、運用者は常に容量内へ戻せます
+- 読み取りは容量より大きい 25,000 row / 32 MB を安全上限とし、これを超えた場合だけ `413 PlanningReadLimitExceeded` で fail-closed にします。書き込みが容量で止まるため、通常の運用で読み取りが失敗することはありません
+- Snapshot は `capacity: { level, liveRowCount, liveRowCapacity, warningRowCount }` を返します。`level` は 16,000 row 以上で `warning`、20,000 row 以上で `full` です。値は Workspace 全体の row 数で、entity ID や scope を含まないため、Planning を読めるすべての member に返します
+- Planning 画面はヘッダーに使用量（`計画データの使用量: n / 20,000 行`）を常に表示し、`warning` では注意、`full` では row を増やす変更が保存できないことを案内します
+- 100 Project・link 済み Work Item 5,000 件（約 5,500 row、閲覧可能な Work Item 5,000 件）の Workspace で snapshot は約 3.1 MB に収まることを `planning.test.ts` で確認しています。閲覧可能な Work Item が 1 万件近い場合は snapshot が 4 MB を超えるため、snapshot に載せる Work Item を link 済みと依存の端点に絞る作業を Issue #459 で行います
+
+DynamoDB client は、デコード済みの graph を META の `revision` と `updatedAt` が一致する間だけ Lambda の memory 上で再利用します（最大 8 Workspace、LRU）。`UPDATE_TARGET#` 以外の graph row は `META` の revision CAS と同じ transaction でしか書かれないため、強整合 read した `META` が一致すれば内容も一致します。`UPDATE_TARGET#` row は通知 schedule worker が `META` を進めずに due-index 属性を更新するので、cache hit 時も毎回強整合 Query で読み直し、Initiative entity との整合を再検証します。Cache した graph は deep freeze し、読み取り側が共有 state を変更できないようにしています（in-memory client も同じく freeze した state を返し、テストで変更を検出します）。
+
+#### 容量に近づいたときの運用手順
+
+1. Planning 画面のヘッダー、または `GET /api/planning` の `capacity` で使用量を確認します
+2. 使用量の大半は通常 Work Item link（Work Item ごとに 1 row）です。終了した Cycle や不要になった Milestone / Goal への link を、Project / Team manager が `DELETE /api/planning/work-item-links/:teamId/:workItemId` で解除します。Work Item 自体と Work Item の履歴は残ります
+3. 不要な entity dependency と Work Item schedule dependency を解除します
+4. 容量超過中も row を増やさない変更は保存できるため、上の操作は `full` の状態でも実行できます
+
+Archive 済み entity と終了済み Cycle の link を live graph から外して容量を消費しないようにする変更と、Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の後続の変更で行います。それまでは、critical path、roll-up、cross-Project dependency はこれまでどおり Workspace 全体の graph から計算します。
 
 ## 階層と roll-up
 
@@ -55,7 +76,7 @@ Cycle を archive できるのは、残っている link の canonical Work Item
 
 `GET /api/planning/update-feed?view=recent&limit=50` returns a live, permission-aware aggregate of the latest Project / Initiative summaries. Supported views are `recent`, `for-me`, `at-risk` (including off-track), `missing`, `stale`, and `overdue`. Health remains independent from submission state. Matches contribute to one target entry, not duplicate entries. The fourth slice below defines the current explainable relevance and attention ranking. Recent excludes targets without a report; submission views include them with unknown health.
 
-The reader uses the existing bounded Planning graph (maximum 2,000 rows / 4 MB), without loading Work Items, history, comments, or reactions. No update body, canonical row, or feed copy is written. Each request revalidates active directory hierarchy, current target permissions, and the latest summary's captured scope, reusing request-local directory and ACL reads across targets. Archived and revoked targets are excluded. Moved-scope or unprovable legacy summaries are removed while their currently authorized targets retain submission state and owner relevance with unknown health. Infrastructure errors fail the request rather than returning a partial success. Responses whitelist public summary fields and retain target identity plus immutable version for existing history/detail APIs, which continue to authorize their own reads. Duplicate `view` or `limit` query parameters are rejected as ambiguous.
+The reader uses the existing bounded Planning graph (live capacity 20,000 rows, snapshot 4 MB), without loading Work Items, history, comments, or reactions. No update body, canonical row, or feed copy is written. Each request revalidates active directory hierarchy, current target permissions, and the latest summary's captured scope, reusing request-local directory and ACL reads across targets. Archived and revoked targets are excluded. Moved-scope or unprovable legacy summaries are removed while their currently authorized targets retain submission state and owner relevance with unknown health. Infrastructure errors fail the request rather than returning a partial success. Responses whitelist public summary fields and retain target identity plus immutable version for existing history/detail APIs, which continue to authorize their own reads. Duplicate `view` or `limit` query parameters are rejected as ambiguous.
 
 `limit` accepts 1–100 (default 50); `total` counts only authorized matches and `truncated` explicitly reports omitted matches. This remains a bounded top-N API rather than cursor pagination. Personal state, saved definitions, activity signals and manual digest previews are described below. Daily/weekly Inbox delivery code remains inactive pending the rollout work below; Issue #241 stays open.
 
