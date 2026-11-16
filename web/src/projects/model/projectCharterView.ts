@@ -36,20 +36,25 @@ export type ProjectCharterDraft = {
   values: ProjectCharterFormValues
 }
 
+/** Identity of one shown charter panel, compared by reference. */
+export type ProjectCharterDraftOwner = object
+
 /** Keeps unsaved charter drafts per Team and Project while their panel is not shown. */
 export type ProjectCharterDraftStore = {
   /** Returns the draft kept for one Project. */
   read(teamId: string, projectId: string): ProjectCharterDraft | undefined
+  /** Makes a newly shown panel the only one that may change the draft of one Project. */
+  claim(teamId: string, projectId: string, owner: ProjectCharterDraftOwner): void
   /**
-   * Keeps or, with undefined, forgets the draft of one Project, only while the stored draft is
-   * still `previous`. A panel that outlived its replacement, such as one whose save completes
-   * after the Project was shown again, then cannot drop the newer panel's draft.
+   * Keeps or, with undefined, forgets the draft of one Project when `owner` is the panel that
+   * last claimed it. A panel replaced by a newer one, such as one whose save completes after the
+   * Project was shown again, then cannot change the newer panel's draft.
    */
   write(
     teamId: string,
     projectId: string,
     draft: ProjectCharterDraft | undefined,
-    previous: ProjectCharterDraft | undefined,
+    owner: ProjectCharterDraftOwner,
   ): void
 }
 
@@ -60,11 +65,15 @@ export type ProjectCharterDraftStore = {
  */
 export function createProjectCharterDraftStore(): ProjectCharterDraftStore {
   const drafts = new Map<string, ProjectCharterDraft>()
+  const owners = new Map<string, ProjectCharterDraftOwner>()
   const keyOf = (teamId: string, projectId: string) => JSON.stringify([teamId, projectId])
   return {
     read: (teamId, projectId) => drafts.get(keyOf(teamId, projectId)),
-    write: (teamId, projectId, draft, previous) => {
-      if (drafts.get(keyOf(teamId, projectId)) !== previous) return
+    claim: (teamId, projectId, owner) => {
+      owners.set(keyOf(teamId, projectId), owner)
+    },
+    write: (teamId, projectId, draft, owner) => {
+      if (owners.get(keyOf(teamId, projectId)) !== owner) return
       if (draft) drafts.set(keyOf(teamId, projectId), draft)
       else drafts.delete(keyOf(teamId, projectId))
     },

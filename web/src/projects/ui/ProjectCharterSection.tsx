@@ -1,7 +1,8 @@
 import type { MessageKey } from '../../shared/i18n/i18n'
-import { useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type {
   ProjectCharterDraft,
+  ProjectCharterDraftOwner,
   ProjectCharterDraftStore,
   ProjectCharterPersonCandidate,
 } from '../model/projectCharterView'
@@ -57,12 +58,15 @@ export function ProjectCharterSection({
   // The server decides with the effective permissions, including Enterprise roles the client
   // cannot evaluate, so its answer replaces the role-based fallback once the charter is loaded.
   const viewer = charter.state?.viewer
-  const keepDraft = useCallback((
-    draft: ProjectCharterDraft | undefined,
-    previous: ProjectCharterDraft | undefined,
-  ) => {
-    if (teamId) draftStore?.write(teamId, projectId, draft, previous)
-  }, [draftStore, projectId, teamId])
+  // Each shown section owns the drafts of the Projects it shows, so a save that completes after
+  // the Project was shown again by a newer section cannot change that section's draft.
+  const [draftOwner] = useState<ProjectCharterDraftOwner>(() => ({}))
+  useEffect(() => {
+    if (teamId) draftStore?.claim(teamId, projectId, draftOwner)
+  }, [draftOwner, draftStore, projectId, teamId])
+  const keepDraft = useCallback((draft: ProjectCharterDraft | undefined) => {
+    if (teamId) draftStore?.write(teamId, projectId, draft, draftOwner)
+  }, [draftOwner, draftStore, projectId, teamId])
 
   if (!teamId) return null
 

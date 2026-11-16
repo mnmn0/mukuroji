@@ -47,15 +47,8 @@ export type ProjectCharterPanelProps = {
   onReload: () => void
   /** Unsaved draft restored when the panel is shown again for the same Project. */
   initialDraft?: ProjectCharterDraft
-  /**
-   * Receives every draft change, with the draft it replaces, so it can outlive the panel.
-   * `previous` is the panel's own last draft, which lets the owner ignore a panel that a newer
-   * panel for the same Project has replaced.
-   */
-  onDraftChange?: (
-    draft: ProjectCharterDraft | undefined,
-    previous: ProjectCharterDraft | undefined,
-  ) => void
+  /** Receives every draft change so it can outlive the panel. */
+  onDraftChange?: (draft: ProjectCharterDraft | undefined) => void
 }
 
 const inputClassName =
@@ -117,11 +110,10 @@ export function ProjectCharterPanel({
   const changeDraft = (
     update: (current: ProjectCharterDraft | undefined) => ProjectCharterDraft | undefined,
   ) => {
-    const previous = latestDraft.current
-    const next = update(previous)
+    const next = update(latestDraft.current)
     latestDraft.current = next
     setDraft(next)
-    onDraftChange?.(next, previous)
+    onDraftChange?.(next)
   }
 
   if (!state) {

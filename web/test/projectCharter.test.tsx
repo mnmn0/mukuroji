@@ -229,8 +229,10 @@ describe('ProjectCharterPanel', () => {
 
   test('restores a draft kept for the same Team and Project only', () => {
     const store = createProjectCharterDraftStore()
+    const owner = {}
+    store.claim('core-team', 'refero', owner)
     const values = { ...createProjectCharterFormValues({ tags: [], repositoryUrls: [] }), purpose: '下書きの目的' }
-    store.write('core-team', 'refero', { revision: 2, values }, undefined)
+    store.write('core-team', 'refero', { revision: 2, values }, owner)
 
     expect(store.read('core-team', 'refero')).toEqual({ revision: 2, values })
     expect(store.read('other-team', 'refero')).toBeUndefined()
@@ -249,22 +251,42 @@ describe('ProjectCharterPanel', () => {
     )
     expect(html).toContain('下書きの目的')
 
-    store.write('core-team', 'refero', undefined, store.read('core-team', 'refero'))
+    store.write('core-team', 'refero', undefined, owner)
     expect(store.read('core-team', 'refero')).toBeUndefined()
   })
 
-  test('ignores a replaced panel that clears its draft after a newer panel changed it', () => {
+  test('ignores a replaced panel whose save completes after the Project was shown again', () => {
     const store = createProjectCharterDraftStore()
     const values = createProjectCharterFormValues({ tags: [], repositoryUrls: [] })
+    const first = {}
+    store.claim('core-team', 'refero', first)
     const submitted = { revision: 1, values: { ...values, purpose: '保存中' } }
-    store.write('core-team', 'refero', submitted, undefined)
+    store.write('core-team', 'refero', submitted, first)
+
+    // The Project is shown again and restores the same draft before the first save completes.
+    const second = {}
+    store.claim('core-team', 'refero', second)
+    store.write('core-team', 'refero', undefined, first)
+    expect(store.read('core-team', 'refero')).toBe(submitted)
+
     const newer = { revision: 1, values: { ...values, purpose: '戻って編集' } }
-    store.write('core-team', 'refero', newer, submitted)
-
-    // The first panel's save completes and drops the draft it submitted.
-    store.write('core-team', 'refero', undefined, submitted)
-
+    store.write('core-team', 'refero', newer, second)
+    store.write('core-team', 'refero', undefined, first)
     expect(store.read('core-team', 'refero')).toBe(newer)
+  })
+
+  test('lets a panel that was not replaced clear the draft its save committed', () => {
+    const store = createProjectCharterDraftStore()
+    const owner = {}
+    store.claim('core-team', 'refero', owner)
+    store.write('core-team', 'refero', {
+      revision: 1,
+      values: createProjectCharterFormValues({ tags: [], repositoryUrls: [] }),
+    }, owner)
+
+    store.write('core-team', 'refero', undefined, owner)
+
+    expect(store.read('core-team', 'refero')).toBeUndefined()
   })
 
   test('offers active Workspace members, not only Project members, as owner and sponsor', () => {
