@@ -453,6 +453,8 @@ export const workItemsMessages = {
   'workItems.relations.noCandidates': 'No Work Items are available to relate',
   'workItems.relations.add': 'Add relation',
   'workItems.relations.adding': 'Adding',
+  'workItems.relations.replaceParent': 'Replace parent',
+  'workItems.relations.replaceParentHint': 'A Work Item has one parent. Adding one replaces the current parent.',
   'workItems.relations.readOnly': 'Relations for this Work Item are read-only.',
   'workItems.relations.graphNotLoaded': 'The latest relation graph is not loaded yet. Please try again.',
   'workItems.dependencies.title': 'Schedule dependencies',

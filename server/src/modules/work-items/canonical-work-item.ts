@@ -1,5 +1,6 @@
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_RELATION_ID_LIMIT,
   WORK_ITEM_SCHEMA_VERSION,
   type CustomFieldValue,
   type WorkflowStatusCategory,
@@ -15,7 +16,6 @@ import {
   isCanonicalWorkItemSchedule,
 } from './domain/work-item-schedule'
 
-const WORK_ITEM_RELATION_ID_LIMIT = 100
 const WORK_ITEM_RELATION_ID_MAX_LENGTH = 512
 const WORK_ITEM_RELATION_TARGET_ID_MAX_LENGTH = 256
 

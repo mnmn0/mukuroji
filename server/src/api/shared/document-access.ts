@@ -15,7 +15,10 @@ import {
   evaluateEnterpriseAccess,
   type EnterpriseAuthorizationResource,
 } from '../../modules/enterprise-identity'
-import { createWorkItemRelationIds } from '../../modules/work-items/work-item-configuration'
+import {
+  createWorkItemRelationIds,
+  WORK_ITEM_PROJECTED_RELATION_TYPES,
+} from '../../modules/work-items/work-item-configuration'
 import { DocumentError, type DocumentProjectRole } from '../../modules/documents'
 import {
   ambientAutomationActionExecutorDependencies,
@@ -308,6 +311,7 @@ export async function projectWorkItemSearchDocumentBestEffort(
         workspaceId,
         issue.teamId,
         issue.id,
+        { types: WORK_ITEM_PROJECTED_RELATION_TYPES },
       )).relations,
       issue.id,
     )

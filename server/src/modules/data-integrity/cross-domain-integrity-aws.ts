@@ -963,7 +963,8 @@ async function normalizeConfigurationRow(
     if (
       recordKey !== 'RELATION_GRAPH' || scope.teamId === null ||
       row.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION ||
-      !isPositiveSafeInteger(row.revision)
+      !isPositiveSafeInteger(row.revision) ||
+      (row.edgeCount !== undefined && !isNonNegativeSafeInteger(row.edgeCount))
     ) return normalizationFailure()
     return []
   }

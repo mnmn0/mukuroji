@@ -231,7 +231,7 @@ export async function prepareConfiguredCreateWorkItem(
   }
 }
 
-/** Reads a Work Item's parent/child relations and fences their graph revision during a type change. */
+/** Reads a Work Item's own parent/child relations and fences their graph revision during a type change. */
 export async function createWorkItemTypeRelationConfigurationTransactionItems(
   directoryId: string,
   teamId: string,
@@ -241,12 +241,15 @@ export async function createWorkItemTypeRelationConfigurationTransactionItems(
   relationDependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'> =
     workItemDependencies,
 ): Promise<WorkItemConfigurationTransactionItems> {
-  const relationPage = await relationDependencies.workItemConfigurations.listRelationGraph(
+  // Reciprocal rows make the changed Work Item the source of both its parent and child links.
+  const relationPage = await relationDependencies.workItemConfigurations.listRelations(
     directoryId,
     teamId,
+    current.id,
+    { types: ['child', 'parent'] },
   )
   const typeChangedRelations = relationPage.relations.filter((relation) =>
-    (relation.sourceWorkItemId === current.id || relation.targetWorkItemId === current.id) &&
+    relation.sourceWorkItemId === current.id &&
       (relation.type === 'parent' || relation.type === 'child'),
   )
   await Promise.all(typeChangedRelations.map(async (relation) => {
