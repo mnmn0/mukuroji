@@ -489,6 +489,37 @@ describe('notification schedule handler', () => {
     })
   })
 
+  test('keys due-soon reminders by the Work Item calendar so a time zone change can emit a fresh one', async () => {
+    const run = async (timeZone: string) => {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+        ? { Items: [createWorkItem({
+            dueDate: '2026-07-14',
+            schedule: {
+              calendarPolicy: {
+                holidays: [],
+                timeZone,
+                workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+              },
+              dueDate: '2026-07-14',
+              mode: 'due-date',
+            },
+          })] }
+        : {})
+      await runNotificationSchedule(createRunOptions(recording.client))
+      return recording.commands
+        .filter(({ name }) => name === 'PutCommand')
+        .map(({ input }) => readPutItem(input))
+        .find((event) => event.eventType === 'work-item.due-soon')?.eventId
+    }
+
+    const utc = await run('UTC')
+    expect(utc).toBeDefined()
+    expect(await run('UTC')).toBe(utc)
+    // Delivery drops a stage that a calendar change moved out of its window, so the new
+    // calendar must not be deduplicated against the dropped event.
+    expect(await run('Asia/Tokyo')).not.toBe(utc)
+  })
+
   test('repeats overdue reminders once per interval with a stable key inside the interval', async () => {
     const run = async (now: string) => {
       const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'

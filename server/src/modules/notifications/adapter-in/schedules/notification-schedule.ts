@@ -170,6 +170,8 @@ type ScheduledNotificationCandidate = {
   workItemUpdatedAt?: string
   /** Project manager notified by an escalation stage; other stages notify the owner. */
   escalationMemberKey?: string
+  /** IANA time zone of the Work Item calendar the stage was evaluated in. */
+  calendarTimeZone?: string
 }
 
 /** Work Item stage evaluation before Project managers are resolved for escalation. */
@@ -961,6 +963,7 @@ export function evaluateScheduledWorkItemNotifications(
     assigneeMemberKey,
     ...(item.assignedProjectId ? { projectId: item.assignedProjectId } : {}),
     title: item.title,
+    calendarTimeZone: item.schedule.calendarPolicy.timeZone,
   }
   const candidates: ScheduledNotificationCandidate[] = []
   let escalation: ScheduledNotificationCandidate | undefined
@@ -1082,7 +1085,20 @@ function createScheduledNotificationAuditEvent(
           candidate.reason,
           candidate.projectId ?? '',
           candidate.escalationMemberKey ?? '',
+          // Delivery drops a stage that a calendar change moved out of its window, so a new
+          // calendar gets its own key and can emit the stage again once it is eligible.
+          candidate.calendarTimeZone ?? '',
         ]
+      : candidate.reason === 'due-soon'
+        ? [
+            candidate.workspaceId,
+            entityId,
+            candidate.dueDate,
+            candidate.reason,
+            candidate.assigneeMemberKey,
+            String(candidate.repetition ?? 0),
+            candidate.calendarTimeZone ?? '',
+          ]
       : candidate.reason === 'stale'
         ? [
             candidate.workspaceId,
