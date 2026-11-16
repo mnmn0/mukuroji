@@ -159,7 +159,7 @@ describe('Project charter persistence', () => {
       .resolves.toMatchObject({ charter, revision: 1, lifecycleState: 'active' })
 
     const items = readTransactItems(writes[0])
-    expect(items).toHaveLength(2)
+    expect(items).toHaveLength(3)
     expect(items[0]).toMatchObject({
       Update: {
         TableName: 'DirectoryTable',
@@ -186,6 +186,12 @@ describe('Project charter persistence', () => {
           code: 'OPS-1',
         },
         ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      },
+    })
+    expect(items[2]).toMatchObject({
+      ConditionCheck: {
+        Key: { directoryId: workspaceId, entryKey: '000010#000000#TEAM#core-team' },
+        ConditionExpression: expect.stringContaining('attribute_not_exists(#archivedAt)'),
       },
     })
   })
@@ -220,7 +226,7 @@ describe('Project charter persistence', () => {
 
     await client.updateProjectCharter(workspaceId, 'core-team', 'refero', 1, { ...charter, purpose: '更新' })
 
-    expect(readTransactItems(writes[0])).toHaveLength(1)
+    expect(readTransactItems(writes[0])).toMatchObject([{ Update: {} }, { ConditionCheck: {} }])
   })
 
   test('classifies a code claimed by another Project', async () => {
@@ -307,6 +313,31 @@ describe('Project charter persistence', () => {
       [callerCheck],
     )).rejects.toMatchObject({ code: 'ProjectCharterAuthorizationChanged', status: 409 })
     expect(readTransactItems(lifecycleWrite.writes[0])[1]).toEqual(callerCheck)
+  })
+
+  test('rejects charter and lifecycle changes under an archived Team', async () => {
+    const { documentClient, writes } = createFakeDocumentClient([
+      { ...teamRow(), archivedAt: '2026-06-01T00:00:00.000Z' },
+      projectRow(),
+    ])
+    const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+    await expect(client.updateProjectCharter(workspaceId, 'core-team', 'refero', 0, charter))
+      .rejects.toMatchObject({ code: 'TeamNotFound', status: 404 })
+    await expect(client.transitionProjectLifecycle(workspaceId, 'core-team', 'refero', 0, 'on-hold'))
+      .rejects.toMatchObject({ code: 'TeamNotFound', status: 404 })
+    expect(writes).toHaveLength(0)
+  })
+
+  test('classifies a Team archived before the lifecycle write commits', async () => {
+    const { documentClient, writes } = createFakeDocumentClient([teamRow(), projectRow()], createCancellation(1, 2))
+    const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+    await expect(client.transitionProjectLifecycle(workspaceId, 'core-team', 'refero', 0, 'on-hold'))
+      .rejects.toMatchObject({ code: 'TeamNotFound', status: 404 })
+    expect(readTransactItems(writes[0])[1]).toMatchObject({
+      ConditionCheck: { Key: { entryKey: '000010#000000#TEAM#core-team' } },
+    })
   })
 
   test('rejects charter and lifecycle changes on an archived Project', async () => {

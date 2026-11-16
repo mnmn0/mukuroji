@@ -195,6 +195,14 @@ describe('Workspace search backfill mapping', () => {
     })
     if (project?.action !== 'put') throw new Error('Expected a Project search document.')
     expect(project.document.body).toContain('OPS-1')
+    expect(project.sourceRevision).toBe(0)
+
+    const revised = mapProjectDirectoryItem({
+      ...row,
+      charter: { code: 'OPS-1', tags: [], repositoryUrls: [] },
+      charterRevision: 3,
+    })
+    expect(revised).toMatchObject({ action: 'put', sourceRevision: 3, document: { sourceRevision: 3 } })
 
     expect(() => mapProjectDirectoryItem({
       ...row,
@@ -630,6 +638,53 @@ describe('Workspace search backfill runner', () => {
     } finally {
       infoSpy.mockRestore()
     }
+  })
+
+  test('write run keeps a Project document projected from a newer charter revision', async () => {
+    const transactionInputs: TransactWriteCommandInput[] = []
+    const documentClient = {
+      async send(command: unknown) {
+        if (command instanceof ScanCommand) {
+          return {
+            Items: [
+              { id: 'fresh', revision: 0 },
+              { id: 'stale', revision: 2 },
+            ],
+            ScannedCount: 2,
+          }
+        }
+        if (command instanceof TransactWriteCommand) {
+          transactionInputs.push(command.input)
+          if (transactionInputs.length === 2) {
+            throw Object.assign(new Error('Transaction cancelled.'), {
+              name: 'TransactionCanceledException',
+              CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+            })
+          }
+          return {}
+        }
+        throw new Error('Unexpected DynamoDB command.')
+      },
+    } as unknown as DynamoDBDocumentClient
+    const mapRevisionedItem = (item: Record<string, unknown>) => {
+      const operation = mapRunnerItem(item)
+      return operation.action === 'put' ? { ...operation, sourceRevision: Number(item.revision) } : operation
+    }
+
+    const counters = await runBackfill(
+      documentClient,
+      [{ name: 'project-directory', tableName: 'SourceTable', mapItem: mapRevisionedItem }],
+      'WorkspaceSearchTable',
+      { dryRun: false, help: false },
+    )
+
+    expect(transactionInputs[0]?.TransactItems?.[0]?.Put?.ConditionExpression)
+      .toBe('attribute_not_exists(#sourceRevision)')
+    expect(transactionInputs[1]?.TransactItems?.[0]?.Put).toMatchObject({
+      ConditionExpression: 'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+      ExpressionAttributeValues: { ':sourceRevision': 2 },
+    })
+    expect(counters['project-directory']).toEqual({ scanned: 2, projected: 1, deleted: 0, skipped: 1 })
   })
 
   test('write run applies both put and delete projection operations', async () => {

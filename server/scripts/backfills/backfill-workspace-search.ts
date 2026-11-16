@@ -103,6 +103,12 @@ export type SearchProjectionOperation =
        * 保存する versioned search document です。
        */
       document: WorkspaceSearchDocument
+      /**
+       * Source revision the row was scanned at, for sources that fence their live projections.
+       * The write then never replaces a document projected from a newer revision; `0` means the
+       * row has no revision yet, so any document that carries one is newer.
+       */
+      sourceRevision?: number
     }
   | {
       /**
@@ -482,7 +488,11 @@ export async function runBackfill(
           continue
         }
 
-        await applyProjectionOperation(client, workspaceSearchTableName, operation)
+        if (!await applyProjectionOperation(client, workspaceSearchTableName, operation)) {
+          // A live projection of a newer revision won; the scanned row is already stale.
+          counters[definition.name].projected -= 1
+          counters[definition.name].skipped += 1
+        }
       }
 
       lastEvaluatedKey = response.LastEvaluatedKey
@@ -520,23 +530,37 @@ function printDryRunOperation(source: SourceName, operation: SearchProjectionOpe
   )
 }
 
+/**
+ * Writes one projection operation to the search table.
+ *
+ * @param client - DynamoDB document client.
+ * @param tableName - Workspace search table name.
+ * @param operation - Operation to apply.
+ * @returns Whether the operation was written; `false` when a newer projection was kept.
+ */
 async function applyProjectionOperation(
   client: DynamoDBDocumentClient,
   tableName: string,
   operation: SearchProjectionOperation,
 ) {
   if (operation.action === 'put') {
-    await client.send(
-      new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: tableName,
-            Item: operation.document,
-          },
-        }],
-      }),
-    )
-    return
+    try {
+      await client.send(
+        new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: tableName,
+              Item: operation.document,
+              ...createSourceRevisionCondition(operation.sourceRevision),
+            },
+          }],
+        }),
+      )
+    } catch (error) {
+      if (operation.sourceRevision !== undefined && isConditionalCheckFailure(error)) return false
+      throw error
+    }
+    return true
   }
 
   await client.send(
@@ -552,6 +576,43 @@ async function applyProjectionOperation(
       }],
     }),
   )
+  return true
+}
+
+/**
+ * Builds the write condition that keeps a document projected from a newer source revision.
+ *
+ * @param sourceRevision - Revision the source row was scanned at, if the source is fenced.
+ * @returns The condition parts of the Put, or nothing for an unfenced source.
+ */
+function createSourceRevisionCondition(sourceRevision: number | undefined) {
+  if (sourceRevision === undefined) return {}
+  if (sourceRevision === 0) {
+    return {
+      ConditionExpression: 'attribute_not_exists(#sourceRevision)',
+      ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+    }
+  }
+  return {
+    ConditionExpression: 'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+    ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+    ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+  }
+}
+
+/**
+ * Checks whether a write failed only because its condition did not hold.
+ *
+ * @param error - Write failure.
+ * @returns Whether the failure is a conditional check failure.
+ */
+function isConditionalCheckFailure(error: unknown) {
+  if (!(error instanceof Error)) return false
+  if (error.name === 'ConditionalCheckFailedException') return true
+  if (error.name !== 'TransactionCanceledException') return false
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  return Array.isArray(reasons) &&
+    reasons.some((reason: unknown) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
 }
 
 /**
@@ -644,6 +705,9 @@ function mapProjectDirectoryItemRow(
     )
   }
 
+  // Charter edits project synchronously behind the charter revision, so the backfill is fenced by
+  // the same revision and cannot replace a newer charter with the one it scanned earlier.
+  const charterRevision = readPositiveInteger(item.charterRevision)
   return {
     action: 'put',
     document: createProjectWorkspaceSearchDocument({
@@ -655,7 +719,9 @@ function mapProjectDirectoryItemRow(
       ...(item.charter === undefined ? {} : { charter: item.charter }),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
+      ...(charterRevision === undefined ? {} : { sourceRevision: charterRevision }),
     }),
+    sourceRevision: charterRevision ?? 0,
   }
 }
 

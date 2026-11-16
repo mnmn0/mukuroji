@@ -2344,7 +2344,7 @@ export class DynamoDbProjectDirectoryClient {
   /** Reads the charter and lifecycle of one Team-owned Project, including an archived one. */
   async getProjectCharter(directoryId: string, teamId: string, projectId: string) {
     try {
-      return toProjectCharterState(await this.readTeamProjectItem(directoryId, teamId, projectId))
+      return toProjectCharterState((await this.readTeamProjectItem(directoryId, teamId, projectId)).project)
     } catch (error) {
       if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
@@ -2372,8 +2372,9 @@ export class DynamoDbProjectDirectoryClient {
     let codeReservationIndex: number | undefined
     let personConditionStartIndex: number | undefined
     let authorizationConditionStartIndex: number | undefined
+    let teamConditionIndex: number | undefined
     try {
-      const project = await this.readMutableTeamProjectItem(
+      const { project, team } = await this.readMutableTeamProjectItem(
         directoryId,
         teamId,
         projectId,
@@ -2442,6 +2443,10 @@ export class DynamoDbProjectDirectoryClient {
       transactItems.push(...personConditionChecks)
       authorizationConditionStartIndex = transactItems.length
       transactItems.push(...authorizationConditionChecks)
+      teamConditionIndex = transactItems.length
+      transactItems.push({
+        ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId),
+      })
       const changedFields = listChangedProjectCharterFields(before, charter)
       transactItems.push(...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
         directoryId,
@@ -2476,6 +2481,9 @@ export class DynamoDbProjectDirectoryClient {
       if (failedAnyConditionFrom(error, authorizationConditionStartIndex, authorizationConditionChecks)) {
         throw createProjectCharterAuthorizationChangedError()
       }
+      if (teamConditionIndex !== undefined && isTransactionConditionalFailureAt(error, teamConditionIndex)) {
+        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+      }
       if (failedAnyConditionFrom(error, personConditionStartIndex, personConditionChecks)) {
         throw new ProjectDataError(
           409,
@@ -2502,10 +2510,11 @@ export class DynamoDbProjectDirectoryClient {
     authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     await this.ensureLocalAuditTable()
-    // The Project update comes first, so the caller's fences start at index 1.
+    // The Project update comes first, then the caller's fences, then the active Team check.
     const authorizationConditionStartIndex = 1
+    const teamConditionIndex = authorizationConditionStartIndex + authorizationConditionChecks.length
     try {
-      const project = await this.readMutableTeamProjectItem(
+      const { project, team } = await this.readMutableTeamProjectItem(
         directoryId,
         teamId,
         projectId,
@@ -2538,6 +2547,7 @@ export class DynamoDbProjectDirectoryClient {
             },
           },
           ...authorizationConditionChecks,
+          { ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId) },
           ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
             directoryId,
             eventType: 'project.lifecycle_changed',
@@ -2563,6 +2573,9 @@ export class DynamoDbProjectDirectoryClient {
       if (failedAnyConditionFrom(error, authorizationConditionStartIndex, authorizationConditionChecks)) {
         throw createProjectCharterAuthorizationChangedError()
       }
+      if (isTransactionConditionalFailureAt(error, teamConditionIndex)) {
+        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+      }
       if (hasTransactionConditionalFailure(error)) {
         throw createProjectCharterRevisionConflictError()
       }
@@ -2577,7 +2590,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The validated Project row.
+   * @returns The validated Project row and, when present, its owning Team row.
    */
   private async readTeamProjectItem(directoryId: string, teamId: string, projectId: string) {
     const items = await this.readValidDirectoryItems(directoryId, true)
@@ -2591,7 +2604,10 @@ export class DynamoDbProjectDirectoryClient {
         `Project "${projectId}" was not found in team "${teamId}".`,
       )
     }
-    return project
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId
+    )
+    return { project, team }
   }
 
   /**
@@ -2601,7 +2617,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
    * @param expectedRevision - Charter revision read by the caller.
-   * @returns The validated Project row.
+   * @returns The validated Project row and its active owning Team row.
    */
   private async readMutableTeamProjectItem(
     directoryId: string,
@@ -2609,15 +2625,21 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     expectedRevision: number,
   ) {
-    const project = await this.readTeamProjectItem(directoryId, teamId, projectId)
+    const { project, team } = await this.readTeamProjectItem(directoryId, teamId, projectId)
+    // Archiving a Team marks only the Team row, so its Projects stay unarchived but are no longer
+    // in the directory; like other Project writes, a charter write needs an active owning Team.
+    if (!team || !isActiveDirectoryItem(team)) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
     if (project.archivedAt !== undefined) {
       throw new ProjectDataError(409, 'ProjectArchived', 'An archived Project cannot be changed.')
     }
     if ((project.charterRevision ?? 0) !== expectedRevision) {
       throw createProjectCharterRevisionConflictError()
     }
-    return project
+    return { project, team }
   }
+
 
   /**
    * Builds the commit-time guard binding a charter write to the revision the caller read.
