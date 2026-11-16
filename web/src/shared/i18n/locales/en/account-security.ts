@@ -1,0 +1,138 @@
+/**
+ * English messages for password reset, password change, and authenticator (MFA) setup.
+ */
+export const accountSecurityMessages = {
+  'passwordReset.eyebrow': 'Account recovery',
+  'passwordReset.title': 'Reset your password',
+  'passwordReset.intro':
+    'We email a reset code to your sign-in address. Enter the code and a new password to get back in without asking an administrator.',
+  'passwordReset.requestTitle': 'Send a reset code',
+  'passwordReset.requestDescription':
+    'This page never shows whether an account exists. Only a registered address receives a code.',
+  'passwordReset.email': 'Sign-in email',
+  'passwordReset.emailPlaceholder': 'name@example.com',
+  'passwordReset.emailError': 'Enter a valid email address.',
+  'passwordReset.send': 'Send code',
+  'passwordReset.sending': 'Sending',
+  'passwordReset.sentNotice':
+    'If {email} has an account, a reset code is on its way. It can take a few minutes.',
+  'passwordReset.adminResetNotice':
+    'An administrator reset your password. Set a new one with the code sent to your email.',
+  'passwordReset.confirmTitle': 'Set a new password',
+  'passwordReset.code': 'Code',
+  'passwordReset.codePlaceholder': '6-digit code from the email',
+  'passwordReset.codeError': 'Enter the 6-digit code from the email.',
+  'passwordReset.newPassword': 'New password',
+  'passwordReset.confirmPassword': 'Confirm new password',
+  'passwordReset.passwordHint':
+    'Use at least 12 characters, including an uppercase letter, a lowercase letter, a number, and a symbol.',
+  'passwordReset.mismatch': 'The passwords do not match.',
+  'passwordReset.submit': 'Reset password',
+  'passwordReset.submitting': 'Saving',
+  'passwordReset.resend': 'Send a new code',
+  'passwordReset.changeEmail': 'Use another email',
+  'passwordReset.doneTitle': 'Your password is reset',
+  'passwordReset.doneDescription': 'Sign in with your new password.',
+  'passwordReset.goToLogin': 'Go to login',
+  'passwordReset.helpTitle': 'No email?',
+  'passwordReset.helpDescription':
+    'Check your spam folder. If the code still does not arrive, a Workspace administrator can use "Send password reset" in the member list. Never share your password or code, even with an administrator.',
+  'passwordReset.supportAction': 'View support',
+  'passwordReset.error.codeInvalid':
+    'The code is wrong or expired. Send a new code and try again.',
+  'passwordReset.error.passwordPolicy':
+    'The new password does not meet the password policy. Check the rules and try again.',
+  'passwordReset.error.rateLimited': 'Too many attempts. Wait a while and try again.',
+  'passwordReset.error.sso':
+    'This email signs in with single sign-on. Change the password with your organization\'s identity provider.',
+  'passwordReset.error.unavailable': 'The reset could not be accepted. Try again later.',
+  'mfaSetup.title': 'Register an authenticator app',
+  'mfaSetup.subtitle': 'Set up multi-factor authentication to continue',
+  'mfaSetup.intro':
+    'Use an authenticator app such as Google Authenticator, Microsoft Authenticator, or 1Password.',
+  'mfaSetup.policyNotice':
+    'This Workspace requires multi-factor authentication. Register an authenticator app to continue.',
+  'mfaSetup.start': 'Start',
+  'mfaSetup.starting': 'Preparing',
+  'mfaSetup.scanStep': '1. Scan the QR code with your authenticator app.',
+  'mfaSetup.qrAlt': 'QR code for authenticator registration',
+  'mfaSetup.manualKey': 'If you cannot scan it, enter this key by hand.',
+  'mfaSetup.copyKey': 'Copy key',
+  'mfaSetup.copied': 'Copied',
+  'mfaSetup.codeStep': '2. Enter the 6-digit code shown in the app.',
+  'mfaSetup.code': 'Code',
+  'mfaSetup.codePlaceholder': '6-digit code',
+  'mfaSetup.verify': 'Register',
+  'mfaSetup.verifying': 'Checking',
+  'mfaSetup.cancel': 'Cancel',
+  'mfaSetup.loginDone':
+    'Your authenticator app is registered. Sign in again and enter the code from the app.',
+  'mfaSetup.error.code': 'Enter the 6-digit code.',
+  'mfaSetup.error.invalid': 'The code does not match. Enter the current code from the app.',
+  'mfaSetup.error.rateLimited': 'Too many attempts. Wait a while and try again.',
+  'mfaSetup.error.alreadyEnabled': 'An authenticator app is already registered.',
+  'mfaSetup.error.expired': 'The setup expired. Sign in again and start over.',
+  'mfaSetup.error.unavailable': 'Registration could not be completed. Try again later.',
+  'accountSecurity.title': 'Sign-in and security',
+  'accountSecurity.description': 'Manage your password and multi-factor authentication.',
+  'accountSecurity.loading': 'Loading',
+  'accountSecurity.loadError': 'Sign-in settings could not be loaded.',
+  'accountSecurity.retry': 'Reload',
+  'accountSecurity.password.title': 'Password',
+  'accountSecurity.password.sso':
+    'You sign in with single sign-on, so change your password with your organization\'s identity provider.',
+  'accountSecurity.password.current': 'Current password',
+  'accountSecurity.password.new': 'New password',
+  'accountSecurity.password.confirm': 'Confirm new password',
+  'accountSecurity.password.submit': 'Change password',
+  'accountSecurity.password.submitting': 'Changing',
+  'accountSecurity.password.changed': 'Your password is changed.',
+  'accountSecurity.password.error.current': 'The current password is incorrect.',
+  'accountSecurity.password.error.unknown': 'The password could not be changed. Try again later.',
+  'accountSecurity.mfa.title': 'Multi-factor authentication (authenticator app)',
+  'accountSecurity.mfa.enabled': 'On',
+  'accountSecurity.mfa.disabled': 'Off',
+  'accountSecurity.mfa.enabledDescription': 'Sign-in asks for a code from your authenticator app.',
+  'accountSecurity.mfa.disabledDescription':
+    'Register an authenticator app to confirm sign-in with a code as well as your password.',
+  'accountSecurity.mfa.requiredByPolicy':
+    'The Workspace security policy requires it, so it cannot be turned off. If you lose your authenticator, ask an administrator to reset your MFA.',
+  'accountSecurity.mfa.sso': 'Your identity provider manages multi-factor authentication for single sign-on.',
+  'accountSecurity.mfa.register': 'Register authenticator app',
+  'accountSecurity.mfa.registered':
+    'Your authenticator app is registered. Sign-in asks for a code from now on.',
+  'accountSecurity.mfa.disable': 'Turn off',
+  'accountSecurity.mfa.disableConfirm':
+    'Turn off the authenticator app? Sign-in will no longer ask for a code.',
+  'accountSecurity.mfa.disableConfirmAction': 'Turn off',
+  'accountSecurity.mfa.disabling': 'Turning off',
+  'accountSecurity.mfa.disabledNotice': 'The authenticator app is turned off.',
+  'accountSecurity.mfa.error.disable': 'The authenticator app could not be turned off. Try again later.',
+  'memberSecurity.mfa.enrolled': 'MFA on',
+  'memberSecurity.mfa.not-enrolled': 'No MFA',
+  'memberSecurity.mfa.sso': 'SSO',
+  'memberSecurity.mfa.unknown': 'MFA unknown',
+  'memberSecurity.summary': 'Active members without MFA: {count}',
+  'memberSecurity.loadError': 'MFA status could not be loaded.',
+  'memberSecurity.action.passwordReset': 'Send password reset',
+  'memberSecurity.action.mfaReset': 'Reset MFA',
+  'memberSecurity.dialog.passwordResetTitle': 'Send a password reset?',
+  'memberSecurity.dialog.passwordResetDescription':
+    '{name}\'s current password stops working and their sessions end. A code goes to their email so they can set a new password. This is recorded in the audit log.',
+  'memberSecurity.dialog.mfaResetTitle': 'Reset MFA?',
+  'memberSecurity.dialog.mfaResetDescription':
+    'This removes {name}\'s authenticator app, for a member who lost it. If MFA is required, they register a new one at their next sign-in. This is recorded in the audit log.',
+  'memberSecurity.done.passwordReset': 'A reset code was sent to {name}.',
+  'memberSecurity.done.mfaReset': '{name}\'s MFA is reset.',
+  'memberSecurity.error.invitationPending':
+    'This member has not accepted the invitation yet. Resend the invitation instead.',
+  'memberSecurity.error.sso': 'This member signs in with single sign-on.',
+  'memberSecurity.error.unavailable':
+    'The action could not be completed. Check that the member\'s email is verified.',
+  'memberSecurity.error.notEnrolled': 'This member has no authenticator app registered.',
+  'security.sessions.mfaImpact.count':
+    '{count} active members have no MFA. After you save, they must register an authenticator app at their next sign-in.',
+  'security.sessions.mfaImpact.unknown': 'The status of {count} members could not be checked.',
+  'security.dialog.mfaRequiredTitle': 'Require MFA?',
+  'security.dialog.mfaRequiredConfirm': 'Require and save',
+} as const

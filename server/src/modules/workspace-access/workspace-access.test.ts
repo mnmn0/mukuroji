@@ -2886,3 +2886,130 @@ test('exposes WorkspaceAccessError status and code for API mapping', () => {
   const error = new WorkspaceAccessError(409, 'WorkspaceVersionConflict', 'conflict')
   expect(error).toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
 })
+
+/**
+ * Creates a client whose members are read from a fixed map and whose transactions are recorded.
+ *
+ * @param members - Members returned by member reads.
+ * @param transactions - Receives each transaction input.
+ * @param auditTableName - Audit table, or null to disable audit.
+ * @returns The configured client.
+ */
+function createCredentialActionClient(
+  members: WorkspaceMember[],
+  transactions: Array<Record<string, unknown>>,
+  auditTableName: string | null = 'AuditTable',
+) {
+  return new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        const member = members.find((candidate) =>
+          `MEMBER#${candidate.memberKey}` === key.recordKey
+        )
+        return member ? { Item: toMemberItem(member) } : {}
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactions.push(command.input)
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    auditTableName ?? undefined,
+    auditTableName ? workspaceAuditPseudonymKey : undefined,
+  )
+}
+
+test('records a member credential reset with actor and target conditions', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('sato@example.com', 'member', 'active', 3),
+  ], transactions)
+
+  const target = await client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'password-reset-requested',
+    createAuditContext('credential-reset'),
+  )
+
+  expect(target.memberKey).toBe('sato@example.com')
+  expect(transactions).toHaveLength(1)
+  const items = transactions[0].TransactItems as Array<Record<string, Record<string, unknown>>>
+  expect(items).toHaveLength(3)
+  expect(items[0].ConditionCheck?.Key).toEqual({
+    workspaceId,
+    recordKey: 'MEMBER#demo@example.com',
+  })
+  expect(items[1].ConditionCheck?.ExpressionAttributeValues).toEqual({
+    ':active': 'active',
+    ':version': 3,
+  })
+  const auditItem = items[2].Put?.Item as Record<string, unknown>
+  expect(auditItem.eventType).toBe('member.password-reset-requested')
+  expect(auditItem.entityId).toBe(createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    'sato@example.com',
+    workspaceAuditPseudonymKey,
+  ))
+  expect(JSON.stringify(auditItem)).not.toContain('sato@example.com')
+})
+
+test('lets an admin reset members but not owners, and nobody reset themselves', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('owner@example.com', 'owner'),
+  ], transactions)
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'owner@example.com',
+    'mfa-reset',
+    createAuditContext('credential-owner'),
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'demo@example.com',
+    'mfa-reset',
+    createAuditContext('credential-self'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceSelfCredentialReset' })
+  expect(transactions).toEqual([])
+})
+
+test('reports a member that changed during a credential reset as a conflict', async () => {
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return key.recordKey === 'MEMBER#demo@example.com'
+          ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+          : { Item: toMemberItem(createWorkspaceMember('sato@example.com', 'member')) }
+      }
+      throw createConditionalTransactionError(3, 1)
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+    workspaceAuditPseudonymKey,
+  )
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'mfa-reset',
+    createAuditContext('credential-conflict'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+})

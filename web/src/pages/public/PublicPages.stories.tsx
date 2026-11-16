@@ -48,20 +48,20 @@ function renderPublicPage(element: ReactElement, initialEntry: string) {
 }
 
 /**
- * 未送信であることを明示するパスワード復旧の初期画面です。
+ * 確認コードを送る前のパスワード再設定画面です。
  */
 export const ForgotPassword: Story = {
   render: () => renderPublicPage(<ForgotPasswordPage initialLocale="ja" />, '/forgot-password'),
 }
 
 /**
- * 有効なメール入力後に安全な連絡メモを表示した復旧画面です。
+ * 確認コードと新しいパスワードを入力するパスワード再設定画面です。
  */
-export const ForgotPasswordGuidance: Story = {
+export const ForgotPasswordConfirm: Story = {
   render: () => renderPublicPage(
     <ForgotPasswordPage
       initialEmail="demo@example.com"
-      initialGuidanceVisible
+      initialStep="confirm"
       initialLocale="ja"
     />,
     '/forgot-password',

@@ -122,6 +122,14 @@ export type WorkspaceMember = {
   deactivatedAt?: string
 }
 
+/**
+ * 管理者が member の sign-in 資格情報に対して行う操作です。
+ *
+ * - `password-reset-requested`: password を無効にし、再設定 code を送った
+ * - `mfa-reset`: 登録済みの authenticator app (TOTP) を解除した
+ */
+export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-reset'
+
 /** Workspace access API が返す invitation です。 */
 export type WorkspaceInvitation = {
   /** invitation の一意な ID です。 */
@@ -337,6 +345,25 @@ export interface WorkspaceAccessClient {
   ): Promise<WorkspaceAccessTransactWriteItem | undefined>
   /** 指定 member を取得します。 */
   getMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
+  /**
+   * 管理者が active member の sign-in 資格情報を操作する権限を確認し、操作を audit に記録します。
+   *
+   * Cognito を変更する前に呼び、記録できなければ操作を中止します。
+   *
+   * @param workspaceId - 対象 Workspace ID です。
+   * @param actorMemberKey - 操作する管理者の member key です。
+   * @param targetMemberKey - 対象 member の member key です。
+   * @param action - 記録する操作です。
+   * @param auditContext - Request の audit context です。
+   * @returns 確認した対象 member です。
+   */
+  recordMemberCredentialAction?(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember>
   /** 指定 member が active な場合だけ返します。 */
   getActiveMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /** 管理画面用の member / invitation snapshot を取得します。 */
@@ -1623,6 +1650,95 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
   }
 
+  /**
+   * 管理者が active member の sign-in 資格情報を操作する権限を確認し、操作を audit に記録します。
+   *
+   * Owner はすべての member を、admin は member と guest を操作できます。自分自身は対象にできません
+   * （自分の password と MFA はアカウント設定から変更します）。
+   *
+   * @param workspaceId - 対象 Workspace ID です。
+   * @param actorMemberKey - 操作する管理者の member key です。
+   * @param targetMemberKey - 対象 member の member key です。
+   * @param action - 記録する操作です。
+   * @param auditContext - Request の audit context です。
+   * @returns 確認した対象 member です。
+   */
+  async recordMemberCredentialAction(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
+    const target = await this.getMember(normalizedWorkspaceId, targetMemberKey)
+
+    if (!target || target.status !== 'active') {
+      throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
+    }
+
+    if (actor.memberKey === target.memberKey) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceSelfCredentialReset',
+        'Change your own password and MFA from your account settings.',
+      )
+    }
+
+    assertCanManageMemberCredentials(actor, target)
+
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: `member.${action}`,
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+      action,
+      occurredAt: this.clock().toISOString(),
+      metadata: { kind: 'workspace-member-credential' },
+      sequence: 0,
+    })
+
+    if (!auditPut) {
+      return target
+    }
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          this.actorCondition(normalizedWorkspaceId, actor),
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: normalizedWorkspaceId,
+                recordKey: createMemberRecordKey(target.memberKey),
+              },
+              ConditionExpression: '#status = :active AND version = :version',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':active': 'active',
+                ':version': target.version,
+              },
+            },
+          },
+          auditPut,
+        ],
+      }))
+      return target
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceVersionConflict',
+          'Workspace member changed. Reload and try again.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
   /** actor の権限を検証し、target member を version 付きで更新します。 */
   async updateMember(
     workspaceId: string,
@@ -2904,6 +3020,28 @@ function capabilitiesForRole(role: WorkspaceRole): WorkspaceAccessCapabilities {
     canManageMembers: role === 'owner' || role === 'admin',
     canManageAdmins: role === 'owner',
   }
+}
+
+/**
+ * Requires the actor to be allowed to reset the target member's sign-in credentials.
+ *
+ * @param actor - Active administrator performing the action.
+ * @param target - Active member whose credentials change.
+ */
+function assertCanManageMemberCredentials(actor: WorkspaceMember, target: WorkspaceMember) {
+  if (actor.role === 'owner') {
+    return
+  }
+
+  if (actor.role === 'admin' && (target.role === 'member' || target.role === 'guest')) {
+    return
+  }
+
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'The Workspace role cannot manage this member.',
+  )
 }
 
 function assertCanManageRole(actor: WorkspaceMember, managedRole: WorkspaceRole) {

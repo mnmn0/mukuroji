@@ -746,6 +746,24 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: workspaceAccess })
   })
 
+  await page.route('**/api/auth/account-security', async (route) => {
+    await route.fulfill({
+      json: { mfaRequiredByPolicy: false, passwordManaged: true, softwareTokenMfaEnabled: false },
+    })
+  })
+
+  await page.route('**/api/workspace/members/sign-in-security', async (route) => {
+    await route.fulfill({
+      json: {
+        members: workspaceAccess.members.map((member) => ({
+          memberKey: member.memberKey,
+          mfa: member.role === 'owner' ? 'enrolled' : 'not-enrolled',
+          passwordReset: 'available',
+        })),
+      },
+    })
+  })
+
   await page.route('**/api/projects/quick-access', async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     expect(route.request().method()).toBe('GET')
@@ -11325,7 +11343,7 @@ test.describe('authenticated task page', () => {
       expect(route.request().method()).toBe('POST')
       await route.fulfill({ json: { invitation: {} } })
     })
-    await page.route(/.*\/api\/workspace\/members\/[^/]+$/, async (route) => {
+    await page.route(/.*\/api\/workspace\/members\/(?!sign-in-security$)[^/]+$/, async (route) => {
       memberUpdateAttempts += 1
       expect(route.request().method()).toBe('PATCH')
       expect(route.request().postDataJSON()).toEqual({
@@ -11375,6 +11393,32 @@ test.describe('authenticated task page', () => {
     await reinviteDialog.getByRole('button', { name: '再招待' }).click()
     await expect(reinviteDialog).toHaveCount(0)
     expect(invitationActions).toBe(2)
+
+    await expect(page.getByTestId('workspace-member-mfa-summary')).toContainText('1 人')
+    await expect(page.getByTestId('workspace-member-mfa-sato-example-com')).toContainText('MFA未登録')
+  })
+
+  test('設定画面で管理者がメンバーにパスワード再設定を送ると監査付きで実行する', async ({ page }) => {
+    let passwordResets = 0
+
+    await page.route('**/api/workspace/members/sato%40example.com/password-reset', async (route) => {
+      passwordResets += 1
+      expect(route.request().method()).toBe('POST')
+      expect(route.request().headers()['idempotency-key']).toBeTruthy()
+      await route.fulfill({ status: 202, json: { sent: true } })
+    })
+
+    await page.goto('/settings')
+
+    const member = page.getByTestId('workspace-member-sato-example-com')
+    await member.getByRole('button', { name: 'パスワード再設定を送る' }).click()
+    const dialog = page.getByRole('dialog', { name: 'パスワード再設定を送りますか？' })
+    await expect(dialog).toContainText('監査ログに記録されます')
+    await dialog.getByRole('button', { name: 'パスワード再設定を送る' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(page.getByRole('status').filter({ hasText: '佐藤 花子 に確認コードを送りました。' })).toBeVisible()
+    expect(passwordResets).toBe(1)
+    await expect(page.getByTestId('workspace-member-demo-example-com').getByRole('button', { name: 'パスワード再設定を送る' })).toHaveCount(0)
   })
 
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {

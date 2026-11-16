@@ -1,0 +1,603 @@
+import { afterEach, expect, test } from 'bun:test'
+import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
+import { CognitoServiceError, type CognitoClient } from '../..'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
+import { InMemoryEnterpriseSessionActivityClient } from '../../../enterprise-identity/enterprise-session-activity'
+import type { MutationAuditContext } from '../../../audit/audit'
+import type {
+  WorkspaceAccessClient,
+  WorkspaceMemberCredentialAction,
+} from '../../../workspace-access/workspace-access'
+
+const {
+  app,
+  configureFakeProjectClients,
+  createFakeCognitoProfile,
+  getTestAppDependencies,
+  resetTestApp,
+  setTestAppDependencies,
+} = createApiTestHarness()
+
+afterEach(() => {
+  resetTestApp()
+})
+
+/** Workspace that the fake Cognito user `demo@example.com` belongs to. */
+const workspaceId = 'user#demo@example.com'
+
+/**
+ * Replaces Cognito methods on top of the fake configured by `configureFakeProjectClients`.
+ *
+ * @param overrides - Cognito methods the test needs.
+ */
+function overrideCognito(overrides: Partial<CognitoClient>) {
+  setTestAppDependencies({
+    cognito: {
+      ...getTestAppDependencies().authentication.cognito,
+      ...overrides,
+    },
+  })
+}
+
+/**
+ * Replaces Workspace Access methods on top of the configured fake.
+ *
+ * @param overrides - Workspace Access methods the test needs.
+ */
+function overrideWorkspaceAccess(overrides: Partial<WorkspaceAccessClient>) {
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...getTestAppDependencies().workspace.workspaceAccess,
+      ...overrides,
+    },
+  })
+}
+
+/**
+ * Installs an enterprise identity store whose security policy requires MFA or not.
+ *
+ * @param mfaRequirement - MFA requirement of the policy.
+ * @returns The installed store.
+ */
+async function installSecurityPolicy(mfaRequirement: 'optional' | 'required') {
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await identity.putSecurityPolicy({
+    workspaceId,
+    loginMode: 'password-or-sso',
+    mfaRequirement,
+    sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
+    reauthenticationIntervalMinutes: 120,
+    sensitiveActionReauthenticationMinutes: 15,
+    ipAllowlistMode: 'disabled',
+    ipAllowlist: [],
+    externalAccess: {
+      allowGuests: true,
+      allowExternalCollaborators: true,
+      requireMfa: false,
+      maximumSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+      permissionCeiling: ['workspace.read'],
+    },
+    revision: 1,
+    updatedAt: new Date().toISOString(),
+    updatedBy: 'demo@example.com',
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+  return identity
+}
+
+/**
+ * Sends a JSON request to the API.
+ *
+ * @param path - API path.
+ * @param body - JSON body.
+ * @param accessToken - Optional bearer access token.
+ * @param method - HTTP method.
+ * @returns The response.
+ */
+function sendJson(path: string, body: unknown, accessToken?: string, method = 'POST') {
+  return app.request(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+test('accepts a password reset request without revealing whether the account exists', async () => {
+  configureFakeProjectClients(true)
+  const requested: string[] = []
+  overrideCognito({
+    async requestPasswordReset(email) {
+      requested.push(email)
+      if (email === 'missing@example.com') {
+        throw new CognitoServiceError(400, 'UserNotFoundException', 'User does not exist.')
+      }
+    },
+  })
+
+  const existing = await sendJson('/api/auth/password-reset/request', { email: ' Demo@Example.com ' })
+  const missing = await sendJson('/api/auth/password-reset/request', { email: 'missing@example.com' })
+  const invalid = await sendJson('/api/auth/password-reset/request', { email: 'not-an-email' })
+
+  expect(existing.status).toBe(202)
+  expect(await existing.json()).toEqual({ accepted: true })
+  expect(missing.status).toBe(202)
+  expect(await missing.json()).toEqual({ accepted: true })
+  expect(invalid.status).toBe(400)
+  expect(requested).toEqual(['demo@example.com', 'missing@example.com'])
+})
+
+test('rate limits repeated password reset requests for one address', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({ async requestPasswordReset() {} })
+
+  const statuses: number[] = []
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    statuses.push((await sendJson('/api/auth/password-reset/request', {
+      email: 'rate-limited@example.com',
+    })).status)
+  }
+
+  expect(statuses).toEqual([202, 202, 202, 202, 202, 429])
+})
+
+test('sets a new password with the emailed code and reports a wrong code without detail', async () => {
+  configureFakeProjectClients(true)
+  const confirmations: Array<[string, string, string]> = []
+  overrideCognito({
+    async confirmPasswordReset(email, code, newPassword) {
+      confirmations.push([email, code, newPassword])
+      if (code === '000000') {
+        throw new CognitoServiceError(400, 'CodeMismatchException', 'Invalid code.')
+      }
+      if (newPassword === 'short') {
+        throw new CognitoServiceError(400, 'InvalidPasswordException', 'Too short.')
+      }
+    },
+  })
+
+  const accepted = await sendJson('/api/auth/password-reset/confirm', {
+    email: 'demo@example.com',
+    code: '123456',
+    newPassword: 'NewPassword123!',
+  })
+  const wrongCode = await sendJson('/api/auth/password-reset/confirm', {
+    email: 'demo@example.com',
+    code: '000000',
+    newPassword: 'NewPassword123!',
+  })
+  const weakPassword = await sendJson('/api/auth/password-reset/confirm', {
+    email: 'demo@example.com',
+    code: '123456',
+    newPassword: 'short',
+  })
+
+  expect(accepted.status).toBe(204)
+  expect(wrongCode.status).toBe(400)
+  expect((await wrongCode.json()).code).toBe('PasswordResetCodeInvalid')
+  expect(weakPassword.status).toBe(400)
+  expect((await weakPassword.json()).code).toBe('InvalidNewPassword')
+  expect(confirmations[0]).toEqual(['demo@example.com', '123456', 'NewPassword123!'])
+})
+
+test('tells the Web to reset the password when an administrator invalidated it', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({
+    async initiatePasswordAuth() {
+      throw new CognitoServiceError(400, 'PasswordResetRequiredException', 'Password reset required.')
+    },
+  })
+
+  const response = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+
+  expect(response.status).toBe(409)
+  expect((await response.json()).code).toBe('PasswordResetRequired')
+})
+
+test('asks a member without MFA to register an authenticator when the policy requires MFA', async () => {
+  const calls = configureFakeProjectClients(true, { passwordAuthTokens: true })
+  await installSecurityPolicy('required')
+
+  const response = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    challenge: 'MFA_SETUP',
+    email: 'demo@example.com',
+    setupAccessToken: 'test-token',
+  })
+  expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('completes the sign-in when the policy requires MFA and Cognito already verified it', async () => {
+  const calls = configureFakeProjectClients(true, { passwordAuthTokens: true })
+  await installSecurityPolicy('required')
+  const getUser = getTestAppDependencies().authentication.cognito.getUser
+  overrideCognito({
+    async getUser(accessToken) {
+      return { ...await getUser(accessToken), UserMFASettingList: ['SOFTWARE_TOKEN_MFA'] }
+    },
+  })
+
+  const response = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).accessToken).toBe('test-token')
+  expect(calls.workspaceReconciliations).toEqual(['demo@example.com'])
+})
+
+test('completes a sign-in without MFA when the policy keeps MFA optional', async () => {
+  configureFakeProjectClients(true, { passwordAuthTokens: true })
+  await installSecurityPolicy('optional')
+
+  const response = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).refreshToken).toBe('test-refresh-token')
+})
+
+test('relays Cognito MFA_SETUP and signs in after the authenticator is verified', async () => {
+  const calls = configureFakeProjectClients(true)
+  const activity = new InMemoryEnterpriseSessionActivityClient()
+  setTestAppDependencies({ enterpriseSessionActivity: activity })
+  const verifications: Array<{ target: unknown; code: string }> = []
+  overrideCognito({
+    async initiatePasswordAuth() {
+      return { ChallengeName: 'MFA_SETUP', Session: 'setup-session-1' }
+    },
+    async associateSoftwareToken(target) {
+      expect(target).toEqual({ session: 'setup-session-1' })
+      return { secretCode: 'JBSWY3DPEHPK3PXP', session: 'setup-session-2' }
+    },
+    async verifySoftwareToken(target, code) {
+      verifications.push({ target, code })
+      return { session: 'setup-session-3' }
+    },
+    async respondToMfaSetupChallenge(email, session) {
+      expect([email, session]).toEqual(['demo@example.com', 'setup-session-3'])
+      return {
+        AuthenticationResult: {
+          AccessToken: 'test-token',
+          RefreshToken: 'test-refresh-token',
+          ExpiresIn: 3_600,
+          TokenType: 'Bearer',
+        },
+      }
+    },
+  })
+
+  const login = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+  expect(await login.json()).toEqual({
+    challenge: 'MFA_SETUP',
+    email: 'demo@example.com',
+    session: 'setup-session-1',
+  })
+
+  const associated = await sendJson('/api/auth/challenge/mfa-setup/associate', {
+    email: 'demo@example.com',
+    session: 'setup-session-1',
+  })
+  expect(associated.headers.get('Cache-Control')).toBe('no-store')
+  expect(await associated.json()).toEqual({
+    secretCode: 'JBSWY3DPEHPK3PXP',
+    accountName: 'demo@example.com',
+    session: 'setup-session-2',
+  })
+
+  const verified = await sendJson('/api/auth/challenge/mfa-setup/verify', {
+    email: 'demo@example.com',
+    session: 'setup-session-2',
+    code: '123456',
+  })
+  expect(verified.status).toBe(200)
+  expect((await verified.json()).refreshToken).toBe('test-refresh-token')
+  expect(verifications).toEqual([{ target: { session: 'setup-session-2' }, code: '123456' }])
+  expect(calls.workspaceReconciliations).toEqual(['demo@example.com'])
+})
+
+test('reports the account security status of the signed-in user', async () => {
+  configureFakeProjectClients(true)
+  await installSecurityPolicy('required')
+
+  const response = await app.request('/api/auth/account-security', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    passwordManaged: true,
+    softwareTokenMfaEnabled: false,
+    mfaRequiredByPolicy: true,
+  })
+})
+
+test('registers an authenticator app with the setup access token', async () => {
+  configureFakeProjectClients(true)
+  const preferences: Array<[string, boolean]> = []
+  const verifications: Array<{ target: unknown; code: string }> = []
+  overrideCognito({
+    async associateSoftwareToken(target) {
+      expect(target).toEqual({ accessToken: 'setup-token' })
+      return { secretCode: 'JBSWY3DPEHPK3PXP' }
+    },
+    async verifySoftwareToken(target, code) {
+      verifications.push({ target, code })
+      return {}
+    },
+    async setSoftwareTokenMfaEnabled(accessToken, enabled) {
+      preferences.push([accessToken, enabled])
+    },
+  })
+
+  const associated = await sendJson('/api/auth/mfa/totp/associate', {}, 'setup-token')
+  const verified = await sendJson('/api/auth/mfa/totp/verify', { code: '654321' }, 'setup-token')
+
+  expect(associated.status).toBe(200)
+  expect(await associated.json()).toEqual({
+    secretCode: 'JBSWY3DPEHPK3PXP',
+    accountName: 'demo@example.com',
+  })
+  expect(verified.status).toBe(200)
+  expect(verifications).toEqual([{ target: { accessToken: 'setup-token' }, code: '654321' }])
+  expect(preferences).toEqual([['setup-token', true]])
+})
+
+test('does not replace an authenticator that is already registered', async () => {
+  configureFakeProjectClients(true)
+  const getUser = getTestAppDependencies().authentication.cognito.getUser
+  let associations = 0
+  overrideCognito({
+    async getUser(accessToken) {
+      return { ...await getUser(accessToken), PreferredMfaSetting: 'SOFTWARE_TOKEN_MFA' }
+    },
+    async associateSoftwareToken() {
+      associations += 1
+      return { secretCode: 'JBSWY3DPEHPK3PXP' }
+    },
+  })
+
+  const response = await sendJson('/api/auth/mfa/totp/associate', {}, 'test-token')
+
+  expect(response.status).toBe(409)
+  expect((await response.json()).code).toBe('MfaAlreadyEnabled')
+  expect(associations).toBe(0)
+})
+
+test('rejects a wrong authenticator code', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({
+    async verifySoftwareToken() {
+      throw new CognitoServiceError(400, 'CodeMismatchException', 'Invalid code.')
+    },
+    async setSoftwareTokenMfaEnabled() {
+      throw new Error('MFA must not be enabled after a wrong code.')
+    },
+  })
+
+  const response = await sendJson('/api/auth/mfa/totp/verify', { code: '111111' }, 'test-token')
+
+  expect(response.status).toBe(400)
+  expect((await response.json()).code).toBe('MfaCodeInvalid')
+})
+
+test('keeps TOTP on while the policy requires MFA and turns it off otherwise', async () => {
+  configureFakeProjectClients(true)
+  const preferences: boolean[] = []
+  overrideCognito({
+    async setSoftwareTokenMfaEnabled(_accessToken, enabled) {
+      preferences.push(enabled)
+    },
+  })
+
+  await installSecurityPolicy('required')
+  const required = await app.request('/api/auth/mfa/totp', {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  // The required policy also rejects the password-only test session itself.
+  expect([403, 409]).toContain(required.status)
+
+  await installSecurityPolicy('optional')
+  const optional = await app.request('/api/auth/mfa/totp', {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(optional.status).toBe(204)
+  expect(preferences).toEqual([false])
+})
+
+test('changes the password after checking the current one', async () => {
+  configureFakeProjectClients(true)
+  const changes: Array<[string, string, string]> = []
+  overrideCognito({
+    async changePassword(accessToken, previousPassword, proposedPassword) {
+      changes.push([accessToken, previousPassword, proposedPassword])
+      if (previousPassword !== 'Current123!') {
+        throw new CognitoServiceError(400, 'NotAuthorizedException', 'Incorrect username or password.')
+      }
+    },
+  })
+
+  const wrong = await sendJson('/api/auth/password/change', {
+    currentPassword: 'Wrong123!',
+    newPassword: 'NewPassword123!',
+  }, 'test-token')
+  const changed = await sendJson('/api/auth/password/change', {
+    currentPassword: 'Current123!',
+    newPassword: 'NewPassword123!',
+  }, 'test-token')
+
+  expect(wrong.status).toBe(400)
+  expect((await wrong.json()).code).toBe('CurrentPasswordIncorrect')
+  expect(changed.status).toBe(204)
+  expect(changes).toHaveLength(2)
+})
+
+test('lists the MFA state of active members for administrators', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({
+    async getUserProfile(userId) {
+      const profile = createFakeCognitoProfile(userId)
+      if (userId === 'sato@example.com') return { ...profile, mfaConfigured: true }
+      if (userId === 'viewer@example.com') return { ...profile, status: 'FORCE_CHANGE_PASSWORD' }
+      return { ...profile, mfaConfigured: false }
+    },
+  })
+
+  const response = await app.request('/api/workspace/members/sign-in-security', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    members: [
+      { memberKey: 'demo@example.com', mfa: 'not-enrolled', passwordReset: 'available' },
+      { memberKey: 'sato@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'suzuki@example.com', mfa: 'not-enrolled', passwordReset: 'available' },
+      { memberKey: 'viewer@example.com', mfa: 'not-enrolled', passwordReset: 'invitation-pending' },
+    ],
+  })
+})
+
+test('records the administrator password reset before Cognito resets and signs the member out', async () => {
+  configureFakeProjectClients(true)
+  const events: string[] = []
+  const recorded: Array<{
+    actor: string
+    target: string
+    action: WorkspaceMemberCredentialAction
+    auditContext?: MutationAuditContext
+  }> = []
+  overrideWorkspaceAccess({
+    async recordMemberCredentialAction(_workspaceId, actor, target, action, auditContext) {
+      events.push('audit')
+      recorded.push({ actor, target, action, auditContext })
+      return (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+    },
+  })
+  overrideCognito({
+    async adminResetUserPassword(userId) {
+      events.push(`reset:${userId}`)
+    },
+    async globallySignOutWorkspaceUser(userId) {
+      events.push(`sign-out:${userId}`)
+    },
+  })
+
+  const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
+
+  expect(response.status).toBe(202)
+  expect(events).toEqual(['audit', 'reset:sato@example.com', 'sign-out:sato@example.com'])
+  expect(recorded[0]).toMatchObject({
+    actor: 'demo@example.com',
+    target: 'sato@example.com',
+    action: 'password-reset-requested',
+  })
+  expect(recorded[0].auditContext?.workspaceId).toBe(workspaceId)
+})
+
+test('does not reset the password of a member who has not accepted the invitation', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), status: 'FORCE_CHANGE_PASSWORD' }
+    },
+    async adminResetUserPassword() {
+      throw new Error('Cognito must not be called for a pending invitation.')
+    },
+  })
+  overrideWorkspaceAccess({
+    async recordMemberCredentialAction() {
+      throw new Error('Nothing must be recorded for a pending invitation.')
+    },
+  })
+
+  const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
+
+  expect(response.status).toBe(409)
+  expect((await response.json()).code).toBe('MemberInvitationPending')
+})
+
+test('resets the authenticator of a member who lost it', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  const actions: WorkspaceMemberCredentialAction[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  overrideWorkspaceAccess({
+    async recordMemberCredentialAction(_workspaceId, _actor, target, action) {
+      actions.push(action)
+      return (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+    },
+  })
+
+  const response = await sendJson('/api/workspace/members/sato%40example.com/mfa-reset', {}, 'test-token')
+
+  expect(response.status).toBe(200)
+  expect(actions).toEqual(['mfa-reset'])
+  expect(resets).toEqual(['sato@example.com'])
+})
+
+test('denies member credential resets to non-administrators', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member' })
+  overrideCognito({
+    async adminResetUserPassword() {
+      throw new Error('Cognito must not be called without administration rights.')
+    },
+  })
+
+  const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
+
+  expect(response.status).toBe(403)
+})
+
+test('previews how many active members must register an authenticator before MFA is required', async () => {
+  configureFakeProjectClients(true)
+  await installSecurityPolicy('optional')
+  overrideCognito({
+    async getUserProfile(userId) {
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: userId === 'demo@example.com',
+      }
+    },
+  })
+
+  const response = await sendJson('/api/enterprise/security/policy/preview', {
+    expectedVersion: 1,
+    ipAllowlist: [],
+    mfaRequired: true,
+  }, 'test-token')
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).impact.mfaImpact).toEqual({
+    activeMemberCount: 4,
+    unenrolledMemberCount: 3,
+    unknownMemberCount: 0,
+  })
+})

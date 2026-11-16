@@ -21,4 +21,6 @@ export {
   type GetUserResponse,
   type InitiateAuthResponse,
   type ListCognitoUsersInput,
+  type SoftwareTokenAssociation,
+  type SoftwareTokenTarget,
 } from './adapter-out/cognito/cognito-client'

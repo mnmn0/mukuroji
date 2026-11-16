@@ -98,6 +98,7 @@ import {
   readJson,
   toAuthErrorResponse,
 } from '../shared/http'
+import { summarizeMfaEnrollment } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
 import {
   createWorkspaceMutationContext,
@@ -2659,7 +2660,12 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
     }
   })
 
-  /** IP allowlist 保存前に現在の caller が締め出されるかを preview します。 */
+  /**
+   * IP allowlist 保存前に現在の caller が締め出されるかを preview します。
+   *
+   * MFA を必須に変える場合は、authenticator app を登録していない active member の数も
+   * `mfaImpact` で返します。その member は次回ログイン時に登録を求められます。
+   */
   routeApp.post('/api/enterprise/security/policy/preview', async (c) => {
     try {
       const principal = await requireEnterpriseSecurityPrincipal(c)
@@ -2677,13 +2683,19 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
       }
       const ipAllowlist = readEnterpriseStringArray(body?.ipAllowlist, 'IP allowlist')
       validateEnterpriseIpAllowlist(ipAllowlist)
+      const turnsMfaOn = body?.mfaRequired === true && current.mfaRequirement !== 'required'
       return c.json({
-        impact: createEnterprisePolicyCallerImpact(
-          c,
-          principal.directoryId,
-          expectedVersion,
-          ipAllowlist,
-        ),
+        impact: {
+          ...createEnterprisePolicyCallerImpact(
+            c,
+            principal.directoryId,
+            expectedVersion,
+            ipAllowlist,
+          ),
+          ...(turnsMfaOn
+            ? { mfaImpact: await summarizeMfaEnrollment(principal.directoryId) }
+            : {}),
+        },
       })
     } catch (error) {
       return toEnterpriseIdentityBoundaryErrorResponse(c, error)

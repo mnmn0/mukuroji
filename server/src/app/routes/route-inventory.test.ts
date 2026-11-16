@@ -9,11 +9,23 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(457)
-  expect(new Set(inventory).size).toBe(453)
+  expect(inventory).toHaveLength(469)
+  expect(new Set(inventory).size).toBe(465)
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
+  expect(inventory).toContain('POST /api/auth/password-reset/request')
+  expect(inventory).toContain('POST /api/auth/password-reset/confirm')
+  expect(inventory).toContain('POST /api/auth/password/change')
+  expect(inventory).toContain('GET /api/auth/account-security')
+  expect(inventory).toContain('POST /api/auth/mfa/totp/associate')
+  expect(inventory).toContain('POST /api/auth/mfa/totp/verify')
+  expect(inventory).toContain('DELETE /api/auth/mfa/totp')
+  expect(inventory).toContain('POST /api/auth/challenge/mfa-setup/associate')
+  expect(inventory).toContain('POST /api/auth/challenge/mfa-setup/verify')
+  expect(inventory).toContain('GET /api/workspace/members/sign-in-security')
+  expect(inventory).toContain('POST /api/workspace/members/:memberKey/password-reset')
+  expect(inventory).toContain('POST /api/workspace/members/:memberKey/mfa-reset')
   expect(inventory).toContain('GET /api/planning/update-feed')
   expect(inventory).toContain('PUT /api/planning/update-feed/read-state')
   expect(inventory).toContain('GET /api/planning/update-feed/saved')
@@ -59,6 +71,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/developer/credential-policy')
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'd29a8dc114c4244e1027786a95cf34bc439d272449c16a0d1f98a9019a202afa',
+    'c883ee948ed567440053a21927d146b07bbd6e64260e590a5c04588c6a24dbdc',
   )
 })

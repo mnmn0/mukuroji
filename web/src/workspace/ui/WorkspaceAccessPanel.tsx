@@ -8,14 +8,16 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from 'react'
-import { useSWRConfig } from 'swr'
+import useSWR, { useSWRConfig } from 'swr'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
   createWorkspaceInvitation,
   getWorkspaceAccess,
+  getWorkspaceMembersSignInSecurity,
   reinviteWorkspaceInvitation,
+  resetWorkspaceMemberCredential,
   resendWorkspaceInvitation,
   revokeWorkspaceInvitation,
   updateWorkspaceMember,
@@ -26,6 +28,8 @@ import {
   type WorkspaceInvitation,
   type WorkspaceInvitationStatus,
   type WorkspaceMember,
+  type WorkspaceMemberCredentialAction,
+  type WorkspaceMemberSignInSecurity,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from '../api'
@@ -103,6 +107,21 @@ type WorkspaceAccessPanelProps = {
    * Workspace access の再取得 callback です。
    */
   onRetry?: () => Promise<void> | void
+  /**
+   * Each active member's MFA enrollment and password reset availability, for owners and admins.
+   */
+  signInSecurity?: WorkspaceMemberSignInSecurity[]
+  /**
+   * Whether loading the sign-in security failed.
+   */
+  signInSecurityLoadFailed?: boolean
+  /**
+   * Sends a password reset code to a member or resets the member's authenticator app.
+   */
+  onResetMemberCredential?: (
+    memberKey: string,
+    action: WorkspaceMemberCredentialAction,
+  ) => Promise<void>
 }
 
 /**
@@ -136,6 +155,20 @@ type WorkspaceAccessAction =
        * 変更後の status です。
        */
       status: WorkspaceMemberStatus
+    }
+  | {
+      /**
+       * Discriminant of a password reset or MFA reset for a member.
+       */
+      kind: 'member-credential'
+      /**
+       * Member to act on.
+       */
+      member: WorkspaceMember
+      /**
+       * Which credential to reset.
+       */
+      action: WorkspaceMemberCredentialAction
     }
   | {
       /**
@@ -222,6 +255,12 @@ type WorkspaceAccessConfirmationDialogProps = {
 
 const workspaceRoles = ['owner', 'admin', 'member', 'guest'] as const satisfies readonly WorkspaceRole[]
 
+const signInSecurityQueryConfig = {
+  dedupingInterval: 30_000,
+  revalidateOnFocus: false,
+  shouldRetryOnError: false,
+} as const
+
 /**
  * Workspace access API を SWR で取得し、mutation 後に最新状態へ再検証します。
  */
@@ -242,6 +281,18 @@ export function WorkspaceAccessPanelContainer({
     isLoading,
     key: accessKey,
   } = useWorkspaceAccess(mutationSession.accessToken)
+  const canReadSignInSecurity = access?.capabilities.canManageMembers === true
+  const {
+    data: signInSecurity,
+    error: signInSecurityError,
+    mutate: mutateSignInSecurity,
+  } = useSWR(
+    canReadSignInSecurity
+      ? ['workspace-members-sign-in-security', mutationSession.accessToken] as const
+      : null,
+    ([, token]) => getWorkspaceMembersSignInSecurity(token),
+    signInSecurityQueryConfig,
+  )
 
   const refresh = async () => {
     if (!accessKey) {
@@ -325,6 +376,23 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
+      onResetMemberCredential={async (memberKey, credentialAction) => {
+        try {
+          await mutationRequestRunner.run(
+            `workspace-member:${credentialAction}:${memberKey}`,
+            JSON.stringify({ memberKey, credentialAction }),
+            (context) => resetWorkspaceMemberCredential(
+              accessToken,
+              memberKey,
+              credentialAction,
+              context,
+            ),
+            shouldRetainWorkspaceMutationContext,
+          )
+        } finally {
+          void mutateSignInSecurity()
+        }
+      }}
       onRetry={retryLoad}
       onRevokeInvitation={async (invitationId) => {
         await mutationRequestRunner.run(
@@ -344,6 +412,8 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
+      signInSecurity={signInSecurity}
+      signInSecurityLoadFailed={Boolean(signInSecurityError)}
     />
   )
 }
@@ -363,6 +433,9 @@ export function WorkspaceAccessPanel({
   onRetry,
   onRevokeInvitation,
   onUpdateMember,
+  onResetMemberCredential,
+  signInSecurity,
+  signInSecurityLoadFailed = false,
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>('member')
@@ -370,6 +443,7 @@ export function WorkspaceAccessPanel({
   const [operationErrorMessage, setOperationErrorMessage] = useState<string | undefined>()
   const [action, setAction] = useState<WorkspaceAccessAction | undefined>()
   const [isActionBusy, setIsActionBusy] = useState(false)
+  const [noticeMessage, setNoticeMessage] = useState<string | undefined>()
   const actionReturnFocusRef = useRef<HTMLElement | null>(null)
 
   if (isLoading && !access) {
@@ -426,6 +500,7 @@ export function WorkspaceAccessPanel({
       ? document.activeElement
       : null
     setOperationErrorMessage(undefined)
+    setNoticeMessage(undefined)
     setAction(nextAction)
   }
 
@@ -448,6 +523,24 @@ export function WorkspaceAccessPanel({
 
     setIsActionBusy(true)
     setOperationErrorMessage(undefined)
+
+    if (action.kind === 'member-credential') {
+      try {
+        await onResetMemberCredential?.(action.member.memberKey, action.action)
+        setAction(undefined)
+        setNoticeMessage(
+          t(action.action === 'password-reset'
+            ? 'memberSecurity.done.passwordReset'
+            : 'memberSecurity.done.mfaReset')
+            .replace('{name}', action.member.name?.trim() || action.member.email),
+        )
+      } catch (error) {
+        setOperationErrorMessage(resolveMemberCredentialErrorMessage(error, t))
+      } finally {
+        setIsActionBusy(false)
+      }
+      return
+    }
 
     try {
       if (action.kind === 'member-role') {
@@ -559,6 +652,15 @@ export function WorkspaceAccessPanel({
           </div>
         ) : null}
 
+        {noticeMessage && !action ? (
+          <p
+            className="rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]"
+            role="status"
+          >
+            {noticeMessage}
+          </p>
+        ) : null}
+
         {canInvite ? (
           <form
             className="grid min-w-0 gap-4"
@@ -613,7 +715,10 @@ export function WorkspaceAccessPanel({
 
         <WorkspaceMemberLedger
           access={access}
+          canResetCredentials={Boolean(onResetMemberCredential)}
           locale={locale}
+          signInSecurity={signInSecurity}
+          signInSecurityLoadFailed={signInSecurityLoadFailed}
           t={t}
           onRequestAction={requestAction}
         />
@@ -683,18 +788,28 @@ function AccessLedgerMetric({
 
 function WorkspaceMemberLedger({
   access,
+  canResetCredentials,
   locale,
+  signInSecurity,
+  signInSecurityLoadFailed,
   t,
   onRequestAction,
 }: {
   access: WorkspaceAccess
+  canResetCredentials: boolean
   locale: Locale
+  signInSecurity?: WorkspaceMemberSignInSecurity[]
+  signInSecurityLoadFailed: boolean
   t: (key: MessageKey) => string
   onRequestAction: (action: WorkspaceAccessAction) => void
 }) {
   const activeOwners = access.members.filter(
     (member) => member.role === 'owner' && member.status === 'active',
   )
+  const signInSecurityByMember = new Map(
+    (signInSecurity ?? []).map((entry) => [entry.memberKey, entry]),
+  )
+  const unenrolledMemberCount = signInSecurity?.filter((entry) => entry.mfa === 'not-enrolled').length
 
   return (
     <section className="min-w-0 border-t border-[var(--workbench-border)] bg-surface">
@@ -702,6 +817,18 @@ function WorkspaceMemberLedger({
         description={t('workspace.access.members.description')}
         title={t('workspace.access.members.title')}
       />
+      {signInSecurityLoadFailed ? (
+        <p className="border-t border-[var(--workbench-border)] px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+          {t('memberSecurity.loadError')}
+        </p>
+      ) : unenrolledMemberCount !== undefined ? (
+        <p
+          className="border-t border-[var(--workbench-border)] px-4 py-3 text-sm font-semibold text-[var(--workbench-muted)]"
+          data-testid="workspace-member-mfa-summary"
+        >
+          {t('memberSecurity.summary').replace('{count}', String(unenrolledMemberCount))}
+        </p>
+      ) : null}
       <div className="relative overflow-x-auto">
         <table className="w-full border-collapse text-left min-[761px]:min-w-[860px]" data-testid="workspace-member-ledger">
           <thead className="max-[760px]:sr-only">
@@ -729,6 +856,13 @@ function WorkspaceMemberLedger({
               const cannotChangeStatus = !canManage ||
                 (isCurrentMember && nextStatus === 'deactivated') ||
                 (isLastActiveOwner && nextStatus === 'deactivated')
+              const memberSignInSecurity = member.status === 'active'
+                ? signInSecurityByMember.get(member.memberKey)
+                : undefined
+              const canResetMemberCredentials = canResetCredentials && canManage && !isCurrentMember
+              const canSendPasswordReset = canResetMemberCredentials &&
+                memberSignInSecurity?.passwordReset === 'available'
+              const canResetMfa = canResetMemberCredentials && memberSignInSecurity?.mfa === 'enrolled'
 
               return (
                 <tr
@@ -745,6 +879,17 @@ function WorkspaceMemberLedger({
                         ) : null}
                       </div>
                       <p className="mt-1 break-all text-sm text-[var(--workbench-muted)]">{member.email}</p>
+                      {memberSignInSecurity ? (
+                        <span
+                          className="mt-1.5 inline-flex"
+                          data-testid={`workspace-member-mfa-${createAccessTestId(member.memberKey)}`}
+                        >
+                          <AccessStatusBadge
+                            label={t(`memberSecurity.mfa.${memberSignInSecurity.mfa}`)}
+                            tone={getMemberMfaTone(memberSignInSecurity.mfa)}
+                          />
+                        </span>
+                      ) : null}
                       <p className="mt-1 text-xs font-medium text-[var(--workbench-muted-soft)]">
                         {t('workspace.access.updatedAt').replace('{date}', formatAccessDate(member.updatedAt, locale))}
                       </p>
@@ -786,23 +931,45 @@ function WorkspaceMemberLedger({
                     </label>
                   </td>
                   <td className="px-4 py-4 text-right max-[760px]:col-span-2 max-[760px]:py-2">
-                    <button
-                      className={member.status === 'active'
-                        ? 'min-h-10 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-fg-slate-400'
-                        : 'workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-60'}
-                      disabled={cannotChangeStatus}
-                      title={isCurrentMember && nextStatus === 'deactivated'
-                        ? t('workspace.access.members.selfDeactivateBlocked')
-                        : isLastActiveOwner && nextStatus === 'deactivated'
-                          ? t('workspace.access.members.lastOwnerBlocked')
-                          : undefined}
-                      type="button"
-                      onClick={() => onRequestAction({ kind: 'member-status', member, status: nextStatus })}
-                    >
-                      {nextStatus === 'active'
-                        ? t('workspace.access.action.reactivate')
-                        : t('workspace.access.action.deactivate')}
-                    </button>
+                    <div className="flex flex-wrap justify-end gap-2 max-[760px]:justify-start">
+                      {canSendPasswordReset ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-password-reset-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onRequestAction({ kind: 'member-credential', member, action: 'password-reset' })}
+                        >
+                          {t('memberSecurity.action.passwordReset')}
+                        </button>
+                      ) : null}
+                      {canResetMfa ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-mfa-reset-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onRequestAction({ kind: 'member-credential', member, action: 'mfa-reset' })}
+                        >
+                          {t('memberSecurity.action.mfaReset')}
+                        </button>
+                      ) : null}
+                      <button
+                        className={member.status === 'active'
+                          ? 'min-h-10 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-fg-slate-400'
+                          : 'workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-60'}
+                        disabled={cannotChangeStatus}
+                        title={isCurrentMember && nextStatus === 'deactivated'
+                          ? t('workspace.access.members.selfDeactivateBlocked')
+                          : isLastActiveOwner && nextStatus === 'deactivated'
+                            ? t('workspace.access.members.lastOwnerBlocked')
+                            : undefined}
+                        type="button"
+                        onClick={() => onRequestAction({ kind: 'member-status', member, status: nextStatus })}
+                      >
+                        {nextStatus === 'active'
+                          ? t('workspace.access.action.reactivate')
+                          : t('workspace.access.action.deactivate')}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               )
@@ -1121,6 +1288,24 @@ function createWorkspaceAccessActionCopy(
     }
   }
 
+  if (action.kind === 'member-credential') {
+    const isPasswordReset = action.action === 'password-reset'
+
+    return {
+      confirmLabel: t(isPasswordReset
+        ? 'memberSecurity.action.passwordReset'
+        : 'memberSecurity.action.mfaReset'),
+      description: t(isPasswordReset
+        ? 'memberSecurity.dialog.passwordResetDescription'
+        : 'memberSecurity.dialog.mfaResetDescription')
+        .replace('{name}', action.member.name?.trim() || action.member.email),
+      destructive: true,
+      title: t(isPasswordReset
+        ? 'memberSecurity.dialog.passwordResetTitle'
+        : 'memberSecurity.dialog.mfaResetTitle'),
+    }
+  }
+
   if (action.kind === 'member-status') {
     const isDeactivation = action.status === 'deactivated'
 
@@ -1212,6 +1397,59 @@ function resolveWorkspaceAccessErrorMessage(
   }
 
   return t('workspace.access.error.operation')
+}
+
+/**
+ * Picks the badge tone for a member's MFA enrollment.
+ *
+ * @param status - MFA enrollment.
+ * @returns The badge tone.
+ */
+function getMemberMfaTone(status: WorkspaceMemberSignInSecurity['mfa']) {
+  if (status === 'enrolled') {
+    return 'success' as const
+  }
+
+  if (status === 'not-enrolled') {
+    return 'warning' as const
+  }
+
+  return 'neutral' as const
+}
+
+/**
+ * Maps a failed password reset or MFA reset to a message.
+ *
+ * @param error - Error from the API.
+ * @param t - Translator.
+ * @returns The message.
+ */
+function resolveMemberCredentialErrorMessage(
+  error: unknown,
+  t: (key: MessageKey) => string,
+) {
+  if (error instanceof WorkspaceAccessApiError) {
+    if (error.code === 'MemberInvitationPending') {
+      return t('memberSecurity.error.invitationPending')
+    }
+
+    if (error.code === 'MemberSignInManagedBySso') {
+      return t('memberSecurity.error.sso')
+    }
+
+    if (error.code === 'MemberMfaNotEnrolled') {
+      return t('memberSecurity.error.notEnrolled')
+    }
+
+    if (
+      error.code === 'MemberPasswordResetUnavailable' ||
+      error.code === 'MemberSignInUnavailable'
+    ) {
+      return t('memberSecurity.error.unavailable')
+    }
+  }
+
+  return resolveWorkspaceAccessErrorMessage(error, t)
 }
 
 function trapWorkspaceAccessDialogFocus(event: KeyboardEvent | globalThis.KeyboardEvent, dialog: HTMLElement) {

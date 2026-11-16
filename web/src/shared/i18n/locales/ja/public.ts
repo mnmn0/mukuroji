@@ -13,38 +13,6 @@ export const publicMessages = {
   'public.backToLogin': 'ログインへ戻る',
   'public.copy.copied': 'コピーしました',
   'public.copy.error': '自動コピーできませんでした。表示された内容を選択してコピーしてください。',
-  'public.forgot.eyebrow': 'アカウント復旧',
-  'public.forgot.title': '安全な復旧経路を確認する',
-  'public.forgot.intro':
-    '現在、mukuroji からパスワード再設定メールを送る機能は接続されていません。アカウントの有無を画面に漏らさず、所属組織の管理者または正式なサポート窓口へ渡す情報を準備します。',
-  'public.forgot.step.admin.title': '正式な連絡先を確認',
-  'public.forgot.step.admin.description':
-    '社内ポータル、導入案内、契約書に記載されたワークスペース管理者またはサポート窓口を使います。',
-  'public.forgot.step.context.title': '特定に必要な情報だけを共有',
-  'public.forgot.step.context.description':
-    'ログイン用メールアドレス、ワークスペース名、最後に正常利用できた時刻を伝えると確認が早くなります。',
-  'public.forgot.step.safe.title': '秘密情報は送らない',
-  'public.forgot.step.safe.description':
-    'パスワード、認証コード、アクセストークン、画面全体のスクリーンショットは共有しないでください。',
-  'public.forgot.localOnly': 'ブラウザ内だけで処理',
-  'public.forgot.form.title': '復旧依頼の準備',
-  'public.forgot.form.description':
-    '入力内容はサーバーへ送信せず、管理者へ渡すメモの作成にだけ使います。',
-  'public.forgot.email': 'ログイン用メールアドレス',
-  'public.forgot.emailPlaceholder': 'name@example.com',
-  'public.forgot.emailHelp': 'この画面ではアカウントの登録有無を確認しません。',
-  'public.forgot.emailError': '有効なメールアドレスを入力してください。',
-  'public.forgot.reviewAction': '復旧手順を確認',
-  'public.forgot.noSend.title': '再設定メールは送信されません',
-  'public.forgot.noSend.description':
-    '送信が完了したように見せることはありません。次の案内から正式な連絡経路へ進んでください。',
-  'public.forgot.guidance.title': '管理者へ渡す連絡メモ',
-  'public.forgot.guidance.description':
-    '下の内容をコピーし、所属組織が指定した連絡先へ送ってください。',
-  'public.forgot.requestTemplate':
-    'mukuroji のアカウント復旧を依頼します。\nログイン用メールアドレス: {email}\nワークスペース名: \n最後に利用できた日時: \n表示されたメッセージ: \n\n※パスワード、認証コード、アクセストークンは記載していません。',
-  'public.forgot.copyAction': '連絡メモをコピー',
-  'public.forgot.supportAction': 'サポート案内を見る',
   'public.legal.updatedLabel': 'ドラフト更新日',
   'public.legal.draftTitle': '法務・セキュリティ確認前のドラフトです',
   'public.legal.draftDescription':

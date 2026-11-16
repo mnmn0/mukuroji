@@ -688,6 +688,7 @@ function createWorkspaceAccessFake(
     prepareReinvite: unsupported,
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
+    recordMemberCredentialAction: unsupported,
     reconcileDirectoryMember: unsupported,
     deprovisionDirectoryMember: unsupported,
     ...overrides,

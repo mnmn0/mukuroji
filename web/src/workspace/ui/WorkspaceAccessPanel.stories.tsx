@@ -251,3 +251,24 @@ export const English: Story = {
     locale: 'en',
   },
 }
+
+/**
+ * An owner sees each active member's MFA enrollment and can send a password reset or reset MFA.
+ */
+export const SignInSecurity: Story = {
+  args: {
+    onResetMemberCredential: async () => undefined,
+    signInSecurity: [
+      { memberKey: 'owner@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'admin@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'member@example.com', mfa: 'not-enrolled', passwordReset: 'available' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('workspace-member-mfa-summary')).toHaveTextContent('1 人')
+    await expect(canvas.getByTestId('workspace-member-mfa-reset-admin-example-com')).toBeVisible()
+    await expect(canvas.queryByTestId('workspace-member-mfa-reset-member-example-com')).toBeNull()
+    await expect(canvas.queryByTestId('workspace-member-password-reset-owner-example-com')).toBeNull()
+  },
+}
