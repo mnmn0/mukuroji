@@ -110,6 +110,7 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
       return {
         Username: 'valid@example.com',
         UserAttributes: [{ Name: 'email', Value: 'valid@example.com' }],
+        UserMFASettingList: ['SMS_MFA'],
       }
     },
   } as unknown as CognitoIdentityProviderClient
@@ -137,13 +138,17 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         name: undefined,
         enabled: undefined,
         mfaConfigured: false,
+        softwareTokenMfaConfigured: false,
         status: undefined,
       },
     ],
     nextToken: undefined,
   })
+  // SMS MFA counts as MFA, but not as an authenticator app.
   await expect(client.getUserProfile('valid@example.com')).resolves.toMatchObject({
     id: 'valid@example.com',
+    mfaConfigured: true,
+    softwareTokenMfaConfigured: false,
   })
   await expect(client.describeEnterpriseIdentityProvider('EnterpriseOidc'))
     .resolves.toEqual({

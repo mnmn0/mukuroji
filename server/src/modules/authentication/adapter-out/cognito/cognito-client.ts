@@ -311,6 +311,8 @@ export type CognitoUserProfile = {
    * Cognito で MFA enrollment が一つ以上確認できたかどうかです。
    */
   mfaConfigured?: boolean
+  /** Whether an authenticator app (TOTP) is registered. SMS or email MFA does not count. */
+  softwareTokenMfaConfigured?: boolean
   /**
    * Workspace membership の利用状態です。assignment candidate response で付与します。
    */
@@ -2795,6 +2797,8 @@ function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | un
       value.PreferredMfaSetting?.trim() ||
       value.UserMFASettingList?.some((setting) => Boolean(setting.trim())),
     ),
+    softwareTokenMfaConfigured: value.PreferredMfaSetting === 'SOFTWARE_TOKEN_MFA' ||
+      value.UserMFASettingList?.includes('SOFTWARE_TOKEN_MFA') === true,
   }
 }
 

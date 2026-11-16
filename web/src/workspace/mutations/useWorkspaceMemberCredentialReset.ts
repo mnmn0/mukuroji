@@ -18,14 +18,17 @@ export type UseWorkspaceMemberCredentialResetOptions = {
 
 /**
  * Keeps the idempotency context of a reset whose outcome is unknown, or that another attempt
- * is still running, so that a retry reuses its key. Any other API error is a definite answer
- * and is not retried with the same key.
+ * is still running, so that a retry reuses its key and resumes the recorded reset instead of
+ * starting a new one. A transport failure or a server error (5xx) may come after the server
+ * recorded or applied the reset, so its outcome is unknown. Any other API error is a definite
+ * answer and is not retried with the same key.
  *
  * @param error - Error of the failed request.
  * @returns Whether to keep the context for a retry.
  */
-function shouldRetainCredentialResetContext(error: unknown) {
+export function shouldRetainCredentialResetContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError) ||
+    error.status >= 500 ||
     error.code === 'WorkspaceCredentialActionInProgress'
 }
 

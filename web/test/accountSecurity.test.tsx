@@ -25,7 +25,9 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 import {
   getWorkspaceMembersSignInSecurity,
   resetWorkspaceMemberCredential,
+  WorkspaceAccessApiError,
 } from '../src/workspace/api'
+import { shouldRetainCredentialResetContext } from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
 
 const originalFetch = globalThis.fetch
 const mutationContext = { idempotencyKey: 'credential-1', correlationId: 'correlation-1' }
@@ -155,6 +157,23 @@ describe('member sign-in security API', () => {
     expect(requests[0]?.url).toEndWith('/workspace/members/a%40example.com/mfa-reset')
     expect(requests[0]?.init.method).toBe('POST')
     expect(new Headers(requests[0]?.init.headers).get('Idempotency-Key')).toBe('credential-1')
+  })
+})
+
+describe('member credential reset retry', () => {
+  test('reuses the idempotency key only while the outcome is unknown or still running', () => {
+    expect(shouldRetainCredentialResetContext(new TypeError('Failed to fetch'))).toBe(true)
+    expect(shouldRetainCredentialResetContext(new WorkspaceAccessApiError(502, 'Bad gateway'))).toBe(true)
+    expect(shouldRetainCredentialResetContext(new WorkspaceAccessApiError(500, 'Failed'))).toBe(true)
+    expect(shouldRetainCredentialResetContext(
+      new WorkspaceAccessApiError(409, 'Running', 'WorkspaceCredentialActionInProgress'),
+    )).toBe(true)
+    expect(shouldRetainCredentialResetContext(
+      new WorkspaceAccessApiError(409, 'Not enrolled', 'MemberMfaNotEnrolled'),
+    )).toBe(false)
+    expect(shouldRetainCredentialResetContext(
+      new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
+    )).toBe(false)
   })
 })
 

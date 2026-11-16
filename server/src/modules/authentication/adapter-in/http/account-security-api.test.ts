@@ -600,9 +600,11 @@ test('lists the MFA state of active members for administrators', async () => {
   overrideCognito({
     async getUserProfile(userId) {
       const profile = createFakeCognitoProfile(userId)
-      if (userId === 'sato@example.com') return { ...profile, mfaConfigured: true }
+      if (userId === 'sato@example.com') return { ...profile, mfaConfigured: true, softwareTokenMfaConfigured: true }
+      // SMS or email MFA from an existing user pool is not an authenticator app.
+      if (userId === 'suzuki@example.com') return { ...profile, mfaConfigured: true, softwareTokenMfaConfigured: false }
       if (userId === 'viewer@example.com') return { ...profile, status: 'FORCE_CHANGE_PASSWORD' }
-      return { ...profile, mfaConfigured: false }
+      return { ...profile, mfaConfigured: false, softwareTokenMfaConfigured: false }
     },
   })
 
@@ -687,7 +689,7 @@ test('resets the authenticator of a member who lost it', async () => {
   const actions: WorkspaceMemberCredentialAction[] = []
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true }
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
@@ -756,7 +758,11 @@ test('resumes an interrupted authenticator reset when the same request is retrie
   const resets: string[] = []
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: mfaEnrolled }
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: mfaEnrolled,
+        softwareTokenMfaConfigured: mfaEnrolled,
+      }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
@@ -782,7 +788,7 @@ test('does not remove an authenticator registered after a completed reset when t
   const resets: string[] = []
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true }
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
@@ -796,6 +802,26 @@ test('does not remove an authenticator registered after a completed reset when t
 
   expect(replay.status).toBe(200)
   expect(resets).toEqual(['sato@example.com'])
+})
+
+test('does not report SMS-only MFA as an authenticator that an administrator can reset', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: false }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  trackCredentialActionProgress()
+
+  const response = await sendMfaResetWithKey()
+
+  expect(response.status).toBe(409)
+  expect((await response.json()).code).toBe('MemberMfaNotEnrolled')
+  expect(resets).toEqual([])
 })
 
 test('denies member credential resets to non-administrators', async () => {
@@ -819,6 +845,7 @@ test('previews how many active members must register an authenticator before MFA
       return {
         ...createFakeCognitoProfile(userId),
         mfaConfigured: userId === 'demo@example.com',
+        softwareTokenMfaConfigured: userId === 'demo@example.com',
       }
     },
   })

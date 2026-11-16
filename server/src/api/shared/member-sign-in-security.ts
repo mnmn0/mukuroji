@@ -41,7 +41,9 @@ async function inspectMemberSignInSecurity(
   }
   try {
     const profile = await authenticationDependencies.cognito.getUserProfile(member.memberKey)
-    const mfa: WorkspaceMemberMfaStatus = profile.mfaConfigured === true ? 'enrolled' : 'not-enrolled'
+    const mfa: WorkspaceMemberMfaStatus = profile.softwareTokenMfaConfigured === true
+      ? 'enrolled'
+      : 'not-enrolled'
     const passwordReset: WorkspaceMemberPasswordResetAvailability =
       profile.status === 'FORCE_CHANGE_PASSWORD'
         ? 'invitation-pending'

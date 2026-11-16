@@ -56,7 +56,8 @@ export function createMemberCredentialResetPorts(
       const profile = await cognito.getUserProfile(memberKey)
       return {
         invitationPending: profile.status === 'FORCE_CHANGE_PASSWORD',
-        mfaEnrolled: profile.mfaConfigured === true,
+        // The reset turns off the authenticator app only, so SMS or email MFA does not count.
+        mfaEnrolled: profile.softwareTokenMfaConfigured === true,
       }
     },
     async readActionProgress(...args) {
