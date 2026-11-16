@@ -116,6 +116,7 @@ import {
   createApiMutationContext,
   getEffectiveProjectScopeAccessList,
   type ProjectPrincipal,
+  requireAssignedProjectPermission,
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
@@ -348,16 +349,17 @@ function isPlanningScopeDenial(error: unknown) {
 }
 
 /**
- * Checks whether the archive list may show one archived entity to the caller.
+ * Checks whether the caller may manage Planning at one entity's scope.
  *
- * The list route is authorized at the Workspace resource, so an Enterprise caller is evaluated
- * again at the entity's own Team / Project resource, the one its restore request resolves.
+ * The route was authorized at one resource (the Workspace for the archive list, the restored
+ * entity for a restore), so an Enterprise caller is evaluated again at this entity's own
+ * Team / Project resource.
  *
  * @param principal - Authenticated Workspace principal.
- * @param entity - Archived entity summary.
- * @returns Whether the caller holds the restore permission at the entity's scope.
+ * @param entity - Entity whose scope is checked.
+ * @returns Whether the caller holds `planning.manage` at the entity's scope.
  */
-async function canRestoreArchivedPlanningEntity(
+async function canManagePlanningEntityScope(
   principal: WorkspacePrincipal,
   entity: Pick<PlanningEntity, 'teamId' | 'projectId'>,
 ) {
@@ -3867,9 +3869,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         workItemState,
         {
           // Restoring an edge needs the same permission on both endpoints as creating one.
-          canRestoreDependencyTo: async (counterpart) => {
+          canRestoreDependencyTo: (counterpart) => canManagePlanningEntityScope(principal, counterpart),
+          // Restoring a link writes the Work Item's link row, like PUT work-item-links.
+          canRestoreLinkTo: async (workItem) => {
             try {
-              await requirePlanningScopePermission(principal, counterpart, 'manager')
+              const context = await requireTeamPermission(principal, workItem.teamId, 'member')
+              requireAssignedProjectPermission(principal, context, workItem.projectId, 'member')
               return true
             } catch (error) {
               if (!isPlanningScopeDenial(error)) throw error
@@ -3908,7 +3913,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       })
       const entities = []
       for (const entity of page.entities) {
-        if (await canRestoreArchivedPlanningEntity(principal, entity)) entities.push(entity)
+        if (await canManagePlanningEntityScope(principal, entity)) entities.push(entity)
       }
       return c.json({
         entities,

@@ -719,6 +719,8 @@ export type PlanningRestoreOptions = {
   canRestoreDependencyTo?: (
     counterpart: Pick<PlanningEntity, 'id' | 'teamId' | 'projectId'>,
   ) => Promise<boolean>
+  /** Whether the caller may write links of Work Items in this scope; denied links stay archived. */
+  canRestoreLinkTo?: (workItem: { teamId: string; projectId?: string }) => Promise<boolean>
 }
 
 type PlanningArchiveStep = {
@@ -1025,7 +1027,7 @@ abstract class BasePlanningClient implements PlanningClient {
         const committed = await this.commitArchiveStep(
           normalizedWorkspaceId,
           (state) => planArchiveCompactionStep(normalizedWorkspaceId, state),
-          false,
+          undefined,
         )
         if (!committed) break
         compacted = true
@@ -1098,15 +1100,33 @@ abstract class BasePlanningClient implements PlanningClient {
     // Only grows: an archived counterpart leaves the archive solely by becoming live again.
     const archivedCounterpartIds = new Set<string>()
     const workItems = createWorkItemMap(workItemState)
-    // A link whose Work Item the caller cannot see (or that no longer exists) stays archived, so a
-    // restore by a caller with narrower Work Item access never discards it.
-    const hidden = new Set(bundle.references.filter((reference) =>
-      reference.kind === 'link' &&
-      !workItems.has(createWorkItemKey(reference.link.teamId, reference.link.workItemId))
-    ))
+    // A link whose Work Item the caller cannot see or write (or that no longer exists) stays
+    // archived, so a restore by a caller with narrower Work Item access never discards it.
+    const hidden = new Set<PlanningArchivedDependency | PlanningArchivedLinkReference>()
+    const linkDecisions = new Map<string, boolean>()
+    for (const reference of bundle.references) {
+      if (reference.kind !== 'link') continue
+      const summary = workItems.get(createWorkItemKey(reference.link.teamId, reference.link.workItemId))
+      if (!summary) {
+        hidden.add(reference)
+        continue
+      }
+      if (!options.canRestoreLinkTo) continue
+      const scope = {
+        teamId: reference.link.teamId,
+        ...(summary.projectId === undefined ? {} : { projectId: summary.projectId }),
+      }
+      const scopeKey = JSON.stringify([scope.teamId, scope.projectId ?? null])
+      let allowed = linkDecisions.get(scopeKey)
+      if (allowed === undefined) {
+        allowed = await options.canRestoreLinkTo(scope)
+        linkDecisions.set(scopeKey, allowed)
+      }
+      if (!allowed) hidden.add(reference)
+    }
     let pending = bundle.references.filter((reference) => !hidden.has(reference))
-    const checkedCounterpartIds = new Set<string>()
-    const deniedCounterpartIds = new Set<string>()
+    // Keyed by scope, not ID: a counterpart moved to another scope is authorized again.
+    const counterpartDecisions = new Map<string, boolean>()
     try {
       for (
         let step = 0;
@@ -1129,17 +1149,21 @@ abstract class BasePlanningClient implements PlanningClient {
             pending,
             archivedCounterpartIds,
           )
+          const deniedCounterpartIds = new Set<string>()
           if (options.canRestoreDependencyTo) {
             for (const reference of pending) {
               if (reference.kind !== 'dependency') continue
               const counterpart = findEntity(state, reference.dependency.predecessorId === entityId
                 ? reference.dependency.successorId
                 : reference.dependency.predecessorId)
-              if (!counterpart || checkedCounterpartIds.has(counterpart.id)) continue
-              checkedCounterpartIds.add(counterpart.id)
-              if (!await options.canRestoreDependencyTo(counterpart)) {
-                deniedCounterpartIds.add(counterpart.id)
+              if (!counterpart) continue
+              const scopeKey = JSON.stringify([counterpart.teamId ?? null, counterpart.projectId ?? null])
+              let allowed = counterpartDecisions.get(scopeKey)
+              if (allowed === undefined) {
+                allowed = await options.canRestoreDependencyTo(counterpart)
+                counterpartDecisions.set(scopeKey, allowed)
               }
+              if (!allowed) deniedCounterpartIds.add(counterpart.id)
             }
           }
           planned = planArchiveRestoreStep(workspaceId, state, entityId, pending, {
@@ -1150,7 +1174,7 @@ abstract class BasePlanningClient implements PlanningClient {
           })
           // Only skipped references: nothing to commit, and no empty revision.
           return planned.step.archiveChanges.length === 0 ? undefined : planned.step
-        }, true)
+        }, workItemState)
         if (!planned) break
         summary.restoredLinkCount += planned.counts.restoredLinkCount
         summary.droppedLinkCount += planned.counts.droppedLinkCount
@@ -1259,7 +1283,8 @@ abstract class BasePlanningClient implements PlanningClient {
    *
    * @param workspaceId - Normalized Workspace identifier.
    * @param plan - Pure planner; returns `undefined` when nothing is left to do.
-   * @param checkCapacity - Whether the step may grow the live graph and must respect its capacity.
+   * @param growth - Work Items of a step that may grow the live graph; the step must then fit the
+   * live capacity and the snapshot response limit. Omitted for steps that only shrink the graph.
    * @returns Whether a revision was committed.
    */
   private async commitArchiveStep(
@@ -1268,7 +1293,7 @@ abstract class BasePlanningClient implements PlanningClient {
       state: PlanningWorkspaceState,
       now: string,
     ) => PlanningArchiveStep | undefined | Promise<PlanningArchiveStep | undefined>,
-    checkCapacity: boolean,
+    growth: PlanningWorkItemState | undefined,
   ) {
     for (let attempt = 1; ; attempt += 1) {
       const before = await this.readState(workspaceId)
@@ -1276,12 +1301,20 @@ abstract class BasePlanningClient implements PlanningClient {
       const step = await plan(structuredClone(before), now)
       if (!step) return false
       validatePlanningState(step.state)
-      if (checkCapacity) {
+      if (growth) {
+        const afterUsage = measurePlanningLiveGraph(workspaceId, step.state)
         requirePlanningLiveCapacity(
           before,
           measurePlanningLiveGraph(workspaceId, before),
           step.state,
-          measurePlanningLiveGraph(workspaceId, step.state),
+          afterUsage,
+        )
+        // Like `mutate`, never commit a graph whose snapshot can no longer be returned.
+        createPlanningSnapshot(
+          { ...step.state, revision: before.revision + 1, updatedAt: now },
+          growth,
+          now,
+          createPlanningCapacity(afterUsage),
         )
       }
       try {
@@ -6999,8 +7032,17 @@ function planArchiveRestoreStep(
   let processedCount = 0
   for (const reference of pending) {
     if (budget < 3) break
-    // A restored row is at most the archived reference it comes from.
-    const cost = estimateArchiveStepBytes(reference)
+    // Size by the rows this reference writes: a restored link merges into the current live row,
+    // which may have grown since the reference was archived.
+    const merged = reference.kind === 'link'
+      ? restoreLinkReference(
+        next,
+        reference,
+        context.workItems.get(createWorkItemKey(reference.link.teamId, reference.link.workItemId)),
+        context.now,
+      )
+      : undefined
+    const cost = estimateArchiveStepBytes(reference) + (merged ? estimateArchiveStepBytes(merged) : 0)
     if (processedCount > 0 && bytes + cost > PLANNING_ARCHIVE_STEP_BYTE_BUDGET) break
     bytes += cost
     const recordKey = createArchivedReferenceRecordKey(reference)
@@ -7037,7 +7079,7 @@ function planArchiveRestoreStep(
       const summary = context.workItems.get(
         createWorkItemKey(reference.link.teamId, reference.link.workItemId),
       )
-      const link = restoreLinkReference(next, reference, summary, context.now)
+      const link = merged
       if (link && summary) {
         next = {
           ...next,

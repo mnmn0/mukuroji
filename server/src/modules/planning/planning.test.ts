@@ -4507,6 +4507,101 @@ describe('planning persistence', () => {
     }
   })
 
+  test('sizes restore steps by the merged live link rows', async () => {
+    // 99 Goals whose IDs grow sixfold when JSON-escaped, added to the links after archive.
+    const largeGoalIds = Array.from({ length: 99 }, (_, index) =>
+      `${'\u0001'.repeat(252)}${String(index).padStart(3, '0')}`
+    )
+    const linkCount = 21
+    const rows: Record<string, unknown>[] = [
+      createScaleEntityRow('portfolio-1', 'portfolio'),
+      createScaleEntityRow('roadmap-1', 'roadmap', { parentId: 'portfolio-1' }),
+      createScaleEntityRow('initiative-1', 'initiative', { parentId: 'roadmap-1' }),
+      createScaleEntityRow('goal-0', 'goal', { parentId: 'initiative-1' }),
+      ...largeGoalIds.map((id) => createScaleEntityRow(id, 'goal', {
+        recordKey: `ENTITY#${encodeURIComponent(id)}`,
+        title: 'Large Goal',
+        parentId: 'initiative-1',
+      })),
+      ...Array.from({ length: linkCount }, (_, index) => ({
+        workspaceId: 'workspace-1',
+        recordKey: `LINK#team-1#item-${index}`,
+        entryType: 'planning-work-item-link',
+        teamId: 'team-1',
+        workItemId: `item-${index}`,
+        goalIds: ['goal-0'],
+        createdAt: NOW.toISOString(),
+      })),
+    ]
+    const workItems: PlanningWorkItemState = {
+      workItems: Array.from({ length: linkCount }, (_, index) =>
+        createWorkItem(`item-${index}`, 'started', { projectId: undefined })
+      ),
+    }
+    await createFakePlanningTable(rows).client
+      .archive('workspace-1', 'goal-0', { expectedRevision: 1 }, workItems)
+    for (let index = 0; index < linkCount; index += 1) {
+      rows.push({
+        workspaceId: 'workspace-1',
+        recordKey: `LINK#team-1#item-${index}`,
+        entryType: 'planning-work-item-link',
+        teamId: 'team-1',
+        workItemId: `item-${index}`,
+        goalIds: largeGoalIds,
+        createdAt: NOW.toISOString(),
+      })
+    }
+
+    const { client, writes } = createFakePlanningTable(rows)
+    const restored = await client.restore('workspace-1', 'goal-0', { expectedRevision: 1 }, workItems)
+    expect(restored.restore).toMatchObject({ restoredLinkCount: linkCount, pendingReferenceCount: 0 })
+    expect(writes.length).toBeGreaterThan(2)
+    for (const write of writes) {
+      expect(new TextEncoder().encode(JSON.stringify(write.TransactItems)).length)
+        .toBeLessThanOrEqual(3_000_000)
+    }
+  })
+
+  test('leaves links archived when the caller cannot write their Work Items', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItems: PlanningWorkItemState = { workItems: [createWorkItem('work-guarded', 'completed')] }
+    await client.create('workspace-1', createCycleInput('cycle-guarded', 0, { projectId: 'project-1' }), workItems)
+    await client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1',
+      workItemId: 'work-guarded',
+      projectId: 'project-1',
+      cycleId: 'cycle-guarded',
+      goalIds: [],
+      expectedRevision: 1,
+    }, workItems)
+    const archived = await client.archive('workspace-1', 'cycle-guarded', { expectedRevision: 2 }, workItems)
+    const scopes: unknown[] = []
+    const denied = await client.restore(
+      'workspace-1',
+      'cycle-guarded',
+      { expectedRevision: archived.planning.revision },
+      workItems,
+      {
+        canRestoreLinkTo: async (scope) => {
+          scopes.push(scope)
+          return false
+        },
+      },
+    )
+    expect(scopes).toEqual([{ teamId: 'team-1', projectId: 'project-1' }])
+    expect(denied.restore).toMatchObject({ restoredLinkCount: 0, droppedLinkCount: 0, pendingReferenceCount: 1 })
+    expect(denied.planning.workItemLinks).toEqual([])
+
+    const allowed = await client.restore(
+      'workspace-1',
+      'cycle-guarded',
+      { expectedRevision: denied.planning.revision },
+      workItems,
+      { canRestoreLinkTo: async () => true },
+    )
+    expect(allowed.restore).toMatchObject({ restoredLinkCount: 1, pendingReferenceCount: 0 })
+  })
+
   test('leaves a dependency archived when the caller cannot manage its counterpart', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
