@@ -8106,89 +8106,105 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('project-lifecycle-active')).toBeVisible()
   })
 
-  test('Issue #340: 保存中に別 Project を開いて戻り、続けた編集は旧保存の完了で消えない', async ({ page }) => {
-    const charterStates: Record<string, Record<string, unknown>> = {
-      refero: {
-        teamId: 'core-team',
-        projectId: 'refero',
-        lifecycleState: 'active',
-        charter: { tags: [], repositoryUrls: [] },
-        revision: 0,
-      },
-      'shared-launch': {
-        teamId: 'core-team',
-        projectId: 'shared-launch',
-        lifecycleState: 'active',
-        charter: { tags: [], repositoryUrls: [] },
-        revision: 0,
-      },
-    }
-    let releaseSave: () => void = () => undefined
-    const saveReleased = new Promise<void>((resolve) => {
-      releaseSave = resolve
-    })
-    await page.route(/.*\/api\/teams\/core-team\/projects\/(refero|shared-launch)\/charter$/, async (route) => {
-      const projectId = /projects\/([^/]+)\/charter$/u.exec(route.request().url())?.[1] ?? ''
-      if (route.request().method() === 'PUT') {
-        // The first Project's save stays in flight until the Project was shown again and edited.
-        await saveReleased
-        const body = route.request().postDataJSON() as { expectedRevision: number; charter: Record<string, unknown> }
-        charterStates[projectId] = {
-          ...charterStates[projectId],
-          charter: { ...body.charter, tags: [], repositoryUrls: [] },
-          revision: body.expectedRevision + 1,
-        }
+  for (const landing of ['after-return', 'while-away'] as const) {
+    test(`Issue #340: 保存中に別 Project を開いて戻り、続けた編集は旧保存の完了で消えない (${landing})`, async ({ page }) => {
+      const charterStates: Record<string, Record<string, unknown>> = {
+        refero: {
+          teamId: 'core-team',
+          projectId: 'refero',
+          lifecycleState: 'active',
+          charter: { tags: [], repositoryUrls: [] },
+          revision: 0,
+        },
+        'shared-launch': {
+          teamId: 'core-team',
+          projectId: 'shared-launch',
+          lifecycleState: 'active',
+          charter: { tags: [], repositoryUrls: [] },
+          revision: 0,
+        },
       }
-      await route.fulfill({ json: charterStates[projectId] })
-    })
-    let historyEntry = 0
-    /**
-     * Shows another Project in the same page, the way the sidebar does, so the page stays mounted.
-     *
-     * @param path - Project route to show.
-     * @returns A promise that resolves once the charter of that Project is shown.
-     */
-    const showProject = async (path: string) => {
-      historyEntry += 1
-      await page.evaluate(({ nextPath, entry }) => {
-        const currentState = window.history.state as { idx?: number } | null
-        window.history.pushState({
-          ...currentState,
-          idx: (typeof currentState?.idx === 'number' ? currentState.idx : 0) + 1,
-          key: `charter-project-${entry}`,
-        }, '', nextPath)
-        window.dispatchEvent(new PopStateEvent('popstate'))
-      }, { nextPath: path, entry: historyEntry })
-      await expect(page).toHaveURL(path)
-      // Another Project opens on its table view, so the permissions tab is chosen again.
-      await expect(page.getByRole('tab', { name: 'テーブル' })).toHaveAttribute('aria-selected', 'true')
+      let releaseSave: () => void = () => undefined
+      const saveReleased = new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      await page.route(/.*\/api\/teams\/core-team\/projects\/(refero|shared-launch)\/charter$/, async (route) => {
+        const projectId = /projects\/([^/]+)\/charter$/u.exec(route.request().url())?.[1] ?? ''
+        if (route.request().method() === 'PUT') {
+          // The first Project's save stays in flight until the Project was shown again and edited.
+          await saveReleased
+          const body = route.request().postDataJSON() as { expectedRevision: number; charter: Record<string, unknown> }
+          charterStates[projectId] = {
+            ...charterStates[projectId],
+            charter: { ...body.charter, tags: [], repositoryUrls: [] },
+            revision: body.expectedRevision + 1,
+          }
+        }
+        await route.fulfill({ json: charterStates[projectId] })
+      })
+      let historyEntry = 0
+      /**
+       * Shows another Project in the same page, the way the sidebar does, so the page stays mounted.
+       *
+       * @param path - Project route to show.
+       * @returns A promise that resolves once the charter of that Project is shown.
+       */
+      const showProject = async (path: string) => {
+        historyEntry += 1
+        await page.evaluate(({ nextPath, entry }) => {
+          const currentState = window.history.state as { idx?: number } | null
+          window.history.pushState({
+            ...currentState,
+            idx: (typeof currentState?.idx === 'number' ? currentState.idx : 0) + 1,
+            key: `charter-project-${entry}`,
+          }, '', nextPath)
+          window.dispatchEvent(new PopStateEvent('popstate'))
+        }, { nextPath: path, entry: historyEntry })
+        await expect(page).toHaveURL(path)
+        // Another Project opens on its table view, so the permissions tab is chosen again.
+        await expect(page.getByRole('tab', { name: 'テーブル' })).toHaveAttribute('aria-selected', 'true')
+        await page.getByRole('tab', { name: '権限' }).click()
+        await expect(page.getByTestId('project-charter-panel')).toContainText('プロジェクト憲章')
+      }
+
+      await page.goto('/projects/refero/issues?teamId=core-team')
       await page.getByRole('tab', { name: '権限' }).click()
-      await expect(page.getByTestId('project-charter-panel')).toContainText('プロジェクト憲章')
-    }
+      const purpose = page.getByTestId('project-charter-purpose')
+      await purpose.fill('保存中の目的')
+      const savedResponse = page.waitForResponse((response) =>
+        response.request().method() === 'PUT' && response.url().endsWith('/projects/refero/charter'))
+      await page.getByTestId('project-charter-save').click()
 
-    await page.goto('/projects/refero/issues?teamId=core-team')
-    await page.getByRole('tab', { name: '権限' }).click()
-    const purpose = page.getByTestId('project-charter-purpose')
-    await purpose.fill('保存中の目的')
-    const savedResponse = page.waitForResponse((response) =>
-      response.request().method() === 'PUT' && response.url().endsWith('/projects/refero/charter'))
-    await page.getByTestId('project-charter-save').click()
+      if (landing === 'while-away') {
+        // The edit typed during the save must outlive a save that lands while another Project is shown.
+        await purpose.fill('保存中に続けた編集')
+        await showProject('/projects/shared-launch/issues?teamId=core-team')
+        await expect(purpose).toHaveValue('')
+        releaseSave()
+        await savedResponse
+        await showProject('/projects/refero/issues?teamId=core-team')
+        await expect(purpose).toHaveValue('保存中に続けた編集')
+        // The kept edit moved onto the revision that save committed.
+        await expect(page.getByTestId('project-charter-stale-draft')).toHaveCount(0)
+        return
+      }
 
-    await showProject('/projects/shared-launch/issues?teamId=core-team')
-    await expect(purpose).toHaveValue('')
-    await showProject('/projects/refero/issues?teamId=core-team')
-    await expect(purpose).toHaveValue('保存中の目的')
-    await purpose.fill('戻って続けた編集')
+      await showProject('/projects/shared-launch/issues?teamId=core-team')
+      await expect(purpose).toHaveValue('')
+      await showProject('/projects/refero/issues?teamId=core-team')
+      await expect(purpose).toHaveValue('保存中の目的')
+      await purpose.fill('戻って続けた編集')
 
-    releaseSave()
-    await savedResponse
-    // The first save landed, so the newer edit is now based on an older revision.
-    await expect(page.getByTestId('project-charter-stale-draft')).toBeVisible()
-    await page.getByRole('tab', { name: 'ファイル' }).click()
-    await expect(page.getByTestId('project-charter-panel')).toHaveCount(0)
-    await page.getByRole('tab', { name: '権限' }).click()
-    await expect(purpose).toHaveValue('戻って続けた編集')
-  })
+      releaseSave()
+      await savedResponse
+      // The first save landed, so the newer edit is now based on an older revision.
+      await expect(page.getByTestId('project-charter-stale-draft')).toBeVisible()
+      await page.getByRole('tab', { name: 'ファイル' }).click()
+      await expect(page.getByTestId('project-charter-panel')).toHaveCount(0)
+      await page.getByRole('tab', { name: '権限' }).click()
+      await expect(purpose).toHaveValue('戻って続けた編集')
+    })
+  }
 
   test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 })
