@@ -149,7 +149,7 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
-  test('fans Work Item changes out to the owner, creator, and item watchers but not the actor', async () => {
+  test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
       'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
@@ -229,6 +229,19 @@ describe('collaboration projection pure helpers', () => {
         record('title-only', 'work-item.updated', {
           actorMemberKey: 'actor@example.com', teamId: 'core', issueId: 'example', projectId: 'platform',
         }),
+        record('published', 'planning-update.health-degraded', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
+          planningTargetType: 'project', planningTargetId: 'platform',
+          notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'escalation' }],
+        }),
+        record('commented', 'planning-update.commented', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
+          planningTargetType: 'project', planningTargetId: 'platform',
+          notificationCandidates: [
+            { memberKey: 'owner@example.com', reason: 'update-author' },
+            { memberKey: 'creator@example.com', reason: 'mention' },
+          ],
+        }),
         record('escalation', 'work-item.overdue-escalation', {
           actorMemberKey: 'system', teamId: 'core', issueId: 'example', projectId: 'platform', dueDate: '2026-07-05',
           notificationCandidates: [
@@ -238,7 +251,23 @@ describe('collaboration projection pure helpers', () => {
         }),
       ] }, dependencies)).toEqual({ batchItemFailures: [] })
 
-      expect(watcherQueries).toEqual(['workspace-1#work-item#team/core/issue/example'])
+      expect(watcherQueries.sort()).toEqual([
+        'workspace-1#planning-update#project/core/platform',
+        'workspace-1#work-item#team/core/issue/example',
+      ])
+      expect(notifications.filter((item) => item.eventId === 'published').map((item) => [item.recipientMemberKey, item.reasons]).sort())
+        .toEqual([
+          ['creator@example.com', ['project-member']],
+          ['former@example.com', ['project-member']],
+          ['lead@example.com', ['escalation', 'project-member']],
+          ['owner@example.com', ['project-member', 'watcher']],
+          ['watcher@example.com', ['project-member', 'watcher']],
+        ])
+      expect(notifications.filter((item) => item.eventId === 'commented').map((item) => [item.recipientMemberKey, item.reasons]).sort())
+        .toEqual([
+          ['creator@example.com', ['mention']],
+          ['owner@example.com', ['update-author']],
+        ])
       expect(notifications.filter((item) => item.eventId === 'completed').map((item) => [item.recipientMemberKey, item.reasons]).sort())
         .toEqual([
           ['creator@example.com', ['creator']],
@@ -936,7 +965,8 @@ describe('collaboration projection pure helpers', () => {
     expect(projectsSubscribedWatchers('planning-update.reminder')).toBe(true)
     expect(projectsSubscribedWatchers('planning-update.overdue')).toBe(true)
     expect(projectsSubscribedWatchers('planning-update.escalation')).toBe(true)
-    expect(projectsSubscribedWatchers('planning-update.published')).toBe(false)
+    expect(projectsSubscribedWatchers('planning-update.published')).toBe(true)
+    expect(projectsSubscribedWatchers('planning-update.commented')).toBe(false)
     expect(createSubscribedWatcherScopes(createProjectionEvent({
       eventType: 'planning-update.overdue',
       workspaceId: 'workspace/one',

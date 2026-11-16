@@ -215,6 +215,14 @@ Publish は人が作成した manual draft のみを正本とし、summary、hea
 
 History は target ごとに新しい順の cursor API で読み、JSON export は同じ認可と履歴正本を使います。Watch は collaboration scope を Team-qualified な Project / Initiative target へ拡張し、legacy の非修飾 Project watch から Planning 通知を fan-out しません。Cadence が有効な `UPDATE_TARGET` だけを16 shardの sparse `UpdateScheduleDueIndex`へ投影し、最初の reminder（未設定なら due）時刻までの targetをQueryするため、schedule実行時も全Planning履歴をscanしません。Notification schedule は reminder、overdue、escalation を `{workspace,target,nextDueAt,kind,recipient}` から決まる event ID で一度だけ生成します。GSI は候補発見だけに使い、base rowの強整合read、audit projection、Inbox read の各段階で current target、owner、cadence occurrence、archive、Project / Initiative scope、recipient 権限を再検証します。Owner / cadence / scope の変更、archive、permission loss 後は、すでに保存された古い通知も表示しません。
 
+Update の publish とコメントは、Planning の書き込みと同じ transaction で audit event を保存し、Inbox 通知の outbox にします。
+
+- publish（`planning-update.published`）: target の watcher、cadence の escalation 先、Project target なら現在の Project member（viewer / member / manager）
+- health が at-risk / off-track に悪化した publish（`planning-update.health-degraded`）: 上に加えて update 担当（cadence の owner）。悪化は前回の update（初回の Initiative は entity）の health と比べて判定します
+- コメント（`planning-update.commented`）: update の作成者と、`mentionMemberKeys`（最大 20 件、Web では本文の `@member@example.com`）で mention された member
+
+どれも投稿した本人は除き、通知から `/planning/portfolio` の target へ移れます。Recipient の閲覧権限は projection と Inbox 表示時に再確認します。Milestone の完了・予定変更の通知と、entity 変更全般の audit はまだありません。
+
 主な HTTP endpoint は次の通りです。
 
 - `PUT /api/planning/updates/cadence`: cadence の設定または解除

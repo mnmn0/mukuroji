@@ -9,6 +9,7 @@ import {
 import {
   createPlanningUpdateEvidenceCandidates,
   createPlanningUpdateWorkItemEvidenceValue,
+  extractPlanningUpdateCommentMentions,
   readPlanningEvidenceHttpsUrl,
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
@@ -229,5 +230,15 @@ describe('Planning update evidence composer', () => {
       () => { resetCount += 1 },
     )).rejects.toThrow('persistence failed')
     expect(resetCount).toBe(1)
+  })
+
+  test('extracts @member mentions from a comment body', () => {
+    expect(extractPlanningUpdateCommentMentions(
+      '@Owner@Example.com can you check? cc @dev@example.com. mail me at pm@example.com',
+    )).toEqual(['dev@example.com', 'owner@example.com'])
+    expect(extractPlanningUpdateCommentMentions('no mentions here')).toEqual([])
+    expect(extractPlanningUpdateCommentMentions(
+      Array.from({ length: 25 }, (_, index) => `@m${String(index).padStart(2, '0')}@example.com`).join(' '),
+    )).toHaveLength(20)
   })
 })

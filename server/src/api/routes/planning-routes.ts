@@ -97,6 +97,12 @@ import {
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { readLocale } from '../shared/input-parsing'
 import {
+  createPlanningUpdateCommentAuditEvent,
+  createPlanningUpdatePublishAuditEvent,
+  readPlanningUpdateCommentMentions,
+  withPlanningAuditOutbox,
+} from '../shared/planning-update-notifications'
+import {
   createPlanningCallerAuthorizationConditionChecks,
   filterPlanningSnapshotForPrincipal,
   planningProjectAccessMatchesQualifiedScope,
@@ -1471,6 +1477,8 @@ type PlanningUpdateAnnotationReceiptExpectation = PlanningUpdateAnnotationReceip
       id: string
       /** Normalized comment body. */
       body: string
+      /** Validated mentioned members, present only when the comment mentions someone. */
+      mentionMemberKeys?: string[]
     }
   | {
       /** Current-member reaction operation. */
@@ -3242,6 +3250,14 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         principal,
         targetScope,
       )
+      const previousHealth = configuredTarget.latestUpdate?.health ?? (
+        input.target.type === 'initiative'
+          ? snapshot.entities.find((entity) =>
+              input.target.type === 'initiative' && entity.id === input.target.entityId
+            )?.health
+          : undefined
+      )
+      const cadence = configuredTarget.cadence
       const response = await workItemDependencies.planning.publishUpdate(
         principal.directoryId,
         input,
@@ -3251,7 +3267,20 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           ...createPlanningCallerAuthorizationConditionChecks(principal),
           ...evidenceConditionChecks,
         ],
-        publishTransaction,
+        withPlanningAuditOutbox(
+          publishTransaction,
+          createApiMutationContext(c, principal, input),
+          (result) => createPlanningUpdatePublishAuditEvent({
+            workspaceId: principal.directoryId,
+            update: result.update,
+            previousHealth,
+            ownerMemberKey: cadence.updateOwnerMemberKey,
+            ...(cadence.escalationMemberKey
+              ? { escalationMemberKey: cadence.escalationMemberKey }
+              : {}),
+            scope: targetScope ?? {},
+          }),
+        ),
       )
       mutationCommitted = true
       return c.json({
@@ -3338,10 +3367,11 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const candidate = await readPlanningJson<Pick<
         CreatePlanningUpdateCommentInput,
-        'body' | 'id'
+        'body' | 'id' | 'mentionMemberKeys'
       >>(c.req)
       const id = readPlanningIdentifier(candidate.id, 'Planning update comment ID')
       const body = readPlanningUpdateCommentBody(candidate.body)
+      const mentionMemberKeys = readPlanningUpdateCommentMentions(candidate.mentionMemberKeys)
       const snapshot = await workItemDependencies.planning.get(
         principal.directoryId,
         await readPlanningWorkItemState(principal),
@@ -3361,15 +3391,32 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           memberKey: principal.userKey.toLowerCase(),
           id,
           body,
+          ...(mentionMemberKeys.length > 0 ? { mentionMemberKeys } : {}),
         }),
-        mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
-          workItemDependencies.planning.createUpdateComment(
+        mutate: async ({ target, updateVersion, transaction, authorizationConditionChecks }) => {
+          const update = await readPlanningUpdateByVersion(principal.directoryId, target, updateVersion)
+          return workItemDependencies.planning.createUpdateComment(
             principal.directoryId,
             { target, updateVersion, id, body },
             principal.userKey,
-            transaction,
+            update
+              ? withPlanningAuditOutbox(
+                  transaction,
+                  createApiMutationContext(c, principal, { target, updateVersion, id, body, mentionMemberKeys }),
+                  (result) => result.kind === 'comment-create'
+                    ? createPlanningUpdateCommentAuditEvent({
+                        workspaceId: principal.directoryId,
+                        comment: result.comment,
+                        updateAuthorMemberKey: update.authorMemberKey,
+                        mentionMemberKeys,
+                        scope: update.contextSnapshot.scope,
+                      })
+                    : undefined,
+                ) ?? transaction
+              : transaction,
             authorizationConditionChecks,
-          ),
+          )
+        },
         replay: (context, replay) => {
           if (replay.operation !== 'comment-create') {
             throw invalidStoredPlanningUpdateAnnotationMutationReceipt()

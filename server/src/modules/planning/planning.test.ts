@@ -3394,6 +3394,57 @@ describe('planning persistence', () => {
     expect(attemptedKeys[1]?.[1]).not.toBe(attemptedKeys[0]?.[1])
   })
 
+  test('commits caller audit outbox writes after the receipt and rejects unsupported actions', async () => {
+    const committed: Array<Array<Record<string, unknown>>> = []
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          committed.push(command.input.TransactItems as Array<Record<string, unknown>>)
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => new Date('2026-07-16T09:00:00.000Z'),
+    )
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    const receipt = { Put: { TableName: 'IdempotencyTable', Item: { recordKey: 'RECEIPT#comment-1' } } }
+    const audit = { Put: { TableName: 'AuditTable', Item: { eventId: 'event-1' } } }
+
+    await client.createUpdateComment('workspace-1', {
+      target, updateVersion: 1, id: 'comment-1', body: 'Looks good',
+    }, 'member@example.com', {
+      async prepare() {
+        return { transactWriteItem: receipt, additionalTransactWriteItems: [audit] }
+      },
+    })
+    const items = committed[0] ?? []
+    expect(items.slice(-2)).toEqual([receipt, audit])
+
+    await expect(client.createUpdateComment('workspace-1', {
+      target, updateVersion: 1, id: 'comment-2', body: 'Again',
+    }, 'member@example.com', {
+      async prepare() {
+        return {
+          transactWriteItem: receipt,
+          additionalTransactWriteItems: [{ Delete: { TableName: 'AuditTable', Key: { eventId: 'event-1' } } }],
+        }
+      },
+    })).rejects.toMatchObject({ status: 503, code: 'PlanningIdempotencyUnavailable' })
+    expect(committed).toHaveLength(1)
+  })
+
   test('condition-checks canonical Work Item revision in link transactions', async () => {
     let transaction: Record<string, unknown> | undefined
     const storedCycle = createStoredCycle('cycle-1')

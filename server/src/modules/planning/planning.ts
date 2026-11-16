@@ -285,6 +285,8 @@ export type PlanningMutationTransactionResult =
 type PlanningMutationTransactionContribution = {
   /** Conditional receipt write committed after Planning row mutations. */
   transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  /** Append-only audit outbox writes committed after the receipt, at most two. */
+  additionalTransactWriteItems?: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /** Adds one durable completion receipt to a supported Planning mutation transaction. */
@@ -2406,13 +2408,32 @@ async function preparePlanningMutationTransactionContribution<
  * Validates an opaque caller contribution before it crosses into the Planning DynamoDB adapter.
  *
  * @param value - Unknown contribution returned by the application transaction port.
- * @returns Whether the value contains exactly one supported DynamoDB transaction action.
+ * @returns Whether the value contains one receipt action and at most two audit Put actions.
  */
 function isPlanningMutationTransactionContribution(
   value: unknown,
 ): value is PlanningMutationTransactionContribution {
   if (!isRecord(value)) return false
-  return isPlanningTransactWriteItem(value.transactWriteItem)
+  const additional = value.additionalTransactWriteItems
+  return isPlanningTransactWriteItem(value.transactWriteItem) && (
+    additional === undefined ||
+    Array.isArray(additional) && additional.length <= 2 &&
+      additional.every((item) => isRecord(item) && isRecord(item.Put) && isPlanningTransactWriteItem(item))
+  )
+}
+
+/**
+ * Lists every DynamoDB action of an optional caller contribution in commit order.
+ *
+ * @param contribution - Validated caller contribution.
+ * @returns The receipt write followed by its audit outbox writes.
+ */
+function planningTransactionContributionItems(
+  contribution: PlanningMutationTransactionContribution | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return contribution
+    ? [contribution.transactWriteItem, ...(contribution.additionalTransactWriteItems ?? [])]
+    : []
 }
 
 /**
@@ -3276,9 +3297,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
               },
             },
           },
-          ...(transactionContribution === undefined
-            ? []
-            : [transactionContribution.transactWriteItem]),
+          ...planningTransactionContributionItems(transactionContribution),
         ],
       }))
     } catch (error) {
@@ -3412,13 +3431,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
             },
           },
           ...activityWrites,
-          ...(transactionContribution === undefined
-            ? []
-            : [transactionContribution.transactWriteItem]),
+          ...planningTransactionContributionItems(transactionContribution),
         ],
       }))
     } catch (error) {
-      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + (transactionContribution ? 1 : 0))) throw toPersistenceError(error)
+      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + planningTransactionContributionItems(transactionContribution).length)) throw toPersistenceError(error)
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
@@ -3548,9 +3565,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         ExpressionAttributeValues: { ':expectedRevision': condition.revision },
       },
     }))
-    const transactionContributionItems = transactionContribution
-      ? [transactionContribution.transactWriteItem]
-      : []
+    const transactionContributionItems = planningTransactionContributionItems(transactionContribution)
     const publishedUpdateItems: NonNullable<TransactWriteCommandInput['TransactItems']> =
       publishedUpdate === undefined
         ? []

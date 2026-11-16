@@ -791,6 +791,11 @@ export type CreatePlanningUpdateCommentInput = {
   id: string
   /** Comment 本文です。 */
   body: string
+  /**
+   * Comment で mention する Workspace member key です（最大 20 件）。mention された member には
+   * Inbox 通知が届きます。
+   */
+  mentionMemberKeys?: string[]
 }
 
 /** Update comment history を cursor pagination で取得する入力です。 */

@@ -779,6 +779,115 @@ test('filters legacy Planning update targets by their Team-qualified Project ACL
   }])
 })
 
+test('commits Inbox audit events with update publishes and comments', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    const { planning } = configurePlanningAnnotationIdempotency(
+      new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z')),
+    )
+    const contributions: unknown[] = []
+    /** Records the contribution a route-supplied transaction prepares. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown> } | undefined) =>
+      transaction && {
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          contributions.push(contribution)
+          return contribution
+        },
+      }
+    const publish = planning.publishUpdate.bind(planning)
+    planning.publishUpdate = (workspaceId, input, author, state, checks, transaction) =>
+      publish(workspaceId, input, author, state, checks, record(transaction))
+    const comment = planning.createUpdateComment.bind(planning)
+    planning.createUpdateComment = (workspaceId, input, author, transaction, checks) =>
+      comment(workspaceId, input, author, record(transaction), checks)
+    const target = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+    expect((await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'Asia/Tokyo',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 24,
+        escalationMemberKey: 'lead@example.com',
+      },
+      expectedRevision: 0,
+    }, 'planning-cadence-audit-1')).status).toBe(200)
+
+    const published = await planningApiRequest('/api/planning/updates', 'POST', {
+      target,
+      id: 'project-update-audit-1',
+      health: 'off-track',
+      risk: 'high',
+      summary: 'The vendor slipped two weeks.',
+      riskSummary: 'Launch moves unless we add a vendor.',
+      decisionSummary: '',
+      helpNeeded: 'Approve the second vendor.',
+      nextAction: 'Sign the contract.',
+      evidence: [],
+      expectedRevision: 1,
+    })
+    expect(await published.json()).toMatchObject({ update: { health: 'off-track' } })
+    expect(published.status).toBe(201)
+    expect(contributions[0]).toMatchObject({
+      transactWriteItem: {
+        Put: {
+          TableName: 'AuditEventsTable',
+          Item: {
+            eventType: 'planning-update.health-degraded',
+            metadata: {
+              planningTargetType: 'project',
+              teamId: 'core-team',
+              projectId: 'refero',
+              notificationCandidates: [
+                { memberKey: 'lead@example.com', reason: 'escalation' },
+                { memberKey: 'demo@example.com', reason: 'update-owner' },
+              ],
+            },
+          },
+        },
+      },
+    })
+
+    const query = '?targetType=project&teamId=core-team&projectId=refero'
+    expect((await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'audit-comment-1', body: 'Escalating to @Lead@Example.com', mentionMemberKeys: ['Lead@Example.com'] },
+      'planning-comment-audit-1',
+    )).status).toBe(201)
+    expect(contributions[1]).toMatchObject({
+      transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable' } },
+      additionalTransactWriteItems: [{
+        Put: {
+          TableName: 'AuditEventsTable',
+          Item: {
+            eventType: 'planning-update.commented',
+            metadata: {
+              commentId: 'audit-comment-1',
+              notificationCandidates: [
+                { memberKey: 'demo@example.com', reason: 'update-author' },
+                { memberKey: 'lead@example.com', reason: 'mention' },
+              ],
+            },
+          },
+        },
+      }],
+    })
+
+    const invalidMentions = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'audit-comment-2', body: 'Bad', mentionMemberKeys: 'lead@example.com' },
+      'planning-comment-audit-2',
+    )
+    expect(invalidMentions.status).toBe(400)
+    expect(await invalidMentions.json()).toMatchObject({ code: 'InvalidPlanningUpdateCommentMentions' })
+  })
+})
+
 test('configures, publishes, pages, exports, and watches a qualified Project update', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   let current = new Date('2026-08-07T00:00:00.000Z')

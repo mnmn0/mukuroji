@@ -371,6 +371,8 @@ const watcherNotificationEventTypes = new Set([
   'planning-update.reminder',
   'planning-update.overdue',
   'planning-update.escalation',
+  'planning-update.published',
+  'planning-update.health-degraded',
   'context-item.created',
   'context-item.updated',
   'accepted-resolution.selected',
@@ -384,6 +386,14 @@ const watcherNotificationEventTypes = new Set([
 const workItemChangeWatcherEventTypes = new Set([
   'work-item.updated',
   'work-item.schedule-cascade-updated',
+])
+/**
+ * Planning update events that fan out to the target's watchers and, for a Project target, to
+ * the current Project members.
+ */
+const planningUpdatePublishEventTypes = new Set([
+  'planning-update.published',
+  'planning-update.health-degraded',
 ])
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
@@ -685,16 +695,24 @@ async function processRecord(
       )
     : undefined
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
+  const memberDirectory = notifiesPlanningUpdateProjectMembers(authorizationEvent)
+    ? await readProjectDirectory(authorizationEvent.workspaceId)
+    : undefined
   const candidates = groupNotificationCandidates({
     ...authorizationEvent,
     notificationCandidates: [
       ...authorizationEvent.notificationCandidates,
       ...watcherCandidates,
+      ...(memberDirectory
+        ? toPlanningUpdateProjectMemberCandidates(authorizationEvent, memberDirectory)
+        : []),
     ],
   })
-  const directoryItems = candidates.length > 0 && (authorizationEvent.projectId || authorizationEvent.teamId)
-    ? await readProjectDirectory(authorizationEvent.workspaceId)
-    : []
+  const directoryItems = memberDirectory ?? (
+    candidates.length > 0 && (authorizationEvent.projectId || authorizationEvent.teamId)
+      ? await readProjectDirectory(authorizationEvent.workspaceId)
+      : []
+  )
   const eligibleCandidates = (
     await Promise.all(
       candidates.map(async (candidate) =>
@@ -989,7 +1007,8 @@ async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
  */
 export function projectsSubscribedWatchers(eventType: string) {
   return ['comment.created', 'comment.replied', 'comment.edited'].includes(eventType) ||
-    planningNotificationKindFromEventType(eventType) !== undefined
+    planningNotificationKindFromEventType(eventType) !== undefined ||
+    planningUpdatePublishEventTypes.has(eventType)
 }
 
 /**
@@ -1015,7 +1034,8 @@ export function createSubscribedWatcherScopes(
     // Project watchers follow comments, not every field change of each Work Item.
     return event.scopeKey ? [{ entityKey: event.scopeKey, reason: 'watcher' }] : []
   }
-  const planningNotification = planningNotificationKindFromEventType(event.eventType) !== undefined
+  const planningNotification = planningNotificationKindFromEventType(event.eventType) !== undefined ||
+    planningUpdatePublishEventTypes.has(event.eventType)
   const planningTargetKey = planningNotification
     ? event.planningTargetType === 'project' && event.teamId && event.projectId
       ? createPlanningUpdatePublicTargetKey({
@@ -1554,6 +1574,42 @@ export function refreshScheduledNotificationEvent(
       reason,
     }],
   }
+}
+
+/**
+ * Reports whether a published Planning update also notifies the current Project members.
+ *
+ * @param event - Parsed audit event.
+ * @returns True for a publish or health-degradation event on a Project target.
+ */
+export function notifiesPlanningUpdateProjectMembers(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'planningTargetType' | 'projectId'>,
+) {
+  return planningUpdatePublishEventTypes.has(event.eventType) &&
+    event.planningTargetType === 'project' &&
+    Boolean(event.projectId)
+}
+
+/**
+ * Lists the current members of the published update's Project as notification candidates.
+ *
+ * @param event - Publish event carrying the Project scope.
+ * @param directoryItems - Current Project directory rows.
+ * @returns One `project-member` candidate per current viewer, member, or manager.
+ */
+export function toPlanningUpdateProjectMemberCandidates(
+  event: Pick<AuditProjectionEvent, 'projectId'>,
+  directoryItems: ProjectDirectoryItem[],
+): NotificationCandidate[] {
+  return directoryItems.flatMap((item) => {
+    const memberKey = normalizeMemberKey(item.memberKey)
+    return item.entryType === 'project-member' &&
+      item.projectId === event.projectId &&
+      (item.role === 'viewer' || item.role === 'member' || item.role === 'manager') &&
+      memberKey
+      ? [{ memberKey, reason: 'project-member' }]
+      : []
+  })
 }
 
 /**
