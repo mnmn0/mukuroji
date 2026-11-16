@@ -144,6 +144,40 @@ describe('PlanningScreen', () => {
     expect(html).toContain('data-testid="planning-roadmap"')
   })
 
+  test('shows live Planning data usage and warns before and at the limit', () => {
+    const normal = renderToStaticMarkup(
+      <PlanningScreen activeView="roadmap" labels={labels} snapshot={planningSnapshotFixture} />,
+    )
+    expect(normal).toContain('data-testid="planning-capacity-usage"')
+    expect(normal).toContain('Planning data usage: 24 / 20,000 rows · 0.0 / 24.0 MB')
+    expect(normal).not.toContain('data-testid="planning-capacity-warning"')
+
+    const warning = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        labels={labels}
+        snapshot={{
+          ...planningSnapshotFixture,
+          capacity: { ...planningSnapshotFixture.capacity, level: 'warning', liveRowCount: 16_500 },
+        }}
+      />,
+    )
+    expect(warning).toContain('data-testid="planning-capacity-warning"')
+    expect(warning).toContain(labels.capacityWarning)
+
+    const full = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        labels={labels}
+        snapshot={{
+          ...planningSnapshotFixture,
+          capacity: { ...planningSnapshotFixture.capacity, level: 'full', liveRowCount: 20_000 },
+        }}
+      />,
+    )
+    expect(full).toContain(labels.capacityFull)
+  })
+
   test('does not fabricate Project update details from an unrelated Planning entity', () => {
     const html = renderToStaticMarkup(
       <PlanningScreen

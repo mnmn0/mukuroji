@@ -175,6 +175,10 @@ export const planningMessages = {
   'planning.dependency.start-to-start': 'Start to start',
   'planning.dependency.finish-to-finish': 'Finish to finish',
   'planning.dependency.start-to-finish': 'Start to finish',
+  'planning.capacity.usage': 'Planning data usage',
+  'planning.capacity.rows': 'rows',
+  'planning.capacity.warning': 'Planning data is close to its limit. Remove Work Item links or dependencies that are no longer needed to reduce usage.',
+  'planning.capacity.full': 'Planning data has reached its limit. Changes that add entities, dependencies, or Work Item links cannot be saved. Remove links or dependencies that are no longer needed. You can still edit or remove existing items.',
   'planning.readOnly': 'You can view this plan, but cannot change it.',
   'planning.conflict': 'Someone else updated this plan. Reload it and try again.',
 } as const
