@@ -1,5 +1,5 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { deriveWorkItemKeyPrefix } from '../../modules/work-items/domain/work-item-key'
+import { deriveWorkItemKeyPrefix } from '../../modules/work-items'
 
 /** Partition key suffix of the Work Item key registry, mirrored from the adapter. */
 const REGISTRY_PARTITION_SUFFIX = '#work-item-key-registry'

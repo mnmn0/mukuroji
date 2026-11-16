@@ -172,4 +172,5 @@ export {
   isWorkItemKeyRegistryRecord,
   type WorkItemKeyLocation,
 } from './adapter-out/dynamodb/work-item-key-registry'
+export { deriveWorkItemKeyPrefix } from './domain/work-item-key'
 export type { TeamIssueCommentResponseItem } from '@mukuroji/contracts'

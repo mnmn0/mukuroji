@@ -13,7 +13,10 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
-import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
+import {
+  isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
+} from '../../src/modules/work-items'
 
 const MANIFEST_KIND = 'mukuroji-work-items-integrity-manifest'
 const MANIFEST_VERSION = 1
@@ -943,12 +946,12 @@ async function scanWorkItemsTable(
       }
       scannedItemCount += 1
       try {
-        if (!hasCanonicalPhysicalWorkItemShape(item)) {
-          invalidCount += 1
-          continue
-        }
         const decoded = decodeAttributeMap(item)
-        if (!isCanonicalWorkItemRecord(decoded)) {
+        // Key registry rows share the table and are restored data too, so they are digested.
+        if (
+          !isWorkItemKeyRegistryRecord(decoded) &&
+          !(hasCanonicalPhysicalWorkItemShape(item) && isCanonicalWorkItemRecord(decoded))
+        ) {
           invalidCount += 1
           continue
         }
