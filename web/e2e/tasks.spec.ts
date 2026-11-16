@@ -6902,6 +6902,65 @@ test.describe('authenticated task page', () => {
     ).toHaveValue('relation-target')
   })
 
+  test('Issue #427: 認証アプリの登録と解除の後に再読み込みが失敗しても、確定した状態と再読み込みボタンを表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    let softwareTokenMfaEnabled = false
+    let failStatusReads = false
+    await page.route('**/api/auth/account-security', async (route) => {
+      if (failStatusReads) {
+        await route.fulfill({ status: 500, json: { message: 'Temporary failure.' } })
+        return
+      }
+      await route.fulfill({
+        json: { mfaRequiredByPolicy: false, passwordManaged: true, softwareTokenMfaEnabled },
+      })
+    })
+    await page.route('**/api/auth/mfa/totp/associate', async (route) => {
+      await route.fulfill({ json: { secretCode: 'JBSWY3DPEHPK3PXP', accountName: 'demo@example.com' } })
+    })
+    await page.route('**/api/auth/mfa/totp/verify', async (route) => {
+      softwareTokenMfaEnabled = true
+      failStatusReads = true
+      await route.fulfill({ json: { softwareTokenMfaEnabled: true } })
+    })
+    await page.route('**/api/auth/mfa/totp', async (route) => {
+      expect(route.request().method()).toBe('DELETE')
+      softwareTokenMfaEnabled = false
+      failStatusReads = true
+      await route.fulfill({ status: 204, body: '' })
+    })
+
+    await page.goto('/settings')
+    const panel = page.getByTestId('account-security-panel')
+    const mfa = panel.getByTestId('account-security-mfa')
+    await expect(mfa).toContainText('未登録')
+
+    await mfa.getByRole('button', { name: '認証アプリを登録' }).click()
+    await mfa.getByRole('button', { name: '登録を始める' }).click()
+    await mfa.getByLabel('2. 認証アプリに表示された6桁のコードを入力します。').fill('123456')
+    await mfa.getByRole('button', { name: '登録する' }).click()
+
+    // The reload after registering fails, but the confirmed state stays with a way to reload.
+    await expect(mfa).toContainText('登録済み')
+    await expect(mfa).toContainText('認証アプリを登録しました。')
+    await expect(panel.getByTestId('account-security-reload')).toBeVisible()
+    failStatusReads = false
+    await panel.getByTestId('account-security-reload').click()
+    await expect(panel.getByTestId('account-security-reload')).toHaveCount(0)
+    await expect(mfa).toContainText('登録済み')
+
+    await mfa.getByRole('button', { name: '登録を解除' }).click()
+    await mfa.getByRole('button', { name: '解除する' }).click()
+
+    await expect(mfa).toContainText('未登録')
+    await expect(mfa).toContainText('認証アプリの登録を解除しました。')
+    await expect(panel.getByTestId('account-security-reload')).toBeVisible()
+    failStatusReads = false
+    await panel.getByTestId('account-security-reload').click()
+    await expect(panel.getByTestId('account-security-reload')).toHaveCount(0)
+    await expect(mfa).toContainText('未登録')
+  })
+
   test('Issue #21: 設定画面で Team scope を選び configuration override を保存できる', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workspaceWorkItemConfiguration: workspaceWorkItemConfigurationFixture,
