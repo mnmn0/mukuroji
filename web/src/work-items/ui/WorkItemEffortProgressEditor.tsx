@@ -32,6 +32,11 @@ export type WorkItemEffortProgressEditorProps = {
   /** Shows the values without inputs. */
   readOnly?: boolean
   /**
+   * Keeps the inputs but disables them, such as while another update of the Work Item is pending,
+   * so the typed values survive until it settles.
+   */
+  disabled?: boolean
+  /**
    * Shows an estimate input. Set it where the estimate has no other editor, such as a Team Work Item
    * detail whose schedule is read-only.
    */
@@ -80,6 +85,7 @@ function parsePercent(value: FormDataEntryValue | null): number | null | undefin
  */
 export function WorkItemEffortProgressEditor({
   canEditEstimate = false,
+  disabled = false,
   editorIdentity,
   item,
   locale,
@@ -96,6 +102,7 @@ export function WorkItemEffortProgressEditor({
   const progress = deriveWorkItemProgressPercent(item, progressMode)
   const isManual = progressMode === 'manual'
   const canEdit = !readOnly && onSave !== undefined
+  const inputsDisabled = disabled || pending
 
   /**
    * Validates and saves the typed values.
@@ -104,7 +111,7 @@ export function WorkItemEffortProgressEditor({
    */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!onSave || pending) return
+    if (!onSave || inputsDisabled) return
     const formData = new FormData(event.currentTarget)
     const plannedEffortMinutes = canEditEstimate ? parseHours(formData.get('estimateHours')) : null
     if (plannedEffortMinutes === undefined) {
@@ -179,6 +186,7 @@ export function WorkItemEffortProgressEditor({
               {t('workItems.effort.estimateHours')}
               <input
                 className="workbench-input h-9 w-32 px-3"
+                disabled={inputsDisabled}
                 defaultValue={planned === undefined ? '' : formatPlannedEffortHours(planned)}
                 inputMode="decimal"
                 min="0"
@@ -192,6 +200,7 @@ export function WorkItemEffortProgressEditor({
             {t('workItems.effort.remainingHours')}
             <input
               className="workbench-input h-9 w-32 px-3"
+              disabled={inputsDisabled}
               defaultValue={item.remainingEffortMinutes === undefined ? '' : formatPlannedEffortHours(item.remainingEffortMinutes)}
               inputMode="decimal"
               min="0"
@@ -205,6 +214,7 @@ export function WorkItemEffortProgressEditor({
               {t('workItems.effort.progressPercent')}
               <input
                 className="workbench-input h-9 w-24 px-3"
+                disabled={inputsDisabled}
                 defaultValue={item.progressPercent ?? ''}
                 inputMode="numeric"
                 max="100"
@@ -215,7 +225,7 @@ export function WorkItemEffortProgressEditor({
               />
             </label>
           ) : null}
-          <button className="workbench-button-secondary min-h-9 px-3" disabled={pending} type="submit">
+          <button className="workbench-button-secondary min-h-9 px-3" disabled={inputsDisabled} type="submit">
             {t('workItems.effort.save')}
           </button>
           <span className="w-full text-xs text-[var(--workbench-muted)]">

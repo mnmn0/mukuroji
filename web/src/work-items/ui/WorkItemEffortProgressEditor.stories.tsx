@@ -58,3 +58,12 @@ export const ReadOnlyWithoutEstimate: Story = {
     readOnly: true,
   },
 }
+
+/** Inputs stay mounted but disabled while another update of the Work Item is pending. */
+export const DisabledWhilePending: Story = {
+  args: { disabled: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByLabelText('残工数（時間）')).toBeDisabled()
+  },
+}

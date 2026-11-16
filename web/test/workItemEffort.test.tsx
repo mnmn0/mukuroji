@@ -63,6 +63,12 @@ describe('Work Item effort and progress', () => {
     expect(renderToStaticMarkup(
       <WorkItemEffortProgressEditor editorIdentity="x" item={estimated} locale="en" readOnly />,
     )).not.toContain('name="remainingEffortHours"')
+    // While another update is pending the inputs stay mounted, disabled, so typed values survive a failure.
+    const pendingHtml = renderToStaticMarkup(
+      <WorkItemEffortProgressEditor disabled editorIdentity="x" item={estimated} locale="en" onSave={async () => undefined} />,
+    )
+    expect(pendingHtml).toMatch(/<input[^>]*disabled=""[^>]*name="remainingEffortHours"/)
+    expect(pendingHtml).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/)
   })
 
   test('writes an estimate change into the same schedule placement and passes other changes through', () => {

@@ -1281,7 +1281,9 @@ export function TaskDetailPane({
                 locale={locale}
                 {...(resolvedConfiguration?.progressMode ? { progressMode: resolvedConfiguration.progressMode } : {})}
                 onSave={(change) => submitIssueUpdate(toWorkItemEffortPatch(change, schedule))}
-                readOnly={isReadOnly || isWorkItemMutationPending}
+                // A pending mutation only disables the inputs, so typed values survive a failed save.
+                disabled={isWorkItemMutationPending}
+                readOnly={isReadOnly}
               />
             </div>
           </fieldset>

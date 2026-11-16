@@ -995,7 +995,9 @@ function IssueDetailContent({
                 {...(configuration?.progressMode ? { progressMode: configuration.progressMode } : {})}
                 canEditEstimate
                 {...(onUpdateIssue ? { onSave: saveEffortProgress } : {})}
-                readOnly={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+                // A pending mutation only disables the inputs, so typed values survive a failed save.
+                disabled={isAiSummaryOperationPending || isIssueUpdatePending}
+                readOnly={isIssueReadOnly}
               />
             </div>
           </div>
