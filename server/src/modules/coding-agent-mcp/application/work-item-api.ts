@@ -239,6 +239,12 @@ export interface AgentWorkItemApi {
    * @returns Criteria in order; empty when none or when the server predates acceptance criteria.
    */
   acceptanceCriteria(id: string): Promise<WorkItemAcceptanceCriterion[]>
+  /**
+   * Reads the short immutable key of a task, such as `ABC-123`.
+   * @param id - Task ID.
+   * @returns The key, or `undefined` when the task predates keys or the server predates the endpoint.
+   */
+  taskKey(id: string): Promise<string | undefined>
 }
 
 /** Safe, transport-independent error that may be returned to the MCP client. */

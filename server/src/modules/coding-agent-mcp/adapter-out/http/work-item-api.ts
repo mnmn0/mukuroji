@@ -13,7 +13,7 @@ const identifier = z.string().min(1).max(256).refine((value) => value !== '.' &&
 const category = z.enum(['backlog', 'unstarted', 'started', 'completed', 'canceled'])
 const customValue = z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()).max(100)])
 const taskSchema: z.ZodType<AgentTask> = z.object({
-  id: identifier, key: z.string().refine(isCanonicalWorkItemKey).optional(), teamId: identifier, revision: z.number().int().positive(),
+  id: identifier, teamId: identifier, revision: z.number().int().positive(),
   title: z.string(), description: z.string().optional(), assigneeUserId: identifier,
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
   workItemTypeId: identifier.optional(), statusCategory: category,
@@ -29,6 +29,10 @@ const acceptanceCriteriaSchema = z.object({
     text: z.string().min(1).max(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH),
     satisfied: z.boolean(),
   })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
+})
+const keySchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
+  key: z.string().refine(isCanonicalWorkItemKey).optional(),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
@@ -351,6 +355,20 @@ export function createAgentWorkItemApi(
         throw new AgentTaskError('invalid_response', 'The API returned acceptance criteria of another task.')
       }
       return criteria.items
+    },
+    /** Reads a task's key; a task created before keys, or a server older than the endpoint, has none. */
+    async taskKey(id) {
+      let found: z.infer<typeof keySchema>
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/key`, keySchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the key of another task.')
+      }
+      return found.key
     },
   }
 

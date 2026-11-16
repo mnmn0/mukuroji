@@ -221,6 +221,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
     async acceptanceCriteria() { return [] },
+    async taskKey() { return undefined },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -307,6 +308,19 @@ describe('agent task lifecycle', () => {
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
     expect(sent.at(-1)).toEqual({ expectedRevision: 1, acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }] })
     expect(criteriaReads).toEqual(['bare', 'canonical'])
+  })
+
+  test('shows the task key in get_task so agents can use it in branch names and PR titles', async () => {
+    const keyReads: string[] = []
+    const { service } = fixture([task('keyed'), task('legacy')], {
+      async taskKey(id) {
+        keyReads.push(id)
+        return id === 'keyed' ? 'TEAM-7' : undefined
+      },
+    })
+    expect(await service.get('keyed')).toMatchObject({ task: { id: 'keyed', key: 'TEAM-7' } })
+    expect((await service.get('legacy')).task).not.toHaveProperty('key')
+    expect(keyReads).toEqual(['keyed', 'legacy'])
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {

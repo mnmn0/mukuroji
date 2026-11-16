@@ -44,7 +44,7 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 
 ## Work Item key
 
-`WorkItem` は `ABC-123` 形式の `key` を持つことがあります。Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item には付きません。操作の path には従来どおり `id` を使います。`title` は 1〜256 文字です。
+`GET /api/v1/work-items/{workItemId}/key?teamId={teamId}` は Work Item の `ABC-123` 形式の `key` を `{ schemaVersion, teamId, workItemId, key }` で返します。key は Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item では `key` を省きます。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。既存の `WorkItem` は closed schema なので `key` を含めません。操作の path には従来どおり `id` を使います。
 
 ## Work Item Type catalog
 

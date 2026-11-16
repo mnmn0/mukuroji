@@ -420,7 +420,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     /** Returns canonical details, dependency readiness, and the task's active run. */
     async get(id: string) {
-      const task = inScope(await api.get(id))
+      const scoped = inScope(await api.get(id))
+      const key = await api.taskKey(id)
+      const task = key === undefined ? scoped : { ...scoped, key }
       // The claim is read directly, so a run started moments ago or before a restart is found.
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
@@ -476,8 +478,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const counts: Record<WorkflowStatusCategory, number> = { backlog: 0, unstarted: 0, started: 0, completed: 0, canceled: 0 }
       for (const task of tasks) counts[task.statusCategory] += 1
       return { counts, total: tasks.length, inProgress: tasks.filter((task) => task.statusCategory === 'started').map((task) => ({
-        id: task.id, ...(task.key === undefined ? {} : { key: task.key }), title: task.title,
-        workflowStatusId: task.workflowStatusId, revision: task.revision, updatedAt: task.updatedAt,
+        id: task.id, title: task.title, workflowStatusId: task.workflowStatusId, revision: task.revision, updatedAt: task.updatedAt,
       })) }
     },
     transition,

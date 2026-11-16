@@ -1966,3 +1966,20 @@ describe('Factory board route', () => {
     expect(await corrupt.json()).not.toHaveProperty('items')
   })
 })
+
+describe('Public Work Item key', () => {
+  test('returns the key from its own endpoint and keeps it off the closed Work Item response', async () => {
+    const { projectOptions } = configureUnstartedAssignedWorkItem()
+    projectOptions.detailKeys = { 'task-1': 'CT-1' }
+    const workItems = createCanonicalPublicWorkItemService()
+
+    expect(await runWithTestAppDependencies(() => workItems.getKey(credential, 'core-team', 'task-1')))
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', key: 'CT-1' })
+    // Adding a property to the closed public Work Item schema would break existing clients.
+    expect(await runWithTestAppDependencies(() => workItems.get(credential, 'core-team', 'task-1')))
+      .not.toHaveProperty('key')
+    // A Work Item created before keys existed has none.
+    expect(await runWithTestAppDependencies(() => workItems.getKey(credential, 'core-team', 'task-2')))
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-2' })
+  })
+})

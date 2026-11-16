@@ -33,9 +33,6 @@ export const WORK_ITEM_SCHEDULE_MAX_HOLIDAYS = 512 as const
 /** Earliest four-digit Gregorian year accepted by every Work Item schedule boundary. */
 export const WORK_ITEM_SCHEDULE_MIN_YEAR = 1_000 as const
 
-/** Maximum Work Item title length in Unicode code points, matching the coding-agent MCP limit. */
-export const WORK_ITEM_TITLE_MAX_LENGTH = 256 as const
-
 /** Highest sequence number a Work Item key can carry within one Team prefix. */
 export const WORK_ITEM_KEY_MAX_NUMBER = 999_999_999 as const
 
@@ -756,4 +753,19 @@ export type WorkItemKeyLookupResponse = {
   teamId: string
   /** Work Item ID within the Team. */
   workItemId: string
+}
+
+/**
+ * Response of `GET /api/v1/work-items/{workItemId}/key`, which tells a Public API client the
+ * Work Item key without adding a property to the stable `WorkItem` schema.
+ */
+export type PublicWorkItemKey = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item ID within the Team. */
+  workItemId: string
+  /** Canonical key such as `ABC-123`, absent on Work Items created before keys existed. */
+  key?: string
 }

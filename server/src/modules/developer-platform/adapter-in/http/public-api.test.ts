@@ -465,7 +465,7 @@ test('serves the same authenticated API contract from Function URL root and /api
   )
 })
 
-test('projects the Work Item key onto the public response only when the Work Item has one', () => {
+test('keeps the Work Item key off the closed public Work Item response', () => {
   const workItem: CanonicalWorkItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -487,6 +487,6 @@ test('projects the Work Item key onto the public response only when the Work Ite
     source: 'dynamodb',
   }
 
-  expect(projectPublicWorkItem({ ...workItem, key: 'CT-7' }).key).toBe('CT-7')
-  expect('key' in projectPublicWorkItem(workItem)).toBe(false)
+  // Clients read the key from GET /api/v1/work-items/{workItemId}/key instead.
+  expect(projectPublicWorkItem({ ...workItem, key: 'CT-7' })).not.toHaveProperty('key')
 })

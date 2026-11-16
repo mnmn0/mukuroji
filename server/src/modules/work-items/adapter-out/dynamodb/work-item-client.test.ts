@@ -4194,35 +4194,6 @@ test('DynamoDB Work Item creation skips a key whose ID an older title-based Work
   expect(sentCommands.filter((command) => command.name === 'QueryCommand')).toHaveLength(1)
 })
 
-test('DynamoDB Work Item creation rejects titles longer than the limit on create and update', async () => {
-  const documentClient = {
-    async send() {
-      throw new Error('Nothing should reach DynamoDB.')
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
-
-  await expect(client.createTeamIssue(
-    'workspace-1',
-    'core-team',
-    createKeyTestInput('あ'.repeat(257)),
-    'demo@example.com',
-  )).rejects.toMatchObject({ status: 400, code: 'WorkItemTitleTooLong' })
-  await expect(client.updateTeamIssue(
-    'workspace-1',
-    'core-team',
-    'ct-1',
-    { title: 'x'.repeat(257), expectedRevision: 1 },
-    'demo@example.com',
-  )).rejects.toMatchObject({ status: 400, code: 'WorkItemTitleTooLong' })
-})
-
 test('DynamoDB Request conversion replay returns the existing Work Item without a new key', async () => {
   const sentCommands: string[] = []
   const existing = {

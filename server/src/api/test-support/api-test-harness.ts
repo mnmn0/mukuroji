@@ -1458,6 +1458,8 @@ function configureFakeProjectClients(
      * When set, an update increments the stored revision so later reads observe it.
      */
     detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
+    /** Work Item key the detail fake returns, by Work Item ID; Work Items not listed have none. */
+    detailKeys?: Record<string, string>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
@@ -2746,6 +2748,7 @@ function configureFakeProjectClients(
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: options.detailRevisions?.[`${teamId}\0${issueId}`] ?? 1,
             id: issueId,
+            ...(options.detailKeys?.[issueId] === undefined ? {} : { key: options.detailKeys[issueId] }),
             teamId,
             assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
               (options.unassignedIssue
