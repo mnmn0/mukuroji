@@ -905,6 +905,8 @@ export type ArchivedPlanningEntitySummary = {
   teamId?: string
   /** Archive 時点の Project scope です。 */
   projectId?: string
+  /** Entity owner の member key です。復元には owner が active な member である必要があります。 */
+  ownerMemberKey: string
   /** Archive した日時の ISO 8601 timestamp です。 */
   archivedAt: string
 }

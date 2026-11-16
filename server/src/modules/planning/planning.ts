@@ -665,6 +665,11 @@ type PlanningArchiveChange =
       kind: 'delete'
       /** Sort key of the archive row in the Workspace partition. */
       recordKey: string
+      /**
+       * Fails the transaction when the row is already gone, so a reference consumed by a
+       * concurrent restore is never applied twice.
+       */
+      requireExisting?: boolean
     }
 
 /** Which field of a Work Item link pointed at an archived entity. */
@@ -989,8 +994,16 @@ abstract class BasePlanningClient implements PlanningClient {
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
   ) {
-    const response = await this.archiveInLiveGraph(workspaceId, entityId, input, workItemState)
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const current = await this.readState(normalizedWorkspaceId)
+    const live = findEntity(current, entityId)
+    let response: PlanningMutationResponse | undefined
+    if (live?.archivedAt === undefined) {
+      response = await this.archiveInLiveGraph(normalizedWorkspaceId, entityId, input, workItemState)
+    } else if (current.revision !== readRevision(input.expectedRevision)) {
+      throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    }
+    // An entity archived earlier but still live resumes moving its rows out of the live graph.
     let compacted = false
     try {
       for (let step = 0; step < PLANNING_ARCHIVE_REQUEST_STEP_LIMIT; step += 1) {
@@ -1006,11 +1019,17 @@ abstract class BasePlanningClient implements PlanningClient {
       // The archive revision is committed. Remaining rows move on the next archive request.
       if (!(error instanceof PlanningError) || error.status >= 500) console.error(error)
     }
-    if (!compacted) return response
+    if (response && !compacted) return response
     try {
-      return { ...response, planning: await this.get(normalizedWorkspaceId, workItemState) }
-    } catch {
-      return response
+      return {
+        movedWorkItemIds: [],
+        retainedWorkItemIds: [],
+        ...response,
+        planning: await this.get(normalizedWorkspaceId, workItemState),
+      }
+    } catch (error) {
+      if (response) return response
+      throw error
     }
   }
 
@@ -1033,12 +1052,23 @@ abstract class BasePlanningClient implements PlanningClient {
     if (archivedEntity) {
       await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
         state: restoreArchivedEntity(state, archivedEntity, now),
-        archiveChanges: [{ kind: 'delete', recordKey: createArchivedEntityRecordKey(entityId) }],
+        archiveChanges: [{
+          kind: 'delete',
+          recordKey: createArchivedEntityRecordKey(entityId),
+          requireExisting: true,
+        }],
       }))
     } else {
       const live = findEntity(await this.readState(workspaceId), entityId)
-      if (!live || live.archivedAt) {
+      if (!live) {
         throw notFound('PlanningArchivedEntityNotFound', 'Archived Planning entity was not found.')
+      }
+      if (live.archivedAt) {
+        // Archived but still live: kept for its update target, kept for a live child, or not yet
+        // moved out. Clearing the archive state restores it in place.
+        await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
+          state: unarchiveLiveEntity(state, entityId, now),
+        }))
       }
     }
     const summary: PlanningRestoreSummary = {
@@ -1095,7 +1125,9 @@ abstract class BasePlanningClient implements PlanningClient {
       if (!(error instanceof PlanningError) || error.status >= 500) throw error
       // Capacity or a concurrent mutation stopped the restore; the rest stays in the archive.
     }
-    summary.pendingReferenceCount = pending.length + hidden.size
+    // Re-read so references consumed by a concurrent restore are not reported as pending.
+    summary.pendingReferenceCount =
+      (await this.readArchivedEntityBundle(workspaceId, entityId)).references.length
     return { planning: await this.get(workspaceId, workItemState), restore: summary }
   }
 
@@ -2529,6 +2561,15 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     if (current.revision !== before.revision) {
       throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
     }
+    if (archiveChanges.some((change) =>
+      change.kind === 'delete' && change.requireExisting &&
+      !this.archives.get(workspaceId)?.has(change.recordKey)
+    )) {
+      throw conflict(
+        'PlanningArchiveChanged',
+        'Archived Planning references changed. Run the restore again.',
+      )
+    }
     if (publishedUpdate) {
       const key = createPlanningUpdateHistoryMapKey(workspaceId, publishedUpdate.target)
       const currentHistory = this.updateHistories.get(key) ?? []
@@ -3281,10 +3322,18 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (recordKey === META_RECORD_KEY || afterRows.has(recordKey)) continue
       mutations.push({ Delete: { TableName: this.tableName, Key: { workspaceId, recordKey } } })
     }
+    const guardedArchiveDeleteOffsets: number[] = []
     for (const change of archiveChanges) {
       if (change.kind === 'delete') {
+        if (change.requireExisting) guardedArchiveDeleteOffsets.push(mutations.length)
         mutations.push({
-          Delete: { TableName: this.tableName, Key: { workspaceId, recordKey: change.recordKey } },
+          Delete: {
+            TableName: this.tableName,
+            Key: { workspaceId, recordKey: change.recordKey },
+            ...(change.requireExisting
+              ? { ConditionExpression: 'attribute_exists(recordKey)' }
+              : {}),
+          },
         })
         continue
       }
@@ -3413,6 +3462,16 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         throw conflict(
           'PlanningWorkItemChanged',
           'A canonical Work Item changed. Reload Planning and try again.',
+        )
+      }
+      const mutationStartIndex =
+        1 + canonicalConditions.length + authorizationConditionChecks.length
+      if (guardedArchiveDeleteOffsets.some((offset) =>
+        isPlanningTransactionConditionalFailureAt(error, mutationStartIndex + offset)
+      )) {
+        throw conflict(
+          'PlanningArchiveChanged',
+          'Archived Planning references changed. Run the restore again.',
         )
       }
       const publishedUpdateIndex =
@@ -6668,6 +6727,48 @@ function restoreArchivedEntity(
 }
 
 /**
+ * Returns the live graph with an archived entity that is still live made active again.
+ *
+ * @param state - Current live graph.
+ * @param entityId - Archived live entity.
+ * @param now - Restore timestamp.
+ * @returns The live graph with `archivedAt` cleared on the entity and its update target.
+ */
+function unarchiveLiveEntity(
+  state: PlanningWorkspaceState,
+  entityId: string,
+  now: string,
+): PlanningWorkspaceState {
+  const current = findEntity(state, entityId)
+  if (!current?.archivedAt) {
+    throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+  }
+  if (current.parentId !== undefined) {
+    const parent = findEntity(state, current.parentId)
+    if (!parent || parent.archivedAt) {
+      throw conflict(
+        'PlanningRestoreParentUnavailable',
+        'Restore the parent Planning entity before this entity.',
+      )
+    }
+  }
+  const restored: StoredPlanningEntity = { ...current, updatedAt: now }
+  delete restored.archivedAt
+  let next = replaceEntity(state, restored)
+  if (current.type === 'initiative') {
+    const target = findStoredPlanningUpdateTarget(next, { type: 'initiative', entityId })
+    if (target?.archivedAt !== undefined) {
+      const active: StoredPlanningUpdateTarget = { ...target, updatedAt: now }
+      delete active.archivedAt
+      // The schedule index is derived again from the cadence when the row is written.
+      delete active.nextNotificationAtRecordKey
+      next = replacePlanningUpdateTarget(next, active)
+    }
+  }
+  return next
+}
+
+/**
  * Returns whether adding a dependency keeps the live dependency graph valid.
  *
  * @param state - Current live graph.
@@ -6732,6 +6833,7 @@ function restoreLinkReference(
   const current = state.workItemLinks.find((link) =>
     link.teamId === teamId && link.workItemId === workItemId
   )
+  if (current && current.projectId !== summary.projectId) return undefined
   const link: PlanningWorkItemLink = current
     ? { ...current, goalIds: [...current.goalIds] }
     : {
@@ -6856,7 +6958,7 @@ function planArchiveRestoreStep(
         budget -= 1
       }
     }
-    archiveChanges.push({ kind: 'delete', recordKey })
+    archiveChanges.push({ kind: 'delete', recordKey, requireExisting: true })
     processedCount += 1
   }
   return {
@@ -6880,6 +6982,7 @@ function createArchivedEntitySummary(entity: StoredPlanningEntity): ArchivedPlan
     ...(entity.parentId === undefined ? {} : { parentId: entity.parentId }),
     ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
     ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
+    ownerMemberKey: entity.ownerMemberKey,
     archivedAt: entity.archivedAt ?? entity.updatedAt,
   }
 }

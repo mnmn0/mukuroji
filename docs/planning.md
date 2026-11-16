@@ -62,18 +62,20 @@ Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の
 - Work Item link は Work Item ごとに 1 row で、Cycle・Milestone・Goal を同時に持てます。退避するのは archive した entity を指す参照だけです。ほかの参照が残る link は live graph に残り、残らない link は削除します。退避した参照は `ARCHIVE_REF#<entity>#LINK#<team>#<workItem>` に、参照を外す前の link とともに保存します
 - 子 entity が live graph に残っている entity は退避しません（子は親を live graph で解決するため）。子を退避したあとに親を退避します
 - Update target を持つ Initiative は archive しても live graph に残します。Update target と immutable update 履歴は通知 schedule と Update Feed が live graph から解決しており、update target は 2,000 件の上限で抑えられているためです。その親も live graph に残ります
-- 1 request で進める退避は 40 revision までです。途中で止まった分（同時編集による revision 競合が 3 回続いた場合など）は live graph で archive 済みのまま残り、次の archive request が続きを退避します。Archive の response は退避後の snapshot を返します
+- 1 request で進める退避は 40 revision までです。途中で止まった分（link が数千件ある場合や、同時編集による revision 競合が 3 回続いた場合など）は live graph で archive 済みのまま残ります。同じ entity の archive を再実行すると、archive の revision を作らずに続きを退避します（ほかの entity の archive でも続きが進みます）。Archive の response は退避後の snapshot を返します
 - 退避中の entity と同じ ID の entity は作成・複製できません（`409 PlanningEntityExists`）。復元するか別の ID を使います
 
-`GET /api/planning/archived-entities?limit=&cursor=` は退避済み entity を ID 順に返します（1 page 最大 50 件）。各 entity の Team / Project scope を manager 権限で確認し、呼び出し元が復元できるものだけを返します。そのため page の件数が `limit` より少なくても `nextCursor` が続くことがあります。
+`GET /api/planning/archived-entities?limit=&cursor=` は退避済み entity を ID 順に返します（1 page 最大 50 件）。各 entity の Team / Project scope を manager 権限で確認し、呼び出し元が復元できるものだけを返します。そのため page の件数が `limit` より少なくても `nextCursor` が続くことがあります。一覧の route は Workspace 単位で認可するため、Enterprise の Team / Project 単位の付与だけを持つ利用者には一覧が空になります。その利用者も、entity ID を指定した復元はその entity の scope で認可されるので実行できます。画面で一覧を出す後続の変更で、scope ごとの一覧を検討します。
 
-`POST /api/planning/entities/:entityId/restore` は `{ expectedRevision }` を受け取り、退避済み entity を active に戻します。権限は archive と同じく entity の scope の manager で、親が live graph にある場合は親の member 権限も確認します。
+`POST /api/planning/entities/:entityId/restore` は `{ expectedRevision }` を受け取り、退避済み entity を active に戻します。権限は archive と同じく entity の scope の manager で、親が live graph にある場合は親の member 権限も確認します。Enterprise 認可では、退避済み entity の Team / Project scope を認可対象の resource とします。Archive 中に owner が無効になった entity は、作成・複製と同じく `409 PlanningOwnerInactive` で拒否します。
+
+Live graph に残っている archive 済み entity（update target を持つ Initiative とその親、退避の途中のもの）も同じ API で戻せます。この場合は live graph の中で `archivedAt` を外し、Initiative の update target も active に戻します（通知の due-index は cadence から作り直します）。
 
 - 最初の revision は呼び出し元の `expectedRevision` で entity を戻します。親が live graph にないか archive 済みなら `409 PlanningRestoreParentUnavailable`、親の Team / Project scope が変わっていれば scope 不一致の 409 になり、entity は退避されたままです。先に親を戻すか、親を元の scope に戻します
-- 続く revision で参照を最大 30 件ずつ戻します。Link の参照は Work Item の revision を同じ transaction で条件検証します。Work Item の同じ欄が別の Cycle / Milestone を指している、Cycle の capacity を超える、Goal が 100 件を超えるなど、戻すと整合しない参照は破棄します。呼び出し元から見えない（または削除・archive 済みの）Work Item の参照は破棄せず退避先に残し、見える人が復元を再実行すると戻ります
+- 続く revision で参照を最大 30 件ずつ戻します。Link の参照は Work Item の revision を同じ transaction で条件検証し、消費する退避用 row が残っていることも条件にします（同時に走った復元が同じ参照を二重に戻さないため）。Work Item の同じ欄が別の Cycle / Milestone を指している、link の Project が Work Item の現在の Project と違う、Cycle の capacity を超える、Goal が 100 件を超えるなど、戻すと整合しない参照は破棄します。呼び出し元から見えない（または削除・archive 済みの）Work Item の参照は破棄せず退避先に残し、見える人が復元を再実行すると戻ります
 - Dependency は、相手の entity が live graph にあれば戻します（重複や循環になるもの、constraint を満たさないものは破棄）。相手がまだ退避中なら相手の退避先に移し、相手を復元したときに戻します
 - 容量（20,000 row / 24 MB）を超える分は戻さず退避先に残します。容量を空けてから同じ復元を再実行すると、active な entity に残っている参照の続きを戻します
-- Response は `{ planning, restore }` です。`restore` は `restoredLinkCount`、`droppedLinkCount`、`restoredDependencyCount`、`retainedDependencyCount`、`droppedDependencyCount`、`pendingReferenceCount` を返します
+- Response は `{ planning, restore }` です。`restore` は `restoredLinkCount`、`droppedLinkCount`、`restoredDependencyCount`、`retainedDependencyCount`、`droppedDependencyCount`、`pendingReferenceCount` を返します。`pendingReferenceCount` は復元の最後に退避先を読み直した件数です
 
 Team / Project の archive は、live graph に残る link と active な entity だけを確認します。退避済みの参照は確認しないため、archive 済み Cycle の link だけが残っていた Team / Project も archive できます。その Team / Project の entity を復元するには、先に Team / Project を戻す必要があります。
 

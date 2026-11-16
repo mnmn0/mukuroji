@@ -2282,6 +2282,51 @@ test('rejects an inactive Planning owner before invoking the mutation client', a
   expect(createCalls).toBe(0)
 })
 
+test('rejects restoring an archived entity whose owner became inactive', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  setTestAppDependencies({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-archived-owner', 0),
+      ownerMemberKey: 'former-owner@example.com',
+    },
+  )
+  expect(created.status).toBe(201)
+  const archived = await planningApiRequest(
+    '/api/planning/entities/cycle-archived-owner/archive',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(archived.status).toBe(200)
+
+  let restoreCalls = 0
+  const restore = planningClient.restore.bind(planningClient)
+  planningClient.restore = async (...input) => {
+    restoreCalls += 1
+    return restore(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    inactiveWorkspaceMemberKeys: ['former-owner@example.com'],
+  })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/cycle-archived-owner/restore',
+    'POST',
+    { expectedRevision: 3 },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(restoreCalls).toBe(0)
+  expect(await planningClient.getArchivedEntity('user#demo@example.com', 'cycle-archived-owner'))
+    .toMatchObject({ ownerMemberKey: 'former-owner@example.com' })
+})
+
 test('rejects duplicate when the source Planning owner became inactive', async () => {
   const planningClient = new InMemoryPlanningClient()
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })

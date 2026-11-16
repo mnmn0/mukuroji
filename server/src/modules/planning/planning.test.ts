@@ -1551,6 +1551,7 @@ describe('planning domain', () => {
             title: 'cycle-source',
             teamId: 'team-1',
             projectId: 'project-1',
+            ownerMemberKey: 'owner@example.com',
             archivedAt: NOW.toISOString(),
           }],
         })
@@ -4233,7 +4234,16 @@ describe('planning persistence', () => {
     expect(restored.planning.revision).toBe(10)
     expect(writes.length - writesBeforeRestore).toBe(5)
     for (const write of writes.slice(writesBeforeRestore)) {
-      expect((write.TransactItems as unknown[]).length).toBeLessThanOrEqual(100)
+      const items = write.TransactItems as Array<Record<string, Record<string, unknown>>>
+      expect(items.length).toBeLessThanOrEqual(100)
+      // Each archive row a restore consumes must still exist, so a concurrent restore cannot
+      // apply the same reference twice.
+      for (const item of items) {
+        const key = item.Delete?.Key as Record<string, unknown> | undefined
+        if (String(key?.recordKey).startsWith('ARCHIVE')) {
+          expect(item.Delete?.ConditionExpression).toBe('attribute_exists(recordKey)')
+        }
+      }
     }
     expect(restored.planning.workItemLinks).toHaveLength(100)
     expect(restored.planning.workItemLinks.every((link) => link.goalIds.includes('goal-1')))
@@ -4429,6 +4439,38 @@ describe('planning persistence', () => {
     expect(roadmap.planning.revision).toBe(6)
     expect(getEntity(roadmap.planning.entities, 'roadmap-1').archivedAt).toBe(NOW.toISOString())
     expect(await client.listArchivedEntities('workspace-1', {})).toEqual({ entities: [] })
+
+    // Archived entities that stay live are restored in place, parent first.
+    await expect(client.restore('workspace-1', 'initiative-1', { expectedRevision: 6 }, EMPTY_WORK_ITEMS))
+      .rejects.toMatchObject({ status: 409, code: 'PlanningRestoreParentUnavailable' })
+    await client.restore('workspace-1', 'roadmap-1', { expectedRevision: 6 }, EMPTY_WORK_ITEMS)
+    const restored = await client.restore(
+      'workspace-1',
+      'initiative-1',
+      { expectedRevision: 7 },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(restored.planning.revision).toBe(8)
+    expect(getEntity(restored.planning.entities, 'initiative-1').archivedAt).toBeUndefined()
+    expect(restored.planning.updateTargets.find((target) =>
+      target.target.type === 'initiative' && target.target.entityId === 'initiative-1'
+    )?.archivedAt).toBeUndefined()
+  })
+
+  test('resumes moving an archived entity that is still live', async () => {
+    const rows = createGoalLinkRows(104)
+    const goal = rows.find((row) => row.recordKey === 'ENTITY#goal-1')
+    if (!goal) throw new Error('Expected the Goal row.')
+    goal.archivedAt = NOW.toISOString()
+    const { client } = createFakePlanningTable(rows)
+    const resumed = await client.archive('workspace-1', 'goal-1', { expectedRevision: 1 }, EMPTY_WORK_ITEMS)
+    // No new archive revision; three revisions move the 100 link references and the Goal.
+    expect(resumed.planning.revision).toBe(4)
+    expect(resumed.planning.capacity.liveRowCount).toBe(3)
+    expect(resumed).toMatchObject({ movedWorkItemIds: [], retainedWorkItemIds: [] })
+    expect(await client.getArchivedEntity('workspace-1', 'goal-1')).toMatchObject({ id: 'goal-1' })
+    await expect(client.archive('workspace-1', 'goal-1', { expectedRevision: 4 }, EMPTY_WORK_ITEMS))
+      .rejects.toMatchObject({ status: 404, code: 'PlanningEntityNotFound' })
   })
 
   test('validates archive list paging input', async () => {

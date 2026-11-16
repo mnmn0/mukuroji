@@ -3811,8 +3811,16 @@ export function registerPlanningRoutes(routeApp: Hono): void {
             'member',
           )
         }
-      } else {
-        await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
+      }
+      const owner = archived ?? await requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        entityId,
+        'manager',
+      )
+      // The owner may have been deactivated while the entity was archived.
+      if (owner.archivedAt !== undefined) {
+        await requirePlanningActiveOwner(principal, owner.ownerMemberKey)
       }
       const response = await workItemDependencies.planning.restore(
         principal.directoryId,

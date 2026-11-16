@@ -1566,6 +1566,15 @@ async function resolveEnterpriseAuthorizationResource(
       const authorizationState = await workItemDependencies.planning.getAuthorizationState(workspaceId)
       const entity = authorizationState.entities.find((candidate) =>
         candidate.id === decodePathSegment(entityId)
+      ) ?? (
+        // A restore targets an entity that left the live graph; its archived scope is the resource.
+        // A failed lookup falls back to the Workspace resource, which only narrows access.
+        /\/planning\/entities\/[^/]+\/restore$/u.test(path)
+          ? await workItemDependencies.planning.getArchivedEntity(
+              workspaceId,
+              decodePathSegment(entityId),
+            ).catch(() => undefined)
+          : undefined
       )
       if (entity?.projectId) {
         return {
