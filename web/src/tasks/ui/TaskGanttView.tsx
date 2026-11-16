@@ -58,12 +58,10 @@ import {
   TaskWorkItemTypeBadge,
   TaskViewHeading,
 } from './TaskViewPrimitives'
-import { TaskScheduleWindowToolbar } from './TaskScheduleWindowToolbar'
+import { TaskGanttPeriodNavigation } from './TaskScheduleWindowToolbar'
 import {
   createTaskGanttWindow,
-  getCurrentTaskMonth,
   listTaskScheduleWindowDates,
-  shiftTaskMonth,
   type TaskScheduleWindow,
 } from '../model/taskScheduleWindow'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
@@ -520,20 +518,11 @@ export function TaskGanttView({
         t={t}
         titleKey="tasks.view.gantt"
       />
-      {windowStartMonth && timelineWindow && onWindowStartMonthChange ? (
-        <TaskScheduleWindowToolbar
-          ariaLabel={t('tasks.gantt.periodNavigation')}
-          currentLabel={t('tasks.gantt.currentPeriod')}
-          nextLabel={t('tasks.gantt.nextPeriod')}
-          note={t('tasks.scheduleWindow.note')}
-          onCurrent={() => onWindowStartMonthChange(getCurrentTaskMonth())}
-          onNext={() => onWindowStartMonthChange(shiftTaskMonth(windowStartMonth, 1))}
-          onPrevious={() => onWindowStartMonthChange(shiftTaskMonth(windowStartMonth, -1))}
-          periodLabel={t('tasks.scheduleWindow.range')
-            .replace('{from}', timelineWindow.from)
-            .replace('{to}', timelineWindow.to)}
-          previousLabel={t('tasks.gantt.previousPeriod')}
-          testId="task-gantt-period-navigation"
+      {windowStartMonth && onWindowStartMonthChange ? (
+        <TaskGanttPeriodNavigation
+          onStartMonthChange={onWindowStartMonthChange}
+          startMonth={windowStartMonth}
+          t={t}
         />
       ) : null}
       {dependencyRows.length > 0 ? (

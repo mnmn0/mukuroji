@@ -53,11 +53,12 @@ export function useEffectiveTaskViewLayoutMode(
   const overrideMode = parsedUrl.state.override?.layout?.mode
   if (overrideMode) return overrideMode
   if (!input.accessToken || !input.enabled) return undefined
-  // A failed saved-view read falls back to the built-in layout, as the controller does.
   if (savedViews.data === undefined && savedViews.error === undefined) return undefined
+  // A failed read of the current scope falls back to the built-in layout, as the controller
+  // does; the previous scope's views kept by `keepPreviousData` must not decide it then.
   return resolveTaskViewLayoutMode({
     builtInMode: input.builtInMode,
-    savedViews: savedViews.data?.views ?? [],
+    savedViews: savedViews.error === undefined ? savedViews.data?.views ?? [] : [],
     ...(parsedUrl.state.viewId ? { viewId: parsedUrl.state.viewId } : {}),
   })
 }

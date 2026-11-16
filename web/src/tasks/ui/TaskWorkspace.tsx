@@ -72,6 +72,10 @@ import {
 import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
 import { TaskBoardView } from './TaskBoardView'
+import {
+  TaskCalendarMonthNavigation,
+  TaskGanttPeriodNavigation,
+} from './TaskScheduleWindowToolbar'
 import { TaskCalendarView } from './TaskCalendarView'
 import { TaskFileView } from './TaskFileView'
 import { TaskGanttView } from './TaskGanttView'
@@ -679,6 +683,25 @@ export function TaskWorkspace({
         </ResponsiveDisclosure>
       </div>
 
+      {/* A period that fails to load keeps its navigation, so another period can be chosen. */}
+      {taskErrorMessage && scheduleWindowNavigation && activeTab === 'calendar' ? (
+        <div className="workbench-table mt-3 overflow-hidden">
+          <TaskCalendarMonthNavigation
+            month={scheduleWindowNavigation.calendarMonth}
+            onMonthChange={scheduleWindowNavigation.onCalendarMonthChange}
+            t={t}
+          />
+        </div>
+      ) : null}
+      {taskErrorMessage && scheduleWindowNavigation && activeTab === 'gantt' ? (
+        <div className="workbench-table mt-3 overflow-hidden">
+          <TaskGanttPeriodNavigation
+            onStartMonthChange={scheduleWindowNavigation.onGanttStartMonthChange}
+            startMonth={scheduleWindowNavigation.ganttStartMonth}
+            t={t}
+          />
+        </div>
+      ) : null}
       {taskErrorMessage && activeTab !== 'table' ? (
         <p
           className="mt-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-fg-red-700"

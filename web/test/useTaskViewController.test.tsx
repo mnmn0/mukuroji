@@ -18,6 +18,7 @@ import {
   type UseTaskViewControllerInput,
 } from '../src/task-views/mutations/useTaskViewController'
 import { resolveTaskViewLayoutMode } from '../src/task-views/model/taskViewBaseSelection'
+import { useEffectiveTaskViewLayoutMode } from '../src/task-views/queries/useEffectiveTaskViewLayoutMode'
 import {
   parseTaskViewUrlState,
   updateTaskViewUrlState,
@@ -787,6 +788,57 @@ describe('resolveTaskViewLayoutMode', () => {
       override: { layout: { mode: 'board' } },
       savedViews,
     })).toBe('board')
+  })
+})
+
+describe('useEffectiveTaskViewLayoutMode', () => {
+  const scope = { kind: 'project', projectId: 'refero' } as const
+  const key = unstable_serialize(['saved-task-views', 'token', 'project', JSON.stringify(scope)])
+  const calendarDefault = createSavedView('calendar-view', 'cal', 'calendar', {
+    isDefault: true,
+    defaultSource: 'personal',
+  })
+
+  /** Renders the hook once against a seeded saved-view cache state. */
+  function renderLayoutMode(
+    cacheState: Record<string, unknown> | undefined,
+    options: { enabled?: boolean; searchParams?: URLSearchParams } = {},
+  ) {
+    let captured: string | undefined = 'unset'
+    /** Captures one server-rendered layout result. */
+    function Probe() {
+      captured = useEffectiveTaskViewLayoutMode({
+        accessToken: 'token',
+        builtInMode: 'table',
+        enabled: options.enabled ?? true,
+        scope,
+        searchParams: options.searchParams ?? new URLSearchParams(),
+        surface: 'project',
+      })
+      return null
+    }
+    renderToStaticMarkup(
+      <SWRConfig value={{
+        provider: () => new Map(cacheState ? [[key, cacheState]] : []),
+        revalidateOnMount: false,
+      }}>
+        <Probe />
+      </SWRConfig>,
+    )
+    return captured
+  }
+
+  test('waits for enabled saved views and falls back to the built-in layout on failure', () => {
+    expect(renderLayoutMode(undefined, { enabled: false })).toBeUndefined()
+    expect(renderLayoutMode({ isLoading: true })).toBeUndefined()
+    expect(renderLayoutMode({
+      data: { capabilities: writableTaskViewCapabilities, views: [calendarDefault] },
+    })).toBe('calendar')
+    // A failed read must not use views that are still cached for the scope.
+    expect(renderLayoutMode({
+      data: { capabilities: writableTaskViewCapabilities, views: [calendarDefault] },
+      error: new Error('Saved views failed.'),
+    })).toBe('table')
   })
 })
 

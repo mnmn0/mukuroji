@@ -38,12 +38,10 @@ import {
 } from '../model/taskView'
 import { TaskViewHeading, TaskWorkItemTypeBadge } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
-import { TaskScheduleWindowToolbar } from './TaskScheduleWindowToolbar'
+import { TaskCalendarMonthNavigation } from './TaskScheduleWindowToolbar'
 import {
   createTaskCalendarMonthWindow,
-  getCurrentTaskMonth,
   listTaskScheduleWindowDates,
-  shiftTaskMonth,
 } from '../model/taskScheduleWindow'
 
 /** Resolves a localized task-calendar message. */
@@ -155,7 +153,6 @@ export function TaskCalendarView({
   tasks,
 }: TaskCalendarViewProps) {
   const calendar = useMemo(() => createCanonicalCalendarModel(tasks, month), [month, tasks])
-  const monthWindow = month ? createTaskCalendarMonthWindow(month) : undefined
   const [draggedTaskKey, setDraggedTaskKey] = useState<string>()
   const [rangeStartDate, setRangeStartDate] = useState<string>()
   const [busyTaskKey, setBusyTaskKey] = useState<string>()
@@ -355,21 +352,8 @@ export function TaskCalendarView({
         t={t}
         titleKey="tasks.view.calendar"
       />
-      {month && monthWindow && onMonthChange ? (
-        <TaskScheduleWindowToolbar
-          ariaLabel={t('tasks.calendar.monthNavigation')}
-          currentLabel={t('tasks.calendar.currentMonth')}
-          nextLabel={t('tasks.calendar.nextMonth')}
-          note={t('tasks.scheduleWindow.note')}
-          onCurrent={() => onMonthChange(getCurrentTaskMonth())}
-          onNext={() => onMonthChange(shiftTaskMonth(month, 1))}
-          onPrevious={() => onMonthChange(shiftTaskMonth(month, -1))}
-          periodLabel={t('tasks.scheduleWindow.range')
-            .replace('{from}', monthWindow.from)
-            .replace('{to}', monthWindow.to)}
-          previousLabel={t('tasks.calendar.previousMonth')}
-          testId="task-calendar-month-navigation"
-        />
+      {month && onMonthChange ? (
+        <TaskCalendarMonthNavigation month={month} onMonthChange={onMonthChange} t={t} />
       ) : null}
       {errorMessage ? (
         <p className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318" role="alert">

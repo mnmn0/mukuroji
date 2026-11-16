@@ -13725,7 +13725,11 @@ test.describe('Issue #463: 10,000 件を超える Project の期限カレンダ�
     await page.route(/.*\/api\/projects\/refero\/issues(?:\?.*)?$/u, async (route) => {
       const searchParams = new URL(route.request().url()).searchParams
       listRequests.push(searchParams)
-      if (!searchParams.has('scheduledFrom') && searchParams.get('unscheduled') !== 'true') {
+      if (
+        (!searchParams.has('scheduledFrom') && searchParams.get('unscheduled') !== 'true') ||
+        // January 2027 also has too many Work Items, so its read fails as well.
+        searchParams.get('scheduledFrom') === '2027-01-01'
+      ) {
         // The complete list of this Project is above the client's 10,000-item limit.
         await route.fulfill({
           status: 413,
@@ -13773,6 +13777,20 @@ test.describe('Issue #463: 10,000 件を超える Project の期限カレンダ�
       timeout: 60_000,
     })
     await expect(createTitle).toHaveValue('月をまたいで残る下書き')
+
+    // A month that fails to load keeps its navigation, so another month can still be chosen.
+    await monthNavigation.getByRole('button', { name: '次の月', exact: true }).click()
+    await expect(page.getByTestId('tasks-error')).toContainText('原因: More than 10000 Work Items', {
+      timeout: 60_000,
+    })
+    await expect(monthNavigation.getByTestId('task-calendar-month-navigation-period')).toHaveText(
+      '2027-01-01 – 2027-01-31',
+    )
+    await monthNavigation.getByRole('button', { name: '前の月', exact: true }).click()
+    await expect(page.getByTestId(`task-calendar-item-dated-${decemberIndex}`)).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.getByTestId('tasks-error')).toHaveCount(0)
     await expect(page.getByTestId(`task-calendar-item-dated-${novemberIndex}`)).toHaveCount(0)
 
     await tablist.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -13794,6 +13812,7 @@ test.describe('Issue #463: 10,000 件を超える Project の期限カレンダ�
       'unscheduled',
       '2026-11-01..2026-11-30',
       '2026-12-01..2026-12-31',
+      '2027-01-01..2027-01-31',
       '2026-11-01..2027-01-31',
     ]))
   })
