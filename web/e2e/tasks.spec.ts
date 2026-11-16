@@ -4632,6 +4632,29 @@ test.describe('authenticated task page', () => {
     ).toBeVisible()
   })
 
+  test('Issue #463: 表示中の月の外へ移したカードの後は月ナビゲーションへフォーカスを移す', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await page.goto('/projects/refero/issues')
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    const calendarCard = page.getByTestId('task-calendar-item-wireframe')
+    await calendarCard.focus()
+    // The card starts on 2026-06-01, so one day earlier leaves the shown month.
+    await page.keyboard.press('ArrowLeft')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('2026-05-31')
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(calendarCard).toHaveCount(0)
+    await expect(
+      page.getByTestId('task-calendar-month-navigation').getByRole('button', {
+        name: '前の月',
+        exact: true,
+      }),
+    ).toBeFocused()
+  })
+
   test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')

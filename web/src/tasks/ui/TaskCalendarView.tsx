@@ -175,8 +175,19 @@ export function TaskCalendarView({
     }
     if (focusCalendarTaskCard(calendarSectionRef.current, taskKey)) {
       pendingFocusTaskKeyRef.current = undefined
+      return
     }
-  }, [calendar, pendingChange])
+    // A card moved out of the shown month has no cell left; keep focus inside the calendar on
+    // its month navigation instead of losing it with the removed card.
+    const isPlacedInMonth = [...calendar.days.flatMap((day) => day.entries), ...calendar.unscheduledEntries]
+      .some((entry) => createTaskKey(entry.task) === taskKey)
+    if (month && !isPlacedInMonth) {
+      calendarSectionRef.current
+        ?.querySelector<HTMLButtonElement>('[data-testid="task-calendar-month-navigation"] button')
+        ?.focus()
+      pendingFocusTaskKeyRef.current = undefined
+    }
+  }, [calendar, month, pendingChange])
   useEffect(() => {
     pendingChangeRef.current = pendingChange
   }, [pendingChange])
