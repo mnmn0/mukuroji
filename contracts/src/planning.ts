@@ -476,6 +476,27 @@ export type PlanningCriticalPath = {
   slackByEntityId: Record<string, number>
 }
 
+/** Live Planning graph の使用量の段階です。 */
+export type PlanningCapacityLevel = 'normal' | 'warning' | 'full'
+
+/** Workspace の live Planning graph が使っている row 数と上限です。 */
+export type PlanningCapacity = {
+  /** 使用量の段階です。row 数か byte 数の一方が閾値を超えると上がり、`full` ではそれを増やす変更を拒否します。 */
+  level: PlanningCapacityLevel
+  /** Live graph に保存されている row 数です（revision META は含みません）。 */
+  liveRowCount: number
+  /** Live graph の row を増やす mutation が到達できる上限 row 数です。 */
+  liveRowCapacity: number
+  /** この row 数以上で `warning` になる閾値です。 */
+  warningRowCount: number
+  /** Live graph の row を保存した UTF-8 JSON の合計 byte 数です。 */
+  liveByteCount: number
+  /** Live graph の byte 数を増やす mutation が到達できる上限 byte 数です。 */
+  liveByteCapacity: number
+  /** この byte 数以上で `warning` になる閾値です。 */
+  warningByteCount: number
+}
+
 /** Planning API が返す Workspace 単位の整合した snapshot です。 */
 export type PlanningSnapshot = {
   /** Snapshot schema version です。 */
@@ -498,6 +519,8 @@ export type PlanningSnapshot = {
   criticalPath: PlanningCriticalPath
   /** Work Item dependency graph summary derived from this exact snapshot. */
   workItemDependencySummary: PlanningWorkItemDependencySummary
+  /** Live Planning graph の使用量です。 */
+  capacity: PlanningCapacity
   /** 永続化済み graph の最終更新日時です。 */
   updatedAt?: string
 }
