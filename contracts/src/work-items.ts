@@ -36,6 +36,18 @@ export const WORK_ITEM_SCHEDULE_MIN_YEAR = 1_000 as const
 /** Maximum Work Item title length in Unicode code points, matching the coding-agent MCP limit. */
 export const WORK_ITEM_TITLE_MAX_LENGTH = 256 as const
 
+/**
+ * Shortens text from another source, such as a Triage entry or a request form answer, to a Work Item title.
+ *
+ * @param title - Trimmed source title.
+ * @returns The title itself, or its first code points followed by an ellipsis when it is too long.
+ */
+export function fitWorkItemTitle(title: string): string {
+  const codePoints = [...title]
+  if (codePoints.length <= WORK_ITEM_TITLE_MAX_LENGTH) return title
+  return `${codePoints.slice(0, WORK_ITEM_TITLE_MAX_LENGTH - 1).join('').trimEnd()}…`
+}
+
 /** Highest sequence number a Work Item key can carry within one Team prefix. */
 export const WORK_ITEM_KEY_MAX_NUMBER = 999_999_999 as const
 

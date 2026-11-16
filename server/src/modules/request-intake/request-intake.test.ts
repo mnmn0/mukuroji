@@ -11,6 +11,7 @@ import type {
   SubmitRequestInput,
   TriageEntry,
 } from '@mukuroji/contracts'
+import { WORK_ITEM_TITLE_MAX_LENGTH } from '@mukuroji/contracts'
 import type { FileObjectClient } from '../files/file-proofing'
 import {
   DynamoDbRequestIntakeClient,
@@ -859,6 +860,15 @@ test('enforces visible required fields, answer types, numeric bounds, safe patte
     }),
     'Field "title" has an invalid format.',
   )
+})
+
+test('shortens a mapped request title to the Work Item title limit', () => {
+  const longTitle = 'a'.repeat(WORK_ITEM_TITLE_MAX_LENGTH + 40)
+  const mapped = createRequestWorkItemInput(
+    createStoredSubmission() as RequestSubmission,
+    { action: 'convert', expectedRevision: 1, title: longTitle },
+  )
+  expect(mapped.input.title).toBe(`${'a'.repeat(WORK_ITEM_TITLE_MAX_LENGTH - 1)}…`)
 })
 
 test('uses the first matching routing rule and maps a submission into a canonical Work Item input', () => {

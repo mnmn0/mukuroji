@@ -27,7 +27,7 @@ Canonical row は次の field を持つ。
 | `issueId` | yes | Physical sort key と公開 `id`。 |
 | `key` | no | `ABC-123` 形式の短い参照。Workspace 内で一意で、作成後は変わらない。key を持つ前に作られた row は持たない（詳細は「Work Item key」）。 |
 | `assignedProjectId` / `directoryProjectId` | no | 遂行先 project と project GSI key。未割当 Work Item では持たない。 |
-| `title` | yes | Literal title。canonical row は `titleKey` を持たない。作成・更新では前後の空白を除いて 1〜256 文字（Unicode code point）で、超えると `400 WorkItemTitleTooLong`。 |
+| `title` | yes | Literal title。canonical row は `titleKey` を持たない。作成・更新では前後の空白を除いて 1〜256 文字（Unicode code point）で、超えると `400 WorkItemTitleTooLong`。Triage（上限 500 文字）や Request の回答から作るときは、255 文字に `…` を付けて収める。Automation の Work Item template の title も 256 文字まで。 |
 | `description` | no | 詳細説明。 |
 | `assigneeUserId` | yes | 最終責任者（accountable owner）である Workspace member の安定 ID。Work Item ごとに 1 人だけ。 |
 | `contributorAssignments` | no | 作業を分担する Contributor の配列。空の場合は属性を持たない。詳細は「責任者と Contributor」を参照。 |
