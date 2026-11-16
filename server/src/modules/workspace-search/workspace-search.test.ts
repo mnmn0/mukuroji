@@ -392,6 +392,38 @@ test('keeps a creator added while a charter projection was between its read and 
   expect(response.results).toEqual([expect.objectContaining({ body: 'OPS-2' })])
 })
 
+test('reports a creation projection that keeps conflicting instead of dropping the creator', async () => {
+  const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  })])
+  let conflictingWrites = 0
+  const contendedClient = {
+    send: async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name !== 'TransactWriteCommand') return await memory.send(command as never)
+      conflictingWrites += 1
+      const error = new Error('transaction condition failed')
+      error.name = 'TransactionCanceledException'
+      throw Object.assign(error, { CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] })
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkspaceSearchClient('search-table', contendedClient, {} as DynamoDBClient, false)
+
+  await expect(client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    creatorUserId: 'creator@example.com',
+  }), { unrevisioned: true })).rejects.toMatchObject({ code: 'SearchProjectionContended' })
+  // The creation write itself, then every bounded attempt to add the creator.
+  expect(conflictingWrites).toBe(6)
+})
+
 test('does not let an older source projection replace or remove a newer document', async () => {
   const current = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',

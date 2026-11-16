@@ -1565,6 +1565,8 @@ export class DynamoDbWorkspaceSearchClient {
    * A revisioned projection may land before the unrevisioned creation projection that knows the
    * creator. The creation then must not replace the newer content, so only the creator and creation
    * time are added, guarded by the stored digest so a concurrent revision is never overwritten.
+   * A conflict re-reads the row; when conflicts persist the failure is raised, so the creator is
+   * never dropped silently.
    *
    * @param workspaceId - Workspace of the document.
    * @param recordKey - Record key of the document.
@@ -1577,7 +1579,7 @@ export class DynamoDbWorkspaceSearchClient {
     creatorUserId: string,
     createdAt: string | undefined,
   ) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 1; ; attempt += 1) {
       const response = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
         Key: { workspaceId, recordKey },
@@ -1609,6 +1611,7 @@ export class DynamoDbWorkspaceSearchClient {
         return
       } catch (error) {
         if (!isTransactionConditionalCheckFailed(error)) throw error
+        if (attempt >= SEARCH_PROJECTION_CAS_ATTEMPTS) throw createSearchProjectionContendedError(error)
       }
     }
   }
@@ -1629,7 +1632,6 @@ export class DynamoDbWorkspaceSearchClient {
     replacement: WorkspaceSearchDocument,
     sourceRevision: number | undefined,
   ) {
-    const maxAttempts = 5
     for (let attempt = 1; ; attempt += 1) {
       const response = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
@@ -1667,7 +1669,8 @@ export class DynamoDbWorkspaceSearchClient {
         }))
         return document
       } catch (error) {
-        if (!isTransactionConditionalCheckFailed(error) || attempt >= maxAttempts) throw error
+        if (!isTransactionConditionalCheckFailed(error)) throw error
+        if (attempt >= SEARCH_PROJECTION_CAS_ATTEMPTS) throw createSearchProjectionContendedError(error)
       }
     }
   }
@@ -6773,6 +6776,24 @@ function withCreatorFrom(
     creatorUserId,
     ...(createdAt ? { createdAt } : {}),
   })
+}
+
+/** Reads before a contended conditional projection write gives up and reports the failure. */
+const SEARCH_PROJECTION_CAS_ATTEMPTS = 5
+
+/**
+ * Creates the error raised when a conditional projection write keeps conflicting.
+ *
+ * @param cause - Last conditional failure.
+ * @returns A retryable search error.
+ */
+function createSearchProjectionContendedError(cause: unknown) {
+  return new WorkspaceSearchError(
+    503,
+    'SearchProjectionContended',
+    'Search projection kept conflicting with concurrent writes.',
+    { cause },
+  )
 }
 
 function normalizeProjectionSourceRevision(value: number | undefined) {
