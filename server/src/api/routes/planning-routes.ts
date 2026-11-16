@@ -3868,8 +3868,9 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         input,
         workItemState,
         {
-          // Restoring an edge needs the same permission on both endpoints as creating one.
-          canRestoreDependencyTo: (counterpart) => canManagePlanningEntityScope(principal, counterpart),
+          // Rechecked each step for the restored entity, and for dependency counterparts: restoring
+          // an edge needs the same permission on both endpoints as creating one.
+          canManageEntity: (entity) => canManagePlanningEntityScope(principal, entity),
           // Restoring a link writes the Work Item's link row, like PUT work-item-links.
           canRestoreLinkTo: async (workItem) => {
             try {

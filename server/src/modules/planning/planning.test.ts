@@ -4602,10 +4602,81 @@ describe('planning persistence', () => {
     expect(allowed.restore).toMatchObject({ restoredLinkCount: 1, pendingReferenceCount: 0 })
   })
 
-  test('leaves a dependency archived when the caller cannot manage its counterpart', async () => {
+  test('stops restoring references once the restored entity is in a scope the caller cannot manage', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
     await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
+    await client.createDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+    const archived = await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
+    const stopped = await client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: archived.planning.revision },
+      EMPTY_WORK_ITEMS,
+      { canManageEntity: async () => false },
+    )
+    expect(stopped.restore).toMatchObject({ restoredDependencyCount: 0, pendingReferenceCount: 1 })
+    expect(stopped.planning.dependencies).toEqual([])
+  })
+
+  test('keeps archived dependencies apart when a dependency ID is reused', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    for (const [index, id] of ['portfolio-a', 'portfolio-b', 'portfolio-c'].entries()) {
+      await client.create('workspace-1', createEntityInput(id, 'portfolio', index), EMPTY_WORK_ITEMS)
+    }
+    await client.createDependency('workspace-1', {
+      id: 'dependency-reused',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 3,
+    }, EMPTY_WORK_ITEMS)
+    let revision = (await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 4 }, EMPTY_WORK_ITEMS))
+      .planning.revision
+    // The ID is free in the live graph again, so another edge may take it.
+    await client.createDependency('workspace-1', {
+      id: 'dependency-reused',
+      predecessorId: 'portfolio-b',
+      successorId: 'portfolio-c',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: revision,
+    }, EMPTY_WORK_ITEMS)
+    revision = (await client.archive('workspace-1', 'portfolio-b', { expectedRevision: revision + 1 }, EMPTY_WORK_ITEMS))
+      .planning.revision
+    // Restoring portfolio-a hands its edge to the archived portfolio-b without replacing B's own.
+    const first = await client.restore('workspace-1', 'portfolio-a', { expectedRevision: revision }, EMPTY_WORK_ITEMS)
+    expect(first.restore).toMatchObject({ retainedDependencyCount: 1 })
+    const second = await client.restore(
+      'workspace-1',
+      'portfolio-b',
+      { expectedRevision: first.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    // Both edges come back to portfolio-b; the second with the same ID cannot be live at once.
+    expect(second.restore).toMatchObject({
+      restoredDependencyCount: 1,
+      droppedDependencyCount: 1,
+      pendingReferenceCount: 0,
+    })
+  })
+
+  test('leaves a dependency archived when the caller cannot manage its counterpart', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create(
+      'workspace-1',
+      createEntityInput('portfolio-b', 'portfolio', 1, { teamId: 'team-b' }),
+      EMPTY_WORK_ITEMS,
+    )
     await client.createDependency('workspace-1', {
       id: 'dependency-a-b',
       predecessorId: 'portfolio-a',
@@ -4622,13 +4693,14 @@ describe('planning persistence', () => {
       { expectedRevision: archived.planning.revision },
       EMPTY_WORK_ITEMS,
       {
-        canRestoreDependencyTo: async (counterpart) => {
-          checked.push(counterpart.id)
-          return false
+        canManageEntity: async (entity) => {
+          checked.push(entity.id)
+          return entity.teamId !== 'team-b'
         },
       },
     )
-    expect(checked).toEqual(['portfolio-b'])
+    // The restored entity is rechecked too; each scope is decided once per request.
+    expect(checked).toEqual(['portfolio-a', 'portfolio-b'])
     expect(denied.restore).toMatchObject({
       restoredDependencyCount: 0,
       droppedDependencyCount: 0,
@@ -4642,7 +4714,7 @@ describe('planning persistence', () => {
       'portfolio-a',
       { expectedRevision: denied.planning.revision },
       EMPTY_WORK_ITEMS,
-      { canRestoreDependencyTo: async () => true },
+      { canManageEntity: async () => true },
     )
     expect(allowed.restore).toMatchObject({ restoredDependencyCount: 1, pendingReferenceCount: 0 })
     expect(allowed.planning.dependencies.map((dependency) => dependency.id)).toEqual(['dependency-a-b'])

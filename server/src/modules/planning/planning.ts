@@ -666,6 +666,8 @@ type PlanningArchiveChange =
       kind: 'put'
       /** Complete archive row, including its Workspace partition and sort key. */
       row: Record<string, unknown>
+      /** Fails the transaction instead of replacing a row another archive already wrote. */
+      requireAbsent?: boolean
     }
   | {
       /** Removes the row. */
@@ -715,8 +717,12 @@ type PlanningArchivedEntityBundle = {
 /** One archive or restore revision planned against a fresh live graph. */
 /** Caller-specific checks a restore applies to the references it brings back. */
 export type PlanningRestoreOptions = {
-  /** Whether the caller may manage a live dependency counterpart; denied edges stay archived. */
-  canRestoreDependencyTo?: (
+  /**
+   * Whether the caller may manage an entity at its current scope. Checked for the restored entity
+   * and each live dependency counterpart on every step; a denied counterpart's edge stays
+   * archived, and a denied restored entity stops the restore.
+   */
+  canManageEntity?: (
     counterpart: Pick<PlanningEntity, 'id' | 'teamId' | 'projectId'>,
   ) => Promise<boolean>
   /** Whether the caller may write links of Work Items in this scope; denied links stay archived. */
@@ -1125,8 +1131,7 @@ abstract class BasePlanningClient implements PlanningClient {
       if (!allowed) hidden.add(reference)
     }
     let pending = bundle.references.filter((reference) => !hidden.has(reference))
-    // Keyed by scope, not ID: a counterpart moved to another scope is authorized again.
-    const counterpartDecisions = new Map<string, boolean>()
+    const scopeDecisions = new Map<string, boolean>()
     try {
       for (
         let step = 0;
@@ -1140,6 +1145,19 @@ abstract class BasePlanningClient implements PlanningClient {
           // archived with it instead of being consumed against a missing target.
           const target = findEntity(state, entityId)
           if (!target || target.archivedAt !== undefined) return undefined
+          // Keyed by scope, not ID: a counterpart moved to another scope is authorized again.
+          const canManage = async (entity: StoredPlanningEntity) => {
+            if (!options.canManageEntity) return true
+            const scopeKey = JSON.stringify([entity.teamId ?? null, entity.projectId ?? null])
+            let allowed = scopeDecisions.get(scopeKey)
+            if (allowed === undefined) {
+              allowed = await options.canManageEntity(entity)
+              scopeDecisions.set(scopeKey, allowed)
+            }
+            return allowed
+          }
+          // The restored entity may have moved to a scope the caller does not manage.
+          if (!await canManage(target)) return undefined
           // Read after the revision-bound graph: a counterpart archived later moves the revision,
           // so the CAS rejects this step instead of dropping a dependency it could have kept.
           await this.collectArchivedCounterparts(
@@ -1150,21 +1168,12 @@ abstract class BasePlanningClient implements PlanningClient {
             archivedCounterpartIds,
           )
           const deniedCounterpartIds = new Set<string>()
-          if (options.canRestoreDependencyTo) {
-            for (const reference of pending) {
-              if (reference.kind !== 'dependency') continue
-              const counterpart = findEntity(state, reference.dependency.predecessorId === entityId
-                ? reference.dependency.successorId
-                : reference.dependency.predecessorId)
-              if (!counterpart) continue
-              const scopeKey = JSON.stringify([counterpart.teamId ?? null, counterpart.projectId ?? null])
-              let allowed = counterpartDecisions.get(scopeKey)
-              if (allowed === undefined) {
-                allowed = await options.canRestoreDependencyTo(counterpart)
-                counterpartDecisions.set(scopeKey, allowed)
-              }
-              if (!allowed) deniedCounterpartIds.add(counterpart.id)
-            }
+          for (const reference of pending) {
+            if (reference.kind !== 'dependency') continue
+            const counterpart = findEntity(state, reference.dependency.predecessorId === entityId
+              ? reference.dependency.successorId
+              : reference.dependency.predecessorId)
+            if (counterpart && !await canManage(counterpart)) deniedCounterpartIds.add(counterpart.id)
           }
           planned = planArchiveRestoreStep(workspaceId, state, entityId, pending, {
             archivedCounterpartIds,
@@ -2672,8 +2681,11 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
     }
     if (archiveChanges.some((change) =>
-      change.kind === 'delete' && change.requireExisting &&
-      !this.archives.get(workspaceId)?.has(change.recordKey)
+      change.kind === 'delete'
+        ? change.requireExisting === true &&
+          !this.archives.get(workspaceId)?.has(change.recordKey)
+        : change.requireAbsent === true &&
+          this.archives.get(workspaceId)?.has(String(change.row.recordKey)) === true
     )) {
       throw conflict(
         'PlanningArchiveChanged',
@@ -3460,7 +3472,16 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
           'A Planning archive row exceeds the safe DynamoDB item size limit.',
         )
       }
-      mutations.push({ Put: { TableName: this.tableName, Item: change.row } })
+      if (change.requireAbsent) guardedArchiveDeleteOffsets.push(mutations.length)
+      mutations.push({
+        Put: {
+          TableName: this.tableName,
+          Item: change.row,
+          ...(change.requireAbsent
+            ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+            : {}),
+        },
+      })
     }
     const canonicalConditions = workItemConditions.map((condition) => ({
       ConditionCheck: {
@@ -7068,6 +7089,7 @@ function planArchiveRestoreStep(
         archiveChanges.push({
           kind: 'put',
           row: createArchivedReferenceRow(workspaceId, { ...reference, entityId: counterpartId }),
+          requireAbsent: true,
         })
         counts.retainedDependencyCount += 1
         budget -= 2
@@ -7257,11 +7279,21 @@ function createArchivedReferenceRecordKey(
   return readRecordKey(
     `${kindPrefix}${
       reference.kind === 'dependency'
+        // A dependency ID can be reused once its edge left the live graph, so the archived key
+        // also names the endpoints, which no other edge with the same ID can share.
         ? boundArchivedKeyPart(
           kindPrefix,
-          encodeRecordKeyIdentifier(reference.dependency.id),
+          [
+            reference.dependency.id,
+            reference.dependency.predecessorId,
+            reference.dependency.successorId,
+          ].map(encodeRecordKeyIdentifier).join('#'),
           0,
-          reference.dependency.id,
+          JSON.stringify([
+            reference.dependency.id,
+            reference.dependency.predecessorId,
+            reference.dependency.successorId,
+          ]),
         )
         : boundArchivedKeyPart(
           kindPrefix,
