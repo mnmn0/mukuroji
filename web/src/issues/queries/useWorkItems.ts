@@ -199,10 +199,11 @@ export function useProjectIssues(
     const response = data === undefined && options === undefined
       ? await query.mutate()
       : await query.mutate(responseData, responseOptions)
-    // The same Project is also cached for the whole list and other calendar or Gantt periods.
-    // Revalidating them clears their request deduplication, so the next layout reads fresh data.
+    // The same Project is also cached for the whole list, other calendar or Gantt periods, and
+    // the Work Items of an unqualified link. Revalidating them clears their request
+    // deduplication and refreshes a mounted link lookup, so no view keeps an old snapshot.
     void mutateCache((candidate: unknown) =>
-      isOtherProjectIssueListKey(candidate, key)
+      isOtherProjectIssueListKey(candidate, key) || isProjectIssueLinkCandidatesKey(candidate, key)
     )
     return response?.issues
   }
@@ -219,11 +220,13 @@ export function useProjectIssues(
     issues: ProjectIssueList,
   ) => {
     if (!accessToken || !projectId) return Promise.resolve(undefined)
-    return mutateCache(
+    const published = mutateCache(
       createProjectIssuesKey(accessToken, projectId, includeArchived, readWindow),
       (current?: ProjectIssuesPage) => createProjectIssuesPage(projectId, issues, current),
       { revalidate: false },
     )
+    void mutateCache((candidate: unknown) => isProjectIssueLinkCandidatesKey(candidate, key))
+    return published
   }
 
   return {
@@ -251,7 +254,7 @@ export function useProjectIssues(
  * @param issueId - Team-local Work Item ID from the link.
  * @param teamIds - Teams that have the Project.
  * @param enabled - Whether the lookup runs, normally only for a windowed list.
- * @returns SWR state whose data lists every matching Work Item.
+ * @returns SWR state whose data lists every matching Work Item, and its cache key.
  */
 export function useProjectIssueLinkCandidates(
   accessToken: string | undefined,
@@ -263,7 +266,7 @@ export function useProjectIssueLinkCandidates(
   const key = accessToken && projectId && issueId && enabled && teamIds.length > 0
     ? ['project-issue-link-candidates', accessToken, projectId, issueId, ...teamIds] as const
     : null
-  return useSWR(
+  const query = useSWR(
     key,
     async ([, token, currentProjectId, currentIssueId, ...candidateTeamIds]) => {
       const issues = await Promise.all(candidateTeamIds.map(async (teamId) => {
@@ -282,6 +285,7 @@ export function useProjectIssueLinkCandidates(
     },
     workItemQueryConfig,
   )
+  return { ...query, key }
 }
 
 /**
@@ -324,6 +328,24 @@ function isOtherProjectIssueListKey(
   return candidate[1] === currentKey[1] &&
     candidate[2] === currentKey[2] &&
     candidate.some((part, index) => part !== currentKey[index])
+}
+
+/**
+ * Decides whether a cache key is the unqualified-link lookup of the same Project as `listKey`.
+ *
+ * @param candidate - Cache key supplied by the global mutator.
+ * @param listKey - Key of the Project list that was changed.
+ * @returns Whether the candidate caches that Project's link lookup for the same session.
+ */
+function isProjectIssueLinkCandidatesKey(
+  candidate: unknown,
+  listKey: readonly unknown[] | null,
+): boolean {
+  return Boolean(listKey) &&
+    Array.isArray(candidate) &&
+    candidate[0] === 'project-issue-link-candidates' &&
+    candidate[1] === listKey?.[1] &&
+    candidate[2] === listKey?.[2]
 }
 
 /**

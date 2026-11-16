@@ -451,7 +451,13 @@ export function TaskPage() {
   )
   // A windowed list cannot resolve an `issueId` link without `teamId` outside its period, so the
   // Work Items such a link can mean are looked up per Team and added to the list.
-  const { data: issueLinkCandidates } = useProjectIssueLinkCandidates(
+  const {
+    data: issueLinkCandidates,
+    error: issueLinkCandidatesError,
+    isLoading: isIssueLinkCandidatesLoading,
+    mutate: mutateIssueLinkCandidates,
+    key: issueLinkCandidatesKey,
+  } = useProjectIssueLinkCandidates(
     accessToken,
     projectId,
     selectedIssueId,
@@ -860,11 +866,14 @@ export function TaskPage() {
   const detailFetchError = Boolean(
     detailError ||
     selectedIssueDetailScopeMismatch ||
+    // A failed lookup of an unqualified link's Work Items is retried with the task queries.
+    issueLinkCandidatesError ||
     (
       Boolean(selectedIssueId) &&
       !taskError &&
       !isProjectTasksLoading &&
       !isSelectedIssueDetailLoading &&
+      !(issueLinkCandidatesKey && isIssueLinkCandidatesLoading) &&
       !resolvedSelectedIssue
     ),
   )
@@ -1831,6 +1840,7 @@ export function TaskPage() {
             void Promise.all([
               mutateProjectTasks(),
               mutateSelectedIssueDetail(),
+              ...(issueLinkCandidatesKey ? [mutateIssueLinkCandidates()] : []),
             ]).catch(() => undefined)
           }
         : undefined}

@@ -4704,6 +4704,38 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-calendar-item-wireframe')).toHaveCount(0)
   })
 
+  test('Issue #463: teamId なしリンクの Work Item 参照が一時的に失敗しても再試行で開ける', async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-09-15T03:00:00.000Z'))
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(page.getByTestId('task-calendar-month-navigation')).toBeVisible()
+    const calendarUrl = new URL(page.url())
+    calendarUrl.searchParams.delete('teamId')
+    calendarUrl.searchParams.set('issueId', 'wireframe')
+    let failedLookups = 0
+    await page.route(/.*\/api\/teams\/core-team\/issues\/wireframe(?:\?.*)?$/u, async (route) => {
+      if (route.request().method() === 'GET' && failedLookups === 0) {
+        failedLookups += 1
+        await route.fulfill({
+          status: 503,
+          json: { code: 'ProjectIssuesUnavailable', message: 'issues.error.loading' },
+        })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.goto(`${calendarUrl.pathname}${calendarUrl.search}`)
+
+    const retry = page.getByTestId('project-task-error').getByRole('button')
+    await expect(retry).toBeVisible()
+    expect(failedLookups).toBe(1)
+    await retry.click()
+    await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toHaveValue(
+      '新しいランディングページのワイヤーフレーム作成',
+    )
+  })
+
   test('Issue #463: 表示中の月の外へ移したカードの後は月ナビゲーションへフォーカスを移す', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
