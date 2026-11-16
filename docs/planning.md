@@ -67,7 +67,7 @@ Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の
 
 `GET /api/planning/archived-entities?limit=&cursor=` は退避済み entity を ID 順に返します（1 page 最大 50 件）。各 entity の Team / Project scope を manager 権限で確認し、呼び出し元が復元できるものだけを返します。そのため page の件数が `limit` より少なくても `nextCursor` が続くことがあります。Enterprise 認可では、一覧の route は Workspace 単位で認可されるため、各 entity の Team / Project（scope が無ければ Workspace）を resource として `planning.manage` を評価し直します。Team / Project 単位の付与だけを持つ利用者にも、復元できる entity が一覧に出ます。
 
-`POST /api/planning/entities/:entityId/restore` は `{ expectedRevision }` を受け取り、退避済み entity を active に戻します。権限は archive と同じく entity の scope の manager で、親が live graph にある場合は親の member 権限も確認します。Enterprise 認可では、退避済み entity の Team / Project scope を認可対象の resource とします。Archive 中に owner が無効になった entity は、作成・複製と同じく `409 PlanningOwnerInactive` で拒否します。復元のすべての revision は、呼び出し元の Workspace membership（Enterprise 認可では control revision も）を同じ transaction で条件検証します。復元の途中で membership や Enterprise の設定が変わると、その revision は失敗し、残りの参照は退避先に残ります。
+`POST /api/planning/entities/:entityId/restore` は `{ expectedRevision }` を受け取り、退避済み entity を active に戻します。権限は archive と同じく entity の scope の manager で、親が live graph にある場合は親の member 権限も確認します。Enterprise 認可では、退避済み entity の Team / Project scope を認可対象の resource とします。Archive 中に owner が無効になった entity は、作成・複製と同じく `409 PlanningOwnerInactive` で拒否します。復元のすべての revision は、呼び出し元の Workspace membership（Enterprise 認可では control revision も）を同じ transaction で条件検証します。復元の途中で membership や Enterprise の設定が変わると、その revision は失敗し、request は `409 PlanningAuthorizationChanged` になります。残りの参照は退避先に残ります。
 
 Live graph に残っている archive 済み entity（update target を持つ Initiative とその親、退避の途中のもの）も同じ API で戻せます。この場合は live graph の中で `archivedAt` を外し、Initiative の update target も active に戻します（通知の due-index は cadence から作り直します）。
 

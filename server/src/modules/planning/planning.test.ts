@@ -4533,6 +4533,33 @@ describe('planning persistence', () => {
     expect(restoreCommits).toEqual([[check], [check]])
   })
 
+  test('fails the restore when the caller authorization changes between its revisions', async () => {
+    const client = new RacingPlanningClient(() => NOW)
+    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
+    await client.createDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+    const archived = await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
+    // The entity revision commits; the guarded reference revision then sees the revoked grant.
+    client.raceAtCommit = client.commitCount + 2
+    client.race = async () => {
+      throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed.')
+    }
+    await expect(client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: archived.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ code: 'PlanningAuthorizationChanged' })
+    expect((await client.get('workspace-1', EMPTY_WORK_ITEMS)).dependencies).toEqual([])
+  })
+
   test('archives and restores identifiers whose combined archive key would be too long', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     // Each ID encodes to 768 bytes: it fits its live key, but not next to the other in one key.

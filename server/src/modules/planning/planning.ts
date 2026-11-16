@@ -1212,6 +1212,8 @@ abstract class BasePlanningClient implements PlanningClient {
       }
     } catch (error) {
       if (!(error instanceof PlanningError) || error.status >= 500) throw error
+      // A revoked grant fails the request: the snapshot would be filtered with the old grant.
+      if (error.code === 'PlanningAuthorizationChanged') throw error
       // Capacity or a concurrent mutation stopped the restore; the rest stays in the archive.
     }
     // Re-read so references consumed by a concurrent restore are not reported as pending.
