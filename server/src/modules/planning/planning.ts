@@ -114,6 +114,11 @@ const PLANNING_ARCHIVE_SCHEMA_VERSION = 1
  * the live graph valid, so a large Cycle moves in several small revisions.
  */
 const PLANNING_ARCHIVE_STEP_ITEM_BUDGET = 90
+/**
+ * Serialized bytes one archive or restore step may write, leaving headroom under
+ * `MAX_PLANNING_TRANSACTION_BYTES` for the META fence, conditions and request envelope.
+ */
+const PLANNING_ARCHIVE_STEP_BYTE_BUDGET = 2_000_000
 /** Archive or restore revisions one request commits before it leaves the rest for a later request. */
 const PLANNING_ARCHIVE_REQUEST_STEP_LIMIT = 40
 /** Attempts per archive or restore revision when a concurrent mutation advances META first. */
@@ -385,6 +390,7 @@ export type PlanningClient = {
     entityId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    options?: PlanningRestoreOptions,
   ): Promise<RestorePlanningEntityResponse>
   /** 退避済み entity を ID 順の cursor page で返します。呼び出し側が scope を認可します。 */
   listArchivedEntities(
@@ -707,6 +713,14 @@ type PlanningArchivedEntityBundle = {
 }
 
 /** One archive or restore revision planned against a fresh live graph. */
+/** Caller-specific checks a restore applies to the references it brings back. */
+export type PlanningRestoreOptions = {
+  /** Whether the caller may manage a live dependency counterpart; denied edges stay archived. */
+  canRestoreDependencyTo?: (
+    counterpart: Pick<PlanningEntity, 'id' | 'teamId' | 'projectId'>,
+  ) => Promise<boolean>
+}
+
 type PlanningArchiveStep = {
   /** Valid live graph after the step. */
   state: PlanningWorkspaceState
@@ -1045,6 +1059,7 @@ abstract class BasePlanningClient implements PlanningClient {
     entityIdValue: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    options: PlanningRestoreOptions = {},
   ): Promise<RestorePlanningEntityResponse> {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const entityId = readIdentifier(entityIdValue, 'Planning entity ID')
@@ -1090,6 +1105,8 @@ abstract class BasePlanningClient implements PlanningClient {
       !workItems.has(createWorkItemKey(reference.link.teamId, reference.link.workItemId))
     ))
     let pending = bundle.references.filter((reference) => !hidden.has(reference))
+    const checkedCounterpartIds = new Set<string>()
+    const deniedCounterpartIds = new Set<string>()
     try {
       for (
         let step = 0;
@@ -1112,12 +1129,27 @@ abstract class BasePlanningClient implements PlanningClient {
             pending,
             archivedCounterpartIds,
           )
+          if (options.canRestoreDependencyTo) {
+            for (const reference of pending) {
+              if (reference.kind !== 'dependency') continue
+              const counterpart = findEntity(state, reference.dependency.predecessorId === entityId
+                ? reference.dependency.successorId
+                : reference.dependency.predecessorId)
+              if (!counterpart || checkedCounterpartIds.has(counterpart.id)) continue
+              checkedCounterpartIds.add(counterpart.id)
+              if (!await options.canRestoreDependencyTo(counterpart)) {
+                deniedCounterpartIds.add(counterpart.id)
+              }
+            }
+          }
           planned = planArchiveRestoreStep(workspaceId, state, entityId, pending, {
             archivedCounterpartIds,
+            deniedCounterpartIds,
             workItems,
             now,
           })
-          return planned.step
+          // Only skipped references: nothing to commit, and no empty revision.
+          return planned.step.archiveChanges.length === 0 ? undefined : planned.step
         }, true)
         if (!planned) break
         summary.restoredLinkCount += planned.counts.restoredLinkCount
@@ -6694,21 +6726,26 @@ function planArchiveCompactionStep(
   const entity = findCompactableArchivedEntity(state)
   if (!entity) return undefined
   let budget = PLANNING_ARCHIVE_STEP_ITEM_BUDGET
+  let bytes = 0
   const archiveChanges: PlanningArchiveChange[] = []
+  /** Whether a change of this many bytes still fits; the first change always does. */
+  const fits = (cost: number) =>
+    archiveChanges.length === 0 || bytes + cost <= PLANNING_ARCHIVE_STEP_BYTE_BUDGET
   const movedDependencyIds = new Set<string>()
   for (const dependency of state.dependencies) {
     if (budget < 2) break
     if (dependency.predecessorId !== entity.id && dependency.successorId !== entity.id) continue
-    archiveChanges.push({
-      kind: 'put',
-      row: createArchivedReferenceRow(workspaceId, {
-        kind: 'dependency',
-        entityId: entity.id,
-        dependency,
-      }),
+    const row = createArchivedReferenceRow(workspaceId, {
+      kind: 'dependency',
+      entityId: entity.id,
+      dependency,
     })
+    const cost = estimateArchiveStepBytes(row)
+    if (!fits(cost)) break
+    archiveChanges.push({ kind: 'put', row })
     movedDependencyIds.add(dependency.id)
     budget -= 2
+    bytes += cost
   }
   const dependencies = state.dependencies.filter((dependency) =>
     !movedDependencyIds.has(dependency.id)
@@ -6720,26 +6757,31 @@ function planArchiveCompactionStep(
       workItemLinks.push(link)
       continue
     }
-    archiveChanges.push({
-      kind: 'put',
-      row: createArchivedReferenceRow(workspaceId, {
-        kind: 'link',
-        entityId: entity.id,
-        reference,
-        link,
-      }),
+    const row = createArchivedReferenceRow(workspaceId, {
+      kind: 'link',
+      entityId: entity.id,
+      reference,
+      link,
     })
-    budget -= 2
     const remaining = removeLinkReference(link, reference, entity.id)
+    const cost = estimateArchiveStepBytes(row) + (remaining ? estimateArchiveStepBytes(remaining) : 0)
+    if (!fits(cost)) {
+      workItemLinks.push(link)
+      continue
+    }
+    archiveChanges.push({ kind: 'put', row })
+    budget -= 2
+    bytes += cost
     if (remaining) workItemLinks.push(remaining)
   }
   const referenced = dependencies.some((dependency) =>
     dependency.predecessorId === entity.id || dependency.successorId === entity.id
   ) || workItemLinks.some((link) => readLinkReferenceKind(link, entity.id) !== undefined)
   let entities = state.entities
-  if (!referenced && budget >= 2) {
+  const entityRow = createArchivedEntityRow(workspaceId, entity)
+  if (!referenced && budget >= 2 && fits(estimateArchiveStepBytes(entityRow))) {
     entities = entities.filter((candidate) => candidate.id !== entity.id)
-    archiveChanges.push({ kind: 'put', row: createArchivedEntityRow(workspaceId, entity) })
+    archiveChanges.push({ kind: 'put', row: entityRow })
   }
   return { state: { ...state, entities, dependencies, workItemLinks }, archiveChanges }
 }
@@ -6934,6 +6976,8 @@ function planArchiveRestoreStep(
   context: {
     /** Dependency counterparts that are still archived. */
     archivedCounterpartIds: ReadonlySet<string>
+    /** Live dependency counterparts the caller may not manage. */
+    deniedCounterpartIds: ReadonlySet<string>
     /** Canonical Work Items by qualified key. */
     workItems: ReadonlyMap<string, PlanningWorkItemSummary>
     /** Restore timestamp. */
@@ -6951,15 +6995,25 @@ function planArchiveRestoreStep(
   const workItemConditions: PlanningWorkItemCondition[] = []
   let next: PlanningWorkspaceState = { ...state }
   let budget = PLANNING_ARCHIVE_STEP_ITEM_BUDGET
+  let bytes = 0
   let processedCount = 0
   for (const reference of pending) {
     if (budget < 3) break
+    // A restored row is at most the archived reference it comes from.
+    const cost = estimateArchiveStepBytes(reference)
+    if (processedCount > 0 && bytes + cost > PLANNING_ARCHIVE_STEP_BYTE_BUDGET) break
+    bytes += cost
     const recordKey = createArchivedReferenceRecordKey(reference)
     if (reference.kind === 'dependency') {
       const { dependency } = reference
       const counterpartId = dependency.predecessorId === entityId
         ? dependency.successorId
         : dependency.predecessorId
+      if (context.deniedCounterpartIds.has(counterpartId) && findEntity(next, counterpartId)) {
+        // The caller cannot manage the counterpart, so the edge stays archived for someone who can.
+        processedCount += 1
+        continue
+      }
       if (findEntity(next, counterpartId)) {
         if (canRestoreDependency(next, dependency)) {
           next = { ...next, dependencies: [...next.dependencies, dependency] }
@@ -7056,13 +7110,24 @@ function createArchivedEntityCursor(entityId: string) {
 }
 
 /**
+ * Estimates the serialized bytes one archive row adds to a step transaction.
+ *
+ * @param value - Row or record written by the step.
+ * @returns JSON size plus a fixed allowance for the table name, key and condition envelope.
+ */
+function estimateArchiveStepBytes(value: unknown) {
+  return utf8ByteLength(JSON.stringify(value)) + 512
+}
+
+/**
  * Decodes an archive list cursor.
  *
  * @param cursor - Untrusted opaque cursor.
  * @returns The exclusive entity ID the next page starts after.
  */
 function readArchivedEntityCursor(cursor: unknown) {
-  if (typeof cursor !== 'string' || cursor.length === 0 || cursor.length > 2_048) {
+  // A 256-character ID JSON-escapes to at most 1,536 bytes, about 2,100 base64url characters.
+  if (typeof cursor !== 'string' || cursor.length === 0 || cursor.length > 4_096) {
     throw invalid('PlanningArchiveCursorInvalid', 'Archived Planning cursor is invalid.')
   }
   try {

@@ -4466,6 +4466,93 @@ describe('planning persistence', () => {
     expect(restored.planning.dependencies.map((dependency) => dependency.id)).toEqual([dependencyId])
   })
 
+  test('splits compaction steps by transaction bytes', async () => {
+    // 100 Goals whose IDs double in size when JSON-escaped, linked from 45 Work Items each.
+    const goalIds = Array.from({ length: 100 }, (_, index) =>
+      `${'"'.repeat(252)}${String(index).padStart(3, '0')}`
+    )
+    const rows: Record<string, unknown>[] = [
+      createScaleEntityRow('portfolio-1', 'portfolio'),
+      createScaleEntityRow('roadmap-1', 'roadmap', { parentId: 'portfolio-1' }),
+      createScaleEntityRow('initiative-1', 'initiative', { parentId: 'roadmap-1' }),
+      ...goalIds.map((id) => createScaleEntityRow(id, 'goal', {
+        recordKey: `ENTITY#${encodeURIComponent(id)}`,
+        parentId: 'initiative-1',
+      })),
+      ...Array.from({ length: 45 }, (_, index) => ({
+        workspaceId: 'workspace-1',
+        recordKey: `LINK#team-1#item-${index}`,
+        entryType: 'planning-work-item-link',
+        teamId: 'team-1',
+        workItemId: `item-${index}`,
+        goalIds,
+        createdAt: NOW.toISOString(),
+      })),
+    ]
+    const { client, writes } = createFakePlanningTable(rows)
+    const workItems: PlanningWorkItemState = {
+      workItems: Array.from({ length: 45 }, (_, index) =>
+        createWorkItem(`item-${index}`, 'started', { projectId: undefined })
+      ),
+    }
+    const archived = await client.archive('workspace-1', goalIds[0]!, { expectedRevision: 1 }, workItems)
+    expect(archived.planning.entities.some((entity) => entity.id === goalIds[0])).toBeFalse()
+    expect(archived.planning.workItemLinks.every((link) => !link.goalIds.includes(goalIds[0]!)))
+      .toBeTrue()
+    // One archive revision, then the 45 references in more than one size-bounded step.
+    expect(writes.length).toBeGreaterThan(2)
+    for (const write of writes) {
+      expect(new TextEncoder().encode(JSON.stringify(write.TransactItems)).length)
+        .toBeLessThanOrEqual(3_000_000)
+    }
+  })
+
+  test('leaves a dependency archived when the caller cannot manage its counterpart', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
+    await client.createDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+    const archived = await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
+    const checked: string[] = []
+    const denied = await client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: archived.planning.revision },
+      EMPTY_WORK_ITEMS,
+      {
+        canRestoreDependencyTo: async (counterpart) => {
+          checked.push(counterpart.id)
+          return false
+        },
+      },
+    )
+    expect(checked).toEqual(['portfolio-b'])
+    expect(denied.restore).toMatchObject({
+      restoredDependencyCount: 0,
+      droppedDependencyCount: 0,
+      pendingReferenceCount: 1,
+    })
+    expect(denied.planning.dependencies).toEqual([])
+
+    // A caller who manages both endpoints brings the edge back by restoring again.
+    const allowed = await client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: denied.planning.revision },
+      EMPTY_WORK_ITEMS,
+      { canRestoreDependencyTo: async () => true },
+    )
+    expect(allowed.restore).toMatchObject({ restoredDependencyCount: 1, pendingReferenceCount: 0 })
+    expect(allowed.planning.dependencies.map((dependency) => dependency.id)).toEqual(['dependency-a-b'])
+  })
+
   test('leaves references that exceed the live capacity archived until a later restore', async () => {
     const archivedGoal = {
       ...createScaleEntityRow('goal-2', 'goal', {
@@ -4622,6 +4709,18 @@ describe('planning persistence', () => {
       .rejects.toMatchObject({ status: 400, code: 'PlanningArchivePageLimitInvalid' })
     await expect(client.listArchivedEntities('workspace-1', { cursor: 'not-a-cursor' }))
       .rejects.toMatchObject({ status: 400, code: 'PlanningArchiveCursorInvalid' })
+
+    // Control characters JSON-escape to six bytes each, the longest cursor an accepted ID makes.
+    const escaped = '\u0001'.repeat(256)
+    const revision = (await client.get('workspace-1', EMPTY_WORK_ITEMS)).revision
+    await client.create('workspace-1', createEntityInput(escaped, 'portfolio', revision), EMPTY_WORK_ITEMS)
+    await client.archive('workspace-1', escaped, { expectedRevision: revision + 1 }, EMPTY_WORK_ITEMS)
+    const head = await client.listArchivedEntities('workspace-1', { limit: 1 })
+    expect(head.entities.map((entity) => entity.id)).toEqual([escaped])
+    expect(head.nextCursor?.length).toBeGreaterThan(2_048)
+    const rest = await client.listArchivedEntities('workspace-1', { cursor: head.nextCursor })
+    expect(rest.entities.map((entity) => entity.id))
+      .toEqual(['portfolio-a', 'portfolio-b', 'portfolio-c'])
   })
 
   test('reports the warning level from the warning threshold', async () => {

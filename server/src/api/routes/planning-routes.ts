@@ -3865,6 +3865,18 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         entityId,
         input,
         workItemState,
+        {
+          // Restoring an edge needs the same permission on both endpoints as creating one.
+          canRestoreDependencyTo: async (counterpart) => {
+            try {
+              await requirePlanningScopePermission(principal, counterpart, 'manager')
+              return true
+            } catch (error) {
+              if (!isPlanningScopeDenial(error)) throw error
+              return false
+            }
+          },
+        },
       )
       return c.json({
         planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
