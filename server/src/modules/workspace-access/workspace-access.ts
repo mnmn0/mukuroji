@@ -146,6 +146,11 @@ export type WorkspaceMemberCredentialRecord = {
   member: WorkspaceMember
   /** Whether a retry with the same idempotency key found the action already recorded. */
   alreadyRecorded: boolean
+  /**
+   * Whether an earlier attempt with the same idempotency key already finished the action, so
+   * the caller must not change the account again.
+   */
+  completed: boolean
 }
 
 /** Workspace access API が返す invitation です。 */
@@ -367,15 +372,19 @@ export interface WorkspaceAccessClient {
    * Checks that an administrator may change an active member's sign-in credentials and records
    * the action in the audit log.
    *
-   * Call it before changing Cognito, and stop when it cannot record. A retry with the same
-   * idempotency key finds the existing record and returns `alreadyRecorded`.
+   * Call it before changing Cognito, and stop when it cannot record. The call also claims the
+   * action for a short lease, so that only one attempt changes Cognito at a time. A retry with
+   * the same idempotency key checks authority again, finds the existing record and returns
+   * `alreadyRecorded`, with `completed` when an earlier attempt finished the action.
    *
    * @param workspaceId - Workspace of the action.
    * @param actorMemberKey - Member key of the administrator.
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
-   * @returns The checked target member, and whether the action was already recorded.
+   * @returns The checked target member, and whether the action was already recorded or completed.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
+   *   holds the lease.
    */
   recordMemberCredentialAction?(
     workspaceId: string,
@@ -1703,17 +1712,20 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 
   /**
    * Checks that an administrator may change an active member's sign-in credentials and records
-   * the action in the audit log, together with a progress record for retries.
+   * the action in the audit log, together with a progress record that claims it for a lease.
    *
    * Owners may act on every member, admins on members and guests. Nobody may act on themselves;
-   * they change their own password and MFA in their account settings.
+   * they change their own password and MFA in their account settings. The authority check runs
+   * on every attempt, including a retry that resumes a recorded action.
    *
    * @param workspaceId - Workspace of the action.
    * @param actorMemberKey - Member key of the administrator.
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
-   * @returns The checked target member, and whether the action was already recorded.
+   * @returns The checked target member, and whether the action was already recorded or completed.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
+   *   holds the lease.
    */
   async recordMemberCredentialAction(
     workspaceId: string,
@@ -1749,8 +1761,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 
     const auditItem = auditPut?.Put?.Item
     if (!auditPut || !auditItem) {
-      return { member: target, alreadyRecorded: false }
+      return { member: target, alreadyRecorded: false, completed: false }
     }
+
+    const now = this.clock()
 
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -1783,27 +1797,32 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
                 actorKey: auditItem.actorKey,
                 action,
                 status: 'recorded',
-                recordedAt: this.clock().toISOString(),
+                recordedAt: now.toISOString(),
+                leaseUntil: now.getTime() + credentialActionLeaseMs,
               },
               ConditionExpression: 'attribute_not_exists(recordKey)',
             },
           },
         ],
       }))
-      return { member: target, alreadyRecorded: false }
+      return { member: target, alreadyRecorded: false, completed: false }
     } catch (error) {
       const replayed = !isTransactionConditionalFailureAt(error, 0) &&
         !isTransactionConditionalFailureAt(error, 1) &&
         (isTransactionConditionalFailureAt(error, 2) || isTransactionConditionalFailureAt(error, 3))
       if (replayed) {
-        const progress = await this.readMemberCredentialActionProgress(
+        const recorded = await this.readCredentialActionRecord(
           normalizedWorkspaceId,
           target.memberKey,
           action,
           auditContext,
         )
-        if (progress !== 'none') {
-          return { member: target, alreadyRecorded: true }
+        if (recorded) {
+          if (recorded.status === 'completed') {
+            return { member: target, alreadyRecorded: true, completed: true }
+          }
+          await this.renewCredentialActionLease(normalizedWorkspaceId, recorded, now)
+          return { member: target, alreadyRecorded: true, completed: false }
         }
         throw new WorkspaceAccessError(
           409,
@@ -1843,32 +1862,57 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMemberCredentialProgress> {
-    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
-    const expected = this.createMemberCredentialAuditPut(
-      normalizedWorkspaceId,
+    const recorded = await this.readCredentialActionRecord(
+      normalizeRequired(workspaceId, 'Workspace ID'),
       normalizeMemberKey(targetMemberKey),
+      action,
+      auditContext,
+    )
+    if (!recorded) {
+      return 'none'
+    }
+    return recorded.status === 'completed' ? 'completed' : 'recorded'
+  }
+
+  /**
+   * Reads the progress record of a credential action under the request's idempotency key.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param targetMemberKey - Normalized member key of the target.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   * @returns The record, or undefined when nothing was recorded or auditing is off.
+   * @throws WorkspaceAccessError 409 when the key was used for a different operation.
+   */
+  private async readCredentialActionRecord(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const expected = this.createMemberCredentialAuditPut(
+      workspaceId,
+      targetMemberKey,
       action,
       auditContext,
     )?.Put?.Item
     if (!expected) {
-      return 'none'
+      return undefined
     }
 
+    const recordKey = createCredentialActionRecordKey(expected.eventId)
     try {
       const response = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
-        Key: {
-          workspaceId: normalizedWorkspaceId,
-          recordKey: createCredentialActionRecordKey(expected.eventId),
-        },
+        Key: { workspaceId, recordKey },
         ConsistentRead: true,
       }))
       const recorded = response.Item
       if (!recorded) {
-        return 'none'
+        return undefined
       }
       if (
-        recorded.memberKey !== normalizeMemberKey(targetMemberKey) ||
+        recorded.memberKey !== targetMemberKey ||
         recorded.action !== action ||
         recorded.actorKey !== expected.actorKey
       ) {
@@ -1878,9 +1922,64 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           'This idempotency key was already used for a different operation.',
         )
       }
-      return recorded.status === 'completed' ? 'completed' : 'recorded'
+      return {
+        recordKey,
+        status: recorded.status === 'completed' ? 'completed' as const : 'recorded' as const,
+        leaseUntil: typeof recorded.leaseUntil === 'number' ? recorded.leaseUntil : undefined,
+      }
     } catch (error) {
       if (error instanceof WorkspaceAccessError) throw error
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Takes over a recorded credential action whose earlier attempt stopped, once its lease ran out.
+   *
+   * The conditional update succeeds for one caller only, so two retries cannot both change
+   * Cognito.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param recorded - Progress record that the caller read.
+   * @param recorded.recordKey - Key of the progress record.
+   * @param recorded.leaseUntil - Lease end the caller observed, if any.
+   * @param now - Current time.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
+   *   holds the lease or took it over first.
+   */
+  private async renewCredentialActionLease(
+    workspaceId: string,
+    recorded: { recordKey: string; leaseUntil: number | undefined },
+    now: Date,
+  ) {
+    const inProgress = () => new WorkspaceAccessError(
+      409,
+      'WorkspaceCredentialActionInProgress',
+      'Another request is still resetting this member\'s sign-in. Try again shortly.',
+    )
+    if (recorded.leaseUntil !== undefined && recorded.leaseUntil > now.getTime()) {
+      throw inProgress()
+    }
+
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: recorded.recordKey },
+        UpdateExpression: 'SET leaseUntil = :leaseUntil',
+        ConditionExpression: recorded.leaseUntil === undefined
+          ? '#status = :recorded AND attribute_not_exists(leaseUntil)'
+          : '#status = :recorded AND leaseUntil = :observedLeaseUntil',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':recorded': 'recorded',
+          ':leaseUntil': now.getTime() + credentialActionLeaseMs,
+          ...(recorded.leaseUntil === undefined ? {} : { ':observedLeaseUntil': recorded.leaseUntil }),
+        },
+      }))
+    } catch (error) {
+      if (isAwsError(error, 'ConditionalCheckFailedException')) {
+        throw inProgress()
+      }
       throw toWorkspaceAccessError(error)
     }
   }
@@ -3208,6 +3307,12 @@ function createMemberRecordKey(memberKey: string) {
 function createInvitationRecordKey(invitationId: string) {
   return `INVITATION#${normalizeEmail(invitationId)}`
 }
+
+/**
+ * How long one attempt holds an administrator credential action before a retry may take it
+ * over. It is longer than the API Lambda's run time, so a live attempt keeps its claim.
+ */
+const credentialActionLeaseMs = 60_000
 
 /** Key of the record that tracks one administrator credential action, named by its audit event. */
 function createCredentialActionRecordKey(auditEventId: unknown) {

@@ -63,7 +63,10 @@ type AttemptScope = keyof typeof attemptLimits
 /** Attempts counted per hashed client and email key, oldest first. */
 const attemptCounters = new Map<string, { attempts: number; resetAt: number }>()
 
-/** Most keys the rate limit keeps, so that many distinct addresses cannot grow memory without bound. */
+/**
+ * Most keys the rate limit keeps, so that many distinct addresses cannot grow memory without
+ * bound. When it is full, new keys are refused until expired ones are swept.
+ */
 const maxAttemptCounters = 10_000
 
 /** Shortest interval between sweeps of expired rate-limit keys. */
@@ -73,20 +76,15 @@ const attemptSweepIntervalMs = 60_000
 let lastAttemptSweepAt = 0
 
 /**
- * Drops expired rate-limit keys, at most once a minute, and the oldest keys over the size cap.
+ * Drops expired rate-limit keys, at most once a minute.
  *
  * @param now - Current time in milliseconds.
  */
-function pruneAttemptCounters(now: number) {
-  if (now - lastAttemptSweepAt >= attemptSweepIntervalMs) {
-    lastAttemptSweepAt = now
-    for (const [candidate, state] of attemptCounters) {
-      if (state.resetAt <= now) attemptCounters.delete(candidate)
-    }
-  }
-  for (const candidate of attemptCounters.keys()) {
-    if (attemptCounters.size < maxAttemptCounters) break
-    attemptCounters.delete(candidate)
+function sweepExpiredAttemptCounters(now: number) {
+  if (Math.abs(now - lastAttemptSweepAt) < attemptSweepIntervalMs) return
+  lastAttemptSweepAt = now
+  for (const [candidate, state] of attemptCounters) {
+    if (state.resetAt <= now) attemptCounters.delete(candidate)
   }
 }
 
@@ -121,8 +119,16 @@ function consumeAttempt(c: Context, scope: AttemptScope, subject: string) {
       retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1_000)),
     }
   }
-  attemptCounters.delete(key)
-  pruneAttemptCounters(now)
+  if (stored && !current) attemptCounters.delete(key)
+  sweepExpiredAttemptCounters(now)
+  if (!current && attemptCounters.size >= maxAttemptCounters) {
+    // Evicting live counters would let a flood of addresses reset a subject's limit, so new
+    // keys wait until expired ones are swept instead.
+    return {
+      allowed: false as const,
+      retryAfterSeconds: Math.ceil(attemptSweepIntervalMs / 1_000),
+    }
+  }
   attemptCounters.set(key, {
     attempts: (current?.attempts ?? 0) + 1,
     resetAt: current?.resetAt ?? now + windowMs,

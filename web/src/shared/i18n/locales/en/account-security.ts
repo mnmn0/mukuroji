@@ -132,6 +132,7 @@ export const accountSecurityMessages = {
   'memberSecurity.error.sso': 'This member signs in with single sign-on.',
   'memberSecurity.error.unavailable':
     'The action could not be completed. Check that the member\'s email is verified.',
+  'memberSecurity.error.inProgress': 'The previous request is still running. Try again in a minute.',
   'memberSecurity.error.notEnrolled': 'This member has no authenticator app registered.',
   'security.sessions.mfaImpact.count':
     '{count} active members have no MFA. After you save, they must register an authenticator app at their next sign-in.',

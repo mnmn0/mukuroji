@@ -29,14 +29,18 @@ export type MemberCredentialResetPorts = {
     action: WorkspaceMemberCredentialAction,
     auditContext: MutationAuditContext | undefined,
   ): Promise<WorkspaceMemberCredentialProgress>
-  /** Checks the actor's authority and records the action in the audit log. */
+  /**
+   * Checks the actor's authority over the member, records the action in the audit log, and
+   * claims it so that only one attempt changes the account at a time. A retry with the same
+   * idempotency key resumes the recorded action, or reports that it already completed.
+   */
   recordAction(
     workspaceId: string,
     actorMemberKey: string,
     memberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext: MutationAuditContext | undefined,
-  ): Promise<unknown>
+  ): Promise<{ completed: boolean }>
   /** Marks the recorded action as finished, so that a retry does not change the account again. */
   completeAction(
     workspaceId: string,
@@ -74,8 +78,9 @@ export type MemberCredentialResetInput = {
  * The action is recorded in the audit log before the account changes, and marked completed
  * after it. A retry with the same idempotency key does nothing once the action completed, so a
  * late retry cannot undo an app or password the member set up since. A retry of an action that
- * was recorded but not completed resumes it without the eligibility checks, because the earlier
- * attempt may already have changed the account.
+ * was recorded but not completed checks the actor's authority again and resumes it without the
+ * eligibility checks, because the earlier attempt may already have changed the account. Each
+ * attempt claims the action before changing the account, so concurrent retries do not repeat it.
  *
  * @param ports - Member, identity, and audit ports.
  * @param input - Actor, member, action, and audit context.
@@ -111,13 +116,16 @@ export async function resetMemberCredential(
     if (blocked) {
       throw blocked
     }
-    await ports.recordAction(
-      input.workspaceId,
-      input.actorMemberKey,
-      member.memberKey,
-      input.action,
-      input.auditContext,
-    )
+  }
+  const claim = await ports.recordAction(
+    input.workspaceId,
+    input.actorMemberKey,
+    member.memberKey,
+    input.action,
+    input.auditContext,
+  )
+  if (claim.completed) {
+    return
   }
 
   if (input.action === 'mfa-reset') {

@@ -1444,6 +1444,10 @@ function resolveMemberCredentialErrorMessage(
       return t('memberSecurity.error.notEnrolled')
     }
 
+    if (error.code === 'WorkspaceCredentialActionInProgress') {
+      return t('memberSecurity.error.inProgress')
+    }
+
     if (
       error.code === 'MemberPasswordResetUnavailable' ||
       error.code === 'MemberSignInUnavailable'

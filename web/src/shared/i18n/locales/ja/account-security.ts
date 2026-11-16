@@ -139,6 +139,7 @@ export const accountSecurityMessages = {
   'memberSecurity.error.sso': 'このメンバーはシングルサインオンでログインします。',
   'memberSecurity.error.unavailable':
     '操作できませんでした。メンバーのメールアドレスが確認済みか確かめてください。',
+  'memberSecurity.error.inProgress': '前回の操作をまだ処理しています。1 分ほど待ってからもう一度お試しください。',
   'memberSecurity.error.notEnrolled': 'このメンバーは認証アプリを登録していません。',
   'security.sessions.mfaImpact.count':
     'MFA を登録していないアクティブメンバーが {count} 人います。保存すると、その人は次回ログイン時に認証アプリの登録を求められます。',

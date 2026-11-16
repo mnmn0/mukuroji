@@ -37,6 +37,7 @@ function createPorts(
     readActionProgress: async () => 'none',
     async recordAction(_workspaceId, actor, memberKey, action) {
       calls.push(`record:${actor}:${memberKey}:${action}`)
+      return { completed: false }
     },
     async completeAction(_workspaceId, memberKey, action) {
       calls.push(`complete:${memberKey}:${action}`)
@@ -123,7 +124,39 @@ test('resumes a recorded reset whose earlier attempt stopped before finishing', 
 
   await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
 
-  expect(calls).toEqual(['disable:sato@example.com', 'complete:sato@example.com:mfa-reset'])
+  expect(calls).toEqual([
+    'record:demo@example.com:sato@example.com:mfa-reset',
+    'disable:sato@example.com',
+    'complete:sato@example.com:mfa-reset',
+  ])
+})
+
+test('checks authority again before resuming a recorded reset', async () => {
+  const { ports, calls } = createPorts({
+    readActionProgress: async () => 'recorded',
+    async recordAction() {
+      throw Object.assign(new Error('The Workspace role cannot manage this member.'), {
+        status: 403,
+        code: 'WorkspaceRoleDenied',
+      })
+    },
+  })
+
+  await expect(resetMemberCredential(ports, { ...input, action: 'mfa-reset' }))
+    .rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+  expect(calls).toEqual([])
+})
+
+test('does not change the account when a concurrent attempt completed the reset first', async () => {
+  const { ports, calls } = createPorts({
+    async recordAction() {
+      return { completed: true }
+    },
+  })
+
+  await resetMemberCredential(ports, { ...input, action: 'password-reset-requested' })
+
+  expect(calls).toEqual([])
 })
 
 test('does nothing for a retry of a completed reset', async () => {
