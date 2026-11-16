@@ -335,6 +335,15 @@ describe('collaboration projection pure helpers', () => {
       .toBeUndefined()
     expect(refreshScheduledNotificationEvent(escalation, { ...scope, projectId: undefined }))
       .toBeUndefined()
+    // Moved to another Project: a fresh escalation is keyed for it, so the old one is dropped.
+    expect(refreshScheduledNotificationEvent(
+      { ...escalation, projectId: 'other' },
+      { ...scope, projectId: 'other' },
+      'platform',
+    )).toBeUndefined()
+    for (const scheduled of [dueSoon, reminder, stale, escalation]) {
+      expect(refreshScheduledNotificationEvent(scheduled, { ...scope, archived: true })).toBeUndefined()
+    }
 
     const directory: ProjectDirectoryItem[] = [
       { entryType: 'project-member', projectId: 'platform', memberKey: 'Lead@Example.com', role: 'manager' },

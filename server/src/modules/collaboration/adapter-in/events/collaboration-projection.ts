@@ -301,6 +301,8 @@ export type CurrentWorkItemNotificationScope = {
   updatedAt?: string
   /** Today in the Work Item schedule's local calendar at read time, as `YYYY-MM-DD`. */
   localDate?: string
+  /** Whether the Work Item is currently archived. */
+  archived?: boolean
 }
 
 /** Projection 時に強整合 read した Planning update target scope です。 */
@@ -643,6 +645,7 @@ async function processRecord(
   const workItemAuthorizationEvent = refreshScheduledNotificationEvent(
     workItemScopedEvent,
     currentScope,
+    event.projectId,
   )
   if (!workItemAuthorizationEvent) {
     await markProjectionProcessed(event.eventId)
@@ -1433,19 +1436,22 @@ export function createNotificationProjectionItem(
 /**
  * Revalidates a scheduled Work Item notification against the current Work Item row.
  *
- * Every stage requires the Work Item to still be open with the same due date (or, for a stale
- * reminder, still started with the same `updatedAt` and not yet overdue). A due-soon reminder also
- * expires once the due date arrives. Owner stages are re-pointed at the current
- * owner and dropped when ownership changed. Escalation keeps its manager candidates; the caller
- * filters them by current Project manager role.
+ * Every stage requires the Work Item to still be open, unarchived, and on the same due date (or,
+ * for a stale reminder, still started with the same `updatedAt` and not yet overdue). A due-soon
+ * reminder also expires once the due date arrives. Owner stages are re-pointed at the current
+ * owner and dropped when ownership changed. Escalation must still target the Project it was
+ * scanned for and keeps its manager candidates; the caller filters them by current Project
+ * manager role.
  *
  * @param event - Parsed scheduled audit event.
  * @param scope - Strongly read current Work Item scope.
+ * @param scheduledProjectId - Project the scan escalated to, before the current scope was overlaid.
  * @returns The event with current recipients, or undefined when the stage is stale.
  */
 export function refreshScheduledNotificationEvent(
   event: AuditProjectionEvent,
   scope: CurrentWorkItemNotificationScope,
+  scheduledProjectId: string | undefined = event.projectId,
 ): AuditProjectionEvent | undefined {
   const reason = scheduledWorkItemNotificationReasons.get(event.eventType)
   if (!reason) {
@@ -1456,6 +1462,7 @@ export function refreshScheduledNotificationEvent(
     !scope.checked ||
     !scope.exists ||
     !scope.assigneeMemberKey ||
+    scope.archived === true ||
     scope.statusCategory === 'completed' ||
     scope.statusCategory === 'canceled'
   ) {
@@ -1480,7 +1487,8 @@ export function refreshScheduledNotificationEvent(
   }
 
   if (reason === 'escalation') {
-    if (!scope.projectId) return undefined
+    // A Project move gets its own escalation key on the next scan, so the old one is dropped.
+    if (!scope.projectId || scope.projectId !== scheduledProjectId) return undefined
     const recipients = event.notificationCandidates.filter((candidate) =>
       candidate.reason === 'escalation' &&
       normalizeMemberKey(candidate.memberKey) !== scope.assigneeMemberKey
@@ -2174,6 +2182,7 @@ export async function authorizeNotificationDelivery(
   const scoped = refreshScheduledNotificationEvent(
     currentScope.checked ? overlayCurrentWorkItemNotificationScope(sourceEvent, currentScope) : sourceEvent,
     currentScope,
+    sourceEvent.projectId,
   )
   if (!scoped) return false
   const planningScope = await readCurrentPlanningUpdateScope(scoped)
@@ -2333,6 +2342,7 @@ async function readCurrentWorkItemScope(
     statusCategory: item.statusCategory,
     updatedAt: item.updatedAt,
     localDate: workItemScheduleInstantToLocalDate(new Date(), item.schedule.calendarPolicy),
+    archived: item.archivedAt !== undefined,
   }
 }
 
