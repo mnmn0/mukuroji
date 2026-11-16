@@ -450,8 +450,14 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.includes('assign')) {
     return 'workspace.inbox.event.assignment'
   }
+  if (normalizedEventType.includes('escalation')) {
+    return 'workspace.inbox.event.escalation'
+  }
   if (normalizedEventType.includes('overdue')) {
     return 'workspace.inbox.event.overdue'
+  }
+  if (normalizedEventType.includes('due-soon')) {
+    return 'workspace.inbox.event.dueSoon'
   }
   if (normalizedEventType.includes('due')) {
     return 'workspace.inbox.event.due'
@@ -461,6 +467,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   }
   if (normalizedEventType.includes('automation')) {
     return 'workspace.inbox.event.automation'
+  }
+  if (normalizedEventType.includes('stale')) {
+    return 'workspace.inbox.event.stale'
   }
   if (normalizedEventType.includes('status') || normalizedEventType.includes('work-item')) {
     return 'workspace.inbox.event.status'
@@ -483,6 +492,21 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   }
   if (normalizedReason.includes('watch')) {
     return t('workspace.inbox.reason.watcher')
+  }
+  if (normalizedReason === 'creator') {
+    return t('workspace.inbox.reason.creator')
+  }
+  if (normalizedReason === 'escalation') {
+    return t('workspace.inbox.reason.escalation')
+  }
+  if (normalizedReason === 'due-soon') {
+    return t('workspace.inbox.reason.dueSoon')
+  }
+  if (normalizedReason === 'overdue') {
+    return t('workspace.inbox.reason.overdue')
+  }
+  if (normalizedReason === 'stale') {
+    return t('workspace.inbox.reason.stale')
   }
 
   return t('workspace.inbox.reason.watch')
@@ -525,10 +549,19 @@ function resolveEventGlyph(eventType: string) {
 function resolveEventToneClassName(eventType: string) {
   const eventKey = resolveNotificationEventKey(eventType)
 
-  if (eventKey === 'workspace.inbox.event.automation' || eventKey === 'workspace.inbox.event.overdue') {
+  if (
+    eventKey === 'workspace.inbox.event.automation' ||
+    eventKey === 'workspace.inbox.event.overdue' ||
+    eventKey === 'workspace.inbox.event.escalation'
+  ) {
     return 'border-red-200 bg-red-50 text-fg-red-700'
   }
-  if (eventKey === 'workspace.inbox.event.due' || eventKey === 'workspace.inbox.event.approval') {
+  if (
+    eventKey === 'workspace.inbox.event.due' ||
+    eventKey === 'workspace.inbox.event.dueSoon' ||
+    eventKey === 'workspace.inbox.event.stale' ||
+    eventKey === 'workspace.inbox.event.approval'
+  ) {
     return 'border-amber-200 bg-amber-50 text-fg-amber-700'
   }
 

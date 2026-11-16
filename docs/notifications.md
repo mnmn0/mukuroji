@@ -13,7 +13,10 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Work Item 作成・担当変更: `assignment`
 - Work Item status 変更: `status-change`
 - Work Item schedule 変更: `schedule-change`
-- 定期 due scan: `due` / `overdue`
+- Work Item archive / restore: `archive-change`
+- 上記の変更の作成者: `creator`（責任者と同じ人なら 1 件にまとまる）
+- 上記の変更の item watcher: `watcher`（projection が現在の購読から解決する。Project watcher には送らない。title や説明だけの変更では送らない）
+- 定期 due scan: `due` / `due-soon` / `overdue` / `escalation` / `stale`
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
 - Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
 
@@ -172,5 +175,16 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 ## Due / overdue scan
 
 EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
+
+同じ scan は次の段階も作ります。日数は schedule Lambda の環境変数で上書きでき、未設定なら括弧内の既定値を使います。
+
+| event type | 宛先 | 条件 | 重複排除の単位 |
+| --- | --- | --- | --- |
+| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3） | 期限・責任者 |
+| `work-item.overdue-reminder` | 責任者 | 超過から interval 日ごと（`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、7）。初回の超過は従来どおり `work-item.overdue` | 期限・責任者・何回目か |
+| `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外 | 期限・Project |
+| `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知 | 最終更新時刻・責任者・何回目か |
+
+再通知は `work-item.overdue` と別の event type にしているため、Automation の `due` trigger（`overdue`）は初回だけ発火します。projection は配送時に Work Item を強整合で読み直し、完了・期限変更・責任者変更・更新済みの段階を捨てます。escalation は配送時点でも Project manager であることを確認します。
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

@@ -257,7 +257,7 @@ describe('notification schedule handler', () => {
               title: 'Security review',
               dueDate: '2026-07-10',
             }),
-            createWorkItem({ issueId: 'future', dueDate: '2026-07-13' }),
+            createWorkItem({ issueId: 'future', dueDate: '2026-07-20' }),
             createWorkItem({ issueId: 'done', statusCategory: 'completed' }),
           ],
         }
@@ -393,9 +393,11 @@ describe('notification schedule handler', () => {
     await expect(runNotificationSchedule(createRunOptions(beforeBoundary.client, {
       now: new Date('2026-07-11T23:59:59.999Z'),
     }))).resolves.toMatchObject({
-      emittedEvents: 0,
-      skippedItems: 1,
+      emittedEvents: 1,
+      skippedItems: 0,
     })
+    expect(beforeBoundary.commands.find(({ name }) => name === 'PutCommand')?.input.Item)
+      .toMatchObject({ eventType: 'work-item.due-soon' })
     await expect(runNotificationSchedule(createRunOptions(atBoundary.client, {
       now: new Date('2026-07-12T00:00:00.000Z'),
     }))).resolves.toMatchObject({
@@ -435,14 +437,162 @@ describe('notification schedule handler', () => {
     await expect(runNotificationSchedule(createRunOptions(recording.client, {
       now: new Date('2026-07-11T15:00:00.000Z'),
     }))).resolves.toMatchObject({
-      emittedEvents: 1,
-      skippedItems: 1,
+      emittedEvents: 2,
+      skippedItems: 0,
     })
-    expect(recording.commands.find(({ name }) => name === 'PutCommand')?.input.Item)
-      .toMatchObject({
-        entityId: 'team/core-team/issue/tokyo',
-        eventType: 'work-item.due',
-      })
+    expect(recording.commands.filter(({ name }) => name === 'PutCommand').map(({ input }) => {
+      const item = input.Item as Record<string, unknown>
+      return [item.entityId, item.eventType]
+    })).toEqual([
+      ['team/core-team/issue/tokyo', 'work-item.due'],
+      ['team/core-team/issue/new-york', 'work-item.due-soon'],
+    ])
+  })
+
+  test('notifies the owner within the due-soon window only', async () => {
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? {
+          Items: [
+            createWorkItem({ issueId: 'in-three-days', dueDate: '2026-07-15' }),
+            createWorkItem({ issueId: 'in-four-days', dueDate: '2026-07-16' }),
+          ],
+        }
+      : {})
+
+    const result = await runNotificationSchedule(createRunOptions(recording.client))
+    const puts = recording.commands.filter(({ name }) => name === 'PutCommand')
+
+    expect(result).toMatchObject({ emittedEvents: 1, skippedItems: 1 })
+    expect(puts[0]?.input.Item).toMatchObject({
+      eventType: 'work-item.due-soon',
+      entityId: 'team/core-team/issue/in-three-days',
+      summary: 'Work Item "Release checklist" is due in 3 day(s).',
+      metadata: {
+        dueDate: '2026-07-15',
+        notificationCandidates: [{ memberKey: 'member@example.com', reason: 'due-soon' }],
+      },
+    })
+  })
+
+  test('repeats overdue reminders once per interval with a stable key inside the interval', async () => {
+    const run = async (now: string) => {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+        ? { Items: [createWorkItem({ assignedProjectId: undefined, directoryProjectId: undefined })] }
+        : {})
+      await runNotificationSchedule(createRunOptions(recording.client, { now: new Date(now) }))
+      return recording.commands
+        .filter(({ name }) => name === 'PutCommand')
+        .map(({ input }) => input.Item as Record<string, unknown>)
+    }
+
+    const [firstOverdue] = await run('2026-07-13T09:00:00.000Z')
+    const [sixDays] = await run('2026-07-18T09:00:00.000Z')
+    const [firstReminder] = await run('2026-07-19T09:00:00.000Z')
+    const [sameWeek] = await run('2026-07-25T09:00:00.000Z')
+    const [secondReminder] = await run('2026-07-26T09:00:00.000Z')
+
+    expect(firstOverdue).toMatchObject({ eventType: 'work-item.overdue' })
+    expect(sixDays?.eventId).toBe(firstOverdue?.eventId)
+    expect(firstReminder).toMatchObject({
+      eventType: 'work-item.overdue-reminder',
+      action: 'overdue-reminder',
+      summary: 'Work Item "Release checklist" is still overdue (7 days).',
+      metadata: {
+        repetition: 1,
+        notificationCandidates: [{ memberKey: 'member@example.com', reason: 'overdue' }],
+      },
+    })
+    expect(sameWeek?.eventId).toBe(firstReminder?.eventId)
+    expect(secondReminder?.eventId).not.toBe(firstReminder?.eventId)
+    expect(secondReminder).toMatchObject({ metadata: { repetition: 2 } })
+  })
+
+  test('escalates a long-overdue Work Item once to current managers of its active Project', async () => {
+    const directory = [
+      { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'platform' },
+      { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'archived', archivedAt: '2026-07-01T00:00:00.000Z' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'Lead@Example.com', role: 'manager' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'member@example.com', role: 'manager' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'viewer@example.com', role: 'viewer' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'archived', memberKey: 'old@example.com', role: 'manager' },
+    ]
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') {
+        return {
+          Items: [
+            createWorkItem({ dueDate: '2026-07-05' }),
+            createWorkItem({
+              issueId: 'archived-project',
+              assignedProjectId: 'archived',
+              directoryProjectId: 'workspace-1#project#archived',
+              dueDate: '2026-07-01',
+            }),
+            createWorkItem({ issueId: 'six-days', dueDate: '2026-07-06' }),
+          ],
+        }
+      }
+      if (name === 'QueryCommand' && input.TableName === 'ProjectDirectoryTable') {
+        return { Items: directory }
+      }
+      return {}
+    })
+
+    await runNotificationSchedule(createRunOptions(recording.client, {
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))
+    const events = recording.commands
+      .filter(({ name }) => name === 'PutCommand')
+      .map(({ input }) => input.Item as Record<string, unknown>)
+    const escalations = events.filter((event) => event.eventType === 'work-item.overdue-escalation')
+
+    expect(recording.commands.filter(({ name }) => name === 'QueryCommand')).toHaveLength(1)
+    expect(escalations).toHaveLength(1)
+    expect(escalations[0]).toMatchObject({
+      entityId: 'team/core-team/issue/release-checklist',
+      summary: 'Work Item "Release checklist" has been overdue for 7 days.',
+      metadata: {
+        projectId: 'platform',
+        dueDate: '2026-07-05',
+        notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'escalation' }],
+      },
+    })
+    expect(events.filter((event) => event.eventType === 'work-item.overdue-reminder'))
+      .toHaveLength(2)
+    expect(events.filter((event) => event.eventType === 'work-item.overdue'))
+      .toHaveLength(1)
+  })
+
+  test('reminds the owner of a started Work Item that has not been updated', async () => {
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? {
+          Items: [
+            createWorkItem({ issueId: 'stale', dueDate: '2026-08-31', updatedAt: '2026-07-05T08:00:00.000Z' }),
+            createWorkItem({ issueId: 'fresh', dueDate: '2026-08-31', updatedAt: '2026-07-06T10:00:00.000Z' }),
+            createWorkItem({
+              issueId: 'not-started',
+              dueDate: '2026-08-31',
+              statusCategory: 'unstarted',
+              workflowStatusId: 'todo',
+              updatedAt: '2026-07-01T09:00:00.000Z',
+            }),
+          ],
+        }
+      : {})
+
+    const result = await runNotificationSchedule(createRunOptions(recording.client))
+    const puts = recording.commands.filter(({ name }) => name === 'PutCommand')
+
+    expect(result).toMatchObject({ emittedEvents: 1, skippedItems: 2 })
+    expect(puts[0]?.input.Item).toMatchObject({
+      eventType: 'work-item.stale',
+      entityId: 'team/core-team/issue/stale',
+      summary: 'Work Item "Release checklist" is in progress and has not been updated since 2026-07-05.',
+      metadata: {
+        workItemUpdatedAt: '2026-07-05T08:00:00.000Z',
+        repetition: 1,
+        notificationCandidates: [{ memberKey: 'member@example.com', reason: 'stale' }],
+      },
+    })
   })
 
   test('fails closed for non-canonical Work Item rows', async () => {

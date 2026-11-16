@@ -128,6 +128,8 @@ export type AuditProjectionEvent = {
   summary?: string
   /** Scheduled due/overdue event が対象にした date-only 期限です。 */
   dueDate?: string
+  /** Work Item `updatedAt` that a scheduled stale reminder was computed from. */
+  workItemUpdatedAt?: string
   /** Scheduled Planning event の Project / Initiative target type です。 */
   planningTargetType?: 'project' | 'initiative'
   /** Scheduled Planning event の canonical target ID です。 */
@@ -295,6 +297,8 @@ export type CurrentWorkItemNotificationScope = {
   dueDate?: string
   /** 現在の標準 workflow status category です。 */
   statusCategory?: string
+  /** Current Work Item `updatedAt` timestamp. */
+  updatedAt?: string
 }
 
 /** Projection 時に強整合 read した Planning update target scope です。 */
@@ -365,6 +369,23 @@ const watcherNotificationEventTypes = new Set([
   'accepted-resolution.replaced',
   'accepted-resolution.edited',
 ])
+/**
+ * Work Item change events whose current item watchers are notified when the change carries
+ * notification candidates (assignment, status, schedule, or archive change).
+ */
+const workItemChangeWatcherEventTypes = new Set([
+  'work-item.updated',
+  'work-item.schedule-cascade-updated',
+])
+/** Scheduled Work Item events that are revalidated against the current Work Item row. */
+const scheduledWorkItemNotificationReasons = new Map([
+  ['work-item.due', 'due'],
+  ['work-item.due-soon', 'due-soon'],
+  ['work-item.overdue', 'overdue'],
+  ['work-item.overdue-reminder', 'overdue'],
+  ['work-item.overdue-escalation', 'escalation'],
+  ['work-item.stale', 'stale'],
+])
 const curatedContextSearchUpsertEventTypes = new Set([
   'context-item.created',
   'context-item.updated',
@@ -382,6 +403,22 @@ const curatedContextSearchProjectionEventTypes = new Set([
  */
 export function supportsCollaborationWatcherNotifications(eventType: string) {
   return watcherNotificationEventTypes.has(eventType)
+}
+
+/**
+ * Reports whether a Work Item change event should notify the item's current watchers.
+ *
+ * Title or description edits carry no notification candidates and stay silent; assignment,
+ * status, schedule, and archive changes reach watchers as well as the owner and creator.
+ *
+ * @param event - Parsed audit event type and stored notification candidates.
+ * @returns Whether item watchers must be resolved for the event.
+ */
+export function notifiesWorkItemChangeWatchers(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'notificationCandidates'>,
+) {
+  return workItemChangeWatcherEventTypes.has(event.eventType) &&
+    event.notificationCandidates.length > 0
 }
 
 /**
@@ -652,6 +689,7 @@ async function processRecord(
   const eligibleCandidates = (
     await Promise.all(
       candidates.map(async (candidate) =>
+        isCurrentEscalationManager(authorizationEvent, candidate.memberKey, directoryItems) &&
         await isEligibleRecipient(
           authorizationEvent,
           candidate.memberKey,
@@ -901,7 +939,10 @@ function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
 }
 
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
-  if (!supportsCollaborationWatcherNotifications(event.eventType)) {
+  if (
+    !supportsCollaborationWatcherNotifications(event.eventType) &&
+    !notifiesWorkItemChangeWatchers(event)
+  ) {
     return []
   }
 
@@ -961,6 +1002,10 @@ export function createSubscribedWatcherScopes(
     | 'workspaceId'
   >,
 ) {
+  if (workItemChangeWatcherEventTypes.has(event.eventType)) {
+    // Project watchers follow comments, not every field change of each Work Item.
+    return event.scopeKey ? [{ entityKey: event.scopeKey, reason: 'watcher' }] : []
+  }
   const planningNotification = planningNotificationKindFromEventType(event.eventType) !== undefined
   const planningTargetKey = planningNotification
     ? event.planningTargetType === 'project' && event.teamId && event.projectId
@@ -1382,29 +1427,62 @@ export function createNotificationProjectionItem(
   }
 }
 
-/** Scheduled notification を projection 時点の担当者と期限へ再検証します。 */
+/**
+ * Revalidates a scheduled Work Item notification against the current Work Item row.
+ *
+ * Every stage requires the Work Item to still be open with the same due date (or, for a stale
+ * reminder, still started with the same `updatedAt`). Owner stages are re-pointed at the current
+ * owner and dropped when ownership changed. Escalation keeps its manager candidates; the caller
+ * filters them by current Project manager role.
+ *
+ * @param event - Parsed scheduled audit event.
+ * @param scope - Strongly read current Work Item scope.
+ * @returns The event with current recipients, or undefined when the stage is stale.
+ */
 export function refreshScheduledNotificationEvent(
   event: AuditProjectionEvent,
   scope: CurrentWorkItemNotificationScope,
 ): AuditProjectionEvent | undefined {
-  if (event.eventType !== 'work-item.due' && event.eventType !== 'work-item.overdue') {
+  const reason = scheduledWorkItemNotificationReasons.get(event.eventType)
+  if (!reason) {
     return event
   }
 
-  const reason = event.eventType === 'work-item.due' ? 'due' : 'overdue'
-  const scheduledMemberKey = normalizeMemberKey(
-    event.notificationCandidates.find((candidate) => candidate.reason === reason)?.memberKey,
-  )
   if (
     !scope.checked ||
     !scope.exists ||
     !scope.assigneeMemberKey ||
     scope.statusCategory === 'completed' ||
-    scope.statusCategory === 'canceled' ||
-    !event.dueDate ||
-    scope.dueDate !== event.dueDate ||
-    scheduledMemberKey !== scope.assigneeMemberKey
+    scope.statusCategory === 'canceled'
   ) {
+    return undefined
+  }
+
+  if (reason === 'stale') {
+    if (
+      scope.statusCategory !== 'started' ||
+      !event.workItemUpdatedAt ||
+      scope.updatedAt !== event.workItemUpdatedAt
+    ) {
+      return undefined
+    }
+  } else if (!event.dueDate || scope.dueDate !== event.dueDate) {
+    return undefined
+  }
+
+  if (reason === 'escalation') {
+    if (!scope.projectId) return undefined
+    const recipients = event.notificationCandidates.filter((candidate) =>
+      candidate.reason === 'escalation' &&
+      normalizeMemberKey(candidate.memberKey) !== scope.assigneeMemberKey
+    )
+    return recipients.length > 0 ? { ...event, notificationCandidates: recipients } : undefined
+  }
+
+  const scheduledMemberKey = normalizeMemberKey(
+    event.notificationCandidates.find((candidate) => candidate.reason === reason)?.memberKey,
+  )
+  if (scheduledMemberKey !== scope.assigneeMemberKey) {
     return undefined
   }
 
@@ -1415,6 +1493,31 @@ export function refreshScheduledNotificationEvent(
       reason,
     }],
   }
+}
+
+/**
+ * Reports whether a recipient may receive a Work Item escalation as a current Project manager.
+ *
+ * @param event - Scheduled event whose Project scope reflects the current Work Item.
+ * @param memberKey - Recipient member key.
+ * @param directoryItems - Current Project directory rows.
+ * @returns True for non-escalation events, or when the member manages the current Project.
+ */
+export function isCurrentEscalationManager(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId'>,
+  memberKey: string,
+  directoryItems: ProjectDirectoryItem[],
+) {
+  if (scheduledWorkItemNotificationReasons.get(event.eventType) !== 'escalation') {
+    return true
+  }
+  const normalized = normalizeMemberKey(memberKey)
+  return Boolean(event.projectId) && directoryItems.some((item) =>
+    item.entryType === 'project-member' &&
+    item.projectId === event.projectId &&
+    item.role === 'manager' &&
+    normalizeMemberKey(item.memberKey) === normalized
+  )
 }
 
 /**
@@ -2094,6 +2197,7 @@ export async function authorizeNotificationDelivery(
     }
     directory = await snapshot
   }
+  if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
   return isEligibleRecipient(
     refreshed, memberKey, directory,
     new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,
@@ -2218,6 +2322,7 @@ async function readCurrentWorkItemScope(
     assigneeMemberKey: normalizeMemberKey(item.assigneeUserId),
     dueDate: normalizeStoredDateOnly(item.dueDate),
     statusCategory: item.statusCategory,
+    updatedAt: item.updatedAt,
   }
 }
 
@@ -2373,6 +2478,7 @@ export function parseAuditProjectionEvent(
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
     summary: readString(value.summary),
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
+    workItemUpdatedAt: readTimestamp(metadata.workItemUpdatedAt),
     planningTargetType: readPlanningTargetType(metadata.planningTargetType),
     planningTargetId: readString(metadata.planningTargetId),
     planningTargetRecordKey: readString(metadata.planningTargetRecordKey),

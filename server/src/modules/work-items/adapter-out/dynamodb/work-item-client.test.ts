@@ -5,7 +5,10 @@ const {
   resetTestApp,
   withTestEnvironment,
 } = createApiTestHarness()
-import { DynamoDbTeamIssuesClient } from './work-item-client'
+import {
+  createWorkItemNotificationCandidates,
+  DynamoDbTeamIssuesClient,
+} from './work-item-client'
 import {
   createMutationAuditContext,
 } from '../../../audit/audit'
@@ -3921,12 +3924,40 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
       notificationCandidates: [
         { memberKey: 'after@example.com', reason: 'assignment' },
         { memberKey: 'after@example.com', reason: 'status-change' },
+        { memberKey: 'demo@example.com', reason: 'creator' },
       ],
     },
   })
   expect(auditItem?.changes).toEqual(expect.arrayContaining([
     { field: 'workItemTypeId', before: 'default', after: 'incident' },
   ]))
+})
+
+test('Work Item change candidates add the creator only for notifiable changes', () => {
+  const before = {
+    assigneeUserId: 'owner@example.com',
+    workflowStatusId: 'todo',
+    schedule: createDueDateSchedule('2026-07-20'),
+    creatorMemberKey: 'creator@example.com',
+  }
+
+  expect(createWorkItemNotificationCandidates(before, { ...before })).toEqual([])
+  expect(createWorkItemNotificationCandidates(before, {
+    ...before,
+    workflowStatusId: 'done',
+  })).toEqual([
+    { memberKey: 'owner@example.com', reason: 'status-change' },
+    { memberKey: 'creator@example.com', reason: 'creator' },
+  ])
+  expect(createWorkItemNotificationCandidates(before, {
+    ...before,
+    schedule: createDueDateSchedule('2026-07-21'),
+    archivedAt: '2026-07-13T00:00:00.000Z',
+  })).toEqual([
+    { memberKey: 'owner@example.com', reason: 'schedule-change' },
+    { memberKey: 'owner@example.com', reason: 'archive-change' },
+    { memberKey: 'creator@example.com', reason: 'creator' },
+  ])
 })
 
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {

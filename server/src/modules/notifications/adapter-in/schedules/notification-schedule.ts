@@ -29,8 +29,37 @@ import {
 } from '../../../work-items'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
-/** 期限通知 schedule が生成する通知理由です。 */
-export type ScheduledNotificationReason = 'due' | 'overdue'
+/**
+ * Work Item notification stages emitted by the schedule. Each stage maps to the audit event type
+ * `work-item.<stage>`.
+ */
+export type ScheduledNotificationReason =
+  | 'due'
+  | 'due-soon'
+  | 'overdue'
+  | 'overdue-reminder'
+  | 'overdue-escalation'
+  | 'stale'
+
+/** Day-based thresholds for scheduled Work Item reminders. */
+export type WorkItemReminderPolicy = {
+  /** Days before the due date when the owner gets the due-soon notification. */
+  dueSoonDays: number
+  /** Interval in days between repeated overdue notifications to the owner. */
+  overdueReminderIntervalDays: number
+  /** Days past the due date after which Project managers are notified once. */
+  overdueEscalationDays: number
+  /** Days without an update after which a started Work Item's owner is reminded. */
+  staleStartedDays: number
+}
+
+/** Default reminder thresholds used when no environment override is configured. */
+export const DEFAULT_WORK_ITEM_REMINDER_POLICY: WorkItemReminderPolicy = {
+  dueSoonDays: 3,
+  overdueReminderIntervalDays: 7,
+  overdueEscalationDays: 7,
+  staleStartedDays: 7,
+}
 
 /** EventBridge scheduled event から利用する最小入力です。 */
 export type NotificationScheduleEvent = {
@@ -94,6 +123,8 @@ export type NotificationScheduleRunOptions = {
   requestId?: string
   /** Prepares Customer completion candidates for a durable Work Item marker. */
   prepareCustomerCompletionNotifications?: CustomerCompletionPreparationHandler
+  /** Reminder thresholds; omitted fields use {@link DEFAULT_WORK_ITEM_REMINDER_POLICY}. */
+  reminderPolicy?: Partial<WorkItemReminderPolicy>
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -126,8 +157,24 @@ type ScheduledNotificationCandidate = {
   title: string
   /** `YYYY-MM-DD` に正規化した期限です。 */
   dueDate: string
-  /** schedule が生成する notification reason です。 */
+  /** schedule が生成する notification stage です。 */
   reason: ScheduledNotificationReason
+  /** Whole days between today and the due date (positive before, negative after). */
+  daysUntilDue?: number
+  /** Repetition index for overdue reminders and stale reminders. */
+  repetition?: number
+  /** Work Item `updatedAt` that a stale reminder was computed from. */
+  workItemUpdatedAt?: string
+  /** Recipients for an escalation stage; other stages notify the owner. */
+  escalationMemberKeys?: string[]
+}
+
+/** Work Item stage evaluation before Project managers are resolved for escalation. */
+type ScheduledWorkItemEvaluation = {
+  /** Owner-facing stages ready to emit. */
+  candidates: ScheduledNotificationCandidate[]
+  /** Escalation stage waiting for the current Project managers. */
+  escalation?: ScheduledNotificationCandidate
 }
 
 /** Planning health update の scheduled notification kind です。 */
@@ -271,6 +318,24 @@ export function createNotificationScheduleHandler(
       ...(prepareCustomerCompletionNotifications
         ? { prepareCustomerCompletionNotifications }
         : {}),
+      reminderPolicy: {
+        dueSoonDays: readPositiveIntegerEnvironment(
+          'NOTIFICATION_DUE_SOON_DAYS',
+          DEFAULT_WORK_ITEM_REMINDER_POLICY.dueSoonDays,
+        ),
+        overdueReminderIntervalDays: readPositiveIntegerEnvironment(
+          'NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS',
+          DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueReminderIntervalDays,
+        ),
+        overdueEscalationDays: readPositiveIntegerEnvironment(
+          'NOTIFICATION_OVERDUE_ESCALATION_DAYS',
+          DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueEscalationDays,
+        ),
+        staleStartedDays: readPositiveIntegerEnvironment(
+          'NOTIFICATION_STALE_STARTED_DAYS',
+          DEFAULT_WORK_ITEM_REMINDER_POLICY.staleStartedDays,
+        ),
+      },
     })
 }
 
@@ -298,6 +363,8 @@ export async function runNotificationSchedule(
     'Audit retention days',
     100_000,
   )
+  const reminderPolicy = normalizeWorkItemReminderPolicy(options.reminderPolicy)
+  const projectManagersByWorkspace = new Map<string, Promise<ReadonlyMap<string, string[]>>>()
   const result: NotificationScheduleResult = {
     scannedItems: 0,
     emittedEvents: 0,
@@ -358,39 +425,61 @@ export async function runNotificationSchedule(
           // A newer completion marker won the race; leave it for the next scan.
         }
       }
-      const candidate = createScheduledNotificationCandidate(item, now)
+      const evaluation = evaluateScheduledWorkItemNotifications(item, now, reminderPolicy)
+      const candidates = [...evaluation.candidates]
+      if (evaluation.escalation?.projectId && options.projectDirectoryTableName) {
+        const escalation = evaluation.escalation
+        let managers = projectManagersByWorkspace.get(escalation.workspaceId)
+        if (!managers) {
+          managers = readScheduledProjectManagers(
+            options,
+            requireText(options.projectDirectoryTableName, 'Project Directory table name'),
+            escalation.workspaceId,
+            scanPageSize,
+            maxScanPages,
+          )
+          projectManagersByWorkspace.set(escalation.workspaceId, managers)
+        }
+        const recipients = ((await managers).get(escalation.projectId ?? '') ?? [])
+          .filter((memberKey) => memberKey !== escalation.assigneeMemberKey)
+        if (recipients.length > 0) {
+          candidates.push({ ...escalation, escalationMemberKeys: recipients })
+        }
+      }
 
-      if (!candidate) {
+      if (candidates.length === 0) {
         result.skippedItems += 1
         continue
       }
 
-      const auditEvent = createScheduledNotificationAuditEvent(
-        candidate,
-        now,
-        auditRetentionDays,
-        options.requestId,
-      )
+      for (const candidate of candidates) {
+        const auditEvent = createScheduledNotificationAuditEvent(
+          candidate,
+          now,
+          auditRetentionDays,
+          options.requestId,
+        )
 
-      try {
-        await options.documentClient.send(new PutCommand({
-          TableName: auditEventsTableName,
-          Item: auditEvent,
-          ConditionExpression:
-            'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)',
-          ExpressionAttributeNames: {
-            '#directoryId': 'directoryId',
-            '#eventId': 'eventId',
-          },
-        }))
-        result.emittedEvents += 1
-      } catch (error) {
-        if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
-          result.duplicateEvents += 1
-          continue
+        try {
+          await options.documentClient.send(new PutCommand({
+            TableName: auditEventsTableName,
+            Item: auditEvent,
+            ConditionExpression:
+              'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)',
+            ExpressionAttributeNames: {
+              '#directoryId': 'directoryId',
+              '#eventId': 'eventId',
+            },
+          }))
+          result.emittedEvents += 1
+        } catch (error) {
+          if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+            result.duplicateEvents += 1
+            continue
+          }
+
+          throw error
         }
-
-        throw error
       }
     }
 
@@ -822,16 +911,25 @@ export function parseUtcDateOnly(value: unknown): string | undefined {
 }
 
 /**
- * Creates a due-notification candidate using the Work Item schedule's local calendar date.
+ * Evaluates every scheduled notification stage for one Work Item at the schedule instant.
+ *
+ * Dates use the Work Item schedule's local calendar. The owner gets `due-soon` within the
+ * configured window, `due` on the due date, `overdue` on the first overdue run, and
+ * `overdue-reminder` once per reminder interval after that. A started Work Item that has not
+ * been updated for the stale window gets one `stale` reminder per window. Project managers are
+ * resolved by the caller for the escalation stage.
  *
  * @param item - Candidate canonical Work Item row.
  * @param now - Absolute schedule execution instant.
- * @returns A due or overdue candidate, or undefined when no notification is required.
+ * @param policy - Normalized reminder thresholds.
+ * @returns Owner-facing candidates and an optional escalation stage.
+ * @throws TypeError when the row is not a canonical Work Item.
  */
-function createScheduledNotificationCandidate(
+export function evaluateScheduledWorkItemNotifications(
   item: Record<string, unknown>,
   now: Date,
-): ScheduledNotificationCandidate | undefined {
+  policy: WorkItemReminderPolicy = DEFAULT_WORK_ITEM_REMINDER_POLICY,
+): ScheduledWorkItemEvaluation {
   if (!isCanonicalWorkItemRecord(item)) {
     throw new TypeError(
       'Notification schedule encountered a non-canonical Work Item row.',
@@ -839,28 +937,154 @@ function createScheduledNotificationCandidate(
   }
 
   const assigneeMemberKey = item.assigneeUserId.toLowerCase()
-  const dueDate = parseUtcDateOnly(item.dueDate)
-  const today = workItemScheduleInstantToLocalDate(now, item.schedule.calendarPolicy)
-
-  if (
-    !assigneeMemberKey ||
-    !isActiveWorkflowStatusCategory(item.statusCategory) ||
-    !dueDate ||
-    dueDate > today
-  ) {
-    return undefined
+  if (!assigneeMemberKey || !isActiveWorkflowStatusCategory(item.statusCategory)) {
+    return { candidates: [] }
   }
 
-  return {
+  const today = workItemScheduleInstantToLocalDate(now, item.schedule.calendarPolicy)
+  const dueDate = parseUtcDateOnly(item.dueDate)
+  const base = {
     workspaceId: item.directoryId,
     teamId: item.teamId,
     issueId: item.issueId,
     assigneeMemberKey,
     ...(item.assignedProjectId ? { projectId: item.assignedProjectId } : {}),
     title: item.title,
-    dueDate,
-    reason: dueDate === today ? 'due' : 'overdue',
   }
+  const candidates: ScheduledNotificationCandidate[] = []
+  let escalation: ScheduledNotificationCandidate | undefined
+
+  if (dueDate) {
+    const daysUntilDue = daysBetweenDateOnly(today, dueDate)
+    if (daysUntilDue === 0) {
+      candidates.push({ ...base, dueDate, reason: 'due', daysUntilDue })
+    } else if (daysUntilDue > 0 && daysUntilDue <= policy.dueSoonDays) {
+      candidates.push({ ...base, dueDate, reason: 'due-soon', daysUntilDue })
+    } else if (daysUntilDue < 0) {
+      const overdueDays = -daysUntilDue
+      const repetition = Math.floor(overdueDays / policy.overdueReminderIntervalDays)
+      candidates.push(repetition === 0
+        ? { ...base, dueDate, reason: 'overdue', daysUntilDue }
+        : { ...base, dueDate, reason: 'overdue-reminder', daysUntilDue, repetition })
+      if (overdueDays >= policy.overdueEscalationDays && base.projectId) {
+        escalation = { ...base, dueDate, reason: 'overdue-escalation', daysUntilDue }
+      }
+    }
+  }
+
+  if (item.statusCategory === 'started') {
+    const updatedAt = Date.parse(item.updatedAt)
+    const idleDays = Number.isFinite(updatedAt)
+      ? Math.floor((now.getTime() - updatedAt) / 86_400_000)
+      : 0
+    const repetition = Math.floor(idleDays / policy.staleStartedDays)
+    if (repetition >= 1) {
+      candidates.push({
+        ...base,
+        dueDate: dueDate ?? '',
+        reason: 'stale',
+        repetition,
+        workItemUpdatedAt: item.updatedAt,
+      })
+    }
+  }
+
+  return { candidates, ...(escalation ? { escalation } : {}) }
+}
+
+/**
+ * Counts whole calendar days from one canonical date-only value to another.
+ *
+ * @param from - Start date in `YYYY-MM-DD` form.
+ * @param to - End date in `YYYY-MM-DD` form.
+ * @returns Days from `from` to `to`; negative when `to` is earlier.
+ */
+function daysBetweenDateOnly(from: string, to: string) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000)
+}
+
+/**
+ * Fills omitted reminder thresholds with defaults and validates configured values.
+ *
+ * @param policy - Partial reminder thresholds from the caller.
+ * @returns Complete, validated reminder thresholds.
+ * @throws RangeError when a threshold is not a positive integer.
+ */
+function normalizeWorkItemReminderPolicy(
+  policy: Partial<WorkItemReminderPolicy> | undefined,
+): WorkItemReminderPolicy {
+  const merged = { ...DEFAULT_WORK_ITEM_REMINDER_POLICY, ...policy }
+  return {
+    dueSoonDays: normalizePositiveInteger(merged.dueSoonDays, 'Due-soon days', 365),
+    overdueReminderIntervalDays: normalizePositiveInteger(
+      merged.overdueReminderIntervalDays,
+      'Overdue reminder interval days',
+      365,
+    ),
+    overdueEscalationDays: normalizePositiveInteger(
+      merged.overdueEscalationDays,
+      'Overdue escalation days',
+      365,
+    ),
+    staleStartedDays: normalizePositiveInteger(merged.staleStartedDays, 'Stale started days', 365),
+  }
+}
+
+/**
+ * Reads the current managers of every active Project in one Workspace directory partition.
+ *
+ * @param options - Schedule dependencies.
+ * @param tableName - Canonical Project Directory table name.
+ * @param workspaceId - Canonical Workspace ID.
+ * @param pageSize - Directory query page size.
+ * @param maxPages - Directory query safety bound.
+ * @returns Sorted manager member keys keyed by active Project ID.
+ * @throws Error when the directory exceeds the page bound.
+ */
+async function readScheduledProjectManagers(
+  options: NotificationScheduleRunOptions,
+  tableName: string,
+  workspaceId: string,
+  pageSize: number,
+  maxPages: number,
+): Promise<ReadonlyMap<string, string[]>> {
+  const activeProjectIds = new Set<string>()
+  const managers = new Map<string, Set<string>>()
+  let exclusiveStartKey: Record<string, unknown> | undefined
+  let pages = 0
+  do {
+    if (pages >= maxPages) {
+      throw new Error(
+        `Work Item escalation Project lookup exceeded the configured ${maxPages} page limit.`,
+      )
+    }
+    const response = await options.documentClient.send(new QueryCommand({
+      TableName: tableName,
+      KeyConditionExpression: 'directoryId = :directoryId',
+      ExpressionAttributeValues: { ':directoryId': workspaceId },
+      ConsistentRead: true,
+      Limit: pageSize,
+      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+    }))
+    pages += 1
+    for (const item of response.Items ?? []) {
+      if (item.entryType === 'project' && item.archivedAt === undefined) {
+        activeProjectIds.add(requireText(item.projectId, 'Project directory project ID'))
+      }
+      if (item.entryType === 'project-member' && item.role === 'manager') {
+        const projectId = requireText(item.projectId, 'Project member project ID')
+        const memberKey = normalizeMemberKey(item.memberKey, 'Project member key')
+        const projectManagers = managers.get(projectId) ?? new Set<string>()
+        projectManagers.add(memberKey)
+        managers.set(projectId, projectManagers)
+      }
+    }
+    exclusiveStartKey = response.LastEvaluatedKey
+  } while (exclusiveStartKey)
+
+  return new Map([...managers]
+    .filter(([projectId]) => activeProjectIds.has(projectId))
+    .map(([projectId, memberKeys]) => [projectId, [...memberKeys].sort()]))
 }
 
 /** 期限通知の対象となる非終端 workflow category か判定します。 */
@@ -868,6 +1092,19 @@ function isActiveWorkflowStatusCategory(value: string | undefined) {
   return value === 'backlog' || value === 'unstarted' || value === 'started'
 }
 
+/**
+ * Creates the deterministic audit outbox event for one scheduled Work Item stage.
+ *
+ * The idempotency key binds the Work Item, the due date (or the last update for a stale
+ * reminder), the stage, the recipient scope, and the repetition index, so retries and
+ * overlapping runs emit each stage once. `due` and `overdue` keep their original key inputs.
+ *
+ * @param candidate - Work Item stage and its recipients.
+ * @param now - Schedule execution instant used as the event timestamp.
+ * @param auditRetentionDays - Audit retention period.
+ * @param requestId - Optional EventBridge request ID for traceability.
+ * @returns Immutable schema-v1 audit outbox event.
+ */
 function createScheduledNotificationAuditEvent(
   candidate: ScheduledNotificationCandidate,
   now: Date,
@@ -876,13 +1113,28 @@ function createScheduledNotificationAuditEvent(
 ) {
   const entityId = `team/${candidate.teamId}/issue/${candidate.issueId}`
   const occurredAt = now.toISOString()
-  const idempotencyDigest = createHash('sha256').update([
-    candidate.workspaceId,
-    entityId,
-    candidate.dueDate,
-    candidate.reason,
-    candidate.assigneeMemberKey,
-  ].join('\0')).digest('hex')
+  const idempotencyParts = candidate.reason === 'due' || candidate.reason === 'overdue'
+    ? [candidate.workspaceId, entityId, candidate.dueDate, candidate.reason, candidate.assigneeMemberKey]
+    : candidate.reason === 'overdue-escalation'
+      ? [candidate.workspaceId, entityId, candidate.dueDate, candidate.reason, candidate.projectId ?? '']
+      : candidate.reason === 'stale'
+        ? [
+            candidate.workspaceId,
+            entityId,
+            candidate.workItemUpdatedAt ?? '',
+            candidate.reason,
+            candidate.assigneeMemberKey,
+            String(candidate.repetition ?? 0),
+          ]
+        : [
+            candidate.workspaceId,
+            entityId,
+            candidate.dueDate,
+            candidate.reason,
+            candidate.assigneeMemberKey,
+            String(candidate.repetition ?? 0),
+          ]
+  const idempotencyDigest = createHash('sha256').update(idempotencyParts.join('\0')).digest('hex')
   const idempotencyKey = `notification-schedule-v1:${idempotencyDigest}`
   const context = createMutationAuditContext({
     workspaceId: candidate.workspaceId,
@@ -900,6 +1152,7 @@ function createScheduledNotificationAuditEvent(
         entityId,
         dueDate: candidate.dueDate,
         reason: candidate.reason,
+        ...(candidate.repetition === undefined ? {} : { repetition: candidate.repetition }),
       },
     },
     source: {
@@ -911,6 +1164,15 @@ function createScheduledNotificationAuditEvent(
   })
   const search = new URLSearchParams({ issueId: candidate.issueId })
   const deepLink = `/teams/${encodeURIComponent(candidate.teamId)}/issues?${search.toString()}`
+  const notificationCandidates = candidate.reason === 'overdue-escalation'
+    ? (candidate.escalationMemberKeys ?? []).map((memberKey) => ({
+        memberKey,
+        reason: 'escalation',
+      }))
+    : [{
+        memberKey: candidate.assigneeMemberKey,
+        reason: scheduledNotificationCandidateReason(candidate.reason),
+      }]
 
   return createAuditEvent({
     context,
@@ -918,9 +1180,7 @@ function createScheduledNotificationAuditEvent(
     entity: { type: 'work-item', id: entityId },
     action: candidate.reason,
     changes: [],
-    summary: candidate.reason === 'due'
-      ? `Work Item "${candidate.title}" is due today.`
-      : `Work Item "${candidate.title}" is overdue.`,
+    summary: createScheduledNotificationSummary(candidate),
     metadata: {
       actorMemberKey: scheduleActorMemberKey,
       teamId: candidate.teamId,
@@ -928,15 +1188,52 @@ function createScheduledNotificationAuditEvent(
       ...(candidate.projectId ? { projectId: candidate.projectId } : {}),
       deepLink,
       title: candidate.title,
-      dueDate: candidate.dueDate,
-      notificationCandidates: [{
-        memberKey: candidate.assigneeMemberKey,
-        reason: candidate.reason,
-      }],
+      ...(candidate.dueDate ? { dueDate: candidate.dueDate } : {}),
+      ...(candidate.workItemUpdatedAt
+        ? { workItemUpdatedAt: candidate.workItemUpdatedAt }
+        : {}),
+      ...(candidate.repetition === undefined ? {} : { repetition: candidate.repetition }),
+      notificationCandidates,
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
     outboxStatus: 'pending',
   })
+}
+
+/**
+ * Maps a schedule stage to the recipient reason stored on the notification.
+ *
+ * @param stage - Scheduled Work Item stage.
+ * @returns Recipient reason; repeated overdue reminders keep the `overdue` reason.
+ */
+function scheduledNotificationCandidateReason(stage: ScheduledNotificationReason) {
+  if (stage === 'overdue-reminder') return 'overdue'
+  if (stage === 'overdue-escalation') return 'escalation'
+  return stage
+}
+
+/**
+ * Creates the short Inbox summary for a scheduled Work Item stage.
+ *
+ * @param candidate - Work Item stage and its day offsets.
+ * @returns English summary stored on the audit event.
+ */
+function createScheduledNotificationSummary(candidate: ScheduledNotificationCandidate) {
+  const overdueDays = -(candidate.daysUntilDue ?? 0)
+  switch (candidate.reason) {
+    case 'due':
+      return `Work Item "${candidate.title}" is due today.`
+    case 'due-soon':
+      return `Work Item "${candidate.title}" is due in ${candidate.daysUntilDue ?? 0} day(s).`
+    case 'overdue':
+      return `Work Item "${candidate.title}" is overdue.`
+    case 'overdue-reminder':
+      return `Work Item "${candidate.title}" is still overdue (${overdueDays} days).`
+    case 'overdue-escalation':
+      return `Work Item "${candidate.title}" has been overdue for ${overdueDays} days.`
+    case 'stale':
+      return `Work Item "${candidate.title}" is in progress and has not been updated since ${(candidate.workItemUpdatedAt ?? '').slice(0, 10)}.`
+  }
 }
 
 /**
