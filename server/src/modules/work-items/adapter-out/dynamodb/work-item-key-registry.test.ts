@@ -126,6 +126,29 @@ describe('Work Item key allocation', () => {
     for (const key of keys.slice(10)) expect(key.prefix).toMatch(/^TEAM[0-9A-F]{4}$/u)
   })
 
+  test('reads the counter again when a concurrent first create conflicts with its transaction', async () => {
+    const table = createRegistryTable()
+    let conflicted = false
+    const client = {
+      async send(command: { constructor: { name: string } }) {
+        if (command.constructor.name === 'TransactWriteCommand' && !conflicted) {
+          conflicted = true
+          // Simulates the other create committing the same rows while this one is cancelled.
+          await allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW)
+          throw Object.assign(new Error('Transaction cancelled.'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [{ Code: 'TransactionConflict' }, { Code: 'None' }],
+          })
+        }
+        return await table.client.send(command as never)
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    const key = await allocateWorkItemKey(client, TABLE, 'ws', 'backend', NOW)
+
+    expect(key.key).toBe('BACK-2')
+  })
+
   test('keeps prefixes and numbers separate per Workspace', async () => {
     const table = createRegistryTable()
 
@@ -195,5 +218,15 @@ describe('Work Item key lookup', () => {
     expect(isWorkItemKeyRegistryRecord({ ...row, directoryTeamId: 'ws#team#backend' })).toBe(false)
     expect(isWorkItemKeyRegistryRecord({ ...row, sortOrder: 10 })).toBe(false)
     expect(isWorkItemKeyRegistryRecord({ ...row, entryType: 'something-else' })).toBe(false)
+    expect(isWorkItemKeyRegistryRecord({ ...row, registeredAt: 'invalid' })).toBe(false)
+    expect(isWorkItemKeyRegistryRecord({ ...row, registeredAt: '2026-11-16T00:00:00Z' })).toBe(false)
+  })
+
+  test('rejects a counter row whose last allocation time is not a canonical timestamp', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW)
+    const counter = table.rows.get('ws#work-item-key-registry\0team#backend')
+    expect(isWorkItemKeyRegistryRecord(counter)).toBe(true)
+    expect(isWorkItemKeyRegistryRecord({ ...counter, lastAllocatedAt: 'invalid' })).toBe(false)
   })
 })

@@ -411,7 +411,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `GET /v1/agent-runs?teamId=&state=&instanceId=&assigneeUserId=&workItemId=` | Team の Run 一覧。`state` は `active`（既定、lease の早い順）または `finished`。`instanceId` は hash 前の値を送り、server が hash して照合する。`workItemId` を指定すると index ではなく claim row を強整合で読み、その Work Item を claim している Run だけを返す（`state=active` のみ）。閲覧できない Work Item の Run は返さない。 |
 | `GET /v1/agent-settings?teamId=` | Team の Agent settings（lease と take over）。MCP の `get_configuration` が使う。 |
 | `GET /v1/agent-context?teamId=` | Ready status と agent brief。閉じた `AgentSettings` schema を広げないための別 path。MCP の `get_configuration` と `get_next_task` が使う。 |
-| `GET /v1/work-items/{workItemId}/key?teamId=` | Work Item の `ABC-123` 形式の key。閉じた `WorkItem` schema を広げないための別 path。MCP の `get_task` が使い、この path がない古い server や key のない Work Item では key なしとして動く。 |
+| `GET /v1/work-items/{workItemId}/key?teamId=` | Work Item の `ABC-123` 形式の key。閉じた `WorkItem` schema を広げないための別 path。MCP の `get_task` が使い、この path がない古い server や key のない Work Item では key なしとして動く。応答の `createdAt` が取得したタスクと違えば（間に削除と同じ ID での作成があった）、retryable な `conflict` を返す。 |
 | `POST /v1/agent-runs/{runId}/heartbeat` | lease 延長。body は Run 開始時と同じ `instanceId`。 |
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | 終了。body は `outcome` と Run 開始時と同じ `instanceId`。 |

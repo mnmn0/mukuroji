@@ -31,7 +31,7 @@ const acceptanceCriteriaSchema = z.object({
   })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
 })
 const keySchema = z.object({
-  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, createdAt: z.iso.datetime(),
   key: z.string().refine(isCanonicalWorkItemKey).optional(),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
@@ -356,7 +356,7 @@ export function createAgentWorkItemApi(
       }
       return criteria.items
     },
-    /** Reads a task's key; a task created before keys, or a server older than the endpoint, has none. */
+    /** Reads a task's key and its Work Item's creation time; a server older than the endpoint has neither. */
     async taskKey(id) {
       let found: z.infer<typeof keySchema>
       try {
@@ -368,7 +368,7 @@ export function createAgentWorkItemApi(
       if (found.teamId !== config.teamId || found.workItemId !== id) {
         throw new AgentTaskError('invalid_response', 'The API returned the key of another task.')
       }
-      return found.key
+      return { createdAt: found.createdAt, ...(found.key === undefined ? {} : { key: found.key }) }
     },
   }
 

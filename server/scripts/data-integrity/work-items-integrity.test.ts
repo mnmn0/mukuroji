@@ -1114,6 +1114,29 @@ describe('Work Items integrity manifest core', () => {
     })
   })
 
+  test.each([
+    ['a counter number that decoding would round', { N: '1.0000000000000001' }],
+    ['a fractional counter number', { N: '1.5' }],
+    ['a counter number with a leading zero', { N: '01' }],
+  ])('rejects a key registry row with %s', async (_case, lastNumber) => {
+    const attempt = startManifestCreation({
+      role: 'source',
+      items: [createCanonicalItem(), {
+        directoryTeamId: { S: 'workspace-1#work-item-key-registry' },
+        issueId: { S: 'team#core' },
+        entryType: { S: 'work-item-key-counter' },
+        directoryId: { S: 'workspace-1' },
+        teamId: { S: 'core' },
+        keyPrefix: { S: 'CORE' },
+        lastNumber,
+        registeredAt: { S: '2026-07-01T00:00:00.000Z' },
+      }],
+    })
+    await expect(attempt.promise).rejects.toMatchObject({
+      code: 'INVALID_WORK_ITEM_RECORD',
+    })
+  })
+
   test('rejects duplicate primary keys after scanning the table', async () => {
     const attempt = startManifestCreation({
       role: 'source',

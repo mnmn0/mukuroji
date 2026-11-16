@@ -161,7 +161,7 @@ function hasRegistryBase(
     Reflect.get(value, 'directoryTeamId') ===
       createRegistryPartitionKey(String(Reflect.get(value, 'directoryId'))) &&
     isText(Reflect.get(value, 'issueId')) &&
-    isText(Reflect.get(value, 'registeredAt')) &&
+    isCanonicalUtcTimestamp(Reflect.get(value, 'registeredAt')) &&
     Reflect.get(value, 'sortOrder') === undefined &&
     Reflect.get(value, 'updatedAt') === undefined &&
     Reflect.get(value, 'directoryProjectId') === undefined
@@ -199,7 +199,7 @@ function isWorkItemKeyCounterRecord(value: unknown): value is WorkItemKeyCounter
     Number.isSafeInteger(value.lastNumber) &&
     value.lastNumber >= 0 &&
     value.lastNumber <= WORK_ITEM_KEY_MAX_NUMBER &&
-    (value.lastAllocatedAt === undefined || isText(value.lastAllocatedAt))
+    (value.lastAllocatedAt === undefined || isCanonicalUtcTimestamp(value.lastAllocatedAt))
 }
 
 /**
@@ -360,6 +360,9 @@ async function initializeTeamCounter(
       if (!isNamedError(error, 'TransactionCanceledException')) throw error
       const reasons = readCancellationReasonCodes(error)
       if (reasons[1] === 'ConditionalCheckFailed') return
+      // A concurrent first create for the same Team touched these rows; nothing was written, so
+      // return and let the caller's bounded loop read the counter again.
+      if (reasons.includes('TransactionConflict')) return
       if (reasons[0] !== 'ConditionalCheckFailed') throw error
     }
   }
@@ -463,6 +466,18 @@ function createRegistryInvalidError(): ProjectDataError {
  */
 function isText(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Checks a canonical millisecond-precision UTC ISO timestamp, such as `2026-11-16T00:00:00.000Z`.
+ *
+ * @param value - Candidate timestamp.
+ * @returns True when parsing and canonical serialization are lossless.
+ */
+function isCanonicalUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const timestamp = new Date(value)
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value
 }
 
 /**

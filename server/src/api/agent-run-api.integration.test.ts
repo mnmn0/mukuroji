@@ -1974,12 +1974,12 @@ describe('Public Work Item key', () => {
     const workItems = createCanonicalPublicWorkItemService()
 
     expect(await runWithTestAppDependencies(() => workItems.getKey(credential, 'core-team', 'task-1')))
-      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', key: 'CT-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', createdAt: expect.any(String), key: 'CT-1' })
     // Adding a property to the closed public Work Item schema would break existing clients.
     expect(await runWithTestAppDependencies(() => workItems.get(credential, 'core-team', 'task-1')))
       .not.toHaveProperty('key')
     // A Work Item created before keys existed has none.
     expect(await runWithTestAppDependencies(() => workItems.getKey(credential, 'core-team', 'task-2')))
-      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-2' })
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-2', createdAt: expect.any(String) })
   })
 })

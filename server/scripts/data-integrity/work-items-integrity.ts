@@ -949,7 +949,7 @@ async function scanWorkItemsTable(
         const decoded = decodeAttributeMap(item)
         // Key registry rows share the table and are restored data too, so they are digested.
         if (
-          !isWorkItemKeyRegistryRecord(decoded) &&
+          !(hasCanonicalRegistryCounterNumber(item) && isWorkItemKeyRegistryRecord(decoded)) &&
           !(hasCanonicalPhysicalWorkItemShape(item) && isCanonicalWorkItemRecord(decoded))
         ) {
           invalidCount += 1
@@ -1062,6 +1062,24 @@ function isStringAttributeValue(value: unknown): value is AttributeValue.SMember
  * @param item - Raw low-level DynamoDB item.
  * @returns True when scalar, map, and list fields retain their canonical physical encoding.
  */
+/**
+ * Checks the raw counter number of a key registry row before decoding can round it.
+ *
+ * `{ N: '1.0000000000000001' }` decodes to `1`, so the stored text itself must be a plain
+ * non-negative integer within the safe range.
+ *
+ * @param item - Raw DynamoDB item.
+ * @returns True when the item has no `lastNumber` or stores it as a canonical integer.
+ */
+function hasCanonicalRegistryCounterNumber(item: Record<string, AttributeValue>): boolean {
+  const lastNumber: unknown = item.lastNumber
+  if (lastNumber === undefined) return true
+  if (!isNumberAttributeValue(lastNumber)) return false
+  const text = Reflect.get(Object(lastNumber), 'N')
+  return typeof text === 'string' && /^(0|[1-9][0-9]{0,14})$/u.test(text) &&
+    Number.isSafeInteger(Number(text))
+}
+
 function hasCanonicalPhysicalWorkItemShape(
   item: Record<string, AttributeValue>,
 ): boolean {

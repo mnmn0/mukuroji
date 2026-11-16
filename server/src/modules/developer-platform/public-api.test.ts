@@ -128,7 +128,7 @@ function createDefaultWorkItemService(
       return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, items: [] }
     },
     async getKey(_credential, teamId, workItemId) {
-      return { schemaVersion: 1, teamId, workItemId, key: 'TEAM-1' }
+      return { schemaVersion: 1, teamId, workItemId, createdAt: workItem.createdAt, key: 'TEAM-1' }
     },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
@@ -454,7 +454,7 @@ describe('public API router', () => {
       workItems: createDefaultWorkItemService({
         async getKey(_credential, teamId, workItemId) {
           reads.push(`${teamId}/${workItemId}`)
-          return { schemaVersion: 1, teamId, workItemId, key: 'TEAM-7' }
+          return { schemaVersion: 1, teamId, workItemId, createdAt: '2026-07-18T00:00:00.000Z', key: 'TEAM-7' }
         },
       }),
     })
@@ -469,7 +469,9 @@ describe('public API router', () => {
     })
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', key: 'TEAM-7' })
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', createdAt: '2026-07-18T00:00:00.000Z', key: 'TEAM-7',
+    })
     expect(denied.status).toBe(403)
     expect(reads).toEqual(['team-1/work-item-1'])
   })

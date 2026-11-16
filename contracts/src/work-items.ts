@@ -769,6 +769,11 @@ export type PublicWorkItemKey = {
   teamId: string
   /** Work Item ID within the Team. */
   workItemId: string
+  /**
+   * When the Work Item was created. A Work Item ID created again after deletion has a new value,
+   * so a client can tell which Work Item the key belongs to.
+   */
+  createdAt: string
   /** Canonical key such as `ABC-123`, absent on Work Items created before keys existed. */
   key?: string
 }
