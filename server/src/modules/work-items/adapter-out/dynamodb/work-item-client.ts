@@ -77,6 +77,7 @@ import {
   readSearchWorkItemTypeKey,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  WORK_ITEM_TITLE_MAX_LENGTH,
   type ParsedWorkItemKey,
 } from '@mukuroji/contracts'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
@@ -1992,7 +1993,7 @@ export class DynamoDbTeamIssuesClient {
     await this.ensureLocalTables()
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
 
-    const title = readRequiredString(input.title, 'Issue title is required.')
+    const title = readWorkItemTitle(input.title)
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
     const contributorAssignments = input.contributorAssignments === undefined
@@ -2693,7 +2694,7 @@ export class DynamoDbTeamIssuesClient {
 
     if ('title' in input) {
       expressionAttributeNames['#title'] = 'title'
-      expressionAttributeValues[':title'] = readRequiredString(input.title, 'Issue title is required.')
+      expressionAttributeValues[':title'] = readWorkItemTitle(input.title)
       setExpressions.push('#title = :title')
     }
 
@@ -4933,6 +4934,25 @@ export function readRequiredCommentBody(value: unknown) {
   }
 
   return value.trim()
+}
+
+/**
+ * Reads and bounds a Work Item title.
+ *
+ * @param value - Untrusted title.
+ * @returns The trimmed title.
+ * @throws ProjectDataError when the title is empty or longer than the limit.
+ */
+function readWorkItemTitle(value: unknown): string {
+  const title = readRequiredString(value, 'Issue title is required.')
+  if ([...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
+    throw new ProjectDataError(
+      400,
+      'WorkItemTitleTooLong',
+      `Work Item title must be at most ${WORK_ITEM_TITLE_MAX_LENGTH} characters.`,
+    )
+  }
+  return title
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

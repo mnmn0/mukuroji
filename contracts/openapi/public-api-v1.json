@@ -1356,6 +1356,7 @@
             "type": "string"
           },
           "title": {
+            "maxLength": 256,
             "minLength": 1,
             "type": "string"
           },
@@ -2956,6 +2957,7 @@
             "$ref": "#/components/schemas/WorkItemSchedule"
           },
           "title": {
+            "maxLength": 256,
             "minLength": 1,
             "type": "string"
           },

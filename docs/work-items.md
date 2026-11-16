@@ -27,7 +27,7 @@ Canonical row は次の field を持つ。
 | `issueId` | yes | Physical sort key と公開 `id`。 |
 | `key` | no | `ABC-123` 形式の短い参照。Workspace 内で一意で、作成後は変わらない。key を持つ前に作られた row は持たない（詳細は「Work Item key」）。 |
 | `assignedProjectId` / `directoryProjectId` | no | 遂行先 project と project GSI key。未割当 Work Item では持たない。 |
-| `title` | yes | Literal title。canonical row は `titleKey` を持たない。 |
+| `title` | yes | Literal title。canonical row は `titleKey` を持たない。作成・更新では前後の空白を除いて 1〜256 文字（Unicode code point）で、超えると `400 WorkItemTitleTooLong`。 |
 | `description` | no | 詳細説明。 |
 | `assigneeUserId` | yes | 最終責任者（accountable owner）である Workspace member の安定 ID。Work Item ごとに 1 人だけ。 |
 | `contributorAssignments` | no | 作業を分担する Contributor の配列。空の場合は属性を持たない。詳細は「責任者と Contributor」を参照。 |
@@ -61,7 +61,7 @@ Canonical row と API response は旧固定 `status`、`titleKey`、`assignee`�
 - `work-item-key` row は Work Item の作成 transaction の最後に条件付き Put で書く。Work Item が作られなかった key は記録されない。
 - `GET /api/work-items/keys/{key}` は key を `{ key, teamId, workItemId }` に解決する。存在しない key、key でない文字列、削除済みの Work Item、閲覧できない Team / Project の Work Item は、どれも同じ `404 WorkItemKeyNotFound` を返す。削除しても key の row は残り、固定 ID の作成では同じ ID が新しい key で作られ得るため、その ID の Work Item が今もその key を持つときだけ解決する。
 - key は内部 API の Work Item、Public API の `GET /api/v1/work-items/{workItemId}/key`、coding-agent MCP の `get_task` に出る。Public API の `WorkItem` は closed schema で、既存操作の応答に property を足すと後方互換を壊すため、key は別 endpoint で返す。作成時の audit event の変更内容にも含める。
-- title の長さ上限は Public API v1 の request を狭める変更になるため、この変更では入れていない。ID は title から作らないので、長い title が sort key を長くすることはない。
+- title の上限 256 文字は Public API v1 の request（`title` の `maxLength`）を狭める変更で、互換チェックは失敗する。利用者がまだいないため、判断のうえで入れた（2026-11-16）。
 - key を持たない既存 Work Item への付与は #365 の migration 契約で行う。
 
 Strict reader は必須 workflow field がない row、未知の schema version、型が不正な status/custom field、不正または欠落した `relationIds`、不正な `schedule`、`dueDate` と schedule の不一致を canonical Work Item として返さない。field-specific timestamp がある場合は canonical UTC で `createdAt` 以上 `updatedAt` 以下であることも検証する。現在の configuration との整合は configuration 更新時の usage 検証と mutation 時の再検証で保証し、read 時に configuration は取得しない。

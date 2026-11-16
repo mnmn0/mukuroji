@@ -33,6 +33,9 @@ export const WORK_ITEM_SCHEDULE_MAX_HOLIDAYS = 512 as const
 /** Earliest four-digit Gregorian year accepted by every Work Item schedule boundary. */
 export const WORK_ITEM_SCHEDULE_MIN_YEAR = 1_000 as const
 
+/** Maximum Work Item title length in Unicode code points, matching the coding-agent MCP limit. */
+export const WORK_ITEM_TITLE_MAX_LENGTH = 256 as const
+
 /** Highest sequence number a Work Item key can carry within one Team prefix. */
 export const WORK_ITEM_KEY_MAX_NUMBER = 999_999_999 as const
 
