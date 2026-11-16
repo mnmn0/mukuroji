@@ -4035,6 +4035,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           { consistentIssueRead: true, includeEvents: false },
         )
         requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+        // A deleted Work Item keeps its key row, and a fixed ID can be created again with a new key,
+        // so the row only counts when the Work Item at that ID still carries this key.
+        if (detail.issue.key !== location.key) return notFound()
       } catch (error) {
         if (
           isTeamIssueNotFoundError(error) ||

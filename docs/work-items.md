@@ -54,12 +54,12 @@ Canonical row と API response は旧固定 `status`、`titleKey`、`assignee`�
 週報、chat、commit message、branch 名、PR で Work Item を短く参照するため、新しい Work Item には作成時に `ABC-123` 形式の `key` を付ける（#375）。
 
 - 形式は「Team の prefix（英大文字で始まる英大文字・数字 2〜10 文字）」「`-`」「1 から始まる連番」。比較と検索では大文字・小文字を区別しない。
-- prefix は Team ごとに 1 つで、その Team で最初に Work Item を作るときに Team ID から決める。複数語の ID は頭文字（`platform-team` → `PT`）、それ以外は先頭 4 文字（`backend` → `BACK`、`team-1a2b…` → `TEAM`）。同じ Workspace の別 Team が使っていれば `PT2`、`PT3` … を使う。Project を移しても key は変わらない。Project code（#340）から prefix を選べるようにするのは後続の作業。
+- prefix は Team ごとに 1 つで、その Team で最初に Work Item を作るときに Team ID から決める。複数語の ID は頭文字（`platform-team` → `PT`）、それ以外は先頭 4 文字（`backend` → `BACK`、`team-1a2b…` → `TEAM`）。同じ Workspace の別 Team が使っていれば `PT2` … `PT10` を順に試し、それも埋まっていれば Team ID のハッシュから作る 4 桁の 16 進数を付けた prefix（`PT3F0A` など）を試す。この順は Team ID だけで決まる。Project を移しても key は変わらない。Project code（#340）から prefix を選べるようにするのは後続の作業。
 - 連番は Team ごとの原子的な counter から取るので、同時に作成しても重複しない。作成が途中で失敗した番号は再利用しないため、欠番があり得る。
 - 呼び出し元が ID を決めない作成では、Work Item ID も key の小文字（`pt-12`）にする。古い title 由来の ID と重なる番号は飛ばす。冪等作成（import・Public API・Triage の `api-`/`import-`/`triage-` ID、`idempotencyResourceId`）と Request 変換（`request-<submissionId>`）は従来どおりの ID に key を付ける。
 - key と prefix と counter は Work Items table の Workspace ごとの registry partition（`<workspaceId>#work-item-key-registry`）に保存する。row は `entryType` が `work-item-key-prefix`（prefix → Team）、`work-item-key-counter`（Team の prefix と最後の番号）、`work-item-key`（key → Team と Work Item ID）のいずれかで、`sortOrder`・`updatedAt`・`directoryProjectId` を持たないので Work Item の GSI には入らない。table 全体を Scan する処理のうち、期限通知・横断整合性検査・Workspace search backfill は形の正しい registry row だけを読み飛ばし、Work Items の整合性 manifest（restore 照合）は registry row も digest に含める。どれも壊れた row では従来どおり失敗する。
 - `work-item-key` row は Work Item の作成 transaction の最後に条件付き Put で書く。Work Item が作られなかった key は記録されない。
-- `GET /api/work-items/keys/{key}` は key を `{ key, teamId, workItemId }` に解決する。存在しない key、key でない文字列、削除済みの Work Item、閲覧できない Team / Project の Work Item は、どれも同じ `404 WorkItemKeyNotFound` を返す。
+- `GET /api/work-items/keys/{key}` は key を `{ key, teamId, workItemId }` に解決する。存在しない key、key でない文字列、削除済みの Work Item、閲覧できない Team / Project の Work Item は、どれも同じ `404 WorkItemKeyNotFound` を返す。削除しても key の row は残り、固定 ID の作成では同じ ID が新しい key で作られ得るため、その ID の Work Item が今もその key を持つときだけ解決する。
 - key は内部 API の Work Item、Public API の `GET /api/v1/work-items/{workItemId}/key`、coding-agent MCP の `get_task` に出る。Public API の `WorkItem` は closed schema で、既存操作の応答に property を足すと後方互換を壊すため、key は別 endpoint で返す。作成時の audit event の変更内容にも含める。
 - title の長さ上限は Public API v1 の request を狭める変更になるため、この変更では入れていない。ID は title から作らないので、長い title が sort key を長くすることはない。
 - key を持たない既存 Work Item への付与は #365 の migration 契約で行う。

@@ -33,8 +33,8 @@ const COUNTER_RECORD_PREFIX = 'team#'
 /** Sort key prefix of the row that maps one allocated key to its Work Item. */
 const KEY_RECORD_PREFIX = 'key#'
 
-/** Prefix candidates tried before a Team's first allocation gives up. */
-const PREFIX_CANDIDATE_LIMIT = 20
+/** Prefix candidates tried before a Team's first allocation gives up: 10 numbered, then 30 hashed. */
+const PREFIX_CANDIDATE_LIMIT = 40
 
 /** Counter initialisation rounds tried before an allocation gives up. */
 const ALLOCATION_ATTEMPT_LIMIT = 3

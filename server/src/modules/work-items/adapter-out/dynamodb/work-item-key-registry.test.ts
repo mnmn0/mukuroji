@@ -112,6 +112,20 @@ describe('Work Item key allocation', () => {
     expect(new Set([platform.prefix, product.prefix])).toEqual(new Set(['PT', 'PT2']))
   })
 
+  test('finds a free prefix for many Teams that derive the same one', async () => {
+    const table = createRegistryTable()
+    const teamIds = Array.from({ length: 30 }, (_, index) => `team-${index.toString(16).padStart(12, '0')}`)
+
+    const keys = []
+    for (const teamId of teamIds) keys.push(await allocateWorkItemKey(table.client, TABLE, 'ws', teamId, NOW))
+
+    expect(new Set(keys.map((key) => key.prefix)).size).toBe(30)
+    expect(keys.slice(0, 10).map((key) => key.prefix)).toEqual(
+      ['TEAM', ...Array.from({ length: 9 }, (_, index) => `TEAM${index + 2}`)],
+    )
+    for (const key of keys.slice(10)) expect(key.prefix).toMatch(/^TEAM[0-9A-F]{4}$/u)
+  })
+
   test('keeps prefixes and numbers separate per Workspace', async () => {
     const table = createRegistryTable()
 

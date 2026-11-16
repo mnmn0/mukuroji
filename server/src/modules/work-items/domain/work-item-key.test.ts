@@ -50,10 +50,24 @@ describe('Work Item key prefix derivation', () => {
 
   test('numbers the fallbacks and keeps them within the prefix length limit', () => {
     expect(createWorkItemKeyPrefixCandidates('platform-team', 3)).toEqual(['PT', 'PT2', 'PT3'])
-    const candidates = createWorkItemKeyPrefixCandidates('backend', 20)
-    expect(new Set(candidates).size).toBe(20)
+    const candidates = createWorkItemKeyPrefixCandidates('backend', 40)
+    expect(new Set(candidates).size).toBe(40)
     for (const candidate of candidates) {
       expect(parseWorkItemKey(`${candidate}-1`)?.prefix).toBe(candidate)
     }
+  })
+
+  test('moves on to Team-specific hashed prefixes after the numbered ones', () => {
+    const first = createWorkItemKeyPrefixCandidates('team-1a2b3c4d5e6f', 12)
+    const second = createWorkItemKeyPrefixCandidates('team-0f9e8d7c6b5a', 12)
+
+    // Both Teams derive TEAM, so they share the numbered candidates.
+    expect(first.slice(0, 10)).toEqual(['TEAM', ...Array.from({ length: 9 }, (_, index) => `TEAM${index + 2}`)])
+    expect(second.slice(0, 10)).toEqual(first.slice(0, 10))
+    // The hashed ones differ by Team, so one taken by a Team does not block the next.
+    for (const candidate of first.slice(10)) expect(candidate).toMatch(/^TEAM[0-9A-F]{4}$/u)
+    expect(first.slice(10)).not.toEqual(second.slice(10))
+    // The order depends only on the Team ID, so concurrent first creates try the same prefixes.
+    expect(createWorkItemKeyPrefixCandidates('team-1a2b3c4d5e6f', 12)).toEqual(first)
   })
 })
