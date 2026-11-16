@@ -29,6 +29,7 @@ import {
   type EnterprisePermissionId,
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
+  type WorkItemKeyLookupResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -3996,6 +3997,58 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         maxItems: WORK_ITEMS_RESPONSE_LIMIT,
       })
       return c.json(await hydrateWorkItemsResponse({ workItems }, principal.directoryId))
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Resolves a Work Item key such as `ABC-123` to the Work Item it names.
+   *
+   * Answers 404 alike for text that is not a key, an unused key, a deleted Work Item, and a
+   * Work Item the caller cannot read, so a key reveals nothing to someone without access.
+   */
+  routeApp.get('/api/work-items/keys/:key', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    const notFound = () => c.json({
+      code: 'WorkItemKeyNotFound',
+      message: 'No readable Work Item has this key.',
+    }, 404)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const location = await workItemDependencies.teamIssues.getWorkItemKeyLocation(
+        principal.directoryId,
+        c.req.param('key'),
+      )
+      if (!location) return notFound()
+      try {
+        const context = await requireTeamPermission(principal, location.teamId, 'viewer')
+        const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          location.teamId,
+          location.workItemId,
+          { consistentIssueRead: true, includeEvents: false },
+        )
+        requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+      } catch (error) {
+        if (
+          isTeamIssueNotFoundError(error) ||
+          error instanceof ProjectDataError && (error.status === 403 || error.status === 404)
+        ) {
+          return notFound()
+        }
+        throw error
+      }
+      return c.json({
+        key: location.key,
+        teamId: location.teamId,
+        workItemId: location.workItemId,
+      } satisfies WorkItemKeyLookupResponse)
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }

@@ -42,6 +42,10 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 Credential の scope は作成後に変更しない。権限を変える場合は、新しい credential を最小 scope で作成し、利用側を移行してから旧 credential を revoke する。
 
+## Work Item key
+
+`WorkItem` は `ABC-123` 形式の `key` を持つことがあります。Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item には付きません。操作の path には従来どおり `id` を使います。`title` は 1〜256 文字です。
+
 ## Work Item Type catalog
 
 `GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。

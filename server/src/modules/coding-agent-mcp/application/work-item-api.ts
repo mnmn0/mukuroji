@@ -6,7 +6,7 @@ import type {
 
 /** Canonical task fields needed by a coding agent, excluding internal storage fields. */
 export type AgentTask = Pick<CanonicalWorkItem,
-  'id' | 'teamId' | 'revision' | 'title' | 'description' | 'assigneeUserId' |
+  'id' | 'key' | 'teamId' | 'revision' | 'title' | 'description' | 'assigneeUserId' |
   'assignedProjectId' | 'workflowStatusId' | 'statusCategory' | 'workItemTypeId' |
   'priority' | 'dueDate' | 'createdAt' | 'updatedAt' | 'relationIds' | 'customFieldValues'>
 

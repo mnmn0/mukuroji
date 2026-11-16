@@ -476,7 +476,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const counts: Record<WorkflowStatusCategory, number> = { backlog: 0, unstarted: 0, started: 0, completed: 0, canceled: 0 }
       for (const task of tasks) counts[task.statusCategory] += 1
       return { counts, total: tasks.length, inProgress: tasks.filter((task) => task.statusCategory === 'started').map((task) => ({
-        id: task.id, title: task.title, workflowStatusId: task.workflowStatusId, revision: task.revision, updatedAt: task.updatedAt,
+        id: task.id, ...(task.key === undefined ? {} : { key: task.key }), title: task.title,
+        workflowStatusId: task.workflowStatusId, revision: task.revision, updatedAt: task.updatedAt,
       })) }
     },
     transition,

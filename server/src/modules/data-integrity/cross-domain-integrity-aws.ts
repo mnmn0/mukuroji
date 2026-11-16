@@ -31,6 +31,7 @@ import {
 import {
   createWorkItemConfigurationScopeKey,
   isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
   validateWorkItemConfiguration,
 } from '../work-items'
 import {
@@ -843,8 +844,9 @@ async function normalizeRow(
   })
 }
 
-/** Strictly normalizes one canonical Work Item row. */
+/** Strictly normalizes one canonical Work Item row or a Work Item key registry row. */
 function normalizeWorkItem(row: Record<string, unknown>): CrossDomainIntegrityItem[] {
+  if (isWorkItemKeyRegistryRecord(row)) return []
   if (!isCanonicalWorkItemRecord(row)) {
     throw new CrossDomainIntegrityAwsBridgeFailure('NORMALIZATION_FAILED')
   }

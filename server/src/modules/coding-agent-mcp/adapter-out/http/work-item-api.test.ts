@@ -241,3 +241,12 @@ test('maps Agent Run problem reasons to stable codes without forwarding remote d
   const scoped = createAgentWorkItemApi(config, async () => Response.json({ ...validRun, teamId: 'other' }))
   await expect(scoped.getRun(validRun.runId)).rejects.toMatchObject({ code: 'invalid_response' })
 })
+
+test('passes a task key through so agents can use it in branch names and PR titles', async () => {
+  const api = createAgentWorkItemApi(config, async () => Response.json({ ...validTask, key: 'TEAM-42' }))
+  await expect(api.get('task')).resolves.toMatchObject({ id: 'task', key: 'TEAM-42' })
+  const legacy = createAgentWorkItemApi(config, async () => Response.json(validTask))
+  expect((await legacy.get('task')).key).toBeUndefined()
+  const malformed = createAgentWorkItemApi(config, async () => Response.json({ ...validTask, key: 'team-42' }))
+  await expect(malformed.get('task')).rejects.toMatchObject({ code: 'invalid_response' })
+})

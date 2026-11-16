@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import {
+  isCanonicalWorkItemKey,
   AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
@@ -12,7 +13,7 @@ const identifier = z.string().min(1).max(256).refine((value) => value !== '.' &&
 const category = z.enum(['backlog', 'unstarted', 'started', 'completed', 'canceled'])
 const customValue = z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()).max(100)])
 const taskSchema: z.ZodType<AgentTask> = z.object({
-  id: identifier, teamId: identifier, revision: z.number().int().positive(),
+  id: identifier, key: z.string().refine(isCanonicalWorkItemKey).optional(), teamId: identifier, revision: z.number().int().positive(),
   title: z.string(), description: z.string().optional(), assigneeUserId: identifier,
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
   workItemTypeId: identifier.optional(), statusCategory: category,

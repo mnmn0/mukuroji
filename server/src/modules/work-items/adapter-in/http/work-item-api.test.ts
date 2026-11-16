@@ -2672,3 +2672,58 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
   expect(ticketInputs[0]?.authenticatedAt).toEqual(expect.any(Number))
   expect(ticketInputs[0]?.tokenExpiresAt).toEqual(expect.any(Number))
 })
+
+test('resolves a Work Item key to a Work Item the caller can read', async () => {
+  const calls = configureFakeProjectClients(true, {
+    workItemKeyLocations: {
+      'CT-12': { key: 'CT-12', teamId: 'core-team', workItemId: 'onboarding-friction' },
+    },
+  })
+
+  const response = await app.request('/api/work-items/keys/ct-12', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    key: 'CT-12',
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+  })
+  expect(calls.issueDetails).toEqual([expect.objectContaining({
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+  })])
+})
+
+test.each([
+  ['an unused key', true, 'CT-99'],
+  ['text that is not a key', true, 'onboarding-friction'],
+  ['a deleted Work Item', true, 'CT-13'],
+  ['a Work Item in a Team the caller cannot read', false, 'CT-12'],
+])('answers 404 for %s', async (_case, hasAccess, key) => {
+  configureFakeProjectClients(hasAccess, {
+    workItemKeyLocations: {
+      'CT-12': { key: 'CT-12', teamId: 'core-team', workItemId: 'onboarding-friction' },
+      'CT-13': { key: 'CT-13', teamId: 'core-team', workItemId: 'wireframe' },
+    },
+  })
+
+  const response = await app.request(`/api/work-items/keys/${key}`, {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemKeyNotFound',
+    message: 'No readable Work Item has this key.',
+  })
+})
+
+test('requires a bearer token to resolve a Work Item key', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request('/api/work-items/keys/CT-12')
+
+  expect(response.status).toBe(401)
+})

@@ -168,4 +168,8 @@ export {
   type WorkItemListReadOptions,
   type WorkItemAuthorizationSnapshot,
 } from './adapter-out/dynamodb/work-item-client'
+export {
+  isWorkItemKeyRegistryRecord,
+  type WorkItemKeyLocation,
+} from './adapter-out/dynamodb/work-item-key-registry'
 export type { TeamIssueCommentResponseItem } from '@mukuroji/contracts'

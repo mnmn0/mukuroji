@@ -1356,6 +1356,7 @@
             "type": "string"
           },
           "title": {
+            "maxLength": 256,
             "minLength": 1,
             "type": "string"
           },
@@ -2956,6 +2957,7 @@
             "$ref": "#/components/schemas/WorkItemSchedule"
           },
           "title": {
+            "maxLength": 256,
             "minLength": 1,
             "type": "string"
           },
@@ -3247,6 +3249,11 @@
             "description": "Deadline projection derived from schedule; empty when unscheduled."
           },
           "id": {
+            "type": "string"
+          },
+          "key": {
+            "description": "Short immutable Work Item reference such as ABC-123, unique in the Workspace. Absent on Work Items created before keys existed.",
+            "pattern": "^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,8}$",
             "type": "string"
           },
           "priority": {

@@ -10,6 +10,7 @@ const {
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
+import { withWorkItemKeyCounter } from './test-support/work-item-key-allocation'
 import {
   DynamoDbTeamIssuesClient,
 } from '../modules/work-items'
@@ -1476,6 +1477,8 @@ test('commits a Request conversion pointer in the same transaction as its canoni
   const documentClient = {
     async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
       if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      // The deterministic Request conversion ID is checked before a key is allocated.
+      if (command.constructor.name === 'GetCommand') return {}
       if (command.constructor.name === 'TransactWriteCommand') {
         transactionItems = command.input.TransactItems as Array<Record<string, unknown>>
         return {}
@@ -1486,7 +1489,7 @@ test('commits a Request conversion pointer in the same transaction as its canoni
   const client = new DynamoDbTeamIssuesClient(
     'work-items-table',
     'events-table',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     { send: async () => ({}) } as unknown as DynamoDBClient,
     false,
   )
@@ -1526,11 +1529,25 @@ test('commits a Request conversion pointer in the same transaction as its canoni
   )
 
   expect(response.issue.sourceRequestId).toBe('req_20260716_atomic')
-  expect(transactionItems).toHaveLength(4)
+  expect(response.issue.id).toBe('request-req-20260716-atomic')
+  expect(response.issue.key).toBe('CT-1')
+  expect(transactionItems).toHaveLength(5)
   expect(transactionItems[0]).toMatchObject({
     Put: {
       TableName: 'work-items-table',
-      Item: { sourceRequestId: 'req_20260716_atomic' },
+      Item: { sourceRequestId: 'req_20260716_atomic', key: 'CT-1' },
+    },
+  })
+  expect(transactionItems[4]).toMatchObject({
+    Put: {
+      TableName: 'work-items-table',
+      Item: {
+        entryType: 'work-item-key',
+        key: 'CT-1',
+        teamId: 'core-team',
+        workItemId: 'request-req-20260716-atomic',
+      },
+      ConditionExpression: 'attribute_not_exists(issueId)',
     },
   })
   expect(transactionItems[2]).toMatchObject({
