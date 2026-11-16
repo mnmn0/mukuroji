@@ -97,4 +97,3 @@ export const PlanAndActual: Story = {
     await expect(canvas.queryByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[2].id}`)).not.toBeInTheDocument()
   },
 }
-
