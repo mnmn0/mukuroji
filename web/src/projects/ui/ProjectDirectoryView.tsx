@@ -7,10 +7,13 @@ import type {
 import type { ProjectDirectoryTeam } from '../api/directory'
 import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 import {
+  PROJECT_DIRECTORY_LIFECYCLE_FILTERS,
   PROJECT_DIRECTORY_UNASSIGNED_ID,
   isProjectDirectoryStatusFilter,
+  parseProjectDirectoryLifecycleFilter,
   type ProjectDirectoryAssignee,
   type ProjectDirectoryFilters,
+  type ProjectDirectoryLifecycleFilter,
   type ProjectDirectoryRow,
   type ProjectDirectoryStatus,
   type ProjectDirectoryStatusFilter,
@@ -19,11 +22,6 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import { formatPlanningUpdateDate } from '../../planning/model/date'
-import {
-  PROJECT_LIFECYCLE_STATES,
-  isProjectLifecycleState,
-  type ProjectLifecycleState,
-} from '@mukuroji/contracts'
 import { projectLifecycleClassNames, projectLifecycleMessageKey } from '../model/projectCharterView'
 
 /** Props for the searchable, filterable Project directory view. */
@@ -61,7 +59,7 @@ export type ProjectDirectoryViewProps = {
   /** Updates the selected status in the route URL. */
   onStatusChange: (status: ProjectDirectoryStatusFilter) => void
   /** Updates the selected lifecycle state in the route URL. */
-  onLifecycleChange?: (lifecycle?: ProjectLifecycleState) => void
+  onLifecycleChange?: (lifecycle?: ProjectDirectoryLifecycleFilter) => void
   /** Updates the selected assignee in the route URL. */
   onAssigneeChange: (assigneeId?: string) => void
   /** Updates whether the route shows only starred Projects. */
@@ -299,11 +297,11 @@ export function ProjectDirectoryView({
                   value={filters.lifecycle ?? ''}
                   onChange={(event) => {
                     const value = event.currentTarget.value
-                    onLifecycleChange?.(isProjectLifecycleState(value) ? value : undefined)
+                    onLifecycleChange?.(parseProjectDirectoryLifecycleFilter(value))
                   }}
                 >
                   <option value="">{t('projects.directory.filterAll')}</option>
-                  {PROJECT_LIFECYCLE_STATES.filter((state) => state !== 'archived').map((state) => (
+                  {PROJECT_DIRECTORY_LIFECYCLE_FILTERS.map((state) => (
                     <option key={state} value={state}>{t(projectLifecycleMessageKey(state))}</option>
                   ))}
                 </select>
@@ -375,7 +373,7 @@ export function ProjectDirectoryView({
       >
         <div
           aria-hidden="true"
-          className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(150px,1fr)_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 text-xs font-semibold text-[var(--workbench-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[1100px]:[&>*:nth-child(5)]:hidden max-[1100px]:[&>*:nth-child(6)]:hidden max-[1100px]:[&>*:nth-child(8)]:hidden max-[760px]:hidden"
+          className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(150px,1fr)_minmax(130px,0.9fr)_140px_120px_48px] max-[1280px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 text-xs font-semibold text-[var(--workbench-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[1280px]:[&>*:nth-child(5)]:hidden max-[1100px]:[&>*:nth-child(6)]:hidden max-[1100px]:[&>*:nth-child(8)]:hidden max-[760px]:hidden"
         >
           <span />
           <span>{t('projects.directory.column.project')}</span>
@@ -513,7 +511,7 @@ function ProjectDirectoryListRow({
 
   return (
     <div
-      className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(150px,1fr)_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-[var(--workbench-surface-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[760px]:grid-cols-[44px_minmax(0,1fr)_44px] max-[760px]:items-start"
+      className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(150px,1fr)_minmax(130px,0.9fr)_140px_120px_48px] max-[1280px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-[var(--workbench-surface-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[760px]:grid-cols-[44px_minmax(0,1fr)_44px] max-[760px]:items-start"
       role="listitem"
     >
       <button
@@ -559,7 +557,7 @@ function ProjectDirectoryListRow({
         <p className="mt-1 hidden truncate text-xs font-medium text-[var(--workbench-muted)] max-[760px]:block">
           {project.teamName} · {statusLabel}
         </p>
-        <p className="mt-0.5 hidden truncate text-xs font-medium text-[var(--workbench-muted)] max-[1100px]:block">
+        <p className="mt-0.5 hidden truncate text-xs font-medium text-[var(--workbench-muted)] max-[1280px]:block">
           {project.owner?.displayName ?? t('projects.directory.charter.noOwner')} · {periodLabel}
         </p>
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
@@ -638,7 +636,7 @@ function ProjectDirectoryListRow({
       </span>
 
       <div
-        className="grid min-w-0 gap-0.5 max-[1100px]:hidden"
+        className="grid min-w-0 gap-0.5 max-[1280px]:hidden"
         data-testid={`project-charter-summary-${project.teamId}-${project.projectId}`}
       >
         <span className="truncate text-sm font-medium text-[var(--workbench-text)]">

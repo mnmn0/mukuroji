@@ -74,6 +74,7 @@ describe('Project charter update validation', () => {
       },
     ],
     ['non-string owner', { expectedRevision: 0, charter: { ownerUserId: 42 } }],
+    ['tag containing a comma separator', { expectedRevision: 0, charter: { tags: ['研究、開発'] } }],
   ])('rejects %s', (_label, body) => {
     expect(readProjectCharterUpdate(body)).toMatchObject({ ok: false, code: 'InvalidProjectCharter' })
   })
@@ -180,5 +181,20 @@ describe('stored Project charter', () => {
     expect(isStoredProjectCharter({ tags: [] })).toBe(false)
     expect(isStoredProjectCharter({ code: 'lower', tags: [], repositoryUrls: [] })).toBe(false)
     expect(isStoredProjectCharter({ owner: { userId: 'x' }, tags: [], repositoryUrls: [] })).toBe(false)
+  })
+
+  test.each([
+    ['an impossible date', { plannedStartDate: '2026-02-30' }],
+    ['a reversed period', { plannedStartDate: '2026-05-01', plannedEndDate: '2026-04-30' }],
+    ['a plain HTTP repository', { repositoryUrls: ['http://example.com/repo'] }],
+    ['an unnormalized repository URL', { repositoryUrls: ['https://EXAMPLE.com/repo'] }],
+    ['an over-long purpose', { purpose: 'x'.repeat(2_001) }],
+    ['untrimmed text', { description: ' padded ' }],
+    ['a blank text', { purpose: '' }],
+    ['duplicate tags', { tags: ['infra', 'Infra'] }],
+    ['a tag containing a separator', { tags: ['研究、開発'] }],
+    ['an empty person name', { owner: { userId: 'pm@example.com', displayName: '' } }],
+  ])('rejects a stored charter with %s', (_label, fields) => {
+    expect(isStoredProjectCharter({ tags: [], repositoryUrls: [], ...fields })).toBe(false)
   })
 })

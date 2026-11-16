@@ -1,7 +1,8 @@
-import type {
-  ProjectCharter,
-  ProjectLifecycleState,
-  UpdateProjectCharterInput,
+import {
+  PROJECT_CHARTER_TAG_SEPARATOR_PATTERN,
+  type ProjectCharter,
+  type ProjectLifecycleState,
+  type UpdateProjectCharterInput,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
@@ -25,6 +26,39 @@ export type ProjectCharterFormValues = {
   tags: string
   /** Newline-separated repository URLs. */
   repositoryUrls: string
+}
+
+/** An unsaved charter form and the revision it was based on. */
+export type ProjectCharterDraft = {
+  /** Charter revision the draft started from. */
+  revision: number
+  /** Edited form values. */
+  values: ProjectCharterFormValues
+}
+
+/** Keeps unsaved charter drafts per Team and Project while their panel is not shown. */
+export type ProjectCharterDraftStore = {
+  /** Returns the draft kept for one Project. */
+  read(teamId: string, projectId: string): ProjectCharterDraft | undefined
+  /** Keeps or, with undefined, forgets the draft of one Project. */
+  write(teamId: string, projectId: string, draft: ProjectCharterDraft | undefined): void
+}
+
+/**
+ * Creates an in-memory draft store scoped to the Team and Project pair.
+ *
+ * @returns A store whose drafts live as long as the store itself.
+ */
+export function createProjectCharterDraftStore(): ProjectCharterDraftStore {
+  const drafts = new Map<string, ProjectCharterDraft>()
+  const keyOf = (teamId: string, projectId: string) => JSON.stringify([teamId, projectId])
+  return {
+    read: (teamId, projectId) => drafts.get(keyOf(teamId, projectId)),
+    write: (teamId, projectId, draft) => {
+      if (draft) drafts.set(keyOf(teamId, projectId), draft)
+      else drafts.delete(keyOf(teamId, projectId))
+    },
+  }
 }
 
 /** Badge colors for each lifecycle state. */
@@ -80,7 +114,8 @@ export function createProjectCharterUpdateInput(
 ): UpdateProjectCharterInput {
   const optional = (value: string) => value.trim() || undefined
   const charter: UpdateProjectCharterInput['charter'] = {
-    tags: values.tags.split(/[,、]/u).map((tag) => tag.trim()).filter(Boolean),
+    // A stored tag never contains a separator, so splitting the joined form restores the list.
+    tags: values.tags.split(PROJECT_CHARTER_TAG_SEPARATOR_PATTERN).map((tag) => tag.trim()).filter(Boolean),
     repositoryUrls: values.repositoryUrls.split(/\r?\n/u).map((url) => url.trim()).filter(Boolean),
   }
   const code = optional(values.code)

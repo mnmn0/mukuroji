@@ -1,5 +1,10 @@
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { ProjectCharterPersonCandidate } from '../model/projectCharterView'
+import { useCallback } from 'react'
+import type {
+  ProjectCharterDraft,
+  ProjectCharterDraftStore,
+  ProjectCharterPersonCandidate,
+} from '../model/projectCharterView'
 import { useProjectCharterActions } from '../mutations/useProjectCharterActions'
 import { ProjectCharterPanel } from './ProjectCharterPanel'
 
@@ -21,6 +26,8 @@ export type ProjectCharterSectionProps = {
   canDecideProposal: boolean
   /** Translator for every label. */
   t: (key: MessageKey) => string
+  /** Keeps unsaved drafts per Project while the section is not shown. */
+  draftStore?: ProjectCharterDraftStore
 }
 
 /**
@@ -38,14 +45,22 @@ export function ProjectCharterSection({
   canEdit,
   canDecideProposal,
   t,
+  draftStore,
 }: ProjectCharterSectionProps) {
   const charter = useProjectCharterActions({ accessToken, teamId, projectId, enabled })
+  const keepDraft = useCallback((draft: ProjectCharterDraft | undefined) => {
+    if (teamId) draftStore?.write(teamId, projectId, draft)
+  }, [draftStore, projectId, teamId])
 
   if (!teamId) return null
 
+  // A draft belongs to one Team and Project, so another pair always starts a fresh panel.
   return (
     <ProjectCharterPanel
+      key={JSON.stringify([teamId, projectId])}
       canDecideProposal={canDecideProposal}
+      initialDraft={draftStore?.read(teamId, projectId)}
+      onDraftChange={keepDraft}
       canEdit={canEdit}
       hasLoadError={charter.hasLoadError}
       isLoading={charter.isLoading}

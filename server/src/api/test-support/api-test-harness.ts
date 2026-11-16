@@ -2207,8 +2207,8 @@ function configureFakeProjectClients(
               ...team,
               expanded: true,
               projects: team.projects.map((project) => ({
-                lifecycleState: 'active' as const,
                 ...project,
+                lifecycleState: readProjectCharterState(team.id, project.id).lifecycleState,
               })),
             })),
           ],

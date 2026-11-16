@@ -1,5 +1,6 @@
 import {
   isProjectLifecycleState,
+  PROJECT_LIFECYCLE_STATES,
   type ProjectCharterPerson,
   type ProjectLifecycleState,
   type ProjectQuickAccessItem,
@@ -24,7 +25,7 @@ export type ProjectDirectoryFilters = {
   /** Whether only starred Projects are included. */
   quickAccessOnly: boolean
   /** Project lifecycle state used to restrict the directory; omitted means every state. */
-  lifecycle?: ProjectLifecycleState
+  lifecycle?: ProjectDirectoryLifecycleFilter
 }
 
 /** Project lifecycle values available in the directory filter. */
@@ -365,11 +366,22 @@ function normalizeProjectDirectoryText(value: string) {
 /**
  * Parses a raw lifecycle query while ignoring unsupported deep-link values.
  *
+ * The directory lists only unarchived Projects, so `archived` is not offered as a filter and a
+ * deep link naming it falls back to the unfiltered list.
+ *
  * @param value - Raw lifecycle query value.
  * @returns A lifecycle state, or undefined for the unfiltered value.
  */
 export function parseProjectDirectoryLifecycleFilter(
   value: string | null,
-): ProjectLifecycleState | undefined {
-  return isProjectLifecycleState(value) ? value : undefined
+): ProjectDirectoryLifecycleFilter | undefined {
+  return isProjectLifecycleState(value) && value !== 'archived' ? value : undefined
 }
+
+/** Lifecycle states the Project directory can filter by. */
+export type ProjectDirectoryLifecycleFilter = Exclude<ProjectLifecycleState, 'archived'>
+
+/** Lifecycle states offered by the Project directory filter, in lifecycle order. */
+export const PROJECT_DIRECTORY_LIFECYCLE_FILTERS = PROJECT_LIFECYCLE_STATES.filter(
+  (state): state is ProjectDirectoryLifecycleFilter => state !== 'archived',
+)

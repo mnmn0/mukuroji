@@ -93,7 +93,7 @@ export const projectsMessages = {
   'projects.charter.field.plannedStartDate': '計画開始日',
   'projects.charter.field.plannedEndDate': '計画終了日',
   'projects.charter.field.tags': '分類タグ',
-  'projects.charter.field.tagsHint': 'カンマ区切りで入力します。',
+  'projects.charter.field.tagsHint': 'カンマ（, や 、）で区切って入力します。',
   'projects.charter.field.repositoryUrls': '関連リポジトリ URL',
   'projects.charter.field.repositoryUrlsHint': '1 行に 1 つ、https の URL を入力します。',
   'projects.charter.save': '憲章を保存',

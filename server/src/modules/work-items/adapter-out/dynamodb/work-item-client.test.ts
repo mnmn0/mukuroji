@@ -4171,3 +4171,66 @@ test('DynamoDB Work Item creation fences the assigned Project against a concurre
   )
   expect(projectRowChecks).toEqual([fence])
 })
+
+test('DynamoDB Work Item creation replays a committed deterministic create after the Project closes', async () => {
+  let committedItem: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'GetCommand') return { Item: committedItem }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const transactItems = command.input.TransactItems as Array<Record<string, unknown>>
+        const put = transactItems[0]?.Put as { Item: Record<string, unknown> }
+        if (!committedItem) {
+          committedItem = put.Item
+          return {}
+        }
+        // The retry finds its own Work Item row and a Project that has closed since.
+        const fenceIndex = transactItems.findIndex((item) =>
+          (item.ConditionCheck as { TableName?: string } | undefined)?.TableName === 'DirectoryTable'
+        )
+        const error = new Error('Already created, and the Project was closed.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === 0 || index === fenceIndex ? 'ConditionalCheckFailed' : 'None',
+          })),
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    title: 'Retried while the Project closes',
+    assigneeUserId: 'demo@example.com',
+    assignedProjectId: 'refero',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted' as const,
+    customFieldValues: {},
+    schedule: createDueDateSchedule('2026-08-14'),
+    priority: 'high' as const,
+    idempotentIssueId: `api-${'c'.repeat(48)}`,
+    idempotentRequestDigest: 'd'.repeat(64),
+    newWorkItemProjectConditionCheck: {
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: { directoryId: 'workspace-1', entryKey: '000010#000010#PROJECT#refero' },
+        ConditionExpression: 'attribute_not_exists(#archivedAt) AND NOT (#lifecycleState IN (:closed))',
+      },
+    },
+  }
+
+  const created = await client.createTeamIssue('workspace-1', 'core-team', input, 'demo@example.com')
+  const replay = await client.createTeamIssue('workspace-1', 'core-team', input, 'demo@example.com')
+
+  expect(replay).toEqual(created)
+})

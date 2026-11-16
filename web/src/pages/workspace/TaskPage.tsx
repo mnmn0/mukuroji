@@ -49,7 +49,10 @@ import {
   useProjectMembers,
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
-import { createProjectCharterPersonCandidates } from '../../projects/model/projectCharterView'
+import {
+  createProjectCharterDraftStore,
+  createProjectCharterPersonCandidates,
+} from '../../projects/model/projectCharterView'
 import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
 import {
   TeamIssuesApiError,
@@ -431,6 +434,8 @@ export function TaskPage() {
     () => createProjectCharterPersonCandidates(workspaceAccess?.members ?? emptyWorkspaceMembers),
     [workspaceAccess?.members],
   )
+  // Unsaved charter edits survive switching away from the settings tab and back.
+  const [projectCharterDraftStore] = useState(createProjectCharterDraftStore)
   const {
     data: projectUsersFirstPage,
     error: projectUsersError,
@@ -1869,6 +1874,7 @@ export function TaskPage() {
           accessToken={accessToken}
           canDecideProposal={canMutateContent && isWorkspaceAdministrator}
           canEdit={canEditProjectCharter}
+          draftStore={projectCharterDraftStore}
           enabled={Boolean(user && !currentUserError)}
           members={projectCharterCandidates}
           projectId={projectId}

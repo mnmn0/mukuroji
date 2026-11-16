@@ -247,9 +247,10 @@ export function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBod
  * Rejects creating a Work Item in a Project whose lifecycle no longer accepts new work.
  *
  * Existing Work Items of a `closed` Project stay readable and editable; only creation is
- * rejected. The directory snapshot gives an early answer, and the returned condition check
- * repeats the decision when the creating transaction commits, so a closure that lands after the
- * directory read cannot be bypassed.
+ * rejected. When the directory can build a commit-time fence, the creating transaction makes the
+ * decision: it first recognizes a retry of a create that already succeeded and returns that Work
+ * Item, so closing the Project after the first attempt does not turn an idempotent retry into a
+ * failure. Without a fence, the directory snapshot decides.
  *
  * @param directoryId - Owning Workspace directory identifier.
  * @param team - Active Team row whose Projects carry their lifecycle state.
@@ -265,6 +266,17 @@ export async function requireAssignedProjectAcceptsNewWorkItems(
     workspaceDependencies.projectDirectory,
 ): Promise<Pick<CreateTeamIssueRequestBody, 'newWorkItemProjectConditionCheck'>> {
   if (!assignedProjectId) return {}
+  const createConditionCheck = projectDirectory.createNewWorkItemProjectConditionCheck
+  if (createConditionCheck) {
+    return {
+      newWorkItemProjectConditionCheck: await createConditionCheck.call(
+        projectDirectory,
+        directoryId,
+        team.id,
+        assignedProjectId,
+      ),
+    }
+  }
   const project = team.projects.find((candidate) => candidate.id === assignedProjectId)
   if (project && !projectLifecycleAcceptsNewWorkItems(project.lifecycleState)) {
     throw new ProjectDataError(
@@ -273,16 +285,7 @@ export async function requireAssignedProjectAcceptsNewWorkItems(
       `Project "${assignedProjectId}" is ${project.lifecycleState} and does not accept new Work Items.`,
     )
   }
-  const createConditionCheck = projectDirectory.createNewWorkItemProjectConditionCheck
-  if (!createConditionCheck) return {}
-  return {
-    newWorkItemProjectConditionCheck: await createConditionCheck.call(
-      projectDirectory,
-      directoryId,
-      team.id,
-      assignedProjectId,
-    ),
-  }
+  return {}
 }
 
 /**

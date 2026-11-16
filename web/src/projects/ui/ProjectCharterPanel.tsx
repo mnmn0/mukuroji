@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import {
   PROJECT_LIFECYCLE_TRANSITIONS,
   type ProjectCharter,
@@ -12,6 +12,7 @@ import {
   createProjectCharterUpdateInput,
   projectLifecycleClassNames,
   projectLifecycleMessageKey,
+  type ProjectCharterDraft,
   type ProjectCharterFormValues,
   type ProjectCharterPersonCandidate,
 } from '../model/projectCharterView'
@@ -44,6 +45,10 @@ export type ProjectCharterPanelProps = {
   ) => Promise<ProjectCharterState | undefined>
   /** Reloads the charter after a failure or conflict. */
   onReload: () => void
+  /** Unsaved draft restored when the panel is shown again for the same Project. */
+  initialDraft?: ProjectCharterDraft
+  /** Receives every draft change so it can outlive the panel. */
+  onDraftChange?: (draft: ProjectCharterDraft | undefined) => void
 }
 
 const inputClassName =
@@ -88,12 +93,18 @@ export function ProjectCharterPanel({
   onSave,
   onTransition,
   onReload,
+  initialDraft,
+  onDraftChange,
 }: ProjectCharterPanelProps) {
-  const [draft, setDraft] = useState<{ revision: number; values: ProjectCharterFormValues }>()
+  const [draft, setDraft] = useState<ProjectCharterDraft | undefined>(initialDraft)
   const [isSaving, setIsSaving] = useState(false)
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string }>()
   const [isConfirmingClose, setIsConfirmingClose] = useState(false)
+
+  useEffect(() => {
+    onDraftChange?.(draft)
+  }, [draft, onDraftChange])
 
   if (!state) {
     return (

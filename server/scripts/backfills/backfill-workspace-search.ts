@@ -636,6 +636,14 @@ function mapProjectDirectoryItemRow(
     return undefined
   }
 
+  // A Project row without a charter is valid; a charter that is present but invalid is corrupt
+  // data, and indexing the row without it would silently hide the problem.
+  if (item.charter !== undefined && !isStoredProjectCharter(item.charter)) {
+    throw new TypeError(
+      `Workspace search backfill encountered an invalid charter on Project "${teamId}/${projectId}".`,
+    )
+  }
+
   return {
     action: 'put',
     document: createProjectWorkspaceSearchDocument({
@@ -644,7 +652,7 @@ function mapProjectDirectoryItemRow(
       subtitle,
       teamId,
       projectId,
-      ...(isStoredProjectCharter(item.charter) ? { charter: item.charter } : {}),
+      ...(item.charter === undefined ? {} : { charter: item.charter }),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
     }),

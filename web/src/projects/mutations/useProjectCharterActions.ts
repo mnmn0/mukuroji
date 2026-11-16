@@ -36,36 +36,43 @@ export function useProjectCharterActions({
 }: UseProjectCharterActionsOptions) {
   const { mutate: mutateGlobal } = useSWRConfig()
   const charter = useProjectCharter({ accessToken, teamId, projectId, enabled })
-  const { mutate } = charter
+  const { key, mutate } = charter
 
-  const commit = useCallback(async (next: ProjectCharterState) => {
-    await mutate(next, { revalidate: false })
+  // The cache entry is the one the request started from, so a response that arrives after the
+  // viewer moved to another Team or Project never lands in that other Project's cache.
+  const commit = useCallback(async (
+    requestKey: NonNullable<typeof key>,
+    next: ProjectCharterState,
+  ) => {
+    await mutateGlobal(requestKey, next, { revalidate: false })
     await mutateGlobal(isProjectDirectoryKey)
     return next
-  }, [mutate, mutateGlobal])
+  }, [mutateGlobal])
 
   const save = useCallback(async (input: UpdateProjectCharterInput) => {
-    if (!accessToken || !teamId) return undefined
-    return await commit(await updateProjectCharter(
-      accessToken,
-      teamId,
-      projectId,
+    if (!key) return undefined
+    const [, token, requestTeamId, requestProjectId] = key
+    return await commit(key, await updateProjectCharter(
+      token,
+      requestTeamId,
+      requestProjectId,
       input,
       createMutationRequestContext(),
     ))
-  }, [accessToken, commit, projectId, teamId])
+  }, [commit, key])
 
   const transition = useCallback(async (expectedRevision: number, state: ProjectLifecycleState) => {
-    if (!accessToken || !teamId) return undefined
-    return await commit(await transitionProjectLifecycle(
-      accessToken,
-      teamId,
-      projectId,
+    if (!key) return undefined
+    const [, token, requestTeamId, requestProjectId] = key
+    return await commit(key, await transitionProjectLifecycle(
+      token,
+      requestTeamId,
+      requestProjectId,
       expectedRevision,
       state,
       createMutationRequestContext(),
     ))
-  }, [accessToken, commit, projectId, teamId])
+  }, [commit, key])
 
   const reload = useCallback(() => {
     void mutate()

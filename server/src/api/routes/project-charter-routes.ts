@@ -2,14 +2,13 @@ import type { Context, Hono } from 'hono'
 import type { ProjectCharterPerson, ProjectCharterState } from '@mukuroji/contracts'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
-  createProjectCharter,
-  decideProjectLifecycleTransition,
   createProjectCharterPerson,
   ProjectDataError,
-  readProjectCharterUpdate,
-  readProjectLifecycleTransition,
+  transitionProjectLifecycleUseCase,
+  updateProjectCharterUseCase,
   type ProjectDirectoryProjectResponse,
   type ProjectDirectoryTeamResponse,
+  type ResolvedProjectCharterPerson,
 } from '../../modules/directory'
 import {
   WorkspaceAccessError,
@@ -75,33 +74,16 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       await requireProjectCharterManagement(principal, projectId)
-      const body = await readJson<unknown>(c.req)
-      const update = readProjectCharterUpdate(body)
-      if (!update.ok) throw new ProjectDataError(400, update.code, update.message)
-      const [owner, sponsor] = await Promise.all([
-        resolveCharterPerson(principal.directoryId, update.value.ownerUserId),
-        resolveCharterPerson(principal.directoryId, update.value.sponsorUserId),
-      ])
-      const charter = createProjectCharter(update.value, {
-        ...(owner === undefined ? {} : { owner: owner.person }),
-        ...(sponsor === undefined ? {} : { sponsor: sponsor.person }),
-      })
-      // One check per member row: DynamoDB rejects a transaction naming one item twice.
-      const personConditionChecks = [...new Map(
-        [owner, sponsor].flatMap((resolved) =>
-          resolved?.conditionCheck === undefined ? [] : [[resolved.person.userId, resolved.conditionCheck] as const]
-        ),
-      ).values()]
-      const state = await workspaceDependencies.projectDirectory.updateProjectCharter(
-        principal.directoryId,
-        teamId,
-        projectId,
-        update.value.expectedRevision,
-        charter,
-        createApiMutationContext(c, principal, { teamId, projectId, ...update.value }),
-        personConditionChecks,
+      const state = await updateProjectCharterUseCase(
+        {
+          store: workspaceDependencies.projectDirectory,
+          resolvePerson: resolveCharterPerson,
+          projectSearchDocument: projectCharterSearchDocumentBestEffort,
+        },
+        { workspaceId: principal.directoryId, teamId, projectId },
+        await readJson<unknown>(c.req),
+        (update) => createApiMutationContext(c, principal, update),
       )
-      await projectCharterSearchDocumentBestEffort(principal.directoryId, state)
       return c.json(state satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
@@ -117,24 +99,15 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readProjectRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      const transition = readProjectLifecycleTransition(await readJson<unknown>(c.req))
-      if (!transition.ok) throw new ProjectDataError(400, transition.code, transition.message)
       await requireProjectCharterManagement(principal, projectId)
-      const current = await workspaceDependencies.projectDirectory.getProjectCharter(
-        principal.directoryId,
-        teamId,
-        projectId,
-      )
-      if (current.lifecycleState === 'proposed') requireProjectProposalDecision(principal)
-      const decision = decideProjectLifecycleTransition(current, transition.value)
-      if (!decision.ok) throw new ProjectDataError(409, decision.code, decision.message)
-      return c.json(await workspaceDependencies.projectDirectory.transitionProjectLifecycle(
-        principal.directoryId,
-        teamId,
-        projectId,
-        transition.value.expectedRevision,
-        decision.to,
-        createApiMutationContext(c, principal, { teamId, projectId, ...transition.value }),
+      return c.json(await transitionProjectLifecycleUseCase(
+        {
+          store: workspaceDependencies.projectDirectory,
+          requireProposalDecision: () => requireProjectProposalDecision(principal),
+        },
+        { workspaceId: principal.directoryId, teamId, projectId },
+        await readJson<unknown>(c.req),
+        (transition) => createApiMutationContext(c, principal, transition),
       ) satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
@@ -199,19 +172,17 @@ function requireProjectProposalDecision(principal: WorkspacePrincipal) {
 /**
  * Resolves a charter person to an active Workspace member with a display snapshot.
  *
- * The returned condition check proves the member is still active, at the version read here,
- * when the charter write commits, so a concurrent deactivation cannot be saved as owner or
- * sponsor.
+ * The returned fence proves the member is still active, at the version read here, when the
+ * charter write commits, so a concurrent deactivation cannot be saved as owner or sponsor.
  *
  * @param workspaceId - Workspace that owns the Project.
- * @param userId - Optional member key from the request.
- * @returns The person snapshot and its membership fence, or undefined when no person is named.
+ * @param userId - Member key from the request.
+ * @returns The person snapshot and its membership fence.
  */
 async function resolveCharterPerson(
   workspaceId: string,
-  userId: string | undefined,
-): Promise<{ person: ProjectCharterPerson; conditionCheck?: ProjectCharterPersonConditionCheck } | undefined> {
-  if (userId === undefined) return undefined
+  userId: string,
+): Promise<ResolvedProjectCharterPerson<ProjectCharterPersonConditionCheck>> {
   const profile = await authenticationDependencies.cognito.getUserProfile(userId)
   const workspaceAccess = workspaceDependencies.workspaceAccess
   const inactive = () => new ProjectDataError(
@@ -224,13 +195,13 @@ async function resolveCharterPerson(
     if (!await workspaceAccess.getActiveMember(workspaceId, profile.id)) throw inactive()
     return { person }
   }
-  const conditionCheck = await workspaceAccess.createActiveMemberConditionCheck.call(
+  const fence = await workspaceAccess.createActiveMemberConditionCheck.call(
     workspaceAccess,
     workspaceId,
     profile.id,
   )
-  if (!conditionCheck) throw inactive()
-  return { person, conditionCheck }
+  if (!fence) throw inactive()
+  return { person, fence }
 }
 
 /**

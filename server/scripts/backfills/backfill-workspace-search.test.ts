@@ -176,6 +176,32 @@ describe('Workspace search backfill mapping', () => {
     expect(project.document.subtitle).toBe('Shared launch')
   })
 
+  test('indexes a valid Project charter and rejects a corrupt one', () => {
+    const row = {
+      directoryId: 'workspace#mukuroji',
+      entryKey: '000010#000010#PROJECT#refero',
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId: 'refero',
+      projectSortOrder: 10,
+      nameJa: 'Refero',
+      nameEn: 'Refero',
+      tone: 'blue',
+    }
+    const project = mapProjectDirectoryItem({
+      ...row,
+      charter: { code: 'OPS-1', purpose: '一次回答を早める', tags: ['基盤'], repositoryUrls: [] },
+    })
+    if (project?.action !== 'put') throw new Error('Expected a Project search document.')
+    expect(project.document.body).toContain('OPS-1')
+
+    expect(() => mapProjectDirectoryItem({
+      ...row,
+      charter: { code: 'ops-1', tags: [], repositoryUrls: [] },
+    })).toThrow('invalid charter on Project "core-team/refero"')
+  })
+
   test('uses different document keys for the same Work Item ID in different Teams', () => {
     const first = mapWorkItem({
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,

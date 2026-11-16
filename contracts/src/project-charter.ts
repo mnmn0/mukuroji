@@ -58,6 +58,11 @@ export const PROJECT_CHARTER_TEXT_MAX_LENGTH = 2_000
 export const PROJECT_CHARTER_TAGS_MAX_ITEMS = 20
 /** Maximum length of one classification tag. */
 export const PROJECT_CHARTER_TAG_MAX_LENGTH = 40
+/**
+ * Matches the separators of the comma-separated tag input. A tag cannot contain one, so the
+ * stored list and its comma-separated form always convert back and forth without loss.
+ */
+export const PROJECT_CHARTER_TAG_SEPARATOR_PATTERN = /[,，、]/u
 /** Maximum number of related repository URLs. */
 export const PROJECT_CHARTER_REPOSITORY_URLS_MAX_ITEMS = 10
 /** Maximum length of one related repository URL. */

@@ -3,6 +3,8 @@ import type { ProjectCharterState } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
 import {
+  createProjectCharterDraftStore,
+  createProjectCharterFormValues,
   createProjectCharterPersonCandidates,
   createProjectCharterUpdateInput,
 } from '../src/projects/model/projectCharterView'
@@ -73,6 +75,8 @@ describe('Project directory charter columns', () => {
       .toEqual(['refero'])
     expect(parseProjectDirectoryLifecycleFilter('closed')).toBe('closed')
     expect(parseProjectDirectoryLifecycleFilter('done')).toBeUndefined()
+    // The directory lists only unarchived Projects, so an archived deep link shows everything.
+    expect(parseProjectDirectoryLifecycleFilter('archived')).toBeUndefined()
   })
 
   test('renders the lifecycle badge, code, owner, and planned period', () => {
@@ -215,6 +219,38 @@ describe('ProjectCharterPanel', () => {
         repositoryUrls: ['https://github.com/example/a', 'https://github.com/example/b'],
       },
     })
+  })
+
+  test('keeps every stored tag when the form is saved unchanged', () => {
+    const charter = { tags: ['研究開発', 'R&D', '社内 基盤'], repositoryUrls: [] }
+    expect(createProjectCharterUpdateInput(createProjectCharterFormValues(charter), 1).charter.tags)
+      .toEqual(charter.tags)
+  })
+
+  test('restores a draft kept for the same Team and Project only', () => {
+    const store = createProjectCharterDraftStore()
+    const values = { ...createProjectCharterFormValues({ tags: [], repositoryUrls: [] }), purpose: '下書きの目的' }
+    store.write('core-team', 'refero', { revision: 2, values })
+
+    expect(store.read('core-team', 'refero')).toEqual({ revision: 2, values })
+    expect(store.read('other-team', 'refero')).toBeUndefined()
+    const html = renderToStaticMarkup(
+      <ProjectCharterPanel
+        canDecideProposal={false}
+        canEdit
+        initialDraft={store.read('core-team', 'refero')}
+        members={[]}
+        state={createState()}
+        t={createTranslator('ja')}
+        onReload={() => undefined}
+        onSave={async () => undefined}
+        onTransition={async () => undefined}
+      />,
+    )
+    expect(html).toContain('下書きの目的')
+
+    store.write('core-team', 'refero', undefined)
+    expect(store.read('core-team', 'refero')).toBeUndefined()
   })
 
   test('offers active Workspace members, not only Project members, as owner and sponsor', () => {

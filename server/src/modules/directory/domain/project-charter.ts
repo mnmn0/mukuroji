@@ -5,6 +5,7 @@ import {
   PROJECT_CHARTER_REPOSITORY_URL_MAX_LENGTH,
   PROJECT_CHARTER_REPOSITORY_URLS_MAX_ITEMS,
   PROJECT_CHARTER_TAG_MAX_LENGTH,
+  PROJECT_CHARTER_TAG_SEPARATOR_PATTERN,
   PROJECT_CHARTER_TAGS_MAX_ITEMS,
   PROJECT_CHARTER_TEXT_MAX_LENGTH,
   PROJECT_INITIAL_LIFECYCLE_STATES,
@@ -212,7 +213,7 @@ export function readProjectCharterUpdate(
   const tags = readTags(charter.tags)
   if (tags === undefined) {
     return invalidCharter(
-      `tags must be at most ${PROJECT_CHARTER_TAGS_MAX_ITEMS} strings of at most ${PROJECT_CHARTER_TAG_MAX_LENGTH} characters.`,
+      `tags must be at most ${PROJECT_CHARTER_TAGS_MAX_ITEMS} strings of at most ${PROJECT_CHARTER_TAG_MAX_LENGTH} characters without commas.`,
     )
   }
   const repositoryUrls = readRepositoryUrls(charter.repositoryUrls)
@@ -377,24 +378,47 @@ export function toProjectCharterSummary(charter: ProjectCharter | undefined): Pr
 /**
  * Checks whether a persisted value is a valid stored charter. Unknown shapes fail closed.
  *
+ * A stored charter must be exactly what a valid update would have produced: every field passes
+ * the request rules and is already in its normalized form, so the guard never repairs a value.
+ *
  * @param value - Persisted DynamoDB value.
  * @returns Whether the value can be returned as a charter.
  */
 export function isStoredProjectCharter(value: unknown): value is ProjectCharter {
   if (!isRecord(value)) return false
-  const optionalStrings = ['code', 'description', 'purpose', 'plannedStartDate', 'plannedEndDate'] as const
-  if (optionalStrings.some((key) => value[key] !== undefined && typeof value[key] !== 'string')) {
+  const textKeys = ['code', 'description', 'purpose', 'plannedStartDate', 'plannedEndDate'] as const
+  if (textKeys.some((key) => value[key] !== undefined && typeof value[key] !== 'string')) return false
+  if (
+    (value.owner !== undefined && !isStoredProjectCharterPerson(value.owner)) ||
+    (value.sponsor !== undefined && !isStoredProjectCharterPerson(value.sponsor)) ||
+    !Array.isArray(value.tags) ||
+    !Array.isArray(value.repositoryUrls)
+  ) {
     return false
   }
-  if (typeof value.code === 'string' && normalizeProjectCode(value.code) !== value.code) return false
+  const normalized = readProjectCharterUpdate({
+    expectedRevision: 0,
+    charter: {
+      code: value.code,
+      description: value.description,
+      purpose: value.purpose,
+      plannedStartDate: value.plannedStartDate,
+      plannedEndDate: value.plannedEndDate,
+      tags: value.tags,
+      repositoryUrls: value.repositoryUrls,
+    },
+  })
+  if (!normalized.ok) return false
   return (
-    (value.owner === undefined || isStoredProjectCharterPerson(value.owner)) &&
-    (value.sponsor === undefined || isStoredProjectCharterPerson(value.sponsor)) &&
-    Array.isArray(value.tags) &&
-    value.tags.every((tag) => typeof tag === 'string') &&
-    Array.isArray(value.repositoryUrls) &&
-    value.repositoryUrls.every((url) => typeof url === 'string')
+    textKeys.every((key) => normalized.value[key] === value[key]) &&
+    isSameStringList(normalized.value.tags, value.tags) &&
+    isSameStringList(normalized.value.repositoryUrls, value.repositoryUrls)
   )
+}
+
+/** Checks two string lists for the same items in the same order. */
+function isSameStringList(expected: readonly string[], actual: readonly unknown[]): boolean {
+  return expected.length === actual.length && expected.every((item, index) => item === actual[index])
 }
 
 /**
@@ -424,7 +448,10 @@ function isStoredProjectCharterPerson(value: unknown): value is ProjectCharterPe
   return isRecord(value) &&
     typeof value.userId === 'string' &&
     value.userId.length > 0 &&
-    typeof value.displayName === 'string'
+    value.userId.length <= MEMBER_KEY_MAX_LENGTH &&
+    typeof value.displayName === 'string' &&
+    value.displayName.length > 0 &&
+    value.displayName.length <= PERSON_DISPLAY_NAME_MAX_LENGTH
 }
 
 /**
@@ -489,7 +516,9 @@ function readTags(value: unknown): string[] | undefined {
     if (typeof candidate !== 'string') return undefined
     const tag = candidate.trim()
     if (tag.length === 0) continue
-    if (tag.length > PROJECT_CHARTER_TAG_MAX_LENGTH) return undefined
+    if (tag.length > PROJECT_CHARTER_TAG_MAX_LENGTH || PROJECT_CHARTER_TAG_SEPARATOR_PATTERN.test(tag)) {
+      return undefined
+    }
     const key = tag.toLocaleLowerCase('en-US')
     if (seen.has(key)) continue
     seen.add(key)

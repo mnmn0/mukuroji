@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import useSWR from 'swr'
 import { getProjectCharter } from '../api/charter'
 
@@ -20,10 +21,10 @@ export type UseProjectCharterOptions = {
  * @returns SWR state and its active key.
  */
 export function useProjectCharter({ accessToken, teamId, projectId, enabled }: UseProjectCharterOptions) {
-  const key: readonly ['project-charter', string, string, string] | null =
-    accessToken && teamId && enabled
-      ? ['project-charter', accessToken, teamId, projectId]
-      : null
+  const key: readonly ['project-charter', string, string, string] | null = useMemo(
+    () => accessToken && teamId && enabled ? ['project-charter', accessToken, teamId, projectId] : null,
+    [accessToken, enabled, projectId, teamId],
+  )
   const query = useSWR(
     key,
     ([, token, currentTeamId, currentProjectId]) =>

@@ -42,3 +42,10 @@ export {
   isProjectQuickAccessItems,
 } from './domain/project-quick-access'
 export { ProjectDataError } from './project-data-error'
+export {
+  transitionProjectLifecycleUseCase,
+  updateProjectCharterUseCase,
+  type ProjectCharterScope,
+  type ProjectCharterStore,
+  type ResolvedProjectCharterPerson,
+} from './application/project-charter-use-cases'
