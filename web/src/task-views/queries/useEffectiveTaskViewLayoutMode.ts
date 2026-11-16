@@ -81,10 +81,11 @@ export function useEffectiveTaskViewLayoutMode(
     if (overrideMode) return overrideMode
     if (!input.accessToken || !input.enabled) return undefined
     if (savedViews.data === undefined && savedViews.error === undefined) return undefined
-    // A failed read falls back to the built-in layout, as the task-view controller does.
+    // Same rule as the task-view controller: cached views of this scope still decide the layout
+    // when a revalidation fails, and a first read that fails falls back to the built-in layout.
     return resolveTaskViewLayoutMode({
       builtInMode: input.builtInMode,
-      savedViews: savedViews.error === undefined ? savedViews.data?.views ?? [] : [],
+      savedViews: savedViews.data?.views ?? [],
       ...(parsedUrl.state.viewId ? { viewId: parsedUrl.state.viewId } : {}),
     })
   }

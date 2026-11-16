@@ -844,17 +844,19 @@ describe('useEffectiveTaskViewLayoutMode', () => {
     return captured
   }
 
-  test('waits for enabled saved views and falls back to the built-in layout on failure', () => {
+  test('waits for enabled saved views and resolves failures as the controller does', () => {
     expect(renderLayoutMode(undefined, { enabled: false })).toBeUndefined()
     expect(renderLayoutMode({ isLoading: true })).toBeUndefined()
     expect(renderLayoutMode({
       data: { capabilities: writableTaskViewCapabilities, views: [calendarDefault] },
     })).toBe('calendar')
-    // A failed read must not use views that are still cached for the scope.
+    // A failed revalidation keeps this scope's cached views, as the controller does.
     expect(renderLayoutMode({
       data: { capabilities: writableTaskViewCapabilities, views: [calendarDefault] },
       error: new Error('Saved views failed.'),
-    })).toBe('table')
+    })).toBe('calendar')
+    // A first read that fails falls back to the built-in layout, as the controller does.
+    expect(renderLayoutMode({ error: new Error('Saved views failed.') })).toBe('table')
   })
 })
 
