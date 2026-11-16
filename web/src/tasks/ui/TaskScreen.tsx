@@ -419,6 +419,8 @@ export type TaskScreenProps = {
   isSystemAdmin?: boolean
   /** Whether the current user may manage Project member roles. */
   canManageProjectMembers?: boolean
+  /** Checks whether the current user may correct one Work Item's recorded actual dates. */
+  canCorrectActualDates?: (task: CanonicalWorkItem) => boolean
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
   canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
@@ -598,6 +600,7 @@ export function TaskScreen({
   assigneeOptions = emptyProjectMembers,
   canAccessTriage = false,
   canManageProjectMembers = false,
+  canCorrectActualDates,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
   collaboration,
@@ -3715,7 +3718,9 @@ export function TaskScreen({
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={isRetainedDetail ? undefined : artifacts}
                   canAccessTriage={isRetainedDetail ? false : canAccessTriage}
-                  canCorrectActualDates={!isRetainedDetail && canManageProjectMembers}
+                  canCorrectActualDates={!isRetainedDetail &&
+                    renderedDetailTask !== undefined &&
+                    (canCorrectActualDates?.(renderedDetailTask) ?? false)}
                   canManageScheduleDependencyEndpoint={isRetainedDetail
                     ? undefined
                     : canManageScheduleDependencyEndpoint}

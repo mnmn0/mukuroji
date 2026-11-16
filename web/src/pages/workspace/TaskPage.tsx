@@ -57,6 +57,7 @@ import {
 } from '../../issues/api'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
+  canManagePlanningScope,
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
@@ -1175,6 +1176,14 @@ export function TaskPage() {
   }
 
   /** Checks one concrete Work Item against the Team-qualified task-view write scopes. */
+  /**
+   * Mirrors the server rule for correcting actual dates: a manager of the assigned Project or of
+   * its Team may correct them.
+   */
+  const canCorrectTaskActualDates = (task: Pick<CanonicalWorkItem, 'teamId'>) =>
+    canManageProjectMembers ||
+    (canMutateContent && canManagePlanningScope(user, { teamId: task.teamId }, planningAccess))
+
   const canMutateProjectTaskTarget = (
     target: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
   ) => canWriteTaskViewWorkItem(taskViewWriteCapabilities, target)
@@ -1859,6 +1868,7 @@ export function TaskPage() {
           }
         : undefined}
       onCommentDraftDirtyChange={reportCommentDraftDirty}
+      canCorrectActualDates={canCorrectTaskActualDates}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}

@@ -86,7 +86,7 @@ export const PlanAndActual: Story = {
         statusCategory: 'completed',
       },
       { ...taskViewStoryTasks[1], actualStartDate: '2026-06-02' },
-      taskViewStoryTasks[2],
+      { ...taskViewStoryTasks[2], actualStartDate: '2026-06-03', statusCategory: 'canceled' },
     ],
     windowStartMonth: '2026-06',
   },
@@ -94,6 +94,8 @@ export const PlanAndActual: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[0].id}`))
       .toHaveAccessibleName(t('tasks.gantt.actualBar').replace('{start}', '2026-06-01').replace('{end}', '2026-06-08'))
+    await expect(canvas.getByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[1].id}`)).toBeInTheDocument()
+    // A canceled Work Item keeps its recorded start but is not in progress, so it has no bar.
     await expect(canvas.queryByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[2].id}`)).not.toBeInTheDocument()
   },
 }

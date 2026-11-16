@@ -260,6 +260,10 @@ export function applyTaskPatchOptimistically(
           schedule: patch.schedule,
         }),
     ...(patch.priority === undefined ? {} : { priority: patch.priority }),
+    ...(patch.actualStartDate === undefined
+      ? {}
+      : { actualStartDate: patch.actualStartDate ?? undefined }),
+    ...(patch.actualEndDate === undefined ? {} : { actualEndDate: patch.actualEndDate ?? undefined }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: patch.workflowStatusId }),
     ...(nextStatus ? { statusCategory: nextStatus.category } : {}),
     ...(patch.customFieldValues === undefined ? {} : { customFieldValues: nextCustomFieldValues }),
@@ -298,6 +302,10 @@ export function createTaskInversePatch(
       ? {}
       : { schedule: task.schedule }),
     ...(patch.priority === undefined ? {} : { priority: task.priority }),
+    ...(patch.actualStartDate === undefined
+      ? {}
+      : { actualStartDate: task.actualStartDate ?? null }),
+    ...(patch.actualEndDate === undefined ? {} : { actualEndDate: task.actualEndDate ?? null }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: task.workflowStatusId }),
     ...(inverseCustomFieldValues === undefined
       ? {}

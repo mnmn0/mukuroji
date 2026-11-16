@@ -347,6 +347,27 @@ describe('task due-date model', () => {
 })
 
 describe('task plan-versus-actual model', () => {
+  test('applies an actual date correction optimistically and builds its undo patch', () => {
+    const task = createTask({
+      actualEndDate: '2026-07-26',
+      actualStartDate: '2026-07-20',
+      statusCategory: 'completed',
+    })
+    const patch = { actualStartDate: '2026-07-18', actualEndDate: null }
+
+    expect(applyTaskPatchOptimistically(task, patch)).toMatchObject({
+      actualStartDate: '2026-07-18',
+      actualEndDate: undefined,
+    })
+    expect(createTaskInversePatch(task, patch)).toEqual({
+      actualStartDate: '2026-07-20',
+      actualEndDate: '2026-07-26',
+    })
+    expect(createTaskInversePatch(createTask({}), { actualStartDate: '2026-07-18' })).toEqual({
+      actualStartDate: null,
+    })
+  })
+
   const lateTask = createTask({
     actualEndDate: '2026-07-26',
     actualStartDate: '2026-07-20',

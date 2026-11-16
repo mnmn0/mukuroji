@@ -862,6 +862,10 @@ const taskViewBuiltInLayoutFields = new Set([
   'labels',
   'relations',
   'watchers',
+  'actualStartDate',
+  'actualEndDate',
+  'startDelayDays',
+  'completionDelayDays',
 ])
 
 const searchEntityTypes = new Set<SearchEntityType>([

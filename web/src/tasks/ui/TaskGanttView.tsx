@@ -1431,10 +1431,14 @@ function createGanttBar(
  * Calculates the actual bar from the recorded start to the actual end, or to today while the
  * work is still in progress.
  *
+ * Only a `started` Work Item is in progress: a canceled or reopened-to-unstarted Work Item keeps
+ * its recorded start without an end, so it gets no open-ended bar.
+ *
  * @param task - Work Item with recorded actual dates.
  * @param schedule - Schedule whose calendar policy defines today.
  * @param columns - Ordered bounded timeline columns.
- * @returns Bar geometry, or undefined before work starts or outside the visible period.
+ * @returns Bar geometry, or undefined before work starts, without ongoing work, or outside the
+ *   visible period.
  */
 function createGanttActualBar(
   task: CanonicalWorkItem,
@@ -1442,6 +1446,7 @@ function createGanttActualBar(
   columns: readonly GanttTimelineColumn[],
 ): GanttBar | undefined {
   if (!task.actualStartDate) return undefined
+  if (!task.actualEndDate && task.statusCategory !== 'started') return undefined
   const endDate = task.actualEndDate ??
     taskScheduleInstantToLocalDate(new Date(), schedule.calendarPolicy)
   if (endDate < task.actualStartDate) return undefined
