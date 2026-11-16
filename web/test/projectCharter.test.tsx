@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import type { ProjectCharterState } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
-import { createProjectCharterUpdateInput } from '../src/projects/model/projectCharterView'
+import {
+  createProjectCharterPersonCandidates,
+  createProjectCharterUpdateInput,
+} from '../src/projects/model/projectCharterView'
 import {
   createProjectDirectoryRows,
   filterProjectDirectoryRows,
@@ -212,5 +215,16 @@ describe('ProjectCharterPanel', () => {
         repositoryUrls: ['https://github.com/example/a', 'https://github.com/example/b'],
       },
     })
+  })
+
+  test('offers active Workspace members, not only Project members, as owner and sponsor', () => {
+    expect(createProjectCharterPersonCandidates([
+      { memberKey: 'suzuki@example.com', email: 'suzuki@example.com', name: '鈴木 次郎', status: 'active' },
+      { memberKey: 'gone@example.com', email: 'gone@example.com', name: '退職者', status: 'suspended' },
+      { memberKey: 'ext@example.com', email: 'ext@example.com', status: 'active' },
+    ])).toEqual([
+      { id: 'ext@example.com', email: 'ext@example.com' },
+      { id: 'suzuki@example.com', email: 'suzuki@example.com', name: '鈴木 次郎' },
+    ])
   })
 })

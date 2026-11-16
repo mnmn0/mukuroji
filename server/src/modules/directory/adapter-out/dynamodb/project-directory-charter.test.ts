@@ -263,18 +263,12 @@ describe('Project charter persistence', () => {
     expect(writes).toHaveLength(0)
   })
 
-  test('moves a Project through an allowed transition and rejects the rest', async () => {
+  test('stores a decided lifecycle state behind the charter revision', async () => {
     const { documentClient, writes } = createFakeDocumentClient([
       teamRow(),
       projectRow({ lifecycleState: 'proposed', charterRevision: 1 }),
     ])
     const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
-
-    await expect(client.transitionProjectLifecycle(workspaceId, 'core-team', 'refero', 1, 'active'))
-      .rejects.toMatchObject({ code: 'ProjectLifecycleTransitionNotAllowed', status: 409 })
-    await expect(client.transitionProjectLifecycle(workspaceId, 'core-team', 'refero', 1, 'archived'))
-      .rejects.toMatchObject({ code: 'ProjectLifecycleTransitionNotAllowed' })
-    expect(writes).toHaveLength(0)
 
     await expect(client.transitionProjectLifecycle(workspaceId, 'core-team', 'refero', 1, 'approved'))
       .resolves.toMatchObject({ lifecycleState: 'approved', revision: 2 })
@@ -310,5 +304,38 @@ describe('Project charter persistence', () => {
       { name: 'Closed Project', lifecycleState: 'closed' },
       { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
     )).rejects.toMatchObject({ code: 'InvalidProjectCharter', status: 400 })
+  })
+
+  test('builds a commit-time fence that rejects new Work Items in a closed Project', async () => {
+    const { documentClient } = createFakeDocumentClient([teamRow(), projectRow({ lifecycleState: 'on-hold' })])
+    const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+    const fence = await client.createNewWorkItemProjectConditionCheck(workspaceId, 'core-team', 'refero')
+
+    expect(fence).toEqual({
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: { directoryId: workspaceId, entryKey: '000010#000010#PROJECT#refero' },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+          'attribute_not_exists(#archivedAt) AND ' +
+          '(attribute_not_exists(#lifecycleState) OR NOT (#lifecycleState IN (:rejectingState0)))',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#lifecycleState': 'lifecycleState',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':projectId': 'refero',
+          ':teamId': 'core-team',
+          ':rejectingState0': 'closed',
+        },
+      },
+    })
+    await expect(client.createNewWorkItemProjectConditionCheck(workspaceId, 'core-team', 'missing'))
+      .rejects.toMatchObject({ code: 'ProjectNotFound', status: 404 })
   })
 })

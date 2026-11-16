@@ -7,6 +7,7 @@ import {
 import {
   createProjectCharter,
   createProjectCharterPerson,
+  decideProjectLifecycleTransition,
   isStoredProjectCharter,
   listChangedProjectCharterFields,
   normalizeProjectCode,
@@ -117,6 +118,25 @@ describe('Project lifecycle', () => {
     expect(projectLifecycleAcceptsNewWorkItems('on-hold')).toBe(true)
     expect(projectLifecycleAcceptsNewWorkItems('closed')).toBe(false)
     expect(projectLifecycleAcceptsNewWorkItems('archived')).toBe(false)
+  })
+
+  test('decides a transition against the current state and revision', () => {
+    expect(decideProjectLifecycleTransition(
+      { lifecycleState: 'proposed', revision: 2 },
+      { expectedRevision: 2, state: 'approved' },
+    )).toEqual({ ok: true, from: 'proposed', to: 'approved' })
+    expect(decideProjectLifecycleTransition(
+      { lifecycleState: 'proposed', revision: 3 },
+      { expectedRevision: 2, state: 'approved' },
+    )).toMatchObject({ ok: false, code: 'ProjectCharterRevisionConflict' })
+    expect(decideProjectLifecycleTransition(
+      { lifecycleState: 'proposed', revision: 2 },
+      { expectedRevision: 2, state: 'active' },
+    )).toMatchObject({ ok: false, code: 'ProjectLifecycleTransitionNotAllowed' })
+    expect(decideProjectLifecycleTransition(
+      { lifecycleState: 'closed', revision: 2 },
+      { expectedRevision: 2, state: 'archived' },
+    )).toMatchObject({ ok: false, code: 'ProjectLifecycleTransitionNotAllowed' })
   })
 
   test('validates a transition body', () => {

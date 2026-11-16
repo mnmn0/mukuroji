@@ -4099,3 +4099,75 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
   })
   expect(mixedReasons.sentInputs).toHaveLength(2)
 })
+
+test('DynamoDB Work Item creation fences the assigned Project against a concurrent closure', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactions.push(command.input)
+        const transactItems = command.input.TransactItems as Array<Record<string, unknown>>
+        const fenceIndex = transactItems.findIndex((item) =>
+          (item.ConditionCheck as { TableName?: string } | undefined)?.TableName === 'DirectoryTable'
+        )
+        const error = new Error('The Project was closed.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === fenceIndex ? 'ConditionalCheckFailed' : 'None',
+          })),
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const projectRowKey = { directoryId: 'workspace-1', entryKey: '000010#000010#PROJECT#refero' }
+  const fence = {
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: projectRowKey,
+      ConditionExpression: 'attribute_not_exists(#archivedAt) AND NOT (#lifecycleState IN (:closed))',
+    },
+  }
+  const activeReference = {
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: projectRowKey,
+      ConditionExpression: 'attribute_not_exists(#archivedAt)',
+    },
+  }
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Created while the Project closes',
+      assigneeUserId: 'demo@example.com',
+      assignedProjectId: 'refero',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      schedule: createDueDateSchedule('2026-08-14'),
+      priority: 'high',
+      authorizationConditionChecks: [activeReference],
+      newWorkItemProjectConditionCheck: fence,
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ProjectClosedForNewWorkItems', status: 409 })
+
+  const transactItems = transactions[0]?.TransactItems as Array<Record<string, unknown>>
+  const projectRowChecks = transactItems.filter((item) =>
+    (item.ConditionCheck as { TableName?: string } | undefined)?.TableName === 'DirectoryTable'
+  )
+  expect(projectRowChecks).toEqual([fence])
+})

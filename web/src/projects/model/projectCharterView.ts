@@ -100,3 +100,44 @@ export function createProjectCharterUpdateInput(
   return { expectedRevision, charter }
 }
 
+
+/** A Workspace member offered as a charter owner or sponsor. */
+export type ProjectCharterPersonCandidate = {
+  /** Member key sent as `ownerUserId` or `sponsorUserId`. */
+  id: string
+  /** Email address shown next to the name. */
+  email: string
+  /** Optional display name. */
+  name?: string
+}
+
+/**
+ * Lists active Workspace members as charter owner and sponsor candidates.
+ *
+ * The owner or sponsor need not belong to the Project, so candidates come from the Workspace
+ * rather than the Project's access list. The server accepts any active Workspace member.
+ *
+ * @param members - Workspace members visible to the viewer.
+ * @returns Active members ordered by display name.
+ */
+export function createProjectCharterPersonCandidates(
+  members: readonly {
+    /** Stable member key. */
+    memberKey: string
+    /** Email address. */
+    email: string
+    /** Optional display name. */
+    name?: string
+    /** Workspace membership status. */
+    status: string
+  }[],
+): ProjectCharterPersonCandidate[] {
+  return members
+    .filter((member) => member.status === 'active')
+    .map((member) => ({
+      id: member.memberKey,
+      email: member.email,
+      ...(member.name ? { name: member.name } : {}),
+    }))
+    .sort((left, right) => (left.name ?? left.email).localeCompare(right.name ?? right.email))
+}

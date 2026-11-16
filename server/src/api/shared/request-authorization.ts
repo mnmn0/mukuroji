@@ -532,6 +532,21 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.manage',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
+    permission: 'projects.manage',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/lifecycle',
+    permission: 'projects.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',
     permission: 'projects.write',

@@ -8,6 +8,7 @@ import {
   PROJECT_CHARTER_TAGS_MAX_ITEMS,
   PROJECT_CHARTER_TEXT_MAX_LENGTH,
   PROJECT_INITIAL_LIFECYCLE_STATES,
+  canTransitionProjectLifecycle,
   isProjectLifecycleState,
   type ProjectCharter,
   type ProjectCharterPerson,
@@ -258,6 +259,64 @@ export function readProjectLifecycleTransition(
     return invalidTransition('state must be a Project lifecycle state.')
   }
   return { ok: true, value: { expectedRevision, state: value.state } }
+}
+
+/** Decision on one requested lifecycle transition. */
+export type ProjectLifecycleTransitionDecision =
+  | {
+      /** Discriminator of an allowed transition. */
+      ok: true
+      /** Lifecycle state the Project leaves. */
+      from: ProjectLifecycleState
+      /** Stored lifecycle state the Project enters. */
+      to: StoredProjectLifecycleState
+    }
+  | {
+      /** Discriminator of a rejected transition. */
+      ok: false
+      /** Stable application error code. */
+      code: 'ProjectCharterRevisionConflict' | 'ProjectLifecycleTransitionNotAllowed'
+      /** Safe diagnostic message. */
+      message: string
+    }
+
+/**
+ * Decides whether a Project at its current state and revision may move to the requested state.
+ *
+ * `archived` is never a target here: it is reached only through the archive operation. The
+ * persistence layer still guards the write with the same revision, so a concurrent change that
+ * commits after this decision fails as a revision conflict.
+ *
+ * @param current - Strongly read lifecycle state and charter revision.
+ * @param transition - Requested transition with the revision the client read.
+ * @returns The allowed transition or the rejection.
+ */
+export function decideProjectLifecycleTransition(
+  current: {
+    /** Current lifecycle state. */
+    lifecycleState: ProjectLifecycleState
+    /** Current charter revision. */
+    revision: number
+  },
+  transition: ProjectLifecycleTransition,
+): ProjectLifecycleTransitionDecision {
+  if (current.revision !== transition.expectedRevision) {
+    return {
+      ok: false,
+      code: 'ProjectCharterRevisionConflict',
+      message: 'The Project charter changed. Reload and try again.',
+    }
+  }
+  const from = current.lifecycleState
+  const to = transition.state
+  if (to === 'archived' || !canTransitionProjectLifecycle(from, to)) {
+    return {
+      ok: false,
+      code: 'ProjectLifecycleTransitionNotAllowed',
+      message: `A Project cannot move from "${from}" to "${to}".`,
+    }
+  }
+  return { ok: true, from, to }
 }
 
 /**

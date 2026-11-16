@@ -3,6 +3,7 @@ import type { ProjectCharterPerson, ProjectCharterState } from '@mukuroji/contra
 import { CognitoServiceError } from '../../modules/authentication'
 import {
   createProjectCharter,
+  decideProjectLifecycleTransition,
   createProjectCharterPerson,
   ProjectDataError,
   readProjectCharterUpdate,
@@ -17,6 +18,7 @@ import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
   createApiMutationContext,
+  hasEnterprisePermissionAtWorkspace,
   requireProjectPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessRead,
@@ -104,22 +106,21 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const transition = readProjectLifecycleTransition(await readJson<unknown>(c.req))
       if (!transition.ok) throw new ProjectDataError(400, transition.code, transition.message)
+      await requireProjectCharterManagement(principal, projectId)
       const current = await workspaceDependencies.projectDirectory.getProjectCharter(
         principal.directoryId,
         teamId,
         projectId,
       )
-      if (current.lifecycleState === 'proposed') {
-        requireWorkspaceAdministration(principal)
-      } else {
-        await requireProjectCharterManagement(principal, projectId)
-      }
+      if (current.lifecycleState === 'proposed') requireProjectProposalDecision(principal)
+      const decision = decideProjectLifecycleTransition(current, transition.value)
+      if (!decision.ok) throw new ProjectDataError(409, decision.code, decision.message)
       return c.json(await workspaceDependencies.projectDirectory.transitionProjectLifecycle(
         principal.directoryId,
         teamId,
         projectId,
         transition.value.expectedRevision,
-        transition.value.state,
+        decision.to,
         createApiMutationContext(c, principal, { teamId, projectId, ...transition.value }),
       ) satisfies ProjectCharterState)
     } catch (error) {
@@ -157,6 +158,29 @@ async function requireProjectCharterManagement(principal: WorkspacePrincipal, pr
     if (!(error instanceof WorkspaceAccessError)) throw error
   }
   await requireProjectPermission(principal, projectId, 'manager')
+}
+
+/**
+ * Requires Workspace-level administration to approve or reject a proposed Project.
+ *
+ * A proposal decision is the approval step, so it must come from the Workspace rather than from
+ * a grant scoped to this Project or its Team. Enterprise principals need `projects.manage` or
+ * `workspace.manage` evaluated at the Workspace resource.
+ *
+ * @param principal - Authenticated Workspace principal.
+ */
+function requireProjectProposalDecision(principal: WorkspacePrincipal) {
+  const allowed = principal.enterprisePermissions === undefined
+    ? principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin'
+    : hasEnterprisePermissionAtWorkspace(principal, 'projects.manage') ||
+      hasEnterprisePermissionAtWorkspace(principal, 'workspace.manage')
+  if (!allowed) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Only a Workspace administrator can approve or reject a proposed Project.',
+    )
+  }
 }
 
 /**

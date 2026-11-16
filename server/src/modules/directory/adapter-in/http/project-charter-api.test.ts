@@ -126,6 +126,23 @@ describe('Project charter API', () => {
     expect(calls.projectLifecycleTransitions).toEqual([])
   })
 
+  test('lets a Workspace administrator approve a proposed Project', async () => {
+    const calls = configureFakeProjectClients(true, {
+      projectLifecycleStates: { 'core-team/refero': 'proposed' },
+    })
+
+    const approved = await send(lifecyclePath, 'POST', { expectedRevision: 0, state: 'approved' })
+    const stale = await send(lifecyclePath, 'POST', { expectedRevision: 0, state: 'active' })
+
+    expect(approved.status).toBe(200)
+    expect(await approved.json()).toMatchObject({ lifecycleState: 'approved', revision: 1 })
+    expect(stale.status).toBe(409)
+    expect(await stale.json()).toMatchObject({ code: 'ProjectCharterRevisionConflict' })
+    expect(calls.projectLifecycleTransitions).toEqual([
+      expect.objectContaining({ state: 'approved', expectedRevision: 0 }),
+    ])
+  })
+
   test('moves the lifecycle and rejects disallowed transitions', async () => {
     const calls = configureFakeProjectClients(true)
 

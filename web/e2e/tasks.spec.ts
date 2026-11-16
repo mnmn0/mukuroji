@@ -8023,7 +8023,7 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('textarea[name="body"]')).toHaveValue('')
   })
 
-  test('Issue #340: 権限タブで憲章を保存し、確認後にプロジェクトを終結できる', async ({ page }) => {
+  test('Issue #340: 権限タブで憲章を保存し、遷移後も入力を保持して、確認後にプロジェクトを終結できる', async ({ page }) => {
     let charterState = {
       teamId: 'core-team',
       projectId: 'refero',
@@ -8064,20 +8064,29 @@ test.describe('authenticated task page', () => {
 
     await page.getByTestId('project-charter-code').fill('ops-1')
     await page.getByTestId('project-charter-purpose').fill('問い合わせ対応を一元化する')
+    await expect(page.getByTestId('project-charter-owner').locator('option', { hasText: '佐藤 花子' }))
+      .toHaveCount(1)
+    await page.getByTestId('project-lifecycle-on-hold').click()
+    await expect(page.getByTestId('project-charter-lifecycle')).toHaveText('保留')
+    await expect(page.getByTestId('project-charter-code')).toHaveValue('ops-1')
+    await expect(page.getByTestId('project-charter-stale-draft')).toHaveCount(0)
     await page.getByTestId('project-charter-save').click()
     await expect(page.getByTestId('project-charter-message')).toContainText('憲章を保存しました')
     expect(charterUpdates).toEqual([{
-      expectedRevision: 0,
+      expectedRevision: 1,
       charter: { code: 'ops-1', purpose: '問い合わせ対応を一元化する', tags: [], repositoryUrls: [] },
     }])
     await expect(page.getByTestId('project-charter-code')).toHaveValue('OPS-1')
 
     await page.getByTestId('project-lifecycle-closed').click()
     await expect(page.getByTestId('project-lifecycle-close-confirmation')).toBeVisible()
-    expect(lifecycleTransitions).toEqual([])
+    expect(lifecycleTransitions).toEqual([{ expectedRevision: 0, state: 'on-hold' }])
     await page.getByTestId('project-lifecycle-close-confirm').click()
     await expect(panel).toContainText('このプロジェクトは終結しています。新しい Issue は作成できません。')
-    expect(lifecycleTransitions).toEqual([{ expectedRevision: 1, state: 'closed' }])
+    expect(lifecycleTransitions).toEqual([
+      { expectedRevision: 0, state: 'on-hold' },
+      { expectedRevision: 2, state: 'closed' },
+    ])
     await expect(page.getByTestId('project-lifecycle-active')).toBeVisible()
   })
 

@@ -33,6 +33,7 @@ export {
   isStoredProjectCharter,
   readProjectCharterUpdate,
   readProjectLifecycleTransition,
+  decideProjectLifecycleTransition,
   type ProjectCharterUpdate,
 } from './domain/project-charter'
 export {

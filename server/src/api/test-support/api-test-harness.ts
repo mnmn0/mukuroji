@@ -23,7 +23,6 @@ import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   readSearchWorkItemTypeKey,
-  canTransitionProjectLifecycle,
   type ProjectCharter,
   type ProjectCharterState,
   type ProjectLifecycleState,
@@ -2441,9 +2440,6 @@ function configureFakeProjectClients(
       },
       async transitionProjectLifecycle(directoryId, teamId, projectId, expectedRevision, state, auditContext) {
         const current = requireMutableProjectCharterState(teamId, projectId, expectedRevision)
-        if (state === 'archived' || !canTransitionProjectLifecycle(current.lifecycleState, state)) {
-          throw new ProjectDataError(409, 'ProjectLifecycleTransitionNotAllowed', 'Transition is not allowed.')
-        }
         calls.projectLifecycleTransitions.push({
           directoryId,
           teamId,

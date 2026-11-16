@@ -109,5 +109,7 @@ export const projectsMessages = {
   'projects.charter.error.invalid': '入力内容を確認してください: {reason}',
   'projects.charter.error.person': '責任者とスポンサーには有効な Workspace メンバーを指定してください。',
   'projects.charter.error.transition': 'ライフサイクルを変更できませんでした。',
+  'projects.charter.staleDraft': '他のユーザーが憲章を更新しました。入力中の内容は残していますが、このまま保存すると競合になります。',
+  'projects.charter.discardDraft': '入力を破棄して最新を表示',
   'projects.charter.reload': '再読み込み',
 } as const

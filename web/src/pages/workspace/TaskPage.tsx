@@ -49,6 +49,7 @@ import {
   useProjectMembers,
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
+import { createProjectCharterPersonCandidates } from '../../projects/model/projectCharterView'
 import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
 import {
   TeamIssuesApiError,
@@ -426,6 +427,10 @@ export function TaskPage() {
   )
   const canEditProjectCharter = canMutateContent &&
     (canManageProjectMembers || isWorkspaceAdministrator)
+  const projectCharterCandidates = useMemo(
+    () => createProjectCharterPersonCandidates(workspaceAccess?.members ?? emptyWorkspaceMembers),
+    [workspaceAccess?.members],
+  )
   const {
     data: projectUsersFirstPage,
     error: projectUsersError,
@@ -1865,7 +1870,7 @@ export function TaskPage() {
           canDecideProposal={canMutateContent && isWorkspaceAdministrator}
           canEdit={canEditProjectCharter}
           enabled={Boolean(user && !currentUserError)}
-          members={activeProjectMembers}
+          members={projectCharterCandidates}
           projectId={projectId}
           t={t}
           teamId={interactionTeamId}

@@ -1619,9 +1619,11 @@ async function executeAutomationWorkItemCreate(
     dependencies,
   )
   const normalizedBody = normalizeTeamIssueInput(body, team)
-  requireAssignedProjectAcceptsNewWorkItems(
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    context.execution.workspaceId,
     team,
     readAssignedProjectId(normalizedBody.assignedProjectId),
+    dependencies.projectDirectory,
   )
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
@@ -1641,7 +1643,7 @@ async function executeAutomationWorkItemCreate(
   const response = await dependencies.teamIssues.createTeamIssue(
     context.execution.workspaceId,
     teamId,
-    configuredBody,
+    { ...configuredBody, ...newWorkItemProjectFence },
     `automation:${context.execution.ruleId}`,
     createAutomationMutationContext(context, values),
   )

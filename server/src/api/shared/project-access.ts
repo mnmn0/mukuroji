@@ -283,6 +283,33 @@ export function createDocumentEnterpriseScopeBoundary(
   }
 }
 
+/**
+ * Checks one Enterprise permission at the Workspace resource, whatever resource the route used.
+ *
+ * Route authorization of a Team or Project path evaluates grants on that narrower resource, so a
+ * Project-scoped role can satisfy it. Decisions that belong to the Workspace re-evaluate the
+ * immutable authorization snapshot against the Workspace itself.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param permission - Enterprise permission required at the Workspace.
+ * @returns Whether the principal holds the permission Workspace-wide.
+ */
+export function hasEnterprisePermissionAtWorkspace(
+  principal: WorkspacePrincipal,
+  permission: EnterprisePermissionId,
+): boolean {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) return hasEnterpriseWorkspacePermission(principal, permission)
+  return evaluateEnterpriseAccess({
+    permission,
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+  }).allowed
+}
+
 /** Checks one Customer capability against the same Enterprise resource as the route. */
 export function hasEnterpriseCustomerPermission(
   principal: WorkspacePrincipal,

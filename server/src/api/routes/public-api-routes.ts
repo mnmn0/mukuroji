@@ -707,7 +707,8 @@ async function createCanonicalPublicWorkItem(
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(input, permission.team)
-  requireAssignedProjectAcceptsNewWorkItems(
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    principal.directoryId,
     permission.team,
     readAssignedProjectId(body.assignedProjectId),
   )
@@ -742,6 +743,7 @@ async function createCanonicalPublicWorkItem(
           }
         : {}),
       authorizationSnapshot,
+      ...newWorkItemProjectFence,
     },
     principal.userKey,
     createPublicMutationAuditContext(principal, context, {

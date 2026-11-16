@@ -3700,7 +3700,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
-      requireAssignedProjectAcceptsNewWorkItems(
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
         teamContext.team,
         readAssignedProjectId(normalized.assignedProjectId),
       )
@@ -3731,15 +3732,18 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversion.target.projectId,
       )
-      const guardedConfigured = authorizationConditionChecks.length === 0
-        ? configured
-        : {
-            ...configured,
-            authorizationConditionChecks: mergeTriageConditionChecks(
-              configured.authorizationConditionChecks ?? [],
-              authorizationConditionChecks,
-            ),
-          };
+      const guardedConfigured = {
+        ...(authorizationConditionChecks.length === 0
+          ? configured
+          : {
+              ...configured,
+              authorizationConditionChecks: mergeTriageConditionChecks(
+                configured.authorizationConditionChecks ?? [],
+                authorizationConditionChecks,
+              ),
+            }),
+        ...newWorkItemProjectFence,
+      };
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
         readTeamIssueAssigneeUserId(guardedConfigured),
@@ -4325,7 +4329,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         requestBody,
         context.team,
       )
-      requireAssignedProjectAcceptsNewWorkItems(
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
         context.team,
         readAssignedProjectId(body.assignedProjectId),
       )
@@ -4361,6 +4366,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             assigneeUserId,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            ...newWorkItemProjectFence,
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),

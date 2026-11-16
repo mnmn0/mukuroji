@@ -14,7 +14,12 @@ import {
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import type { IdempotencyMutationToken } from '../../modules/developer-platform/application/ports'
-import { developerPlatformDependencies, workItemDependencies } from './app-dependencies'
+import {
+  developerPlatformDependencies,
+  workItemDependencies,
+  workspaceDependencies,
+  type AutomationActionExecutorDependencies,
+} from './app-dependencies'
 import { WORK_ITEMS_PARTITION_SCAN_LIMIT } from './constants'
 import {
   canAccessAssignedProject,
@@ -242,16 +247,24 @@ export function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBod
  * Rejects creating a Work Item in a Project whose lifecycle no longer accepts new work.
  *
  * Existing Work Items of a `closed` Project stay readable and editable; only creation is
- * rejected. Archived Projects are already absent from the active Team directory.
+ * rejected. The directory snapshot gives an early answer, and the returned condition check
+ * repeats the decision when the creating transaction commits, so a closure that lands after the
+ * directory read cannot be bypassed.
  *
+ * @param directoryId - Owning Workspace directory identifier.
  * @param team - Active Team row whose Projects carry their lifecycle state.
  * @param assignedProjectId - Normalized Project the new Work Item is assigned to.
+ * @param projectDirectory - Directory port that builds the commit-time fence.
+ * @returns Create input fields carrying the commit-time Project fence.
  */
-export function requireAssignedProjectAcceptsNewWorkItems(
+export async function requireAssignedProjectAcceptsNewWorkItems(
+  directoryId: string,
   team: ProjectDirectoryTeamResponse,
   assignedProjectId: string | null | undefined,
-): void {
-  if (!assignedProjectId) return
+  projectDirectory: AutomationActionExecutorDependencies['projectDirectory'] =
+    workspaceDependencies.projectDirectory,
+): Promise<Pick<CreateTeamIssueRequestBody, 'newWorkItemProjectConditionCheck'>> {
+  if (!assignedProjectId) return {}
   const project = team.projects.find((candidate) => candidate.id === assignedProjectId)
   if (project && !projectLifecycleAcceptsNewWorkItems(project.lifecycleState)) {
     throw new ProjectDataError(
@@ -259,6 +272,16 @@ export function requireAssignedProjectAcceptsNewWorkItems(
       'ProjectClosedForNewWorkItems',
       `Project "${assignedProjectId}" is ${project.lifecycleState} and does not accept new Work Items.`,
     )
+  }
+  const createConditionCheck = projectDirectory.createNewWorkItemProjectConditionCheck
+  if (!createConditionCheck) return {}
+  return {
+    newWorkItemProjectConditionCheck: await createConditionCheck.call(
+      projectDirectory,
+      directoryId,
+      team.id,
+      assignedProjectId,
+    ),
   }
 }
 

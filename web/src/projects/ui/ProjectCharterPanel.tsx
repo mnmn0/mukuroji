@@ -7,13 +7,13 @@ import {
   type UpdateProjectCharterInput,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { ProjectMember } from '../api'
 import {
   createProjectCharterFormValues,
   createProjectCharterUpdateInput,
   projectLifecycleClassNames,
   projectLifecycleMessageKey,
   type ProjectCharterFormValues,
+  type ProjectCharterPersonCandidate,
 } from '../model/projectCharterView'
 
 /** Props for the Project charter and lifecycle panel. */
@@ -24,18 +24,24 @@ export type ProjectCharterPanelProps = {
   isLoading?: boolean
   /** Whether loading the charter failed. */
   hasLoadError?: boolean
-  /** Project members offered as owner and sponsor. */
-  members: readonly ProjectMember[]
+  /** Active Workspace members offered as owner and sponsor. */
+  members: readonly ProjectCharterPersonCandidate[]
   /** Whether the viewer may edit the charter and move the lifecycle. */
   canEdit: boolean
   /** Whether the viewer may approve or reject a proposed Project. */
   canDecideProposal: boolean
   /** Translator for every label. */
   t: (key: MessageKey) => string
-  /** Saves a complete charter replacement. Rejects with an error carrying an optional `code`. */
-  onSave: (input: UpdateProjectCharterInput) => Promise<void>
-  /** Moves the Project to another lifecycle state. */
-  onTransition: (expectedRevision: number, state: ProjectLifecycleState) => Promise<void>
+  /**
+   * Saves a complete charter replacement and resolves with the committed state.
+   * Rejects with an error carrying an optional `code`.
+   */
+  onSave: (input: UpdateProjectCharterInput) => Promise<ProjectCharterState | undefined>
+  /** Moves the Project to another lifecycle state and resolves with the committed state. */
+  onTransition: (
+    expectedRevision: number,
+    state: ProjectLifecycleState,
+  ) => Promise<ProjectCharterState | undefined>
   /** Reloads the charter after a failure or conflict. */
   onReload: () => void
 }
@@ -114,7 +120,10 @@ export function ProjectCharterPanel({
     )
   }
 
-  const values = draft && draft.revision === state.revision ? draft.values : createProjectCharterFormValues(state.charter)
+  // An unsaved draft survives later revisions. It keeps the revision it was based on, so saving
+  // it after someone else's change is rejected as a conflict instead of overwriting that change.
+  const values = draft ? draft.values : createProjectCharterFormValues(state.charter)
+  const isDraftStale = draft !== undefined && draft.revision !== state.revision
   const isEditable = canEdit && state.lifecycleState !== 'archived'
   const transitions = PROJECT_LIFECYCLE_TRANSITIONS[state.lifecycleState]
   const canTransition = isEditable && (state.lifecycleState !== 'proposed' || canDecideProposal)
@@ -130,7 +139,7 @@ export function ProjectCharterPanel({
   /** Updates one form field while keeping the draft bound to the current revision. */
   const updateValue = (key: keyof ProjectCharterFormValues, value: string) => {
     setMessage(undefined)
-    setDraft({ revision: state.revision, values: { ...values, [key]: value } })
+    setDraft({ revision: draft?.revision ?? state.revision, values: { ...values, [key]: value } })
   }
 
   /** Saves the form as a complete charter replacement. */
@@ -140,7 +149,7 @@ export function ProjectCharterPanel({
     setIsSaving(true)
     setMessage(undefined)
     try {
-      await onSave(createProjectCharterUpdateInput(values, state.revision))
+      await onSave(createProjectCharterUpdateInput(values, draft?.revision ?? state.revision))
       setDraft(undefined)
       setMessage({ kind: 'success', text: t('projects.charter.saved') })
     } catch (error) {
@@ -148,6 +157,13 @@ export function ProjectCharterPanel({
     } finally {
       setIsSaving(false)
     }
+  }
+
+  /** Drops unsaved edits and reloads the latest charter. */
+  const discardDraft = () => {
+    setDraft(undefined)
+    setMessage(undefined)
+    onReload()
   }
 
   /** Moves the lifecycle, asking for confirmation before closing. */
@@ -159,7 +175,12 @@ export function ProjectCharterPanel({
     setIsTransitioning(true)
     setMessage(undefined)
     try {
-      await onTransition(state.revision, target)
+      const next = await onTransition(state.revision, target)
+      // A lifecycle change does not touch charter fields, so a draft based on the state this
+      // transition started from is still current at the committed revision.
+      if (next && draft && draft.revision === state.revision) {
+        setDraft({ revision: next.revision, values: draft.values })
+      }
       setIsConfirmingClose(false)
     } catch (error) {
       setMessage({ kind: 'error', text: describeCharterError(error, t, 'projects.charter.error.transition') })
@@ -257,6 +278,19 @@ export function ProjectCharterPanel({
 
       {!canEdit ? (
         <p className="text-xs font-medium text-fg-505967">{t('projects.charter.readOnly')}</p>
+      ) : null}
+
+      {isEditable && isDraftStale ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2"
+          data-testid="project-charter-stale-draft"
+          role="status"
+        >
+          <p className="text-sm font-semibold text-fg-amber-800">{t('projects.charter.staleDraft')}</p>
+          <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={discardDraft}>
+            {t('projects.charter.discardDraft')}
+          </button>
+        </div>
       ) : null}
 
       <form className="grid grid-cols-2 gap-3 max-[780px]:grid-cols-1" onSubmit={(event) => void handleSubmit(event)}>
@@ -382,7 +416,7 @@ export function ProjectCharterPanel({
           {isEditable ? (
             <div className="flex flex-wrap gap-2">
               {message?.kind === 'error' ? (
-                <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={onReload}>
+                <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={discardDraft}>
                   {t('projects.charter.reload')}
                 </button>
               ) : null}

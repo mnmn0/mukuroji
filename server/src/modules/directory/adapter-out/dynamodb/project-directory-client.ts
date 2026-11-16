@@ -55,8 +55,8 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  canTransitionProjectLifecycle,
   isProjectLifecycleState,
+  PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectCharter,
   type ProjectCharterState,
@@ -629,6 +629,18 @@ export type ProjectDirectoryClient = {
     teamId: string,
     projectId?: string,
   ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
+  /** Builds a commit-time condition proving a Project still accepts new Work Items.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project the new Work Item is assigned to.
+   * @returns A DynamoDB condition check for the creating transaction.
+   */
+  createNewWorkItemProjectConditionCheck?(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number]>
   /** Builds a condition proving a Project member retains the requested role at commit time.
    *
    * @param directoryId - Owning Workspace directory identifier.
@@ -802,13 +814,16 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
   ): Promise<ProjectCharterState>
   /**
-   * Moves an unarchived Project to another lifecycle state allowed by the transition rules.
+   * Stores a lifecycle state the application already decided is allowed.
+   *
+   * The write is guarded by the charter revision the decision was based on, so a concurrent
+   * change fails as `ProjectCharterRevisionConflict` instead of being overwritten.
    *
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @param expectedRevision - Charter revision read by the caller.
-   * @param state - Requested lifecycle state.
+   * @param expectedRevision - Charter revision the decision was based on.
+   * @param state - Lifecycle state to store.
    * @param auditContext - Audit context of the mutation.
    * @returns The committed charter state.
    */
@@ -817,7 +832,7 @@ export type ProjectDirectoryClient = {
     teamId: string,
     projectId: string,
     expectedRevision: number,
-    state: ProjectLifecycleState,
+    state: StoredProjectLifecycleState,
     auditContext?: MutationAuditContext,
   ): Promise<ProjectCharterState>
 }
@@ -1003,6 +1018,65 @@ export class DynamoDbProjectDirectoryClient {
       },
     })
     return checks
+  }
+
+  /** Builds a commit-time condition proving a Project still accepts new Work Items.
+   *
+   * The Project row is strongly read for its exact key. The condition fails when the Project is
+   * archived or its stored lifecycle state rejects new Work Items, so a closure that commits
+   * after the caller's directory read cannot be bypassed.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param teamId Team that owns the Project.
+   * @param projectId Project the new Work Item is assigned to.
+   * @returns A DynamoDB condition check composable with the creating transaction.
+   */
+  async createNewWorkItemProjectConditionCheck(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number]> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId
+    )
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+    const rejectingStates = PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS
+      .filter((state): state is StoredProjectLifecycleState => state !== 'archived')
+    const rejectingValues = Object.fromEntries(
+      rejectingStates.map((state, index) => [`:rejectingState${index}`, state]),
+    )
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: project.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+          'attribute_not_exists(#archivedAt) AND ' +
+          `(attribute_not_exists(#lifecycleState) OR NOT (#lifecycleState IN (${Object.keys(rejectingValues).join(', ')})))`,
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#lifecycleState': 'lifecycleState',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':projectId': projectId,
+          ':teamId': teamId,
+          ...rejectingValues,
+        },
+      },
+    }
   }
 
   /** Builds a commit-time condition for one active direct Project membership. */
@@ -2393,13 +2467,13 @@ export class DynamoDbProjectDirectoryClient {
     }
   }
 
-  /** Moves an unarchived Project to another lifecycle state allowed by the transition rules. */
+  /** Stores a decided lifecycle state behind the charter revision the decision was based on. */
   async transitionProjectLifecycle(
     directoryId: string,
     teamId: string,
     projectId: string,
     expectedRevision: number,
-    state: ProjectLifecycleState,
+    state: StoredProjectLifecycleState,
     auditContext?: MutationAuditContext,
   ) {
     await this.ensureLocalAuditTable()
@@ -2411,13 +2485,6 @@ export class DynamoDbProjectDirectoryClient {
         expectedRevision,
       )
       const from = resolveProjectLifecycleState(project)
-      if (state === 'archived' || !canTransitionProjectLifecycle(from, state)) {
-        throw new ProjectDataError(
-          409,
-          'ProjectLifecycleTransitionNotAllowed',
-          `A Project cannot move from "${from}" to "${state}".`,
-        )
-      }
       const updatedAt = new Date().toISOString()
       const nextRevision = expectedRevision + 1
       const condition = this.createCharterRevisionCondition(teamId, projectId, expectedRevision)
