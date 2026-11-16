@@ -230,7 +230,7 @@ describe('ProjectCharterPanel', () => {
   test('restores a draft kept for the same Team and Project only', () => {
     const store = createProjectCharterDraftStore()
     const values = { ...createProjectCharterFormValues({ tags: [], repositoryUrls: [] }), purpose: '下書きの目的' }
-    store.write('core-team', 'refero', { revision: 2, values })
+    store.write('core-team', 'refero', { revision: 2, values }, undefined)
 
     expect(store.read('core-team', 'refero')).toEqual({ revision: 2, values })
     expect(store.read('other-team', 'refero')).toBeUndefined()
@@ -249,8 +249,22 @@ describe('ProjectCharterPanel', () => {
     )
     expect(html).toContain('下書きの目的')
 
-    store.write('core-team', 'refero', undefined)
+    store.write('core-team', 'refero', undefined, store.read('core-team', 'refero'))
     expect(store.read('core-team', 'refero')).toBeUndefined()
+  })
+
+  test('ignores a replaced panel that clears its draft after a newer panel changed it', () => {
+    const store = createProjectCharterDraftStore()
+    const values = createProjectCharterFormValues({ tags: [], repositoryUrls: [] })
+    const submitted = { revision: 1, values: { ...values, purpose: '保存中' } }
+    store.write('core-team', 'refero', submitted, undefined)
+    const newer = { revision: 1, values: { ...values, purpose: '戻って編集' } }
+    store.write('core-team', 'refero', newer, submitted)
+
+    // The first panel's save completes and drops the draft it submitted.
+    store.write('core-team', 'refero', undefined, submitted)
+
+    expect(store.read('core-team', 'refero')).toBe(newer)
   })
 
   test('offers active Workspace members, not only Project members, as owner and sponsor', () => {

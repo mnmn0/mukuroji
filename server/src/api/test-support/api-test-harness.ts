@@ -2420,9 +2420,17 @@ function configureFakeProjectClients(
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
+      /** Returns a copy of the stored charter state, so callers cannot mutate the fake's state. */
       async getProjectCharter(_directoryId, teamId, projectId) {
         return structuredClone(readProjectCharterState(teamId, projectId))
       },
+      /**
+       * Replaces the charter when the revision matches and advances the revision.
+       *
+       * Condition checks are recorded but not evaluated: person checks are ignored and only the
+       * record keys of the authorization checks are captured, so tests can assert which fences a
+       * route sends but not how DynamoDB would evaluate them.
+       */
       async updateProjectCharter(
         directoryId,
         teamId,
@@ -2452,6 +2460,11 @@ function configureFakeProjectClients(
         projectCharterStates.set(`${teamId}/${projectId}`, next)
         return structuredClone(next)
       },
+      /**
+       * Moves the lifecycle state when the revision matches and advances the revision.
+       *
+       * Authorization condition checks are recorded by record key but not evaluated.
+       */
       async transitionProjectLifecycle(
         directoryId,
         teamId,

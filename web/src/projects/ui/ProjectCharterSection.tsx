@@ -30,6 +30,8 @@ export type ProjectCharterSectionProps = {
   t: (key: MessageKey) => string
   /** Keeps unsaved drafts per Project while the section is not shown. */
   draftStore?: ProjectCharterDraftStore
+  /** Receives every failed charter request, so the page can handle an expired session. */
+  onSessionError?: (error: unknown) => void
 }
 
 /**
@@ -49,13 +51,17 @@ export function ProjectCharterSection({
   canDecideProposal,
   t,
   draftStore,
+  onSessionError,
 }: ProjectCharterSectionProps) {
-  const charter = useProjectCharterActions({ accessToken, teamId, projectId, enabled })
+  const charter = useProjectCharterActions({ accessToken, teamId, projectId, enabled, onSessionError })
   // The server decides with the effective permissions, including Enterprise roles the client
   // cannot evaluate, so its answer replaces the role-based fallback once the charter is loaded.
   const viewer = charter.state?.viewer
-  const keepDraft = useCallback((draft: ProjectCharterDraft | undefined) => {
-    if (teamId) draftStore?.write(teamId, projectId, draft)
+  const keepDraft = useCallback((
+    draft: ProjectCharterDraft | undefined,
+    previous: ProjectCharterDraft | undefined,
+  ) => {
+    if (teamId) draftStore?.write(teamId, projectId, draft, previous)
   }, [draftStore, projectId, teamId])
 
   if (!teamId) return null

@@ -708,6 +708,13 @@ function mapProjectDirectoryItemRow(
   // Charter edits project synchronously behind the charter revision, so the backfill is fenced by
   // the same revision and cannot replace a newer charter with the one it scanned earlier.
   const charterRevision = readPositiveInteger(item.charterRevision)
+  // Only a Project that never had a charter edit may lack the revision; a stored value that is not
+  // a positive safe integer is corrupt and must not be projected as revision 0.
+  if (item.charterRevision !== undefined && charterRevision === undefined) {
+    throw new TypeError(
+      `Workspace search backfill encountered an invalid charter revision on Project "${teamId}/${projectId}".`,
+    )
+  }
   return {
     action: 'put',
     document: createProjectWorkspaceSearchDocument({

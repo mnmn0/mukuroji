@@ -208,6 +208,11 @@ describe('Workspace search backfill mapping', () => {
       ...row,
       charter: { code: 'ops-1', tags: [], repositoryUrls: [] },
     })).toThrow('invalid charter on Project "core-team/refero"')
+
+    for (const charterRevision of [0, -1, '3', 1.5]) {
+      expect(() => mapProjectDirectoryItem({ ...row, charterRevision }))
+        .toThrow('invalid charter revision on Project "core-team/refero"')
+    }
   })
 
   test('uses different document keys for the same Work Item ID in different Teams', () => {

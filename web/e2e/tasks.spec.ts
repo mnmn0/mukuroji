@@ -8087,7 +8087,8 @@ test.describe('authenticated task page', () => {
     }])
     await expect(page.getByTestId('project-charter-code')).toHaveValue('OPS-1')
 
-    await page.getByTestId('project-lifecycle-closed').click()
+    // Pressing the plain close button again only keeps the confirmation open.
+    await page.getByTestId('project-lifecycle-closed').dblclick()
     await expect(page.getByTestId('project-lifecycle-close-confirmation')).toBeVisible()
     expect(lifecycleTransitions).toEqual([{ expectedRevision: 0, state: 'on-hold' }])
     await page.getByTestId('project-lifecycle-close-confirm').click()

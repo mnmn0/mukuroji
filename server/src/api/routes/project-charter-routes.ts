@@ -41,7 +41,7 @@ import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-acces
 /**
  * Registers the Project charter and lifecycle endpoints.
  *
- * Reads require viewer access to the Project. Charter edits and lifecycle transitions require a
+ * Reads require viewer access to the Project or Workspace administration. Charter edits and lifecycle transitions require a
  * Workspace administrator or a manager of the Project; deciding on a `proposed` Project requires
  * a Workspace administrator because it is the approval step.
  *
@@ -57,7 +57,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readProjectRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
-      await requireProjectPermission(principal, projectId, 'viewer')
+      await requireProjectCharterRead(principal, projectId)
       const [state, viewer] = await Promise.all([
         workspaceDependencies.projectDirectory.getProjectCharter(principal.directoryId, teamId, projectId),
         describeProjectCharterViewer(principal, teamId, projectId),
@@ -151,6 +151,25 @@ async function requireProjectCharterManagement(principal: WorkspacePrincipal, pr
     if (!(error instanceof WorkspaceAccessError)) throw error
   }
   await requireProjectPermission(principal, projectId, 'manager')
+}
+
+/**
+ * Requires the principal to read the charter of a Project.
+ *
+ * Workspace administrators may edit any charter without a Project role, so they may also read
+ * it; everyone else needs viewer access to the Project.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param projectId - Project whose charter is read.
+ */
+async function requireProjectCharterRead(principal: WorkspacePrincipal, projectId: string) {
+  try {
+    requireWorkspaceAdministration(principal)
+    return
+  } catch (error) {
+    if (!(error instanceof WorkspaceAccessError)) throw error
+  }
+  await requireProjectPermission(principal, projectId, 'viewer')
 }
 
 /**

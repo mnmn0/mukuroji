@@ -1551,8 +1551,65 @@ export class DynamoDbWorkspaceSearchClient {
       if (!fenced || !isTransactionConditionalCheckFailed(error)) {
         throw error
       }
+      if (sourceRevision === undefined && document.creatorUserId !== undefined) {
+        await this.fillStoredCreator(document.workspaceId, document.recordKey, document.creatorUserId, document.createdAt)
+      }
     }
     return document
+  }
+
+  /**
+   * Adds a creator to a stored revisioned document that was projected before the creation.
+   *
+   * A revisioned projection may land before the unrevisioned creation projection that knows the
+   * creator. The creation then must not replace the newer content, so only the creator and creation
+   * time are added, guarded by the stored digest so a concurrent revision is never overwritten.
+   *
+   * @param workspaceId - Workspace of the document.
+   * @param recordKey - Record key of the document.
+   * @param creatorUserId - Creator known to the creation projection.
+   * @param createdAt - Creation time known to the creation projection.
+   */
+  private async fillStoredCreator(
+    workspaceId: string,
+    recordKey: string,
+    creatorUserId: string,
+    createdAt: string | undefined,
+  ) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey },
+        ConsistentRead: true,
+      }))
+      if (!response.Item || response.Item.creatorUserId !== undefined) return
+      const stored = readWorkspaceSearchDocument(response.Item)
+      const storedCreatedAt = stored.createdAt ?? createdAt
+      const completed = createWorkspaceSearchDocument({
+        ...stored,
+        creatorUserId,
+        ...(storedCreatedAt ? { createdAt: storedCreatedAt } : {}),
+      })
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: this.tableName,
+              Item: completed,
+              ConditionExpression: '#projectionDigest = :projectionDigest AND attribute_not_exists(#creatorUserId)',
+              ExpressionAttributeNames: {
+                '#projectionDigest': 'projectionDigest',
+                '#creatorUserId': 'creatorUserId',
+              },
+              ExpressionAttributeValues: { ':projectionDigest': stored.projectionDigest },
+            },
+          }],
+        }))
+        return
+      } catch (error) {
+        if (!isTransactionConditionalCheckFailed(error)) throw error
+      }
+    }
   }
 
   /**

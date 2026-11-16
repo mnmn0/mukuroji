@@ -121,6 +121,18 @@ describe('Project charter API', () => {
     expect(await inactive.json()).toMatchObject({ code: 'ProjectCharterPersonInactive' })
   })
 
+  test('lets a Workspace administrator without a Project role read the charter it may edit', async () => {
+    configureFakeProjectClients(false)
+    const administrator = await send(charterPath, 'GET')
+    expect(administrator.status).toBe(200)
+    expect(await administrator.json()).toMatchObject({ viewer: { canEdit: true } })
+
+    resetTestApp()
+    configureFakeProjectClients(false, { workspaceRole: 'member' })
+    const member = await send(charterPath, 'GET')
+    expect(member.status).toBe(403)
+  })
+
   test('requires a Project manager or Workspace administrator to edit', async () => {
     const calls = configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
 

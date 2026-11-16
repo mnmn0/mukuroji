@@ -16,6 +16,11 @@ export type UseProjectCharterActionsOptions = {
   projectId: string
   /** Whether the current authentication state permits the requests. */
   enabled: boolean
+  /**
+   * Receives every failed load, save, and transition before the panel shows it, so the page can
+   * send an expired or revoked session to sign in again.
+   */
+  onSessionError?: (error: unknown) => void
 }
 
 /**
@@ -33,9 +38,10 @@ export function useProjectCharterActions({
   teamId,
   projectId,
   enabled,
+  onSessionError,
 }: UseProjectCharterActionsOptions) {
   const { mutate: mutateGlobal } = useSWRConfig()
-  const charter = useProjectCharter({ accessToken, teamId, projectId, enabled })
+  const charter = useProjectCharter({ accessToken, teamId, projectId, enabled, onError: onSessionError })
   const { key, mutate } = charter
 
   // The cache entry is the one the request started from, so a response that arrives after the
@@ -52,27 +58,27 @@ export function useProjectCharterActions({
   const save = useCallback(async (input: UpdateProjectCharterInput) => {
     if (!key) return undefined
     const [, token, requestTeamId, requestProjectId] = key
-    return await commit(key, await updateProjectCharter(
+    return await commit(key, await reportingSessionError(updateProjectCharter(
       token,
       requestTeamId,
       requestProjectId,
       input,
       createMutationRequestContext(),
-    ))
-  }, [commit, key])
+    ), onSessionError))
+  }, [commit, key, onSessionError])
 
   const transition = useCallback(async (expectedRevision: number, state: ProjectLifecycleState) => {
     if (!key) return undefined
     const [, token, requestTeamId, requestProjectId] = key
-    return await commit(key, await transitionProjectLifecycle(
+    return await commit(key, await reportingSessionError(transitionProjectLifecycle(
       token,
       requestTeamId,
       requestProjectId,
       expectedRevision,
       state,
       createMutationRequestContext(),
-    ))
-  }, [commit, key])
+    ), onSessionError))
+  }, [commit, key, onSessionError])
 
   const reload = useCallback(() => {
     void mutate()
@@ -85,5 +91,24 @@ export function useProjectCharterActions({
     reload,
     save,
     transition,
+  }
+}
+
+/**
+ * Hands a failed request to the session error handler and rethrows it for the panel.
+ *
+ * @param request - Pending charter request.
+ * @param onSessionError - Optional handler for failed requests.
+ * @returns The request's result.
+ */
+async function reportingSessionError<Result>(
+  request: Promise<Result>,
+  onSessionError: ((error: unknown) => void) | undefined,
+) {
+  try {
+    return await request
+  } catch (error) {
+    onSessionError?.(error)
+    throw error
   }
 }

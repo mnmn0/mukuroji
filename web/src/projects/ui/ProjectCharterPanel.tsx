@@ -47,8 +47,15 @@ export type ProjectCharterPanelProps = {
   onReload: () => void
   /** Unsaved draft restored when the panel is shown again for the same Project. */
   initialDraft?: ProjectCharterDraft
-  /** Receives every draft change so it can outlive the panel. */
-  onDraftChange?: (draft: ProjectCharterDraft | undefined) => void
+  /**
+   * Receives every draft change, with the draft it replaces, so it can outlive the panel.
+   * `previous` is the panel's own last draft, which lets the owner ignore a panel that a newer
+   * panel for the same Project has replaced.
+   */
+  onDraftChange?: (
+    draft: ProjectCharterDraft | undefined,
+    previous: ProjectCharterDraft | undefined,
+  ) => void
 }
 
 const inputClassName =
@@ -110,10 +117,11 @@ export function ProjectCharterPanel({
   const changeDraft = (
     update: (current: ProjectCharterDraft | undefined) => ProjectCharterDraft | undefined,
   ) => {
-    const next = update(latestDraft.current)
+    const previous = latestDraft.current
+    const next = update(previous)
     latestDraft.current = next
     setDraft(next)
-    onDraftChange?.(next)
+    onDraftChange?.(next, previous)
   }
 
   if (!state) {
@@ -196,12 +204,8 @@ export function ProjectCharterPanel({
     onReload()
   }
 
-  /** Moves the lifecycle, asking for confirmation before closing. */
+  /** Moves the lifecycle. Closing is reached only from the confirmation's own button. */
   const handleTransition = async (target: ProjectLifecycleState) => {
-    if (target === 'closed' && !isConfirmingClose) {
-      setIsConfirmingClose(true)
-      return
-    }
     setIsTransitioning(true)
     setMessage(undefined)
     try {
@@ -266,7 +270,8 @@ export function ProjectCharterPanel({
                 disabled={!canTransition || isTransitioning}
                 key={target}
                 type="button"
-                onClick={() => void handleTransition(target)}
+                // Closing only opens the confirmation, however often the button is pressed.
+                onClick={() => target === 'closed' ? setIsConfirmingClose(true) : void handleTransition(target)}
               >
                 {t('projects.charter.lifecycle.moveTo').replace('{state}', t(projectLifecycleMessageKey(target)))}
               </button>

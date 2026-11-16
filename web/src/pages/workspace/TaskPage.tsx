@@ -1881,6 +1881,9 @@ export function TaskPage() {
           projectId={projectId}
           t={t}
           teamId={interactionTeamId}
+          onSessionError={(error) => {
+            redirectEnterpriseSessionError(error)
+          }}
         />
       )}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}

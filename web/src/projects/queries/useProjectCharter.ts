@@ -12,6 +12,8 @@ export type UseProjectCharterOptions = {
   projectId: string
   /** Whether the current authentication state permits the request. */
   enabled: boolean
+  /** Receives each failed load, so an expired session can be sent to sign in again. */
+  onError?: (error: unknown) => void
 }
 
 /**
@@ -20,7 +22,13 @@ export type UseProjectCharterOptions = {
  * @param options - Authentication state and Project identity.
  * @returns SWR state and its active key.
  */
-export function useProjectCharter({ accessToken, teamId, projectId, enabled }: UseProjectCharterOptions) {
+export function useProjectCharter({
+  accessToken,
+  teamId,
+  projectId,
+  enabled,
+  onError,
+}: UseProjectCharterOptions) {
   const key: readonly ['project-charter', string, string, string] | null = useMemo(
     () => accessToken && teamId && enabled ? ['project-charter', accessToken, teamId, projectId] : null,
     [accessToken, enabled, projectId, teamId],
@@ -32,6 +40,7 @@ export function useProjectCharter({ accessToken, teamId, projectId, enabled }: U
     {
       dedupingInterval: 5_000,
       shouldRetryOnError: false,
+      onError: (error: unknown) => onError?.(error),
     },
   )
 
