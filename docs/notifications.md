@@ -180,7 +180,7 @@ EventBridge の定期 rule が canonical Work Item を bounded pagination で走
 
 | event type | 宛先 | 条件 | 重複排除の単位 |
 | --- | --- | --- | --- |
-| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3） | 期限・責任者 |
+| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3）。配信が期限当日以降にずれた場合は捨てる | 期限・責任者 |
 | `work-item.overdue-reminder` | 責任者 | 超過から interval 日ごと（`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、7）。初回の超過は従来どおり `work-item.overdue` で、超過中は毎回同じ key で試行するため、超過から時間が経って初めて走査された item にも一度だけ出る | 期限・責任者・何回目か |
 | `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外 | 期限・Project |
 | `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知。期限超過中は超過の再通知に任せて送らない。配送時に期限を過ぎていた場合も捨てる | 最終更新時刻・責任者・何回目か |

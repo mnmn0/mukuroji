@@ -1434,7 +1434,8 @@ export function createNotificationProjectionItem(
  * Revalidates a scheduled Work Item notification against the current Work Item row.
  *
  * Every stage requires the Work Item to still be open with the same due date (or, for a stale
- * reminder, still started with the same `updatedAt` and not yet overdue). Owner stages are re-pointed at the current
+ * reminder, still started with the same `updatedAt` and not yet overdue). A due-soon reminder also
+ * expires once the due date arrives. Owner stages are re-pointed at the current
  * owner and dropped when ownership changed. Escalation keeps its manager candidates; the caller
  * filters them by current Project manager role.
  *
@@ -1472,6 +1473,9 @@ export function refreshScheduledNotificationEvent(
       return undefined
     }
   } else if (!event.dueDate || scope.dueDate !== event.dueDate) {
+    return undefined
+  } else if (reason === 'due-soon' && scope.localDate !== undefined && scope.localDate >= event.dueDate) {
+    // Delivered on or after the due date: the due and overdue stages take over.
     return undefined
   }
 

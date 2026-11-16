@@ -308,6 +308,10 @@ describe('collaboration projection pure helpers', () => {
     expect(refreshScheduledNotificationEvent(dueSoon, scope)?.notificationCandidates)
       .toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
     expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, dueDate: '2026-07-16' })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, localDate: '2026-07-14' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
+    // Delivered once the due date arrived: the due / overdue stages cover it instead.
+    expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, localDate: '2026-07-15' })).toBeUndefined()
     expect(refreshScheduledNotificationEvent(reminder, scope)?.notificationCandidates)
       .toEqual([{ memberKey: 'owner@example.com', reason: 'overdue' }])
     expect(refreshScheduledNotificationEvent(reminder, { ...scope, assigneeMemberKey: 'new@example.com' }))
