@@ -190,8 +190,10 @@ import {
 } from '../model/taskView'
 import {
   formatTaskScheduleRange,
+  taskScheduleInstantToLocalDate,
   taskScheduleModeLabelKeys,
 } from '../model/taskSchedule'
+import { resolveTaskActualDateUndo } from '../model/taskActualDates'
 import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { CreateTaskPanel } from './CreateTaskPanel'
 import { TaskActionFeedback } from './TaskActionFeedback'
@@ -713,6 +715,36 @@ export function TaskScreen({
   >()
   const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
   const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
+
+  /**
+   * Creates the undo entry for one successful update, or undefined when it cannot be undone.
+   *
+   * @param before - Work Item before the update.
+   * @param input - Forward patch that was saved.
+   * @param after - Work Item returned by the update.
+   * @returns Undo state including any actual dates the reverse status change cannot restore.
+   */
+  const createTaskUndoState = useCallback((
+    before: CanonicalWorkItem,
+    input: UpdateTeamIssueInput,
+    after: CanonicalWorkItem,
+  ): TaskUndoState | undefined => {
+    if (!isReversibleTaskUpdate(input)) return undefined
+    const actualDateUndo = resolveTaskActualDateUndo(
+      before,
+      after,
+      input,
+      canCorrectActualDates?.(before) ?? false,
+      taskScheduleInstantToLocalDate(new Date(), after.schedule.calendarPolicy),
+    )
+    if (!actualDateUndo.reversible) return undefined
+    return {
+      forwardPatch: input,
+      inversePatch: { ...createTaskInversePatch(before, input), ...actualDateUndo.patch },
+      task: after,
+      undoToken: createTaskUpdateUndoToken(after),
+    }
+  }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
   const [isRestoringTask, setIsRestoringTask] = useState(false)
   const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
@@ -1855,16 +1887,7 @@ export function TaskScreen({
 
     try {
       const updatedTask = await onUpdateTask(task, input)
-      if (isReversibleTaskUpdate(input)) {
-        setTaskUndo({
-          forwardPatch: input,
-          inversePatch: createTaskInversePatch(task, input),
-          task: updatedTask,
-          undoToken: createTaskUpdateUndoToken(updatedTask),
-        })
-      } else {
-        setTaskUndo(undefined)
-      }
+      setTaskUndo(createTaskUndoState(task, input, updatedTask))
       setTaskRedo(undefined)
       setTaskAction({
         kind: 'success',
@@ -1883,7 +1906,7 @@ export function TaskScreen({
       })
       throw error
     }
-  }, [onUpdateTask, t])
+  }, [createTaskUndoState, onUpdateTask, t])
 
   /**
    * Previews every schedule patch before allowing the shared persistence path to run.
@@ -2116,12 +2139,7 @@ export function TaskScreen({
         setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
         return
       }
-      setTaskUndo({
-        forwardPatch: taskRedo.forwardPatch,
-        inversePatch: createTaskInversePatch(taskRedo.task, taskRedo.forwardPatch),
-        task: result.task,
-        undoToken: createTaskUpdateUndoToken(result.task),
-      })
+      setTaskUndo(createTaskUndoState(taskRedo.task, taskRedo.forwardPatch, result.task))
       setTaskRedo(undefined)
       setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
     } catch (error) {
@@ -2196,16 +2214,7 @@ export function TaskScreen({
             const result = await onUpdateIssue(teamId, issueId, input)
             if (result) {
               updatedTask = result
-              if (isReversibleTaskUpdate(input)) {
-                setTaskUndo({
-                  forwardPatch: input,
-                  inversePatch: createTaskInversePatch(detailTask, input),
-                  task: result,
-                  undoToken: createTaskUpdateUndoToken(result),
-                })
-              } else {
-                setTaskUndo(undefined)
-              }
+              setTaskUndo(createTaskUndoState(detailTask, input, result))
               setTaskRedo(undefined)
               setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
             }

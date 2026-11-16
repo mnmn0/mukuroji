@@ -10,6 +10,7 @@ import {
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
+import { resolveTaskActualDateUndo } from '../src/tasks/model/taskActualDates'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import type { WorkspaceMember } from '../src/workspace/api/access'
 import {
@@ -347,6 +348,42 @@ describe('task due-date model', () => {
 })
 
 describe('task plan-versus-actual model', () => {
+  test('restores actual dates on undo only when the reverse status change cannot', () => {
+    const completed = createTask({
+      actualEndDate: '2026-07-20',
+      actualStartDate: '2026-07-10',
+      statusCategory: 'completed',
+    })
+    const reopened = createTask({ actualStartDate: '2026-07-10', statusCategory: 'started' })
+    const statusPatch = { workflowStatusId: 'active' }
+
+    // Undoing a reopen would record today as the completion, so a manager restores it explicitly.
+    expect(resolveTaskActualDateUndo(completed, reopened, statusPatch, true, '2026-07-25')).toEqual({
+      reversible: true,
+      patch: { actualStartDate: '2026-07-10', actualEndDate: '2026-07-20' },
+    })
+    expect(resolveTaskActualDateUndo(completed, reopened, statusPatch, false, '2026-07-25'))
+      .toEqual({ reversible: false })
+    // Completing again on the original day already restores the same dates.
+    expect(resolveTaskActualDateUndo(completed, reopened, statusPatch, false, '2026-07-20'))
+      .toEqual({ reversible: true })
+    // Undoing a completion removes the end through the reverse transition alone.
+    expect(resolveTaskActualDateUndo(reopened, completed, statusPatch, false, '2026-07-25'))
+      .toEqual({ reversible: true })
+    // Undoing a first start would keep the recorded start.
+    const unstarted = createTask({ statusCategory: 'unstarted' })
+    const started = createTask({ actualStartDate: '2026-07-25', statusCategory: 'started' })
+    expect(resolveTaskActualDateUndo(unstarted, started, statusPatch, true, '2026-07-25')).toEqual({
+      reversible: true,
+      patch: { actualStartDate: null, actualEndDate: null },
+    })
+    expect(resolveTaskActualDateUndo(unstarted, started, statusPatch, false, '2026-07-25'))
+      .toEqual({ reversible: true })
+    // Explicit corrections are reversed by the generic inverse patch.
+    expect(resolveTaskActualDateUndo(completed, completed, { actualStartDate: '2026-07-09' }, false, '2026-07-25'))
+      .toEqual({ reversible: true })
+  })
+
   test('applies an actual date correction optimistically and builds its undo patch', () => {
     const task = createTask({
       actualEndDate: '2026-07-26',

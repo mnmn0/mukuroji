@@ -1,12 +1,10 @@
-import type { WorkflowStatusCategory } from '@mukuroji/contracts'
+import {
+  applyWorkItemStatusTransitionToActualDates,
+  type WorkItemActualDates,
+  type WorkflowStatusCategory,
+} from '@mukuroji/contracts'
 
-/** Recorded actual dates of one Work Item. */
-export type WorkItemActualDates = {
-  /** Local date when the Work Item first entered the started or completed category. */
-  actualStartDate?: string
-  /** Local date of the latest effective completion. */
-  actualEndDate?: string
-}
+export { applyWorkItemStatusTransitionToActualDates, type WorkItemActualDates }
 
 /** Manager correction of the recorded actual dates; null removes a date. */
 export type WorkItemActualDateCorrection = {
@@ -33,45 +31,6 @@ export class WorkItemActualDateError extends Error {
     super(message)
     this.name = 'WorkItemActualDateError'
   }
-}
-
-/**
- * Records the actual dates implied by a status category transition.
- *
- * The first entry into `started` or `completed` records the start. Every entry into `completed`
- * records the end, so a reopened and completed again Work Item keeps its latest completion. Leaving
- * `completed` removes the end because the completion is no longer effective; the start stays.
- * An update that keeps the category leaves the dates unchanged.
- *
- * @param current - Actual dates before the transition; empty for a new Work Item.
- * @param previousCategory - Status category before the transition; undefined for a new Work Item.
- * @param nextCategory - Status category after the transition.
- * @param transitionDate - Local date of the transition in the schedule calendar timezone.
- * @returns The actual dates after the transition.
- */
-export function applyWorkItemStatusTransitionToActualDates(
-  current: WorkItemActualDates,
-  previousCategory: WorkflowStatusCategory | undefined,
-  nextCategory: WorkflowStatusCategory,
-  transitionDate: string,
-): WorkItemActualDates {
-  const next: WorkItemActualDates = { ...current }
-  // Rows recorded before actual dates existed keep their state until the category changes.
-  if (previousCategory === nextCategory) return next
-  if ((nextCategory === 'started' || nextCategory === 'completed') && !next.actualStartDate) {
-    next.actualStartDate = transitionDate
-  }
-  if (nextCategory === 'completed') {
-    const actualEndDate = transitionDate
-    next.actualEndDate = actualEndDate
-    if (next.actualStartDate && next.actualStartDate > actualEndDate) {
-      // A corrected start cannot fall after the completion that just happened.
-      next.actualStartDate = actualEndDate
-    }
-  } else {
-    delete next.actualEndDate
-  }
-  return next
 }
 
 /**
