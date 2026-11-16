@@ -130,6 +130,8 @@ export type AuditProjectionEvent = {
   dueDate?: string
   /** Work Item `updatedAt` that a scheduled stale reminder was computed from. */
   workItemUpdatedAt?: string
+  /** Whole days until the due date when the schedule emitted the stage (negative once overdue). */
+  daysUntilDue?: number
   /** Scheduled Planning event の Project / Initiative target type です。 */
   planningTargetType?: 'project' | 'initiative'
   /** Scheduled Planning event の canonical target ID です。 */
@@ -303,6 +305,8 @@ export type CurrentWorkItemNotificationScope = {
   localDate?: string
   /** Whether the Work Item is currently archived. */
   archived?: boolean
+  /** Current Work Item revision, used to pin scheduled notification writes to this read. */
+  revision?: number
 }
 
 /** Projection 時に強整合 read した Planning update target scope です。 */
@@ -1192,11 +1196,24 @@ export function createCuratedContextSearchParentCondition(
     return undefined
   }
 
-  const conditionExpression = !scope.exists
+  const baseExpression = !scope.exists
     ? 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)'
     : scope.projectId === undefined
       ? 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)'
       : 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #assignedProjectId = :assignedProjectId'
+  // Scheduled stages were revalidated against this exact read, so any later Work Item write
+  // cancels the save and the stream retry re-reads and revalidates.
+  const pinRevision = scope.exists &&
+    scope.revision !== undefined &&
+    scheduledWorkItemNotificationReasons.has(event.eventType)
+  const names: Record<string, string> = scope.exists ? { '#assignedProjectId': 'assignedProjectId' } : {}
+  const values: Record<string, unknown> = scope.exists && scope.projectId !== undefined
+    ? { ':assignedProjectId': scope.projectId }
+    : {}
+  if (pinRevision) {
+    names['#revision'] = 'revision'
+    values[':revision'] = scope.revision
+  }
   return {
     ConditionCheck: {
       TableName: tableName,
@@ -1204,15 +1221,9 @@ export function createCuratedContextSearchParentCondition(
         directoryTeamId: `${event.workspaceId}#team#${event.teamId}`,
         issueId: event.issueId,
       },
-      ConditionExpression: conditionExpression,
-      ...(scope.exists && scope.projectId !== undefined
-        ? {
-            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
-            ExpressionAttributeValues: { ':assignedProjectId': scope.projectId },
-          }
-        : scope.exists
-          ? { ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' } }
-          : {}),
+      ConditionExpression: pinRevision ? `${baseExpression} AND #revision = :revision` : baseExpression,
+      ...(Object.keys(names).length > 0 ? { ExpressionAttributeNames: names } : {}),
+      ...(Object.keys(values).length > 0 ? { ExpressionAttributeValues: values } : {}),
     },
   }
 }
@@ -1434,6 +1445,39 @@ export function createNotificationProjectionItem(
 }
 
 /**
+ * Re-evaluates a dated stage against today's date in the Work Item's calendar at delivery time.
+ *
+ * A due-soon reminder stays valid only while the item is still before its due date and no
+ * further out than when it was scanned. An escalation stays valid only while the item is at
+ * least as overdue as when it was scanned. Without a local date or the scanned day count the
+ * stage is kept, so events from older schedule versions still deliver.
+ *
+ * @param reason - Scheduled recipient reason.
+ * @param event - Parsed scheduled audit event with its due date.
+ * @param localDate - Today in the Work Item schedule's local calendar.
+ * @returns Whether the stage still applies.
+ */
+function isScheduledStageStillCurrent(
+  reason: string,
+  event: AuditProjectionEvent,
+  localDate: string | undefined,
+) {
+  if (!event.dueDate || localDate === undefined) return true
+  const currentDaysUntilDue = Math.round(
+    (Date.parse(`${event.dueDate}T00:00:00Z`) - Date.parse(`${localDate}T00:00:00Z`)) / 86_400_000,
+  )
+  if (reason === 'due-soon') {
+    // On or after the due date the due and overdue stages take over.
+    if (currentDaysUntilDue <= 0) return false
+    return event.daysUntilDue === undefined || currentDaysUntilDue <= event.daysUntilDue
+  }
+  if (reason === 'escalation' && event.daysUntilDue !== undefined) {
+    return currentDaysUntilDue <= event.daysUntilDue
+  }
+  return true
+}
+
+/**
  * Revalidates a scheduled Work Item notification against the current Work Item row.
  *
  * Every stage requires the Work Item to still be open, unarchived, and on the same due date (or,
@@ -1481,8 +1525,7 @@ export function refreshScheduledNotificationEvent(
     }
   } else if (!event.dueDate || scope.dueDate !== event.dueDate) {
     return undefined
-  } else if (reason === 'due-soon' && scope.localDate !== undefined && scope.localDate >= event.dueDate) {
-    // Delivered on or after the due date: the due and overdue stages take over.
+  } else if (!isScheduledStageStillCurrent(reason, event, scope.localDate)) {
     return undefined
   }
 
@@ -2344,6 +2387,7 @@ async function readCurrentWorkItemScope(
     updatedAt: item.updatedAt,
     localDate: workItemScheduleInstantToLocalDate(new Date(), item.schedule.calendarPolicy),
     archived: item.archivedAt !== undefined,
+    revision: item.revision,
   }
 }
 
@@ -2500,6 +2544,7 @@ export function parseAuditProjectionEvent(
     summary: readString(value.summary),
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
     workItemUpdatedAt: readTimestamp(metadata.workItemUpdatedAt),
+    daysUntilDue: readSafeInteger(metadata.daysUntilDue),
     planningTargetType: readPlanningTargetType(metadata.planningTargetType),
     planningTargetId: readString(metadata.planningTargetId),
     planningTargetRecordKey: readString(metadata.planningTargetRecordKey),
@@ -2632,6 +2677,10 @@ function readTimestamp(value: unknown): string | undefined {
 
 function readPositiveInteger(value: unknown) {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : undefined
+}
+
+function readSafeInteger(value: unknown) {
+  return Number.isSafeInteger(value) ? Number(value) : undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

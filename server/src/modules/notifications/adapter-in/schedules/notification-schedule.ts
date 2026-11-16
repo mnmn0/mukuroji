@@ -168,8 +168,8 @@ type ScheduledNotificationCandidate = {
   repetition?: number
   /** Work Item `updatedAt` that a stale reminder was computed from. */
   workItemUpdatedAt?: string
-  /** Recipients for an escalation stage; other stages notify the owner. */
-  escalationMemberKeys?: string[]
+  /** Project manager notified by an escalation stage; other stages notify the owner. */
+  escalationMemberKey?: string
 }
 
 /** Work Item stage evaluation before Project managers are resolved for escalation. */
@@ -446,8 +446,10 @@ export async function runNotificationSchedule(
         }
         const recipients = ((await managers).get(escalation.projectId ?? '') ?? [])
           .filter((memberKey) => memberKey !== escalation.assigneeMemberKey)
-        if (recipients.length > 0) {
-          candidates.push({ ...escalation, escalationMemberKeys: recipients })
+        // One event per manager keeps each recipient's dedupe independent, so a manager who
+        // joins after the first escalation still receives one.
+        for (const memberKey of recipients) {
+          candidates.push({ ...escalation, escalationMemberKey: memberKey })
         }
       }
 
@@ -1073,7 +1075,14 @@ function createScheduledNotificationAuditEvent(
   const idempotencyParts = candidate.reason === 'due' || candidate.reason === 'overdue'
     ? [candidate.workspaceId, entityId, candidate.dueDate, candidate.reason, candidate.assigneeMemberKey]
     : candidate.reason === 'overdue-escalation'
-      ? [candidate.workspaceId, entityId, candidate.dueDate, candidate.reason, candidate.projectId ?? '']
+      ? [
+          candidate.workspaceId,
+          entityId,
+          candidate.dueDate,
+          candidate.reason,
+          candidate.projectId ?? '',
+          candidate.escalationMemberKey ?? '',
+        ]
       : candidate.reason === 'stale'
         ? [
             candidate.workspaceId,
@@ -1122,10 +1131,7 @@ function createScheduledNotificationAuditEvent(
   const search = new URLSearchParams({ issueId: candidate.issueId })
   const deepLink = `/teams/${encodeURIComponent(candidate.teamId)}/issues?${search.toString()}`
   const notificationCandidates = candidate.reason === 'overdue-escalation'
-    ? (candidate.escalationMemberKeys ?? []).map((memberKey) => ({
-        memberKey,
-        reason: 'escalation',
-      }))
+    ? [{ memberKey: candidate.escalationMemberKey ?? '', reason: 'escalation' }]
     : [{
         memberKey: candidate.assigneeMemberKey,
         reason: scheduledNotificationCandidateReason(candidate.reason),
@@ -1149,6 +1155,7 @@ function createScheduledNotificationAuditEvent(
       ...(candidate.workItemUpdatedAt
         ? { workItemUpdatedAt: candidate.workItemUpdatedAt }
         : {}),
+      ...(candidate.daysUntilDue === undefined ? {} : { daysUntilDue: candidate.daysUntilDue }),
       ...(candidate.repetition === undefined ? {} : { repetition: candidate.repetition }),
       notificationCandidates,
     },

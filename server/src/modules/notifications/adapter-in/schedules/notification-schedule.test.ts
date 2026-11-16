@@ -152,6 +152,20 @@ function resolvePlanningTargetGet(
   }
 }
 
+/** Returns the recorded PutCommand item, failing the test when the command has none. */
+function readPutItem(input: Record<string, unknown> | undefined): Record<string, unknown> {
+  const item = input?.Item
+  if (!isPlainRecord(item)) {
+    throw new Error('Expected a recorded PutCommand with an Item.')
+  }
+  return item
+}
+
+/** Narrows an unknown value to a plain object record. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function createRecordingDocumentClient(
   resolve: (name: string, input: Record<string, unknown>) => unknown | Promise<unknown>,
 ) {
@@ -269,8 +283,8 @@ describe('notification schedule handler', () => {
 
     const result = await runNotificationSchedule(createRunOptions(recording.client))
     const puts = recording.commands.filter((command) => command.name === 'PutCommand')
-    const dueEvent = puts[0]?.input.Item as Record<string, unknown>
-    const overdueEvent = puts[1]?.input.Item as Record<string, unknown>
+    const dueEvent = readPutItem(puts[0]?.input)
+    const overdueEvent = readPutItem(puts[1]?.input)
 
     expect(result).toEqual({
       scannedItems: 4,
@@ -442,7 +456,7 @@ describe('notification schedule handler', () => {
       skippedItems: 0,
     })
     expect(recording.commands.filter(({ name }) => name === 'PutCommand').map(({ input }) => {
-      const item = input.Item as Record<string, unknown>
+      const item = readPutItem(input)
       return [item.entityId, item.eventType]
     })).toEqual([
       ['team/core-team/issue/tokyo', 'work-item.due'],
@@ -483,7 +497,7 @@ describe('notification schedule handler', () => {
       await runNotificationSchedule(createRunOptions(recording.client, { now: new Date(now) }))
       const events = recording.commands
         .filter(({ name }) => name === 'PutCommand')
-        .map(({ input }) => input.Item as Record<string, unknown>)
+        .map(({ input }) => readPutItem(input))
       return {
         overdue: events.filter((event) => event.eventType === 'work-item.overdue'),
         reminders: events.filter((event) => event.eventType === 'work-item.overdue-reminder'),
@@ -518,12 +532,13 @@ describe('notification schedule handler', () => {
     expect(secondReminder).toMatchObject({ metadata: { repetition: 2 } })
   })
 
-  test('escalates a long-overdue Work Item once to current managers of its active Project', async () => {
+  test('escalates a long-overdue Work Item once per current manager of its active Project', async () => {
     const directory = [
       { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'platform' },
       { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'archived', archivedAt: '2026-07-01T00:00:00.000Z' },
       { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'Lead@Example.com', role: 'manager' },
       { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'member@example.com', role: 'manager' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'second@example.com', role: 'manager' },
       { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'viewer@example.com', role: 'viewer' },
       { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'archived', memberKey: 'old@example.com', role: 'manager' },
     ]
@@ -556,20 +571,26 @@ describe('notification schedule handler', () => {
     }))
     const events = recording.commands
       .filter(({ name }) => name === 'PutCommand')
-      .map(({ input }) => input.Item as Record<string, unknown>)
+      .map(({ input }) => readPutItem(input))
     const escalations = events.filter((event) => event.eventType === 'work-item.overdue-escalation')
 
     expect(recording.commands.filter(({ name }) => name === 'QueryCommand')).toHaveLength(1)
-    expect(escalations).toHaveLength(1)
+    // One event per manager, so each recipient is deduplicated on its own key.
+    expect(escalations).toHaveLength(2)
     expect(escalations[0]).toMatchObject({
       entityId: 'team/core-team/issue/release-checklist',
       summary: 'Work Item "Release checklist" has been overdue for 7 days.',
       metadata: {
         projectId: 'platform',
         dueDate: '2026-07-05',
+        daysUntilDue: -7,
         notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'escalation' }],
       },
     })
+    expect(escalations[1]).toMatchObject({
+      metadata: { notificationCandidates: [{ memberKey: 'second@example.com', reason: 'escalation' }] },
+    })
+    expect(escalations[1]?.eventId).not.toBe(escalations[0]?.eventId)
     expect(events.filter((event) => event.eventType === 'work-item.overdue-reminder'))
       .toHaveLength(2)
     expect(events.filter((event) => event.eventType === 'work-item.overdue'))
@@ -584,7 +605,7 @@ describe('notification schedule handler', () => {
     await runNotificationSchedule(createRunOptions(recording.client))
     const events = recording.commands
       .filter(({ name }) => name === 'PutCommand')
-      .map(({ input }) => input.Item as Record<string, unknown>)
+      .map(({ input }) => readPutItem(input))
 
     expect(events.map((event) => event.eventType)).toEqual([
       'work-item.overdue',
@@ -644,7 +665,7 @@ describe('notification schedule handler', () => {
 
     expect(result).toMatchObject({ emittedEvents: 2, skippedItems: 2 })
     expect(puts.map(({ input }) => {
-      const item = input.Item as Record<string, unknown>
+      const item = readPutItem(input)
       return [item.entityId, item.eventType]
     })).toEqual([
       ['team/core-team/issue/stale', 'work-item.stale'],
@@ -752,7 +773,7 @@ describe('notification schedule handler', () => {
       }
 
       putCount += 1
-      eventIds.push(String((input.Item as Record<string, unknown>).eventId))
+      eventIds.push(String(readPutItem(input).eventId))
       if (putCount === 2) {
         const duplicate = new Error('The conditional request failed')
         duplicate.name = 'ConditionalCheckFailedException'

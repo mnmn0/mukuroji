@@ -312,6 +312,12 @@ describe('collaboration projection pure helpers', () => {
       ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
     // Delivered once the due date arrived: the due / overdue stages cover it instead.
     expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, localDate: '2026-07-15' })).toBeUndefined()
+    // Scanned 3 days out: still valid closer to the date, not when today is further out than that.
+    const scannedDueSoon = { ...dueSoon, daysUntilDue: 3 }
+    expect(refreshScheduledNotificationEvent(scannedDueSoon, { ...scope, localDate: '2026-07-13' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
+    expect(refreshScheduledNotificationEvent(scannedDueSoon, { ...scope, localDate: '2026-07-11' }))
+      .toBeUndefined()
     expect(refreshScheduledNotificationEvent(reminder, scope)?.notificationCandidates)
       .toEqual([{ memberKey: 'owner@example.com', reason: 'overdue' }])
     expect(refreshScheduledNotificationEvent(reminder, { ...scope, assigneeMemberKey: 'new@example.com' }))
@@ -334,6 +340,12 @@ describe('collaboration projection pure helpers', () => {
     expect(refreshScheduledNotificationEvent(escalation, { ...scope, statusCategory: 'completed' }))
       .toBeUndefined()
     expect(refreshScheduledNotificationEvent(escalation, { ...scope, projectId: undefined }))
+      .toBeUndefined()
+    // Scanned 7 days overdue: valid while at least that overdue in the item's calendar.
+    const scannedEscalation = { ...escalation, daysUntilDue: -7 }
+    expect(refreshScheduledNotificationEvent(scannedEscalation, { ...scope, localDate: '2026-07-22' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
+    expect(refreshScheduledNotificationEvent(scannedEscalation, { ...scope, localDate: '2026-07-21' }))
       .toBeUndefined()
     // Moved to another Project: a fresh escalation is keyed for it, so the old one is dropped.
     expect(refreshScheduledNotificationEvent(
@@ -1149,6 +1161,35 @@ describe('collaboration projection pure helpers', () => {
         ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
       },
     })
+  })
+
+  test('pins scheduled Work Item notification writes to the revision they were revalidated against', () => {
+    const scheduled = createProjectionEvent({
+      eventType: 'work-item.overdue-reminder',
+      teamId: 'core',
+      issueId: 'example',
+    })
+    const scope = { checked: true, exists: true, revision: 7 }
+
+    expect(createCuratedContextSearchParentCondition('team-issues', scheduled, scope)).toEqual({
+      ConditionCheck: {
+        TableName: 'team-issues',
+        Key: {
+          directoryTeamId: 'workspace-1#team#core',
+          issueId: 'example',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId) AND #revision = :revision',
+        ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId', '#revision': 'revision' },
+        ExpressionAttributeValues: { ':revision': 7 },
+      },
+    })
+    // Other events keep the scope-only fence.
+    expect(createCuratedContextSearchParentCondition(
+      'team-issues',
+      { ...scheduled, eventType: 'work-item.updated' },
+      scope,
+    )?.ConditionCheck.ConditionExpression).not.toContain('#revision')
   })
 
   test('projects context Search once before the projection receipt completes the event', async () => {

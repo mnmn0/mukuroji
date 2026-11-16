@@ -180,11 +180,11 @@ EventBridge の定期 rule が canonical Work Item を bounded pagination で走
 
 | event type | 宛先 | 条件 | 重複排除の単位 |
 | --- | --- | --- | --- |
-| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3）。配信が期限当日以降にずれた場合は捨てる | 期限・責任者 |
+| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3）。配信が期限当日以降にずれた場合や、配信時点の残日数が scan 時より多い場合は捨てる | 期限・責任者 |
 | `work-item.overdue-reminder` | 責任者 | 超過から interval 日ごと（`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、7）。初回の超過は従来どおり `work-item.overdue` で、超過中は毎回同じ key で試行するため、超過から時間が経って初めて走査された item にも一度だけ出る | 期限・責任者・何回目か |
-| `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（archive 済みの membership と責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外 | 期限・Project |
+| `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（archive 済みの membership と責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外。manager ごとに別 event にし、配信時点の超過日数が scan 時より少なければ捨てる | 期限・Project・manager |
 | `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知。期限超過中は超過の再通知に任せて送らない。配送時に期限を過ぎていた場合も捨てる | 最終更新時刻・責任者・何回目か |
 
-再通知は `work-item.overdue` と別の event type にしているため、Automation の `due` trigger（`overdue`）は初回だけ発火します。archived の Work Item はどの段階も作りません。projection は配送時に Work Item を強整合で読み直し、完了・archive・期限変更・責任者変更・更新済みの段階と、別 Project へ移った後の escalation を捨てます。escalation の宛先は schedule が notifications の application port（`ScheduledProjectManagerReader`）経由で読み、Project Directory の DynamoDB 実装は composition root で注入します。配送時点でも Project manager であることを確認します。
+再通知は `work-item.overdue` と別の event type にしているため、Automation の `due` trigger（`overdue`）は初回だけ発火します。archived の Work Item はどの段階も作りません。projection は配送時に Work Item を強整合で読み直し、完了・archive・期限変更・責任者変更・更新済みの段階と、別 Project へ移った後の escalation を捨てます。escalation の宛先は schedule が notifications の application port（`ScheduledProjectManagerReader`）経由で読み、Project Directory の DynamoDB 実装は composition root で注入します。配送時点でも Project manager であることを確認します。schedule event は scan 時の残日数（`daysUntilDue`、超過時は負）を metadata に持ち、projection は Work Item の calendar での今日と比べて段階を再判定します。通知の保存 transaction は読み直した Work Item の `revision` を条件にするため、読み直しと保存の間に Work Item が更新されると stream の retry で再判定します。
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

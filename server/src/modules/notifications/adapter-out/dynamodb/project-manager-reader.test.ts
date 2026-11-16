@@ -1,18 +1,17 @@
 import { describe, expect, test } from 'bun:test'
 import { createDynamoDbProjectManagerReader } from './project-manager-reader'
 
+type ProjectManagerReaderClient = Parameters<typeof createDynamoDbProjectManagerReader>[0]['documentClient']
+
 /** Creates a DocumentClient fake that returns the given Query pages in order. */
 function createPagedClient(pages: readonly Record<string, unknown>[]) {
   const inputs: Record<string, unknown>[] = []
-  return {
-    inputs,
-    client: {
-      send: async (command: { input: Record<string, unknown> }) => {
-        inputs.push(command.input)
-        return pages[inputs.length - 1] ?? {}
-      },
-    } as never,
+  const send = async (command: { input: object }) => {
+    inputs.push({ ...command.input })
+    return pages[inputs.length - 1] ?? {}
   }
+  const client: ProjectManagerReaderClient = { send } as ProjectManagerReaderClient
+  return { inputs, client }
 }
 
 describe('DynamoDB Project manager reader', () => {
