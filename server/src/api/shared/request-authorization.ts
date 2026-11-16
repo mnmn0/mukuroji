@@ -48,6 +48,7 @@ import {
   getVerifiedEnterpriseAuthenticationMethods,
   hasUnqualifiedEnterpriseProjectScope,
   isEnterpriseSsoConfigured,
+  isEnterpriseExternalMember,
   normalizeEnterpriseEmailDomain,
   qualifyEnterpriseProjectScopes,
   readCognitoAuthenticationMethods,
@@ -594,6 +595,13 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/push-subscriptions',
     permission: 'workspace.read',
   },
+  // Removing one's own authenticator is self-service; the route still checks the MFA policy
+  // and a recent sign-in.
+  {
+    method: 'DELETE',
+    pathPattern: '/api/auth/mfa/totp',
+    permission: 'workspace.read',
+  },
   {
     method: 'POST',
     pathPattern: '/api/ai-assistance/generations*',
@@ -721,14 +729,7 @@ export async function authenticateWorkspacePrincipal(
       'Workspace access was deprovisioned by the enterprise directory.',
     )
   }
-  const memberDomain = normalizeEnterpriseEmailDomain(workspaceMember.email)
-  const verifiedDomains = snapshot.domains.filter((domain) =>
-    domain.status === 'verified'
-  )
-  const managedDomain = verifiedDomains.length === 0 || verifiedDomains.some((domain) =>
-    domain.domain === memberDomain
-  )
-  const external = workspaceMember.role === 'guest' || !managedDomain
+  const external = isEnterpriseExternalMember(snapshot, workspaceMember)
   requireEnterpriseExternalAccessAllowed(
     snapshot,
     workspaceMember.email,

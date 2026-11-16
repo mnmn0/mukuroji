@@ -11,7 +11,7 @@ import {
   workspaceDependencies,
 } from './app-dependencies'
 import { toProjectPrincipal } from './authentication-session'
-import type { CognitoAccessTokenClaims } from './enterprise-access'
+import { isEnterpriseExternalMember, type CognitoAccessTokenClaims } from './enterprise-access'
 import { getEnv } from './runtime-config'
 import { decodeJwtPayload, readNumericClaim } from './token-claims'
 
@@ -43,29 +43,33 @@ export function isSsoSessionAccessToken(accessToken: string) {
 }
 
 /**
- * Reads whether the security policy of the user's Workspace requires MFA.
+ * Reads whether the user's Workspace security policy requires MFA from this user.
+ *
+ * It applies the same rule as session validation: MFA is required when the policy requires it
+ * for everyone, or when the user is external (a guest, or outside every verified domain) and
+ * the external-access policy requires it.
  *
  * @param user - Cognito GetUser response.
  * @param accessToken - Access token of the user.
- * @returns Whether the policy requires MFA.
+ * @returns The policy, and whether it requires MFA from the user.
  */
-export async function isMfaRequiredByWorkspacePolicy(user: GetUserResponse, accessToken: string) {
-  return (await readWorkspaceSecurityPolicy(user, accessToken))?.mfaRequirement === 'required'
-}
-
-/**
- * Reads the security policy of the user's Workspace.
- *
- * @param user - Cognito GetUser response.
- * @param accessToken - Access token of the user.
- * @returns The policy, or undefined when the Workspace has not saved one.
- */
-export async function readWorkspaceSecurityPolicy(user: GetUserResponse, accessToken: string) {
+export async function readMfaRequirement(user: GetUserResponse, accessToken: string) {
   const principal = toProjectPrincipal(user, accessToken)
   const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(
     principal.directoryId,
   )
-  return snapshot.policy
+  const policy = snapshot.policy
+  if (!policy) return { policy, mfaRequired: false }
+  if (policy.mfaRequirement === 'required') return { policy, mfaRequired: true }
+  if (!policy.externalAccess.requireMfa) return { policy, mfaRequired: false }
+  const member = await workspaceDependencies.workspaceAccess.getActiveMember(
+    principal.directoryId,
+    principal.userKey,
+  )
+  return {
+    policy,
+    mfaRequired: member !== undefined && isEnterpriseExternalMember(snapshot, member),
+  }
 }
 
 /**
@@ -133,7 +137,7 @@ export async function resolvePolicyMfaSetupChallenge(
     return {}
   }
   const user = await authenticationDependencies.cognito.getUser(accessToken)
-  if (hasEnabledMfa(user) || !await isMfaRequiredByWorkspacePolicy(user, accessToken)) {
+  if (hasEnabledMfa(user) || !(await readMfaRequirement(user, accessToken)).mfaRequired) {
     return { user }
   }
   return { challenge: { challenge: 'MFA_SETUP', email, setupAccessToken: accessToken } }

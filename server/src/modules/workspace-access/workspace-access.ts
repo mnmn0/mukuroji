@@ -130,6 +130,14 @@ export type WorkspaceMember = {
  */
 export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-reset'
 
+/** Result of recording a credential action for a member. */
+export type WorkspaceMemberCredentialRecord = {
+  /** Member the action targets. */
+  member: WorkspaceMember
+  /** Whether a retry with the same idempotency key found the action already recorded. */
+  alreadyRecorded: boolean
+}
+
 /** Workspace access API が返す invitation です。 */
 export type WorkspaceInvitation = {
   /** invitation の一意な ID です。 */
@@ -349,13 +357,14 @@ export interface WorkspaceAccessClient {
    * 管理者が active member の sign-in 資格情報を操作する権限を確認し、操作を audit に記録します。
    *
    * Cognito を変更する前に呼び、記録できなければ操作を中止します。
+   * 同じ idempotency key の retry では既存の記録を検出し、`alreadyRecorded` を返します。
    *
    * @param workspaceId - 対象 Workspace ID です。
    * @param actorMemberKey - 操作する管理者の member key です。
    * @param targetMemberKey - 対象 member の member key です。
    * @param action - 記録する操作です。
    * @param auditContext - Request の audit context です。
-   * @returns 確認した対象 member です。
+   * @returns 確認した対象 member と、既に記録済みだったかどうかです。
    */
   recordMemberCredentialAction?(
     workspaceId: string,
@@ -363,7 +372,22 @@ export interface WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
-  ): Promise<WorkspaceMember>
+  ): Promise<WorkspaceMemberCredentialRecord>
+  /**
+   * 同じ idempotency key の資格情報操作が既に audit に記録されているかを確認します。
+   *
+   * @param workspaceId - 対象 Workspace ID です。
+   * @param targetMemberKey - 対象 member の member key です。
+   * @param action - 確認する操作です。
+   * @param auditContext - Request の audit context です。
+   * @returns 同じ actor・対象・操作で記録済みなら true です。
+   */
+  hasRecordedMemberCredentialAction?(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<boolean>
   /** 指定 member が active な場合だけ返します。 */
   getActiveMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /** 管理画面用の member / invitation snapshot を取得します。 */
@@ -1688,19 +1712,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 
     assertCanManageMemberCredentials(actor, target)
 
-    const auditPut = this.createWorkspaceAuditPut(auditContext, {
-      directoryId: normalizedWorkspaceId,
-      eventType: `member.${action}`,
-      entityType: 'member',
-      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+    const auditPut = this.createMemberCredentialAuditPut(
+      normalizedWorkspaceId,
+      target.memberKey,
       action,
-      occurredAt: this.clock().toISOString(),
-      metadata: { kind: 'workspace-member-credential' },
-      sequence: 0,
-    })
+      auditContext,
+    )
 
     if (!auditPut) {
-      return target
+      return { member: target, alreadyRecorded: false }
     }
 
     try {
@@ -1725,8 +1745,21 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           auditPut,
         ],
       }))
-      return target
+      return { member: target, alreadyRecorded: false }
     } catch (error) {
+      if (
+        isTransactionConditionalFailureAt(error, 2) &&
+        !isTransactionConditionalFailureAt(error, 0) &&
+        !isTransactionConditionalFailureAt(error, 1) &&
+        await this.hasRecordedMemberCredentialAction(
+          normalizedWorkspaceId,
+          target.memberKey,
+          action,
+          auditContext,
+        )
+      ) {
+        return { member: target, alreadyRecorded: true }
+      }
       if (isConditionalTransactionCancellation(error)) {
         throw new WorkspaceAccessError(
           409,
@@ -1737,6 +1770,76 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       }
       throw toWorkspaceAccessError(error)
     }
+  }
+
+  /**
+   * 同じ idempotency key の資格情報操作が既に audit に記録されているかを確認します。
+   *
+   * Audit event ID は idempotency key から決まるため、同じ key の retry は同じ event を指します。
+   * 別の actor・対象・操作の event だった場合は key の使い回しとして conflict にします。
+   */
+  async hasRecordedMemberCredentialAction(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const expected = this.createMemberCredentialAuditPut(
+      normalizedWorkspaceId,
+      normalizeMemberKey(targetMemberKey),
+      action,
+      auditContext,
+    )?.Put
+    if (!expected?.Item) {
+      return false
+    }
+
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: expected.TableName,
+        Key: { directoryId: expected.Item.directoryId, eventId: expected.Item.eventId },
+        ConsistentRead: true,
+      }))
+      const recorded = response.Item
+      if (!recorded) {
+        return false
+      }
+      if (
+        recorded.eventType !== expected.Item.eventType ||
+        recorded.entityId !== expected.Item.entityId ||
+        recorded.actorKey !== expected.Item.actorKey
+      ) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceIdempotencyConflict',
+          'This idempotency key was already used for a different operation.',
+        )
+      }
+      return true
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) throw error
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /** 資格情報操作の audit Put を作ります。audit が無効なら undefined です。 */
+  private createMemberCredentialAuditPut(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext: MutationAuditContext | undefined,
+  ) {
+    return this.createWorkspaceAuditPut(auditContext, {
+      directoryId: workspaceId,
+      eventType: `member.${action}`,
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(workspaceId, targetMemberKey),
+      action,
+      occurredAt: this.clock().toISOString(),
+      metadata: { kind: 'workspace-member-credential' },
+      sequence: 0,
+    })
   }
 
   /** actor の権限を検証し、target member を version 付きで更新します。 */

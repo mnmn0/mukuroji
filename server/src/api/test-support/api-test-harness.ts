@@ -689,6 +689,7 @@ function createWorkspaceAccessFake(
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
     recordMemberCredentialAction: unsupported,
+    hasRecordedMemberCredentialAction: async () => false,
     reconcileDirectoryMember: unsupported,
     deprovisionDirectoryMember: unsupported,
     ...overrides,

@@ -57,9 +57,13 @@ function overrideWorkspaceAccess(overrides: Partial<WorkspaceAccessClient>) {
  * Installs an enterprise identity store whose security policy requires MFA or not.
  *
  * @param mfaRequirement - MFA requirement of the policy.
+ * @param externalRequireMfa - Whether the external-access policy requires MFA.
  * @returns The installed store.
  */
-async function installSecurityPolicy(mfaRequirement: 'optional' | 'required') {
+async function installSecurityPolicy(
+  mfaRequirement: 'optional' | 'required',
+  externalRequireMfa = false,
+) {
   const identity = new InMemoryEnterpriseIdentityClient()
   await identity.putSecurityPolicy({
     workspaceId,
@@ -74,7 +78,7 @@ async function installSecurityPolicy(mfaRequirement: 'optional' | 'required') {
     externalAccess: {
       allowGuests: true,
       allowExternalCollaborators: true,
-      requireMfa: false,
+      requireMfa: externalRequireMfa,
       maximumSessionLifetimeMinutes: 120,
       allowedGuestDomains: [],
       permissionCeiling: ['workspace.read'],
@@ -217,6 +221,19 @@ test('asks a member without MFA to register an authenticator when the policy req
     setupAccessToken: 'test-token',
   })
   expect(calls.workspaceReconciliations).toEqual([])
+})
+
+test('asks a guest to register when only the external-access policy requires MFA', async () => {
+  configureFakeProjectClients(true, { passwordAuthTokens: true, workspaceRole: 'guest' })
+  await installSecurityPolicy('optional', true)
+
+  const response = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).challenge).toBe('MFA_SETUP')
 })
 
 test('completes the sign-in when the policy requires MFA and Cognito already verified it', async () => {
@@ -433,6 +450,27 @@ test('keeps TOTP on while the policy requires MFA and turns it off otherwise', a
   expect(preferences).toEqual([false])
 })
 
+test('lets a guest remove their own authenticator', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'guest' })
+  const preferences: boolean[] = []
+  overrideCognito({
+    async setSoftwareTokenMfaEnabled(_accessToken, enabled) {
+      preferences.push(enabled)
+    },
+  })
+  await installSecurityPolicy('optional')
+
+  const response = await app.request('/api/auth/mfa/totp', {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${createAccessTokenSignedInAt(Math.floor(Date.now() / 1_000) - 60)}`,
+    },
+  })
+
+  expect(response.status).toBe(204)
+  expect(preferences).toEqual([false])
+})
+
 /**
  * Builds an unsigned test access token whose sign-in happened at the given time.
  *
@@ -518,7 +556,8 @@ test('records the administrator password reset before Cognito resets and signs t
     async recordMemberCredentialAction(_workspaceId, actor, target, action, auditContext) {
       events.push('audit')
       recorded.push({ actor, target, action, auditContext })
-      return (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+      const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+      return { member, alreadyRecorded: false }
     },
   })
   overrideCognito({
@@ -553,6 +592,9 @@ test('does not reset the password of a member who has not accepted the invitatio
     },
   })
   overrideWorkspaceAccess({
+    async hasRecordedMemberCredentialAction() {
+      return false
+    },
     async recordMemberCredentialAction() {
       throw new Error('Nothing must be recorded for a pending invitation.')
     },
@@ -579,7 +621,8 @@ test('resets the authenticator of a member who lost it', async () => {
   overrideWorkspaceAccess({
     async recordMemberCredentialAction(_workspaceId, _actor, target, action) {
       actions.push(action)
-      return (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+      const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+      return { member, alreadyRecorded: false }
     },
   })
 
@@ -588,6 +631,53 @@ test('resets the authenticator of a member who lost it', async () => {
   expect(response.status).toBe(200)
   expect(actions).toEqual(['mfa-reset'])
   expect(resets).toEqual(['sato@example.com'])
+})
+
+test('resumes an interrupted authenticator reset when the same request is retried', async () => {
+  configureFakeProjectClients(true)
+  let mfaEnrolled = true
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: mfaEnrolled }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+      mfaEnrolled = false
+      if (resets.length === 1) throw new Error('Connection lost after Cognito removed the app.')
+    },
+  })
+  const recordedKeys = new Set<string>()
+  overrideWorkspaceAccess({
+    async hasRecordedMemberCredentialAction(_workspaceId, _target, _action, auditContext) {
+      return recordedKeys.has(auditContext?.idempotencyKeyHash ?? '')
+    },
+    async recordMemberCredentialAction(_workspaceId, _actor, target, _action, auditContext) {
+      const key = auditContext?.idempotencyKeyHash ?? ''
+      const alreadyRecorded = recordedKeys.has(key)
+      recordedKeys.add(key)
+      const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+      return { member, alreadyRecorded }
+    },
+  })
+  const send = () => app.request('/api/workspace/members/sato%40example.com/mfa-reset', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'mfa-reset-retry-1',
+    },
+    body: '{}',
+  })
+
+  expect((await send()).status).toBe(500)
+  const retry = await send()
+
+  // The first attempt removed the app before failing, so the retry reports success.
+  expect(retry.status).toBe(200)
+  expect(await retry.json()).toEqual({ reset: true })
+  expect(resets).toEqual(['sato@example.com'])
+  expect(recordedKeys.size).toBe(1)
 })
 
 test('denies member credential resets to non-administrators', async () => {

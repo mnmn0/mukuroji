@@ -168,6 +168,8 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   expect(commandNames).toEqual([
     'InitiateAuthCommand',
     'RespondToAuthChallengeCommand',
+    // Replacing the emailed temporary password proves the address, so reset can reach it later.
+    'AdminUpdateUserAttributesCommand',
     'GetUserCommand',
     'ListUsersCommand',
     'AdminGetUserCommand',
@@ -437,11 +439,17 @@ test('runs the Workspace identity lifecycle through the production AWS Cognito a
     ['missing@example.com', 1],
     ['sub-forbidden@example.com', 1],
   ]))
+  // Replacing the emailed temporary password proves the address, so reset can reach it later.
+  expect(sentCommands.find(({ name, input }) =>
+    name === 'AdminUpdateUserAttributesCommand' &&
+    JSON.stringify(input.UserAttributes) === JSON.stringify([{ Name: 'email_verified', Value: 'true' }])
+  )).toBeDefined()
   expect(sentCommands
     .filter(({ name }) => name !== 'GetUserCommand')
     .map(({ name }) => name)).toEqual([
     'AdminGetUserCommand',
     'RespondToAuthChallengeCommand',
+    'AdminUpdateUserAttributesCommand',
     'AdminListGroupsForUserCommand',
     'AdminGetUserCommand',
     'AdminUpdateUserAttributesCommand',

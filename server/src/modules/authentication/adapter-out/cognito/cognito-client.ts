@@ -759,6 +759,7 @@ export class AwsCognitoClient implements CognitoClient {
         ClientId: clientId,
         Session: session,
       }))
+      await this.markInvitedEmailVerified(email)
 
       return {
         AuthenticationResult: response.AuthenticationResult,
@@ -768,6 +769,30 @@ export class AwsCognitoClient implements CognitoClient {
       }
     } catch (error) {
       throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Marks the email of a user who just replaced the emailed temporary password as verified.
+   *
+   * Cognito's NEW_PASSWORD_REQUIRED challenge follows a sign-in with the temporary password it
+   * mailed to that address, so the user has proven control of it. Password reset needs a verified
+   * email, so without this an invited user could never reset a forgotten password. A failure is
+   * logged rather than failing the sign-in the user already completed.
+   *
+   * @param email - Email address and username of the user.
+   */
+  private async markInvitedEmailVerified(email: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(email),
+        UserAttributes: [{ Name: 'email_verified', Value: 'true' }],
+      }))
+    } catch (error) {
+      console.error('Failed to mark the invited user email as verified:', toCognitoSdkError(error).code)
     }
   }
 

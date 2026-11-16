@@ -12,15 +12,16 @@ import {
   EnterpriseIdentityError,
 } from '../../modules/enterprise-identity'
 import {
+  resetMemberCredential,
   WorkspaceAccessError,
+  type MemberCredentialResetPorts,
   type WorkspaceMemberCredentialAction,
-} from '../../modules/workspace-access/workspace-access'
+} from '../../modules/workspace-access'
 import {
   hasEnabledMfa,
-  isMfaRequiredByWorkspacePolicy,
   isRecentlyAuthenticated,
   isSsoSessionAccessToken,
-  readWorkspaceSecurityPolicy,
+  readMfaRequirement,
 } from '../shared/account-security'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createAuthenticationResponse } from '../shared/authentication-session'
@@ -362,7 +363,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
       const status: AccountSecurityStatus = {
         passwordManaged: !isSsoSessionAccessToken(caller.accessToken),
         softwareTokenMfaEnabled: hasEnabledMfa(caller.user),
-        mfaRequiredByPolicy: await isMfaRequiredByWorkspacePolicy(caller.user, caller.accessToken),
+        mfaRequiredByPolicy: (await readMfaRequirement(caller.user, caller.accessToken)).mfaRequired,
       }
       return c.json(status)
     } catch (error) {
@@ -493,8 +494,8 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
       validateConfiguredCognitoAccessToken(accessToken)
       const user = await authenticationDependencies.cognito.getUser(accessToken)
       await authenticateWorkspacePrincipal(accessToken, user, c)
-      const policy = await readWorkspaceSecurityPolicy(user, accessToken)
-      if (policy?.mfaRequirement === 'required') {
+      const { policy, mfaRequired } = await readMfaRequirement(user, accessToken)
+      if (mfaRequired) {
         return c.json({
           code: 'MfaRequiredByPolicy' as const,
           message: 'The Workspace security policy requires MFA.',
@@ -708,59 +709,20 @@ async function handleMemberCredentialAction(
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceAdministration(principal)
     const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
-    const member = await workspaceDependencies.workspaceAccess.getActiveMember(
-      principal.directoryId,
+    const ports = createMemberCredentialResetPorts(action)
+    if (!ports) return unavailableResponse(c)
+
+    await resetMemberCredential(ports, {
+      workspaceId: principal.directoryId,
+      actorMemberKey: principal.userKey,
       memberKey,
-    )
-    if (!member) {
-      throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
-    }
-    if (await isSsoManagedEmail(member.email)) {
-      return c.json({
-        code: 'MemberSignInManagedBySso' as const,
-        message: 'The identity provider manages this member\'s password and MFA.',
-      }, 409)
-    }
-    const cognito = authenticationDependencies.cognito
-    const resetCredential = action === 'password-reset-requested'
-      ? cognito.adminResetUserPassword
-      : cognito.adminDisableSoftwareTokenMfa
-    const recordAction = workspaceDependencies.workspaceAccess.recordMemberCredentialAction
-    if (!resetCredential || !recordAction) return unavailableResponse(c)
-
-    const profile = await cognito.getUserProfile(member.memberKey)
-    if (action === 'password-reset-requested' && profile.status === 'FORCE_CHANGE_PASSWORD') {
-      return c.json({
-        code: 'MemberInvitationPending' as const,
-        message: 'The member has not accepted the invitation. Resend the invitation instead.',
-      }, 409)
-    }
-    if (action === 'mfa-reset' && profile.mfaConfigured !== true) {
-      return c.json({
-        code: 'MemberMfaNotEnrolled' as const,
-        message: 'The member has no authenticator app to reset.',
-      }, 409)
-    }
-
-    await recordAction.call(
-      workspaceDependencies.workspaceAccess,
-      principal.directoryId,
-      principal.userKey,
-      member.memberKey,
       action,
-      createWorkspaceMutationContext(c, principal, { action, memberKey: member.memberKey }),
-    )
-    await resetCredential.call(cognito, member.memberKey)
+      auditContext: createWorkspaceMutationContext(c, principal, { action, memberKey }),
+    })
 
-    if (action === 'password-reset-requested') {
-      try {
-        await cognito.globallySignOutWorkspaceUser?.(member.memberKey)
-      } catch (error) {
-        console.error('Failed to sign the member out after a password reset:', error)
-      }
-      return c.json({ sent: true as const }, 202)
-    }
-    return c.json({ reset: true as const })
+    return action === 'password-reset-requested'
+      ? c.json({ sent: true as const }, 202)
+      : c.json({ reset: true as const })
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       if (error.code === 'UserNotFoundException') {
@@ -777,5 +739,65 @@ async function handleMemberCredentialAction(
       }
     }
     return toAccountSecurityErrorResponse(c, error)
+  }
+}
+
+/**
+ * Creates the error for a credential reset this deployment cannot perform.
+ *
+ * @returns The error.
+ */
+function createCredentialResetUnavailableError() {
+  return new WorkspaceAccessError(503, 'AccountSecurityUnavailable', 'This sign-in operation is not available.')
+}
+
+/**
+ * Connects the credential reset use case to the Workspace store and Cognito.
+ *
+ * @param action - Reset the request asks for.
+ * @returns The ports, or undefined when this deployment cannot perform that reset.
+ */
+function createMemberCredentialResetPorts(
+  action: WorkspaceMemberCredentialAction,
+): MemberCredentialResetPorts | undefined {
+  const cognito = authenticationDependencies.cognito
+  const workspaceAccess = workspaceDependencies.workspaceAccess
+  const { adminResetUserPassword, adminDisableSoftwareTokenMfa } = cognito
+  const { recordMemberCredentialAction, hasRecordedMemberCredentialAction } = workspaceAccess
+  const changeCredential = action === 'password-reset-requested'
+    ? adminResetUserPassword
+    : adminDisableSoftwareTokenMfa
+  if (!changeCredential || !recordMemberCredentialAction) {
+    return undefined
+  }
+
+  return {
+    getActiveMember: (workspaceId, memberKey) => workspaceAccess.getActiveMember(workspaceId, memberKey),
+    isSsoManagedEmail,
+    async readSignInAccount(memberKey) {
+      const profile = await cognito.getUserProfile(memberKey)
+      return {
+        invitationPending: profile.status === 'FORCE_CHANGE_PASSWORD',
+        mfaEnrolled: profile.mfaConfigured === true,
+      }
+    },
+    async hasRecordedAction(...args) {
+      return await hasRecordedMemberCredentialAction?.apply(workspaceAccess, args) ?? false
+    },
+    recordAction: (...args) => recordMemberCredentialAction.apply(workspaceAccess, args),
+    async resetPassword(memberKey) {
+      if (!adminResetUserPassword) throw createCredentialResetUnavailableError()
+      await adminResetUserPassword.call(cognito, memberKey)
+    },
+    async disableAuthenticator(memberKey) {
+      if (!adminDisableSoftwareTokenMfa) throw createCredentialResetUnavailableError()
+      await adminDisableSoftwareTokenMfa.call(cognito, memberKey)
+    },
+    async signOutEverywhere(memberKey) {
+      await cognito.globallySignOutWorkspaceUser?.(memberKey)
+    },
+    reportFailure(message, error) {
+      console.error(message, error instanceof Error ? error.name : 'UnknownError')
+    },
   }
 }

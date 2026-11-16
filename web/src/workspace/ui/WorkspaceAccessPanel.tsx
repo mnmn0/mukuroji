@@ -8,14 +8,13 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from 'react'
-import useSWR, { useSWRConfig } from 'swr'
+import { useSWRConfig } from 'swr'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
   createWorkspaceInvitation,
   getWorkspaceAccess,
-  getWorkspaceMembersSignInSecurity,
   reinviteWorkspaceInvitation,
   resetWorkspaceMemberCredential,
   resendWorkspaceInvitation,
@@ -34,6 +33,7 @@ import {
   type WorkspaceRole,
 } from '../api'
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
+import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -255,12 +255,6 @@ type WorkspaceAccessConfirmationDialogProps = {
 
 const workspaceRoles = ['owner', 'admin', 'member', 'guest'] as const satisfies readonly WorkspaceRole[]
 
-const signInSecurityQueryConfig = {
-  dedupingInterval: 30_000,
-  revalidateOnFocus: false,
-  shouldRetryOnError: false,
-} as const
-
 /**
  * Workspace access API を SWR で取得し、mutation 後に最新状態へ再検証します。
  */
@@ -281,17 +275,13 @@ export function WorkspaceAccessPanelContainer({
     isLoading,
     key: accessKey,
   } = useWorkspaceAccess(mutationSession.accessToken)
-  const canReadSignInSecurity = access?.capabilities.canManageMembers === true
   const {
     data: signInSecurity,
     error: signInSecurityError,
     mutate: mutateSignInSecurity,
-  } = useSWR(
-    canReadSignInSecurity
-      ? ['workspace-members-sign-in-security', mutationSession.accessToken] as const
-      : null,
-    ([, token]) => getWorkspaceMembersSignInSecurity(token),
-    signInSecurityQueryConfig,
+  } = useWorkspaceMembersSignInSecurity(
+    mutationSession.accessToken,
+    access?.capabilities.canManageMembers === true,
   )
 
   const refresh = async () => {

@@ -1,0 +1,144 @@
+import type { MutationAuditContext } from '../../audit'
+import {
+  WorkspaceAccessError,
+  type WorkspaceMember,
+  type WorkspaceMemberCredentialAction,
+} from '../workspace-access'
+
+/** Sign-in state of a member's password account that decides whether a reset applies. */
+export type MemberSignInAccount = {
+  /** Whether the member has not yet replaced the invitation's temporary password. */
+  invitationPending: boolean
+  /** Whether the member has an MFA method registered. */
+  mfaEnrolled: boolean
+}
+
+/** Ports the credential reset use case needs. */
+export type MemberCredentialResetPorts = {
+  /** Reads an active member, or undefined when the member is missing or deactivated. */
+  getActiveMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
+  /** Tells whether an identity provider owns the sign-in of this email address. */
+  isSsoManagedEmail(email: string): Promise<boolean>
+  /** Reads the member's password account state. */
+  readSignInAccount(memberKey: string): Promise<MemberSignInAccount>
+  /** Tells whether a request with the same idempotency key already recorded this action. */
+  hasRecordedAction(
+    workspaceId: string,
+    memberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<boolean>
+  /** Checks the actor's authority and records the action in the audit log. */
+  recordAction(
+    workspaceId: string,
+    actorMemberKey: string,
+    memberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<unknown>
+  /** Invalidates the password and emails a reset code. */
+  resetPassword(memberKey: string): Promise<void>
+  /** Removes the member's authenticator app. */
+  disableAuthenticator(memberKey: string): Promise<void>
+  /** Signs the member out of every session. */
+  signOutEverywhere(memberKey: string): Promise<void>
+  /** Records a failure that does not undo the completed reset. */
+  reportFailure(message: string, error: unknown): void
+}
+
+/** Input of {@link resetMemberCredential}. */
+export type MemberCredentialResetInput = {
+  /** Workspace of the actor and the member. */
+  workspaceId: string
+  /** Member key of the administrator. */
+  actorMemberKey: string
+  /** Member whose credential is reset. */
+  memberKey: string
+  /** Which credential to reset. */
+  action: WorkspaceMemberCredentialAction
+  /** Audit context of the request, carrying its idempotency key. */
+  auditContext?: MutationAuditContext
+}
+
+/**
+ * Sends a password reset to a member, or removes a lost authenticator app, for an administrator.
+ *
+ * The action is recorded in the audit log before the account changes. A retry with the same
+ * idempotency key resumes after the recorded audit event, so a request interrupted between the
+ * audit write and the account change still completes. When the earlier attempt already removed
+ * the authenticator, the retry reports success instead of "not enrolled".
+ *
+ * @param ports - Member, identity, and audit ports.
+ * @param input - Actor, member, action, and audit context.
+ * @throws WorkspaceAccessError when the member cannot be found or the reset does not apply.
+ */
+export async function resetMemberCredential(
+  ports: MemberCredentialResetPorts,
+  input: MemberCredentialResetInput,
+): Promise<void> {
+  const member = await ports.getActiveMember(input.workspaceId, input.memberKey)
+  if (!member) {
+    throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
+  }
+  if (await ports.isSsoManagedEmail(member.email)) {
+    throw new WorkspaceAccessError(
+      409,
+      'MemberSignInManagedBySso',
+      'The identity provider manages this member\'s password and MFA.',
+    )
+  }
+
+  const account = await ports.readSignInAccount(member.memberKey)
+  const blocked = resolveBlockedReset(input.action, account)
+  if (blocked) {
+    if (await ports.hasRecordedAction(input.workspaceId, member.memberKey, input.action, input.auditContext)) {
+      return
+    }
+    throw blocked
+  }
+
+  await ports.recordAction(
+    input.workspaceId,
+    input.actorMemberKey,
+    member.memberKey,
+    input.action,
+    input.auditContext,
+  )
+
+  if (input.action === 'mfa-reset') {
+    await ports.disableAuthenticator(member.memberKey)
+    return
+  }
+
+  await ports.resetPassword(member.memberKey)
+  try {
+    await ports.signOutEverywhere(member.memberKey)
+  } catch (error) {
+    ports.reportFailure('Failed to sign the member out after a password reset.', error)
+  }
+}
+
+/**
+ * Explains why a reset does not apply to the member's current account.
+ *
+ * @param action - Requested reset.
+ * @param account - Member's password account state.
+ * @returns The error to report, or undefined when the reset applies.
+ */
+function resolveBlockedReset(action: WorkspaceMemberCredentialAction, account: MemberSignInAccount) {
+  if (action === 'password-reset-requested' && account.invitationPending) {
+    return new WorkspaceAccessError(
+      409,
+      'MemberInvitationPending',
+      'The member has not accepted the invitation. Resend the invitation instead.',
+    )
+  }
+  if (action === 'mfa-reset' && !account.mfaEnrolled) {
+    return new WorkspaceAccessError(
+      409,
+      'MemberMfaNotEnrolled',
+      'The member has no authenticator app to reset.',
+    )
+  }
+  return undefined
+}

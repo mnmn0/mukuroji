@@ -1,10 +1,8 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import useSWR from 'swr'
 import {
   ApiError,
   changePassword,
   disableSoftwareToken,
-  getAccountSecurity,
   startSoftwareTokenSetup,
   verifySoftwareTokenSetup,
   type AccountSecurityStatus,
@@ -12,13 +10,8 @@ import {
   type SoftwareTokenSetupStart,
 } from '../../../auth/api'
 import { createTranslator, type Locale, type MessageKey } from '../../../shared/i18n/i18n'
+import { useAccountSecurity } from '../queries/useAccountSecurity'
 import { AuthenticatorSetup } from './AuthenticatorSetup'
-
-/** SWR options for the account security status. */
-const accountSecurityQueryConfig = {
-  dedupingInterval: 10_000,
-  shouldRetryOnError: false,
-} as const
 
 /**
  * Props of {@link AccountSecurityPanelContainer}.
@@ -40,11 +33,7 @@ export function AccountSecurityPanelContainer({
   accessToken,
   locale,
 }: AccountSecurityPanelContainerProps) {
-  const { data, error, isLoading, mutate } = useSWR(
-    ['account-security', accessToken] as const,
-    ([, token]) => getAccountSecurity(token),
-    accountSecurityQueryConfig,
-  )
+  const { data, error, isLoading, mutate } = useAccountSecurity(accessToken)
 
   return (
     <AccountSecurityPanel
