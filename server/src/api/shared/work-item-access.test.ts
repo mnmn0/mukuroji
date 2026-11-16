@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ProjectDirectoryTeamResponse } from '../../modules/directory'
 import { requireAssignedProjectAcceptsNewWorkItems } from './work-item-access'
 
+/** Project directory port the assigned-Project lifecycle check reads in these tests. */
 type ProjectDirectoryPort = NonNullable<Parameters<typeof requireAssignedProjectAcceptsNewWorkItems>[3]>
 
 const closedTeam = {
