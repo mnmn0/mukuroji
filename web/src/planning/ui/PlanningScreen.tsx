@@ -7,6 +7,7 @@ import type {
   PlanningGoalFramework,
   PlanningHealth,
   PlanningRisk,
+  PlanningCapacity,
   PlanningSnapshot,
   ScheduleDependencyConstraint,
   ScheduleDependencyType,
@@ -176,6 +177,12 @@ export type PlanningLabels = PlanningUpdateLabels & {
   move: string
   /** 操作権限がない場合の文言です。 */
   readOnly: string
+  /** Live Planning graph の使用量を表示する formatter です。 */
+  capacityUsage: (capacity: PlanningCapacity) => string
+  /** 使用量が警告閾値を超えたときの案内です。 */
+  capacityWarning: string
+  /** 使用量が上限に達したときの案内です。 */
+  capacityFull: string
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -546,6 +553,14 @@ export function PlanningScreen({
         <p className="workbench-eyebrow">{labels.eyebrow}</p>
         <h1 className="workbench-title mt-2 text-page-title">{labels.title}</h1>
         <p className="workbench-description mt-2 max-w-[820px]">{labels.description}</p>
+        {snapshot ? (
+          <p
+            className="mt-2 text-xs font-medium text-[var(--workbench-muted)]"
+            data-testid="planning-capacity-usage"
+          >
+            {labels.capacityUsage(snapshot.capacity)}
+          </p>
+        ) : null}
         <div
           aria-label={labels.viewTabs}
           className="mt-5 flex flex-wrap gap-2"
@@ -580,6 +595,23 @@ export function PlanningScreen({
         role="tabpanel"
         tabIndex={0}
       >
+        {snapshot && snapshot.capacity.level !== 'normal' ? (
+          <div
+            className={snapshot.capacity.level === 'full'
+              ? 'rounded-lg border border-red-200 bg-red-50 px-4 py-3'
+              : 'rounded-lg border border-amber-300 bg-amber-50 px-4 py-3'}
+            data-testid="planning-capacity-warning"
+            role="status"
+          >
+            <p
+              className={snapshot.capacity.level === 'full'
+                ? 'max-w-[820px] text-sm font-semibold text-fg-red-800'
+                : 'max-w-[820px] text-sm font-semibold text-fg-amber-900'}
+            >
+              {snapshot.capacity.level === 'full' ? labels.capacityFull : labels.capacityWarning}
+            </p>
+          </div>
+        ) : null}
         {errorMessage ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
             <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.error}</p>
