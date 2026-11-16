@@ -1516,10 +1516,11 @@ export class DynamoDbWorkspaceSearchClient {
   ) {
     await this.ensureLocalTable()
     const replacement = createWorkspaceSearchDocument(input)
-    const document = options?.preserveCreator && replacement.creatorUserId === undefined
-      ? await this.withStoredCreator(replacement)
-      : replacement
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    if (options?.preserveCreator && replacement.creatorUserId === undefined) {
+      return await this.upsertPreservingCreator(replacement, sourceRevision)
+    }
+    const document = replacement
     const fenced = sourceRevision !== undefined || options?.unrevisioned === true
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -1613,27 +1614,62 @@ export class DynamoDbWorkspaceSearchClient {
   }
 
   /**
-   * Copies the creator and creation time of the stored document onto a replacement without them.
+   * Replaces a document that lacks a creator while keeping the stored creator and creation time.
    *
-   * @param document - Replacement document that lacks a creator.
-   * @returns The replacement, with the stored creator when the stored document has one.
+   * The write is conditioned on the stored row being exactly the one read, or still absent, so a
+   * creator added between the read and the write (by a late creation projection) is never
+   * dropped. A conflict re-reads the row and tries again; a stored document from a newer source
+   * revision is left in place.
+   *
+   * @param replacement - Replacement document that lacks a creator.
+   * @param sourceRevision - Source revision of the replacement, when the source is revisioned.
+   * @returns The document that was written, or the replacement when a newer one is kept.
    */
-  private async withStoredCreator(document: WorkspaceSearchDocument) {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: { workspaceId: document.workspaceId, recordKey: document.recordKey },
-      ConsistentRead: true,
-    }))
-    const stored = response.Item
-    const creatorUserId = typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined
-    if (!creatorUserId) return document
-    const createdAt = document.createdAt ??
-      (typeof stored?.createdAt === 'string' ? stored.createdAt : undefined)
-    return createWorkspaceSearchDocument({
-      ...document,
-      creatorUserId,
-      ...(createdAt ? { createdAt } : {}),
-    })
+  private async upsertPreservingCreator(
+    replacement: WorkspaceSearchDocument,
+    sourceRevision: number | undefined,
+  ) {
+    const maxAttempts = 5
+    for (let attempt = 1; ; attempt += 1) {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: replacement.workspaceId, recordKey: replacement.recordKey },
+        ConsistentRead: true,
+      }))
+      const stored = response.Item
+      const storedRevision = stored?.sourceRevision
+      if (
+        sourceRevision !== undefined &&
+        typeof storedRevision === 'number' &&
+        storedRevision > sourceRevision
+      ) {
+        return replacement
+      }
+      const document = withCreatorFrom(replacement, stored)
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: this.tableName,
+              Item: document,
+              ...(stored
+                ? {
+                    ConditionExpression: '#projectionDigest = :projectionDigest',
+                    ExpressionAttributeNames: { '#projectionDigest': 'projectionDigest' },
+                    ExpressionAttributeValues: { ':projectionDigest': stored.projectionDigest },
+                  }
+                : {
+                    ConditionExpression: 'attribute_not_exists(#recordKey)',
+                    ExpressionAttributeNames: { '#recordKey': 'recordKey' },
+                  }),
+            },
+          }],
+        }))
+        return document
+      } catch (error) {
+        if (!isTransactionConditionalCheckFailed(error) || attempt >= maxAttempts) throw error
+      }
+    }
   }
 
   /** Search document を entity key で削除します。 */
@@ -6717,6 +6753,28 @@ function invalidStoredTaskView() {
 }
 
 /** Validates the optional source revision used by an asynchronous projection guard. */
+/**
+ * Copies the creator and creation time of a stored document onto a replacement without them.
+ *
+ * @param document - Replacement document that lacks a creator.
+ * @param stored - Stored row, if any.
+ * @returns The replacement, with the stored creator when the stored row has one.
+ */
+function withCreatorFrom(
+  document: WorkspaceSearchDocument,
+  stored: Record<string, unknown> | undefined,
+) {
+  const creatorUserId = typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined
+  if (!creatorUserId) return document
+  const createdAt = document.createdAt ??
+    (typeof stored?.createdAt === 'string' ? stored.createdAt : undefined)
+  return createWorkspaceSearchDocument({
+    ...document,
+    creatorUserId,
+    ...(createdAt ? { createdAt } : {}),
+  })
+}
+
 function normalizeProjectionSourceRevision(value: number | undefined) {
   if (value === undefined) return undefined
   if (!Number.isSafeInteger(value) || value <= 0) {

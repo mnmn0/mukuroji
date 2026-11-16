@@ -338,6 +338,60 @@ test('adds the creator when the creation projection lands after a charter projec
   ])
 })
 
+test('keeps a creator added while a charter projection was between its read and write', async () => {
+  const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  })])
+  const creationWriter = new DynamoDbWorkspaceSearchClient('search-table', memory, {} as DynamoDBClient, false)
+  let interleaved = false
+  const racingClient = {
+    send: async (command: { constructor: { name: string } }) => {
+      const result = await memory.send(command as never)
+      // The creation projection lands right after the charter projection read the row.
+      if (!interleaved && command.constructor.name === 'GetCommand') {
+        interleaved = true
+        await creationWriter.upsertDocument(createProjectWorkspaceSearchDocument({
+          workspaceId: 'workspace-1',
+          teamId: 'core',
+          projectId: 'refero',
+          title: 'Refero',
+          creatorUserId: 'creator@example.com',
+        }), { unrevisioned: true })
+      }
+      return result
+    },
+  } as unknown as DynamoDBDocumentClient
+  const charterWriter = new DynamoDbWorkspaceSearchClient('search-table', racingClient, {} as DynamoDBClient, false)
+
+  const written = await charterWriter.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS-2', tags: [], repositoryUrls: [] },
+    sourceRevision: 2,
+  }), { sourceRevision: 2, preserveCreator: true })
+
+  expect(interleaved).toBe(true)
+  expect(written).toMatchObject({ body: 'OPS-2', creatorUserId: 'creator@example.com', sourceRevision: 2 })
+  const response = await creationWriter.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: true,
+      projectIds: new Set(['refero']),
+      teamIds: new Set(['core']),
+    },
+    filters: { creatorUserIds: ['creator@example.com'] },
+  })
+  expect(response.results).toEqual([expect.objectContaining({ body: 'OPS-2' })])
+})
+
 test('does not let an older source projection replace or remove a newer document', async () => {
   const current = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',
