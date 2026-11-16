@@ -202,6 +202,51 @@ test('persists service-account read state using Enterprise control without a syn
   })
 })
 
+test('restores as a service account with only the Enterprise control fence', async () => {
+  const workspaceId = 'workspace-service-restore'
+  await withTestEnvironment({ ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable', MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceId }, async () => {
+    configureFakeProjectClients(false)
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const timestamp = new Date().toISOString()
+    const issued = await identity.createServiceAccountWithToken({
+      workspaceId, accountId: 'planning-restorer', displayName: 'Planning restorer',
+      permissions: ['planning.read', 'planning.manage', 'projects.read', 'service-accounts.use'], roleId: 'workspace:admin',
+      scope: { workspaceId, kind: 'workspace' }, credentialLifetimeDays: 30,
+      allowedSourceCidrs: [], status: 'active', credentialGeneration: 0, revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    }, 'create-planning-restorer', 'create-planning-restorer-fingerprint')
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    await planning.create(workspaceId, {
+      id: 'portfolio-service', type: 'portfolio', title: 'Service portfolio', ownerMemberKey: 'demo@example.com',
+      status: 'planned', health: 'on-track', risk: 'none', progressMode: 'automatic',
+      baseline: { startDate: '2026-08-01', endDate: '2026-08-01' }, forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      expectedRevision: 0,
+    }, { workItems: [] })
+    const archived = await planning.archive(workspaceId, 'portfolio-service', { expectedRevision: 1 }, { workItems: [] })
+    const restore = planning.restore.bind(planning)
+    let checks: unknown
+    planning.restore = async (...input) => {
+      checks = input[4]?.authorizationConditionChecks
+      return restore(...input)
+    }
+    setTestAppDependencies({ planning, enterpriseIdentity: identity })
+    const response = await app.request('/api/planning/entities/portfolio-service/restore', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: archived.planning.revision }),
+    })
+    expect(response.status).toBe(200)
+    // The synthetic member of a service account has no row a membership fence could match.
+    expect(checks).toEqual([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'EnterpriseIdentityTable',
+          Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' },
+        }),
+      }),
+    ])
+  })
+})
+
 /** Creates the canonical two-endpoint dependency input shared by API idempotency tests. */
 function createWorkItemDependencyInput(expectedRevision = 0) {
   return {

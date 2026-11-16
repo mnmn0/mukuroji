@@ -3869,7 +3869,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         workItemState,
         {
           // Every restore revision fails once the caller's membership or Enterprise controls change.
-          authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
+          // A service account has no Workspace member row, so only its Enterprise control is fenced.
+          authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
           // Rechecked each step for the restored entity, and for dependency counterparts: restoring
           // an edge needs the same permission on both endpoints as creating one.
           canManageEntity: (entity) => canManagePlanningEntityScope(principal, entity),
