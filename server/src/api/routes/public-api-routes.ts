@@ -524,6 +524,8 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'dueDate',
   'schedule',
   'priority',
+  'actualStartDate',
+  'actualEndDate',
   'creatorMemberKey',
   'workflowStatusId',
   'workItemTypeId',
@@ -561,6 +563,10 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
     dueDate: workItem.dueDate,
     schedule: projectPublicWorkItemSchedule(workItem.schedule),
     priority: workItem.priority,
+    ...(workItem.actualStartDate === undefined
+      ? {}
+      : { actualStartDate: workItem.actualStartDate }),
+    ...(workItem.actualEndDate === undefined ? {} : { actualEndDate: workItem.actualEndDate }),
     creatorMemberKey: workItem.creatorMemberKey,
     workflowStatusId: workItem.workflowStatusId,
     workItemTypeId: workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,

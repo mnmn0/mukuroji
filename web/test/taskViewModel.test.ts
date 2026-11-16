@@ -59,8 +59,16 @@ describe('task view constants and input normalization', () => {
   test('exposes the existing tabs, priorities, due-date filters, and sort orders', () => {
     expect(taskTabs).toEqual(['table', 'board', 'gantt', 'calendar', 'file', 'permissions'])
     expect(taskPriorities).toEqual(['high', 'medium', 'low'])
-    expect(taskDueDateFilters).toEqual(['all', 'overdue', 'today', 'upcoming', 'no-date'])
-    expect(taskSortOrders).toEqual(['due-date-asc', 'due-date-desc'])
+    expect(taskDueDateFilters).toEqual([
+      'all',
+      'overdue',
+      'today',
+      'upcoming',
+      'no-date',
+      'completed-late',
+      'started-late',
+    ])
+    expect(taskSortOrders).toEqual(['due-date-asc', 'due-date-desc', 'completion-delay-desc'])
   })
 
   test('narrows supported priorities and defaults invalid values to medium', () => {
@@ -86,10 +94,13 @@ describe('task view constants and input normalization', () => {
       'tasks.filter.dueDateToday',
       'tasks.filter.dueDateUpcoming',
       'tasks.filter.dueDateNoDate',
+      'tasks.filter.completedLate',
+      'tasks.filter.startedLate',
     ])
     expect(taskSortOrders.map(resolveTaskSortOrderLabelKey)).toEqual([
       'tasks.sort.dueDateAsc',
       'tasks.sort.dueDateDesc',
+      'tasks.sort.completionDelayDesc',
     ])
   })
 })
@@ -332,6 +343,54 @@ describe('task due-date model', () => {
       'later',
       'same-date-a',
     ])
+  })
+})
+
+describe('task plan-versus-actual model', () => {
+  const lateTask = createTask({
+    actualEndDate: '2026-07-26',
+    actualStartDate: '2026-07-20',
+    id: 'late',
+    statusCategory: 'completed',
+  })
+  const earlyTask = createTask({
+    actualEndDate: '2026-07-21',
+    actualStartDate: '2026-07-20',
+    id: 'early',
+    statusCategory: 'completed',
+  })
+  const openTask = createTask({ id: 'open', statusCategory: 'started', actualStartDate: '2026-07-20' })
+  const rangeTask = createTask({
+    actualStartDate: '2026-07-22',
+    id: 'range',
+    schedule: {
+      calendarPolicy: { holidays: [], timeZone: 'UTC', workingWeekdays: ['monday'] },
+      durationDays: 3,
+      endDate: '2026-07-23',
+      mode: 'date-range',
+      startDate: '2026-07-21',
+    },
+    statusCategory: 'started',
+  })
+
+  test('filters completed-late and started-late Work Items', () => {
+    const tasks = [lateTask, earlyTask, openTask, rangeTask]
+    expect(tasks.filter((task) => matchesTaskDueDateFilter(task, 'completed-late')).map((task) => task.id))
+      .toEqual(['late'])
+    expect(tasks.filter((task) => matchesTaskDueDateFilter(task, 'started-late')).map((task) => task.id))
+      .toEqual(['range'])
+  })
+
+  test('sorts the longest completion delay first and keeps the rest in due-date order', () => {
+    expect(sortTasksByDueDate([earlyTask, openTask, lateTask], 'completion-delay-desc').map((task) => task.id))
+      .toEqual(['late', 'early', 'open'])
+  })
+
+  test('groups by actual dates and delays', () => {
+    const t = (key: MessageKey) => key
+    expect(resolveProjectTaskGroupValue(lateTask, 'actualEndDate', {}, undefined, t).label).toBe('2026-07-26')
+    expect(resolveProjectTaskGroupValue(lateTask, 'completionDelayDays', {}, undefined, t).label).toBe('3')
+    expect(resolveProjectTaskGroupValue(openTask, 'completionDelayDays', {}, undefined, t).label).toBe('—')
   })
 })
 

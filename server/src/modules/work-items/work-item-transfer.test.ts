@@ -188,4 +188,16 @@ describe('Work Item export', () => {
     expect(exported.workItems[0]).not.toHaveProperty('source')
     expect(exported.workItems[0]).not.toHaveProperty('schemaVersion')
   })
+
+  test('CSV と JSON に実績開始日・実績終了日を出し、未記録なら空にする', () => {
+    const completed = { ...workItem, actualStartDate: '2026-07-20', actualEndDate: '2026-08-03' }
+    const csv = createWorkItemExport('csv', [completed, workItem]).body.split('\r\n')
+    expect(csv[0]).toContain(',dueDateUpdatedAt,actualStartDate,actualEndDate,revision,')
+    expect(csv[1]).toContain(',2026-07-18T00:45:00.000Z,2026-07-20,2026-08-03,2,')
+    expect(csv[2]).toContain(',2026-07-18T00:45:00.000Z,,,2,')
+
+    const exported = JSON.parse(createWorkItemExport('json', [completed, workItem]).body)
+    expect(exported.workItems[0]).toMatchObject({ actualStartDate: '2026-07-20', actualEndDate: '2026-08-03' })
+    expect(exported.workItems[1]).not.toHaveProperty('actualStartDate')
+  })
 })

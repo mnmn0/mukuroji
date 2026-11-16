@@ -1,12 +1,13 @@
-import type {
-  BulkOperation,
-  BulkOperationPreview,
-  BulkOperationRequest,
-  ResolvedWorkItemConfiguration,
-  WorkItemPatch,
-  WorkItemConfiguration,
-  CanonicalWorkItem,
-  WorkItemPriority,
+import {
+  deriveWorkItemScheduleVariance,
+  type BulkOperation,
+  type BulkOperationPreview,
+  type BulkOperationRequest,
+  type ResolvedWorkItemConfiguration,
+  type WorkItemPatch,
+  type WorkItemConfiguration,
+  type CanonicalWorkItem,
+  type WorkItemPriority,
 } from '@mukuroji/contracts'
 import {
   Fragment,
@@ -61,6 +62,11 @@ import {
   taskScheduleModeLabelKeys,
 } from '../model/taskSchedule'
 import { TaskInlineField } from './TaskInlineField'
+import {
+  formatTaskScheduleVariance,
+  resolveTaskScheduleVarianceTone,
+  taskScheduleVarianceToneClasses,
+} from '../model/taskActualDates'
 import { TaskInlineCustomFields } from './TaskInlineCustomFields'
 import { WorkItemAssigneeAvatar } from '../../work-items/ui/WorkItemAssigneeAvatar'
 import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDisplay'
@@ -772,6 +778,7 @@ function TaskTableRow({
   const scheduleRange = formatTaskScheduleRange(schedule)
   const scheduleDisplay = `${t(taskScheduleModeLabelKeys[schedule.mode])}${scheduleRange ? `: ${scheduleRange}` : ''}`
   const overdue = isTaskOverdue(task)
+  const scheduleVariance = deriveWorkItemScheduleVariance(task)
   const cellPadding = resolveTaskTableCellPadding(presentation?.density)
   const titleCellPadding = resolveTaskTableCellPadding(presentation?.density, true)
   const wrapText = presentation?.display.wrapTitles ?? false
@@ -987,6 +994,34 @@ function TaskTableRow({
               ) : <span>{scheduleDisplay}</span>}
             </td>
           )
+          case 'actualStartDate':
+          case 'actualEndDate': return (
+            <td
+              {...columnCellProps}
+              className={`whitespace-nowrap ${cellPadding} text-fg-505967`}
+              data-testid={`task-${field}-${task.id}`}
+              key={field}
+            >
+              {task[field] ?? '—'}
+            </td>
+          )
+          case 'startDelayDays':
+          case 'completionDelayDays': {
+            const delay = scheduleVariance[field]
+            const tone = resolveTaskScheduleVarianceTone(delay)
+            return (
+              <td
+                {...columnCellProps}
+                className={`whitespace-nowrap ${cellPadding} ${
+                  tone ? taskScheduleVarianceToneClasses[tone] : 'text-fg-8f99a8'
+                }`}
+                data-testid={`task-${field}-${task.id}`}
+                key={field}
+              >
+                {formatTaskScheduleVariance(delay, t)}
+              </td>
+            )
+          }
           case 'priority': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
               {canEditTask ? (
@@ -1119,6 +1154,10 @@ function isSupportedProjectTaskColumn(field: string): boolean {
     'assignee',
     'status',
     'dueDate',
+    'actualStartDate',
+    'actualEndDate',
+    'startDelayDays',
+    'completionDelayDays',
     'priority',
     'workItemType',
     'project',
@@ -1139,6 +1178,10 @@ function resolveTaskTableColumnLabel(
     case 'assignee': return t('tasks.column.assignee')
     case 'status': return t('tasks.column.status')
     case 'dueDate': return t('tasks.column.dueDate')
+    case 'actualStartDate': return t('tasks.column.actualStartDate')
+    case 'actualEndDate': return t('tasks.column.actualEndDate')
+    case 'startDelayDays': return t('tasks.column.startDelayDays')
+    case 'completionDelayDays': return t('tasks.column.completionDelayDays')
     case 'priority': return t('tasks.column.priority')
     case 'workItemType': return t('tasks.column.workItemType')
     case 'project': return t('workspace.column.project')

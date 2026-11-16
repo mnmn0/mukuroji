@@ -3715,6 +3715,7 @@ export function TaskScreen({
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={isRetainedDetail ? undefined : artifacts}
                   canAccessTriage={isRetainedDetail ? false : canAccessTriage}
+                  canCorrectActualDates={!isRetainedDetail && canManageProjectMembers}
                   canManageScheduleDependencyEndpoint={isRetainedDetail
                     ? undefined
                     : canManageScheduleDependencyEndpoint}

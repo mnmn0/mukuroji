@@ -1079,7 +1079,9 @@ function readTaskViewDueDatePreset(
     value === 'overdue' ||
     value === 'today' ||
     value === 'upcoming' ||
-    value === 'no-date'
+    value === 'no-date' ||
+    value === 'completed-late' ||
+    value === 'started-late'
   ) {
     return value
   }

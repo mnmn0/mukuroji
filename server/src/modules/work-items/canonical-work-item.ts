@@ -10,6 +10,7 @@ import {
 } from '@mukuroji/contracts'
 import { isStoredContributorAssignmentList } from './domain/contributor-assignments'
 import { isStoredAcceptanceCriterionList } from './domain/acceptance-criteria'
+import { isOptionalWorkItemActualDate } from './domain/actual-dates'
 import {
   deriveWorkItemScheduleDueDate,
   isCanonicalWorkItemSchedule,
@@ -79,6 +80,10 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
   dueDateUpdatedAt?: string
+  /** Local date when the Work Item first entered the started or completed category. */
+  actualStartDate?: string
+  /** Local date of the latest effective completion; present only while completed. */
+  actualEndDate?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終 state 更新日時の ISO 8601 timestamp です。 */
@@ -164,7 +169,9 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
       value.createdAt,
       value.updatedAt,
     ) &&
-    hasCanonicalArchiveState(value)
+    hasCanonicalArchiveState(value) &&
+    isOptionalWorkItemActualDate(value.actualStartDate) &&
+    isOptionalWorkItemActualDate(value.actualEndDate)
 }
 
 /**

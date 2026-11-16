@@ -60,6 +60,7 @@ export function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueR
     )
   }
   rejectWorkItemInternalFields(input, [
+    'actualDateCorrection',
     'authorizationConditionChecks',
     'authorizationSnapshot',
     'configurationConditionChecks',

@@ -73,6 +73,8 @@ const taskViewDueDatePresets: readonly TaskViewDueDatePreset[] = [
   'today',
   'upcoming',
   'no-date',
+  'completed-late',
+  'started-late',
 ]
 const taskViewDisplayOptionIds: readonly (keyof TaskViewDisplayOptions)[] = [
   'showCompleted',

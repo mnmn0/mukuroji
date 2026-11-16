@@ -1510,6 +1510,8 @@ function configureFakeProjectClients(
       contributorAssignments?: unknown
       /** Acceptance criteria supplied to the adapter, when the update changes them. */
       acceptanceCriteria?: unknown
+      /** Manager correction of the actual dates supplied to the adapter. */
+      actualDateCorrection?: UpdateTeamIssueRequestBody['actualDateCorrection']
       /** Caller authorization ConditionChecks supplied to the adapter. */
       authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
       /** Configuration guard ConditionChecks supplied to the adapter. */
@@ -2837,6 +2839,7 @@ function configureFakeProjectClients(
           issueId,
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
           ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
+          ...(input.actualDateCorrection ? { actualDateCorrection: input.actualDateCorrection } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),

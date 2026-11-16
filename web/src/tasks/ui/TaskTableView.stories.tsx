@@ -90,6 +90,41 @@ export const SavedViewPresentation: Story = {
   },
 }
 
+/** Planned due dates beside the recorded actual dates and the completion delay. */
+export const PlanAndActual: Story = {
+  args: {
+    presentation: {
+      columns: [
+        { field: 'title' },
+        { field: 'status' },
+        { field: 'dueDate' },
+        { field: 'actualStartDate' },
+        { field: 'actualEndDate' },
+        { field: 'completionDelayDays' },
+      ],
+      density: 'comfortable',
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: true,
+        showCompleted: true,
+        showEmptyGroups: true,
+        showSubtasks: true,
+        wrapTitles: false,
+      },
+    },
+    tasks: [
+      {
+        ...taskViewStoryTasks[0],
+        actualStartDate: '2026-06-01',
+        actualEndDate: '2026-06-08',
+        statusCategory: 'completed',
+      },
+      { ...taskViewStoryTasks[1], actualStartDate: '2026-06-02' },
+      taskViewStoryTasks[2],
+    ],
+  },
+}
+
 /** Canonical Assign request consumed once while retaining the initialized toolbar mode. */
 export const CanonicalAssignEntrance: Story = {
   args: {

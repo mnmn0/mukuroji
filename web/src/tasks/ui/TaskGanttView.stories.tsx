@@ -74,3 +74,27 @@ export const PeriodWindow: Story = {
     )
   },
 }
+
+/** Planned bars with the recorded actual bars below them, one completed late and one in progress. */
+export const PlanAndActual: Story = {
+  args: {
+    tasks: [
+      {
+        ...taskViewStoryTasks[0],
+        actualStartDate: '2026-06-01',
+        actualEndDate: '2026-06-08',
+        statusCategory: 'completed',
+      },
+      { ...taskViewStoryTasks[1], actualStartDate: '2026-06-02' },
+      taskViewStoryTasks[2],
+    ],
+    windowStartMonth: '2026-06',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[0].id}`))
+      .toHaveAccessibleName(t('tasks.gantt.actualBar').replace('{start}', '2026-06-01').replace('{end}', '2026-06-08'))
+    await expect(canvas.queryByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[2].id}`)).not.toBeInTheDocument()
+  },
+}
+

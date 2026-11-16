@@ -46,6 +46,7 @@ import {
   resolveTaskScheduleEndDate,
   resolveTaskSchedulePrimaryDate,
   resolveTaskScheduleStartDate,
+  taskScheduleInstantToLocalDate,
   tryAddTaskTimelineDays,
 } from '../model/taskSchedule'
 import {
@@ -72,6 +73,8 @@ import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRe
 const GANTT_DAY_WIDTH = 42
 const GANTT_TABLE_WIDTH = 360
 const GANTT_ROW_HEIGHT = 124
+/** Vertical offset of the actual bar, just below the 36px planned bar placed at 28px. */
+const GANTT_ACTUAL_BAR_TOP = 70
 const GANTT_BAR_CENTER_OFFSET = 46
 const GANTT_EXTERNAL_STUB_HEIGHT = 44
 const MAX_GANTT_TIMELINE_COLUMNS = 180
@@ -691,6 +694,12 @@ export function TaskGanttView({
             const taskKey = createTaskKey(row.task)
             const isBusy = busyTaskKey === taskKey
             const bar = createGanttBar(row.schedule, timelineColumns)
+            const actualBar = createGanttActualBar(row.task, row.schedule, timelineColumns)
+            const actualBarLabel = row.task.actualStartDate
+              ? t('tasks.gantt.actualBar')
+                  .replace('{start}', row.task.actualStartDate)
+                  .replace('{end}', row.task.actualEndDate ?? t('tasks.gantt.actualInProgress'))
+              : undefined
             return (
               <article
                 className="grid min-w-max border-b border-tone-e4e7ec last:border-b-0"
@@ -897,6 +906,25 @@ export function TaskGanttView({
                         : t('tasks.gantt.outsideWindow')}
                     </span>
                   )}
+                  {actualBar && actualBarLabel ? (
+                    // The actual bar sits below the planned bar so the plan and the result line up.
+                    <div
+                      aria-label={actualBarLabel}
+                      className={`absolute z-[2] h-2.5 rounded-sm ${
+                        row.task.actualEndDate
+                          ? 'bg-tone-087c70'
+                          : 'border border-dashed border-tone-087c70 bg-tone-ccfbea'
+                      }`}
+                      data-testid={`task-gantt-actual-bar-${row.task.id}`}
+                      role="img"
+                      style={{
+                        left: `${actualBar.left}px`,
+                        top: `${GANTT_ACTUAL_BAR_TOP}px`,
+                        width: `${actualBar.width}px`,
+                      }}
+                      title={actualBarLabel}
+                    />
+                  ) : null}
                 </div>
               </article>
             )
@@ -1396,6 +1424,43 @@ function createGanttBar(
   if (!startDate || !endDate) {
     return undefined
   }
+  return createGanttDateRangeBar(startDate, endDate, columns)
+}
+
+/**
+ * Calculates the actual bar from the recorded start to the actual end, or to today while the
+ * work is still in progress.
+ *
+ * @param task - Work Item with recorded actual dates.
+ * @param schedule - Schedule whose calendar policy defines today.
+ * @param columns - Ordered bounded timeline columns.
+ * @returns Bar geometry, or undefined before work starts or outside the visible period.
+ */
+function createGanttActualBar(
+  task: CanonicalWorkItem,
+  schedule: WorkItemSchedule,
+  columns: readonly GanttTimelineColumn[],
+): GanttBar | undefined {
+  if (!task.actualStartDate) return undefined
+  const endDate = task.actualEndDate ??
+    taskScheduleInstantToLocalDate(new Date(), schedule.calendarPolicy)
+  if (endDate < task.actualStartDate) return undefined
+  return createGanttDateRangeBar(task.actualStartDate, endDate, columns)
+}
+
+/**
+ * Calculates bar geometry for an inclusive date range.
+ *
+ * @param startDate - Inclusive first date.
+ * @param endDate - Inclusive last date.
+ * @param columns - Ordered bounded timeline columns.
+ * @returns Bar geometry, or undefined for an out-of-axis range.
+ */
+function createGanttDateRangeBar(
+  startDate: string,
+  endDate: string,
+  columns: readonly GanttTimelineColumn[],
+): GanttBar | undefined {
   const firstDate = columns[0]?.startDate
   const lastDate = columns.at(-1)?.endDate
   if (!firstDate || !lastDate || endDate < firstDate || lastDate < startDate) {

@@ -9,7 +9,9 @@ import { type WorkItemDependencies } from '../../app/composition/app-dependencie
 import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import {
+  applyWorkItemStatusTransitionToActualDates,
   readAssignedProjectId,
+  workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
   type UpdateTeamIssueRequestBody,
 } from '../../modules/work-items'
@@ -320,6 +322,15 @@ export async function resolveFileApprovalCompletionTransition(
       statusCategory: nextStatus.statusCategory,
       workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
       expectedRevision: workItem.revision,
+      actualDates: applyWorkItemStatusTransitionToActualDates(
+        {
+          ...(workItem.actualStartDate ? { actualStartDate: workItem.actualStartDate } : {}),
+          ...(workItem.actualEndDate ? { actualEndDate: workItem.actualEndDate } : {}),
+        },
+        workItem.statusCategory,
+        nextStatus.statusCategory,
+        workItemScheduleInstantToLocalDate(new Date(), workItem.schedule.calendarPolicy),
+      ),
       configurationConditionChecks: createWorkItemConfigurationGuardConditionChecks(
         getWorkItemConfigurationTableName(),
         directoryId,

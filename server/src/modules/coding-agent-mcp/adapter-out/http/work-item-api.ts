@@ -17,6 +17,7 @@ const taskSchema: z.ZodType<AgentTask> = z.object({
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
   workItemTypeId: identifier.optional(), statusCategory: category,
   priority: z.enum(['high', 'medium', 'low']), dueDate: z.union([z.literal(''), z.iso.date()]),
+  actualStartDate: z.iso.date().optional(), actualEndDate: z.iso.date().optional(),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),

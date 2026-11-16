@@ -91,6 +91,7 @@ import {
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from './TaskHandoffPanel'
+import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -207,6 +208,8 @@ export type TaskDetailPaneProps = {
   onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
   onScheduleNoChange?: (teamId: string, issueId: string) => void
+  /** Whether the viewer manages the Work Item's Project and may correct its actual dates. */
+  canCorrectActualDates?: boolean
   /** Saves editable fields on the selected Work Item. */
   onUpdateIssue?: (
     teamId: string,
@@ -306,6 +309,7 @@ export function TaskDetailPane({
   onDeleteRelation,
   onDeleteScheduleDependency,
   onScheduleNoChange,
+  canCorrectActualDates = false,
   onUpdateIssue,
   onUpdateScheduleDependency,
   projects,
@@ -1180,6 +1184,7 @@ export function TaskDetailPane({
         )
       case 'schedule':
         return (
+          <>
           <fieldset
             className="contents"
             disabled={isReadOnly || isWorkItemMutationPending}
@@ -1272,6 +1277,16 @@ export function TaskDetailPane({
               </button>
             </div>
           </fieldset>
+          <TaskActualDatesPanel
+            canCorrect={Boolean(canCorrectActualDates && onUpdateIssue) && !isReadOnly}
+            disabled={isReadOnly || isWorkItemMutationPending}
+            onCorrect={(patch) => {
+              void submitIssueUpdate(patch)
+            }}
+            t={t}
+            task={task}
+          />
+          </>
         )
       case 'relations':
         return (

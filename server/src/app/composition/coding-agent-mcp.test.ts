@@ -141,7 +141,9 @@ function startFakeApi() {
       if (rejected) return rejected
       seenKeys.push(request.headers.get('Idempotency-Key') ?? '')
       task = { ...task, revision: task.revision + 1, workflowStatusId: body.workflowStatusId, statusCategory: body.workflowStatusId === 'done' ? 'completed' : 'started' }
-      return Response.json(task)
+      return Response.json(task.statusCategory === 'completed'
+        ? { ...task, actualStartDate: '2026-09-01', actualEndDate: '2026-09-02' }
+        : task)
     }
     return Response.json(url.pathname === '/api/v1/work-items' ? { items: [task], hasMore: false } : task)
   } })
@@ -255,7 +257,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     }
     expect(fake.reportBodies).toHaveLength(reportsBeforeInvalid)
     expect((await call(client, 'complete_task', { taskId: 'task', expectedRevision: 2, workflowStatusId: 'done', idempotencyKey: crypto.randomUUID() })).content)
-      .toMatchObject({ data: { statusCategory: 'completed' } })
+      .toMatchObject({ data: { statusCategory: 'completed', actualStartDate: '2026-09-01', actualEndDate: '2026-09-02' } })
     expect((await call(client, 'finish_run', { runId: 'run_00000000-0000-4000-8000-000000000001', outcome: 'completed', idempotencyKey: crypto.randomUUID() })).content)
       .toMatchObject({ data: { state: 'finished', outcome: 'completed' } })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'none', task: null, ownRuns: [] } })

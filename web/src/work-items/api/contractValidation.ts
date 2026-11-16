@@ -510,7 +510,19 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isOptionalString(value.sourceTriageEntryId) &&
     isOptionalString(value.archivedAt) &&
     isOptionalString(value.archivedBy) &&
+    isOptionalCalendarDate(value.actualStartDate) &&
+    isOptionalCalendarDate(value.actualEndDate) &&
     isApprovalSummary(value.approvalSummary, value.createdAt)
+}
+
+/**
+ * Returns whether a value is absent or a `YYYY-MM-DD` calendar date.
+ *
+ * @param value - Unknown date candidate.
+ * @returns Whether the value is undefined or a well-formed date string.
+ */
+function isOptionalCalendarDate(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(value))
 }
 
 /**
