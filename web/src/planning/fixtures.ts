@@ -330,6 +330,15 @@ export const planningSnapshotFixture = {
       'release-autumn': 0,
     },
   },
+  capacity: {
+    level: 'normal',
+    liveRowCount: 24,
+    liveRowCapacity: 20_000,
+    warningRowCount: 16_000,
+    liveByteCount: 12_000,
+    liveByteCapacity: 24_000_000,
+    warningByteCount: 19_200_000,
+  },
   workItemDependencySummary: {
     criticalPath: {
       workItems: [
@@ -456,6 +465,15 @@ export const emptyPlanningSnapshotFixture = {
     entityIds: [],
     totalDurationDays: 0,
     slackByEntityId: {},
+  },
+  capacity: {
+    level: 'normal',
+    liveRowCount: 0,
+    liveRowCapacity: 20_000,
+    warningRowCount: 16_000,
+    liveByteCount: 12_000,
+    liveByteCapacity: 24_000_000,
+    warningByteCount: 19_200_000,
   },
   workItemDependencySummary: {
     criticalPath: {
