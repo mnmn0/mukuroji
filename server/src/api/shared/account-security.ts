@@ -13,7 +13,7 @@ import {
 import { toProjectPrincipal } from './authentication-session'
 import type { CognitoAccessTokenClaims } from './enterprise-access'
 import { getEnv } from './runtime-config'
-import { decodeJwtPayload } from './token-claims'
+import { decodeJwtPayload, readNumericClaim } from './token-claims'
 
 /**
  * Checks whether a Cognito user has any MFA method enabled.
@@ -50,11 +50,43 @@ export function isSsoSessionAccessToken(accessToken: string) {
  * @returns Whether the policy requires MFA.
  */
 export async function isMfaRequiredByWorkspacePolicy(user: GetUserResponse, accessToken: string) {
+  return (await readWorkspaceSecurityPolicy(user, accessToken))?.mfaRequirement === 'required'
+}
+
+/**
+ * Reads the security policy of the user's Workspace.
+ *
+ * @param user - Cognito GetUser response.
+ * @param accessToken - Access token of the user.
+ * @returns The policy, or undefined when the Workspace has not saved one.
+ */
+export async function readWorkspaceSecurityPolicy(user: GetUserResponse, accessToken: string) {
   const principal = toProjectPrincipal(user, accessToken)
   const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(
     principal.directoryId,
   )
-  return snapshot.policy?.mfaRequirement === 'required'
+  return snapshot.policy
+}
+
+/**
+ * Checks whether the user signed in recently enough for a sensitive account change.
+ *
+ * @param accessToken - Access token of the user.
+ * @param maximumAgeMinutes - Longest time since sign-in that still counts as recent.
+ * @param nowMilliseconds - Current time.
+ * @returns Whether the token's `auth_time` (or `iat`) is within the limit.
+ */
+export function isRecentlyAuthenticated(
+  accessToken: string,
+  maximumAgeMinutes: number,
+  nowMilliseconds = Date.now(),
+) {
+  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
+  const authenticatedAt = readNumericClaim(claims?.auth_time) ?? readNumericClaim(claims?.iat)
+  const nowSeconds = Math.floor(nowMilliseconds / 1000)
+  return authenticatedAt !== undefined &&
+    authenticatedAt <= nowSeconds &&
+    nowSeconds - authenticatedAt <= maximumAgeMinutes * 60
 }
 
 /**

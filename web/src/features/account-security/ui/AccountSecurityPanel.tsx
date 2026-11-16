@@ -298,8 +298,12 @@ function MfaSection({
       await onDisableMfa()
       setIsConfirmingDisable(false)
       setNoticeKey('accountSecurity.mfa.disabledNotice')
-    } catch {
-      setErrorKey('accountSecurity.mfa.error.disable')
+    } catch (error) {
+      setErrorKey(
+        error instanceof ApiError && error.code === 'RecentSignInRequired'
+          ? 'accountSecurity.mfa.error.recentSignIn'
+          : 'accountSecurity.mfa.error.disable',
+      )
     } finally {
       setIsDisabling(false)
     }

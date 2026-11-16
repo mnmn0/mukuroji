@@ -18,7 +18,9 @@ import {
 import {
   hasEnabledMfa,
   isMfaRequiredByWorkspacePolicy,
+  isRecentlyAuthenticated,
   isSsoSessionAccessToken,
+  readWorkspaceSecurityPolicy,
 } from '../shared/account-security'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createAuthenticationResponse } from '../shared/authentication-session'
@@ -491,11 +493,19 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
       validateConfiguredCognitoAccessToken(accessToken)
       const user = await authenticationDependencies.cognito.getUser(accessToken)
       await authenticateWorkspacePrincipal(accessToken, user, c)
-      if (await isMfaRequiredByWorkspacePolicy(user, accessToken)) {
+      const policy = await readWorkspaceSecurityPolicy(user, accessToken)
+      if (policy?.mfaRequirement === 'required') {
         return c.json({
           code: 'MfaRequiredByPolicy' as const,
           message: 'The Workspace security policy requires MFA.',
         }, 409)
+      }
+      // A stolen access token must not be enough to remove the second factor.
+      if (!isRecentlyAuthenticated(accessToken, policy?.sensitiveActionReauthenticationMinutes ?? 15)) {
+        return c.json({
+          code: 'RecentSignInRequired' as const,
+          message: 'Sign in again before turning off the authenticator app.',
+        }, 403)
       }
       const cognito = authenticationDependencies.cognito
       if (!cognito.setSoftwareTokenMfaEnabled) return unavailableResponse(c)

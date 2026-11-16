@@ -107,6 +107,8 @@ export const accountSecurityMessages = {
   'accountSecurity.mfa.disableConfirmAction': 'Turn off',
   'accountSecurity.mfa.disabling': 'Turning off',
   'accountSecurity.mfa.disabledNotice': 'The authenticator app is turned off.',
+  'accountSecurity.mfa.error.recentSignIn':
+    'For your security, sign in again before turning it off.',
   'accountSecurity.mfa.error.disable': 'The authenticator app could not be turned off. Try again later.',
   'memberSecurity.mfa.enrolled': 'MFA on',
   'memberSecurity.mfa.not-enrolled': 'No MFA',

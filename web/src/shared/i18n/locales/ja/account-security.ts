@@ -114,6 +114,8 @@ export const accountSecurityMessages = {
   'accountSecurity.mfa.disableConfirmAction': '解除する',
   'accountSecurity.mfa.disabling': '解除中',
   'accountSecurity.mfa.disabledNotice': '認証アプリの登録を解除しました。',
+  'accountSecurity.mfa.error.recentSignIn':
+    '安全のため、ログインし直してから解除してください。',
   'accountSecurity.mfa.error.disable': '登録を解除できませんでした。時間をおいて再試行してください。',
   'memberSecurity.mfa.enrolled': 'MFA登録済み',
   'memberSecurity.mfa.not-enrolled': 'MFA未登録',

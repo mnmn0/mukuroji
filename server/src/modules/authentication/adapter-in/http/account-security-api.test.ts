@@ -417,13 +417,40 @@ test('keeps TOTP on while the policy requires MFA and turns it off otherwise', a
   expect([403, 409]).toContain(required.status)
 
   await installSecurityPolicy('optional')
+  const nowSeconds = Math.floor(Date.now() / 1_000)
+  const stale = await app.request('/api/auth/mfa/totp', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${createAccessTokenSignedInAt(nowSeconds - 16 * 60)}` },
+  })
+  expect(stale.status).toBe(403)
+  expect((await stale.json()).code).toBe('RecentSignInRequired')
+
   const optional = await app.request('/api/auth/mfa/totp', {
     method: 'DELETE',
-    headers: { Authorization: 'Bearer test-token' },
+    headers: { Authorization: `Bearer ${createAccessTokenSignedInAt(nowSeconds - 60)}` },
   })
   expect(optional.status).toBe(204)
   expect(preferences).toEqual([false])
 })
+
+/**
+ * Builds an unsigned test access token whose sign-in happened at the given time.
+ *
+ * @param authTimeSeconds - Sign-in time in epoch seconds.
+ * @returns The token.
+ */
+function createAccessTokenSignedInAt(authTimeSeconds: number) {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({
+      auth_time: authTimeSeconds,
+      iat: authTimeSeconds,
+      exp: authTimeSeconds + 3_600,
+      token_use: 'access',
+    })).toString('base64url'),
+    'test-signature',
+  ].join('.')
+}
 
 test('changes the password after checking the current one', async () => {
   configureFakeProjectClients(true)
