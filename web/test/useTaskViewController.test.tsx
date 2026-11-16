@@ -17,7 +17,10 @@ import {
   type TaskViewController,
   type UseTaskViewControllerInput,
 } from '../src/task-views/mutations/useTaskViewController'
-import { resolveTaskViewLayoutMode } from '../src/task-views/model/taskViewBaseSelection'
+import {
+  continueTaskViewLayoutMode,
+  resolveTaskViewLayoutMode,
+} from '../src/task-views/model/taskViewBaseSelection'
 import { useEffectiveTaskViewLayoutMode } from '../src/task-views/queries/useEffectiveTaskViewLayoutMode'
 import {
   parseTaskViewUrlState,
@@ -791,6 +794,18 @@ describe('resolveTaskViewLayoutMode', () => {
   })
 })
 
+describe('continueTaskViewLayoutMode', () => {
+  test('keeps the last layout only within the same Project while saved views load', () => {
+    const last = { continuityKey: 'refero', mode: 'calendar' } as const
+    expect(continueTaskViewLayoutMode('table', last, 'refero')).toBe('table')
+    // Opening a Work Item of the same Project keeps its calendar until the views load.
+    expect(continueTaskViewLayoutMode(undefined, last, 'refero')).toBe('calendar')
+    // Another Project waits for its own saved views instead of reading a whole list.
+    expect(continueTaskViewLayoutMode(undefined, last, 'launch')).toBeUndefined()
+    expect(continueTaskViewLayoutMode(undefined, undefined, 'refero')).toBeUndefined()
+  })
+})
+
 describe('useEffectiveTaskViewLayoutMode', () => {
   const scope = { kind: 'project', projectId: 'refero' } as const
   const key = unstable_serialize(['saved-task-views', 'token', 'project', JSON.stringify(scope)])
@@ -810,6 +825,7 @@ describe('useEffectiveTaskViewLayoutMode', () => {
       captured = useEffectiveTaskViewLayoutMode({
         accessToken: 'token',
         builtInMode: 'table',
+        continuityKey: 'refero',
         enabled: options.enabled ?? true,
         scope,
         searchParams: options.searchParams ?? new URLSearchParams(),

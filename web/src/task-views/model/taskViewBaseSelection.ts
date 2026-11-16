@@ -72,3 +72,28 @@ export function resolveTaskViewLayoutMode(input: {
     selectTaskViewBase(input.savedViews, input.viewId).activeSavedView?.definition.layout.mode ??
     input.builtInMode
 }
+
+/** Last settled layout of a route, remembered for scope changes within the same identity. */
+export type ContinuedTaskViewLayoutMode = {
+  /** Identity the layout was settled for, such as a Project ID. */
+  continuityKey: string
+  /** Settled layout mode. */
+  mode: TaskViewLayoutMode
+}
+
+/**
+ * Chooses the layout to use while the current scope's saved views may still be loading.
+ *
+ * @param current - Layout of the current scope, or `undefined` while it is not settled.
+ * @param last - Last settled layout, if any.
+ * @param continuityKey - Identity of the current route, such as a Project ID.
+ * @returns The current layout, else the last one of the same identity, else `undefined`.
+ */
+export function continueTaskViewLayoutMode(
+  current: TaskViewLayoutMode | undefined,
+  last: ContinuedTaskViewLayoutMode | undefined,
+  continuityKey: string,
+): TaskViewLayoutMode | undefined {
+  if (current !== undefined) return current
+  return last?.continuityKey === continuityKey ? last.mode : undefined
+}

@@ -302,6 +302,7 @@ export function TaskPage() {
   const projectListLayoutMode = useEffectiveTaskViewLayoutMode({
     accessToken,
     builtInMode: 'table',
+    continuityKey: projectId,
     enabled: Boolean(accessToken && user && !currentUserError),
     scope: taskViewScope,
     searchParams,
