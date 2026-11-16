@@ -11,7 +11,13 @@ import {
   type ProjectDirectoryProjectResponse,
   type ProjectDirectoryTeamResponse,
 } from '../../modules/directory'
-import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import {
+  WorkspaceAccessError,
+  type WorkspaceAccessTransactWriteItem,
+} from '../../modules/workspace-access/workspace-access'
+
+/** Commit-time proof that a charter person is still an active Workspace member. */
+type ProjectCharterPersonConditionCheck = WorkspaceAccessTransactWriteItem
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createProjectSearchDocument } from '../shared/document-access'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
@@ -77,9 +83,15 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         resolveCharterPerson(principal.directoryId, update.value.sponsorUserId),
       ])
       const charter = createProjectCharter(update.value, {
-        ...(owner === undefined ? {} : { owner }),
-        ...(sponsor === undefined ? {} : { sponsor }),
+        ...(owner === undefined ? {} : { owner: owner.person }),
+        ...(sponsor === undefined ? {} : { sponsor: sponsor.person }),
       })
+      // One check per member row: DynamoDB rejects a transaction naming one item twice.
+      const personConditionChecks = [...new Map(
+        [owner, sponsor].flatMap((resolved) =>
+          resolved?.conditionCheck === undefined ? [] : [[resolved.person.userId, resolved.conditionCheck] as const]
+        ),
+      ).values()]
       const state = await workspaceDependencies.projectDirectory.updateProjectCharter(
         principal.directoryId,
         teamId,
@@ -87,6 +99,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         update.value.expectedRevision,
         charter,
         createApiMutationContext(c, principal, { teamId, projectId, ...update.value }),
+        personConditionChecks,
       )
       await projectCharterSearchDocumentBestEffort(principal.directoryId, state)
       return c.json(state satisfies ProjectCharterState)
@@ -186,25 +199,38 @@ function requireProjectProposalDecision(principal: WorkspacePrincipal) {
 /**
  * Resolves a charter person to an active Workspace member with a display snapshot.
  *
+ * The returned condition check proves the member is still active, at the version read here,
+ * when the charter write commits, so a concurrent deactivation cannot be saved as owner or
+ * sponsor.
+ *
  * @param workspaceId - Workspace that owns the Project.
  * @param userId - Optional member key from the request.
- * @returns The person snapshot, or undefined when no person is named.
+ * @returns The person snapshot and its membership fence, or undefined when no person is named.
  */
 async function resolveCharterPerson(
   workspaceId: string,
   userId: string | undefined,
-): Promise<ProjectCharterPerson | undefined> {
+): Promise<{ person: ProjectCharterPerson; conditionCheck?: ProjectCharterPersonConditionCheck } | undefined> {
   if (userId === undefined) return undefined
   const profile = await authenticationDependencies.cognito.getUserProfile(userId)
-  const member = await workspaceDependencies.workspaceAccess.getActiveMember(workspaceId, profile.id)
-  if (!member) {
-    throw new ProjectDataError(
-      409,
-      'ProjectCharterPersonInactive',
-      'The Project manager and sponsor must be active Workspace members.',
-    )
+  const workspaceAccess = workspaceDependencies.workspaceAccess
+  const inactive = () => new ProjectDataError(
+    409,
+    'ProjectCharterPersonInactive',
+    'The Project manager and sponsor must be active Workspace members.',
+  )
+  const person = createProjectCharterPerson(profile.id, profile.name, profile.email)
+  if (!workspaceAccess.createActiveMemberConditionCheck) {
+    if (!await workspaceAccess.getActiveMember(workspaceId, profile.id)) throw inactive()
+    return { person }
   }
-  return createProjectCharterPerson(profile.id, profile.name, profile.email)
+  const conditionCheck = await workspaceAccess.createActiveMemberConditionCheck.call(
+    workspaceAccess,
+    workspaceId,
+    profile.id,
+  )
+  if (!conditionCheck) throw inactive()
+  return { person, conditionCheck }
 }
 
 /**

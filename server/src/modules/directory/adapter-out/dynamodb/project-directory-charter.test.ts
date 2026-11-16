@@ -247,6 +247,32 @@ describe('Project charter persistence', () => {
       .rejects.toMatchObject({ code: 'ProjectCharterRevisionConflict', status: 409 })
   })
 
+  test('fences the owner and sponsor membership in the charter transaction', async () => {
+    const personCheck = {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+        ConditionExpression: '#status = :active AND #version = :version',
+      },
+    }
+    const { documentClient, writes } = createFakeDocumentClient(
+      [teamRow(), projectRow()],
+      createCancellation(1, 2),
+    )
+    const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+    await expect(client.updateProjectCharter(
+      workspaceId,
+      'core-team',
+      'refero',
+      0,
+      { owner: { userId: 'sato@example.com', displayName: '佐藤 花子' }, tags: [], repositoryUrls: [] },
+      undefined,
+      [personCheck],
+    )).rejects.toMatchObject({ code: 'ProjectCharterPersonInactive', status: 409 })
+    expect(readTransactItems(writes[0])[1]).toEqual(personCheck)
+  })
+
   test('rejects charter and lifecycle changes on an archived Project', async () => {
     const { documentClient, writes } = createFakeDocumentClient([
       teamRow(),

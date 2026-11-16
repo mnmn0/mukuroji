@@ -148,9 +148,15 @@ export function ProjectCharterPanel({
     if (!isEditable) return
     setIsSaving(true)
     setMessage(undefined)
+    const submittedDraft = draft
     try {
-      await onSave(createProjectCharterUpdateInput(values, draft?.revision ?? state.revision))
-      setDraft(undefined)
+      const next = await onSave(createProjectCharterUpdateInput(values, draft?.revision ?? state.revision))
+      // Edits typed while the request was in flight build on what was just saved, so keep them
+      // and move them to the committed revision; drop the draft only if nothing changed since.
+      setDraft((current) => {
+        if (current === submittedDraft) return undefined
+        return current && next ? { revision: next.revision, values: current.values } : current
+      })
       setMessage({ kind: 'success', text: t('projects.charter.saved') })
     } catch (error) {
       setMessage({ kind: 'error', text: describeCharterError(error, t, 'projects.charter.error.save') })
@@ -177,9 +183,14 @@ export function ProjectCharterPanel({
     try {
       const next = await onTransition(state.revision, target)
       // A lifecycle change does not touch charter fields, so a draft based on the state this
-      // transition started from is still current at the committed revision.
-      if (next && draft && draft.revision === state.revision) {
-        setDraft({ revision: next.revision, values: draft.values })
+      // transition started from, including edits typed meanwhile, is current at the new revision.
+      const startRevision = state.revision
+      if (next) {
+        setDraft((current) =>
+          current && current.revision === startRevision
+            ? { revision: next.revision, values: current.values }
+            : current
+        )
       }
       setIsConfirmingClose(false)
     } catch (error) {

@@ -803,6 +803,7 @@ export type ProjectDirectoryClient = {
    * @param expectedRevision - Charter revision read by the caller.
    * @param charter - Validated next charter with resolved people.
    * @param auditContext - Audit context of the mutation.
+   * @param personConditionChecks - Membership fences of the owner and sponsor, checked at commit.
    * @returns The committed charter state.
    */
   updateProjectCharter(
@@ -812,6 +813,7 @@ export type ProjectDirectoryClient = {
     expectedRevision: number,
     charter: ProjectCharter,
     auditContext?: MutationAuditContext,
+    personConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ProjectCharterState>
   /**
    * Stores a lifecycle state the application already decided is allowed.
@@ -2359,9 +2361,11 @@ export class DynamoDbProjectDirectoryClient {
     expectedRevision: number,
     charter: ProjectCharter,
     auditContext?: MutationAuditContext,
+    personConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     await this.ensureLocalAuditTable()
     let codeReservationIndex: number | undefined
+    let personConditionStartIndex: number | undefined
     try {
       const project = await this.readMutableTeamProjectItem(
         directoryId,
@@ -2428,6 +2432,8 @@ export class DynamoDbProjectDirectoryClient {
           })
         }
       }
+      personConditionStartIndex = transactItems.length
+      transactItems.push(...personConditionChecks)
       const changedFields = listChangedProjectCharterFields(before, charter)
       transactItems.push(...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
         directoryId,
@@ -2457,6 +2463,17 @@ export class DynamoDbProjectDirectoryClient {
           409,
           'ProjectCodeAlreadyUsed',
           'The Project code is already used in this Workspace.',
+        )
+      }
+      const personStart = personConditionStartIndex
+      if (
+        personStart !== undefined &&
+        personConditionChecks.some((_, index) => isTransactionConditionalFailureAt(error, personStart + index))
+      ) {
+        throw new ProjectDataError(
+          409,
+          'ProjectCharterPersonInactive',
+          'The Project manager and sponsor must be active Workspace members.',
         )
       }
       if (hasTransactionConditionalFailure(error)) {
