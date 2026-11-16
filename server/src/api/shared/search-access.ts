@@ -526,14 +526,16 @@ export function toWorkspaceSearchErrorResponse(c: Context, error: unknown) {
  *
  * @param createDocument - Factory for the search document.
  * @param operation - Operation name used in logs.
+ * @param options - Optional source revision; an older projection then never replaces a newer one.
  */
 export async function projectWorkspaceSearchDocumentBestEffort(
   createDocument: () => WorkspaceSearchDocument,
   operation: string,
+  options?: { sourceRevision?: number },
 ) {
   if (!isWorkspaceSearchProjectionEnabled()) return
   try {
-    await workItemDependencies.workspaceSearch.upsertDocument(createDocument())
+    await workItemDependencies.workspaceSearch.upsertDocument(createDocument(), options)
   } catch (error) {
     console.error(`Workspace search projection failed after ${operation}.`, error)
   }

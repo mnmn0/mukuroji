@@ -75,6 +75,10 @@ describe('Project charter update validation', () => {
     ],
     ['non-string owner', { expectedRevision: 0, charter: { ownerUserId: 42 } }],
     ['tag containing a comma separator', { expectedRevision: 0, charter: { tags: ['研究、開発'] } }],
+    [
+      'repository URL that grows past the limit when encoded',
+      { expectedRevision: 0, charter: { repositoryUrls: [`https://example.com/${'あ'.repeat(60)}`] } },
+    ],
   ])('rejects %s', (_label, body) => {
     expect(readProjectCharterUpdate(body)).toMatchObject({ ok: false, code: 'InvalidProjectCharter' })
   })

@@ -1874,6 +1874,7 @@ export function TaskPage() {
           accessToken={accessToken}
           canDecideProposal={canMutateContent && isWorkspaceAdministrator}
           canEdit={canEditProjectCharter}
+          canMutate={canMutateContent}
           draftStore={projectCharterDraftStore}
           enabled={Boolean(user && !currentUserError)}
           members={projectCharterCandidates}

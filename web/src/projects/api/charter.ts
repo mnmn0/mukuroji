@@ -173,7 +173,23 @@ function isProjectCharterState(value: unknown): value is ProjectCharterState {
     isProjectLifecycleState(Reflect.get(value, 'lifecycleState')) &&
     typeof revision === 'number' &&
     Number.isSafeInteger(revision) &&
-    isProjectCharter(Reflect.get(value, 'charter'))
+    isProjectCharter(Reflect.get(value, 'charter')) &&
+    isOptionalViewerCapabilities(Reflect.get(value, 'viewer'))
+}
+
+/**
+ * Checks the optional server-decided charter capabilities of the viewer.
+ *
+ * @param value - Untrusted `viewer` value.
+ * @returns Whether the value is absent or a complete capability set.
+ */
+function isOptionalViewerCapabilities(value: unknown): boolean {
+  return value === undefined || (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof Reflect.get(value, 'canEdit') === 'boolean' &&
+    typeof Reflect.get(value, 'canDecideProposal') === 'boolean'
+  )
 }
 
 /**

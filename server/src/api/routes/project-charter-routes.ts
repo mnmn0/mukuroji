@@ -1,5 +1,5 @@
 import type { Context, Hono } from 'hono'
-import type { ProjectCharterPerson, ProjectCharterState } from '@mukuroji/contracts'
+import type { ProjectCharterState, ProjectCharterViewerCapabilities } from '@mukuroji/contracts'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
   createProjectCharterPerson,
@@ -54,11 +54,11 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
       await requireProjectPermission(principal, projectId, 'viewer')
-      return c.json(await workspaceDependencies.projectDirectory.getProjectCharter(
-        principal.directoryId,
-        teamId,
-        projectId,
-      ) satisfies ProjectCharterState)
+      const [state, viewer] = await Promise.all([
+        workspaceDependencies.projectDirectory.getProjectCharter(principal.directoryId, teamId, projectId),
+        describeProjectCharterViewer(principal, projectId),
+      ])
+      return c.json({ ...state, viewer } satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
     }
@@ -84,7 +84,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         await readJson<unknown>(c.req),
         (update) => createApiMutationContext(c, principal, update),
       )
-      return c.json(state satisfies ProjectCharterState)
+      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, projectId) } satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
     }
@@ -100,7 +100,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       await requireProjectCharterManagement(principal, projectId)
-      return c.json(await transitionProjectLifecycleUseCase(
+      const state = await transitionProjectLifecycleUseCase(
         {
           store: workspaceDependencies.projectDirectory,
           requireProposalDecision: () => requireProjectProposalDecision(principal),
@@ -108,7 +108,8 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         { workspaceId: principal.directoryId, teamId, projectId },
         await readJson<unknown>(c.req),
         (transition) => createApiMutationContext(c, principal, transition),
-      ) satisfies ProjectCharterState)
+      )
+      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, projectId) } satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
     }
@@ -144,6 +145,42 @@ async function requireProjectCharterManagement(principal: WorkspacePrincipal, pr
     if (!(error instanceof WorkspaceAccessError)) throw error
   }
   await requireProjectPermission(principal, projectId, 'manager')
+}
+
+/**
+ * Decides which charter actions the principal may take, with the same checks the write routes use,
+ * so the client never has to re-derive Enterprise permissions.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param projectId - Project whose charter is shown.
+ * @returns The viewer's charter capabilities.
+ */
+async function describeProjectCharterViewer(
+  principal: WorkspacePrincipal,
+  projectId: string,
+): Promise<ProjectCharterViewerCapabilities> {
+  const allowed = async (check: () => unknown) => {
+    try {
+      await check()
+      return true
+    } catch (error) {
+      if (isPermissionDenial(error)) return false
+      throw error
+    }
+  }
+  const canEdit = await allowed(async () => {
+    requireWorkspaceBusinessWrite(principal)
+    await requireProjectCharterManagement(principal, projectId)
+  })
+  return {
+    canEdit,
+    canDecideProposal: canEdit && await allowed(() => requireProjectProposalDecision(principal)),
+  }
+}
+
+/** Checks whether an authorization helper rejected the principal rather than failing. */
+function isPermissionDenial(error: unknown) {
+  return (error instanceof WorkspaceAccessError || error instanceof ProjectDataError) && error.status === 403
 }
 
 /**
@@ -235,6 +272,9 @@ async function projectCharterSearchDocumentBestEffort(workspaceId: string, state
   }
   if (!names) return
   const resolved = names
+  // The charter revision fences the write, so a slower projection of an older charter cannot
+  // overwrite the document of a newer one.
+  const sourceRevision = state.revision > 0 ? state.revision : undefined
   await projectWorkspaceSearchDocumentBestEffort(
     () => createProjectSearchDocument(
       workspaceId,
@@ -243,8 +283,10 @@ async function projectCharterSearchDocumentBestEffort(workspaceId: string, state
       undefined,
       resolved.englishName,
       state.charter,
+      sourceRevision,
     ),
     'project charter update',
+    { sourceRevision },
   )
 }
 

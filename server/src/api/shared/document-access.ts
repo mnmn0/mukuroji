@@ -265,6 +265,7 @@ export function createCommentSearchDocument(
  * @param creatorUserId - User who created the Project.
  * @param subtitle - Search result subtitle.
  * @param charter - Optional Project charter indexed as searchable body text.
+ * @param sourceRevision - Charter revision the document reflects, when written after a charter change.
  * @returns The Project search document.
  */
 export function createProjectSearchDocument(
@@ -274,6 +275,7 @@ export function createProjectSearchDocument(
   creatorUserId?: string,
   subtitle?: string,
   charter?: ProjectCharter,
+  sourceRevision?: number,
 ) {
   return createProjectWorkspaceSearchDocument({
     workspaceId,
@@ -283,6 +285,7 @@ export function createProjectSearchDocument(
     ...(subtitle ? { subtitle } : {}),
     ...(charter ? { charter } : {}),
     ...(creatorUserId ? { creatorUserId } : {}),
+    ...(sourceRevision === undefined ? {} : { sourceRevision }),
   })
 }
 

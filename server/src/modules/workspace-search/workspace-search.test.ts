@@ -22,6 +22,7 @@ import {
   createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchSourceDocument,
   createDocumentWorkspaceSearchDocument,
+  createProjectWorkspaceSearchDocument,
   createTaskViewRecordKey,
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
@@ -3997,3 +3998,17 @@ function splitMemoryAssignments(expression: string) {
   if (tail) assignments.push(tail)
   return assignments
 }
+
+test('carries the charter revision on a Project search document so older projections lose', () => {
+  const document = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core-team',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS-1', tags: [], repositoryUrls: [] },
+    sourceRevision: 3,
+  })
+
+  expect(document.sourceRevision).toBe(3)
+  expect(document.body).toContain('OPS-1')
+})

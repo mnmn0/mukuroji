@@ -551,7 +551,9 @@ function readRepositoryUrls(value: unknown): string[] | undefined {
     if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.hostname === '') {
       return undefined
     }
+    // Serialization percent-encodes non-ASCII text, so the stored form can be longer than the input.
     const normalized = url.toString()
+    if (normalized.length > PROJECT_CHARTER_REPOSITORY_URL_MAX_LENGTH) return undefined
     if (!urls.includes(normalized)) urls.push(normalized)
   }
   return urls.length > PROJECT_CHARTER_REPOSITORY_URLS_MAX_ITEMS ? undefined : urls

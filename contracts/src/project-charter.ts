@@ -121,6 +121,16 @@ export type ProjectCharterState = {
   revision: number
   /** ISO 8601 timestamp of the last charter or lifecycle change. */
   updatedAt?: string
+  /** What the requesting member may do, decided by the server from the effective permissions. */
+  viewer?: ProjectCharterViewerCapabilities
+}
+
+/** Charter actions the requesting member may take. */
+export type ProjectCharterViewerCapabilities = {
+  /** Whether the member may edit the charter and move the lifecycle. */
+  canEdit: boolean
+  /** Whether the member may approve or reject a proposed Project. */
+  canDecideProposal: boolean
 }
 
 /** Complete replacement of a Project charter. People are referenced by member key. */

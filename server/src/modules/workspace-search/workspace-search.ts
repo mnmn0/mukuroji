@@ -1106,6 +1106,8 @@ export function createProjectWorkspaceSearchDocument(input: {
   createdAt?: string
   /** Project row の最終更新日時です。 */
   updatedAt?: string
+  /** Charter revision the document reflects, so an older projection cannot replace it. */
+  sourceRevision?: number
 }) {
   const query = new URLSearchParams({ teamId: input.teamId })
   const body = createProjectCharterSearchBody(input.charter)
@@ -1122,6 +1124,7 @@ export function createProjectWorkspaceSearchDocument(input: {
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.sourceRevision === undefined ? {} : { sourceRevision: input.sourceRevision }),
   })
 }
 

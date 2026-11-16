@@ -20,9 +20,11 @@ export type ProjectCharterSectionProps = {
   enabled: boolean
   /** Active Workspace members offered as owner and sponsor. */
   members: readonly ProjectCharterPersonCandidate[]
-  /** Whether the viewer may edit the charter and move the lifecycle. */
+  /** Whether this session may change content at all, for example while online. */
+  canMutate: boolean
+  /** Fallback edit permission used until the server states the viewer's capabilities. */
   canEdit: boolean
-  /** Whether the viewer may approve or reject a proposed Project. */
+  /** Fallback proposal-decision permission used until the server states the viewer's capabilities. */
   canDecideProposal: boolean
   /** Translator for every label. */
   t: (key: MessageKey) => string
@@ -42,12 +44,16 @@ export function ProjectCharterSection({
   projectId,
   enabled,
   members,
+  canMutate,
   canEdit,
   canDecideProposal,
   t,
   draftStore,
 }: ProjectCharterSectionProps) {
   const charter = useProjectCharterActions({ accessToken, teamId, projectId, enabled })
+  // The server decides with the effective permissions, including Enterprise roles the client
+  // cannot evaluate, so its answer replaces the role-based fallback once the charter is loaded.
+  const viewer = charter.state?.viewer
   const keepDraft = useCallback((draft: ProjectCharterDraft | undefined) => {
     if (teamId) draftStore?.write(teamId, projectId, draft)
   }, [draftStore, projectId, teamId])
@@ -58,10 +64,10 @@ export function ProjectCharterSection({
   return (
     <ProjectCharterPanel
       key={JSON.stringify([teamId, projectId])}
-      canDecideProposal={canDecideProposal}
+      canDecideProposal={viewer ? canMutate && viewer.canDecideProposal : canDecideProposal}
       initialDraft={draftStore?.read(teamId, projectId)}
       onDraftChange={keepDraft}
-      canEdit={canEdit}
+      canEdit={viewer ? canMutate && viewer.canEdit : canEdit}
       hasLoadError={charter.hasLoadError}
       isLoading={charter.isLoading}
       members={members}

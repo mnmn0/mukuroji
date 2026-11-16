@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import {
   PROJECT_LIFECYCLE_TRANSITIONS,
   type ProjectCharter,
@@ -97,14 +97,23 @@ export function ProjectCharterPanel({
   onDraftChange,
 }: ProjectCharterPanelProps) {
   const [draft, setDraft] = useState<ProjectCharterDraft | undefined>(initialDraft)
+  // Mirrors the latest draft for handlers that resume after a request, where the rendered value
+  // may already be stale. Only changeDraft writes it.
+  const latestDraft = useRef(initialDraft)
   const [isSaving, setIsSaving] = useState(false)
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string }>()
   const [isConfirmingClose, setIsConfirmingClose] = useState(false)
 
-  useEffect(() => {
-    onDraftChange?.(draft)
-  }, [draft, onDraftChange])
+  /** Replaces the draft from the latest value and hands it to the owner that outlives the panel. */
+  const changeDraft = (
+    update: (current: ProjectCharterDraft | undefined) => ProjectCharterDraft | undefined,
+  ) => {
+    const next = update(latestDraft.current)
+    latestDraft.current = next
+    setDraft(next)
+    onDraftChange?.(next)
+  }
 
   if (!state) {
     return (
@@ -150,7 +159,10 @@ export function ProjectCharterPanel({
   /** Updates one form field while keeping the draft bound to the current revision. */
   const updateValue = (key: keyof ProjectCharterFormValues, value: string) => {
     setMessage(undefined)
-    setDraft({ revision: draft?.revision ?? state.revision, values: { ...values, [key]: value } })
+    changeDraft((current) => ({
+      revision: current?.revision ?? state.revision,
+      values: { ...(current?.values ?? values), [key]: value },
+    }))
   }
 
   /** Saves the form as a complete charter replacement. */
@@ -159,12 +171,12 @@ export function ProjectCharterPanel({
     if (!isEditable) return
     setIsSaving(true)
     setMessage(undefined)
-    const submittedDraft = draft
+    const submittedDraft = latestDraft.current
     try {
       const next = await onSave(createProjectCharterUpdateInput(values, draft?.revision ?? state.revision))
       // Edits typed while the request was in flight build on what was just saved, so keep them
       // and move them to the committed revision; drop the draft only if nothing changed since.
-      setDraft((current) => {
+      changeDraft((current) => {
         if (current === submittedDraft) return undefined
         return current && next ? { revision: next.revision, values: current.values } : current
       })
@@ -178,7 +190,7 @@ export function ProjectCharterPanel({
 
   /** Drops unsaved edits and reloads the latest charter. */
   const discardDraft = () => {
-    setDraft(undefined)
+    changeDraft(() => undefined)
     setMessage(undefined)
     onReload()
   }
@@ -197,7 +209,7 @@ export function ProjectCharterPanel({
       // transition started from, including edits typed meanwhile, is current at the new revision.
       const startRevision = state.revision
       if (next) {
-        setDraft((current) =>
+        changeDraft((current) =>
           current && current.revision === startRevision
             ? { revision: next.revision, values: current.values }
             : current

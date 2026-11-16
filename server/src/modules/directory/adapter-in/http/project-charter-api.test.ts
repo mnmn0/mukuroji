@@ -47,7 +47,20 @@ describe('Project charter API', () => {
       lifecycleState: 'active',
       charter: { tags: [], repositoryUrls: [] },
       revision: 0,
+      viewer: { canEdit: true, canDecideProposal: true },
     })
+  })
+
+  test.each([
+    ['a Project manager', { workspaceRole: 'member' as const }, { canEdit: true, canDecideProposal: false }],
+    ['a Project member', { role: 'member' as const, workspaceRole: 'member' as const }, { canEdit: false, canDecideProposal: false }],
+  ])('tells %s which charter actions the server allows', async (_label, options, viewer) => {
+    configureFakeProjectClients(true, options)
+
+    const response = await send(charterPath, 'GET')
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ viewer })
   })
 
   test('saves a charter with a resolved owner snapshot and audit context', async () => {
