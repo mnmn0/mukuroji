@@ -7,8 +7,13 @@ import type {
   WorkspaceMembersSignInSecurityResponse,
 } from '@mukuroji/contracts'
 import {
+  AccountCredentialChangeError,
+  changeAccountPassword,
   CognitoServiceError,
+  confirmAccountPasswordReset,
   confirmSoftwareTokenEnrollment,
+  removeSoftwareToken,
+  requestAccountPasswordReset,
   SoftwareTokenEnrollmentError,
   startSoftwareTokenEnrollment,
   type GetUserResponse,
@@ -17,6 +22,11 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   EnterpriseIdentityError,
 } from '../../modules/enterprise-identity'
+import {
+  createPasswordChangePorts,
+  createPasswordResetPorts,
+  createSoftwareTokenRemovalPorts,
+} from '../../app/composition/account-credential-changes'
 import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
 import { createSoftwareTokenEnrollmentPorts } from '../../app/composition/software-token-enrollment'
 import {
@@ -262,6 +272,9 @@ function toAccountSecurityErrorResponse(c: Context, error: unknown) {
   if (error instanceof SoftwareTokenEnrollmentError) {
     return c.json({ code: error.code, message: error.message }, error.status)
   }
+  if (error instanceof AccountCredentialChangeError) {
+    return c.json({ code: error.code, message: error.message }, error.status)
+  }
   if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
   if (error instanceof ProjectDataError) return toProjectDataErrorResponse(c, error)
   if (error instanceof EnterpriseIdentityError) return toEnterpriseIdentityErrorResponse(c, error)
@@ -326,21 +339,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const sso = await ssoRequiredResponse(c, email)
       if (sso) return sso
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.requestPasswordReset) return unavailableResponse(c)
-      try {
-        await cognito.requestPasswordReset(email)
-      } catch (error) {
-        if (
-          !(error instanceof CognitoServiceError) ||
-          !isUndisclosedResetFailure(error.code)
-        ) {
-          throw error
-        }
-        if (error.code === 'CodeDeliveryFailureException') {
-          console.error('Password reset code delivery failed:', error)
-        }
-      }
+      await requestAccountPasswordReset(createPasswordResetPorts(authenticationDependencies.cognito), email)
       return c.json({ accepted: true as const }, 202)
     } catch (error) {
       return toAccountSecurityErrorResponse(c, error)
@@ -372,25 +371,14 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const sso = await ssoRequiredResponse(c, email)
       if (sso) return sso
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.confirmPasswordReset) return unavailableResponse(c)
-      await cognito.confirmPasswordReset(email, code, newPassword)
+      await confirmAccountPasswordReset(
+        createPasswordResetPorts(authenticationDependencies.cognito),
+        email,
+        code,
+        newPassword,
+      )
       return c.body(null, 204)
     } catch (error) {
-      if (
-        error instanceof CognitoServiceError &&
-        (
-          error.code === 'CodeMismatchException' ||
-          error.code === 'ExpiredCodeException' ||
-          error.code === 'UserNotFoundException' ||
-          error.code === 'NotAuthorizedException'
-        )
-      ) {
-        return c.json({
-          code: 'PasswordResetCodeInvalid' as const,
-          message: 'The code is invalid or expired. Request a new code.',
-        }, 400)
-      }
       return toAccountSecurityErrorResponse(c, error)
     }
   })
@@ -436,26 +424,12 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const caller = await readCognitoCaller(c)
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
-      if (isSsoSessionAccessToken(caller.accessToken)) {
-        return c.json({
-          code: 'PasswordManagedBySso' as const,
-          message: 'Your identity provider manages this password.',
-        }, 409)
-      }
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.changePassword) return unavailableResponse(c)
-      try {
-        await cognito.changePassword(caller.accessToken, currentPassword, newPassword)
-      } catch (error) {
-        // The access token was just accepted by GetUser, so a rejection here is the password.
-        if (error instanceof CognitoServiceError && error.code === 'NotAuthorizedException') {
-          return c.json({
-            code: 'CurrentPasswordIncorrect' as const,
-            message: 'The current password is incorrect.',
-          }, 400)
-        }
-        throw error
-      }
+      await changeAccountPassword(
+        createPasswordChangePorts(authenticationDependencies.cognito),
+        { accessToken: caller.accessToken, ssoSession: isSsoSessionAccessToken(caller.accessToken) },
+        currentPassword,
+        newPassword,
+      )
       return c.body(null, 204)
     } catch (error) {
       return toAccountSecurityErrorResponse(c, error)
@@ -534,22 +508,14 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
       const user = await authenticationDependencies.cognito.getUser(accessToken)
       await authenticateWorkspacePrincipal(accessToken, user, c)
       const { policy, mfaRequired } = await readMfaRequirement(user, accessToken)
-      if (mfaRequired) {
-        return c.json({
-          code: 'MfaRequiredByPolicy' as const,
-          message: 'The Workspace security policy requires MFA.',
-        }, 409)
-      }
-      // A stolen access token must not be enough to remove the second factor.
-      if (!isRecentlyAuthenticated(accessToken, policy?.sensitiveActionReauthenticationMinutes ?? 15)) {
-        return c.json({
-          code: 'RecentSignInRequired' as const,
-          message: 'Sign in again before turning off the authenticator app.',
-        }, 403)
-      }
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.setSoftwareTokenMfaEnabled) return unavailableResponse(c)
-      await cognito.setSoftwareTokenMfaEnabled(accessToken, false)
+      await removeSoftwareToken(createSoftwareTokenRemovalPorts(authenticationDependencies.cognito), {
+        accessToken,
+        mfaRequiredByPolicy: mfaRequired,
+        recentlyAuthenticated: isRecentlyAuthenticated(
+          accessToken,
+          policy?.sensitiveActionReauthenticationMinutes ?? 15,
+        ),
+      })
       return c.body(null, 204)
     } catch (error) {
       return toAccountSecurityErrorResponse(c, error)
@@ -687,19 +653,6 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
   routeApp.post('/api/workspace/members/:memberKey/mfa-reset', async (c) => {
     return handleMemberCredentialAction(c, 'mfa-reset')
   })
-}
-
-/**
- * Cognito errors of a reset request that must not reveal whether the account exists.
- *
- * @param code - Cognito error code.
- * @returns Whether the request still answers 202.
- */
-function isUndisclosedResetFailure(code: string) {
-  return code === 'UserNotFoundException' ||
-    code === 'NotAuthorizedException' ||
-    code === 'InvalidParameterException' ||
-    code === 'CodeDeliveryFailureException'
 }
 
 /**
