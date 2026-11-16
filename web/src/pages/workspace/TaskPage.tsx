@@ -1881,8 +1881,12 @@ export function TaskPage() {
           projectId={projectId}
           t={t}
           teamId={interactionTeamId}
-          onSessionError={(error) => {
-            redirectEnterpriseSessionError(error)
+          onSessionError={(error, requestAccessToken) => {
+            // A late failure of a request sent with a token that was replaced since, such as one
+            // from before signing in again, must not clear the current session.
+            if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+              redirectEnterpriseSessionError(error)
+            }
           }}
         />
       )}

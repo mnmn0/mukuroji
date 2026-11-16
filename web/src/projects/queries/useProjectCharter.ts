@@ -12,8 +12,11 @@ export type UseProjectCharterOptions = {
   projectId: string
   /** Whether the current authentication state permits the request. */
   enabled: boolean
-  /** Receives each failed load, so an expired session can be sent to sign in again. */
-  onError?: (error: unknown) => void
+  /**
+   * Receives each failed load with the access token it was sent with, so an expired session can
+   * be sent to sign in again without acting on a token that was already replaced.
+   */
+  onError?: (error: unknown, requestAccessToken: string) => void
 }
 
 /**
@@ -35,12 +38,17 @@ export function useProjectCharter({
   )
   const query = useSWR(
     key,
-    ([, token, currentTeamId, currentProjectId]) =>
-      getProjectCharter(token, currentTeamId, currentProjectId),
+    async ([, token, currentTeamId, currentProjectId]) => {
+      try {
+        return await getProjectCharter(token, currentTeamId, currentProjectId)
+      } catch (error) {
+        onError?.(error, token)
+        throw error
+      }
+    },
     {
       dedupingInterval: 5_000,
       shouldRetryOnError: false,
-      onError: (error: unknown) => onError?.(error),
     },
   )
 

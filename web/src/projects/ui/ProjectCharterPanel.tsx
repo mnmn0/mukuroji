@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   PROJECT_LIFECYCLE_TRANSITIONS,
   type ProjectCharter,
@@ -13,6 +13,7 @@ import {
   projectLifecycleClassNames,
   projectLifecycleMessageKey,
   type ProjectCharterDraft,
+  type ProjectCharterDraftOwner,
   type ProjectCharterFormValues,
   type ProjectCharterPersonCandidate,
 } from '../model/projectCharterView'
@@ -47,8 +48,10 @@ export type ProjectCharterPanelProps = {
   onReload: () => void
   /** Unsaved draft restored when the panel is shown again for the same Project. */
   initialDraft?: ProjectCharterDraft
-  /** Receives every draft change so it can outlive the panel. */
-  onDraftChange?: (draft: ProjectCharterDraft | undefined) => void
+  /** Receives every draft change, with this panel's identity, so it can outlive the panel. */
+  onDraftChange?: (draft: ProjectCharterDraft | undefined, owner: ProjectCharterDraftOwner) => void
+  /** Receives this panel's identity once it is shown, so it becomes the draft's only writer. */
+  onDraftClaim?: (owner: ProjectCharterDraftOwner) => void
 }
 
 const inputClassName =
@@ -96,6 +99,7 @@ export function ProjectCharterPanel({
   onReload,
   initialDraft,
   onDraftChange,
+  onDraftClaim,
 }: ProjectCharterPanelProps) {
   const [draft, setDraft] = useState<ProjectCharterDraft | undefined>(initialDraft)
   // Mirrors the latest draft for handlers that resume after a request, where the rendered value
@@ -105,6 +109,11 @@ export function ProjectCharterPanel({
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'success'; text: string }>()
   const [isConfirmingClose, setIsConfirmingClose] = useState(false)
+  // Identity of this shown panel. A panel shown again for the same Project is a new identity.
+  const [draftOwner] = useState<ProjectCharterDraftOwner>(() => ({}))
+  useEffect(() => {
+    onDraftClaim?.(draftOwner)
+  }, [draftOwner, onDraftClaim])
 
   /** Replaces the draft from the latest value and hands it to the owner that outlives the panel. */
   const changeDraft = (
@@ -113,7 +122,7 @@ export function ProjectCharterPanel({
     const next = update(latestDraft.current)
     latestDraft.current = next
     setDraft(next)
-    onDraftChange?.(next)
+    onDraftChange?.(next, draftOwner)
   }
 
   if (!state) {

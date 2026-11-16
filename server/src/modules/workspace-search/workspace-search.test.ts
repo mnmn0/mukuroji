@@ -338,6 +338,30 @@ test('adds the creator when the creation projection lands after a charter projec
   ])
 })
 
+test('keeps the stored creation time when the stored Project row has no creator', async () => {
+  const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    createdAt: '2026-11-01T00:00:00.000Z',
+  })])
+  const client = new DynamoDbWorkspaceSearchClient('search-table', memory, {} as DynamoDBClient, false)
+
+  const written = await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  }), { sourceRevision: 1, preserveCreator: true })
+
+  expect(written.creatorUserId).toBeUndefined()
+  expect(written.createdAt).toBe('2026-11-01T00:00:00.000Z')
+  expect(createWorkspaceSearchDocument(written)).toEqual(written)
+})
+
 test('keeps a creator added while a charter projection was between its read and write', async () => {
   const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
     workspaceId: 'workspace-1',

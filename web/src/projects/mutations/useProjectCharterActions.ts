@@ -20,7 +20,7 @@ export type UseProjectCharterActionsOptions = {
    * Receives every failed load, save, and transition before the panel shows it, so the page can
    * send an expired or revoked session to sign in again.
    */
-  onSessionError?: (error: unknown) => void
+  onSessionError?: (error: unknown, requestAccessToken: string) => void
 }
 
 /**
@@ -64,7 +64,7 @@ export function useProjectCharterActions({
       requestProjectId,
       input,
       createMutationRequestContext(),
-    ), onSessionError))
+    ), token, onSessionError))
   }, [commit, key, onSessionError])
 
   const transition = useCallback(async (expectedRevision: number, state: ProjectLifecycleState) => {
@@ -77,7 +77,7 @@ export function useProjectCharterActions({
       expectedRevision,
       state,
       createMutationRequestContext(),
-    ), onSessionError))
+    ), token, onSessionError))
   }, [commit, key, onSessionError])
 
   const reload = useCallback(() => {
@@ -98,17 +98,19 @@ export function useProjectCharterActions({
  * Hands a failed request to the session error handler and rethrows it for the panel.
  *
  * @param request - Pending charter request.
+ * @param requestAccessToken - Access token the request was sent with.
  * @param onSessionError - Optional handler for failed requests.
  * @returns The request's result.
  */
 async function reportingSessionError<Result>(
   request: Promise<Result>,
-  onSessionError: ((error: unknown) => void) | undefined,
+  requestAccessToken: string,
+  onSessionError: ((error: unknown, requestAccessToken: string) => void) | undefined,
 ) {
   try {
     return await request
   } catch (error) {
-    onSessionError?.(error)
+    onSessionError?.(error, requestAccessToken)
     throw error
   }
 }

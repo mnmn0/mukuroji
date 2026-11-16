@@ -1,5 +1,5 @@
 import type { MessageKey } from '../../shared/i18n/i18n'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback } from 'react'
 import type {
   ProjectCharterDraft,
   ProjectCharterDraftOwner,
@@ -32,7 +32,7 @@ export type ProjectCharterSectionProps = {
   /** Keeps unsaved drafts per Project while the section is not shown. */
   draftStore?: ProjectCharterDraftStore
   /** Receives every failed charter request, so the page can handle an expired session. */
-  onSessionError?: (error: unknown) => void
+  onSessionError?: (error: unknown, requestAccessToken: string) => void
 }
 
 /**
@@ -58,15 +58,17 @@ export function ProjectCharterSection({
   // The server decides with the effective permissions, including Enterprise roles the client
   // cannot evaluate, so its answer replaces the role-based fallback once the charter is loaded.
   const viewer = charter.state?.viewer
-  // Each shown section owns the drafts of the Projects it shows, so a save that completes after
-  // the Project was shown again by a newer section cannot change that section's draft.
-  const [draftOwner] = useState<ProjectCharterDraftOwner>(() => ({}))
-  useEffect(() => {
-    if (teamId) draftStore?.claim(teamId, projectId, draftOwner)
-  }, [draftOwner, draftStore, projectId, teamId])
-  const keepDraft = useCallback((draft: ProjectCharterDraft | undefined) => {
-    if (teamId) draftStore?.write(teamId, projectId, draft, draftOwner)
-  }, [draftOwner, draftStore, projectId, teamId])
+  // Each shown panel owns the draft of its Project, so a save that completes after the Project
+  // was shown again by a newer panel cannot change that panel's draft.
+  const claimDraft = useCallback((owner: ProjectCharterDraftOwner) => {
+    if (teamId) draftStore?.claim(teamId, projectId, owner)
+  }, [draftStore, projectId, teamId])
+  const keepDraft = useCallback((
+    draft: ProjectCharterDraft | undefined,
+    owner: ProjectCharterDraftOwner,
+  ) => {
+    if (teamId) draftStore?.write(teamId, projectId, draft, owner)
+  }, [draftStore, projectId, teamId])
 
   if (!teamId) return null
 
@@ -77,6 +79,7 @@ export function ProjectCharterSection({
       canDecideProposal={viewer ? canMutate && viewer.canDecideProposal : canDecideProposal}
       initialDraft={draftStore?.read(teamId, projectId)}
       onDraftChange={keepDraft}
+      onDraftClaim={claimDraft}
       canEdit={viewer ? canMutate && viewer.canEdit : canEdit}
       hasLoadError={charter.hasLoadError}
       isLoading={charter.isLoading}

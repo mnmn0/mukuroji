@@ -6755,25 +6755,25 @@ function invalidStoredTaskView() {
   return new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.')
 }
 
-/** Validates the optional source revision used by an asynchronous projection guard. */
 /**
  * Copies the creator and creation time of a stored document onto a replacement without them.
  *
  * @param document - Replacement document that lacks a creator.
  * @param stored - Stored row, if any.
- * @returns The replacement, with the stored creator when the stored row has one.
+ * @returns The replacement, with the stored creator and creation time it lacks.
  */
 function withCreatorFrom(
   document: WorkspaceSearchDocument,
   stored: Record<string, unknown> | undefined,
 ) {
-  const creatorUserId = typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined
-  if (!creatorUserId) return document
+  const creatorUserId = document.creatorUserId ??
+    (typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined)
   const createdAt = document.createdAt ??
     (typeof stored?.createdAt === 'string' ? stored.createdAt : undefined)
+  if (creatorUserId === document.creatorUserId && createdAt === document.createdAt) return document
   return createWorkspaceSearchDocument({
     ...document,
-    creatorUserId,
+    ...(creatorUserId ? { creatorUserId } : {}),
     ...(createdAt ? { createdAt } : {}),
   })
 }
@@ -6796,6 +6796,7 @@ function createSearchProjectionContendedError(cause: unknown) {
   )
 }
 
+/** Validates the optional source revision used by an asynchronous projection guard. */
 function normalizeProjectionSourceRevision(value: number | undefined) {
   if (value === undefined) return undefined
   if (!Number.isSafeInteger(value) || value <= 0) {
