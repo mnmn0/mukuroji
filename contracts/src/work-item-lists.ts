@@ -1,5 +1,5 @@
 import type { WorkflowStatusCategory } from './work-item-configuration'
-import type { CanonicalWorkItem } from './work-items'
+import type { CanonicalWorkItem, WorkItemSchedule } from './work-items'
 
 /** Largest `limit` accepted by a paged Workspace Work Item list request. */
 export const WORKSPACE_WORK_ITEM_PAGE_MAX_LIMIT = 200
@@ -133,4 +133,77 @@ export type ProjectWorkItemListPage<TWorkItem extends CanonicalWorkItem = Canoni
   canReadCustomerImpact?: boolean
   /** Opaque cursor for the next page. Absent once every matching Work Item was returned. */
   nextCursor?: string
+}
+
+/**
+ * Longest inclusive schedule window, in calendar days, that a Team or Project list accepts.
+ *
+ * It covers a month calendar with its surrounding weeks and a quarter-long Gantt with margin,
+ * while keeping one windowed read far below the complete-list limits.
+ */
+export const SCOPED_WORK_ITEM_SCHEDULE_WINDOW_MAX_DAYS = 400
+
+/**
+ * Schedule filter of `GET /api/teams/:teamId/issues` and `GET /api/projects/:projectId/issues`.
+ *
+ * - `window` keeps Work Items whose schedule touches the inclusive `from`..`to` dates. It is sent
+ *   as `scheduledFrom` and `scheduledTo`, and never includes unscheduled Work Items.
+ * - `unscheduled` keeps only Work Items without a calendar placement. It is sent as
+ *   `unscheduled=true`.
+ */
+export type ScopedWorkItemScheduleFilter =
+  | {
+      /** Keeps Work Items whose schedule overlaps the window. */
+      kind: 'window'
+      /** Inclusive first local date in `YYYY-MM-DD` form. */
+      from: string
+      /** Inclusive last local date in `YYYY-MM-DD` form. */
+      to: string
+    }
+  | {
+      /** Keeps only Work Items whose schedule mode is `unscheduled`. */
+      kind: 'unscheduled'
+    }
+
+/**
+ * Decides whether a canonical schedule touches an inclusive local date window.
+ *
+ * A deadline touches the window when its date is inside it. A date range or milestone touches
+ * the window when the two inclusive ranges overlap. An unscheduled Work Item never does.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @param from - Inclusive first date in `YYYY-MM-DD` form.
+ * @param to - Inclusive last date in `YYYY-MM-DD` form.
+ * @returns Whether the schedule is placed on at least one date of the window.
+ */
+export function workItemScheduleOverlapsWindow(
+  schedule: WorkItemSchedule,
+  from: string,
+  to: string,
+): boolean {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return false
+    case 'due-date':
+      return from <= schedule.dueDate && schedule.dueDate <= to
+    case 'date-range':
+    case 'milestone':
+      return schedule.startDate <= to && from <= schedule.endDate
+  }
+}
+
+/**
+ * Decides whether a canonical schedule passes a Team or Project list schedule filter.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @param filter - Schedule filter of the list request.
+ * @returns Whether the Work Item belongs to the filtered list.
+ */
+export function matchesScopedWorkItemScheduleFilter(
+  schedule: WorkItemSchedule,
+  filter: ScopedWorkItemScheduleFilter,
+): boolean {
+  return filter.kind === 'unscheduled'
+    ? schedule.mode === 'unscheduled'
+    : workItemScheduleOverlapsWindow(schedule, filter.from, filter.to)
 }

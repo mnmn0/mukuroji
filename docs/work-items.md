@@ -197,6 +197,33 @@ Web の `loadWorkspaceWorkItems(accessToken, includeArchived, filter)`（`web/sr
 
 Web の `loadTeamIssues` / `loadProjectIssues`（`web/src/issues/queries/scopedWorkItemLoader.ts`）は `limit=200` で cursor を最後まで追い、`loadWorkspaceWorkItems` と同じく 10,000 件を超えると `413`、cursor が進まないと `503 WorkItemListReadStalled` 相当の error にする。Team / Project 画面はこの 2 つを原因付きで表示する（`tasks.error.scopeLimitExceeded` / `tasks.error.readStalled` と `tasks.error.reason`）。
 
+### 期間で絞る読み取り（`scheduledFrom` / `scheduledTo` / `unscheduled`）
+
+Team / Project の一覧は、schedule で絞った範囲だけを読める。
+
+- `scheduledFrom=YYYY-MM-DD&scheduledTo=YYYY-MM-DD`: schedule が期間（両端を含む）にかかる Work Item だけを返す。期限（`due-date`）は期限日が期間内、期間（`date-range`）とマイルストーンは開始〜終了が期間と重なるものを返す。期限のない Work Item（`unscheduled`）は含めない。
+- `unscheduled=true`: 期限のない Work Item だけを返す。期間とは同時に指定できない。
+- 2 つは必ず組で指定し、実在する日付で `scheduledFrom <= scheduledTo`、期間は最大 400 日（`SCOPED_WORK_ITEM_SCHEDULE_WINDOW_MAX_DAYS`）。違反は `400 InvalidWorkItemScheduleWindow`。
+- 判定は `@mukuroji/contracts` の `matchesScopedWorkItemScheduleFilter` で、Web も同じ関数を使う。
+- 並び順・cursor・評価予算は通常の一覧と同じ。期間外の Work Item は archive 済みや閲覧できない Work Item と同じく「評価して除く row」なので、cursor に ID は入らず（#462 の方針を維持）、`issues` が `limit` 未満でも `nextCursor` が付くことがある。cursor は期間と `unscheduled` にも結び付いており、別の期間で使うと `400 InvalidWorkItemPageCursor` になる。
+- 範囲用の GSI は追加していない。期間の重なりは 1 つの GSI の key 条件では表せず（開始と終了の 2 条件）、追加には既存 Work Item への属性の backfill も要るため、まず既存の並び順 GSI を評価予算つきで読み、返す Work Item だけを期間で絞る。DynamoDB が読む row 数は全件読み取りと同じだが、1 request は 2,000 row までで、response と Web が保持する件数は表示期間の分だけになる。読み取りの費用が問題になったら、期限日の GSI（期限・マイルストーン）と期間の開始日 GSI を分けて検討する。
+
+Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わせて読む範囲を決める。
+
+| レイアウト | 読む範囲 |
+| --- | --- |
+| 期限カレンダー | 表示中の 1 か月（`scheduledFrom` = 1 日、`scheduledTo` = 月末）と `unscheduled=true` |
+| 期限順（ガント） | 表示中の 3 か月（開始月の 1 日〜2 か月後の月末）と `unscheduled=true` |
+| テーブル・ボード | 一覧全体（従来どおり cursor で読み切る） |
+
+- 期限カレンダーは表示中の月の全日付を並べ、「前の月 / 今月 / 次の月」で月を移る。カードは主日付（期限・開始日）が表示中の月にあるものだけを置く。期間が前月から続く Work Item は、主日付の月で表示する。
+- ガントは表示期間の日付を 1 日 1 列で並べ、「1 か月前 / 今月から / 1 か月後」で期間を 1 か月ずつ動かす。期間をまたぐバーは期間の端で切る。依存関係の相手が表示期間の外にある同じ Project の Work Item でも、Planning snapshot の `projectId` で同じ Project と判定し、外部 Project 扱いにしない。
+- 期限のない Work Item は、期限カレンダーの「予定なし」とガントの未計画 row に必要なので、期間とは別の `unscheduled=true` の読み取りで毎回すべて読む。期間の読み取りと期限なしの読み取りは、それぞれ 10,000 件の上限を持つ。
+- 画面を開いたときは、保存済みビューを含めてレイアウトが決まるまで一覧を読まない。期限カレンダーやガントで開いた場合も、最初の読み取りから期間で絞る。表示月・期間は画面の state で、URL には残さない（再読み込みすると今月に戻る）。
+- 範囲外の Work Item を deep link（`?teamId=…&issueId=…`）や検索結果から開いた場合は、従来どおり詳細 API で取得した Work Item を一覧に足し、詳細 pane を開く。`teamId` の無い `?issueId=…` は、期間で絞った一覧では Team を決められないので、その Project を持つ各 Team の詳細 API で同じ ID を引き、Project に割り当てられた Work Item を一覧に足してから従来どおり解決する（同じ ID が複数 Team にあれば曖昧として扱う）。表示月・期間は自動では移らない。ガントではその Work Item の row が出るが、バーは表示期間の外なので描かない。
+- 日程の変更を確定したあとの再読込は同じ期間で読み、期間から外れた Work Item は一覧から消える。同じ Project の別の一覧（全体、別の月・期間）の cache は変更のたびに再検証し、レイアウトを切り替えたときに古い日程を出さない。
+- ボードは列（workflow status）ごとに読まず、一覧全体を読む。列ごとの件数表示、列をまたぐ drag の並び順（`sortOrder`）、検索・絞り込みが一覧全体を前提にしており、列ごとに page を読むには status 別の並び順 GSI が要るため。1 Project 10,000 件を超えるボードは、引き続き `413` の原因表示になる。
+
 ### 大きな一覧の表示
 
 読み込んだ Work Item は検索・絞り込み・並び替え・件数表示のすべてに使い、描画だけを段階的に行う。
@@ -209,7 +236,8 @@ Web の `loadTeamIssues` / `loadProjectIssues`（`web/src/issues/queries/scopedW
 
 ### まだ残している上限
 
-- Web の Team / Project 画面は、表示に使う範囲（期限カレンダーの月、期限順の期間など）ではなく一覧全体を cursor で読み切る。1 一覧 10,000 件を超えると読み込めない。期間で絞って読む API は無い。
+- Web の Team 画面と、Project のテーブル・ボードは一覧全体を cursor で読み切る。1 一覧 10,000 件を超えると読み込めない。Project の期限カレンダーとガントは表示期間と期限なしの Work Item だけを読む（期限なしが 10,000 件を超えると読み込めない）。
+- 期間で絞る読み取りも、DynamoDB では並び順 GSI を評価予算つきで読み、期間外の row を評価後に除く。範囲用の GSI は未追加。
 - Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
 - Work Item 作成は ID と `sortOrder` を決めるために Team partition 全件を読む。
 

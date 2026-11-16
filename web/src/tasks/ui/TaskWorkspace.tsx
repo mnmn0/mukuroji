@@ -69,8 +69,13 @@ import {
   type TaskSortOrder,
   type TaskTab,
 } from '../model/taskView'
+import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
 import { TaskBoardView } from './TaskBoardView'
+import {
+  TaskCalendarMonthNavigation,
+  TaskGanttPeriodNavigation,
+} from './TaskScheduleWindowToolbar'
 import { TaskCalendarView } from './TaskCalendarView'
 import { TaskFileView } from './TaskFileView'
 import { TaskGanttView } from './TaskGanttView'
@@ -82,6 +87,8 @@ const priorityFilterOptions: readonly PriorityFilter[] = ['all', ...taskPrioriti
 
 /** Props accepted by the task view workspace. */
 export type TaskWorkspaceProps = {
+  /** Visible calendar and Gantt periods. Without it, both layouts span every loaded schedule. */
+  scheduleWindowNavigation?: TaskScheduleWindowNavigation
   /** Currently active task view. */
   activeTab: TaskTab
   /** Unfiltered tasks used to derive complete filter options. */
@@ -281,6 +288,7 @@ export type TaskWorkspaceProps = {
  */
 export function TaskWorkspace({
   activeTab,
+  scheduleWindowNavigation,
   allTasks,
   bulkProjectOptions,
   bulkTaskActionEpoch,
@@ -675,6 +683,25 @@ export function TaskWorkspace({
         </ResponsiveDisclosure>
       </div>
 
+      {/* A period that fails to load keeps its navigation, so another period can be chosen. */}
+      {taskErrorMessage && scheduleWindowNavigation && activeTab === 'calendar' ? (
+        <div className="workbench-table mt-3 overflow-hidden">
+          <TaskCalendarMonthNavigation
+            month={scheduleWindowNavigation.calendarMonth}
+            onMonthChange={scheduleWindowNavigation.onCalendarMonthChange}
+            t={t}
+          />
+        </div>
+      ) : null}
+      {taskErrorMessage && scheduleWindowNavigation && activeTab === 'gantt' ? (
+        <div className="workbench-table mt-3 overflow-hidden">
+          <TaskGanttPeriodNavigation
+            onStartMonthChange={scheduleWindowNavigation.onGanttStartMonthChange}
+            startMonth={scheduleWindowNavigation.ganttStartMonth}
+            t={t}
+          />
+        </div>
+      ) : null}
       {taskErrorMessage && activeTab !== 'table' ? (
         <p
           className="mt-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-fg-red-700"
@@ -761,6 +788,12 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          {...(scheduleWindowNavigation
+            ? {
+                onWindowStartMonthChange: scheduleWindowNavigation.onGanttStartMonthChange,
+                windowStartMonth: scheduleWindowNavigation.ganttStartMonth,
+              }
+            : {})}
         />
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
@@ -773,6 +806,12 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          {...(scheduleWindowNavigation
+            ? {
+                month: scheduleWindowNavigation.calendarMonth,
+                onMonthChange: scheduleWindowNavigation.onCalendarMonthChange,
+              }
+            : {})}
         />
       ) : null}
     </div>

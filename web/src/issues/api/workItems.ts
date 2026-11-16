@@ -7,6 +7,7 @@ import type {
   PreviewWorkItemScheduleInput,
   PreviewWorkItemTypeChangeInput,
   ResolvedWorkItemConfiguration,
+  ScopedWorkItemScheduleFilter,
   TeamWorkItemListPage,
   UpdateWorkItemInput,
   WorkItemPatch,
@@ -116,6 +117,8 @@ export type ScopedWorkItemPageRequest = {
   limit?: number
   /** Cursor returned by the previous page. */
   cursor?: string
+  /** Optional schedule window or unscheduled-only filter evaluated by the server. */
+  scheduleFilter?: ScopedWorkItemScheduleFilter
 }
 
 /**
@@ -239,6 +242,12 @@ function createScopedWorkItemPageUrl(url: string, request: ScopedWorkItemPageReq
     limit: String(request.limit ?? SCOPED_WORK_ITEM_PAGE_MAX_LIMIT),
   })
   if (request.includeArchived) searchParams.set('includeArchived', 'true')
+  if (request.scheduleFilter?.kind === 'window') {
+    searchParams.set('scheduledFrom', request.scheduleFilter.from)
+    searchParams.set('scheduledTo', request.scheduleFilter.to)
+  } else if (request.scheduleFilter?.kind === 'unscheduled') {
+    searchParams.set('unscheduled', 'true')
+  }
   if (request.cursor) searchParams.set('cursor', request.cursor)
   return `${url}?${searchParams.toString()}`
 }

@@ -263,6 +263,7 @@ import {
 import {
   readScopedWorkItemPage,
   readScopedWorkItemPageQuery,
+  readScopedWorkItemScheduleFilter,
   readScopedWorkItemsWithinLegacyLimit,
   type ScopedWorkItemListScope,
 } from '../shared/scoped-work-item-page'
@@ -4245,11 +4246,13 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
       const workItemTypeId = readOptionalWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
       const pageQuery = readScopedWorkItemPageQuery((name) => c.req.query(name))
+      const scheduleFilter = readScopedWorkItemScheduleFilter((name) => c.req.query(name))
       const scope = {
         kind: 'team',
         id: context.team.id,
         includeArchived,
         ...(workItemTypeId ? { workItemTypeId } : {}),
+        ...(scheduleFilter ? { scheduleFilter } : {}),
       } satisfies ScopedWorkItemListScope
       const isReadable = (issue: TeamIssueResponseItem) =>
         filterAccessibleTeamIssues([issue], principal, context).length > 0
@@ -5608,11 +5611,13 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const workItemTypeId = readOptionalProjectWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
 
       const pageQuery = readScopedWorkItemPageQuery((name) => c.req.query(name))
+      const scheduleFilter = readScopedWorkItemScheduleFilter((name) => c.req.query(name))
       const scope = {
         kind: 'project',
         id: projectId,
         includeArchived,
         ...(workItemTypeId ? { workItemTypeId } : {}),
+        ...(scheduleFilter ? { scheduleFilter } : {}),
       } satisfies ScopedWorkItemListScope
       const canReadCustomerImpact = hasCustomerReadAccess(principal, { projectId })
 

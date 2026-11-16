@@ -192,6 +192,7 @@ import {
   formatTaskScheduleRange,
   taskScheduleModeLabelKeys,
 } from '../model/taskSchedule'
+import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { CreateTaskPanel } from './CreateTaskPanel'
 import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
@@ -344,6 +345,8 @@ type PendingTaskScheduleUpdate = {
 
 /** Props accepted by the task management screen. */
 export type TaskScreenProps = {
+  /** Visible calendar and Gantt periods. Without it, both layouts span every loaded schedule. */
+  scheduleWindowNavigation?: TaskScheduleWindowNavigation
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
   aiAssistanceEnabled?: boolean
   /** Whether the Summary workflow is enabled for the current Workspace member. */
@@ -574,6 +577,7 @@ export type TaskScreenProps = {
  */
 export function TaskScreen({
   activeTaskViewId,
+  scheduleWindowNavigation,
   workspaceId = '',
   accessToken,
   aiAssistanceEnabled = true,
@@ -3583,6 +3587,7 @@ export function TaskScreen({
             >
               <TaskWorkspace
                 activeTab={activeTab}
+                scheduleWindowNavigation={scheduleWindowNavigation}
                 allTasks={tasks}
                 assigneeOptions={assigneeOptions}
                 assigneeFilter={assigneeFilter}

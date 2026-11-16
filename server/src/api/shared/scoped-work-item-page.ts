@@ -1,7 +1,10 @@
 import {
+  matchesScopedWorkItemScheduleFilter,
   SCOPED_WORK_ITEM_LEGACY_MAX_ITEMS,
   SCOPED_WORK_ITEM_PAGE_DEFAULT_LIMIT,
   SCOPED_WORK_ITEM_PAGE_MAX_LIMIT,
+  SCOPED_WORK_ITEM_SCHEDULE_WINDOW_MAX_DAYS,
+  type ScopedWorkItemScheduleFilter,
 } from '@mukuroji/contracts'
 import { createHash } from 'node:crypto'
 import { ProjectDataError } from '../../modules/directory'
@@ -23,6 +26,8 @@ export type ScopedWorkItemListScope = {
   includeArchived: boolean
   /** Optional stable Work Item Type filter. */
   workItemTypeId?: string
+  /** Optional schedule window or unscheduled-only filter. */
+  scheduleFilter?: ScopedWorkItemScheduleFilter
 }
 
 /** Parsed paging parameters of a Team or Project Work Item list request. */
@@ -76,6 +81,55 @@ export function readScopedWorkItemPageQuery(
     limit: readScopedWorkItemPageLimit(rawLimit),
     ...(cursor ? { cursor } : {}),
   }
+}
+
+/**
+ * Parses the `scheduledFrom`, `scheduledTo`, and `unscheduled` query parameters of a Team or
+ * Project list.
+ *
+ * `scheduledFrom` and `scheduledTo` must be sent together as real `YYYY-MM-DD` dates, in order,
+ * spanning at most {@link SCOPED_WORK_ITEM_SCHEDULE_WINDOW_MAX_DAYS} days. `unscheduled=true`
+ * cannot be combined with a window.
+ *
+ * @param readQuery - Reads one query value by name.
+ * @returns The schedule filter, or `undefined` when the request reads every schedule.
+ * @throws ProjectDataError `400 InvalidWorkItemScheduleWindow` for a malformed filter.
+ */
+export function readScopedWorkItemScheduleFilter(
+  readQuery: (name: string) => string | undefined,
+): ScopedWorkItemScheduleFilter | undefined {
+  const from = readQuery('scheduledFrom')
+  const to = readQuery('scheduledTo')
+  const unscheduled = readQuery('unscheduled')
+  if (unscheduled !== undefined && unscheduled !== 'true' && unscheduled !== 'false') {
+    throw invalidScopedWorkItemScheduleWindow('unscheduled must be true or false.')
+  }
+  const onlyUnscheduled = unscheduled === 'true'
+  if (from === undefined && to === undefined) {
+    return onlyUnscheduled ? { kind: 'unscheduled' } : undefined
+  }
+  if (onlyUnscheduled) {
+    throw invalidScopedWorkItemScheduleWindow(
+      'unscheduled=true cannot be combined with scheduledFrom and scheduledTo.',
+    )
+  }
+  if (from === undefined || to === undefined) {
+    throw invalidScopedWorkItemScheduleWindow('scheduledFrom and scheduledTo must be sent together.')
+  }
+  const fromDay = readScheduleWindowDay(from)
+  const toDay = readScheduleWindowDay(to)
+  if (fromDay === undefined || toDay === undefined) {
+    throw invalidScopedWorkItemScheduleWindow('scheduledFrom and scheduledTo must be YYYY-MM-DD dates.')
+  }
+  if (toDay < fromDay) {
+    throw invalidScopedWorkItemScheduleWindow('scheduledTo must not be before scheduledFrom.')
+  }
+  if (toDay - fromDay + 1 > SCOPED_WORK_ITEM_SCHEDULE_WINDOW_MAX_DAYS) {
+    throw invalidScopedWorkItemScheduleWindow(
+      `A schedule window can span at most ${SCOPED_WORK_ITEM_SCHEDULE_WINDOW_MAX_DAYS} days.`,
+    )
+  }
+  return { kind: 'window', from, to }
 }
 
 /**
@@ -164,8 +218,14 @@ function readSortedPage(
   startAfter: SortedWorkItemPagePosition | undefined,
   isReadable: ((issue: TeamIssueResponseItem) => boolean) | undefined,
 ): Promise<SortedWorkItemPage> {
+  const scheduleFilter = scope.scheduleFilter
+  const keepsIssue = scheduleFilter
+    ? (issue: TeamIssueResponseItem) =>
+        matchesScopedWorkItemScheduleFilter(issue.schedule, scheduleFilter) &&
+        (isReadable?.(issue) ?? true)
+    : isReadable
   const options = {
-    ...(isReadable ? { isReadable } : {}),
+    ...(keepsIssue ? { isReadable: keepsIssue } : {}),
     limit,
     maxEvaluatedRows: WORK_ITEMS_PAGE_SCAN_BUDGET,
     includeArchived: scope.includeArchived,
@@ -203,11 +263,18 @@ function readScopedWorkItemPageLimit(value: string | undefined): number {
  * @returns A short digest.
  */
 function createScopedWorkItemPageFingerprint(scope: ScopedWorkItemListScope): string {
+  const scheduleFilter = scope.scheduleFilter
   const canonical = JSON.stringify([
     scope.kind,
     scope.id,
     scope.includeArchived,
     scope.workItemTypeId ?? null,
+    // Appended only for a schedule filter, so cursors of unfiltered lists keep their value.
+    ...(scheduleFilter
+      ? [scheduleFilter.kind === 'window'
+          ? ['window', scheduleFilter.from, scheduleFilter.to]
+          : scheduleFilter.kind]
+      : []),
   ])
   return createHash('sha256').update(canonical).digest('base64url').slice(0, 16)
 }
@@ -278,4 +345,39 @@ function invalidScopedWorkItemPageCursor(): ProjectDataError {
     'InvalidWorkItemPageCursor',
     'Work Item page cursor is invalid or was issued for different filters.',
   )
+}
+
+/**
+ * Converts a strict `YYYY-MM-DD` calendar date into a UTC day number.
+ *
+ * @param value - Raw query value.
+ * @returns Days since the Unix epoch, or `undefined` when the value is not a real date.
+ */
+function readScheduleWindowDay(value: string): number | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (!match) return undefined
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (year < 1000) return undefined
+  const time = Date.UTC(year, month - 1, day)
+  const date = new Date(time)
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return undefined
+  }
+  return time / 86_400_000
+}
+
+/**
+ * Creates the error for a malformed schedule filter.
+ *
+ * @param message - Reason shown to the client.
+ * @returns The 400 project data error.
+ */
+function invalidScopedWorkItemScheduleWindow(message: string): ProjectDataError {
+  return new ProjectDataError(400, 'InvalidWorkItemScheduleWindow', message)
 }

@@ -1552,6 +1552,8 @@ function configureFakeProjectClients(
     }>
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
+    /** Project 別 canonical Work Item fake の Issue ID ごとの canonical schedule です。 */
+    canonicalProjectIssueSchedules?: Readonly<Record<string, WorkItemSchedule>>
     /** Project quick access fake が最初に返す viewer preference です。 */
     projectQuickAccessPreference?: ProjectQuickAccessPreferences
     /** Team Issue fake が返す canonical Work Item 数です。 */
@@ -1743,6 +1745,17 @@ function configureFakeProjectClients(
     updatedAt: '2026-07-11T00:00:00.000Z',
   })
   /**
+   * Resolves the canonical schedule and deadline projection of one fake Project Work Item.
+   *
+   * @param issueId - Fake Work Item ID.
+   * @returns The configured schedule, or a 2026-06-18 deadline by default.
+   */
+  const createFakeProjectIssueSchedule = (issueId: string) => {
+    const schedule = options.canonicalProjectIssueSchedules?.[issueId] ??
+      createDefaultDueDateWorkItemSchedule('2026-06-18')
+    return { dueDate: deriveWorkItemScheduleDueDate(schedule), schedule }
+  }
+  /**
    * Builds the fake Work Items assigned to one Project.
    *
    * @param projectId - Project the Work Items are assigned to.
@@ -1764,8 +1777,7 @@ function configureFakeProjectClients(
           statusCategory: 'started' as const,
           customFieldValues: {},
           relationIds: [],
-          dueDate: '2026-06-18',
-          schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+          ...createFakeProjectIssueSchedule(issueId),
           priority: 'high' as const,
           createdAt: '2026-06-08T00:00:00.000Z',
           updatedAt: '2026-06-08T00:00:00.000Z',

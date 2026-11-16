@@ -24,6 +24,7 @@ import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { applyConfirmedSchedulesToTasks } from '../model/scheduleConfirmation'
+import { isTaskScheduleInWindow, type TaskScheduleWindow } from '../model/taskScheduleWindow'
 import {
   refreshScheduleConfirmationCache,
   revalidateScheduleConfirmationCachesBestEffort,
@@ -51,6 +52,23 @@ export type TaskScheduleMutationControllerOptions = {
   planningAccess: PlanningAccessSnapshot
   /** Latest authoritative Planning snapshot. */
   planningSnapshot?: PlanningSnapshot
+  /**
+   * Visible calendar or Gantt period of the Project list cache, when the list is windowed.
+   *
+   * The refresh after a confirmation then reads the same period, and only expects confirmed
+   * Work Items that still belong to it.
+   */
+  scheduleWindow?: TaskScheduleWindow
+  /**
+   * Publishes a refreshed list to the cache of the period it was read for.
+   *
+   * The visible period can change while a refresh runs, so the result must not go to the cache
+   * of whichever period is current when it settles. Without it, `mutateProjectTasks` is used.
+   */
+  publishProjectTasks?: (
+    scheduleWindow: TaskScheduleWindow | undefined,
+    tasks: CanonicalWorkItem[],
+  ) => Promise<unknown>
   /** Resolves localized fallback messages. */
   t: (key: MessageKey) => string
   /** Authenticated user whose endpoint authority is checked before mutations. */
@@ -98,6 +116,8 @@ export function createTaskScheduleMutationController({
   planningAccess,
   planningSnapshot,
   projectId,
+  publishProjectTasks,
+  scheduleWindow,
   t,
   user,
 }: TaskScheduleMutationControllerOptions): TaskScheduleMutationController {
@@ -225,17 +245,46 @@ export function createTaskScheduleMutationController({
       },
       { revalidate: false },
     )
+    /** Confirmed Work Items that the refreshed Project list must contain. */
+    const expectedProjectTasks = response.workItems.filter((item) =>
+      item.assignedProjectId === projectId &&
+      // A windowed list only holds the period's Work Items and the unscheduled ones.
+      (!scheduleWindow || item.schedule.mode === 'unscheduled' ||
+        isTaskScheduleInWindow(item.schedule, scheduleWindow))
+    )
+    /**
+     * Reads the Project list, and explains each expected Work Item it lacks from its detail.
+     *
+     * A later update can move a confirmed Work Item out of the period, or out of the Project,
+     * before the list is read. Such an item is legitimately absent, so it is not required.
+     */
+    const readProjectTasks = async () => {
+      const tasks = (await loadProjectIssues(projectId, token, true, scheduleWindow)).issues
+      const movedAwayKeys = scheduleWindow
+        ? await findConfirmedItemsMovedOutOfList({
+            expected: expectedProjectTasks,
+            listedTasks: tasks,
+            projectId,
+            readCurrent: async (item) =>
+              (await getTeamIssueDetail(item.teamId, item.id, token)).issue,
+            scheduleWindow,
+          })
+        : new Set<string>()
+      return { movedAwayKeys, tasks }
+    }
     /** Fetches and publishes the Project list only after it observes committed revisions. */
     const refreshProjectTasks = () => refreshScheduleConfirmationCache(
-      () => guardEnterpriseSession(
-        loadProjectIssues(projectId, token, true).then((list) => list.issues),
-      ),
-      (refreshedTasks) => assertConfirmedScheduleRevisionsObserved(
-        refreshedTasks,
-        response.workItems.filter((item) => item.assignedProjectId === projectId),
+      () => guardEnterpriseSession(readProjectTasks()),
+      ({ movedAwayKeys, tasks }) => assertConfirmedScheduleRevisionsObserved(
+        tasks,
+        expectedProjectTasks.filter((item) =>
+          !movedAwayKeys.has(createConfirmedScheduleKey(item.teamId, item.id))
+        ),
         'Project Work Item list',
       ),
-      (refreshedTasks) => mutateProjectTasks(refreshedTasks, { revalidate: false }),
+      ({ tasks }) => publishProjectTasks
+        ? publishProjectTasks(scheduleWindow, tasks)
+        : mutateProjectTasks(tasks, { revalidate: false }),
     )
     /** Fetches and publishes the selected detail only after it observes the direct commit. */
     const refreshSelectedIssueDetail = () => refreshScheduleConfirmationCache(
@@ -311,6 +360,45 @@ export function assertConfirmedScheduleRevisionsObserved(
   if (!hasEveryConfirmedRevision) {
     throw new Error(`${source} has not observed the confirmed schedule revisions yet.`)
   }
+}
+
+/**
+ * Finds confirmed Work Items that a windowed Project list legitimately no longer contains.
+ *
+ * A later update can move a confirmed Work Item out of the period, or out of the Project,
+ * before the list is read. Each expected Work Item missing from the list is checked against its
+ * current detail; it is excused only when that detail is newer than the confirmation and no
+ * longer belongs to the list. Otherwise the list is stale and must still be retried.
+ *
+ * @param input - Expected confirmed items, the read list, the list scope, and a detail reader.
+ * @returns Keys, as `createConfirmedScheduleKey` builds them, of the excused Work Items.
+ */
+export async function findConfirmedItemsMovedOutOfList(input: {
+  /** Confirmed Work Items the list was expected to contain. */
+  expected: readonly ConfirmedWorkItemSchedule[]
+  /** Work Items the list returned. */
+  listedTasks: readonly { id: string; teamId: string }[]
+  /** Project of the list. */
+  projectId: string
+  /** Visible period of the list. */
+  scheduleWindow: TaskScheduleWindow
+  /** Reads the current state of one Work Item. */
+  readCurrent: (item: ConfirmedWorkItemSchedule) => Promise<CanonicalWorkItem>
+}): Promise<Set<string>> {
+  const listedKeys = new Set(input.listedTasks.map((item) =>
+    createConfirmedScheduleKey(item.teamId, item.id)
+  ))
+  const movedAwayKeys = new Set<string>()
+  for (const item of input.expected) {
+    const key = createConfirmedScheduleKey(item.teamId, item.id)
+    if (listedKeys.has(key)) continue
+    const current = await input.readCurrent(item)
+    const belongsToList = current.assignedProjectId === input.projectId &&
+      (current.schedule.mode === 'unscheduled' ||
+        isTaskScheduleInWindow(current.schedule, input.scheduleWindow))
+    if (current.revision > item.revision && !belongsToList) movedAwayKeys.add(key)
+  }
+  return movedAwayKeys
 }
 
 /** Creates an unambiguous cache-local key for one Team-qualified Work Item. */

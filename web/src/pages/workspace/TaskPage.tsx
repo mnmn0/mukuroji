@@ -61,6 +61,7 @@ import {
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
 import {
+  useProjectIssueLinkCandidates,
   useProjectIssues,
   useTeamIssueDetail,
   useTeamIssues,
@@ -90,6 +91,12 @@ import {
 import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
 import { createTaskMutationController } from '../../tasks/mutations/createTaskMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
+import {
+  createTaskCalendarMonthWindow,
+  createTaskGanttWindow,
+  getCurrentTaskMonth,
+  type TaskScheduleWindowLayout,
+} from '../../tasks/model/taskScheduleWindow'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
   createBuiltInTaskViewDefinition,
@@ -101,6 +108,7 @@ import {
 } from '../../task-views/model/taskViewSurfaceState'
 import { preserveTaskViewUrlState } from '../../task-views/model/taskViewUrlState'
 import { useTaskViewController } from '../../task-views/mutations/useTaskViewController'
+import { useEffectiveTaskViewLayoutMode } from '../../task-views/queries/useEffectiveTaskViewLayoutMode'
 import { TaskViewToolbar } from '../../task-views/ui/TaskViewToolbar'
 import {
   createTaskViewOption,
@@ -284,20 +292,58 @@ export function TaskPage() {
   )
   const canAccessTriage = workspaceAccess?.currentMember.status === 'active' &&
     workspaceAccess.currentMember.role !== 'guest'
+  const taskViewScope = useMemo<TaskViewScope>(
+    () => selectedTeamId
+      ? { kind: 'project', projectId, teamId: selectedTeamId }
+      : { kind: 'project', projectId },
+    [projectId, selectedTeamId],
+  )
+  // The calendar and Gantt read only their visible period, so the list waits until the
+  // effective task-view layout is known instead of first reading the whole Project.
+  const projectListLayoutMode = useEffectiveTaskViewLayoutMode({
+    accessToken,
+    builtInMode: 'table',
+    continuityKey: projectId,
+    enabled: Boolean(accessToken && user && !currentUserError),
+    scope: taskViewScope,
+    searchParams,
+    surface: 'project',
+  })
+  const projectListWindowLayout: TaskScheduleWindowLayout | undefined =
+    projectListLayoutMode === 'calendar' || projectListLayoutMode === 'gantt'
+      ? projectListLayoutMode
+      : undefined
+  const [calendarMonth, setCalendarMonth] = useState(() => getCurrentTaskMonth())
+  const [ganttStartMonth, setGanttStartMonth] = useState(() => getCurrentTaskMonth())
+  const scheduleWindowNavigation = useMemo(() => ({
+    calendarMonth,
+    ganttStartMonth,
+    onCalendarMonthChange: setCalendarMonth,
+    onGanttStartMonthChange: setGanttStartMonth,
+  }), [calendarMonth, ganttStartMonth])
+  const projectScheduleWindow = useMemo(() => {
+    if (projectListWindowLayout === 'calendar') return createTaskCalendarMonthWindow(calendarMonth)
+    if (projectListWindowLayout === 'gantt') return createTaskGanttWindow(ganttStartMonth)
+    return undefined
+  }, [calendarMonth, ganttStartMonth, projectListWindowLayout])
   const {
-    data: projectIssues = emptyTeamIssues,
+    data: projectListIssues = emptyTeamIssues,
     error: taskError,
-    isLoading: isProjectTasksLoading,
+    isLoading: isProjectListLoading,
     mutate: mutateProjectTasks,
+    publishIssues: publishProjectTasks,
     canReadCustomerImpact,
   } = useProjectIssues(
     accessToken,
     projectId,
-    Boolean(user && !currentUserError),
+    Boolean(user && !currentUserError && projectListLayoutMode !== undefined),
     true,
     selectedTeamId,
     selectedIssueId,
+    projectScheduleWindow,
   )
+  const isProjectTasksLoading = isProjectListLoading ||
+    Boolean(user && !currentUserError && projectListLayoutMode === undefined)
   const {
     data: projectCustomerImpact,
     error: projectCustomerImpactError,
@@ -397,6 +443,35 @@ export function TaskPage() {
   )
   const projectUsersNextToken =
     activeProjectUsersExtraPage ? activeProjectUsersExtraPage.nextToken : projectUsersFirstPage?.nextToken
+  const projectTeamIds = useMemo(
+    () => teams
+      .filter((team) => team.projects.some((project) => project.id === projectId))
+      .map((team) => team.id),
+    [projectId, teams],
+  )
+  // A windowed list cannot resolve an `issueId` link without `teamId` outside its period, so the
+  // Work Items such a link can mean are looked up per Team and added to the list.
+  const {
+    data: issueLinkCandidates,
+    error: issueLinkCandidatesError,
+    isLoading: isIssueLinkCandidatesLoading,
+    mutate: mutateIssueLinkCandidates,
+    key: issueLinkCandidatesKey,
+  } = useProjectIssueLinkCandidates(
+    accessToken,
+    projectId,
+    selectedIssueId,
+    projectTeamIds,
+    Boolean(user && !currentUserError && projectScheduleWindow && selectedIssueId && !selectedTeamId),
+  )
+  const projectIssues = useMemo(() => {
+    if (!projectScheduleWindow || !issueLinkCandidates?.length) return projectListIssues
+    const listedKeys = new Set(projectListIssues.map((issue) => `${issue.teamId}\u0000${issue.id}`))
+    const missing = issueLinkCandidates.filter((issue) =>
+      !listedKeys.has(`${issue.teamId}\u0000${issue.id}`)
+    )
+    return missing.length > 0 ? [...projectListIssues, ...missing] : projectListIssues
+  }, [issueLinkCandidates, projectListIssues, projectScheduleWindow])
   const projectUsersErrorMessage = projectUsersError
     ? t('workspace.permissions.usersError')
     : undefined
@@ -474,12 +549,6 @@ export function TaskPage() {
     ? workItemConfigurationLoadResult.configurationsByTeam[selectedWorkItemTeamId]
     : undefined
   const failedConfigurationTeamIds = workItemConfigurationLoadResult.failedTeamIds
-  const taskViewScope = useMemo<TaskViewScope>(
-    () => selectedTeamId
-      ? { kind: 'project', projectId, teamId: selectedTeamId }
-      : { kind: 'project', projectId },
-    [projectId, selectedTeamId],
-  )
   const taskViewCustomFields = useMemo(() => {
     const fieldsById = new Map<string, string>()
     for (const resolved of Object.values(
@@ -711,6 +780,7 @@ export function TaskPage() {
       ...workItemConfigurationLoadResult.errors,
       relationCandidatesError,
       detailError,
+      issueLinkCandidatesError,
       ...(issueArtifacts.sessionErrors ?? []),
       ...(projectFiles.sessionErrors ?? []),
       ...(collaboration.sessionErrors ?? []),
@@ -758,6 +828,8 @@ export function TaskPage() {
     planningAccess,
     planningSnapshot,
     projectId,
+    publishProjectTasks,
+    ...(projectScheduleWindow ? { scheduleWindow: projectScheduleWindow } : {}),
     t,
     user,
   })
@@ -795,11 +867,14 @@ export function TaskPage() {
   const detailFetchError = Boolean(
     detailError ||
     selectedIssueDetailScopeMismatch ||
+    // A failed lookup of an unqualified link's Work Items is retried with the task queries.
+    issueLinkCandidatesError ||
     (
       Boolean(selectedIssueId) &&
       !taskError &&
       !isProjectTasksLoading &&
       !isSelectedIssueDetailLoading &&
+      !(issueLinkCandidatesKey && isIssueLinkCandidatesLoading) &&
       !resolvedSelectedIssue
     ),
   )
@@ -1738,6 +1813,7 @@ export function TaskPage() {
   return (
     <TaskScreen
       key={taskScopeKey}
+      scheduleWindowNavigation={scheduleWindowNavigation}
       aiAssistanceEnabled={aiPlanningAssistanceEnabled}
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
@@ -1765,6 +1841,7 @@ export function TaskPage() {
             void Promise.all([
               mutateProjectTasks(),
               mutateSelectedIssueDetail(),
+              ...(issueLinkCandidatesKey ? [mutateIssueLinkCandidates()] : []),
             ]).catch(() => undefined)
           }
         : undefined}

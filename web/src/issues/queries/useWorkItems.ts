@@ -1,16 +1,18 @@
 import type { WorkspaceWorkItemListFilter } from '@mukuroji/contracts'
-import useSWR from 'swr'
+import useSWR, { useSWRConfig } from 'swr'
 import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
 import { useMemo } from 'react'
 import {
   getTeamIssueDetail,
   getWorkspaceWorkItemSummary,
 } from '../api/workItems'
+import { resolveEnterpriseSessionErrorAction } from '../../auth/enterpriseSessionErrors'
 import { TeamIssuesApiError } from '../api/errors'
 import {
   loadProjectIssues,
   loadTeamIssues,
   type ProjectIssueList as ProjectIssuesPage,
+  type ProjectIssueScheduleWindow,
 } from './scopedWorkItemLoader'
 import { loadWorkspaceWorkItems } from './workspaceWorkItemLoader'
 
@@ -86,6 +88,9 @@ export function useTeamIssues(
  * @param includeArchived - Whether the Project query includes archived Work Items.
  * @param selectedTeamId - Optional Team identity from the routed Work Item.
  * @param selectedIssueId - Optional Work Item identity from the route.
+ * @param scheduleWindow - Optional visible calendar or Gantt period. When set, only the Work
+ *   Items touching it and the unscheduled Work Items are read. The routed Work Item is still
+ *   added from its detail when it lies outside the period.
  * @returns Project Work Item 一覧の SWR state です。
  */
 export function useProjectIssues(
@@ -95,17 +100,28 @@ export function useProjectIssues(
   includeArchived = false,
   selectedTeamId?: string,
   selectedIssueId?: string,
+  scheduleWindow?: ProjectIssueScheduleWindow,
 ) {
   const key = accessToken && projectId && enabled
-    ? ['project-issues', accessToken, projectId, includeArchived] as const
+    ? createProjectIssuesKey(accessToken, projectId, includeArchived, scheduleWindow)
     : null
 
+  // Moving to another period or layout keeps the previous list on screen while the next one
+  // loads, so the page does not fall back to its loading state and unmount open forms.
   const query = useSWR(
     key,
-    ([, token, currentProjectId, shouldIncludeArchived]) =>
-      loadProjectIssues(currentProjectId, token, shouldIncludeArchived),
-    workItemQueryConfig,
+    ([, token, currentProjectId, shouldIncludeArchived, from, to]) =>
+      loadProjectIssues(
+        currentProjectId,
+        token,
+        shouldIncludeArchived,
+        from !== null && to !== null ? { from, to } : undefined,
+      ),
+    { ...workItemQueryConfig, keepPreviousData: true },
   )
+  const { mutate: mutateCache } = useSWRConfig()
+  // The previous list is kept only for the same Project, never shown for another one.
+  const listData = query.data?.projectId === projectId ? query.data : undefined
 
   const selectedDetailQuery = useTeamIssueDetail(
     accessToken,
@@ -118,7 +134,7 @@ export function useProjectIssues(
     ? undefined
     : selectedDetailQuery.data?.issue
   const reconciledIssues = useMemo(() => {
-    const issues = query.data?.issues
+    const issues = listData?.issues
     if (!issues || !selectedTeamId || !selectedIssueId || !selectedDetailIssue) {
       return issues
     }
@@ -151,7 +167,7 @@ export function useProjectIssues(
   }, [
     includeArchived,
     projectId,
-    query.data?.issues,
+    listData?.issues,
     selectedDetailIssue,
     selectedIssueId,
     selectedTeamId,
@@ -184,16 +200,160 @@ export function useProjectIssues(
     const response = data === undefined && options === undefined
       ? await query.mutate()
       : await query.mutate(responseData, responseOptions)
+    // The same Project is also cached for the whole list, other calendar or Gantt periods, and
+    // the Work Items of an unqualified link. Revalidating them clears their request
+    // deduplication and refreshes a mounted link lookup, so no view keeps an old snapshot.
+    void mutateCache((candidate: unknown) =>
+      isOtherProjectIssueListKey(candidate, key) || isProjectIssueLinkCandidatesKey(candidate, key)
+    )
     return response?.issues
+  }
+
+  /**
+   * Publishes a list to the cache of the period it was read for, not the current period.
+   *
+   * @param readWindow - Period the list was read for, or `undefined` for the whole Project.
+   * @param issues - Refreshed Work Items of that period.
+   * @returns The cache update.
+   */
+  const publishProjectIssues = (
+    readWindow: ProjectIssueScheduleWindow | undefined,
+    issues: ProjectIssueList,
+  ) => {
+    if (!accessToken || !projectId) return Promise.resolve(undefined)
+    const published = mutateCache(
+      createProjectIssuesKey(accessToken, projectId, includeArchived, readWindow),
+      (current?: ProjectIssuesPage) => createProjectIssuesPage(projectId, issues, current),
+      { revalidate: false },
+    )
+    void mutateCache((candidate: unknown) => isProjectIssueLinkCandidatesKey(candidate, key))
+    return published
   }
 
   return {
     ...query,
     data: reconciledIssues,
-    canReadCustomerImpact: query.data?.canReadCustomerImpact === true,
+    // The previous list stays visible while another period loads; only a first load is loading.
+    isLoading: Boolean(key) && listData === undefined && query.error === undefined,
+    canReadCustomerImpact: listData?.canReadCustomerImpact === true,
     mutate: mutateProjectIssues,
+    publishIssues: publishProjectIssues,
     key,
   }
+}
+
+/**
+ * Finds the Work Items that an `issueId` link without `teamId` can mean, outside of any list.
+ *
+ * A calendar or Gantt list holds only its visible period, so it cannot tell which Team owns a
+ * routed Work Item outside that period, or whether two Teams use the same local ID. Each Team
+ * that has the Project is asked for the ID directly; a Work Item counts when it is assigned to
+ * the Project. A missing or unreadable Work Item of one Team is not a match; an enterprise
+ * session policy denial fails the lookup so the page can start its login or recovery flow.
+ *
+ * @param accessToken - Work Item API access token.
+ * @param projectId - Project the link points into.
+ * @param issueId - Team-local Work Item ID from the link.
+ * @param teamIds - Teams that have the Project.
+ * @param enabled - Whether the lookup runs, normally only for a windowed list.
+ * @returns SWR state whose data lists every matching Work Item, and its cache key.
+ */
+export function useProjectIssueLinkCandidates(
+  accessToken: string | undefined,
+  projectId: string | undefined,
+  issueId: string | undefined,
+  teamIds: readonly string[],
+  enabled: boolean,
+) {
+  const key = accessToken && projectId && issueId && enabled && teamIds.length > 0
+    ? ['project-issue-link-candidates', accessToken, projectId, issueId, ...teamIds] as const
+    : null
+  const query = useSWR(
+    key,
+    async ([, token, currentProjectId, currentIssueId, ...candidateTeamIds]) => {
+      const issues = await Promise.all(candidateTeamIds.map(async (teamId) => {
+        try {
+          return (await getTeamIssueDetail(teamId, currentIssueId, token)).issue
+        } catch (error) {
+          // A resource that is missing or not readable in one Team is not a match, but a session
+          // policy denial must reach the page's login or recovery flow.
+          if (
+            error instanceof TeamIssuesApiError &&
+            (error.status === 403 || error.status === 404) &&
+            resolveEnterpriseSessionErrorAction(error, '/').kind === 'stay'
+          ) {
+            return undefined
+          }
+          throw error
+        }
+      }))
+      return issues.filter((issue): issue is NonNullable<typeof issue> =>
+        issue !== undefined && issue.assignedProjectId === currentProjectId
+      )
+    },
+    workItemQueryConfig,
+  )
+  return { ...query, key }
+}
+
+/**
+ * Creates the SWR key of one Project Work Item list.
+ *
+ * @param accessToken - Work Item API access token.
+ * @param projectId - Project whose Work Items are listed.
+ * @param includeArchived - Whether archived Work Items are included.
+ * @param scheduleWindow - Optional visible calendar or Gantt period.
+ * @returns The cache key, distinct per archive option and period.
+ */
+function createProjectIssuesKey(
+  accessToken: string,
+  projectId: string,
+  includeArchived: boolean,
+  scheduleWindow: ProjectIssueScheduleWindow | undefined,
+) {
+  return [
+    'project-issues',
+    accessToken,
+    projectId,
+    includeArchived,
+    scheduleWindow?.from ?? null,
+    scheduleWindow?.to ?? null,
+  ] as const
+}
+
+/**
+ * Decides whether a cache key is another list of the same Project as `currentKey`.
+ *
+ * @param candidate - Cache key supplied by the global mutator.
+ * @param currentKey - Key of the Project list that was changed.
+ * @returns Whether the candidate caches the same Project for another archive option or period.
+ */
+function isOtherProjectIssueListKey(
+  candidate: unknown,
+  currentKey: readonly unknown[] | null,
+): boolean {
+  if (!currentKey || !Array.isArray(candidate) || candidate[0] !== 'project-issues') return false
+  return candidate[1] === currentKey[1] &&
+    candidate[2] === currentKey[2] &&
+    candidate.some((part, index) => part !== currentKey[index])
+}
+
+/**
+ * Decides whether a cache key is the unqualified-link lookup of the same Project as `listKey`.
+ *
+ * @param candidate - Cache key supplied by the global mutator.
+ * @param listKey - Key of the Project list that was changed.
+ * @returns Whether the candidate caches that Project's link lookup for the same session.
+ */
+function isProjectIssueLinkCandidatesKey(
+  candidate: unknown,
+  listKey: readonly unknown[] | null,
+): boolean {
+  return Boolean(listKey) &&
+    Array.isArray(candidate) &&
+    candidate[0] === 'project-issue-link-candidates' &&
+    candidate[1] === listKey?.[1] &&
+    candidate[2] === listKey?.[2]
 }
 
 /**

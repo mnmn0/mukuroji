@@ -58,6 +58,12 @@ import {
   TaskWorkItemTypeBadge,
   TaskViewHeading,
 } from './TaskViewPrimitives'
+import { TaskGanttPeriodNavigation } from './TaskScheduleWindowToolbar'
+import {
+  createTaskGanttWindow,
+  listTaskScheduleWindowDates,
+  type TaskScheduleWindow,
+} from '../model/taskScheduleWindow'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
@@ -198,6 +204,15 @@ export type TaskGanttViewProps = {
     dependency: WorkItemScheduleDependency,
     patch: WorkItemScheduleDependencyPatch,
   ) => void | Promise<void>
+  /**
+   * First month of the visible period, in `YYYY-MM` form.
+   *
+   * When set, the timeline spans exactly that period and bars outside it are clipped. Without
+   * it, the timeline spans every loaded schedule.
+   */
+  windowStartMonth?: string
+  /** Moves the period to start at another month. Shown as navigation with `windowStartMonth`. */
+  onWindowStartMonthChange?: (month: string) => void
 }
 
 /** Props for the Gantt schedule-preview dialog. */
@@ -234,12 +249,38 @@ export function TaskGanttView({
   onRequestScheduleChange,
   onSelectTask,
   onUpdateScheduleDependency,
+  onWindowStartMonthChange,
   planningSnapshot,
   projectId,
   t,
   tasks,
+  windowStartMonth,
 }: TaskGanttViewProps) {
-  const projectTasks = allProjectTasks ?? tasks
+  const timelineWindow = useMemo(
+    () => windowStartMonth ? createTaskGanttWindow(windowStartMonth) : undefined,
+    [windowStartMonth],
+  )
+  const projectTasks = useMemo(() => {
+    const loadedTasks = allProjectTasks ?? tasks
+    if (!timelineWindow || !projectId || !planningSnapshot) return loadedTasks
+    // A windowed list holds only the period's Work Items, so the Project's other Work Items
+    // come from the Planning snapshot. Their endpoints then stay local instead of external.
+    const loadedKeys = new Set(loadedTasks.map((task) =>
+      createWorkItemDependencyEndpointKey({ teamId: task.teamId, workItemId: task.id })
+    ))
+    return [
+      ...loadedTasks,
+      ...planningSnapshot.workItems
+        .filter((item) =>
+          item.projectId === projectId &&
+          !loadedKeys.has(createWorkItemDependencyEndpointKey({
+            teamId: item.teamId,
+            workItemId: item.id,
+          }))
+        )
+        .map((item) => ({ id: item.id, teamId: item.teamId })),
+    ]
+  }, [allProjectTasks, planningSnapshot, projectId, tasks, timelineWindow])
   const rows = useMemo(() => createGanttRows(tasks), [tasks])
   const dependencySummaries = useMemo(
     () => createWorkItemDependencySummaries(planningSnapshot),
@@ -262,14 +303,16 @@ export function TaskGanttView({
     )
   }, [planningSnapshot, visibleTaskKeys])
   const timelineColumns = useMemo(
-    () => createGanttTimelineColumns([
-      ...rows.map((row) => row.schedule),
-      ...dependencyRows.flatMap((row) => [
-        ...(row.predecessor ? [row.predecessor.schedule] : []),
-        ...(row.successor ? [row.successor.schedule] : []),
-      ]),
-    ]),
-    [dependencyRows, rows],
+    () => timelineWindow
+      ? createGanttWindowColumns(timelineWindow)
+      : createGanttTimelineColumns([
+          ...rows.map((row) => row.schedule),
+          ...dependencyRows.flatMap((row) => [
+            ...(row.predecessor ? [row.predecessor.schedule] : []),
+            ...(row.successor ? [row.successor.schedule] : []),
+          ]),
+        ]),
+    [dependencyRows, rows, timelineWindow],
   )
   // Thousands of rows are rendered in steps; connectors are laid out for rendered rows only.
   const {
@@ -475,6 +518,13 @@ export function TaskGanttView({
         t={t}
         titleKey="tasks.view.gantt"
       />
+      {windowStartMonth && onWindowStartMonthChange ? (
+        <TaskGanttPeriodNavigation
+          onStartMonthChange={onWindowStartMonthChange}
+          startMonth={windowStartMonth}
+          t={t}
+        />
+      ) : null}
       {dependencyRows.length > 0 ? (
         <ul
           aria-label={t('workItems.dependencies.title')}
@@ -841,7 +891,10 @@ export function TaskGanttView({
                     </div>
                   ) : (
                     <span className="absolute left-3 top-9 z-[1] rounded border border-dashed border-tone-98a2b3 bg-surface px-2 py-1 text-xs font-semibold text-fg-667085">
-                      {t('tasks.calendar.empty')}
+                      {/* A scheduled row without a bar lies outside the visible period. */}
+                      {row.schedule.mode === 'unscheduled'
+                        ? t('tasks.calendar.empty')
+                        : t('tasks.gantt.outsideWindow')}
                     </span>
                   )}
                 </div>
@@ -1171,6 +1224,20 @@ function createGanttTimelineColumns(
 }
 
 /**
+ * Builds one column per date of a visible Gantt period.
+ *
+ * @param window - Inclusive visible period.
+ * @returns Ordered single-date columns covering the period.
+ */
+function createGanttWindowColumns(window: TaskScheduleWindow): GanttTimelineColumn[] {
+  return listTaskScheduleWindowDates(window).map((date) => ({
+    endDate: date,
+    label: formatGanttTimelineColumnLabel(date, date),
+    startDate: date,
+  }))
+}
+
+/**
  * Builds deterministic connector geometry for local bars and one-sided cross-Project edges.
  *
  * @param dependencies - Dependency rows touching at least one local task.
@@ -1329,8 +1396,17 @@ function createGanttBar(
   if (!startDate || !endDate) {
     return undefined
   }
-  const startIndex = findGanttTimelineColumnIndex(columns, startDate)
-  const endIndex = findGanttTimelineColumnIndex(columns, endDate)
+  const firstDate = columns[0]?.startDate
+  const lastDate = columns.at(-1)?.endDate
+  if (!firstDate || !lastDate || endDate < firstDate || lastDate < startDate) {
+    return undefined
+  }
+  // A windowed timeline clips bars that start before or end after the visible period.
+  const startIndex = findGanttTimelineColumnIndex(
+    columns,
+    startDate < firstDate ? firstDate : startDate,
+  )
+  const endIndex = findGanttTimelineColumnIndex(columns, lastDate < endDate ? lastDate : endDate)
   if (startIndex < 0 || endIndex < startIndex) {
     return undefined
   }

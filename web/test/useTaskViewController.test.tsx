@@ -18,6 +18,11 @@ import {
   type UseTaskViewControllerInput,
 } from '../src/task-views/mutations/useTaskViewController'
 import {
+  continueTaskViewLayoutMode,
+  resolveTaskViewLayoutMode,
+} from '../src/task-views/model/taskViewBaseSelection'
+import { useEffectiveTaskViewLayoutMode } from '../src/task-views/queries/useEffectiveTaskViewLayoutMode'
+import {
   parseTaskViewUrlState,
   updateTaskViewUrlState,
 } from '../src/task-views/model/taskViewUrlState'
@@ -760,6 +765,100 @@ function createDefinition(keyword: string, mode: TaskViewDefinition['layout']['m
     },
   }
 }
+
+describe('resolveTaskViewLayoutMode', () => {
+  test('follows URL override, explicit view, personal default, Team default, then built-in', () => {
+    const team = createSavedView('team-view', 'team', 'board', { isDefault: true, defaultSource: 'team' })
+    const personal = createSavedView('personal-view', 'mine', 'calendar', {
+      isDefault: true,
+      defaultSource: 'personal',
+    })
+    const gantt = createSavedView('gantt-view', 'gantt', 'gantt', { isDefault: false })
+    const savedViews = [team, personal, gantt]
+
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews: [] })).toBe('table')
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews: [team] })).toBe('board')
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews })).toBe('calendar')
+    expect(resolveTaskViewLayoutMode({ builtInMode: 'table', savedViews, viewId: 'gantt-view' }))
+      .toBe('gantt')
+    expect(resolveTaskViewLayoutMode({
+      builtInMode: 'table',
+      savedViews,
+      viewId: BUILT_IN_TASK_VIEW_ID,
+    })).toBe('table')
+    expect(resolveTaskViewLayoutMode({
+      builtInMode: 'table',
+      override: { layout: { mode: 'board' } },
+      savedViews,
+    })).toBe('board')
+  })
+})
+
+describe('continueTaskViewLayoutMode', () => {
+  test('keeps the last layout only within the same Project while saved views load', () => {
+    const last = { continuityKey: 'refero', mode: 'calendar' } as const
+    expect(continueTaskViewLayoutMode('table', last, 'refero')).toBe('table')
+    // Opening a Work Item of the same Project keeps its calendar until the views load.
+    expect(continueTaskViewLayoutMode(undefined, last, 'refero')).toBe('calendar')
+    // Another Project waits for its own saved views instead of reading a whole list.
+    expect(continueTaskViewLayoutMode(undefined, last, 'launch')).toBeUndefined()
+    expect(continueTaskViewLayoutMode(undefined, undefined, 'refero')).toBeUndefined()
+  })
+})
+
+describe('useEffectiveTaskViewLayoutMode', () => {
+  const scope = { kind: 'project', projectId: 'refero' } as const
+  const key = unstable_serialize(['saved-task-views', 'token', 'project', JSON.stringify(scope)])
+  const calendarDefault = createSavedView('calendar-view', 'cal', 'calendar', {
+    isDefault: true,
+    defaultSource: 'personal',
+  })
+
+  /** Renders the hook once against a seeded saved-view cache state. */
+  function renderLayoutMode(
+    cacheState: Record<string, unknown> | undefined,
+    options: { enabled?: boolean; searchParams?: URLSearchParams } = {},
+  ) {
+    let captured: string | undefined = 'unset'
+    /** Captures one server-rendered layout result. */
+    function Probe() {
+      captured = useEffectiveTaskViewLayoutMode({
+        accessToken: 'token',
+        builtInMode: 'table',
+        continuityKey: 'refero',
+        enabled: options.enabled ?? true,
+        scope,
+        searchParams: options.searchParams ?? new URLSearchParams(),
+        surface: 'project',
+      })
+      return null
+    }
+    renderToStaticMarkup(
+      <SWRConfig value={{
+        provider: () => new Map(cacheState ? [[key, cacheState]] : []),
+        revalidateOnMount: false,
+      }}>
+        <Probe />
+      </SWRConfig>,
+    )
+    return captured
+  }
+
+  test('waits for enabled saved views and resolves failures as the controller does', () => {
+    expect(renderLayoutMode(undefined, { enabled: false })).toBeUndefined()
+    expect(renderLayoutMode({ isLoading: true })).toBeUndefined()
+    expect(renderLayoutMode({
+      data: { capabilities: writableTaskViewCapabilities, views: [calendarDefault] },
+    })).toBe('calendar')
+    // A failed revalidation keeps this scope's cached views, as the controller does.
+    expect(renderLayoutMode({
+      data: { capabilities: writableTaskViewCapabilities, views: [calendarDefault] },
+      error: new Error('Saved views failed.'),
+    })).toBe('calendar')
+    // A first read that fails falls back to the built-in layout, as the controller does.
+    expect(renderLayoutMode({ error: new Error('Saved views failed.') })).toBe('table')
+  })
+})
 
 /** Creates a saved Project view with configurable default metadata. */
 function createSavedView(

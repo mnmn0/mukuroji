@@ -38,6 +38,11 @@ import {
 } from '../model/taskView'
 import { TaskViewHeading, TaskWorkItemTypeBadge } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
+import { TaskCalendarMonthNavigation } from './TaskScheduleWindowToolbar'
+import {
+  createTaskCalendarMonthWindow,
+  listTaskScheduleWindowDates,
+} from '../model/taskScheduleWindow'
 
 /** Resolves a localized task-calendar message. */
 type TaskCalendarTranslator = (key: MessageKey) => string
@@ -92,6 +97,15 @@ export type TaskCalendarViewProps = {
   tasks: CanonicalWorkItem[]
   /** Translator used for calendar labels. */
   t: TaskCalendarTranslator
+  /**
+   * Month the calendar shows, in `YYYY-MM` form.
+   *
+   * When set, the calendar shows every date of the month and only the cards placed on them,
+   * plus the unscheduled bucket. Without it, the calendar shows the dates around every task.
+   */
+  month?: string
+  /** Moves the calendar to another month. Shown as period navigation together with `month`. */
+  onMonthChange?: (month: string) => void
   /** Opens the create panel with a date or date-range context. */
   onCreateTaskOpen?: (context?: CalendarTaskCreateContext) => void
   /** Selects a task in the shared detail pane. */
@@ -129,14 +143,16 @@ type CalendarSchedulePreviewProps = {
 export function TaskCalendarView({
   configuration,
   configurationsByTeam = {},
+  month,
   onCreateTaskOpen,
+  onMonthChange,
   onRequestScheduleChange,
   onSelectTask,
   projectId,
   t,
   tasks,
 }: TaskCalendarViewProps) {
-  const calendar = useMemo(() => createCanonicalCalendarModel(tasks), [tasks])
+  const calendar = useMemo(() => createCanonicalCalendarModel(tasks, month), [month, tasks])
   const [draggedTaskKey, setDraggedTaskKey] = useState<string>()
   const [rangeStartDate, setRangeStartDate] = useState<string>()
   const [busyTaskKey, setBusyTaskKey] = useState<string>()
@@ -159,8 +175,19 @@ export function TaskCalendarView({
     }
     if (focusCalendarTaskCard(calendarSectionRef.current, taskKey)) {
       pendingFocusTaskKeyRef.current = undefined
+      return
     }
-  }, [calendar, pendingChange])
+    // A card moved out of the shown month has no cell left; keep focus inside the calendar on
+    // its month navigation instead of losing it with the removed card.
+    const isPlacedInMonth = [...calendar.days.flatMap((day) => day.entries), ...calendar.unscheduledEntries]
+      .some((entry) => createTaskKey(entry.task) === taskKey)
+    if (month && !isPlacedInMonth) {
+      calendarSectionRef.current
+        ?.querySelector<HTMLButtonElement>('[data-testid="task-calendar-month-navigation"] button')
+        ?.focus()
+      pendingFocusTaskKeyRef.current = undefined
+    }
+  }, [calendar, month, pendingChange])
   useEffect(() => {
     pendingChangeRef.current = pendingChange
   }, [pendingChange])
@@ -331,11 +358,14 @@ export function TaskCalendarView({
       ref={calendarSectionRef}
     >
       <TaskViewHeading
-        count={tasks.length}
+        count={month ? entries.length : tasks.length}
         meta={t('tasks.calendar.weekTitle')}
         t={t}
         titleKey="tasks.view.calendar"
       />
+      {month && onMonthChange ? (
+        <TaskCalendarMonthNavigation month={month} onMonthChange={onMonthChange} t={t} />
+      ) : null}
       {errorMessage ? (
         <p className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318" role="alert">
           {errorMessage}
@@ -355,7 +385,8 @@ export function TaskCalendarView({
       >
         {calendar.days.map((day) => (
           <div
-            className="min-h-[210px] border-b border-r border-tone-e4e7ec p-3 transition-colors"
+            // A month shows every date, so empty dates stay short and the month stays scannable.
+            className={`${month && day.entries.length === 0 ? 'min-h-[72px]' : 'min-h-[210px]'} border-b border-r border-tone-e4e7ec p-3 transition-colors`}
             data-testid={`task-calendar-day-${day.date}`}
             key={day.date}
             onDragOver={(event) => {
@@ -719,23 +750,19 @@ function CalendarSchedulePreview({
  * Groups tasks by canonical primary date and retains a separate unscheduled bucket.
  *
  * @param tasks - Work Items displayed by Calendar.
+ * @param month - Optional month, in `YYYY-MM` form, whose every date becomes a cell. Tasks
+ *   placed outside it get no cell.
  * @returns A deterministic date grid and explicit unscheduled entries.
  */
-function createCanonicalCalendarModel(tasks: readonly CanonicalWorkItem[]): CanonicalCalendarModel {
+function createCanonicalCalendarModel(
+  tasks: readonly CanonicalWorkItem[],
+  month?: string,
+): CanonicalCalendarModel {
   const entries = tasks.map((task) => ({ schedule: resolveTaskSchedule(task), task }))
   const scheduledEntries = entries.filter(hasCalendarPrimaryDate)
-  const today = new Date().toISOString().slice(0, 10)
-  const primaryDates = scheduledEntries.flatMap((entry) => {
-    const primaryDate = resolveTaskSchedulePrimaryDate(entry.schedule)
-    return primaryDate ? [primaryDate] : []
-  })
-  const anchors = primaryDates.length > 0 ? primaryDates : [today]
-  const dates = [...new Set(anchors.flatMap((anchor) =>
-    [-3, -2, -1, 0, 1, 2, 3].flatMap((offset) => {
-      const shiftedDate = tryAddTaskTimelineDays(anchor, offset)
-      return shiftedDate ? [shiftedDate] : []
-    })
-  ))].toSorted()
+  const dates = month
+    ? listTaskScheduleWindowDates(createTaskCalendarMonthWindow(month))
+    : createTaskAnchoredCalendarDates(scheduledEntries)
   return {
     days: dates.map((date) => ({
       date,
@@ -747,6 +774,27 @@ function createCanonicalCalendarModel(tasks: readonly CanonicalWorkItem[]): Cano
       .filter((entry) => entry.schedule.mode === 'unscheduled')
       .toSorted((left, right) => createTaskKey(left.task).localeCompare(createTaskKey(right.task))),
   }
+}
+
+/**
+ * Lists the dates around every scheduled task, used when no month is selected.
+ *
+ * @param scheduledEntries - Tasks that have a canonical primary date.
+ * @returns Sorted dates three days either side of each primary date, or of today.
+ */
+function createTaskAnchoredCalendarDates(scheduledEntries: readonly CalendarTaskEntry[]): string[] {
+  const today = new Date().toISOString().slice(0, 10)
+  const primaryDates = scheduledEntries.flatMap((entry) => {
+    const primaryDate = resolveTaskSchedulePrimaryDate(entry.schedule)
+    return primaryDate ? [primaryDate] : []
+  })
+  const anchors = primaryDates.length > 0 ? primaryDates : [today]
+  return [...new Set(anchors.flatMap((anchor) =>
+    [-3, -2, -1, 0, 1, 2, 3].flatMap((offset) => {
+      const shiftedDate = tryAddTaskTimelineDays(anchor, offset)
+      return shiftedDate ? [shiftedDate] : []
+    })
+  ))].toSorted()
 }
 
 /**

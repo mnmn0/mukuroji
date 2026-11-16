@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useState } from 'react'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TaskCalendarView } from './TaskCalendarView'
 import { taskViewStoryTasks } from './TaskView.stories.fixtures'
@@ -32,3 +33,14 @@ type Story = StoryObj<typeof meta>
 
 /** Calendar with scheduled and unscheduled project tasks. */
 export const Default: Story = {}
+
+/** Calendar that reads one month at a time and moves between months. */
+export const MonthWindow: Story = {
+  args: {
+    month: '2026-06',
+  },
+  render: function MonthWindowStory(args) {
+    const [month, setMonth] = useState(args.month ?? '2026-06')
+    return <TaskCalendarView {...args} month={month} onMonthChange={setMonth} />
+  },
+}

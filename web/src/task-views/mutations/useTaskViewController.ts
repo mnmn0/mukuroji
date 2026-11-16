@@ -26,6 +26,7 @@ import {
   sanitizeTaskViewDefinition,
 } from '../model/taskViewDefinition'
 import { createTaskViewUrlOverride } from '../model/taskViewSurfaceState'
+import { BUILT_IN_TASK_VIEW_ID, selectTaskViewBase } from '../model/taskViewBaseSelection'
 import {
   createTaskViewUrlStateFingerprint,
   parseTaskViewUrlState,
@@ -33,8 +34,7 @@ import {
 } from '../model/taskViewUrlState'
 import { useSavedTaskViews } from '../queries/useSavedTaskViews'
 
-/** Reserved URL identifier that explicitly selects the built-in route definition. */
-export const BUILT_IN_TASK_VIEW_ID = '__built-in__'
+export { BUILT_IN_TASK_VIEW_ID }
 
 const emptySavedTaskViews: SavedTaskView[] = []
 const deniedSavedTaskViewCapabilities = {
@@ -360,20 +360,12 @@ export function useTaskViewController(
     }),
     [input.scope, input.searchParams, input.surface],
   )
-  const explicitBuiltIn = parsedUrl.state.viewId === BUILT_IN_TASK_VIEW_ID
-  const explicitlySelectedView = explicitBuiltIn
-    ? undefined
-    : savedViews.find((view) => view.id === parsedUrl.state.viewId)
-  const hasExplicitSelection = parsedUrl.state.viewId !== undefined
-  const personalDefault = hasExplicitSelection
-    ? undefined
-    : savedViews.find((view) => view.preference.isPersonalDefault)
-  const teamDefault = hasExplicitSelection
-    ? undefined
-    : savedViews.find((view) => view.preference.isTeamDefault)
-  const activeSavedView = parsedUrl.state.viewId
-    ? explicitlySelectedView
-    : personalDefault ?? teamDefault
+  const {
+    activeSavedView,
+    explicitlySelectedView,
+    personalDefault,
+    teamDefault,
+  } = selectTaskViewBase(savedViews, parsedUrl.state.viewId)
   const baselineResolution = resolveTaskViewDefinition({
     builtIn: input.builtInDefinition,
     ...(teamDefault ? { teamDefault: teamDefault.definition } : {}),
