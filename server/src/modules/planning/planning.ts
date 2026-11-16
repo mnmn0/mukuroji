@@ -1079,17 +1079,8 @@ abstract class BasePlanningClient implements PlanningClient {
       droppedDependencyCount: 0,
       pendingReferenceCount: 0,
     }
+    // Only grows: an archived counterpart leaves the archive solely by becoming live again.
     const archivedCounterpartIds = new Set<string>()
-    for (const reference of bundle.references) {
-      if (reference.kind !== 'dependency') continue
-      const counterpartId = reference.dependency.predecessorId === entityId
-        ? reference.dependency.successorId
-        : reference.dependency.predecessorId
-      if (archivedCounterpartIds.has(counterpartId)) continue
-      if (await this.readArchivedEntity(workspaceId, counterpartId)) {
-        archivedCounterpartIds.add(counterpartId)
-      }
-    }
     const workItems = createWorkItemMap(workItemState)
     // A link whose Work Item the caller cannot see (or that no longer exists) stays archived, so a
     // restore by a caller with narrower Work Item access never discards it.
@@ -1105,7 +1096,16 @@ abstract class BasePlanningClient implements PlanningClient {
         step += 1
       ) {
         let planned: PlanningArchiveRestorePlan | undefined
-        await this.commitArchiveStep(workspaceId, (state, now) => {
+        await this.commitArchiveStep(workspaceId, async (state, now) => {
+          // Read after the revision-bound graph: a counterpart archived later moves the revision,
+          // so the CAS rejects this step instead of dropping a dependency it could have kept.
+          await this.collectArchivedCounterparts(
+            workspaceId,
+            state,
+            entityId,
+            pending,
+            archivedCounterpartIds,
+          )
           planned = planArchiveRestoreStep(workspaceId, state, entityId, pending, {
             archivedCounterpartIds,
             workItems,
@@ -1181,6 +1181,42 @@ abstract class BasePlanningClient implements PlanningClient {
   }
 
   /**
+   * Adds the dependency counterparts that are absent from the live graph but still archived.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param state - Live graph the next restore step is planned against.
+   * @param entityId - Entity being restored.
+   * @param pending - Archived references not yet processed.
+   * @param archivedCounterpartIds - Known archived counterparts; updated in place.
+   */
+  private async collectArchivedCounterparts(
+    workspaceId: string,
+    state: PlanningWorkspaceState,
+    entityId: string,
+    pending: readonly (PlanningArchivedDependency | PlanningArchivedLinkReference)[],
+    archivedCounterpartIds: Set<string>,
+  ) {
+    const checked = new Set<string>()
+    for (const reference of pending) {
+      if (reference.kind !== 'dependency') continue
+      const counterpartId = reference.dependency.predecessorId === entityId
+        ? reference.dependency.successorId
+        : reference.dependency.predecessorId
+      if (
+        checked.has(counterpartId) ||
+        archivedCounterpartIds.has(counterpartId) ||
+        findEntity(state, counterpartId)
+      ) {
+        continue
+      }
+      checked.add(counterpartId)
+      if (await this.readArchivedEntity(workspaceId, counterpartId)) {
+        archivedCounterpartIds.add(counterpartId)
+      }
+    }
+  }
+
+  /**
    * Commits one archive or restore revision planned against the current live graph.
    *
    * @param workspaceId - Normalized Workspace identifier.
@@ -1190,13 +1226,16 @@ abstract class BasePlanningClient implements PlanningClient {
    */
   private async commitArchiveStep(
     workspaceId: string,
-    plan: (state: PlanningWorkspaceState, now: string) => PlanningArchiveStep | undefined,
+    plan: (
+      state: PlanningWorkspaceState,
+      now: string,
+    ) => PlanningArchiveStep | undefined | Promise<PlanningArchiveStep | undefined>,
     checkCapacity: boolean,
   ) {
     for (let attempt = 1; ; attempt += 1) {
       const before = await this.readState(workspaceId)
       const now = this.now().toISOString()
-      const step = plan(structuredClone(before), now)
+      const step = await plan(structuredClone(before), now)
       if (!step) return false
       validatePlanningState(step.state)
       if (checkCapacity) {

@@ -4338,6 +4338,55 @@ describe('planning persistence', () => {
     expect(await client.listArchivedEntities('workspace-1', {})).toEqual({ entities: [] })
   })
 
+  test('hands a dependency to a counterpart archived while the restore is running', async () => {
+    /** Archives portfolio-b just before the first reference step commits, as a concurrent request would. */
+    class RacingPlanningClient extends InMemoryPlanningClient {
+      commitCount = 0
+      raceAtCommit = 0
+
+      protected override async commitState(
+        ...args: Parameters<InMemoryPlanningClient['commitState']>
+      ) {
+        this.commitCount += 1
+        if (this.commitCount === this.raceAtCommit) {
+          const { revision } = await this.get('workspace-1', EMPTY_WORK_ITEMS)
+          await this.archive('workspace-1', 'portfolio-b', { expectedRevision: revision }, EMPTY_WORK_ITEMS)
+        }
+        return super.commitState(...args)
+      }
+    }
+    const client = new RacingPlanningClient(() => NOW)
+    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
+    await client.createDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+    const archived = await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
+
+    // The first commit restores portfolio-a; the second carries its dependency reference.
+    client.raceAtCommit = client.commitCount + 2
+    const first = await client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: archived.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(first.restore).toMatchObject({ retainedDependencyCount: 1, droppedDependencyCount: 0 })
+    const second = await client.restore(
+      'workspace-1',
+      'portfolio-b',
+      { expectedRevision: first.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(second.restore).toMatchObject({ restoredDependencyCount: 1 })
+    expect(second.planning.dependencies.map((dependency) => dependency.id)).toEqual(['dependency-a-b'])
+  })
+
   test('leaves references that exceed the live capacity archived until a later restore', async () => {
     const archivedGoal = {
       ...createScaleEntityRow('goal-2', 'goal', {

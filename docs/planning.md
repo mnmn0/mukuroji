@@ -73,7 +73,7 @@ Live graph に残っている archive 済み entity（update target を持つ In
 
 - 最初の revision は呼び出し元の `expectedRevision` で entity を戻します。親が live graph にないか archive 済みなら `409 PlanningRestoreParentUnavailable`、親の Team / Project scope が変わっていれば scope 不一致の 409 になり、entity は退避されたままです。先に親を戻すか、親を元の scope に戻します
 - 続く revision で参照を最大 30 件ずつ戻します。Link の参照は Work Item の revision を同じ transaction で条件検証し、消費する退避用 row が残っていることも条件にします（同時に走った復元が同じ参照を二重に戻さないため）。Work Item の同じ欄が別の Cycle / Milestone を指している、link の Project が Work Item の現在の Project と違う、Cycle の capacity を超える、Goal が 100 件を超えるなど、戻すと整合しない参照は破棄します。呼び出し元から見えない（または削除・archive 済みの）Work Item の参照は破棄せず退避先に残し、見える人が復元を再実行すると戻ります
-- Dependency は、相手の entity が live graph にあれば戻します（重複や循環になるもの、constraint を満たさないものは破棄）。相手がまだ退避中なら相手の退避先に移し、相手を復元したときに戻します
+- Dependency は、相手の entity が live graph にあれば戻します（重複や循環になるもの、constraint を満たさないものは破棄）。相手がまだ退避中なら相手の退避先に移し、相手を復元したときに戻します。相手が退避中かどうかは各 revision で live graph を読んだ後に確かめるので、復元中に相手が archive されても dependency は破棄されません
 - 容量（20,000 row / 24 MB）を超える分は戻さず退避先に残します。容量を空けてから同じ復元を再実行すると、active な entity に残っている参照の続きを戻します
 - Response は `{ planning, restore }` です。`restore` は `restoredLinkCount`、`droppedLinkCount`、`restoredDependencyCount`、`retainedDependencyCount`、`droppedDependencyCount`、`pendingReferenceCount` を返します。`pendingReferenceCount` は復元の最後に退避先を読み直した件数です
 

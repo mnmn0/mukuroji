@@ -3800,27 +3800,21 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       )
       if (archived) {
         await requirePlanningScopePermission(principal, archived, 'manager')
-        if (
-          archived.parentId !== undefined &&
-          snapshot.entities.some((entity) => entity.id === archived.parentId)
-        ) {
-          await requirePlanningEntityPermission(
-            principal,
-            snapshot.entities,
-            archived.parentId,
-            'member',
-          )
-        }
       }
-      const owner = archived ?? await requirePlanningEntityPermission(
+      const target = archived ?? await requirePlanningEntityPermission(
         principal,
         snapshot.entities,
         entityId,
         'manager',
       )
-      // The owner may have been deactivated while the entity was archived.
-      if (owner.archivedAt !== undefined) {
-        await requirePlanningActiveOwner(principal, owner.ownerMemberKey)
+      if (target.archivedAt !== undefined) {
+        // Restoring re-attaches the entity under its parent, whether it was compacted or kept live.
+        const { parentId } = target
+        if (parentId !== undefined && snapshot.entities.some((entity) => entity.id === parentId)) {
+          await requirePlanningEntityPermission(principal, snapshot.entities, parentId, 'member')
+        }
+        // The owner may have been deactivated while the entity was archived.
+        await requirePlanningActiveOwner(principal, target.ownerMemberKey)
       }
       const response = await workItemDependencies.planning.restore(
         principal.directoryId,

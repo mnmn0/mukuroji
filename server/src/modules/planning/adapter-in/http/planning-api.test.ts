@@ -2327,6 +2327,76 @@ test('rejects restoring an archived entity whose owner became inactive', async (
     .toMatchObject({ ownerMemberKey: 'former-owner@example.com' })
 })
 
+test('checks the parent scope before restoring an archived entity kept in the live graph', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const scope = { teamId: undefined, projectId: undefined, cadence: undefined, capacity: undefined, carryOverPolicy: undefined }
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 0),
+    ...scope,
+    id: 'retained-portfolio',
+    type: 'portfolio',
+    title: 'Retained portfolio',
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 1),
+    ...scope,
+    id: 'retained-roadmap',
+    type: 'roadmap',
+    title: 'Workspace roadmap',
+    parentId: 'retained-portfolio',
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 2),
+    ...scope,
+    id: 'retained-initiative',
+    type: 'initiative',
+    title: 'Project initiative',
+    parentId: 'retained-roadmap',
+    teamId: 'core-team',
+    projectId: 'refero',
+  }, { workItems: [] })
+  await planningClient.configureUpdateCadence(workspaceId, {
+    target: { type: 'initiative', entityId: 'retained-initiative' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-01T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  }, { workItems: [] })
+  // The update target keeps the archived Initiative in the live graph.
+  await planningClient.archive(workspaceId, 'retained-initiative', { expectedRevision: 4 }, { workItems: [] })
+  expect(await planningClient.getArchivedEntity(workspaceId, 'retained-initiative')).toBeUndefined()
+  let restoreCalls = 0
+  const restore = planningClient.restore.bind(planningClient)
+  planningClient.restore = async (...input) => {
+    restoreCalls += 1
+    return restore(...input)
+  }
+  setTestAppDependencies({ planning: planningClient })
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const projectManager = await planningApiRequest(
+    '/api/planning/entities/retained-initiative/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(projectManager.status).toBe(403)
+  expect(restoreCalls).toBe(0)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const workspaceOwner = await planningApiRequest(
+    '/api/planning/entities/retained-initiative/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(workspaceOwner.status).toBe(200)
+  expect(restoreCalls).toBe(1)
+})
+
 test('rejects duplicate when the source Planning owner became inactive', async () => {
   const planningClient = new InMemoryPlanningClient()
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
