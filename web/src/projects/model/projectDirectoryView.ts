@@ -1,7 +1,10 @@
-import type {
-  ProjectQuickAccessItem,
-  WorkItemSummaryBucket,
-  WorkItemSummaryResponse,
+import {
+  isProjectLifecycleState,
+  type ProjectCharterPerson,
+  type ProjectLifecycleState,
+  type ProjectQuickAccessItem,
+  type WorkItemSummaryBucket,
+  type WorkItemSummaryResponse,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
 
@@ -20,6 +23,8 @@ export type ProjectDirectoryFilters = {
   assigneeId?: string
   /** Whether only starred Projects are included. */
   quickAccessOnly: boolean
+  /** Project lifecycle state used to restrict the directory; omitted means every state. */
+  lifecycle?: ProjectLifecycleState
 }
 
 /** Project lifecycle values available in the directory filter. */
@@ -74,6 +79,16 @@ export type ProjectDirectoryRow = {
   assignees: ProjectDirectoryAssignee[]
   /** Whether the Project is currently shown in quick access. */
   isQuickAccess: boolean
+  /** Lifecycle state from the Project charter. */
+  lifecycleState: ProjectLifecycleState
+  /** Workspace-unique Project code, when set. */
+  code?: string
+  /** Accountable Project manager, when set. */
+  owner?: ProjectCharterPerson
+  /** Planned start date in `YYYY-MM-DD`, when set. */
+  plannedStartDate?: string
+  /** Planned end date in `YYYY-MM-DD`, when set. */
+  plannedEndDate?: string
 }
 
 /** One page of filtered Project directory rows. */
@@ -137,6 +152,15 @@ export function createProjectDirectoryRows(
           teamId: team.id,
         }),
         key: createProjectDirectoryRowKey(team.id, project.id),
+        lifecycleState: project.lifecycleState ?? 'active',
+        ...(project.charter?.code === undefined ? {} : { code: project.charter.code }),
+        ...(project.charter?.owner === undefined ? {} : { owner: { ...project.charter.owner } }),
+        ...(project.charter?.plannedStartDate === undefined
+          ? {}
+          : { plannedStartDate: project.charter.plannedStartDate }),
+        ...(project.charter?.plannedEndDate === undefined
+          ? {}
+          : { plannedEndDate: project.charter.plannedEndDate }),
         openWorkItemCount,
         progress: workItemCount === 0
           ? 0
@@ -199,6 +223,10 @@ export function filterProjectDirectoryRows(
       return false
     }
 
+    if (filters.lifecycle && row.lifecycleState !== filters.lifecycle) {
+      return false
+    }
+
     if (filters.quickAccessOnly && !row.isQuickAccess) {
       return false
     }
@@ -219,6 +247,8 @@ export function filterProjectDirectoryRows(
     const searchText = [
       row.projectName,
       row.teamName,
+      row.code ?? '',
+      row.owner?.displayName ?? '',
       ...row.assignees.map((assignee) => assignee.label),
     ].map(normalizeProjectDirectoryText).join('\n')
 
@@ -330,4 +360,16 @@ export function parseProjectDirectoryStatusFilter(
  */
 function normalizeProjectDirectoryText(value: string) {
   return value.trim().toLocaleLowerCase()
+}
+
+/**
+ * Parses a raw lifecycle query while ignoring unsupported deep-link values.
+ *
+ * @param value - Raw lifecycle query value.
+ * @returns A lifecycle state, or undefined for the unfiltered value.
+ */
+export function parseProjectDirectoryLifecycleFilter(
+  value: string | null,
+): ProjectLifecycleState | undefined {
+  return isProjectLifecycleState(value) ? value : undefined
 }

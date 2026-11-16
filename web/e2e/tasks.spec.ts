@@ -8023,6 +8023,64 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('textarea[name="body"]')).toHaveValue('')
   })
 
+  test('Issue #340: 権限タブで憲章を保存し、確認後にプロジェクトを終結できる', async ({ page }) => {
+    let charterState = {
+      teamId: 'core-team',
+      projectId: 'refero',
+      lifecycleState: 'active',
+      charter: { tags: [] as string[], repositoryUrls: [] as string[] } as Record<string, unknown>,
+      revision: 0,
+    }
+    const charterUpdates: unknown[] = []
+    const lifecycleTransitions: unknown[] = []
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/charter$/, async (route) => {
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+      if (route.request().method() === 'PUT') {
+        const body = route.request().postDataJSON() as {
+          expectedRevision: number
+          charter: { code?: string; purpose?: string }
+        }
+        charterUpdates.push(body)
+        charterState = {
+          ...charterState,
+          charter: { code: body.charter.code?.toUpperCase(), purpose: body.charter.purpose, tags: [], repositoryUrls: [] },
+          revision: body.expectedRevision + 1,
+        }
+      }
+      await route.fulfill({ json: charterState })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/lifecycle$/, async (route) => {
+      expect(route.request().method()).toBe('POST')
+      const body = route.request().postDataJSON() as { expectedRevision: number; state: string }
+      lifecycleTransitions.push(body)
+      charterState = { ...charterState, lifecycleState: body.state, revision: body.expectedRevision + 1 }
+      await route.fulfill({ json: charterState })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team')
+    await page.getByRole('tab', { name: '権限' }).click()
+    const panel = page.getByTestId('project-charter-panel')
+    await expect(panel).toContainText('プロジェクト憲章')
+
+    await page.getByTestId('project-charter-code').fill('ops-1')
+    await page.getByTestId('project-charter-purpose').fill('問い合わせ対応を一元化する')
+    await page.getByTestId('project-charter-save').click()
+    await expect(page.getByTestId('project-charter-message')).toContainText('憲章を保存しました')
+    expect(charterUpdates).toEqual([{
+      expectedRevision: 0,
+      charter: { code: 'ops-1', purpose: '問い合わせ対応を一元化する', tags: [], repositoryUrls: [] },
+    }])
+    await expect(page.getByTestId('project-charter-code')).toHaveValue('OPS-1')
+
+    await page.getByTestId('project-lifecycle-closed').click()
+    await expect(page.getByTestId('project-lifecycle-close-confirmation')).toBeVisible()
+    expect(lifecycleTransitions).toEqual([])
+    await page.getByTestId('project-lifecycle-close-confirm').click()
+    await expect(panel).toContainText('このプロジェクトは終結しています。新しい Issue は作成できません。')
+    expect(lifecycleTransitions).toEqual([{ expectedRevision: 1, state: 'closed' }])
+    await expect(page.getByTestId('project-lifecycle-active')).toBeVisible()
+  })
+
   test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 })
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')

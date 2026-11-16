@@ -49,6 +49,7 @@ import {
   useProjectMembers,
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
+import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
 import {
   TeamIssuesApiError,
   type TeamIssue,
@@ -419,6 +420,12 @@ export function TaskPage() {
         member.id === currentUserProjectKey && member.role === 'manager',
       )
     )
+  const isWorkspaceAdministrator = workspaceAccess?.currentMember.status === 'active' && (
+    workspaceAccess.currentMember.role === 'owner' ||
+    workspaceAccess.currentMember.role === 'admin'
+  )
+  const canEditProjectCharter = canMutateContent &&
+    (canManageProjectMembers || isWorkspaceAdministrator)
   const {
     data: projectUsersFirstPage,
     error: projectUsersError,
@@ -1852,6 +1859,18 @@ export function TaskPage() {
       assigneeOptions={activeProjectMembers}
       canAccessTriage={canAccessTriage}
       canManageProjectMembers={canManageProjectMembers}
+      projectCharterPanel={(
+        <ProjectCharterSection
+          accessToken={accessToken}
+          canDecideProposal={canMutateContent && isWorkspaceAdministrator}
+          canEdit={canEditProjectCharter}
+          enabled={Boolean(user && !currentUserError)}
+          members={activeProjectMembers}
+          projectId={projectId}
+          t={t}
+          teamId={interactionTeamId}
+        />
+      )}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
       collaborationRoute={
