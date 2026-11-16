@@ -237,12 +237,45 @@ function createGoalLinkRows(rowCount: number): Record<string, unknown>[] {
 }
 
 /**
+ * Returns one DynamoDB Query page over rows sorted by sort key, honoring `Limit` and
+ * `ExclusiveStartKey` and reporting `LastEvaluatedKey` when rows remain.
+ *
+ * @param input - AWS SDK Query input.
+ * @param rows - Complete physical rows available to the fake table.
+ * @param pageSize - Maximum rows the fake returns per page, standing in for the 1 MB page limit.
+ * @returns The page in DynamoDB response shape.
+ */
+function queryPlanningPage(
+  input: Record<string, unknown>,
+  rows: readonly Record<string, unknown>[],
+  pageSize: number,
+) {
+  const start = input.ExclusiveStartKey
+  const startKey = typeof start === 'object' && start !== null && 'recordKey' in start
+    ? String(start.recordKey)
+    : undefined
+  const matching = rowsForPlanningRecordPrefixQuery(input, rows)
+    .filter((row) => startKey === undefined || String(row.recordKey) > startKey)
+    .sort((first, second) => String(first.recordKey) < String(second.recordKey) ? -1 : 1)
+  const limit = typeof input.Limit === 'number' ? Math.min(input.Limit, pageSize) : pageSize
+  const items = matching.slice(0, limit)
+  const last = items.at(-1)
+  return {
+    Items: items,
+    ...(matching.length > items.length && last
+      ? { LastEvaluatedKey: { workspaceId: last.workspaceId, recordKey: last.recordKey } }
+      : {}),
+  }
+}
+
+/**
  * Creates a DynamoDB Planning client over an in-memory table stored at revision 1.
  *
- * @param rows - Live graph rows of `workspace-1`.
- * @returns The client, its mutable rows, and every transaction it wrote.
+ * @param rows - Rows of `workspace-1`, live graph and archive alike.
+ * @param pageSize - Maximum rows one Query page returns.
+ * @returns The client, its mutable rows, every Query input, and every transaction it wrote.
  */
-function createFakePlanningTable(rows: Record<string, unknown>[]) {
+function createFakePlanningTable(rows: Record<string, unknown>[], pageSize = 1_000_000) {
   let meta: Record<string, unknown> = {
     workspaceId: 'FENCE#workspace-1',
     recordKey: 'META',
@@ -252,6 +285,7 @@ function createFakePlanningTable(rows: Record<string, unknown>[]) {
     updatedAt: NOW.toISOString(),
   }
   const writes: Record<string, unknown>[] = []
+  const queries: Record<string, unknown>[] = []
   const documentClient = {
     async send(command: {
       /** AWS SDK command constructor. */
@@ -261,13 +295,14 @@ function createFakePlanningTable(rows: Record<string, unknown>[]) {
     }) {
       if (command.constructor.name === 'GetCommand') {
         const key = command.input.Key
-        return typeof key === 'object' && key !== null && 'workspaceId' in key &&
-          key.workspaceId === 'FENCE#workspace-1'
-          ? { Item: meta }
-          : {}
+        if (typeof key !== 'object' || key === null || !('recordKey' in key)) return {}
+        if ('workspaceId' in key && key.workspaceId === 'FENCE#workspace-1') return { Item: meta }
+        const item = rows.find((row) => row.recordKey === key.recordKey)
+        return item ? { Item: { ...item } } : {}
       }
       if (command.constructor.name === 'QueryCommand') {
-        return { Items: rowsForPlanningRecordPrefixQuery(command.input, rows) }
+        queries.push(command.input)
+        return queryPlanningPage(command.input, rows, pageSize)
       }
       writes.push(command.input)
       const items = command.input.TransactItems
@@ -305,7 +340,7 @@ function createFakePlanningTable(rows: Record<string, unknown>[]) {
     false,
     () => NOW,
   )
-  return { client, rows, writes }
+  return { client, rows, writes, queries }
 }
 
 /**
@@ -1501,9 +1536,46 @@ describe('planning domain', () => {
           { expectedRevision: 5 },
           workItemState,
         )
-        expect(getEntity(archived.planning.entities, 'cycle-source').archivedAt)
-          .toBe(NOW.toISOString())
-        expect(archived.planning.workItemLinks).toHaveLength(2)
+        // The archived Cycle and its link reference leave the live graph in one more revision.
+        expect(archived.planning.revision).toBe(7)
+        expect(archived.planning.entities.some((entity) => entity.id === 'cycle-source'))
+          .toBeFalse()
+        expect(archived.planning.workItemLinks.map((link) => [link.workItemId, link.cycleId]))
+          .toEqual([['work-todo', 'cycle-target']])
+        expect(archived.planning.capacity.liveRowCount)
+          .toBe(response.planning.capacity.liveRowCount - 2)
+        expect(await client.listArchivedEntities('workspace-1', {})).toEqual({
+          entities: [{
+            id: 'cycle-source',
+            type: 'cycle',
+            title: 'cycle-source',
+            teamId: 'team-1',
+            projectId: 'project-1',
+            archivedAt: NOW.toISOString(),
+          }],
+        })
+
+        const restored = await client.restore(
+          'workspace-1',
+          'cycle-source',
+          { expectedRevision: 7 },
+          workItemState,
+        )
+        expect(restored.restore).toEqual({
+          restoredLinkCount: 1,
+          droppedLinkCount: 0,
+          restoredDependencyCount: 0,
+          retainedDependencyCount: 0,
+          droppedDependencyCount: 0,
+          pendingReferenceCount: 0,
+        })
+        expect(getEntity(restored.planning.entities, 'cycle-source')).toMatchObject({
+          status: 'completed',
+        })
+        expect(getEntity(restored.planning.entities, 'cycle-source').archivedAt).toBeUndefined()
+        expect(restored.planning.workItemLinks.find((link) => link.workItemId === 'work-done'))
+          .toMatchObject({ cycleId: 'cycle-source' })
+        expect(await client.listArchivedEntities('workspace-1', {})).toEqual({ entities: [] })
       } else {
         await expect(client.archive(
           'workspace-1',
@@ -1834,27 +1906,53 @@ describe('planning domain', () => {
       { expectedRevision: 4 },
       EMPTY_WORK_ITEMS,
     )
-    expect(getEntity(archived.planning.entities, 'roadmap-copy').archivedAt)
-      .toBe(NOW.toISOString())
+    expect(archived.planning.revision).toBe(6)
+    expect(archived.planning.entities.some((entity) => entity.id === 'roadmap-copy')).toBeFalse()
+    expect(await client.getArchivedEntity('workspace-1', 'roadmap-copy')).toMatchObject({
+      id: 'roadmap-copy',
+      archivedAt: NOW.toISOString(),
+    })
+    // The archived entity keeps its ID so it can be restored later.
+    await expect(client.duplicate('workspace-1', 'roadmap-1', {
+      targetId: 'roadmap-copy',
+      expectedRevision: 6,
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({ status: 409, code: 'PlanningEntityExists' })
+    await expect(client.create(
+      'workspace-1',
+      createEntityInput('roadmap-copy', 'roadmap', 6, { parentId: 'portfolio-1' }),
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningEntityExists' })
 
     const archivedOriginal = await client.archive(
       'workspace-1',
       'roadmap-1',
-      { expectedRevision: 5 },
+      { expectedRevision: 6 },
       EMPTY_WORK_ITEMS,
     )
-    expect(archivedOriginal.planning.dependencies).toHaveLength(1)
+    // The dependency leaves the live graph with its archived successor.
+    expect(archivedOriginal.planning.dependencies).toHaveLength(0)
     await expect(client.createDependency('workspace-1', {
       id: 'dependency-to-archived',
       predecessorId: 'portfolio-1',
       successorId: 'roadmap-1',
       type: 'finish-to-start',
       lagDays: 0,
-      expectedRevision: 6,
+      expectedRevision: archivedOriginal.planning.revision,
     }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
-      status: 409,
-      code: 'PlanningEntityArchived',
+      status: 404,
+      code: 'PlanningEntityNotFound',
     })
+
+    const restored = await client.restore(
+      'workspace-1',
+      'roadmap-1',
+      { expectedRevision: archivedOriginal.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(restored.restore).toMatchObject({ restoredDependencyCount: 1, pendingReferenceCount: 0 })
+    expect(getEntity(restored.planning.entities, 'roadmap-1').archivedAt).toBeUndefined()
+    expect(restored.planning.dependencies.map((dependency) => dependency.id))
+      .toEqual(['dependency-1'])
   })
 
   test('rejects archiving a parent until all active children are archived', async () => {
@@ -1888,11 +1986,48 @@ describe('planning domain', () => {
     const response = await client.archive(
       'workspace-1',
       'portfolio-parent',
-      { expectedRevision: 3 },
+      { expectedRevision: 4 },
       EMPTY_WORK_ITEMS,
     )
-    expect(getEntity(response.planning.entities, 'portfolio-parent').archivedAt)
-      .toBe(NOW.toISOString())
+    expect(response.planning.entities).toEqual([])
+    expect((await client.listArchivedEntities('workspace-1', {})).entities.map((entity) => entity.id))
+      .toEqual(['portfolio-parent', 'roadmap-child'])
+
+    await expect(client.restore(
+      'workspace-1',
+      'roadmap-child',
+      { expectedRevision: response.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningRestoreParentUnavailable' })
+    const parent = await client.restore(
+      'workspace-1',
+      'portfolio-parent',
+      { expectedRevision: response.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    const child = await client.restore(
+      'workspace-1',
+      'roadmap-child',
+      { expectedRevision: parent.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(child.planning.entities.map((entity) => [entity.id, entity.archivedAt]))
+      .toEqual([['portfolio-parent', undefined], ['roadmap-child', undefined]])
+    // Restoring an active entity again only resumes leftover references; there are none.
+    const again = await client.restore(
+      'workspace-1',
+      'roadmap-child',
+      { expectedRevision: child.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(again.planning.revision).toBe(child.planning.revision)
+    expect(again.restore.pendingReferenceCount).toBe(0)
+    await expect(client.restore(
+      'workspace-1',
+      'missing-entity',
+      { expectedRevision: child.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ status: 404, code: 'PlanningArchivedEntityNotFound' })
   })
 
   test('rejects archiving a Cycle while it has an incomplete Work Item link', async () => {
@@ -1995,11 +2130,21 @@ describe('planning domain', () => {
     const response = await client.move('workspace-1', 'portfolio-active', {
       teamId: 'team-1',
       projectId: 'project-2',
-      expectedRevision: 3,
+      expectedRevision: 4,
     }, EMPTY_WORK_ITEMS)
 
     expect(getEntity(response.planning.entities, 'portfolio-active').projectId).toBe('project-2')
-    expect(getEntity(response.planning.entities, 'roadmap-archived').projectId).toBe('project-1')
+    expect(await client.getArchivedEntity('workspace-1', 'roadmap-archived'))
+      .toMatchObject({ projectId: 'project-1' })
+    // Restoring under a parent whose scope changed does not silently move the entity.
+    await expect(client.restore(
+      'workspace-1',
+      'roadmap-archived',
+      { expectedRevision: response.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningProjectScopeMismatch' })
+    expect(await client.getArchivedEntity('workspace-1', 'roadmap-archived'))
+      .toMatchObject({ projectId: 'project-1' })
   })
 })
 
@@ -2869,7 +3014,12 @@ describe('planning persistence', () => {
     )
 
     expect(response.planning.revision).toBe(1)
+    expect(commands[0]?.input.Key).toEqual({
+      workspaceId: 'workspace-1',
+      recordKey: 'ARCHIVE_ENTITY#portfolio-1',
+    })
     expect(commands.map((command) => command.name)).toEqual([
+      'GetCommand',
       'GetCommand',
       'QueryCommand',
       'QueryCommand',
@@ -3998,6 +4148,310 @@ describe('planning persistence', () => {
       expectedRevision: 1,
     }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({ status: 413, code: 'PlanningCapacityExceeded' })
     expect(writes).toHaveLength(0)
+  })
+
+  test('reads a live graph across Query pages and keeps the bound on later pages', async () => {
+    const paged = createFakePlanningTable(createGoalLinkRows(50), 7)
+    const snapshot = await paged.client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(snapshot.capacity.liveRowCount).toBe(50)
+    const linkQueries = paged.queries.filter((input) =>
+      (input.ExpressionAttributeValues as Record<string, unknown>)[':recordPrefix'] === 'LINK#'
+    )
+    // 46 links in pages of 7 take 7 Query calls, each continuing from the previous page.
+    expect(linkQueries).toHaveLength(7)
+    expect(linkQueries[0]).not.toHaveProperty('ExclusiveStartKey')
+    expect(linkQueries.slice(1).every((input) => input.ExclusiveStartKey !== undefined)).toBeTrue()
+
+    const overBound = createFakePlanningTable(createGoalLinkRows(25_001), 10_000)
+    await expect(overBound.client.get('workspace-1', EMPTY_WORK_ITEMS))
+      .rejects.toMatchObject({ status: 413, code: 'PlanningReadLimitExceeded' })
+    // The bound trips on the third LINK page, after two pages were accepted.
+    expect(overBound.queries.filter((input) =>
+      (input.ExpressionAttributeValues as Record<string, unknown>)[':recordPrefix'] === 'LINK#'
+    )).toHaveLength(3)
+  })
+
+  test('moves an archived Goal and its links out of the live graph and restores them', async () => {
+    const { client, rows, writes } = createFakePlanningTable(createGoalLinkRows(104), 30)
+    const workItems: PlanningWorkItemState = {
+      workItems: Array.from({ length: 100 }, (_, index) =>
+        createWorkItem(`item-${index}`, 'started', { projectId: undefined })
+      ),
+    }
+    const archived = await client.archive(
+      'workspace-1',
+      'goal-1',
+      { expectedRevision: 1 },
+      workItems,
+    )
+    // Archive is revision 2. 100 link references move 45 at a time, the last step with the Goal.
+    expect(archived.planning.revision).toBe(5)
+    expect(archived.planning.workItemLinks).toEqual([])
+    expect(archived.planning.entities.map((entity) => entity.id))
+      .toEqual(['initiative-1', 'portfolio-1', 'roadmap-1'])
+    expect(archived.planning.capacity.liveRowCount).toBe(3)
+    expect(writes).toHaveLength(4)
+    for (const write of writes) {
+      expect((write.TransactItems as unknown[]).length).toBeLessThanOrEqual(100)
+    }
+    expect(rows.filter((row) => String(row.recordKey).startsWith('LINK#'))).toHaveLength(0)
+    expect(rows.filter((row) => row.entryType === 'planning-archived-link-reference'))
+      .toHaveLength(100)
+    expect(rows.find((row) => row.entryType === 'planning-archived-entity')).toMatchObject({
+      recordKey: 'ARCHIVE_ENTITY#goal-1',
+      entity: { id: 'goal-1', archivedAt: NOW.toISOString() },
+    })
+
+    // Live reads never touch the archive prefixes.
+    const fresh = createFakePlanningTable(rows.map((row) => ({ ...row })))
+    expect((await fresh.client.get('workspace-1', workItems)).capacity.liveRowCount).toBe(3)
+    expect(fresh.queries.some((input) =>
+      String((input.ExpressionAttributeValues as Record<string, unknown>)[':recordPrefix'])
+        .startsWith('ARCHIVE')
+    )).toBeFalse()
+
+    const page = await client.listArchivedEntities('workspace-1', { limit: 1 })
+    expect(page.entities.map((entity) => entity.id)).toEqual(['goal-1'])
+    expect(page).not.toHaveProperty('nextCursor')
+
+    const writesBeforeRestore = writes.length
+    const restored = await client.restore(
+      'workspace-1',
+      'goal-1',
+      { expectedRevision: 5 },
+      workItems,
+    )
+    expect(restored.restore).toEqual({
+      restoredLinkCount: 100,
+      droppedLinkCount: 0,
+      restoredDependencyCount: 0,
+      retainedDependencyCount: 0,
+      droppedDependencyCount: 0,
+      pendingReferenceCount: 0,
+    })
+    // One revision restores the Goal; link references return 30 per revision with Work Item guards.
+    expect(restored.planning.revision).toBe(10)
+    expect(writes.length - writesBeforeRestore).toBe(5)
+    for (const write of writes.slice(writesBeforeRestore)) {
+      expect((write.TransactItems as unknown[]).length).toBeLessThanOrEqual(100)
+    }
+    expect(restored.planning.workItemLinks).toHaveLength(100)
+    expect(restored.planning.workItemLinks.every((link) => link.goalIds.includes('goal-1')))
+      .toBeTrue()
+    expect(rows.some((row) => String(row.recordKey).startsWith('ARCHIVE'))).toBeFalse()
+  })
+
+  test('keeps restored references valid and reports what could not return', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItems: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-moved', 'completed'),
+        createWorkItem('work-deleted', 'completed'),
+        createWorkItem('work-kept', 'completed'),
+      ],
+    }
+    await client.create('workspace-1', createCycleInput('cycle-old', 0, { projectId: 'project-1' }), workItems)
+    await client.create('workspace-1', createCycleInput('cycle-new', 1, { projectId: 'project-1' }), workItems)
+    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 2), workItems)
+    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 3), workItems)
+    await client.createDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 4,
+    }, workItems)
+    let revision = 5
+    for (const workItemId of ['work-moved', 'work-deleted', 'work-kept']) {
+      await client.putWorkItemLink('workspace-1', {
+        teamId: 'team-1',
+        workItemId,
+        projectId: 'project-1',
+        cycleId: 'cycle-old',
+        goalIds: [],
+        expectedRevision: revision,
+      }, workItems)
+      revision += 1
+    }
+    revision = (await client.archive('workspace-1', 'cycle-old', { expectedRevision: revision }, workItems))
+      .planning.revision
+    await client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1',
+      workItemId: 'work-moved',
+      projectId: 'project-1',
+      cycleId: 'cycle-new',
+      goalIds: [],
+      expectedRevision: revision,
+    }, workItems)
+    revision += 1
+    revision = (await client.archive('workspace-1', 'portfolio-a', { expectedRevision: revision }, workItems))
+      .planning.revision
+    revision = (await client.archive('workspace-1', 'portfolio-b', { expectedRevision: revision }, workItems))
+      .planning.revision
+    expect((await client.get('workspace-1', workItems)).dependencies).toEqual([])
+
+    const withoutDeleted: PlanningWorkItemState = {
+      workItems: workItems.workItems.filter((item) => item.id !== 'work-deleted'),
+    }
+    const cycle = await client.restore('workspace-1', 'cycle-old', { expectedRevision: revision }, withoutDeleted)
+    // work-moved now belongs to another Cycle, so its old reference is dropped. work-deleted is not
+    // visible to this restore, so its reference stays archived instead of being discarded.
+    expect(cycle.restore).toMatchObject({
+      restoredLinkCount: 1,
+      droppedLinkCount: 1,
+      pendingReferenceCount: 1,
+    })
+    expect(cycle.planning.workItemLinks.map((link) => [link.workItemId, link.cycleId])).toEqual([
+      ['work-kept', 'cycle-old'],
+      ['work-moved', 'cycle-new'],
+    ])
+
+    // portfolio-a left the live graph first, so it owns the archived dependency. Restoring it
+    // while portfolio-b is archived hands the dependency to portfolio-b until both are live.
+    const first = await client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: cycle.planning.revision },
+      workItems,
+    )
+    expect(first.restore).toMatchObject({ retainedDependencyCount: 1, restoredDependencyCount: 0 })
+    expect(first.planning.dependencies).toEqual([])
+    const second = await client.restore(
+      'workspace-1',
+      'portfolio-b',
+      { expectedRevision: first.planning.revision },
+      workItems,
+    )
+    expect(second.restore).toMatchObject({ restoredDependencyCount: 1 })
+    expect(second.planning.dependencies.map((dependency) => dependency.id)).toEqual(['dependency-a-b'])
+    expect(await client.listArchivedEntities('workspace-1', {})).toEqual({ entities: [] })
+  })
+
+  test('leaves references that exceed the live capacity archived until a later restore', async () => {
+    const archivedGoal = {
+      ...createScaleEntityRow('goal-2', 'goal', {
+        parentId: 'initiative-1',
+        archivedAt: NOW.toISOString(),
+      }),
+    }
+    const { recordKey: _recordKey, workspaceId: _workspaceId, entryType: _entryType, ...entity } =
+      archivedGoal
+    const newLinks = ['item-new-0', 'item-new-1'].map((workItemId) => ({
+      workspaceId: 'workspace-1',
+      recordKey: `ARCHIVE_REF#goal-2#LINK#team-1#${workItemId}`,
+      entryType: 'planning-archived-link-reference',
+      schemaVersion: 1,
+      kind: 'link',
+      entityId: 'goal-2',
+      reference: 'goal',
+      link: { teamId: 'team-1', workItemId, goalIds: ['goal-2'], createdAt: NOW.toISOString() },
+    }))
+    const { client, rows } = createFakePlanningTable([
+      ...createGoalLinkRows(19_999),
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'ARCHIVE_ENTITY#goal-2',
+        entryType: 'planning-archived-entity',
+        schemaVersion: 1,
+        entity,
+      },
+      ...newLinks,
+    ])
+    const workItems: PlanningWorkItemState = {
+      workItems: ['item-new-0', 'item-new-1'].map((id) =>
+        createWorkItem(id, 'started', { projectId: undefined })
+      ),
+    }
+
+    const partial = await client.restore('workspace-1', 'goal-2', { expectedRevision: 1 }, workItems)
+    expect(partial.restore).toMatchObject({ restoredLinkCount: 0, pendingReferenceCount: 2 })
+    expect(partial.planning.capacity).toMatchObject({ level: 'full', liveRowCount: 20_000 })
+    expect(getEntity(partial.planning.entities, 'goal-2').archivedAt).toBeUndefined()
+    expect(rows.filter((row) => row.entryType === 'planning-archived-link-reference'))
+      .toHaveLength(2)
+
+    let revision = partial.planning.revision
+    for (const workItemId of ['item-0', 'item-1']) {
+      revision = (await client.deleteWorkItemLink(
+        'workspace-1',
+        'team-1',
+        workItemId,
+        { expectedRevision: revision },
+        workItems,
+      )).planning.revision
+    }
+    const resumed = await client.restore('workspace-1', 'goal-2', { expectedRevision: revision }, workItems)
+    expect(resumed.restore).toMatchObject({ restoredLinkCount: 2, pendingReferenceCount: 0 })
+    expect(resumed.planning.capacity.liveRowCount).toBe(20_000)
+    expect(rows.some((row) => String(row.recordKey).startsWith('ARCHIVE'))).toBeFalse()
+  })
+
+  test('keeps archived Initiatives with an update target in the live graph', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createEntityInput('portfolio-1', 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create(
+      'workspace-1',
+      createEntityInput('roadmap-1', 'roadmap', 1, { parentId: 'portfolio-1' }),
+      EMPTY_WORK_ITEMS,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('initiative-1', 'initiative', 2, { parentId: 'roadmap-1' }),
+      EMPTY_WORK_ITEMS,
+    )
+    await client.configureUpdateCadence('workspace-1', {
+      target: { type: 'initiative', entityId: 'initiative-1' },
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-01T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 3,
+    }, EMPTY_WORK_ITEMS)
+    const initiative = await client.archive(
+      'workspace-1',
+      'initiative-1',
+      { expectedRevision: 4 },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(initiative.planning.revision).toBe(5)
+    expect(getEntity(initiative.planning.entities, 'initiative-1').archivedAt).toBe(NOW.toISOString())
+    const roadmap = await client.archive(
+      'workspace-1',
+      'roadmap-1',
+      { expectedRevision: 5 },
+      EMPTY_WORK_ITEMS,
+    )
+    // The roadmap's archived child is still live, so the roadmap stays live too.
+    expect(roadmap.planning.revision).toBe(6)
+    expect(getEntity(roadmap.planning.entities, 'roadmap-1').archivedAt).toBe(NOW.toISOString())
+    expect(await client.listArchivedEntities('workspace-1', {})).toEqual({ entities: [] })
+  })
+
+  test('validates archive list paging input', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    for (const id of ['portfolio-a', 'portfolio-b', 'portfolio-c']) {
+      const revision = (await client.get('workspace-1', EMPTY_WORK_ITEMS)).revision
+      await client.create('workspace-1', createEntityInput(id, 'portfolio', revision), EMPTY_WORK_ITEMS)
+      await client.archive('workspace-1', id, { expectedRevision: revision + 1 }, EMPTY_WORK_ITEMS)
+    }
+    const first = await client.listArchivedEntities('workspace-1', { limit: 2 })
+    expect(first.entities.map((entity) => entity.id)).toEqual(['portfolio-a', 'portfolio-b'])
+    expect(typeof first.nextCursor).toBe('string')
+    const second = await client.listArchivedEntities('workspace-1', {
+      limit: 2,
+      cursor: first.nextCursor,
+    })
+    expect(second).toEqual({
+      entities: [expect.objectContaining({ id: 'portfolio-c' })],
+    })
+    await expect(client.listArchivedEntities('workspace-1', { limit: 51 }))
+      .rejects.toMatchObject({ status: 400, code: 'PlanningArchivePageLimitInvalid' })
+    await expect(client.listArchivedEntities('workspace-1', { cursor: 'not-a-cursor' }))
+      .rejects.toMatchObject({ status: 400, code: 'PlanningArchiveCursorInvalid' })
   })
 
   test('reports the warning level from the warning threshold', async () => {

@@ -289,6 +289,11 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: 'POST',
+    pathPattern: '/api/planning/entities/:entityId/restore',
+    permission: 'planning.manage',
+  },
+  {
+    method: 'POST',
     pathPattern: '/api/planning/entities/:entityId/move',
     permission: 'planning.manage',
   },

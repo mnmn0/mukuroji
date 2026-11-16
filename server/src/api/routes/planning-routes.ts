@@ -31,7 +31,7 @@ import {
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
-import { type Locale, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
+import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
 import { type TeamIssueResponseItem } from '../../modules/work-items'
 import {
   WorkspaceAccessError,
@@ -331,6 +331,20 @@ function readPlanningUpdateReactionToken(value: unknown): string {
     )
   }
   return emoji
+}
+
+/**
+ * Returns whether an authorization failure only means the caller cannot manage one scope.
+ *
+ * @param error - Error thrown by a Planning scope permission check.
+ * @returns Whether the archive list should skip the entity instead of failing.
+ */
+function isPlanningScopeDenial(error: unknown) {
+  return (
+    error instanceof PlanningError ||
+    error instanceof WorkspaceAccessError ||
+    error instanceof ProjectDataError
+  ) && (error.status === 403 || error.status === 404 || error.status === 409)
 }
 
 function readPlanningRouteId(value: string | undefined, label: string) {
@@ -3760,6 +3774,93 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
       const response = await workItemDependencies.planning.archive(principal.directoryId, entityId, input, workItemState)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** Live graph から退避した archive 済み entity を active に戻します。 */
+  routeApp.post('/api/planning/entities/:entityId/restore', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+      const input = await readPlanningJson<PlanningRevisionInput>(c.req)
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      const archived = await workItemDependencies.planning.getArchivedEntity(
+        principal.directoryId,
+        entityId,
+      )
+      if (archived) {
+        await requirePlanningScopePermission(principal, archived, 'manager')
+        if (
+          archived.parentId !== undefined &&
+          snapshot.entities.some((entity) => entity.id === archived.parentId)
+        ) {
+          await requirePlanningEntityPermission(
+            principal,
+            snapshot.entities,
+            archived.parentId,
+            'member',
+          )
+        }
+      } else {
+        await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
+      }
+      const response = await workItemDependencies.planning.restore(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+      )
+      return c.json({
+        planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+        restore: response.restore,
+      })
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** 呼び出し元が復元できる退避済み entity を ID 順の cursor page で返します。 */
+  routeApp.get('/api/planning/archived-entities', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const limitValue = c.req.query('limit')
+      const limit = limitValue === undefined ? undefined : Number(limitValue)
+      if (limit !== undefined && (!/^[1-9][0-9]*$/.test(limitValue ?? '') || !Number.isSafeInteger(limit))) {
+        throw new PlanningError(400, 'InvalidPlanningInput', 'Archived Planning page limit is invalid.')
+      }
+      const cursor = c.req.query('cursor')
+      const page = await workItemDependencies.planning.listArchivedEntities(principal.directoryId, {
+        ...(limit === undefined ? {} : { limit }),
+        ...(cursor === undefined ? {} : { cursor }),
+      })
+      const entities = []
+      for (const entity of page.entities) {
+        try {
+          await requirePlanningScopePermission(principal, entity, 'manager')
+          entities.push(entity)
+        } catch (error) {
+          if (!isPlanningScopeDenial(error)) throw error
+        }
+      }
+      return c.json({
+        entities,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+      })
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }

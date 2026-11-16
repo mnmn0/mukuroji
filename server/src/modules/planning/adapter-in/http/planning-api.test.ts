@@ -2199,10 +2199,53 @@ test('enforces Planning revisions and structural permissions before mutations', 
   )
   expect(managerArchive.status).toBe(200)
   const archivedPlanning = await managerArchive.json() as PlanningSnapshot
-  expect(archivedPlanning.revision).toBe(4)
-  expect(archivedPlanning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
-    .toBeDefined()
+  // Archive commits revision 4; moving the archived Cycle out of the live graph commits 5.
+  expect(archivedPlanning.revision).toBe(5)
+  expect(archivedPlanning.entities.some((entity) => entity.id === 'cycle-structural')).toBe(false)
   expect(structuralCalls).toEqual({ archive: 1, duplicate: 1, move: 1 })
+
+  const archivedList = await planningApiRequest('/api/planning/archived-entities')
+  expect(archivedList.status).toBe(200)
+  expect(await archivedList.json()).toMatchObject({
+    entities: [{ id: 'cycle-structural', type: 'cycle', archivedAt: expect.any(String) }],
+  })
+  const invalidLimit = await planningApiRequest('/api/planning/archived-entities?limit=0')
+  expect(invalidLimit.status).toBe(400)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const memberList = await planningApiRequest('/api/planning/archived-entities')
+  expect(memberList.status).toBe(200)
+  expect(await memberList.json()).toEqual({ entities: [] })
+  const memberRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(memberRestore.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const staleRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 4 },
+  )
+  expect(staleRestore.status).toBe(409)
+  const managerRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(managerRestore.status).toBe(200)
+  const restored = await managerRestore.json() as {
+    /** Snapshot after the restore. */
+    planning: PlanningSnapshot
+    /** Restore outcome counts. */
+    restore: Record<string, number>
+  }
+  expect(restored.planning.revision).toBe(6)
+  expect(restored.planning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
+    .toBeUndefined()
+  expect(restored.restore).toMatchObject({ pendingReferenceCount: 0 })
 })
 
 test('rejects an inactive Planning owner before invoking the mutation client', async () => {
