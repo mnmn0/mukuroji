@@ -422,6 +422,18 @@ function isWorkItemDependencySummary(value: unknown): boolean {
     isStringArray(value.affectedMilestoneIds)
 }
 
+/** Returns whether a value is the live Planning graph capacity usage. */
+function isPlanningCapacity(value: unknown): boolean {
+  return isRecord(value) &&
+    (value.level === 'normal' || value.level === 'warning' || value.level === 'full') &&
+    isNonnegativeSafeInteger(value.liveRowCount) &&
+    isNonnegativeSafeInteger(value.liveRowCapacity) &&
+    isNonnegativeSafeInteger(value.warningRowCount) &&
+    isNonnegativeSafeInteger(value.liveByteCount) &&
+    isNonnegativeSafeInteger(value.liveByteCapacity) &&
+    isNonnegativeSafeInteger(value.warningByteCount)
+}
+
 /**
  * Returns whether an unknown response is a complete authoritative Planning snapshot.
  *
@@ -446,6 +458,7 @@ export function isPlanningSnapshot(value: unknown): value is PlanningSnapshot {
     value.updateTargets.every(isPlanningUpdateTargetSummary) &&
     isPlanningCriticalPath(value.criticalPath) &&
     isWorkItemDependencySummary(value.workItemDependencySummary) &&
+    isPlanningCapacity(value.capacity) &&
     isOptionalString(value.updatedAt)
 }
 

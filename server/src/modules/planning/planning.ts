@@ -30,6 +30,7 @@ import {
   type ListPlanningUpdateReactionsInput,
   type PlanningCriticalPath,
   type PlanningCadence,
+  type PlanningCapacity,
   type PlanningDependency,
   type PlanningEntity,
   type PlanningEntityStatus,
@@ -106,7 +107,30 @@ const PLANNING_GRAPH_ROW_QUERIES = [
   { recordPrefix: LINK_RECORD_PREFIX, entryType: 'planning-work-item-link' },
   { recordPrefix: UPDATE_TARGET_RECORD_PREFIX, entryType: 'planning-update-target' },
 ]
-const PLANNING_READ_LIMIT = 2_000
+/**
+ * Maximum live graph rows (excluding META) that a row-adding mutation may reach.
+ * Mutations that do not add rows stay allowed above it so operators can always shrink the graph.
+ */
+const PLANNING_LIVE_ROW_CAPACITY = 20_000
+/** Live graph row count at which the snapshot reports a `warning` capacity level. */
+const PLANNING_LIVE_ROW_WARNING_COUNT = 16_000
+/** Maximum UTF-8 JSON bytes of live graph rows that a growing mutation may reach. */
+const PLANNING_LIVE_GRAPH_BYTE_CAPACITY = 24_000_000
+/** Live graph bytes at which the snapshot reports a `warning` capacity level. */
+const PLANNING_LIVE_GRAPH_WARNING_BYTES = 19_200_000
+/**
+ * Maximum Project / Initiative update targets. Update Feed projections and the per-target
+ * activity read are bounded to the same count.
+ */
+const PLANNING_UPDATE_TARGET_CAPACITY = 2_000
+/** Hard safety bound for one strongly consistent live graph read, above the write capacity. */
+const PLANNING_LIVE_ROW_READ_LIMIT = 25_000
+/** Hard safety bound, in UTF-8 JSON bytes, for the rows of one live graph read. */
+const PLANNING_LIVE_GRAPH_READ_BYTE_LIMIT = 32_000_000
+/** Maximum compact update activity rows read for one Workspace. */
+const PLANNING_UPDATE_ACTIVITY_READ_LIMIT = 2_000
+/** Maximum number of Workspaces whose live graph one client keeps in its revision cache. */
+const PLANNING_STATE_CACHE_LIMIT = 8
 const TRANSACTION_ITEM_LIMIT = 100
 const MAX_PLANNING_ROW_BYTES = 300_000
 const MAX_PLANNING_TRANSACTION_BYTES = 3_000_000
@@ -678,9 +702,15 @@ abstract class BasePlanningClient implements PlanningClient {
   ): Promise<void>
 
   /** Workspace planning snapshot を返します。 */
-  async get(workspaceId: string, workItemState: PlanningWorkItemState) {
-    const state = await this.readState(readIdentifier(workspaceId, 'Workspace ID'))
-    return createPlanningSnapshot(state, workItemState, this.now().toISOString())
+  async get(workspaceIdValue: string, workItemState: PlanningWorkItemState) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const state = await this.readState(workspaceId)
+    return createPlanningSnapshot(
+      state,
+      workItemState,
+      this.now().toISOString(),
+      createPlanningCapacity(measurePlanningLiveGraph(workspaceId, state)),
+    )
   }
 
   /** 外部 authorization transaction を束縛する global revision を返します。 */
@@ -1697,12 +1727,24 @@ abstract class BasePlanningClient implements PlanningClient {
     }
     const result = mutation(structuredClone(before), this.now().toISOString())
     validatePlanningState(result.state)
+    const afterUsage = measurePlanningLiveGraph(workspaceId, result.state)
+    requirePlanningLiveCapacity(
+      before,
+      measurePlanningLiveGraph(workspaceId, before),
+      result.state,
+      afterUsage,
+    )
     const after = {
       ...result.state,
       revision: before.revision + 1,
       updatedAt: this.now().toISOString(),
     }
-    const planning = createPlanningSnapshot(after, workItemState, this.now().toISOString())
+    const planning = createPlanningSnapshot(
+      after,
+      workItemState,
+      this.now().toISOString(),
+      createPlanningCapacity(afterUsage),
+    )
     const cadenceTransactionTarget = result.planningUpdateCadenceTransactionTarget
     const cadenceTarget = cadenceTransactionTarget === undefined
       ? undefined
@@ -1854,7 +1896,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
   async getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]> {
     const prefix = `${JSON.stringify(workspaceId)}:`
     const activities = [...this.updateActivities].filter(([key]) => key.startsWith(prefix)).map(([, value]) => structuredClone(value))
-    if (activities.length > PLANNING_READ_LIMIT) throw new PlanningError(413, 'PlanningActivityLimitExceeded', 'Planning activity exceeds the bounded read limit.')
+    if (activities.length > PLANNING_UPDATE_ACTIVITY_READ_LIMIT) throw new PlanningError(413, 'PlanningActivityLimitExceeded', 'Planning activity exceeds the bounded read limit.')
     return activities
   }
 
@@ -1879,9 +1921,9 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     super(now)
   }
 
-  /** In-memory state を返します。 */
+  /** In-memory state を返します。DynamoDB の revision cache と同じく、読み取り側は変更できません。 */
   protected async readState(workspaceId: string) {
-    return structuredClone(this.states.get(workspaceId) ?? createEmptyPlanningState())
+    return deepFreeze(structuredClone(this.states.get(workspaceId) ?? createEmptyPlanningState()))
   }
 
   /** In-memory immutable history の1 pageを返します。 */
@@ -2096,7 +2138,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     let pages = 0
     try {
       do {
-        const response = await this.documentClient.send(new QueryCommand({ TableName: this.tableName, KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)', ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': UPDATE_ACTIVITY_RECORD_PREFIX }, ConsistentRead: true, Limit: PLANNING_READ_LIMIT + 1 - activities.length, ...(cursor ? { ExclusiveStartKey: cursor } : {}) }))
+        const response = await this.documentClient.send(new QueryCommand({ TableName: this.tableName, KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)', ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': UPDATE_ACTIVITY_RECORD_PREFIX }, ConsistentRead: true, Limit: PLANNING_UPDATE_ACTIVITY_READ_LIMIT + 1 - activities.length, ...(cursor ? { ExclusiveStartKey: cursor } : {}) }))
         for (const row of response.Items ?? []) {
           const activity = readStoredPlanningUpdateActivity(row, workspaceId)
           const identity = createPlanningUpdateTargetRecordSuffix(activity.target)
@@ -2107,7 +2149,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         }
         cursor = response.LastEvaluatedKey
         pages += 1
-        if (activities.length > PLANNING_READ_LIMIT || bytes > MAX_PLANNING_SNAPSHOT_BYTES || cursor && (pages >= 20 || !response.Items?.length)) throw new PlanningError(413, 'PlanningActivityLimitExceeded', 'Planning activity exceeds the bounded read limit.')
+        if (activities.length > PLANNING_UPDATE_ACTIVITY_READ_LIMIT || bytes > MAX_PLANNING_SNAPSHOT_BYTES || cursor && (pages >= 20 || !response.Items?.length)) throw new PlanningError(413, 'PlanningActivityLimitExceeded', 'Planning activity exceeds the bounded read limit.')
       } while (cursor)
       return activities
     } catch (error) { throw toPersistenceError(error) }
@@ -2138,6 +2180,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   private readonly documentClient: DynamoDBDocumentClient
   /** Local bootstrap 用の低レベル DynamoDB client です。 */
   private readonly dynamoDbClient: DynamoDBClient
+  /**
+   * Graphs decoded at one META revision, without `UPDATE_TARGET#` rows, in LRU order.
+   * Values are deeply frozen so no reader can change a graph shared across requests.
+   */
+  private readonly graphCache = new Map<string, PlanningWorkspaceState>()
   /** Local table の自動作成を有効にするかどうかです。 */
   private readonly bootstrapLocalTable: boolean
 
@@ -2158,12 +2205,56 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     this.bootstrapLocalTable = bootstrapLocalTable
   }
 
-  /** Stable global revision に対応する Workspace state を読み込みます。 */
+  /**
+   * Reads the Workspace graph that belongs to one stable META revision.
+   *
+   * Graph rows other than `UPDATE_TARGET#` are written only by `commitState`, in the same
+   * transaction as the META revision CAS, so a decoded graph is reused while the strongly read
+   * META revision and timestamp are unchanged. `UPDATE_TARGET#` rows are always re-read because
+   * the notification schedule advances their due-index attributes without a META write.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @returns The live graph state at one stable revision.
+   */
   protected async readState(workspaceId: string) {
     await this.ensureTable()
     const before = await this.readMeta(workspaceId)
+    const cached = this.readCachedGraph(workspaceId, before)
+    const items = await this.queryLiveGraphRows(
+      workspaceId,
+      cached === undefined
+        ? PLANNING_GRAPH_ROW_QUERIES
+        : PLANNING_GRAPH_ROW_QUERIES.filter(({ recordPrefix }) =>
+            recordPrefix === UPDATE_TARGET_RECORD_PREFIX
+          ),
+    )
+    const after = await this.readMeta(workspaceId)
+    if (before.revision !== after.revision) {
+      throw conflict('PlanningRevisionConflict', 'Planning changed while it was being read.')
+    }
+    if (before.revision === 0 && items.some((item) => item.recordKey !== META_RECORD_KEY)) {
+      throw persistenceInvalid('Planning rows exist without metadata.')
+    }
+    if (cached !== undefined) return readPlanningUpdateTargetRows(items, cached, workspaceId)
+    const state = readPlanningRows(items, before, workspaceId)
+    this.storeCachedGraph(workspaceId, state)
+    return state
+  }
+
+  /**
+   * Strongly queries the requested live graph prefixes with hard row and byte bounds.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param queries - Graph prefixes and their expected entry types.
+   * @returns Every row under the requested prefixes.
+   */
+  private async queryLiveGraphRows(
+    workspaceId: string,
+    queries: readonly (typeof PLANNING_GRAPH_ROW_QUERIES)[number][],
+  ) {
     const items: Record<string, unknown>[] = []
-    for (const { recordPrefix, entryType } of PLANNING_GRAPH_ROW_QUERIES) {
+    let bytes = 0
+    for (const { recordPrefix, entryType } of queries) {
       let exclusiveStartKey: Record<string, unknown> | undefined
       do {
         const response = await this.documentClient.send(new QueryCommand({
@@ -2176,7 +2267,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
           },
           ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
           ConsistentRead: true,
-          Limit: PLANNING_READ_LIMIT - items.length,
+          Limit: PLANNING_LIVE_ROW_READ_LIMIT + 1 - items.length,
         }))
         const pageItems = response.Items ?? []
         if (pageItems.some((item) =>
@@ -2187,24 +2278,60 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
           throw persistenceInvalid('Planning graph query returned an invalid row.')
         }
         items.push(...pageItems)
-        if (items.length >= PLANNING_READ_LIMIT) {
+        for (const item of pageItems) bytes += utf8ByteLength(JSON.stringify(item))
+        if (items.length > PLANNING_LIVE_ROW_READ_LIMIT || bytes > PLANNING_LIVE_GRAPH_READ_BYTE_LIMIT) {
           throw new PlanningError(
             413,
             'PlanningReadLimitExceeded',
-            `Planning Workspace cannot exceed ${PLANNING_READ_LIMIT} rows.`,
+            `Planning Workspace cannot be read beyond ${PLANNING_LIVE_ROW_READ_LIMIT} live rows.`,
           )
         }
         exclusiveStartKey = response.LastEvaluatedKey
+        if (exclusiveStartKey !== undefined && pageItems.length === 0) {
+          throw persistenceInvalid('Planning graph query returned an empty continuation page.')
+        }
       } while (exclusiveStartKey)
     }
-    const after = await this.readMeta(workspaceId)
-    if (before.revision !== after.revision) {
-      throw conflict('PlanningRevisionConflict', 'Planning changed while it was being read.')
+    return items
+  }
+
+  /**
+   * Returns the cached graph only when it belongs to the strongly read META row.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param meta - META row read before the graph query.
+   * @returns The cached frozen graph, or undefined on a miss.
+   */
+  private readCachedGraph(workspaceId: string, meta: PlanningMeta) {
+    const cached = this.graphCache.get(workspaceId)
+    if (
+      cached === undefined ||
+      meta.revision === 0 ||
+      cached.revision !== meta.revision ||
+      cached.updatedAt !== meta.updatedAt
+    ) {
+      return undefined
     }
-    if (before.revision === 0 && items.some((item) => item.recordKey !== META_RECORD_KEY)) {
-      throw persistenceInvalid('Planning rows exist without metadata.')
+    this.graphCache.delete(workspaceId)
+    this.graphCache.set(workspaceId, cached)
+    return cached
+  }
+
+  /**
+   * Caches one decoded graph, evicting the least recently used Workspace beyond the bound.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param state - Fully validated graph decoded at one stable revision.
+   */
+  private storeCachedGraph(workspaceId: string, state: PlanningWorkspaceState) {
+    if (state.revision === 0) return
+    this.graphCache.delete(workspaceId)
+    this.graphCache.set(workspaceId, deepFreeze(structuredClone({ ...state, updateTargets: [] })))
+    while (this.graphCache.size > PLANNING_STATE_CACHE_LIMIT) {
+      const oldest = this.graphCache.keys().next().value
+      if (oldest === undefined) break
+      this.graphCache.delete(oldest)
     }
-    return readPlanningRows(items, before, workspaceId)
   }
 
   /** DynamoDB target prefix から append-only update history の1 pageを返します。 */
@@ -2622,13 +2749,6 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     await this.ensureTable()
     const beforeRows = createPlanningRowMap(workspaceId, before)
     const afterRows = createPlanningRowMap(workspaceId, after)
-    if (afterRows.size > PLANNING_READ_LIMIT) {
-      throw new PlanningError(
-        413,
-        'PlanningReadLimitExceeded',
-        `Planning Workspace cannot exceed ${PLANNING_READ_LIMIT} rows.`,
-      )
-    }
     const mutations: NonNullable<TransactWriteCommandInput['TransactItems']> = []
     for (const [recordKey, item] of afterRows) {
       if (recordKey === META_RECORD_KEY || recordsEqual(item, beforeRows.get(recordKey))) continue
@@ -3433,6 +3553,16 @@ function validatePlanningState(state: PlanningWorkspaceState) {
   validateDependencies(state)
   validateWorkItemDependencies(state.workItemDependencies)
   for (const link of state.workItemLinks) validateWorkItemLink(state, link)
+  validatePlanningUpdateTargets(state)
+  validateCycleCapacities(state)
+}
+
+/**
+ * Validates update target rows and their consistency with Initiative entities.
+ *
+ * @param state - Graph whose update targets are checked.
+ */
+function validatePlanningUpdateTargets(state: PlanningWorkspaceState) {
   const updateTargetKeys = new Set<string>()
   for (const target of state.updateTargets) {
     validateStoredPlanningUpdateTarget(target)
@@ -3451,7 +3581,6 @@ function validatePlanningState(state: PlanningWorkspaceState) {
       }
     }
   }
-  validateCycleCapacities(state)
 }
 
 /**
@@ -3754,10 +3883,105 @@ function validateCycleCapacities(state: PlanningWorkspaceState) {
   }
 }
 
+/** Persisted size of a live graph, measured as the rows a commit writes. */
+type PlanningLiveGraphUsage = {
+  /** Live graph rows, excluding the revision META row. */
+  rows: number
+  /** UTF-8 JSON bytes of those rows, matching the accounting of a cold graph read. */
+  bytes: number
+}
+
+/**
+ * Measures the rows and bytes that a state persists, excluding the revision META row.
+ *
+ * @param workspaceId - Owning Workspace identifier included in every row.
+ * @param state - Live Planning graph.
+ * @returns Row count and UTF-8 JSON bytes of the persisted rows.
+ */
+function measurePlanningLiveGraph(
+  workspaceId: string,
+  state: PlanningWorkspaceState,
+): PlanningLiveGraphUsage {
+  let rows = 0
+  let bytes = 0
+  for (const [recordKey, row] of createPlanningRowMap(workspaceId, state)) {
+    if (recordKey === META_RECORD_KEY) continue
+    rows += 1
+    bytes += Buffer.byteLength(JSON.stringify(row), 'utf8')
+  }
+  return { rows, bytes }
+}
+
+/**
+ * Describes how much of the live graph capacity a measured graph uses.
+ *
+ * @param usage - Measured live graph rows and bytes.
+ * @returns Row and byte usage, capacities, warning thresholds, and level.
+ */
+function createPlanningCapacity(usage: PlanningLiveGraphUsage): PlanningCapacity {
+  return {
+    level: usage.rows >= PLANNING_LIVE_ROW_CAPACITY ||
+        usage.bytes >= PLANNING_LIVE_GRAPH_BYTE_CAPACITY
+      ? 'full'
+      : usage.rows >= PLANNING_LIVE_ROW_WARNING_COUNT ||
+          usage.bytes >= PLANNING_LIVE_GRAPH_WARNING_BYTES
+        ? 'warning'
+        : 'normal',
+    liveRowCount: usage.rows,
+    liveRowCapacity: PLANNING_LIVE_ROW_CAPACITY,
+    warningRowCount: PLANNING_LIVE_ROW_WARNING_COUNT,
+    liveByteCount: usage.bytes,
+    liveByteCapacity: PLANNING_LIVE_GRAPH_BYTE_CAPACITY,
+    warningByteCount: PLANNING_LIVE_GRAPH_WARNING_BYTES,
+  }
+}
+
+/**
+ * Rejects a mutation that grows the live graph beyond its row, byte, or update target capacity.
+ *
+ * Mutations that do not grow the exceeded dimension stay allowed above the capacity, so a
+ * Workspace can always be brought back under it by editing, unlinking, deleting, or moving data.
+ * The byte capacity stays below the hard read bound, so a committed graph remains readable.
+ *
+ * @param before - Graph read for the mutation.
+ * @param beforeUsage - Persisted size of `before`.
+ * @param after - Validated graph the mutation would persist.
+ * @param afterUsage - Persisted size of `after`.
+ */
+function requirePlanningLiveCapacity(
+  before: PlanningWorkspaceState,
+  beforeUsage: PlanningLiveGraphUsage,
+  after: PlanningWorkspaceState,
+  afterUsage: PlanningLiveGraphUsage,
+) {
+  if (
+    afterUsage.rows > PLANNING_LIVE_ROW_CAPACITY && afterUsage.rows > beforeUsage.rows ||
+    afterUsage.bytes > PLANNING_LIVE_GRAPH_BYTE_CAPACITY && afterUsage.bytes > beforeUsage.bytes
+  ) {
+    throw new PlanningError(
+      413,
+      'PlanningCapacityExceeded',
+      `Planning Workspace cannot exceed ${PLANNING_LIVE_ROW_CAPACITY} live rows or ` +
+        `${PLANNING_LIVE_GRAPH_BYTE_CAPACITY} bytes.`,
+    )
+  }
+  if (
+    after.updateTargets.length > PLANNING_UPDATE_TARGET_CAPACITY &&
+    after.updateTargets.length > before.updateTargets.length
+  ) {
+    throw new PlanningError(
+      413,
+      'PlanningCapacityExceeded',
+      `Planning Workspace cannot exceed ${PLANNING_UPDATE_TARGET_CAPACITY} update targets.`,
+    )
+  }
+}
+
 function createPlanningSnapshot(
   state: PlanningWorkspaceState,
   workItemState: PlanningWorkItemState,
   evaluatedAt: string,
+  capacity: PlanningCapacity,
 ): PlanningSnapshot {
   const workItemMap = createWorkItemMap(workItemState)
   const visibleLinks = state.workItemLinks
@@ -3814,6 +4038,7 @@ function createPlanningSnapshot(
       visibleWorkItems,
       visibleLinks,
     ),
+    capacity,
     ...(state.updatedAt ? { updatedAt: state.updatedAt } : {}),
   } satisfies PlanningSnapshot
   if (utf8ByteLength(JSON.stringify(snapshot)) > MAX_PLANNING_SNAPSHOT_BYTES) {
@@ -5014,6 +5239,35 @@ function readPlanningRows(
       }
     }
     validatePlanningState(state)
+    return state
+  } catch (error) {
+    if (error instanceof PlanningError && error.code === 'InvalidPlanningData') throw error
+    throw persistenceInvalid('Stored Planning data failed validation.')
+  }
+}
+
+/**
+ * Combines freshly read `UPDATE_TARGET#` rows with a graph cached at the same META revision.
+ *
+ * @param rows - Untrusted update target rows read between two matching META reads.
+ * @param cached - Frozen graph decoded earlier at the same revision, without update targets.
+ * @param workspaceId - Owning Workspace identifier.
+ * @returns The current graph; cached collections stay frozen and must not be mutated.
+ */
+function readPlanningUpdateTargetRows(
+  rows: readonly Record<string, unknown>[],
+  cached: PlanningWorkspaceState,
+  workspaceId: string,
+): PlanningWorkspaceState {
+  try {
+    const updateTargets = rows.map((row) => {
+      if (row.workspaceId !== workspaceId || row.entryType !== 'planning-update-target') {
+        throw persistenceInvalid('Planning update target row is invalid.')
+      }
+      return readStoredPlanningUpdateTarget(row)
+    })
+    const state = { ...cached, updateTargets }
+    validatePlanningUpdateTargets(state)
     return state
   } catch (error) {
     if (error instanceof PlanningError && error.code === 'InvalidPlanningData') throw error
@@ -6942,6 +7196,20 @@ function readPlanningMetaItem(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Recursively freezes a structured-clone-safe value so shared reads cannot mutate it.
+ *
+ * @param value - Plain data value to freeze in place.
+ * @returns The same value, frozen.
+ */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value)
+    for (const child of Object.values(value)) deepFreeze(child)
+  }
+  return value
 }
 
 function utf8ByteLength(value: string) {
