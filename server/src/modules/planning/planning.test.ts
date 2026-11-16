@@ -41,11 +41,14 @@ class RacingPlanningClient extends InMemoryPlanningClient {
   commitCount = 0
   raceAtCommit = 0
   raceEntityId = ''
+  /** Work Item revision conditions of every commit, in order. */
+  workItemConditions: unknown[] = []
 
   protected override async commitState(
     ...args: Parameters<InMemoryPlanningClient['commitState']>
   ) {
     this.commitCount += 1
+    this.workItemConditions.push(...args[3] ?? [])
     if (this.commitCount === this.raceAtCommit) {
       const { revision } = await this.get('workspace-1', EMPTY_WORK_ITEMS)
       await this.archive('workspace-1', this.raceEntityId, { expectedRevision: revision }, EMPTY_WORK_ITEMS)
@@ -4271,7 +4274,7 @@ describe('planning persistence', () => {
   })
 
   test('keeps restored references valid and reports what could not return', async () => {
-    const client = new InMemoryPlanningClient(() => NOW)
+    const client = new RacingPlanningClient(() => NOW)
     const workItems: PlanningWorkItemState = {
       workItems: [
         createWorkItem('work-moved', 'completed'),
@@ -4323,7 +4326,13 @@ describe('planning persistence', () => {
     const withoutDeleted: PlanningWorkItemState = {
       workItems: workItems.workItems.filter((item) => item.id !== 'work-deleted'),
     }
+    client.workItemConditions = []
     const cycle = await client.restore('workspace-1', 'cycle-old', { expectedRevision: revision }, withoutDeleted)
+    // The dropped reference is guarded too: it was judged against the Work Item's current revision.
+    expect(client.workItemConditions).toEqual([
+      expect.objectContaining({ workItemId: 'work-kept' }),
+      expect.objectContaining({ workItemId: 'work-moved' }),
+    ])
     // work-moved now belongs to another Cycle, so its old reference is dropped. work-deleted is not
     // visible to this restore, so its reference stays archived instead of being discarded.
     expect(cycle.restore).toMatchObject({
@@ -4426,6 +4435,35 @@ describe('planning persistence', () => {
     expect(restored.restore).toMatchObject({ restoredLinkCount: 1, pendingReferenceCount: 0 })
     expect(restored.planning.workItemLinks.map((link) => [link.workItemId, link.cycleId]))
       .toEqual([['work-race', 'cycle-race']])
+  })
+
+  test('archives and restores identifiers whose combined archive key would be too long', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    // Each ID encodes to 768 bytes: it fits its live key, but not next to the other in one key.
+    const entityId = '%'.repeat(256)
+    const dependencyId = '#'.repeat(256)
+    await client.create('workspace-1', createEntityInput(entityId, 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
+    await client.createDependency('workspace-1', {
+      id: dependencyId,
+      predecessorId: entityId,
+      successorId: 'portfolio-b',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+    const archived = await client.archive('workspace-1', entityId, { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
+    expect(archived.planning.entities.some((entity) => entity.id === entityId)).toBeFalse()
+    expect(archived.planning.dependencies).toEqual([])
+
+    const restored = await client.restore(
+      'workspace-1',
+      entityId,
+      { expectedRevision: archived.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(restored.restore).toMatchObject({ restoredDependencyCount: 1, pendingReferenceCount: 0 })
+    expect(restored.planning.dependencies.map((dependency) => dependency.id)).toEqual([dependencyId])
   })
 
   test('leaves references that exceed the live capacity archived until a later restore', async () => {

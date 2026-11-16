@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -2855,6 +2856,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     workspaceId: string,
     entityId: string,
   ): Promise<PlanningArchivedEntityBundle> {
+    await this.ensureTable()
     const entity = await this.readArchivedEntity(workspaceId, entityId)
     const prefix = createArchivedReferenceRecordPrefix(entityId)
     const references: PlanningArchivedEntityBundle['references'] = []
@@ -2884,6 +2886,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
 
   /** Archive の entity row を強整合で読みます。 */
   protected async readArchivedEntity(workspaceId: string, entityId: string) {
+    await this.ensureTable()
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: createArchivedEntityRecordKey(entityId) },
@@ -2900,6 +2903,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     limit: number,
     afterEntityId?: string,
   ) {
+    await this.ensureTable()
     const entities: StoredPlanningEntity[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined = afterEntityId === undefined
       ? undefined
@@ -7000,6 +7004,16 @@ function planArchiveRestoreStep(
       } else {
         counts.droppedLinkCount += 1
         budget -= 1
+        if (summary) {
+          // The drop is decided against this Work Item summary, so a later change to the Work Item
+          // must abort the step instead of losing a reference that has become valid again.
+          workItemConditions.push({
+            teamId: reference.link.teamId,
+            workItemId: reference.link.workItemId,
+            revision: readRevision(summary.revision),
+          })
+          budget -= 1
+        }
       }
     }
     archiveChanges.push({ kind: 'delete', recordKey, requireExisting: true })
@@ -7073,9 +7087,33 @@ function readArchivedEntityCursor(cursor: unknown) {
  */
 function createArchivedEntityRecordKey(entityId: string) {
   return readRecordKey(
-    `${ARCHIVED_ENTITY_RECORD_PREFIX}${encodeRecordKeyIdentifier(entityId)}`,
+    `${ARCHIVED_ENTITY_RECORD_PREFIX}${
+      boundArchivedKeyPart(ARCHIVED_ENTITY_RECORD_PREFIX, encodeRecordKeyIdentifier(entityId), 0, entityId)
+    }`,
     'Archived Planning entity record key',
   )
+}
+
+/** Bytes kept free after an archived reference prefix for the longest digested reference suffix. */
+const ARCHIVED_REFERENCE_SUFFIX_RESERVE = 'DEPENDENCY#'.length + 65
+
+/**
+ * Keeps an archive key part within the DynamoDB sort-key limit.
+ *
+ * Archive keys concatenate identifiers that each fit their live key, so a long encoded part is
+ * replaced by `#` and its SHA-256 digest. `encodeURIComponent` never emits `#`, so a digest
+ * cannot collide with an encoded identifier; the row itself keeps the full identifiers.
+ *
+ * @param prefix - Key text before the part.
+ * @param encoded - URI-encoded part.
+ * @param reservedBytes - Bytes that must stay free after the part.
+ * @param source - Unencoded value digested when the part does not fit.
+ * @returns The encoded part, or its digest form.
+ */
+function boundArchivedKeyPart(prefix: string, encoded: string, reservedBytes: number, source: string) {
+  return utf8ByteLength(prefix) + utf8ByteLength(encoded) + reservedBytes <= 1_024
+    ? encoded
+    : `#${createHash('sha256').update(source).digest('hex')}`
 }
 
 /**
@@ -7086,7 +7124,14 @@ function createArchivedEntityRecordKey(entityId: string) {
  */
 function createArchivedReferenceRecordPrefix(entityId: string) {
   return readRecordKey(
-    `${ARCHIVED_REFERENCE_RECORD_PREFIX}${encodeRecordKeyIdentifier(entityId)}#`,
+    `${ARCHIVED_REFERENCE_RECORD_PREFIX}${
+      boundArchivedKeyPart(
+        ARCHIVED_REFERENCE_RECORD_PREFIX,
+        encodeRecordKeyIdentifier(entityId),
+        1 + ARCHIVED_REFERENCE_SUFFIX_RESERVE,
+        entityId,
+      )
+    }#`,
     'Archived Planning reference record prefix',
   )
 }
@@ -7101,12 +7146,25 @@ function createArchivedReferenceRecordKey(
   reference: PlanningArchivedDependency | PlanningArchivedLinkReference,
 ) {
   const prefix = createArchivedReferenceRecordPrefix(reference.entityId)
+  const kindPrefix = `${prefix}${reference.kind === 'dependency' ? 'DEPENDENCY#' : 'LINK#'}`
   return readRecordKey(
-    reference.kind === 'dependency'
-      ? `${prefix}DEPENDENCY#${encodeRecordKeyIdentifier(reference.dependency.id)}`
-      : `${prefix}LINK#${encodeRecordKeyIdentifier(reference.link.teamId)}#${
-        encodeRecordKeyIdentifier(reference.link.workItemId)
-      }`,
+    `${kindPrefix}${
+      reference.kind === 'dependency'
+        ? boundArchivedKeyPart(
+          kindPrefix,
+          encodeRecordKeyIdentifier(reference.dependency.id),
+          0,
+          reference.dependency.id,
+        )
+        : boundArchivedKeyPart(
+          kindPrefix,
+          `${encodeRecordKeyIdentifier(reference.link.teamId)}#${
+            encodeRecordKeyIdentifier(reference.link.workItemId)
+          }`,
+          0,
+          JSON.stringify([reference.link.teamId, reference.link.workItemId]),
+        )
+    }`,
     'Archived Planning reference record key',
   )
 }

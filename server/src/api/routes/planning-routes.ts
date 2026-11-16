@@ -347,6 +347,50 @@ function isPlanningScopeDenial(error: unknown) {
   ) && (error.status === 403 || error.status === 404 || error.status === 409)
 }
 
+/**
+ * Checks whether the archive list may show one archived entity to the caller.
+ *
+ * The list route is authorized at the Workspace resource, so an Enterprise caller is evaluated
+ * again at the entity's own Team / Project resource, the one its restore request resolves.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param entity - Archived entity summary.
+ * @returns Whether the caller holds the restore permission at the entity's scope.
+ */
+async function canRestoreArchivedPlanningEntity(
+  principal: WorkspacePrincipal,
+  entity: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+) {
+  try {
+    const evaluation = principal.enterpriseAuthorizationEvaluation
+    if (principal.enterprisePermissions === undefined || evaluation === undefined) {
+      await requirePlanningScopePermission(principal, entity, 'manager')
+      return true
+    }
+    requireWorkspaceBusinessWrite(principal)
+    return evaluateEnterpriseAccess({
+      permission: 'planning.manage',
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource: entity.projectId
+        ? {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: entity.projectId,
+            ...(entity.teamId === undefined ? {} : { parentTeamId: entity.teamId }),
+          }
+        : entity.teamId
+          ? { workspaceId: principal.directoryId, kind: 'team', targetId: entity.teamId }
+          : { workspaceId: principal.directoryId, kind: 'workspace' },
+    }).allowed
+  } catch (error) {
+    if (!isPlanningScopeDenial(error)) throw error
+    return false
+  }
+}
+
 function readPlanningRouteId(value: string | undefined, label: string) {
   return readPlanningIdentifier(value, label)
 }
@@ -3852,12 +3896,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       })
       const entities = []
       for (const entity of page.entities) {
-        try {
-          await requirePlanningScopePermission(principal, entity, 'manager')
-          entities.push(entity)
-        } catch (error) {
-          if (!isPlanningScopeDenial(error)) throw error
-        }
+        if (await canRestoreArchivedPlanningEntity(principal, entity)) entities.push(entity)
       }
       return c.json({
         entities,

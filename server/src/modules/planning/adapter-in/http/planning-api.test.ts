@@ -28,6 +28,7 @@ import { CollaborationError } from '../../../collaboration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
+  ArchivedPlanningEntityPage,
   EnterpriseCustomRole,
   EnterpriseRoleAssignment,
   PlanningMutationResponse,
@@ -485,6 +486,41 @@ test('preserves direct Enterprise Team access for an Initiative in an empty Team
   const revoked = await planningApiRequest('/api/planning/update-feed?view=recent')
   expect(revoked.status).toBe(200)
   expect(await revoked.json()).toMatchObject({ total: 0, entries: [] })
+})
+
+test('lists archived entities that an Enterprise Team grant can restore', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [], teamProjects: [] })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  const workspaceId = 'user#demo@example.com'
+  await seedPlanningUpdateInitiative(planning, 'team-initiative', 'core-team')
+  let revision = 3
+  for (const entityId of ['team-initiative', 'team-initiative-roadmap', 'team-initiative-portfolio']) {
+    revision = (await planning.archive(workspaceId, entityId, { expectedRevision: revision }, { workItems: [] }))
+      .planning.revision
+  }
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:planning-manager', name: 'Planning manager',
+    permissions: ['planning.read', 'planning.manage'], guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'team-planning-manager',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({ planning, enterpriseIdentity: identity })
+
+  const response = await planningApiRequest('/api/planning/archived-entities')
+  expect(response.status).toBe(200)
+  // The Workspace-scoped Portfolio needs a Workspace grant, so only the Team entities are listed.
+  expect((await response.json() as ArchivedPlanningEntityPage).entities.map((entity) => entity.id))
+    .toEqual(['team-initiative', 'team-initiative-roadmap'])
 })
 
 test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
