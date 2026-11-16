@@ -27,8 +27,8 @@ import { DynamoDbInboxDigestStore } from '../../../update-feed'
 import { CollaborationError } from '../../../collaboration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
+import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 import type {
-  ArchivedPlanningEntityPage,
   EnterpriseCustomRole,
   EnterpriseRoleAssignment,
   PlanningMutationResponse,
@@ -519,8 +519,12 @@ test('lists archived entities that an Enterprise Team grant can restore', async 
   const response = await planningApiRequest('/api/planning/archived-entities')
   expect(response.status).toBe(200)
   // The Workspace-scoped Portfolio needs a Workspace grant, so only the Team entities are listed.
-  expect((await response.json() as ArchivedPlanningEntityPage).entities.map((entity) => entity.id))
-    .toEqual(['team-initiative', 'team-initiative-roadmap'])
+  expect(await response.json()).toEqual({
+    entities: [
+      expect.objectContaining({ id: 'team-initiative' }),
+      expect.objectContaining({ id: 'team-initiative-roadmap' }),
+    ],
+  })
 })
 
 test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
@@ -2175,6 +2179,12 @@ test('enforces Planning revisions and structural permissions before mutations', 
     structuralCalls.move += 1
     return move(...input)
   }
+  const restore = planningClient.restore.bind(planningClient)
+  const restoreAuthorizationChecks: unknown[] = []
+  planningClient.restore = async (...input) => {
+    restoreAuthorizationChecks.push(input[4]?.authorizationConditionChecks)
+    return restore(...input)
+  }
 
   const futureRevision = await planningApiRequest(
     '/api/planning/entities/cycle-structural/archive',
@@ -2272,16 +2282,23 @@ test('enforces Planning revisions and structural permissions before mutations', 
     { expectedRevision: 5 },
   )
   expect(managerRestore.status).toBe(200)
-  const restored = await managerRestore.json() as {
-    /** Snapshot after the restore. */
-    planning: PlanningSnapshot
-    /** Restore outcome counts. */
-    restore: Record<string, number>
-  }
-  expect(restored.planning.revision).toBe(6)
-  expect(restored.planning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
-    .toBeUndefined()
-  expect(restored.restore).toMatchObject({ pendingReferenceCount: 0 })
+  const restored: unknown = await managerRestore.json()
+  expect(restored).toMatchObject({ planning: { revision: 6 }, restore: { pendingReferenceCount: 0 } })
+  const restoredEntities = isRecord(restored) && isRecord(restored.planning) &&
+      Array.isArray(restored.planning.entities)
+    ? restored.planning.entities
+    : []
+  const restoredCycle = restoredEntities.find((entity) => isRecord(entity) && entity.id === 'cycle-structural')
+  expect(restoredCycle).toMatchObject({ id: 'cycle-structural' })
+  expect(restoredCycle).not.toHaveProperty('archivedAt')
+  // Each restore revision guards the caller's Workspace membership.
+  expect(restoreAuthorizationChecks.at(-1)).toEqual([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({
+        Key: expect.objectContaining({ recordKey: expect.stringMatching(/^MEMBER#/) }),
+      }),
+    }),
+  ])
 })
 
 test('rejects an inactive Planning owner before invoking the mutation client', async () => {

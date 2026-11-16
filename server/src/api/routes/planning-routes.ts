@@ -3868,6 +3868,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         input,
         workItemState,
         {
+          // Every restore revision fails once the caller's membership or Enterprise controls change.
+          authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
           // Rechecked each step for the restored entity, and for dependency counterparts: restoring
           // an edge needs the same permission on both endpoints as creating one.
           canManageEntity: (entity) => canManagePlanningEntityScope(principal, entity),

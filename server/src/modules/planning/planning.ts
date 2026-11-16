@@ -727,6 +727,11 @@ export type PlanningRestoreOptions = {
   ) => Promise<boolean>
   /** Whether the caller may write links of Work Items in this scope; denied links stay archived. */
   canRestoreLinkTo?: (workItem: { teamId: string; projectId?: string }) => Promise<boolean>
+  /**
+   * Caller authorization rows guarded by every restore revision, so a membership or Enterprise
+   * control change during the restore stops it instead of letting later steps use the old grant.
+   */
+  authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[]
 }
 
 type PlanningArchiveStep = {
@@ -1071,6 +1076,7 @@ abstract class BasePlanningClient implements PlanningClient {
   ): Promise<RestorePlanningEntityResponse> {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const entityId = readIdentifier(entityIdValue, 'Planning entity ID')
+    const authorizationChecks = options.authorizationConditionChecks ?? []
     const bundle = await this.readArchivedEntityBundle(workspaceId, entityId)
     const archivedEntity = bundle.entity
     if (archivedEntity) {
@@ -1081,7 +1087,7 @@ abstract class BasePlanningClient implements PlanningClient {
           recordKey: createArchivedEntityRecordKey(entityId),
           requireExisting: true,
         }],
-      }))
+      }), authorizationChecks)
     } else {
       const live = findEntity(await this.readState(workspaceId), entityId)
       if (!live) {
@@ -1092,7 +1098,7 @@ abstract class BasePlanningClient implements PlanningClient {
         // moved out. Clearing the archive state restores it in place.
         await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
           state: unarchiveLiveEntity(state, entityId, now),
-        }))
+        }), authorizationChecks)
       }
     }
     const summary: PlanningRestoreSummary = {
@@ -1106,18 +1112,16 @@ abstract class BasePlanningClient implements PlanningClient {
     // Only grows: an archived counterpart leaves the archive solely by becoming live again.
     const archivedCounterpartIds = new Set<string>()
     const workItems = createWorkItemMap(workItemState)
+    const linkDecisions = new Map<string, boolean>()
     // A link whose Work Item the caller cannot see or write (or that no longer exists) stays
     // archived, so a restore by a caller with narrower Work Item access never discards it.
-    const hidden = new Set<PlanningArchivedDependency | PlanningArchivedLinkReference>()
-    const linkDecisions = new Map<string, boolean>()
-    for (const reference of bundle.references) {
-      if (reference.kind !== 'link') continue
+    const isRestorable = async (
+      reference: PlanningArchivedDependency | PlanningArchivedLinkReference,
+    ) => {
+      if (reference.kind !== 'link') return true
       const summary = workItems.get(createWorkItemKey(reference.link.teamId, reference.link.workItemId))
-      if (!summary) {
-        hidden.add(reference)
-        continue
-      }
-      if (!options.canRestoreLinkTo) continue
+      if (!summary) return false
+      if (!options.canRestoreLinkTo) return true
       const scope = {
         teamId: reference.link.teamId,
         ...(summary.projectId === undefined ? {} : { projectId: summary.projectId }),
@@ -1128,14 +1132,13 @@ abstract class BasePlanningClient implements PlanningClient {
         allowed = await options.canRestoreLinkTo(scope)
         linkDecisions.set(scopeKey, allowed)
       }
-      if (!allowed) hidden.add(reference)
+      return allowed
     }
-    let pending = bundle.references.filter((reference) => !hidden.has(reference))
     const scopeDecisions = new Map<string, boolean>()
     try {
       for (
         let step = 0;
-        step < PLANNING_ARCHIVE_REQUEST_STEP_LIMIT && pending.length > 0;
+        step < PLANNING_ARCHIVE_REQUEST_STEP_LIMIT && bundle.references.length > 0;
         step += 1
       ) {
         let planned: PlanningArchiveRestorePlan | undefined
@@ -1158,6 +1161,14 @@ abstract class BasePlanningClient implements PlanningClient {
           }
           // The restored entity may have moved to a scope the caller does not manage.
           if (!await canManage(target)) return undefined
+          // Read after the revision-bound graph, like the counterparts below: every archive row
+          // change moves the revision, so a committed step consumed exactly the rows it read. A
+          // reference restored, recreated and archived again by another request is planned from
+          // its current row, never from the copy this request read first.
+          const pending: (PlanningArchivedDependency | PlanningArchivedLinkReference)[] = []
+          for (const reference of (await this.readArchivedEntityBundle(workspaceId, entityId)).references) {
+            if (await isRestorable(reference)) pending.push(reference)
+          }
           // Read after the revision-bound graph: a counterpart archived later moves the revision,
           // so the CAS rejects this step instead of dropping a dependency it could have kept.
           await this.collectArchivedCounterparts(
@@ -1175,7 +1186,15 @@ abstract class BasePlanningClient implements PlanningClient {
               : reference.dependency.predecessorId)
             if (counterpart && !await canManage(counterpart)) deniedCounterpartIds.add(counterpart.id)
           }
-          planned = planArchiveRestoreStep(workspaceId, state, entityId, pending, {
+          // Edges kept for a counterpart the caller cannot manage are skipped before planning, so
+          // they never take the budget of a step from the references that can still be restored.
+          const plannable = pending.filter((reference) =>
+            reference.kind !== 'dependency' ||
+            !deniedCounterpartIds.has(reference.dependency.predecessorId === entityId
+              ? reference.dependency.successorId
+              : reference.dependency.predecessorId)
+          )
+          planned = planArchiveRestoreStep(workspaceId, state, entityId, plannable, {
             archivedCounterpartIds,
             deniedCounterpartIds,
             workItems,
@@ -1183,14 +1202,13 @@ abstract class BasePlanningClient implements PlanningClient {
           })
           // Only skipped references: nothing to commit, and no empty revision.
           return planned.step.archiveChanges.length === 0 ? undefined : planned.step
-        }, workItemState)
+        }, workItemState, authorizationChecks)
         if (!planned) break
         summary.restoredLinkCount += planned.counts.restoredLinkCount
         summary.droppedLinkCount += planned.counts.droppedLinkCount
         summary.restoredDependencyCount += planned.counts.restoredDependencyCount
         summary.retainedDependencyCount += planned.counts.retainedDependencyCount
         summary.droppedDependencyCount += planned.counts.droppedDependencyCount
-        pending = pending.slice(planned.processedCount)
       }
     } catch (error) {
       if (!(error instanceof PlanningError) || error.status >= 500) throw error
@@ -1294,6 +1312,7 @@ abstract class BasePlanningClient implements PlanningClient {
    * @param plan - Pure planner; returns `undefined` when nothing is left to do.
    * @param growth - Work Items of a step that may grow the live graph; the step must then fit the
    * live capacity and the snapshot response limit. Omitted for steps that only shrink the graph.
+   * @param authorizationConditionChecks - Caller authorization rows guarded by the revision.
    * @returns Whether a revision was committed.
    */
   private async commitArchiveStep(
@@ -1303,6 +1322,7 @@ abstract class BasePlanningClient implements PlanningClient {
       now: string,
     ) => PlanningArchiveStep | undefined | Promise<PlanningArchiveStep | undefined>,
     growth: PlanningWorkItemState | undefined,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ) {
     for (let attempt = 1; ; attempt += 1) {
       const before = await this.readState(workspaceId)
@@ -1332,7 +1352,7 @@ abstract class BasePlanningClient implements PlanningClient {
           before,
           { ...step.state, revision: before.revision + 1, updatedAt: now },
           step.workItemConditions ?? [],
-          [],
+          authorizationConditionChecks,
           undefined,
           undefined,
           step.archiveChanges,
@@ -6688,8 +6708,6 @@ function readStoredPlanningWorkItemLink(row: Record<string, unknown>): PlanningW
 type PlanningArchiveRestorePlan = {
   /** Revision to commit. */
   step: PlanningArchiveStep
-  /** How many leading pending references the revision consumes. */
-  processedCount: number
   /** Per-outcome counts of the consumed references. */
   counts: Omit<PlanningRestoreSummary, 'pendingReferenceCount'>
 }
@@ -7139,7 +7157,6 @@ function planArchiveRestoreStep(
   }
   return {
     step: { state: next, archiveChanges, workItemConditions },
-    processedCount,
     counts,
   }
 }

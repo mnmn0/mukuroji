@@ -43,15 +43,24 @@ class RacingPlanningClient extends InMemoryPlanningClient {
   raceEntityId = ''
   /** Work Item revision conditions of every commit, in order. */
   workItemConditions: unknown[] = []
+  /** Caller authorization checks of each commit, in order. */
+  authorizationConditionChecks: unknown[][] = []
+  /** Concurrent requests run at `raceAtCommit`; archives `raceEntityId` when unset. */
+  race?: () => Promise<void>
 
   protected override async commitState(
     ...args: Parameters<InMemoryPlanningClient['commitState']>
   ) {
     this.commitCount += 1
     this.workItemConditions.push(...args[3] ?? [])
+    this.authorizationConditionChecks.push([...args[4] ?? []])
     if (this.commitCount === this.raceAtCommit) {
-      const { revision } = await this.get('workspace-1', EMPTY_WORK_ITEMS)
-      await this.archive('workspace-1', this.raceEntityId, { expectedRevision: revision }, EMPTY_WORK_ITEMS)
+      if (this.race) {
+        await this.race()
+      } else {
+        const { revision } = await this.get('workspace-1', EMPTY_WORK_ITEMS)
+        await this.archive('workspace-1', this.raceEntityId, { expectedRevision: revision }, EMPTY_WORK_ITEMS)
+      }
     }
     return super.commitState(...args)
   }
@@ -4435,6 +4444,93 @@ describe('planning persistence', () => {
     expect(restored.restore).toMatchObject({ restoredLinkCount: 1, pendingReferenceCount: 0 })
     expect(restored.planning.workItemLinks.map((link) => [link.workItemId, link.cycleId]))
       .toEqual([['work-race', 'cycle-race']])
+  })
+
+  test('restores the archived dependency row current at each step, not the one read first', async () => {
+    const client = new RacingPlanningClient(() => NOW)
+    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
+    const dependencyInput = {
+      id: 'dependency-a-b',
+      predecessorId: 'portfolio-a',
+      successorId: 'portfolio-b',
+      type: 'finish-to-start' as const,
+      lagDays: 0,
+    }
+    await client.createDependency('workspace-1', { ...dependencyInput, expectedRevision: 2 }, EMPTY_WORK_ITEMS)
+    const archived = await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
+
+    const revision = async () => (await client.get('workspace-1', EMPTY_WORK_ITEMS)).revision
+    // Before this restore's reference step commits, other requests restore the edge, recreate it
+    // with another lag under the same ID, archive it again and restore only the entity.
+    client.raceAtCommit = client.commitCount + 2
+    client.race = async () => {
+      await client.restore('workspace-1', 'portfolio-a', { expectedRevision: await revision() }, EMPTY_WORK_ITEMS)
+      await client.deleteDependency('workspace-1', 'dependency-a-b', { expectedRevision: await revision() }, EMPTY_WORK_ITEMS)
+      await client.createDependency(
+        'workspace-1',
+        { ...dependencyInput, lagDays: 5, expectedRevision: await revision() },
+        EMPTY_WORK_ITEMS,
+      )
+      await client.archive('workspace-1', 'portfolio-a', { expectedRevision: await revision() }, EMPTY_WORK_ITEMS)
+      await client.restore(
+        'workspace-1',
+        'portfolio-a',
+        { expectedRevision: await revision() },
+        EMPTY_WORK_ITEMS,
+        { canManageEntity: async () => false },
+      )
+    }
+    const restored = await client.restore(
+      'workspace-1',
+      'portfolio-a',
+      { expectedRevision: archived.planning.revision },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(restored.restore).toMatchObject({ restoredDependencyCount: 1, pendingReferenceCount: 0 })
+    expect(restored.planning.dependencies.map((dependency) => [dependency.id, dependency.lagDays]))
+      .toEqual([['dependency-a-b', 5]])
+  })
+
+  test('guards every restore revision with the caller authorization checks', async () => {
+    const client = new RacingPlanningClient(() => NOW)
+    const workItems: PlanningWorkItemState = {
+      workItems: [createWorkItem('work-a', 'completed'), createWorkItem('work-b', 'completed')],
+    }
+    await client.create('workspace-1', createCycleInput('cycle-auth', 0, { projectId: 'project-1' }), workItems)
+    for (const [index, workItemId] of ['work-a', 'work-b'].entries()) {
+      await client.putWorkItemLink('workspace-1', {
+        teamId: 'team-1',
+        workItemId,
+        projectId: 'project-1',
+        cycleId: 'cycle-auth',
+        goalIds: [],
+        expectedRevision: index + 1,
+      }, workItems)
+    }
+    const archived = await client.archive('workspace-1', 'cycle-auth', { expectedRevision: 3 }, workItems)
+    const check = {
+      ConditionCheck: {
+        TableName: 'workspace-access',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#version = :version',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':version': 3 },
+      },
+    }
+    const firstRestoreCommit = client.commitCount
+    const restored = await client.restore(
+      'workspace-1',
+      'cycle-auth',
+      { expectedRevision: archived.planning.revision },
+      workItems,
+      { authorizationConditionChecks: [check] },
+    )
+    expect(restored.restore).toMatchObject({ restoredLinkCount: 2, pendingReferenceCount: 0 })
+    // The entity revision and the reference revision both carry the caller's checks.
+    const restoreCommits = client.authorizationConditionChecks.slice(firstRestoreCommit)
+    expect(restoreCommits).toHaveLength(2)
+    expect(restoreCommits).toEqual([[check], [check]])
   })
 
   test('archives and restores identifiers whose combined archive key would be too long', async () => {
