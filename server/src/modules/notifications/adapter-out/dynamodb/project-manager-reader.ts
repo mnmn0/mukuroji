@@ -19,7 +19,8 @@ export type DynamoDbProjectManagerReaderOptions = {
 }
 
 /**
- * Creates a reader that resolves active Project managers from the Project Directory partition.
+ * Creates a reader that resolves the unarchived managers of active Projects from the Project
+ * Directory partition.
  *
  * @param options - DocumentClient, table name, and paging bounds.
  * @returns Reader for the notification schedule's overdue escalation.
@@ -57,7 +58,12 @@ export function createDynamoDbProjectManagerReader(
           if (item.entryType === 'project' && item.archivedAt === undefined) {
             activeProjectIds.add(requireText(item.projectId, 'Project directory project ID'))
           }
-          if (item.entryType === 'project-member' && item.role === 'manager') {
+          // An archived membership confers no access, so a former manager is not escalated to.
+          if (
+            item.entryType === 'project-member' &&
+            item.role === 'manager' &&
+            item.archivedAt === undefined
+          ) {
             const projectId = requireText(item.projectId, 'Project member project ID')
             const memberKey = requireText(item.memberKey, 'Project member key').toLowerCase()
             const projectManagers = managers.get(projectId) ?? new Set<string>()

@@ -1533,6 +1533,7 @@ export function isCurrentEscalationManager(
     item.entryType === 'project-member' &&
     item.projectId === event.projectId &&
     item.role === 'manager' &&
+    item.archivedAt === undefined &&
     normalizeMemberKey(item.memberKey) === normalized
   )
 }

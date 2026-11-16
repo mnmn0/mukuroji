@@ -31,6 +31,13 @@ describe('DynamoDB Project manager reader', () => {
           { entryType: 'project', projectId: 'archived', archivedAt: '2026-07-01T00:00:00.000Z' },
           { entryType: 'project-member', projectId: 'archived', memberKey: 'old@example.com', role: 'manager' },
           { entryType: 'project-member', projectId: 'platform', memberKey: 'ada@example.com', role: 'manager' },
+          {
+            entryType: 'project-member',
+            projectId: 'platform',
+            memberKey: 'former@example.com',
+            role: 'manager',
+            archivedAt: '2026-07-01T00:00:00.000Z',
+          },
         ],
       },
     ])

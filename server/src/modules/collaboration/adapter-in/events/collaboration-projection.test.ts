@@ -348,8 +348,16 @@ describe('collaboration projection pure helpers', () => {
     const directory: ProjectDirectoryItem[] = [
       { entryType: 'project-member', projectId: 'platform', memberKey: 'Lead@Example.com', role: 'manager' },
       { entryType: 'project-member', projectId: 'platform', memberKey: 'viewer@example.com', role: 'viewer' },
+      {
+        entryType: 'project-member',
+        projectId: 'platform',
+        memberKey: 'former@example.com',
+        role: 'manager',
+        archivedAt: '2026-07-01T00:00:00.000Z',
+      },
     ]
     expect(isCurrentEscalationManager(escalation, 'lead@example.com', directory)).toBe(true)
+    expect(isCurrentEscalationManager(escalation, 'former@example.com', directory)).toBe(false)
     expect(isCurrentEscalationManager(escalation, 'viewer@example.com', directory)).toBe(false)
     expect(isCurrentEscalationManager({ ...escalation, projectId: 'other' }, 'lead@example.com', directory))
       .toBe(false)
