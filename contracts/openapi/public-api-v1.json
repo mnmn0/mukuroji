@@ -3207,14 +3207,6 @@
       "WorkItem": {
         "additionalProperties": false,
         "properties": {
-          "actualEndDate": {
-            "$ref": "#/components/schemas/WorkItemScheduleDate",
-            "description": "Local date of the latest effective completion in the schedule calendar timezone; present only while the Work Item is completed."
-          },
-          "actualStartDate": {
-            "$ref": "#/components/schemas/WorkItemScheduleDate",
-            "description": "Local date when the Work Item first entered the started or completed category; absent until work starts."
-          },
           "assignedProjectId": {
             "type": "string"
           },
