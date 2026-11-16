@@ -2,6 +2,8 @@ import {
   type CanonicalWorkItem,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  deriveWorkItemProgressPercent,
+  deriveWorkItemRemainingEffortMinutes,
   type SearchCustomFieldFilter,
   type SearchCustomFieldValue,
   type TaskViewDefinition,
@@ -746,6 +748,11 @@ function resolveTaskViewFieldValue(
     case 'team': return task.teamId
     case 'createdAt': return task.createdAt
     case 'updatedAt': return task.updatedAt
+    case 'estimate': return task.schedule.plannedEffortMinutes
+    case 'remainingEffort': return deriveWorkItemRemainingEffortMinutes(task)
+    // Sorting has no Team configuration, so progress sorts by the recorded percentage when there
+    // is one and otherwise by estimate and remaining effort, falling back to the status category.
+    case 'progress': return deriveWorkItemProgressPercent(task, task.progressPercent === undefined ? 'remaining-effort' : 'manual')
     default: return undefined
   }
 }

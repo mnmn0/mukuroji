@@ -32,6 +32,10 @@ import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkIte
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import {
+  WorkItemEffortProgressEditor,
+  type WorkItemEffortProgressChange,
+} from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import {
   isCustomFieldApplicable,
@@ -675,6 +679,21 @@ function IssueDetailContent({
       .finally(() => setIssueUpdatePending(false))
   }
 
+  /**
+   * Saves remaining effort and manual progress on their own, outside the editor form.
+   *
+   * @param change - Validated effort and progress change.
+   */
+  const saveEffortProgress = async (change: WorkItemEffortProgressChange) => {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) return
+    setIssueUpdatePending(true)
+    try {
+      await onUpdateIssue(issue.id, change)
+    } finally {
+      setIssueUpdatePending(false)
+    }
+  }
+
   /** Renders the Work Item Type selector and any pending type-change resolution UI. */
   const renderWorkItemTypeControl = (): ReactNode => configuration ? (
     <section className="workbench-panel-muted grid min-w-0 gap-3 p-3" data-testid="team-issue-detail-work-item-type">
@@ -970,6 +989,16 @@ function IssueDetailContent({
             <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
               {describeTeamIssueSchedule(issue.schedule, t)}
             </output>
+            <div className="workbench-panel-muted p-3 font-normal">
+              <WorkItemEffortProgressEditor
+                editorIdentity={editorIdentity}
+                item={issue}
+                locale={locale}
+                {...(configuration?.progressMode ? { progressMode: configuration.progressMode } : {})}
+                {...(onUpdateIssue ? { onSave: saveEffortProgress } : {})}
+                readOnly={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+              />
+            </div>
           </div>
         )
       case 'relations':
@@ -1048,7 +1077,9 @@ function IssueDetailContent({
             key={issue.teamId + ':' + issue.id + ':time'}
             locale={locale}
             {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
+            {...(issue.schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: issue.schedule.plannedEffortMinutes })}
             readOnly={isIssueReadOnly}
+            {...(issue.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: issue.remainingEffortMinutes })}
             teamId={issue.teamId}
             timesheetHref={createTeamTimeTrackingPath(issue.teamId)}
             workItemId={issue.id}

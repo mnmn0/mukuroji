@@ -64,7 +64,10 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
 type WorkItemScheduleBase = {
   /** Calendar policy applied to date movement and duration calculations. */
   calendarPolicy: WorkItemScheduleCalendarPolicy
-  /** Planned effort independent from elapsed or working-day duration. */
+  /**
+   * Planned effort (estimate) in minutes, independent from elapsed or working-day duration. This is
+   * the single source of a Work Item's estimate for every view, report, and API.
+   */
   plannedEffortMinutes?: number
 }
 
@@ -445,6 +448,16 @@ export type CanonicalWorkItem = {
   contributorAssignments?: WorkItemContributorAssignment[]
   /** Conditions the Work Item must meet before it is accepted; absent when none. */
   acceptanceCriteria?: WorkItemAcceptanceCriterion[]
+  /**
+   * Recorded effort still remaining, in minutes; absent until someone records it. Readers derive the
+   * remaining effort with `deriveWorkItemRemainingEffortMinutes`.
+   */
+  remainingEffortMinutes?: number
+  /**
+   * Manually recorded progress percentage (0 to 100); absent until someone records it. Teams whose
+   * progress mode is not `manual` keep the value but derive progress from other fields.
+   */
+  progressPercent?: number
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
@@ -617,6 +630,10 @@ export type WorkItemPatch = {
   customFieldValues?: Record<string, CustomFieldValue | null>
   /** Complete replacement schedule used by all interactive planning views. */
   schedule?: WorkItemSchedule
+  /** Recorded remaining effort in minutes; null clears it. */
+  remainingEffortMinutes?: number | null
+  /** Manually recorded progress percentage from 0 to 100; null clears it. */
+  progressPercent?: number | null
   /**
    * 変更後の優先度です。
    */

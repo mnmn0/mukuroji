@@ -2952,6 +2952,24 @@
             ],
             "type": "string"
           },
+          "progressPercent": {
+            "description": "Manually recorded progress percentage; null clears it.",
+            "maximum": 100,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remainingEffortMinutes": {
+            "description": "Remaining effort in minutes; null clears it.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "schedule": {
             "$ref": "#/components/schemas/WorkItemSchedule"
           },
@@ -3257,11 +3275,23 @@
             ],
             "type": "string"
           },
+          "progressPercent": {
+            "description": "Manually recorded progress percentage. Teams choose whether progress uses it with their Work Item configuration progressMode.",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
           "relationIds": {
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "remainingEffortMinutes": {
+            "description": "Remaining effort in minutes recorded on the Work Item. The estimate itself is schedule.plannedEffortMinutes.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
           },
           "revision": {
             "minimum": 1,

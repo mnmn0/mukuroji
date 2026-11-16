@@ -5,6 +5,8 @@ import {
   WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
   WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEMA_VERSION,
+  isWorkItemEffortMinutes,
+  isWorkItemProgressPercent,
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
   type ConfirmWorkItemScheduleChangeResponse,
@@ -477,6 +479,8 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.assigneeUserId === 'string' &&
     (value.contributorAssignments === undefined || isContributorAssignmentList(value.contributorAssignments)) &&
     (value.acceptanceCriteria === undefined || isAcceptanceCriterionList(value.acceptanceCriteria)) &&
+    (value.remainingEffortMinutes === undefined || isWorkItemEffortMinutes(value.remainingEffortMinutes)) &&
+    (value.progressPercent === undefined || isWorkItemProgressPercent(value.progressPercent)) &&
     typeof value.creatorMemberKey === 'string' &&
     typeof value.workflowStatusId === 'string' &&
     isOptionalString(value.workItemTypeId) &&

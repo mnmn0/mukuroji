@@ -40,7 +40,9 @@ Canonical row は次の field を持つ。
 | `relationIds` | yes | Relation Graph から導出した `type:targetWorkItemId` の辞書順・重複なし配列。最大100件で、relation がなくても `[]` を保存する。 |
 | `priority` | yes | `low`、`medium`、`high`。 |
 | `priorityUpdatedAt` | no | `priority` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
-| `schedule` | yes | 日付の意味、予定工数、timezone、稼働曜日、祝日を固定する canonical schedule。 |
+| `schedule` | yes | 日付の意味、予定工数、timezone、稼働曜日、祝日を固定する canonical schedule。`schedule.plannedEffortMinutes` が見積の正本。 |
+| `remainingEffortMinutes` | no | 記録された残工数（分、0 以上の整数）。未記録なら属性を持たない。 |
+| `progressPercent` | no | 手入力の進捗率（0〜100 の整数）。未記録なら属性を持たない。 |
 | `dueDate` | yes | `schedule` から導出する projection。`unscheduled` では空文字、それ以外は `YYYY-MM-DD`。 |
 | `dueDateUpdatedAt` | no | 導出済み `dueDate` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
 | `sortOrder` | yes | Team/project list の安定表示順。 |
@@ -70,6 +72,29 @@ Interactive な schedule 操作は、保存前に server preview を取得する
 Work Item Relation Graph の `blocks` / `blockedBy` は意味上の blocker であり、単独では schedule を変更しない。自動 reschedule が必要な関係は PlanningTable の qualified Work Item schedule dependency として別に作成する。
 
 日付は `1000-01-01` から `9999-12-31` までの実在する `YYYY-MM-DD` に正規化する。`date-range.durationDays` は開始・終了を含む範囲で `calendarPolicy.workingWeekdays` に属し、`calendarPolicy.holidays` に含まれない日の数と完全に一致させる。`calendarPolicy.timeZone` は IANA timezone、稼働曜日は1件以上7件以下、祝日は重複のない local calendar date として最大512件まで保存する。通知と Web の due/overdue 判定は、現在時刻をこの time zone の local calendar date へ変換して同じ期限境界を使用する。`plannedEffortMinutes` は任意の非負の整数（分）であり、calendar duration とは別に扱う。
+
+### Estimate, remaining effort, and progress
+
+見積（工数）の正本は `schedule.plannedEffortMinutes` の1か所だけです。工数管理、キャパシティ、Analytics、Table / Gantt / 詳細、MCP、Public API はすべてこの値を読み書きします。以前の工数管理の `TimeEstimate`（`PUT/GET /api/teams/:teamId/work-items/:workItemId/time-estimate`）は廃止しました。
+
+| Field | 意味 | 書き込み |
+| --- | --- | --- |
+| `schedule.plannedEffortMinutes` | 見積（分）。 | schedule の置換。見積だけを変える置換は日付を動かさないため、dependency preview / confirm を必要としない。 |
+| `remainingEffortMinutes` | 記録された残工数（分）。 | Work Item update。`null` で消す。 |
+| `progressPercent` | 手入力の進捗率（0〜100）。 | Work Item update。`null` で消す。 |
+
+不正な値は `400 InvalidWorkItemEffort` / `400 InvalidWorkItemProgress`（Public API は `validation_failed`）で拒否し、どちらの変更も他の field と同じ revision 付き transaction と audit event に入ります（audit の field 名は `remainingEffortMinutes` / `progressPercent`）。
+
+導出規則は `@mukuroji/contracts` の `deriveWorkItemRemainingEffortMinutes` / `deriveWorkItemProgressPercent` で共通化しています。
+
+- 残工数: `completed` / `canceled` は 0。それ以外は記録された残工数、なければ見積。どちらもなければ不明。
+- 進捗率は Team の Work Item configuration の `progressMode` で選ぶ（省略時 `status-category`）。変更は configuration の保存として監査される。
+  - `status-category`: `backlog` / `unstarted` は 0%、`started` は 50%。
+  - `remaining-effort`: `(見積 - 残工数) / 見積`。見積が 0 以下、または残工数が未記録なら `status-category` に戻る。
+  - `manual`: 記録された `progressPercent`。未記録なら `status-category` に戻る。
+  - どのモードでも `completed` は 100%、`canceled` は対象外。
+
+**移行方針**: 本番データはまだないため、旧 `TimeEstimate` row は移行せずに破棄します（読み手がなくなるだけで、既存 row があっても無視される）。`remainingEffortMinutes` / `progressPercent` を持たない既存 Work Item row は「未記録」として読み、strict reader は fail-closed にしません。
 
 Relation の正本は `WorkItemConfigurationTable` の Relation Graph row であり、Work Item row の `relationIds` は検索と backfill のための派生 projection である。Relation の作成・削除 transaction は、graph metadata と reciprocal row に加えて source / target 両方の `relationIds` を同時に更新する。この projection 更新では Work Item の `revision` と `updatedAt` を進めない。
 

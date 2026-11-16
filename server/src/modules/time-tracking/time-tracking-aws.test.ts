@@ -226,12 +226,12 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(completed).toBe(0)
   })
 
-  test('writes estimate and budget audit events in their state transactions', async () => {
+  test('writes budget audit events in their state transaction', async () => {
     const commands: CommandWithInput[] = []
     const service = new TimeTrackingService(
       new DynamoDbTimeTrackingRepository(
         'analytics-table',
-        createDocumentClient([{}, {}, {}, {}], commands),
+        createDocumentClient([{}, {}], commands),
       ),
       {
         now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -246,15 +246,6 @@ describe('DynamoDbTimeTrackingRepository', () => {
       },
     )
 
-    await service.saveEstimate({
-      workspaceId: 'workspace-1',
-      teamId: 'team-1',
-      workItemId: 'work-item-1',
-      estimateMinutes: 120,
-      expectedRevision: 0,
-      updatedBy: 'manager-1',
-      idempotencyKey: 'estimate-1',
-    })
     await service.saveBudget({
       workspaceId: 'workspace-1',
       teamId: 'team-1',
@@ -267,15 +258,13 @@ describe('DynamoDbTimeTrackingRepository', () => {
       idempotencyKey: 'budget-1',
     })
 
-    expect(commands).toHaveLength(4)
-    expect(commands[1]?.input.TransactItems).toHaveLength(2)
-    expect(commands[2]?.input.Key).toEqual({
+    expect(commands).toHaveLength(2)
+    expect(commands[0]?.input.Key).toEqual({
       workspaceId: 'workspace-1',
       recordKey: 'TIME_BUDGET#team#team-1',
     })
-    expect(commands[3]?.input.TransactItems).toHaveLength(2)
+    expect(commands[1]?.input.TransactItems).toHaveLength(2)
     expect(JSON.stringify(commands[1]?.input.TransactItems)).toContain('audit-table')
-    expect(JSON.stringify(commands[3]?.input.TransactItems)).toContain('audit-table')
   })
 
   test('writes timer start and its audit event in one transaction', async () => {

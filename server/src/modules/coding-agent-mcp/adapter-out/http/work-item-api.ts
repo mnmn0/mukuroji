@@ -11,12 +11,34 @@ import { AgentTaskError } from '../../application/work-item-api'
 const identifier = z.string().min(1).max(256).refine((value) => value !== '.' && value !== '..')
 const category = z.enum(['backlog', 'unstarted', 'started', 'completed', 'canceled'])
 const customValue = z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()).max(100)])
+const effortMinutes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+const scheduleBase = {
+  calendarPolicy: z.object({
+    timeZone: z.string().min(1),
+    workingWeekdays: z.array(z.enum(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'])),
+    holidays: z.array(z.iso.date()),
+  }),
+  plannedEffortMinutes: effortMinutes.optional(),
+}
+const scheduleSchema = z.discriminatedUnion('mode', [
+  z.object({ ...scheduleBase, mode: z.literal('unscheduled') }),
+  z.object({ ...scheduleBase, mode: z.literal('due-date'), dueDate: z.iso.date() }),
+  z.object({
+    ...scheduleBase, mode: z.literal('date-range'), startDate: z.iso.date(), endDate: z.iso.date(),
+    durationDays: z.number().int().positive(),
+  }),
+  z.object({
+    ...scheduleBase, mode: z.literal('milestone'), startDate: z.iso.date(), endDate: z.iso.date(), durationDays: z.literal(0),
+  }),
+])
 const taskSchema: z.ZodType<AgentTask> = z.object({
   id: identifier, teamId: identifier, revision: z.number().int().positive(),
   title: z.string(), description: z.string().optional(), assigneeUserId: identifier,
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
   workItemTypeId: identifier.optional(), statusCategory: category,
   priority: z.enum(['high', 'medium', 'low']), dueDate: z.union([z.literal(''), z.iso.date()]),
+  schedule: scheduleSchema, remainingEffortMinutes: effortMinutes.optional(),
+  progressPercent: z.number().int().min(0).max(100).optional(),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),

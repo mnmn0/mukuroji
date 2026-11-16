@@ -297,6 +297,7 @@ import {
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
+import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
 
 /** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
 const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
@@ -4772,11 +4773,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
+      // An estimate-only change moves no date, so it needs no dependency confirmation.
       const changesSchedule =
         'schedule' in configuredBody &&
         configuredBody.schedule !== undefined &&
-        stableDigestStringify(configuredBody.schedule) !==
-          stableDigestStringify(detail.issue.schedule)
+        changesWorkItemSchedulePlacement(configuredBody.schedule, detail.issue.schedule)
       const changesAssignedProject =
         'assignedProjectId' in configuredBody &&
         readAssignedProjectId(configuredBody.assignedProjectId) !== detail.issue.assignedProjectId
@@ -4827,6 +4828,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         detail.issue.contributorAssignments ?? [],
       )
       const acceptanceCriteria = readAcceptanceCriteriaChange(configuredBody, detail.issue.acceptanceCriteria ?? [], false)
+      const effortChange = readWorkItemEffortChange(configuredBody)
 
       const response = await hydrateUpdateTeamIssueResponse(
         await workItemDependencies.teamIssues.updateTeamIssue(
@@ -4837,6 +4839,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
             ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+            ...effortChange,
             expectedRevision,
             ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
           },

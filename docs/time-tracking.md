@@ -4,7 +4,7 @@ Time tracking is scoped by Workspace and Team. A time entry references a canonic
 
 `draft → submitted → approved → locked`
 
-Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Estimate and budget changes also append a shared audit event in the same transaction. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
+Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Budget changes also append a shared audit event in the same transaction. Estimates are not stored here: the canonical estimate is the Work Item's `schedule.plannedEffortMinutes` (see [Work Items](work-items.md#estimate-remaining-effort-and-progress)), and summaries and timesheets read it from the Work Items. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
 
 ## HTTP surface
 
@@ -17,8 +17,6 @@ Rejected entries return to `rejected` and can be edited and submitted again. Eve
 - `GET /api/teams/:teamId/timesheet` returns daily and Monday-based weekly rows using the requested IANA timezone.
 - `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, or Work Item.
 - `GET /api/teams/:teamId/time-tracking/export` exports the same ACL-filtered summary as CSV.
-- `PUT /api/teams/:teamId/work-items/:workItemId/time-estimate` stores a Work Item estimate in minutes with an expected revision.
-- `GET /api/teams/:teamId/work-items/:workItemId/time-estimate` reads the estimate for an authorized Work Item.
 - `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets.
 
 All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`. Date-only ranges are interpreted as local dates and converted to UTC before querying. Intervals crossing midnight are split at timezone-aware local boundaries, including daylight-saving transitions.
@@ -33,7 +31,7 @@ Production time-entry persistence uses the existing analytics DynamoDB table wit
 
 ## Web screens
 
-- **Work Item detail → 工数 section** (`time` in a Work Item Type's `detailSections`, included in the default type): shows the estimate next to the Team's actual minutes for the last year (from the `work-item` summary), lets a member start / stop / discard their timer (restored from `GET /api/time-tracking/timers/active` after a reload or reconnect), set the estimate, and add, edit, and submit their own entries from the last 90 days. A timer older than the 7-day entry limit can only be discarded.
+- **Work Item detail → 工数 section** (`time` in a Work Item Type's `detailSections`, included in the default type): shows the Work Item's canonical estimate next to the Team's actual minutes for the last year (from the `work-item` summary) and the remaining effort (the recorded remaining effort, otherwise the estimate minus actual), lets a member start / stop / discard their timer (restored from `GET /api/time-tracking/timers/active` after a reload or reconnect), and add, edit, and submit their own entries from the last 90 days. A timer older than the 7-day entry limit can only be discarded. The estimate and remaining effort are edited in the Work Item's schedule section, not here.
 - **Team → 工数** (`/teams/:teamId/timesheet`): the member's Monday-based week as a Work Item × day table and per-day entries, with week-wide submit, rejection reasons from the entry history, and resubmission. `?week=YYYY-MM-DD` selects the week.
 - **Team → 工数 → 承認** (`?view=approvals`): Team managers see submitted entries grouped by member with approve / reject (reason required) and approved entries with lock, plus week-wide approve and lock that report `failedEntryIds` for a retry. Whether the viewer manages the Team is read from the Team timesheet's `costsRedacted` flag; other members see a permission notice. The screens never display confidential rates or costs.
 

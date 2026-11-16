@@ -110,26 +110,6 @@ export type TimeEntryHistory = {
   occurredAt: string
 }
 
-/** An estimate attached to a canonical Work Item. */
-export type TimeEstimate = {
-  /** Contract schema version. */
-  schemaVersion: typeof TIME_TRACKING_SCHEMA_VERSION
-  /** Owning Workspace identifier. */
-  workspaceId: string
-  /** Owning Team identifier. */
-  teamId: string
-  /** Canonical Work Item identifier. */
-  workItemId: string
-  /** Planned effort in minutes. */
-  estimateMinutes: number
-  /** Optimistic concurrency revision. */
-  revision: number
-  /** Member who last changed the estimate. */
-  updatedBy: string
-  /** Last update timestamp. */
-  updatedAt: string
-}
-
 /** A budget for a Team or Project and optional local-date period. */
 export type TimeBudget = {
   /** Contract schema version. */
@@ -166,7 +146,10 @@ export type TimeSummaryGroup = {
   billableMinutes: number
   /** Number of entries contributing to the group. */
   entryCount: number
-  /** Estimate in minutes when the group is a Work Item or Project report. */
+  /**
+   * Sum of the canonical estimates (`schedule.plannedEffortMinutes`) of the Work Items in the group;
+   * absent when none has one.
+   */
   estimateMinutes?: number
   /** Confidential actual cost in minor currency units. */
   actualCostMinor?: number

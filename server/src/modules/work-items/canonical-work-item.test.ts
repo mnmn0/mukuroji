@@ -92,6 +92,22 @@ describe('canonical Work Item validation', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ contributorAssignments: [] }))).toBe(false)
   })
 
+  test('accepts rows with or without remaining effort and manual progress and rejects malformed values', () => {
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem())).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ remainingEffortMinutes: 0, progressPercent: 0 }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ remainingEffortMinutes: 480, progressPercent: 100 }))).toBe(true)
+    for (const overrides of [
+      { remainingEffortMinutes: -1 },
+      { remainingEffortMinutes: 1.5 },
+      { remainingEffortMinutes: null },
+      { progressPercent: 101 },
+      { progressPercent: 12.5 },
+      { progressPercent: '50' },
+    ]) {
+      expect(isCanonicalWorkItemRecord(createCanonicalWorkItem(overrides))).toBe(false)
+    }
+  })
+
   test('accepts all four explicit schedule states with an exact due-date projection', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       dueDate: '',

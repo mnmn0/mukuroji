@@ -1510,6 +1510,10 @@ function configureFakeProjectClients(
       contributorAssignments?: unknown
       /** Acceptance criteria supplied to the adapter, when the update changes them. */
       acceptanceCriteria?: unknown
+      /** Remaining effort supplied to the adapter, when the update changes it. */
+      remainingEffortMinutes?: unknown
+      /** Manual progress percentage supplied to the adapter, when the update changes it. */
+      progressPercent?: unknown
       /** Caller authorization ConditionChecks supplied to the adapter. */
       authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
       /** Configuration guard ConditionChecks supplied to the adapter. */
@@ -2837,6 +2841,8 @@ function configureFakeProjectClients(
           issueId,
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
           ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
+          ...('remainingEffortMinutes' in input ? { remainingEffortMinutes: input.remainingEffortMinutes } : {}),
+          ...('progressPercent' in input ? { progressPercent: input.progressPercent } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
@@ -2884,6 +2890,8 @@ function configureFakeProjectClients(
               ? { contributorAssignments: input.contributorAssignments }
               : {}),
             ...(isStoredAcceptanceCriterionList(input.acceptanceCriteria) ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
+            ...(typeof input.remainingEffortMinutes === 'number' ? { remainingEffortMinutes: input.remainingEffortMinutes } : {}),
+            ...(typeof input.progressPercent === 'number' ? { progressPercent: input.progressPercent } : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId: typeof input.workflowStatusId === 'string'

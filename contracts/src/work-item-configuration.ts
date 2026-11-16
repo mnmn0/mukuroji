@@ -167,6 +167,8 @@ export type WorkItemConfiguration = {
   workItemTypes?: import('./work-item-types').WorkItemTypeDefinition[]
   /** Job roles contributors can be planned against; absent when the scope defines none. */
   jobRoles?: import('./work-item-contributors').WorkItemJobRoleDefinition[]
+  /** How Work Item progress percentages are derived; absent means `status-category`. */
+  progressMode?: import('./work-item-effort').WorkItemProgressMode
   /** 最終更新日時の ISO 8601 timestamp です。 */
   updatedAt?: string
 }

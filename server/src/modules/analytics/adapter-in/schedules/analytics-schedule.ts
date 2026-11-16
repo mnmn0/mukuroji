@@ -614,6 +614,7 @@ export function createAnalyticsScheduleRenderer(
       ...(report.forecastBaseline === undefined
         ? {}
         : { forecastBaseline: structuredClone(report.forecastBaseline) }),
+      ...(report.forecastWeighting === undefined ? {} : { forecastWeighting: report.forecastWeighting }),
     }
     const snapshot = createAnalyticsSnapshot({
       ...authorized,
@@ -1165,6 +1166,7 @@ function createAnalyticsDeliveryDefinitionHash(report: AnalyticsReport) {
       timeZone: report.timeZone,
       filter: report.filter,
       forecastBaseline: report.forecastBaseline,
+      forecastWeighting: report.forecastWeighting,
       widgets: report.widgets,
       schedule: schedule === undefined
         ? undefined

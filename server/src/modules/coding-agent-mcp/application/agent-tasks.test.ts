@@ -12,6 +12,7 @@ function task(id = 'one', patch: Partial<AgentTask> = {}): AgentTask {
     id, teamId: 'team', revision: 1, title: id, description: 'Original instructions',
     assigneeUserId: 'agent-member', workflowStatusId: 'todo', statusCategory: 'unstarted',
     priority: 'medium', dueDate: '', createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+    schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
     relationIds: [], customFieldValues: {}, ...patch,
   }
 }
@@ -651,6 +652,32 @@ describe('agent task lifecycle', () => {
     await expect(service.transition('one', 2, 'coding', 'start', 'future')).rejects.toMatchObject({ code: 'conflict' })
     await expect(service.update('one', { expectedRevision: 2, title: 'Overwrite' }, 'future')).rejects.toMatchObject({ code: 'conflict' })
     expect(writes).toBe(0)
+  })
+
+  test('writes the estimate into the read schedule and passes remaining effort and progress through', async () => {
+    const sent: unknown[] = []
+    const stored = task('one', {
+      schedule: {
+        mode: 'due-date', dueDate: '2026-09-10', plannedEffortMinutes: 120,
+        calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: [] },
+      },
+    })
+    const { service } = fixture([stored], {
+      async update(_id, input) { sent.push(input); return task('one', { revision: 2 }) },
+    })
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 }, 'effort')
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: null }, 'clear')
+    expect(sent).toEqual([
+      {
+        expectedRevision: 1, remainingEffortMinutes: 300, progressPercent: 40,
+        schedule: { ...stored.schedule, plannedEffortMinutes: 480 },
+      },
+      {
+        expectedRevision: 1,
+        schedule: { mode: 'due-date', dueDate: '2026-09-10', calendarPolicy: stored.schedule.calendarPolicy },
+      },
+    ])
+    await expect(service.update('one', { expectedRevision: 0, plannedEffortMinutes: 60 }, 'stale')).rejects.toMatchObject({ code: 'conflict' })
   })
 
   test('replays stale metadata updates and forwards comment scope to the canonical API', async () => {

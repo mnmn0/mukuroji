@@ -10,6 +10,7 @@ import {
   ANALYTICS_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_TYPE_ID,
   createSearchWorkItemTypeKey,
+  deriveWorkItemRemainingEffortMinutes,
   readSearchWorkItemTypeKey,
   type AnalyticsCustomFieldFilter,
   type AnalyticsDateRange,
@@ -30,6 +31,7 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsSnapshotRecord,
   type AnalyticsTableRow,
+  type AnalyticsWeighting,
   type AnalyticsWidget,
   type AnalyticsWidgetResult,
   type CanonicalWorkItem,
@@ -121,6 +123,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       count: 'items',
       hours: 'hours',
       'items-per-week': 'items/week',
+      'hours-per-week': 'hours/week',
       percent: '%',
     }),
     riskLabels: Object.freeze({
@@ -173,6 +176,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       count: '件',
       hours: '時間',
       'items-per-week': '件/週',
+      'hours-per-week': '時間/週',
       percent: '%',
     }),
     riskLabels: Object.freeze({
@@ -486,6 +490,10 @@ type AnalyticsWorkItemState = {
   customFieldValues: Record<string, string | number | boolean | string[]>
   /** Date-only due date です。 */
   dueDate: string
+  /** Canonical estimate (`schedule.plannedEffortMinutes`) です。 */
+  plannedEffortMinutes?: number
+  /** Recorded remaining effort, otherwise the estimate, and 0 once terminal です。 */
+  remainingEffortMinutes?: number
   /** Work Item creation instant です。 */
   createdAt: string
   /** Work Item update instant です。 */
@@ -802,6 +810,7 @@ export function normalizeAnalyticsEvidenceInput(
   const slaTargetHours = evidence.slaTargetHours === undefined
     ? undefined
     : readPositiveNumber(evidence.slaTargetHours, 'Analytics SLA target hours')
+  const weighting = readWidgetWeighting(evidence.weighting, metric)
   const normalizedQuery = normalizeAnalyticsQueryInput({
     filter: evidence.filter,
     widgets: [{
@@ -810,6 +819,7 @@ export function normalizeAnalyticsEvidenceInput(
       type: 'table',
       metric,
       ...(slaTargetHours === undefined ? {} : { slaTargetHours }),
+      ...(weighting === undefined ? {} : { weighting }),
     }],
     asOf: evidence.asOf,
     timeZone: evidence.timeZone,
@@ -830,6 +840,7 @@ export function normalizeAnalyticsEvidenceInput(
     asOf: normalizedQuery.asOf,
     timeZone: normalizedQuery.timeZone,
     ...(slaTargetHours === undefined ? {} : { slaTargetHours }),
+    ...(weighting === undefined ? {} : { weighting }),
     limit,
     ...(cursor === undefined ? {} : { cursor }),
   }
@@ -875,6 +886,7 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
         normalized.periodTo,
         normalized.asOf,
         widget.slaTargetHours,
+        widget.weighting,
       ).evidence
     ),
   ).length
@@ -921,6 +933,7 @@ export function queryAnalyticsEvidence(
       ...(evidence.slaTargetHours === undefined
         ? {}
         : { slaTargetHours: evidence.slaTargetHours }),
+      ...(evidence.weighting === undefined ? {} : { weighting: evidence.weighting }),
     }],
     asOf: evidence.asOf,
     timeZone: evidence.timeZone,
@@ -942,6 +955,7 @@ export function queryAnalyticsEvidence(
     normalized.periodTo,
     normalized.asOf,
     evidence.slaTargetHours,
+    evidence.weighting,
   )
   const items = dedupeEvidence(computation.evidence)
     .sort(compareEvidence)
@@ -951,6 +965,7 @@ export function queryAnalyticsEvidence(
     asOf: normalized.query.asOf,
     timeZone: normalized.query.timeZone,
     slaTargetHours: evidence.slaTargetHours,
+    weighting: evidence.weighting,
     permissionScopeHash: createAnalyticsPermissionScopeHash(
       input.workItems,
       normalized.asOf,
@@ -1201,6 +1216,7 @@ function normalizeAnalyticsQuery(query: unknown): NormalizedAnalyticsQuery {
   const forecastBaseline = query.forecastBaseline === undefined
     ? undefined
     : normalizeDateRange(query.forecastBaseline, 'Analytics forecast baseline')
+  const forecastWeighting = readForecastWeighting(query.forecastWeighting)
   const normalized: NormalizedAnalyticsQuery = {
     query: {
       filter,
@@ -1208,6 +1224,7 @@ function normalizeAnalyticsQuery(query: unknown): NormalizedAnalyticsQuery {
       asOf,
       timeZone,
       ...(forecastBaseline === undefined ? {} : { forecastBaseline }),
+      ...(forecastWeighting === undefined ? {} : { forecastWeighting }),
     },
     periodFrom,
     periodTo,
@@ -1430,6 +1447,7 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
     const slaTargetHours = candidate.slaTargetHours === undefined
       ? undefined
       : readPositiveNumber(candidate.slaTargetHours, 'Analytics SLA target hours')
+    const weighting = readWidgetWeighting(candidate.weighting, metric)
     return {
       id,
       type,
@@ -1439,6 +1457,7 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
       ...(size === undefined ? {} : { size }),
       ...(groupBy === undefined ? {} : { groupBy }),
       ...(slaTargetHours === undefined ? {} : { slaTargetHours }),
+      ...(weighting === undefined ? {} : { weighting }),
     }
   })
 }
@@ -1639,10 +1658,24 @@ function createCurrentAnalyticsState(item: CanonicalWorkItem): AnalyticsWorkItem
     statusCategory: item.statusCategory,
     customFieldValues: structuredClone(item.customFieldValues),
     dueDate: item.dueDate,
+    ...(item.schedule.plannedEffortMinutes === undefined
+      ? {}
+      : { plannedEffortMinutes: item.schedule.plannedEffortMinutes }),
+    ...withRemainingEffort(deriveWorkItemRemainingEffortMinutes(item)),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     ...(item.archivedAt === undefined ? {} : { archivedAt: item.archivedAt }),
   }
+}
+
+/**
+ * Builds the optional remaining effort field of an analytics state.
+ *
+ * @param remainingEffortMinutes - Derived remaining minutes, when known.
+ * @returns The field, or an empty object.
+ */
+function withRemainingEffort(remainingEffortMinutes: number | undefined) {
+  return remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes }
 }
 
 function rewindStateChanges(
@@ -1855,6 +1888,7 @@ function createWidgetResult(
     normalized.periodTo,
     normalized.asOf,
     widget.slaTargetHours,
+    widget.weighting,
   )
   const calendarGroup = widget.groupBy === undefined ||
     widget.groupBy.dimension === 'day' ||
@@ -1896,7 +1930,7 @@ function createWidgetResult(
   return {
     widgetId: widget.id,
     metric: widget.metric,
-    definition: ANALYTICS_METRIC_DEFINITIONS[widget.metric],
+    definition: resolveAnalyticsMetricDefinition(widget.metric, widget.weighting),
     value: total.value,
     sampleSize: total.sampleSize,
     series,
@@ -1955,6 +1989,7 @@ function createMetricSeries(
       bucket.to,
       evaluationAt,
       widget.slaTargetHours,
+      widget.weighting,
     )
     return {
       from: new Date(bucket.from).toISOString(),
@@ -2011,6 +2046,7 @@ function createMetricGroups(
         bucket.to,
         evaluationAt,
         widget.slaTargetHours,
+        widget.weighting,
       )
       const label = localDateAt(bucket.from, normalized.query.timeZone)
       return {
@@ -2042,6 +2078,7 @@ function createMetricGroups(
         normalized.periodTo,
         normalized.asOf,
         widget.slaTargetHours,
+        widget.weighting,
       )
       return {
         key,
@@ -2090,6 +2127,90 @@ function analyticsGroupIdentity(state: AnalyticsWorkItemState, groupBy: Analytic
   return { key: '', label: 'Unassigned' }
 }
 
+/**
+ * Converts optional effort minutes into hours, counting a missing estimate as zero.
+ *
+ * @param minutes - Effort minutes, when known.
+ * @returns Hours.
+ */
+function effortHours(minutes: number | undefined): number {
+  return (minutes ?? 0) / 60
+}
+
+/**
+ * Returns the metric definition for a weighting; effort-weighted throughput and velocity count hours.
+ *
+ * @param metric - Metric key.
+ * @param weighting - Widget weighting; `count` when omitted.
+ * @returns The versioned definition reported with the widget result.
+ */
+export function resolveAnalyticsMetricDefinition(
+  metric: AnalyticsMetricKey,
+  weighting: AnalyticsWeighting | undefined,
+): AnalyticsMetricDefinition {
+  const definition = ANALYTICS_METRIC_DEFINITIONS[metric]
+  if (weighting !== 'effort') return definition
+  if (metric === 'throughput') {
+    return {
+      ...definition,
+      label: 'Throughput (effort)',
+      unit: 'hours',
+      description: 'Sums the estimates, in hours, of Work Items whose effective completion occurred in the period. Work Items without an estimate count as zero.',
+    }
+  }
+  if (metric === 'velocity') {
+    return {
+      ...definition,
+      label: 'Velocity (effort)',
+      unit: 'hours-per-week',
+      description: 'Normalizes the estimates, in hours, of effective completions in the period to a seven-calendar-day rate.',
+    }
+  }
+  return definition
+}
+
+/**
+ * Reads an optional widget weighting, which only throughput and velocity accept.
+ *
+ * @param value - Untrusted weighting.
+ * @param metric - Widget metric.
+ * @returns The weighting, or `undefined` when omitted.
+ */
+function readWidgetWeighting(value: unknown, metric: AnalyticsMetricKey): AnalyticsWeighting | undefined {
+  if (value === undefined) return undefined
+  if (value !== 'count' && value !== 'effort') {
+    throw invalid('AnalyticsWidgetInvalid', 'Analytics widget weighting must be count or effort.')
+  }
+  if (value === 'effort' && metric !== 'throughput' && metric !== 'velocity') {
+    throw invalid('AnalyticsWidgetInvalid', 'Only throughput and velocity widgets can be weighted by effort.')
+  }
+  return value
+}
+
+/**
+ * Reads an optional forecast weighting.
+ *
+ * @param value - Untrusted weighting.
+ * @returns The weighting, or `undefined` when omitted.
+ */
+function readForecastWeighting(value: unknown): AnalyticsWeighting | undefined {
+  if (value === undefined) return undefined
+  if (value !== 'count' && value !== 'effort') {
+    throw invalid('AnalyticsQueryInvalid', 'Analytics forecast weighting must be count or effort.')
+  }
+  return value
+}
+
+/**
+ * Builds the optional forecast weighting field of a report.
+ *
+ * @param forecastWeighting - Weighting, when set.
+ * @returns The field, or an empty object.
+ */
+function withForecastWeighting(forecastWeighting: AnalyticsWeighting | undefined) {
+  return forecastWeighting === undefined ? {} : { forecastWeighting }
+}
+
 function calculateMetric(
   metric: AnalyticsMetricKey,
   facts: readonly AnalyticsWorkItemFact[],
@@ -2098,6 +2219,7 @@ function calculateMetric(
   to: number,
   evaluationAt: number,
   slaTargetHours = DEFAULT_SLA_TARGET_HOURS,
+  weighting: AnalyticsWeighting = 'count',
 ): MetricComputation {
   if (metric === 'throughput' || metric === 'velocity') {
     const completed = facts.filter((fact) =>
@@ -2106,10 +2228,13 @@ function calculateMetric(
       fact.completionAt <= to
     )
     const count = completed.length
+    const total = weighting === 'effort'
+      ? completed.reduce((sum, fact) => sum + effortHours(fact.state.plannedEffortMinutes), 0)
+      : count
     const value = metric === 'throughput'
-      ? count
+      ? roundMetric(total)
       : roundMetric(
-          count * 7 /
+          total * 7 /
           Math.max(1, createCalendarBuckets(
             from,
             to,
@@ -2117,13 +2242,28 @@ function calculateMetric(
             'day',
           ).length),
         )
+    const unestimated = weighting === 'effort'
+      ? completed.filter((fact) => fact.state.plannedEffortMinutes === undefined).length
+      : 0
     return {
       value,
       sampleSize: count,
       evidence: completed.map((fact) =>
-        createFactEvidence(fact, metric, fact.completionAt!, metric === 'velocity' ? 1 : undefined)
+        createFactEvidence(
+          fact,
+          metric,
+          fact.completionAt!,
+          weighting === 'effort'
+            ? effortHours(fact.state.plannedEffortMinutes)
+            : metric === 'velocity' ? 1 : undefined,
+        )
       ),
-      warnings: count === 0 ? ['No effective completions were recorded in this period.'] : [],
+      warnings: [
+        ...(count === 0 ? ['No effective completions were recorded in this period.'] : []),
+        ...(unestimated === 0
+          ? []
+          : [`${unestimated} completed Work Item(s) had no estimate and counted as zero effort.`]),
+      ],
     }
   }
   if (metric === 'cycle-time' || metric === 'lead-time') {
@@ -2267,9 +2407,24 @@ function createForecast(
       ? [fact.completionAt]
       : []
   )
-  const remainingWorkItems = facts.filter((fact) =>
+  const effortWeighted = normalized.query.forecastWeighting === 'effort'
+  const completionWeights = effortWeighted
+    ? facts.flatMap((fact) =>
+        fact.completionAt !== undefined &&
+        fact.completionAt >= normalized.periodFrom &&
+        fact.completionAt <= normalized.periodTo
+          ? [{ at: fact.completionAt, weight: effortHours(fact.state.plannedEffortMinutes) }]
+          : []
+      )
+    : completionTimes.map((at) => ({ at, weight: 1 }))
+  const openFacts = facts.filter((fact) =>
     fact.state.statusCategory !== 'completed' && fact.state.statusCategory !== 'canceled'
-  ).length
+  )
+  const remainingWorkItems = openFacts.length
+  const remainingEffortHours = roundMetric(
+    openFacts.reduce((sum, fact) => sum + effortHours(fact.state.remainingEffortMinutes), 0),
+  )
+  const remainingAmount = effortWeighted ? remainingEffortHours : remainingWorkItems
   const dailyBuckets = createCalendarBuckets(
     normalized.periodFrom,
     normalized.periodTo,
@@ -2277,15 +2432,16 @@ function createForecast(
     'day',
   )
   const dailyCompletionCounts = dailyBuckets.map((bucket) =>
-    completionTimes.filter((completionAt) =>
-      completionAt >= bucket.from && completionAt <= bucket.to
-    ).length
+    completionWeights
+      .filter((completion) => completion.at >= bucket.from && completion.at <= bucket.to)
+      .reduce((sum, completion) => sum + completion.weight, 0)
   )
-  const rawDailyThroughput = completionTimes.length / Math.max(1, dailyBuckets.length)
+  const completedAmount = completionWeights.reduce((sum, completion) => sum + completion.weight, 0)
+  const rawDailyThroughput = completedAmount / Math.max(1, dailyBuckets.length)
   const dailyThroughput = roundMetric(rawDailyThroughput)
   const confidence = roundMetric(Math.min(1, completionTimes.length / 20))
   const completionDayScenarios = completionTimes.length >= 2 && rawDailyThroughput > 0
-    ? createEmpiricalCompletionDayScenarios(dailyCompletionCounts, remainingWorkItems)
+    ? createEmpiricalCompletionDayScenarios(dailyCompletionCounts, remainingAmount)
     : []
   const completionDate = (quantile: number) => {
     const days = empiricalQuantile(completionDayScenarios, quantile)
@@ -2307,6 +2463,7 @@ function createForecast(
     risk = drift <= 0 ? 'low' : drift <= 7 * MILLISECONDS_PER_DAY ? 'medium' : 'high'
   }
   return {
+    ...(effortWeighted ? { weighting: 'effort' as const, remainingEffortHours } : {}),
     remainingWorkItems,
     sampleSize: completionTimes.length,
     dailyThroughput,
@@ -2327,10 +2484,11 @@ function createEmpiricalCompletionDayScenarios(
 ) {
   const cycleThroughput = dailyCompletionCounts.reduce((sum, count) => sum + count, 0)
   if (dailyCompletionCounts.length === 0 || cycleThroughput <= 0) return []
-  if (remainingWorkItems === 0) return dailyCompletionCounts.map(() => 0)
+  if (remainingWorkItems <= 0) return dailyCompletionCounts.map(() => 0)
 
   return dailyCompletionCounts.map((_, startIndex) => {
-    const completeCycles = Math.floor((remainingWorkItems - 1) / cycleThroughput)
+    // The cycles that end strictly before the remaining work runs out; this also holds for fractional hours.
+    const completeCycles = Math.ceil(remainingWorkItems / cycleThroughput) - 1
     let outstanding = remainingWorkItems - completeCycles * cycleThroughput
     let elapsedDays = completeCycles * dailyCompletionCounts.length
     for (let offset = 0; offset < dailyCompletionCounts.length; offset += 1) {
@@ -3520,6 +3678,7 @@ function createReportDefinition(
             'Analytics forecast baseline',
           ),
         }),
+    ...withForecastWeighting(readForecastWeighting(input.forecastWeighting)),
     widgets: normalizeWidgets(input.widgets),
     ...(input.schedule === undefined ? {} : { schedule: normalizeSchedule(input.schedule, now) }),
     createdAt: timestamp,
@@ -3560,6 +3719,11 @@ function updateReportDefinition(
     : input.forecastBaseline === null
       ? undefined
       : normalizeDateRange(input.forecastBaseline, 'Analytics forecast baseline')
+  const forecastWeighting = input.forecastWeighting === undefined
+    ? current.forecastWeighting
+    : input.forecastWeighting === null
+      ? undefined
+      : readForecastWeighting(input.forecastWeighting)
   return {
     ...structuredClone(current),
     name: input.name === undefined
@@ -3576,6 +3740,7 @@ function updateReportDefinition(
     ...(forecastBaseline === undefined
       ? { forecastBaseline: undefined }
       : { forecastBaseline }),
+    ...(forecastWeighting === undefined ? { forecastWeighting: undefined } : { forecastWeighting }),
     widgets: input.widgets === undefined
       ? structuredClone(current.widgets)
       : normalizeWidgets(input.widgets),
@@ -3618,6 +3783,7 @@ function normalizeStoredReport(value: unknown): AnalyticsReport {
     revision: readPositiveInteger(value.revision, 'Stored Analytics report revision'),
     filter: normalizeFilter(value.filter as AnalyticsFilter),
     ...(forecastBaseline === undefined ? {} : { forecastBaseline }),
+    ...withForecastWeighting(readForecastWeighting(value.forecastWeighting)),
     widgets: normalizeWidgets(value.widgets),
     ...(schedule === undefined ? {} : { schedule }),
     createdAt: normalizeIsoTimestamp(value.createdAt, 'Stored Analytics report creation time'),
@@ -3790,7 +3956,7 @@ function validateSnapshotQueryAlignment(
       result.metric !== widget.metric ||
       !isRecord(result.definition) ||
       canonicalJson(result.definition) !==
-        canonicalJson(ANALYTICS_METRIC_DEFINITIONS[widget.metric]) ||
+        canonicalJson(resolveAnalyticsMetricDefinition(widget.metric, widget.weighting)) ||
       !Array.isArray(result.series) ||
       !Array.isArray(result.groups) ||
       !Array.isArray(result.rows) ||

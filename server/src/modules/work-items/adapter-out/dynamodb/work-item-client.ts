@@ -67,6 +67,8 @@ import type {
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  isWorkItemEffortMinutes,
+  isWorkItemProgressPercent,
   readSearchWorkItemTypeKey,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -521,6 +523,10 @@ type TeamIssueItem = {
   contributorAssignments?: WorkItemContributorAssignment[]
   /** Acceptance criteria; absent when none. */
   acceptanceCriteria?: WorkItemAcceptanceCriterion[]
+  /** Recorded remaining effort in minutes; absent until recorded. */
+  remainingEffortMinutes?: number
+  /** Manually recorded progress percentage; absent until recorded. */
+  progressPercent?: number
   /**
    * Issue 作成者の Workspace member key です。
    */
@@ -1029,6 +1035,10 @@ export type PublicUpdateTeamIssueRequestBody = {
   acceptanceCriteria?: unknown
   /** Complete replacement schedule shared by every task view. */
   schedule?: unknown
+  /** Recorded remaining effort in minutes; null clears it. */
+  remainingEffortMinutes?: unknown
+  /** Manually recorded progress percentage; null clears it. */
+  progressPercent?: unknown
   /**
    * 優先度です。
    */
@@ -2720,6 +2730,28 @@ export class DynamoDbTeamIssuesClient {
       }
     }
 
+    if ('remainingEffortMinutes' in input) {
+      const remainingEffortMinutes = readOptionalEffortMinutes(input.remainingEffortMinutes)
+      expressionAttributeNames['#remainingEffortMinutes'] = 'remainingEffortMinutes'
+      if (remainingEffortMinutes === undefined) {
+        removeExpressions.push('#remainingEffortMinutes')
+      } else {
+        expressionAttributeValues[':remainingEffortMinutes'] = remainingEffortMinutes
+        setExpressions.push('#remainingEffortMinutes = :remainingEffortMinutes')
+      }
+    }
+
+    if ('progressPercent' in input) {
+      const progressPercent = readOptionalProgressPercent(input.progressPercent)
+      expressionAttributeNames['#progressPercent'] = 'progressPercent'
+      if (progressPercent === undefined) {
+        removeExpressions.push('#progressPercent')
+      } else {
+        expressionAttributeValues[':progressPercent'] = progressPercent
+        setExpressions.push('#progressPercent = :progressPercent')
+      }
+    }
+
     if ('workflowStatusId' in input) {
       expressionAttributeNames['#workflowStatusId'] = 'workflowStatusId'
       expressionAttributeValues[':workflowStatusId'] = readWorkflowStatusId(input.workflowStatusId)
@@ -2911,6 +2943,8 @@ export class DynamoDbTeamIssuesClient {
           'customFieldValues',
           'dueDate',
           'schedule',
+          'remainingEffortMinutes',
+          'progressPercent',
           'priority',
           'archivedAt',
           'archivedBy',
@@ -4059,6 +4093,14 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.acceptanceCriteria = item.acceptanceCriteria
   }
 
+  if (item.remainingEffortMinutes !== undefined) {
+    issue.remainingEffortMinutes = item.remainingEffortMinutes
+  }
+
+  if (item.progressPercent !== undefined) {
+    issue.progressPercent = item.progressPercent
+  }
+
   if (item.archivedAt) {
     issue.archivedAt = item.archivedAt
     issue.archivedBy = item.archivedBy
@@ -4740,6 +4782,34 @@ export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | 
 function readNormalizedContributorAssignments(value: unknown): WorkItemContributorAssignment[] {
   if (!isStoredContributorAssignmentList(value)) {
     throw new ProjectDataError(400, 'InvalidContributorAssignments', 'Contributor assignments are invalid.')
+  }
+  return value
+}
+
+/**
+ * Reads an optional effort amount for a Work Item update.
+ *
+ * @param value - Candidate minutes, or null to clear the stored value.
+ * @returns The minutes, or `undefined` when the value is cleared.
+ */
+function readOptionalEffortMinutes(value: unknown): number | undefined {
+  if (value === null) return undefined
+  if (!isWorkItemEffortMinutes(value)) {
+    throw new ProjectDataError(400, 'InvalidWorkItemEffort', 'Remaining effort minutes must be a nonnegative integer.')
+  }
+  return value
+}
+
+/**
+ * Reads an optional manually recorded progress percentage for a Work Item update.
+ *
+ * @param value - Candidate percentage, or null to clear the stored value.
+ * @returns The percentage, or `undefined` when the value is cleared.
+ */
+function readOptionalProgressPercent(value: unknown): number | undefined {
+  if (value === null) return undefined
+  if (!isWorkItemProgressPercent(value)) {
+    throw new ProjectDataError(400, 'InvalidWorkItemProgress', 'Progress percent must be an integer from 0 to 100.')
   }
   return value
 }

@@ -933,6 +933,44 @@ describe('public API router', () => {
     expect(receivedDueDates).toEqual(['1000-01-01', '2024-02-29', '2026-04-30'])
   })
 
+  test('passes remaining effort and manual progress updates, including clears, and rejects invalid amounts', async () => {
+    const inputs: unknown[] = []
+    const workItems = createDefaultWorkItemService({
+      async update(_credential, _teamId, _workItemId, input) {
+        inputs.push(input)
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const request = (key: string, body: Record<string, unknown>) => router.request('http://localhost/v1/work-items/work-item-1?teamId=team-1', {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({ expectedRevision: 1, ...body }),
+    })
+
+    expect((await request('effort-set', { remainingEffortMinutes: 90, progressPercent: 40 })).status).toBe(200)
+    expect((await request('effort-clear', { remainingEffortMinutes: null, progressPercent: null })).status).toBe(200)
+    for (const [key, body] of [
+      ['effort-negative', { remainingEffortMinutes: -1 }],
+      ['effort-fraction', { remainingEffortMinutes: 1.5 }],
+      ['progress-over', { progressPercent: 101 }],
+      ['progress-text', { progressPercent: '50' }],
+    ] as const) {
+      const response = await request(key, body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'validation_failed' })
+    }
+    expect(inputs).toEqual([
+      { expectedRevision: 1, remainingEffortMinutes: 90, progressPercent: 40 },
+      { expectedRevision: 1, remainingEffortMinutes: null, progressPercent: null },
+    ])
+  })
+
   test('rejects oversized calendar collections before invoking the Work Item service', async () => {
     let createCalls = 0
     const workItems = createDefaultWorkItemService({

@@ -1,4 +1,6 @@
 import {
+  isWorkItemEffortMinutes,
+  isWorkItemProgressPercent,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type CustomFieldValue,
@@ -53,6 +55,10 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   contributorAssignments?: WorkItemContributorAssignment[]
   /** Acceptance criteria; absent when none. */
   acceptanceCriteria?: WorkItemAcceptanceCriterion[]
+  /** Recorded remaining effort in minutes; absent until recorded. */
+  remainingEffortMinutes?: number
+  /** Manually recorded progress percentage; absent until recorded. */
+  progressPercent?: number
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
@@ -139,6 +145,9 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
         isStoredContributorAssignmentList(value.contributorAssignments))) &&
     // Rows saved before acceptance criteria existed lack the attribute; an empty list is also stored absent.
     (value.acceptanceCriteria === undefined || isStoredAcceptanceCriterionList(value.acceptanceCriteria)) &&
+    // Rows saved before remaining effort and progress existed lack both attributes.
+    (value.remainingEffortMinutes === undefined || isWorkItemEffortMinutes(value.remainingEffortMinutes)) &&
+    (value.progressPercent === undefined || isWorkItemProgressPercent(value.progressPercent)) &&
     isNonEmptyString(value.creatorMemberKey) &&
     (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
     (value.sourceTriageEntryId === undefined ||

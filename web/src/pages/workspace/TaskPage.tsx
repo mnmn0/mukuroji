@@ -134,6 +134,7 @@ import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workI
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { taskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui'
+import { isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -627,6 +628,9 @@ export function TaskPage() {
       { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
       { id: 'team', label: t('workspace.column.team') },
+      { id: 'estimate', label: t('tasks.column.estimate') },
+      { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
+      { id: 'progress', label: t('tasks.column.progress') },
       ...(taskViewCustomFields.length > 0
         ? [{ id: 'customFields', label: t('workItems.fields.title') }]
         : []),
@@ -638,7 +642,7 @@ export function TaskPage() {
     [t, taskViewCustomFields],
   )
   const taskViewGroupOptions = useMemo(
-    () => taskViewFieldOptions.filter((option) => option.id !== 'customFields'),
+    () => taskViewFieldOptions.filter((option) => option.id !== 'customFields' && !isWorkItemEffortColumnField(option.id)),
     [taskViewFieldOptions],
   )
   const taskViewTeams = useMemo(

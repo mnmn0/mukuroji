@@ -197,6 +197,25 @@ describe('capacity planning calculations', () => {
     expect(snapshot.members.map((member) => member.remainingEffortMinutes)).toEqual([240, 240])
   })
 
+  test('takes remaining effort from the canonical estimate only, never adding assignment planned effort', () => {
+    const secondMember = createProfile('member-2', 'UTC')
+    const assignments = [
+      { ...createAssignment('assignment-a', false), workItemId: 'work-item-1', plannedEffortMinutes: 600 },
+      { ...createAssignment('assignment-b', false), memberId: 'member-2', workItemId: 'work-item-1', plannedEffortMinutes: 600 },
+    ]
+    const state = createState([profile, secondMember], assignments)
+    const estimated = buildWorkloadSnapshot(state, [], [{ workItemId: 'work-item-1', estimateMinutes: 480 }], createInput())
+    expect(estimated.members.map((member) => member.remainingEffortMinutes)).toEqual([240, 240])
+
+    const recorded = buildWorkloadSnapshot(
+      state, [], [{ workItemId: 'work-item-1', estimateMinutes: 480, remainingEffortMinutes: 100 }], createInput(),
+    )
+    expect(recorded.members.map((member) => member.remainingEffortMinutes)).toEqual([50, 50])
+
+    const unestimated = buildWorkloadSnapshot(state, [], [], createInput())
+    expect(unestimated.members.map((member) => member.remainingEffortMinutes)).toEqual([600, 600])
+  })
+
   test('bounds the snapshot time-entry query by the visible assignment horizon', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     await repository.saveState(

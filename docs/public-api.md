@@ -94,6 +94,10 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   一覧が変わっていても replay になります。`acceptanceCriteria` と同時には送れません。
   Agent context の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
   custom field の値）がない Work Item の Run start は `not_ready` です。
+- `WorkItem` は見積の正本 `schedule.plannedEffortMinutes` と、記録されていれば `remainingEffortMinutes`（分）と
+  `progressPercent`（0〜100）を返します。PATCH は `remainingEffortMinutes` / `progressPercent` を受け付け、`null` で
+  消します。見積は `schedule` の置換で変え、見積だけの変更は dependency の確認を必要としません。不正な値は
+  `400 validation_failed` です。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress) を参照してください。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。

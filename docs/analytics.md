@@ -102,8 +102,15 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | Velocity | 期間の週数で正規化した completed Work Item 数。 |
 | SLA | Widget の `slaTargetHours` 以下で完了した eligible Work Item の割合。 |
 
-Work Item の重みを表す共通 estimate/point field はまだありません。そのため velocity は item count
-を単位とし、任意の数値 custom field を暗黙に story point として扱いません。
+既定では throughput と velocity は item count を単位とし、任意の数値 custom field を暗黙に story point として扱いません。
+Throughput / velocity widget は `weighting: "effort"` を指定すると、完了した Work Item の正本見積
+（`schedule.plannedEffortMinutes`）の合計を時間（`hours` / `hours-per-week`）で返します。見積のない完了 item は
+0 として数え、その件数を warning で返します。他の metric に `weighting` を指定すると `400` で拒否します。
+
+Forecast は query / report の `forecastWeighting: "effort"` で、完了した見積工数の日次分布と、未完了 Work Item の
+残工数（記録された残工数、なければ見積）の合計 `remainingEffortHours` から完了日を予測します。この場合の
+`dailyThroughput` は 1 日あたりの見積時間です。`weighting` と `forecastWeighting` は query hash、snapshot、
+evidence、定期配信の hash に含まれます。
 
 ## Timezone and date boundaries
 

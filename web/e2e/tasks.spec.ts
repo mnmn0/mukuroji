@@ -2186,14 +2186,13 @@ async function mockAuthenticatedTaskPage(
 
   // Time tracking reads from the Work Item "time" section start empty; tests that need state override them.
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
-  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|timesheet|time-tracking\/summary|work-items\/[^/]+\/time-estimate)$/u.test(url.pathname), async (route) => {
+  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|timesheet|time-tracking\/summary)$/u.test(url.pathname), async (route) => {
     if (route.request().method() !== 'GET') {
       await route.fallback()
       return
     }
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/time-entries')) await route.fulfill({ json: { entries: [] } })
-    else if (path.endsWith('/time-estimate')) await route.fulfill({ json: { estimate: null } })
     else if (path.endsWith('/timesheet')) await route.fulfill({ json: { from: '2026-11-10', to: '2026-11-10', timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: true } })
     else await route.fulfill({ json: { totalMinutes: 0, groups: [] } })
   })
@@ -5498,7 +5497,7 @@ test.describe('authenticated task page', () => {
       entries.push(entry)
       return route.fulfill({ json: { entry } })
     })
-    await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') || url.pathname.includes('/time-estimate') || url.pathname === '/api/teams/core-team/timers', async (route) => {
+    await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') || url.pathname === '/api/teams/core-team/timers', async (route) => {
       const request = route.request()
       const path = new URL(request.url()).pathname
       const key = request.headers()['idempotency-key']
@@ -5508,7 +5507,6 @@ test.describe('authenticated task page', () => {
         timer = { schemaVersion: 1, id: 'timer-1', workspaceId: 'workspace-demo', teamId: 'core-team', projectId: 'refero', workItemId: input.workItemId, userId: 'demo@example.com', startedAt: new Date(Date.now() - 60_000).toISOString(), billable: input.billable, revision: 1, updatedAt: new Date().toISOString() }
         return route.fulfill({ status: 201, json: { timer } })
       }
-      if (path.endsWith('/time-estimate')) return route.fulfill({ json: { estimate: null } })
       if (path.endsWith('/time-tracking/summary')) {
         return route.fulfill({ json: { totalMinutes: 25 * entries.length, groups: entries.length ? [{ key: 'wireframe', label: 'wireframe', minutes: 25, billableMinutes: 0, entryCount: 1 }] : [] } })
       }

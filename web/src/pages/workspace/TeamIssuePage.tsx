@@ -95,6 +95,7 @@ import {
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
 import { emptyWorkspaceMembers } from '../../issues/ui/teamIssueScreenShared'
+import { isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 
@@ -716,6 +717,9 @@ export function TeamIssuePage() {
     { id: 'priority', label: t('tasks.column.priority') },
     { id: 'workItemType', label: t('tasks.column.workItemType') },
     { id: 'project', label: t('issues.column.project') },
+    { id: 'estimate', label: t('tasks.column.estimate') },
+    { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
+    { id: 'progress', label: t('tasks.column.progress') },
     ...(taskViewCustomFields.length > 0
       ? [{ id: 'customFields', label: t('workItems.fields.title') }]
       : []),
@@ -725,7 +729,7 @@ export function TeamIssuePage() {
     })),
   ]
   const taskViewGroupOptions = taskViewFieldOptions.filter(
-    (option) => option.id !== 'customFields',
+    (option) => option.id !== 'customFields' && !isWorkItemEffortColumnField(option.id),
   )
   const taskViewOptions = taskViewController.views.map(createTaskViewOption)
   const selectedTaskView = taskViewController.activeSavedView

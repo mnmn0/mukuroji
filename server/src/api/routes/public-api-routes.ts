@@ -171,6 +171,7 @@ import {
   normalizeTeamIssueInput,
 } from '../shared/work-item-access'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
+import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -523,6 +524,8 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'assigneeName',
   'dueDate',
   'schedule',
+  'remainingEffortMinutes',
+  'progressPercent',
   'priority',
   'creatorMemberKey',
   'workflowStatusId',
@@ -560,6 +563,10 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
     ...(workItem.assigneeName === undefined ? {} : { assigneeName: workItem.assigneeName }),
     dueDate: workItem.dueDate,
     schedule: projectPublicWorkItemSchedule(workItem.schedule),
+    ...(workItem.remainingEffortMinutes === undefined
+      ? {}
+      : { remainingEffortMinutes: workItem.remainingEffortMinutes }),
+    ...(workItem.progressPercent === undefined ? {} : { progressPercent: workItem.progressPercent }),
     priority: workItem.priority,
     creatorMemberKey: workItem.creatorMemberKey,
     workflowStatusId: workItem.workflowStatusId,
@@ -887,8 +894,8 @@ export async function updateCanonicalPublicWorkItem(
       const dependencyAuthorizationSnapshot =
         'schedule' in body &&
           body.schedule !== undefined &&
-          stableDigestStringify(body.schedule) !==
-            stableDigestStringify(detail.issue.schedule)
+          // An estimate-only change moves no date, so it needs no dependency confirmation.
+          changesWorkItemSchedulePlacement(body.schedule, detail.issue.schedule)
           ? await createDependencyFencedWorkItemAuthorizationSnapshot(
               principal,
               teamId,
@@ -939,6 +946,7 @@ export async function updateCanonicalPublicWorkItem(
   const acceptanceCriteria = readAcceptanceCriteriaChange(
     criteriaChange, detail.issue.acceptanceCriteria ?? [], options.agentFenced === true,
   )
+  const effortChange = readWorkItemEffortChange(writableBody)
   const auditContext = createPublicMutationAuditContext(
     principal,
     mutationContext,
@@ -966,6 +974,7 @@ export async function updateCanonicalPublicWorkItem(
       {
         ...writableBody,
         ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+        ...effortChange,
         expectedRevision,
         authorizationSnapshot,
         ...(prepared && prepared.transactItems.length > 0

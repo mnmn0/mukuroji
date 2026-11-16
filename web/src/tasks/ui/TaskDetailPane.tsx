@@ -44,6 +44,7 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
@@ -496,6 +497,7 @@ export function TaskDetailPane({
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
   const assigneeLabel = resolveWorkItemAssignee(issue ?? task)
   const schedule = issue?.schedule ?? task.schedule
+  const effortItem = issue ?? task
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue ?? task)
   const workflowStatuses = issue
     ? selectedWorkItemTypeId === currentWorkItemTypeId
@@ -1271,6 +1273,16 @@ export function TaskDetailPane({
                 {t('tasks.schedule.save')}
               </button>
             </div>
+            <div className="workbench-panel-muted p-3">
+              <WorkItemEffortProgressEditor
+                editorIdentity={editorIdentity}
+                item={effortItem}
+                locale={locale}
+                {...(resolvedConfiguration?.progressMode ? { progressMode: resolvedConfiguration.progressMode } : {})}
+                onSave={(change) => submitIssueUpdate(change)}
+                readOnly={isReadOnly || isWorkItemMutationPending}
+              />
+            </div>
           </fieldset>
         )
       case 'relations':
@@ -1341,7 +1353,9 @@ export function TaskDetailPane({
             key={task.teamId + ':' + task.id + ':time'}
             locale={locale}
             {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
+            {...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes })}
             readOnly={isReadOnly}
+            {...(effortItem.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effortItem.remainingEffortMinutes })}
             teamId={task.teamId}
             timesheetHref={createTeamTimeTrackingPath(task.teamId)}
             workItemId={task.id}

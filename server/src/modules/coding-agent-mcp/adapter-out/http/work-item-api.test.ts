@@ -5,6 +5,8 @@ import { createAgentTasks } from '../../application/agent-tasks'
 const config = { origin: 'https://mukuroji.example.test', token: 'secret-test-token', teamId: 'team' }
 const validTask = { id: 'task', teamId: 'team', revision: 1, title: 'Task', assigneeUserId: 'agent',
   workflowStatusId: 'todo', statusCategory: 'unstarted', priority: 'medium', dueDate: '',
+  schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] }, plannedEffortMinutes: 240 },
+  remainingEffortMinutes: 60, progressPercent: 75,
   createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
 
 test('pins origin and Team, encodes IDs, forwards idempotency unchanged, and refuses redirects', async () => {

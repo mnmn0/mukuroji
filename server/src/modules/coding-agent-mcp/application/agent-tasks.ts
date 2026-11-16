@@ -18,7 +18,12 @@ import {
 } from './work-item-api'
 
 /** Metadata changes an agent may make, including marking its task's acceptance criteria met or unmet. */
-export type AgentTaskUpdate = Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'> & {
+export type AgentTaskUpdate = Pick<
+  UpdatePublicWorkItemRequest,
+  'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues' | 'remainingEffortMinutes' | 'progressPercent'
+> & {
+  /** New estimate in minutes, stored as the task schedule's planned effort; null clears it. */
+  plannedEffortMinutes?: number | null
   /** Criteria to mark met or unmet by ID; criteria not listed keep their state. */
   acceptanceCriteria?: {
     /** ID of a criterion on the task. */
@@ -486,12 +491,17 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       if (input.expectedRevision > task.revision) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
-      const { acceptanceCriteria: marks, ...fields } = input
+      const { acceptanceCriteria: marks, plannedEffortMinutes, ...fields } = input
+      if (plannedEffortMinutes !== undefined && input.expectedRevision !== task.revision) {
+        // The estimate is written as a complete schedule, so it must replace the schedule the caller read.
+        throw new AgentTaskError('conflict', 'The task changed after it was read. Reload it before changing the estimate.')
+      }
       // The server applies the marks to the stored list inside the request's idempotency boundary, so a
       // retry with the same arguments replays even if a person edited the criteria meanwhile.
       return api.update(id, {
         ...fields,
         ...(marks === undefined ? {} : { acceptanceCriteriaMarks: marks }),
+        ...(plannedEffortMinutes === undefined ? {} : { schedule: withPlannedEffort(task.schedule, plannedEffortMinutes) }),
       }, key, await fenceFor(id))
     },
     /** Creates assigned work within the operator-selected Project boundary. */
@@ -611,6 +621,18 @@ function composeBrief(settings: AgentSettingsRecord, projectId: string | undefin
     : undefined
   const parts = [settings.brief, projectBrief].filter((part): part is string => typeof part === 'string')
   return parts.length === 0 ? null : parts.join('\n\n')
+}
+
+/**
+ * Replaces the estimate of a schedule and keeps its calendar placement.
+ *
+ * @param schedule - Schedule read with the task.
+ * @param plannedEffortMinutes - New estimate in minutes, or null to clear it.
+ * @returns The schedule to send as a complete replacement.
+ */
+function withPlannedEffort(schedule: AgentTask['schedule'], plannedEffortMinutes: number | null): AgentTask['schedule'] {
+  const { plannedEffortMinutes: _previous, ...placement } = schedule
+  return plannedEffortMinutes === null ? placement : { ...placement, plannedEffortMinutes }
 }
 
 /** Orders ready work deterministically; undated work follows dated work at equal priority. */

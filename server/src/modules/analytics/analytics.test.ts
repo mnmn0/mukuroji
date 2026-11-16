@@ -1098,6 +1098,61 @@ describe('Analytics metric engine', () => {
     expect(forecast.p95).toBe('2026-03-09T13:00:00.000Z')
   })
 
+  test('weights throughput, velocity, and forecast by the canonical estimate when asked', () => {
+    const estimated = (id: string, minutes: number | undefined, overrides: Partial<CanonicalWorkItem> = {}) =>
+      createWorkItem(id, {
+        schedule: { ...createDefaultDueDateWorkItemSchedule('2026-03-10'), ...(minutes === undefined ? {} : { plannedEffortMinutes: minutes }) },
+        dueDate: '2026-03-10',
+        ...overrides,
+      })
+    const first = estimated('effort-1', 240)
+    const second = estimated('effort-2', 120)
+    const unestimated = estimated('effort-3', undefined)
+    const open = estimated('effort-open', 600, {
+      statusCategory: 'started', workflowStatusId: 'status-started', remainingEffortMinutes: 360,
+    })
+    const completion = (item: CanonicalWorkItem, at: string) => createAuditEvent(
+      `${item.id}-complete`, item, at, [{ field: 'statusCategory', before: 'started', after: 'completed' }],
+    )
+    const input = {
+      workItems: [first, second, unestimated, open],
+      events: [
+        completion(first, '2026-03-02T12:00:00.000Z'),
+        completion(second, '2026-03-03T12:00:00.000Z'),
+        completion(unestimated, '2026-03-04T12:00:00.000Z'),
+      ],
+    }
+    const snapshotFor = (weighting: 'count' | 'effort') => createTestAnalyticsSnapshot({
+      ...input,
+      query: createQuery([
+        { id: 'throughput', title: 'Throughput', type: 'metric', metric: 'throughput', weighting },
+        { id: 'velocity', title: 'Velocity', type: 'metric', metric: 'velocity', weighting },
+      ], {
+        filter: { period: { from: '2026-03-02T00:00:00.000Z', to: '2026-03-08T23:59:59.999Z' } },
+        asOf: '2026-03-08T23:59:59.999Z',
+        forecastWeighting: weighting,
+      }),
+    })
+
+    const counted = snapshotFor('count')
+    expect(counted.widgets.map((widget) => widget.value)).toEqual([3, 3])
+    expect(counted.forecast.remainingWorkItems).toBe(1)
+    expect(counted.forecast.weighting).toBeUndefined()
+
+    const weighted = snapshotFor('effort')
+    expect(weighted.widgets.map((widget) => [widget.value, widget.definition.unit])).toEqual([[6, 'hours'], [6, 'hours-per-week']])
+    expect(weighted.widgets[0]?.warnings).toContain('1 completed Work Item(s) had no estimate and counted as zero effort.')
+    expect(weighted.forecast).toMatchObject({ weighting: 'effort', remainingWorkItems: 1, remainingEffortHours: 6 })
+    // Six hours completed over seven days, so six remaining hours take at least the next completing days.
+    expect(weighted.forecast.dailyThroughput).toBe(0.857)
+    expect(weighted.forecast.p95).not.toBeNull()
+
+    expect(() => createTestAnalyticsSnapshot({
+      ...input,
+      query: createQuery([{ id: 'wip', title: 'WIP', type: 'metric', metric: 'wip', weighting: 'effort' }]),
+    })).toThrow('Only throughput and velocity widgets can be weighted by effort.')
+  })
+
   test('excludes facts and evidence whose as-of Project is outside the current allowlist', () => {
     const item = createWorkItem('cross-project-history', {
       assignedProjectId: 'project-a',
