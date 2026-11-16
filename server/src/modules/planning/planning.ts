@@ -1097,6 +1097,11 @@ abstract class BasePlanningClient implements PlanningClient {
       ) {
         let planned: PlanningArchiveRestorePlan | undefined
         await this.commitArchiveStep(workspaceId, async (state, now) => {
+          planned = undefined
+          // A concurrent archive may have taken the entity out again; its references then stay
+          // archived with it instead of being consumed against a missing target.
+          const target = findEntity(state, entityId)
+          if (!target || target.archivedAt !== undefined) return undefined
           // Read after the revision-bound graph: a counterpart archived later moves the revision,
           // so the CAS rejects this step instead of dropping a dependency it could have kept.
           await this.collectArchivedCounterparts(

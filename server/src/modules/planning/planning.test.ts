@@ -35,6 +35,25 @@ import {
 
 const NOW = new Date('2026-07-16T09:00:00.000Z')
 const EMPTY_WORK_ITEMS: PlanningWorkItemState = { workItems: [] }
+
+/** Archives one entity just before a chosen commit, as a concurrent request would. */
+class RacingPlanningClient extends InMemoryPlanningClient {
+  commitCount = 0
+  raceAtCommit = 0
+  raceEntityId = ''
+
+  protected override async commitState(
+    ...args: Parameters<InMemoryPlanningClient['commitState']>
+  ) {
+    this.commitCount += 1
+    if (this.commitCount === this.raceAtCommit) {
+      const { revision } = await this.get('workspace-1', EMPTY_WORK_ITEMS)
+      await this.archive('workspace-1', this.raceEntityId, { expectedRevision: revision }, EMPTY_WORK_ITEMS)
+    }
+    return super.commitState(...args)
+  }
+}
+
 const NEXT_CYCLE_RANGE = { startDate: '2026-08-15', endDate: '2026-08-28' }
 
 function createEntityInput(
@@ -4339,22 +4358,6 @@ describe('planning persistence', () => {
   })
 
   test('hands a dependency to a counterpart archived while the restore is running', async () => {
-    /** Archives portfolio-b just before the first reference step commits, as a concurrent request would. */
-    class RacingPlanningClient extends InMemoryPlanningClient {
-      commitCount = 0
-      raceAtCommit = 0
-
-      protected override async commitState(
-        ...args: Parameters<InMemoryPlanningClient['commitState']>
-      ) {
-        this.commitCount += 1
-        if (this.commitCount === this.raceAtCommit) {
-          const { revision } = await this.get('workspace-1', EMPTY_WORK_ITEMS)
-          await this.archive('workspace-1', 'portfolio-b', { expectedRevision: revision }, EMPTY_WORK_ITEMS)
-        }
-        return super.commitState(...args)
-      }
-    }
     const client = new RacingPlanningClient(() => NOW)
     await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
     await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
@@ -4370,6 +4373,7 @@ describe('planning persistence', () => {
 
     // The first commit restores portfolio-a; the second carries its dependency reference.
     client.raceAtCommit = client.commitCount + 2
+    client.raceEntityId = 'portfolio-b'
     const first = await client.restore(
       'workspace-1',
       'portfolio-a',
@@ -4385,6 +4389,43 @@ describe('planning persistence', () => {
     )
     expect(second.restore).toMatchObject({ restoredDependencyCount: 1 })
     expect(second.planning.dependencies.map((dependency) => dependency.id)).toEqual(['dependency-a-b'])
+  })
+
+  test('keeps the references archived when the restored entity is archived again', async () => {
+    const client = new RacingPlanningClient(() => NOW)
+    const workItems: PlanningWorkItemState = { workItems: [createWorkItem('work-race', 'completed')] }
+    await client.create('workspace-1', createCycleInput('cycle-race', 0, { projectId: 'project-1' }), workItems)
+    await client.putWorkItemLink('workspace-1', {
+      teamId: 'team-1',
+      workItemId: 'work-race',
+      projectId: 'project-1',
+      cycleId: 'cycle-race',
+      goalIds: [],
+      expectedRevision: 1,
+    }, workItems)
+    const archived = await client.archive('workspace-1', 'cycle-race', { expectedRevision: 2 }, workItems)
+
+    // The first commit restores the Cycle; a concurrent archive lands before its link returns.
+    client.raceAtCommit = client.commitCount + 2
+    client.raceEntityId = 'cycle-race'
+    const interrupted = await client.restore(
+      'workspace-1',
+      'cycle-race',
+      { expectedRevision: archived.planning.revision },
+      workItems,
+    )
+    expect(interrupted.restore).toMatchObject({ droppedLinkCount: 0, pendingReferenceCount: 1 })
+    expect(await client.getArchivedEntity('workspace-1', 'cycle-race')).toMatchObject({ id: 'cycle-race' })
+
+    const restored = await client.restore(
+      'workspace-1',
+      'cycle-race',
+      { expectedRevision: interrupted.planning.revision },
+      workItems,
+    )
+    expect(restored.restore).toMatchObject({ restoredLinkCount: 1, pendingReferenceCount: 0 })
+    expect(restored.planning.workItemLinks.map((link) => [link.workItemId, link.cycleId]))
+      .toEqual([['work-race', 'cycle-race']])
   })
 
   test('leaves references that exceed the live capacity archived until a later restore', async () => {
