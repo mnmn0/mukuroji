@@ -175,6 +175,10 @@ export const planningMessages = {
   'planning.dependency.start-to-start': '開始から開始',
   'planning.dependency.finish-to-finish': '終了から終了',
   'planning.dependency.start-to-finish': '開始から終了',
+  'planning.capacity.usage': '計画データの使用量',
+  'planning.capacity.rows': '行',
+  'planning.capacity.warning': '計画データが上限に近づいています。不要になった Work Item link や依存関係を解除して、使用量を減らしてください。',
+  'planning.capacity.full': '計画データが上限に達しました。Entity・依存関係・Work Item link を増やす変更は保存できません。不要な link や依存関係を解除してください。既存の内容の編集や解除はできます。',
   'planning.readOnly': 'この計画は参照のみ可能です。',
   'planning.conflict': '他のユーザーが計画を更新しました。再読み込みしてください。',
 } as const
