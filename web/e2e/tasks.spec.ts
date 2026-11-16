@@ -4632,6 +4632,55 @@ test.describe('authenticated task page', () => {
     ).toBeVisible()
   })
 
+  test('Issue #463: 別 Project へ移ると、その Project の saved views が決まるまで一覧を読まない', async ({ page }) => {
+    let releaseRoadmapViews: (() => void) | undefined
+    const roadmapViewsGate = new Promise<void>((resolve) => {
+      releaseRoadmapViews = resolve
+    })
+    let roadmapViewsRequested: (() => void) | undefined
+    const roadmapViewsSeen = new Promise<void>((resolve) => {
+      roadmapViewsRequested = resolve
+    })
+    await page.route(/\/api\/task-views(?:\?.*)?$/u, async (route) => {
+      const scopeText = new URL(route.request().url()).searchParams.get('scope')
+      const scope: unknown = scopeText ? JSON.parse(scopeText) : undefined
+      if (
+        typeof scope === 'object' && scope !== null &&
+        'projectId' in scope && scope.projectId === 'product-roadmap'
+      ) {
+        roadmapViewsRequested?.()
+        await roadmapViewsGate
+      }
+      await route.fallback()
+    })
+    const roadmapListRequests: string[] = []
+    page.on('request', (request) => {
+      const url = new URL(request.url())
+      if (request.method() === 'GET' && url.pathname === '/api/projects/product-roadmap/issues') {
+        roadmapListRequests.push(url.search)
+      }
+    })
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+
+    // Client-side navigation keeps the page mounted, as a sidebar link does.
+    await page.evaluate(() => {
+      window.history.pushState(window.history.state, '', '/projects/product-roadmap/issues')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await roadmapViewsSeen
+    // While the saved views of the new Project are pending, its list is not read with the previous
+    // Project's layout, so no unfiltered request can start.
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      setTimeout(resolve, 500)
+    }))
+    expect(roadmapListRequests).toEqual([])
+
+    releaseRoadmapViews?.()
+    await expect.poll(() => roadmapListRequests.length).toBeGreaterThan(0)
+    expect(roadmapListRequests[0]).toBe('?limit=200&includeArchived=true')
+  })
+
   test('Issue #463: 表示中の月の外へ移したカードの後は月ナビゲーションへフォーカスを移す', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
