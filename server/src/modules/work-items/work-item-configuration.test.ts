@@ -1787,6 +1787,49 @@ test('replaces, removes, and sets a parent atomically', async () => {
   expect(store.transactions).toHaveLength(3)
 })
 
+test('returns success without writing when a lost-response retry finds the requested parent', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+  const input = {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+  }
+
+  expect(await client.replaceParent('workspace-1', 'core-team', input)).toMatchObject({
+    parentWorkItemId: 'phase-b',
+    graphRevision: 6,
+  })
+  expect(await client.replaceParent('workspace-1', 'core-team', input)).toMatchObject({
+    parentWorkItemId: 'phase-b',
+    graphRevision: 6,
+  })
+  expect(store.transactions).toHaveLength(1)
+})
+
+test('keeps unexplained parent replacement cancellations retryable', async () => {
+  const store = createInMemoryRelationStore({ cancelTransactions: true })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 1 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 1 },
+    expectedGraphRevision: 5,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 2 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 1 },
+    expectedGraphRevision: 5,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+})
+
 test('rejects a stale or cyclic parent replacement before writing', async () => {
   const store = createInMemoryRelationStore()
   store.seedRelation('task', 'phase', 'parent')
@@ -1970,9 +2013,13 @@ type InMemoryRelationStore = {
 /**
  * Creates an in-memory configuration table that understands relation key prefixes.
  *
+ * @param options - Set `cancelTransactions` to make every TransactWrite fail as canceled.
+ *
  * @returns The fake store and its counters.
  */
-function createInMemoryRelationStore(): InMemoryRelationStore {
+function createInMemoryRelationStore(
+  options: { cancelTransactions?: boolean } = {},
+): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
   const rows = new Map<string, Record<string, unknown>>()
   const rowsBySource = new Map<string, Map<string, Record<string, unknown>>>()
@@ -2058,6 +2105,9 @@ function createInMemoryRelationStore(): InMemoryRelationStore {
             store.rowsRead += items.length
             rowsSinceTransaction += items.length
             return { Items: items }
+          }
+          if (command.constructor.name === 'TransactWriteCommand' && options.cancelTransactions) {
+            throw { name: 'TransactionCanceledException' }
           }
           if (command.constructor.name === 'TransactWriteCommand') {
             store.maxRowsReadPerOperation = Math.max(store.maxRowsReadPerOperation, rowsSinceTransaction)

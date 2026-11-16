@@ -1,6 +1,7 @@
 import type { WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
+import { expect, userEvent, within } from 'storybook/test'
 import type { Locale } from '../../shared/i18n/i18n'
 import { WorkItemFieldsEditor } from './WorkItemFieldsEditor'
 import {
@@ -26,8 +27,9 @@ function WorkItemEditorsPreview({
 }) {
   const [relations, setRelations] = useState<WorkItemRelation[]>([...workItemRelationFixtures])
   const handleAddRelation = async (input: WorkItemRelationEditorInput) => {
+    // A Work Item has one parent, so adding a parent replaces the current one like the API does.
     setRelations((current) => [
-      ...current,
+      ...current.filter((relation) => input.type !== 'parent' || relation.type !== 'parent'),
       {
         sourceWorkItemId: 'WI-104',
         targetWorkItemId: input.targetWorkItemId,
@@ -88,6 +90,22 @@ type Story = StoryObj<typeof meta>
  * 全 custom field type と relation mutation を確認する標準状態です。
  */
 export const Default: Story = {}
+
+/**
+ * 親がある Work Item で親を選ぶと、追加ではなく付け替えになることを確認します。
+ */
+export const ParentReplacement: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const editor = within(canvas.getByTestId('work-item-relations-editor'))
+
+    await userEvent.selectOptions(editor.getByLabelText('関係'), 'parent')
+    await userEvent.click(editor.getByRole('button', { name: '親を付け替え' }))
+
+    await expect(editor.queryByTestId('work-item-relation-parent-WI-100')).toBeNull()
+    await expect(editor.getByTestId('work-item-relation-parent-WI-121')).toBeVisible()
+  },
+}
 
 /**
  * 英語 locale かつ参照専用の表示状態です。

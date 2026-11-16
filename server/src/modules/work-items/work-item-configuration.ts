@@ -1478,7 +1478,6 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       throw new WorkItemConfigurationError(400, 'WorkItemRelationSelf', 'A Work Item cannot relate to itself.')
     }
     const graph = await this.readRelationGraphState(workspaceId, teamId)
-    assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
     const storedParents = await this.readWorkItemRelations(
       workspaceId,
       teamId,
@@ -1487,6 +1486,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     )
     const previousParentWorkItemId = normalized.currentParent?.workItemId ?? null
     const parentWorkItemId = normalized.nextParent?.workItemId ?? null
+    // Setting a parent is declarative: when the child already has exactly the requested parent,
+    // including on a retry after a lost response, report success without writing.
+    if (
+      storedParents.length === (parentWorkItemId ? 1 : 0) &&
+      (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
+    ) {
+      return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
+    }
+    assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
     if (
       storedParents.length !== (normalized.currentParent ? 1 : 0) ||
       (storedParents[0]?.targetWorkItemId ?? null) !== previousParentWorkItemId
@@ -1496,9 +1504,6 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         'WorkItemRelationGraphConflict',
         'The Work Item parent changed. Reload and try again.',
       )
-    }
-    if (previousParentWorkItemId === parentWorkItemId) {
-      return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
     }
     const removed: WorkItemRelation[] = []
     const storedParent = storedParents[0]
@@ -2207,8 +2212,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ...(input.currentParent ? [input.currentParent] : []),
         ...(input.nextParent ? [input.nextParent] : []),
       ]
-      const [graphRevision, ...items] = await Promise.all([
+      const [graphRevision, storedParents, ...items] = await Promise.all([
         this.getRelationGraphRevision(workspaceId, teamId),
+        this.readWorkItemRelations(workspaceId, teamId, input.child.workItemId, ['parent']),
         ...endpoints.map((endpoint) => this.documentClient.send(new GetCommand({
           TableName: this.workItemsTableName,
           Key: { directoryTeamId: workItemPartitionKey, issueId: endpoint.workItemId },
@@ -2222,21 +2228,32 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           'A relation endpoint no longer exists.',
         )
       }
-      if (graphRevision !== input.expectedGraphRevision) {
+      const endpointsChanged = endpoints.some((endpoint, index) => {
+        const item = items[index]?.Item
+        return !item ||
+          !relationEndpointMatchesSnapshot(item, endpoint.expectedRevision, endpoint.assignedProjectId)
+      })
+      const parentChanged = storedParents.length !== (input.currentParent ? 1 : 0) ||
+        (storedParents[0]?.targetWorkItemId ?? null) !== (input.currentParent?.workItemId ?? null)
+      if (
+        endpointsChanged ||
+        parentChanged ||
+        graphRevision !== input.expectedGraphRevision
+      ) {
         return new WorkItemConfigurationError(
           409,
           'WorkItemRelationGraphConflict',
-          'Work Item relations changed. Reload and try again.',
+          'Work Item relations or endpoints changed. Reload and try again.',
         )
       }
-      return new WorkItemConfigurationError(
-        409,
-        'WorkItemRelationGraphConflict',
-        'Work Item relations or endpoints changed. Reload and try again.',
-      )
     } catch (error) {
       return toPersistenceError(error)
     }
+    return new WorkItemConfigurationError(
+      503,
+      'WorkItemRelationUnavailable',
+      'The relation transaction was canceled for an unclassified reason.',
+    )
   }
 
   private async classifyRelationTransactionCancellation(

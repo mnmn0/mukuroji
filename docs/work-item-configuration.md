@@ -174,7 +174,7 @@ Relation row の sort key は source Work Item ID から始まるため、`REL#<
 
 ### 親子関係と上限
 
-`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。
+`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。付け替えは宣言的な操作で、子の親がすでに指定された親（`null` なら親なし）であれば graph revision に関係なく書き込まずに成功を返す。これで応答が失われた後の再送も成功として扱える。Transaction が取り消され、再読み取りで graph・現在の親・endpoint のどれも変わっていない場合は、競合ではなく再試行可能な `503 WorkItemRelationUnavailable` を返す。
 
 残る上限は次のとおりで、`@mukuroji/contracts` の定数と一致させる。
 
