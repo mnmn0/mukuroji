@@ -22,7 +22,9 @@ import { createProjectSearchDocument } from '../shared/document-access'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
+  canWorkspaceBusinessWrite,
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   hasEnterprisePermissionAtWorkspace,
   requireProjectPermission,
   requireWorkspaceAdministration,
@@ -56,7 +58,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       await requireProjectPermission(principal, projectId, 'viewer')
       const [state, viewer] = await Promise.all([
         workspaceDependencies.projectDirectory.getProjectCharter(principal.directoryId, teamId, projectId),
-        describeProjectCharterViewer(principal, projectId),
+        describeProjectCharterViewer(principal, teamId, projectId),
       ])
       return c.json({ ...state, viewer } satisfies ProjectCharterState)
     } catch (error) {
@@ -84,7 +86,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         await readJson<unknown>(c.req),
         (update) => createApiMutationContext(c, principal, update),
       )
-      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, projectId) } satisfies ProjectCharterState)
+      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, teamId, projectId) } satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
     }
@@ -109,7 +111,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         await readJson<unknown>(c.req),
         (transition) => createApiMutationContext(c, principal, transition),
       )
-      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, projectId) } satisfies ProjectCharterState)
+      return c.json({ ...state, viewer: await describeProjectCharterViewer(principal, teamId, projectId) } satisfies ProjectCharterState)
     } catch (error) {
       return toProjectCharterErrorResponse(c, error)
     }
@@ -148,15 +150,20 @@ async function requireProjectCharterManagement(principal: WorkspacePrincipal, pr
 }
 
 /**
- * Decides which charter actions the principal may take, with the same checks the write routes use,
- * so the client never has to re-derive Enterprise permissions.
+ * Decides which charter actions the principal may take, as the write routes would decide them.
+ *
+ * The current request is a read, so its route authorization proves only `projects.read`. Enterprise
+ * principals are therefore re-evaluated for `projects.manage` at this Project, and other principals
+ * go through the same role checks as the write routes.
  *
  * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Project.
  * @param projectId - Project whose charter is shown.
  * @returns The viewer's charter capabilities.
  */
 async function describeProjectCharterViewer(
   principal: WorkspacePrincipal,
+  teamId: string,
   projectId: string,
 ): Promise<ProjectCharterViewerCapabilities> {
   const allowed = async (check: () => unknown) => {
@@ -168,10 +175,19 @@ async function describeProjectCharterViewer(
       throw error
     }
   }
-  const canEdit = await allowed(async () => {
-    requireWorkspaceBusinessWrite(principal)
-    await requireProjectCharterManagement(principal, projectId)
-  })
+  const canEdit = canWorkspaceBusinessWrite(principal) && (
+    principal.enterprisePermissions === undefined
+      ? await allowed(() => requireProjectCharterManagement(
+          { ...principal, enterpriseRouteAuthorizedAtResource: false },
+          projectId,
+        ))
+      : hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: projectId,
+          parentTeamId: teamId,
+        })
+  )
   return {
     canEdit,
     canDecideProposal: canEdit && await allowed(() => requireProjectProposalDecision(principal)),

@@ -1639,9 +1639,15 @@ async function resolveEnterpriseAuthorizationResource(
         .filter((team) => team.projects.some((project) => project.id === decodedProjectId))
         .map((team) => team.id),
     )
-    const parentTeamId = ownerTeamIds.size === 1
-      ? ownerTeamIds.values().next().value
-      : undefined
+    // A Team-qualified path names the owner directly, which also tells apart two Teams that use
+    // the same Project ID. The qualifier counts only when that Team really owns the Project.
+    const qualifiedTeamId = path?.match(/\/teams\/([^/]+)\/projects\/[^/]+/u)?.[1]
+    const decodedQualifiedTeamId = qualifiedTeamId ? decodePathSegment(qualifiedTeamId) : undefined
+    const parentTeamId = decodedQualifiedTeamId && ownerTeamIds.has(decodedQualifiedTeamId)
+      ? decodedQualifiedTeamId
+      : ownerTeamIds.size === 1
+        ? ownerTeamIds.values().next().value
+        : undefined
     return {
       workspaceId,
       kind: 'project' as const,
