@@ -4246,12 +4246,15 @@ test('DynamoDB idempotent Work Item create retry replays without using up a key 
     importRequestDigest: 'd'.repeat(64),
   }
   const sentCommands: string[] = []
+  const issueConditions: unknown[] = []
   const documentClient = {
     async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
       sentCommands.push(command.constructor.name)
       if (command.constructor.name === 'GetCommand') return { Item: existing }
       if (command.constructor.name === 'QueryCommand') return { Items: [] }
       if (command.constructor.name === 'TransactWriteCommand') {
+        const items: Array<{ Put?: { ConditionExpression?: string } }> = Object(command.input).TransactItems
+        issueConditions.push(items[0]?.Put?.ConditionExpression)
         throw Object.assign(new Error('Transaction cancelled.'), {
           name: 'TransactionCanceledException',
           CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
@@ -4281,4 +4284,6 @@ test('DynamoDB idempotent Work Item create retry replays without using up a key 
 
   expect(replay.issue).toMatchObject({ id: existing.issueId, key: 'CT-9' })
   expect(sentCommands).not.toContain('UpdateCommand')
+  // The keyless insert can never succeed, even if the Work Item was deleted after the read.
+  expect(issueConditions).toEqual(['attribute_exists(issueId) AND attribute_not_exists(issueId)'])
 })

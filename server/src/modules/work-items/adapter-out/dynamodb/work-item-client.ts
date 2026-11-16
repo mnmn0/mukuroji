@@ -2208,7 +2208,12 @@ export class DynamoDbTeamIssuesClient {
               Put: {
                 TableName: this.issueTableName,
                 Item: item,
-                ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+                // A retry that found its Work Item allocated no key, so it must never insert: if
+                // the Work Item was deleted since, inserting would leave a keyless replacement.
+                // The always-false condition sends it down the replay path below instead.
+                ConditionExpression: key
+                  ? 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)'
+                  : 'attribute_exists(issueId) AND attribute_not_exists(issueId)',
               },
             },
             {
@@ -3311,8 +3316,8 @@ export class DynamoDbTeamIssuesClient {
    *
    * A caller-chosen ID (idempotent import, API, Triage, or Request conversion) is kept. When a
    * Work Item already has that ID, the create is a retry: no key is allocated, so retries do not
-   * use up numbers, and the create transaction fails its existence condition and replays as
-   * before. Otherwise the ID is the lowercase key, and a number whose ID an older title-based
+   * use up numbers, and the create transaction is sent with a condition that never inserts, so it
+   * replays as before even when the Work Item is deleted between this read and the transaction. Otherwise the ID is the lowercase key, and a number whose ID an older title-based
    * Work Item already uses is skipped.
    *
    * @param directoryId - Workspace ID.
