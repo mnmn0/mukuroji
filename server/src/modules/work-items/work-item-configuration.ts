@@ -15,6 +15,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORK_ITEM_PROGRESS_MODE,
   isWorkItemProgressMode,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
@@ -1822,6 +1823,8 @@ function createScopedDefaultConfiguration(
 function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfiguration) {
   return {
     revision: configuration.revision,
+    // The calculation policy changes every displayed progress percentage, so its value is audited.
+    progressMode: configuration.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE,
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),

@@ -377,6 +377,7 @@ export function TeamIssueScreen({
   const visibleIssues = useMemo(
     () => taskViewDefinition
       ? applyTaskViewDefinitionToTasks(issues, taskViewDefinition, {
+          resolveProgressMode: () => configuration?.progressMode,
           keywordMatcher: (issue, normalizedKeyword) => matchesTeamIssueKeyword(
             issue,
             normalizedKeyword,

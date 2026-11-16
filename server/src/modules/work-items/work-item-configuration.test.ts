@@ -1030,6 +1030,59 @@ test('writes a configuration audit event in the same transaction as the revision
   })
 })
 
+test('audits the progress mode before and after a change of only that setting', async () => {
+  const previousConfiguration = createConfiguration({ revision: 2 })
+  const sent: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      sent.push(command.input)
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: toStoredConfiguration(previousConfiguration) }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'audit-table',
+  )
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'configuration-progress-mode-audit-1',
+    request: { method: 'PUT', path: '/api/work-item-configuration', body: { revision: 2 } },
+    source: { kind: 'api', method: 'PUT', route: '/api/work-item-configuration' },
+    occurredAt: '2026-07-16T00:00:00.000Z',
+  })
+
+  await client.saveWorkspaceConfiguration(
+    'workspace-1',
+    { ...previousConfiguration, progressMode: 'manual' },
+    async () => undefined,
+    [],
+    auditContext,
+  )
+
+  const transaction = sent[2]
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Expected a configuration transaction.')
+  }
+  expect(transaction.TransactItems).toContainEqual(expect.objectContaining({
+    Put: expect.objectContaining({
+      TableName: 'audit-table',
+      Item: expect.objectContaining({
+        changes: expect.arrayContaining([
+          expect.objectContaining({ field: 'progressMode', before: 'status-category', after: 'manual' }),
+        ]),
+      }),
+    }),
+  }))
+})
+
 test('audits Work Item Type policy changes even when policy counts stay the same', async () => {
   const previousConfiguration = createConfiguration({
     customFields: [field('summary', 'text'), field('severity', 'text')],
