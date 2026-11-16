@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { isRecord } from '../../infrastructure/runtime/value-guards'
 import type {
   CreatePlanningEntityInput,
   PlanningEntity,
@@ -304,9 +305,12 @@ function queryPlanningPage(
  *
  * @param rows - Rows of `workspace-1`, live graph and archive alike.
  * @param pageSize - Maximum rows one Query page returns.
- * @returns The client, its mutable rows, every Query input, and every transaction it wrote.
+ * @returns The client, its mutable rows, every Query input, every transaction it wrote, and a
+ * control whose `rejectAuthorizationAtWrite` cancels that write (1-based) on its
+ * `workspace-access` condition checks, as DynamoDB does when the caller's membership changed.
  */
 function createFakePlanningTable(rows: Record<string, unknown>[], pageSize = 1_000_000) {
+  const control = { rejectAuthorizationAtWrite: 0 }
   let meta: Record<string, unknown> = {
     workspaceId: 'FENCE#workspace-1',
     recordKey: 'META',
@@ -338,6 +342,17 @@ function createFakePlanningTable(rows: Record<string, unknown>[], pageSize = 1_0
       writes.push(command.input)
       const items = command.input.TransactItems
       if (!Array.isArray(items)) throw new Error('Expected a transaction.')
+      if (writes.length === control.rejectAuthorizationAtWrite) {
+        throw {
+          name: 'TransactionCanceledException',
+          CancellationReasons: items.map((item) => ({
+            Code: isRecord(item) && isRecord(item.ConditionCheck) &&
+                item.ConditionCheck.TableName === 'workspace-access'
+              ? 'ConditionalCheckFailed'
+              : 'None',
+          })),
+        }
+      }
       for (const item of items) {
         if (typeof item !== 'object' || item === null) continue
         if ('Put' in item && typeof item.Put === 'object' && item.Put !== null && 'Item' in item.Put) {
@@ -371,7 +386,7 @@ function createFakePlanningTable(rows: Record<string, unknown>[], pageSize = 1_0
     false,
     () => NOW,
   )
-  return { client, rows, writes, queries }
+  return { client, rows, writes, queries, control }
 }
 
 /**
@@ -4533,31 +4548,37 @@ describe('planning persistence', () => {
     expect(restoreCommits).toEqual([[check], [check]])
   })
 
-  test('fails the restore when the caller authorization changes between its revisions', async () => {
-    const client = new RacingPlanningClient(() => NOW)
-    await client.create('workspace-1', createEntityInput('portfolio-a', 'portfolio', 0), EMPTY_WORK_ITEMS)
-    await client.create('workspace-1', createEntityInput('portfolio-b', 'portfolio', 1), EMPTY_WORK_ITEMS)
-    await client.createDependency('workspace-1', {
-      id: 'dependency-a-b',
-      predecessorId: 'portfolio-a',
-      successorId: 'portfolio-b',
-      type: 'finish-to-start',
-      lagDays: 0,
-      expectedRevision: 2,
-    }, EMPTY_WORK_ITEMS)
-    const archived = await client.archive('workspace-1', 'portfolio-a', { expectedRevision: 3 }, EMPTY_WORK_ITEMS)
-    // The entity revision commits; the guarded reference revision then sees the revoked grant.
-    client.raceAtCommit = client.commitCount + 2
-    client.race = async () => {
-      throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed.')
+  test('fails the restore and keeps the references archived when the caller authorization changes', async () => {
+    const { client, rows, writes, control } = createFakePlanningTable(createGoalLinkRows(14))
+    const workItems: PlanningWorkItemState = {
+      workItems: Array.from({ length: 10 }, (_, index) =>
+        createWorkItem(`item-${index}`, 'started', { projectId: undefined })
+      ),
     }
+    const archived = await client.archive('workspace-1', 'goal-1', { expectedRevision: 1 }, workItems)
+    const membershipCheck: PlanningCallerAuthorizationConditionCheck = {
+      ConditionCheck: {
+        TableName: 'workspace-access',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 3 },
+      },
+    }
+    // The Goal revision commits; the membership changes before the reference revision.
+    control.rejectAuthorizationAtWrite = writes.length + 2
     await expect(client.restore(
       'workspace-1',
-      'portfolio-a',
+      'goal-1',
       { expectedRevision: archived.planning.revision },
-      EMPTY_WORK_ITEMS,
-    )).rejects.toMatchObject({ code: 'PlanningAuthorizationChanged' })
-    expect((await client.get('workspace-1', EMPTY_WORK_ITEMS)).dependencies).toEqual([])
+      workItems,
+      { authorizationConditionChecks: [membershipCheck] },
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningAuthorizationChanged' })
+    expect(writes.at(-1)?.TransactItems).toContainEqual(membershipCheck)
+    // The Goal is live again and every link reference is still archived for a later restore.
+    expect(rows.some((row) => row.recordKey === 'ENTITY#goal-1')).toBeTrue()
+    expect(rows.filter((row) => row.entryType === 'planning-archived-link-reference')).toHaveLength(10)
+    expect(rows.filter((row) => String(row.recordKey).startsWith('LINK#'))).toHaveLength(0)
   })
 
   test('archives and restores identifiers whose combined archive key would be too long', async () => {

@@ -18,6 +18,7 @@ const {
 } = createApiTestHarness()
 import {
   InMemoryPlanningClient,
+  PlanningError,
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../../../authentication'
@@ -2181,8 +2182,13 @@ test('enforces Planning revisions and structural permissions before mutations', 
   }
   const restore = planningClient.restore.bind(planningClient)
   const restoreAuthorizationChecks: unknown[] = []
+  let restoreAuthorizationRevoked = false
   planningClient.restore = async (...input) => {
     restoreAuthorizationChecks.push(input[4]?.authorizationConditionChecks)
+    if (restoreAuthorizationRevoked) {
+      // What the client throws once a restore revision fails its caller authorization checks.
+      throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed.')
+    }
     return restore(...input)
   }
 
@@ -2291,6 +2297,14 @@ test('enforces Planning revisions and structural permissions before mutations', 
   const restoredCycle = restoredEntities.find((entity) => isRecord(entity) && entity.id === 'cycle-structural')
   expect(restoredCycle).toMatchObject({ id: 'cycle-structural' })
   expect(restoredCycle).not.toHaveProperty('archivedAt')
+  restoreAuthorizationRevoked = true
+  const revokedRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 6 },
+  )
+  expect(revokedRestore.status).toBe(409)
+  expect(await revokedRestore.json()).toMatchObject({ code: 'PlanningAuthorizationChanged' })
   // Each restore revision guards the caller's Workspace membership.
   expect(restoreAuthorizationChecks.at(-1)).toEqual([
     expect.objectContaining({
