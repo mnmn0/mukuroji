@@ -7,6 +7,7 @@ import type {
   PlanningGoalFramework,
   PlanningHealth,
   PlanningRisk,
+  PlanningCapacity,
   PlanningSnapshot,
   ScheduleDependencyConstraint,
   ScheduleDependencyType,
@@ -177,7 +178,7 @@ export type PlanningLabels = PlanningUpdateLabels & {
   /** 操作権限がない場合の文言です。 */
   readOnly: string
   /** Live Planning graph の使用量を表示する formatter です。 */
-  capacityUsage: (used: number, capacity: number) => string
+  capacityUsage: (capacity: PlanningCapacity) => string
   /** 使用量が警告閾値を超えたときの案内です。 */
   capacityWarning: string
   /** 使用量が上限に達したときの案内です。 */
@@ -557,7 +558,7 @@ export function PlanningScreen({
             className="mt-2 text-xs font-medium text-[var(--workbench-muted)]"
             data-testid="planning-capacity-usage"
           >
-            {labels.capacityUsage(snapshot.capacity.liveRowCount, snapshot.capacity.liveRowCapacity)}
+            {labels.capacityUsage(snapshot.capacity)}
           </p>
         ) : null}
         <div

@@ -428,7 +428,10 @@ function isPlanningCapacity(value: unknown): boolean {
     (value.level === 'normal' || value.level === 'warning' || value.level === 'full') &&
     isNonnegativeSafeInteger(value.liveRowCount) &&
     isNonnegativeSafeInteger(value.liveRowCapacity) &&
-    isNonnegativeSafeInteger(value.warningRowCount)
+    isNonnegativeSafeInteger(value.warningRowCount) &&
+    isNonnegativeSafeInteger(value.liveByteCount) &&
+    isNonnegativeSafeInteger(value.liveByteCapacity) &&
+    isNonnegativeSafeInteger(value.warningByteCount)
 }
 
 /**

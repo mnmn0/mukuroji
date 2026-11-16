@@ -70,8 +70,13 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     moveToRoot: t('issues.project.unassigned'),
     move: t('planning.action.move'),
     readOnly: t('planning.readOnly'),
-    capacityUsage: (used, capacity) =>
-      `${t('planning.capacity.usage')}: ${used.toLocaleString(locale)} / ${capacity.toLocaleString(locale)} ${t('planning.capacity.rows')}`,
+    capacityUsage: (capacity) => {
+      const megabytes = (bytes: number) =>
+        (bytes / 1_000_000).toLocaleString(locale, { maximumFractionDigits: 1, minimumFractionDigits: 1 })
+      return `${t('planning.capacity.usage')}: ` +
+        `${capacity.liveRowCount.toLocaleString(locale)} / ${capacity.liveRowCapacity.toLocaleString(locale)} ${t('planning.capacity.rows')} · ` +
+        `${megabytes(capacity.liveByteCount)} / ${megabytes(capacity.liveByteCapacity)} MB`
+    },
     capacityWarning: t('planning.capacity.warning'),
     capacityFull: t('planning.capacity.full'),
     portfolioTitle: t('planning.view.portfolio'),

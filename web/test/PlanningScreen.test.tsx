@@ -149,7 +149,7 @@ describe('PlanningScreen', () => {
       <PlanningScreen activeView="roadmap" labels={labels} snapshot={planningSnapshotFixture} />,
     )
     expect(normal).toContain('data-testid="planning-capacity-usage"')
-    expect(normal).toContain('Planning data usage: 24 / 20,000 rows')
+    expect(normal).toContain('Planning data usage: 24 / 20,000 rows · 0.0 / 24.0 MB')
     expect(normal).not.toContain('data-testid="planning-capacity-warning"')
 
     const warning = renderToStaticMarkup(

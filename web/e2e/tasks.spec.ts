@@ -2909,6 +2909,9 @@ function createMockPlanningSnapshot(
       liveRowCount: dependencies.length,
       liveRowCapacity: 20_000,
       warningRowCount: 16_000,
+      liveByteCount: 12_000,
+      liveByteCapacity: 24_000_000,
+      warningByteCount: 19_200_000,
     },
     workItemDependencySummary: {
       affectedMilestoneIds: [],

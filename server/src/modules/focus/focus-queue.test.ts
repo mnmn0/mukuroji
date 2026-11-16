@@ -1186,6 +1186,9 @@ function createPlanningSnapshot(
       liveRowCount: entities.length + dependencies.length + links.length,
       liveRowCapacity: 20_000,
       warningRowCount: 16_000,
+      liveByteCount: 12_000,
+      liveByteCapacity: 24_000_000,
+      warningByteCount: 19_200_000,
     },
     updatedAt: '2026-08-09T09:00:00.000Z',
   }

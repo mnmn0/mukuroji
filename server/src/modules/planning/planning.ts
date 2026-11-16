@@ -114,6 +114,15 @@ const PLANNING_GRAPH_ROW_QUERIES = [
 const PLANNING_LIVE_ROW_CAPACITY = 20_000
 /** Live graph row count at which the snapshot reports a `warning` capacity level. */
 const PLANNING_LIVE_ROW_WARNING_COUNT = 16_000
+/** Maximum UTF-8 JSON bytes of live graph rows that a growing mutation may reach. */
+const PLANNING_LIVE_GRAPH_BYTE_CAPACITY = 24_000_000
+/** Live graph bytes at which the snapshot reports a `warning` capacity level. */
+const PLANNING_LIVE_GRAPH_WARNING_BYTES = 19_200_000
+/**
+ * Maximum Project / Initiative update targets. Update Feed projections and the per-target
+ * activity read are bounded to the same count.
+ */
+const PLANNING_UPDATE_TARGET_CAPACITY = 2_000
 /** Hard safety bound for one strongly consistent live graph read, above the write capacity. */
 const PLANNING_LIVE_ROW_READ_LIMIT = 25_000
 /** Hard safety bound, in UTF-8 JSON bytes, for the rows of one live graph read. */
@@ -693,9 +702,15 @@ abstract class BasePlanningClient implements PlanningClient {
   ): Promise<void>
 
   /** Workspace planning snapshot を返します。 */
-  async get(workspaceId: string, workItemState: PlanningWorkItemState) {
-    const state = await this.readState(readIdentifier(workspaceId, 'Workspace ID'))
-    return createPlanningSnapshot(state, workItemState, this.now().toISOString())
+  async get(workspaceIdValue: string, workItemState: PlanningWorkItemState) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const state = await this.readState(workspaceId)
+    return createPlanningSnapshot(
+      state,
+      workItemState,
+      this.now().toISOString(),
+      createPlanningCapacity(measurePlanningLiveGraph(workspaceId, state)),
+    )
   }
 
   /** 外部 authorization transaction を束縛する global revision を返します。 */
@@ -1712,13 +1727,24 @@ abstract class BasePlanningClient implements PlanningClient {
     }
     const result = mutation(structuredClone(before), this.now().toISOString())
     validatePlanningState(result.state)
-    requirePlanningLiveCapacity(before, result.state)
+    const afterUsage = measurePlanningLiveGraph(workspaceId, result.state)
+    requirePlanningLiveCapacity(
+      before,
+      measurePlanningLiveGraph(workspaceId, before),
+      result.state,
+      afterUsage,
+    )
     const after = {
       ...result.state,
       revision: before.revision + 1,
       updatedAt: this.now().toISOString(),
     }
-    const planning = createPlanningSnapshot(after, workItemState, this.now().toISOString())
+    const planning = createPlanningSnapshot(
+      after,
+      workItemState,
+      this.now().toISOString(),
+      createPlanningCapacity(afterUsage),
+    )
     const cadenceTransactionTarget = result.planningUpdateCadenceTransactionTarget
     const cadenceTarget = cadenceTransactionTarget === undefined
       ? undefined
@@ -3857,55 +3883,96 @@ function validateCycleCapacities(state: PlanningWorkspaceState) {
   }
 }
 
-/**
- * Counts the live graph rows of a state, excluding the revision META row.
- *
- * @param state - Live Planning graph.
- * @returns Number of graph rows that the state persists.
- */
-function countPlanningLiveRows(state: PlanningWorkspaceState) {
-  return state.entities.length + state.dependencies.length +
-    state.workItemDependencies.length + state.workItemLinks.length +
-    state.updateTargets.length
+/** Persisted size of a live graph, measured as the rows a commit writes. */
+type PlanningLiveGraphUsage = {
+  /** Live graph rows, excluding the revision META row. */
+  rows: number
+  /** UTF-8 JSON bytes of those rows, matching the accounting of a cold graph read. */
+  bytes: number
 }
 
 /**
- * Describes how much of the live graph capacity a state uses.
+ * Measures the rows and bytes that a state persists, excluding the revision META row.
  *
+ * @param workspaceId - Owning Workspace identifier included in every row.
  * @param state - Live Planning graph.
- * @returns Row usage, capacity, warning threshold, and level.
+ * @returns Row count and UTF-8 JSON bytes of the persisted rows.
  */
-function createPlanningCapacity(state: PlanningWorkspaceState): PlanningCapacity {
-  const liveRowCount = countPlanningLiveRows(state)
+function measurePlanningLiveGraph(
+  workspaceId: string,
+  state: PlanningWorkspaceState,
+): PlanningLiveGraphUsage {
+  let rows = 0
+  let bytes = 0
+  for (const [recordKey, row] of createPlanningRowMap(workspaceId, state)) {
+    if (recordKey === META_RECORD_KEY) continue
+    rows += 1
+    bytes += Buffer.byteLength(JSON.stringify(row), 'utf8')
+  }
+  return { rows, bytes }
+}
+
+/**
+ * Describes how much of the live graph capacity a measured graph uses.
+ *
+ * @param usage - Measured live graph rows and bytes.
+ * @returns Row and byte usage, capacities, warning thresholds, and level.
+ */
+function createPlanningCapacity(usage: PlanningLiveGraphUsage): PlanningCapacity {
   return {
-    level: liveRowCount >= PLANNING_LIVE_ROW_CAPACITY
+    level: usage.rows >= PLANNING_LIVE_ROW_CAPACITY ||
+        usage.bytes >= PLANNING_LIVE_GRAPH_BYTE_CAPACITY
       ? 'full'
-      : liveRowCount >= PLANNING_LIVE_ROW_WARNING_COUNT ? 'warning' : 'normal',
-    liveRowCount,
+      : usage.rows >= PLANNING_LIVE_ROW_WARNING_COUNT ||
+          usage.bytes >= PLANNING_LIVE_GRAPH_WARNING_BYTES
+        ? 'warning'
+        : 'normal',
+    liveRowCount: usage.rows,
     liveRowCapacity: PLANNING_LIVE_ROW_CAPACITY,
     warningRowCount: PLANNING_LIVE_ROW_WARNING_COUNT,
+    liveByteCount: usage.bytes,
+    liveByteCapacity: PLANNING_LIVE_GRAPH_BYTE_CAPACITY,
+    warningByteCount: PLANNING_LIVE_GRAPH_WARNING_BYTES,
   }
 }
 
 /**
- * Rejects a mutation that adds rows beyond the live capacity.
+ * Rejects a mutation that grows the live graph beyond its row, byte, or update target capacity.
  *
- * Mutations that keep or reduce the row count stay allowed above the capacity, so a Workspace
- * can always be brought back under it by unlinking, deleting, or moving data.
+ * Mutations that do not grow the exceeded dimension stay allowed above the capacity, so a
+ * Workspace can always be brought back under it by editing, unlinking, deleting, or moving data.
+ * The byte capacity stays below the hard read bound, so a committed graph remains readable.
  *
  * @param before - Graph read for the mutation.
+ * @param beforeUsage - Persisted size of `before`.
  * @param after - Validated graph the mutation would persist.
+ * @param afterUsage - Persisted size of `after`.
  */
 function requirePlanningLiveCapacity(
   before: PlanningWorkspaceState,
+  beforeUsage: PlanningLiveGraphUsage,
   after: PlanningWorkspaceState,
+  afterUsage: PlanningLiveGraphUsage,
 ) {
-  const afterCount = countPlanningLiveRows(after)
-  if (afterCount > PLANNING_LIVE_ROW_CAPACITY && afterCount > countPlanningLiveRows(before)) {
+  if (
+    afterUsage.rows > PLANNING_LIVE_ROW_CAPACITY && afterUsage.rows > beforeUsage.rows ||
+    afterUsage.bytes > PLANNING_LIVE_GRAPH_BYTE_CAPACITY && afterUsage.bytes > beforeUsage.bytes
+  ) {
     throw new PlanningError(
       413,
       'PlanningCapacityExceeded',
-      `Planning Workspace cannot exceed ${PLANNING_LIVE_ROW_CAPACITY} live rows.`,
+      `Planning Workspace cannot exceed ${PLANNING_LIVE_ROW_CAPACITY} live rows or ` +
+        `${PLANNING_LIVE_GRAPH_BYTE_CAPACITY} bytes.`,
+    )
+  }
+  if (
+    after.updateTargets.length > PLANNING_UPDATE_TARGET_CAPACITY &&
+    after.updateTargets.length > before.updateTargets.length
+  ) {
+    throw new PlanningError(
+      413,
+      'PlanningCapacityExceeded',
+      `Planning Workspace cannot exceed ${PLANNING_UPDATE_TARGET_CAPACITY} update targets.`,
     )
   }
 }
@@ -3914,6 +3981,7 @@ function createPlanningSnapshot(
   state: PlanningWorkspaceState,
   workItemState: PlanningWorkItemState,
   evaluatedAt: string,
+  capacity: PlanningCapacity,
 ): PlanningSnapshot {
   const workItemMap = createWorkItemMap(workItemState)
   const visibleLinks = state.workItemLinks
@@ -3970,7 +4038,7 @@ function createPlanningSnapshot(
       visibleWorkItems,
       visibleLinks,
     ),
-    capacity: createPlanningCapacity(state),
+    capacity,
     ...(state.updatedAt ? { updatedAt: state.updatedAt } : {}),
   } satisfies PlanningSnapshot
   if (utf8ByteLength(JSON.stringify(snapshot)) > MAX_PLANNING_SNAPSHOT_BYTES) {

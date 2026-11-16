@@ -3883,12 +3883,17 @@ describe('planning persistence', () => {
   test('rejects only row-adding mutations once the live capacity is reached', async () => {
     const { client, rows, writes } = createFakePlanningTable(createGoalLinkRows(20_000))
     const snapshot = await client.get('workspace-1', EMPTY_WORK_ITEMS)
-    expect(snapshot.capacity).toEqual({
+    expect(snapshot.capacity).toMatchObject({
       level: 'full',
       liveRowCount: 20_000,
       liveRowCapacity: 20_000,
       warningRowCount: 16_000,
+      liveByteCapacity: 24_000_000,
+      warningByteCount: 19_200_000,
     })
+    expect(snapshot.capacity.liveByteCount).toBe(
+      rows.reduce((total, row) => total + Buffer.byteLength(JSON.stringify(row), 'utf8'), 0),
+    )
 
     await expect(client.create(
       'workspace-1',
@@ -3916,6 +3921,83 @@ describe('planning persistence', () => {
       EMPTY_WORK_ITEMS,
     )
     expect(unlinked.planning.capacity).toMatchObject({ level: 'warning', liveRowCount: 19_999 })
+  })
+
+  test('rejects growth beyond the byte capacity so committed graphs stay readable', async () => {
+    const goalIds = Array.from({ length: 100 }, (_, index) =>
+      `goal-${String(index).padStart(240, '0')}`
+    )
+    const rows: Record<string, unknown>[] = [
+      createScaleEntityRow('portfolio-1', 'portfolio'),
+      createScaleEntityRow('roadmap-1', 'roadmap', { parentId: 'portfolio-1' }),
+      createScaleEntityRow('initiative-1', 'initiative', { parentId: 'roadmap-1' }),
+      ...goalIds.map((id) => createScaleEntityRow(id, 'goal', { parentId: 'initiative-1' })),
+    ]
+    let bytes = rows.reduce<number>(
+      (total, row) => total + Buffer.byteLength(JSON.stringify(row), 'utf8'),
+      0,
+    )
+    for (let index = 0; bytes < 24_000_000; index += 1) {
+      const link = {
+        workspaceId: 'workspace-1',
+        recordKey: `LINK#team-1#item-${index}`,
+        entryType: 'planning-work-item-link',
+        teamId: 'team-1',
+        workItemId: `item-${index}`,
+        goalIds,
+        createdAt: NOW.toISOString(),
+      }
+      rows.push(link)
+      bytes += Buffer.byteLength(JSON.stringify(link), 'utf8')
+    }
+    const { client, writes } = createFakePlanningTable(rows)
+
+    const snapshot = await client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(snapshot.capacity.liveRowCount).toBeLessThan(16_000)
+    expect(snapshot.capacity).toMatchObject({ level: 'full', liveByteCount: bytes })
+    await expect(client.create(
+      'workspace-1',
+      createEntityInput('portfolio-over-bytes', 'portfolio', 1),
+      EMPTY_WORK_ITEMS,
+    )).rejects.toMatchObject({ status: 413, code: 'PlanningCapacityExceeded' })
+    expect(writes).toHaveLength(0)
+
+    await client.update('workspace-1', 'portfolio-1', {
+      expectedRevision: 1,
+      patch: { title: 'P' },
+    }, EMPTY_WORK_ITEMS)
+    expect(writes).toHaveLength(1)
+  })
+
+  test('caps update targets at the Update Feed projection bound', async () => {
+    const rows: Record<string, unknown>[] = Array.from({ length: 2_000 }, (_, index) => {
+      const target: PlanningUpdateTarget = {
+        type: 'project',
+        teamId: 'team-1',
+        projectId: `project-${index}`,
+      }
+      return {
+        workspaceId: 'workspace-1',
+        recordKey: `UPDATE_TARGET#PROJECT#team-1#project-${index}`,
+        entryType: 'planning-update-target',
+        target,
+        latestVersion: 0,
+        updatedAt: NOW.toISOString(),
+      }
+    })
+    const { client, writes } = createFakePlanningTable(rows)
+    await expect(client.configureUpdateCadence('workspace-1', {
+      target: { type: 'project', teamId: 'team-1', projectId: 'project-2000' },
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-01T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 1,
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({ status: 413, code: 'PlanningCapacityExceeded' })
+    expect(writes).toHaveLength(0)
   })
 
   test('reports the warning level from the warning threshold', async () => {

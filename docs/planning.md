@@ -34,10 +34,12 @@ Planning client は FENCE `META` だけを強整合 read し、row がなけれ�
 
 Live graph の row 数（`ENTITY#`、`DEPENDENCY#`、`WORK_ITEM_DEPENDENCY#`、`LINK#`、`UPDATE_TARGET#` の合計。`META` は含みません）は、1 Workspace あたり 20,000 row を容量とします（Issue #369 で 2,000 row から変更）。
 
-- 容量を超えて row を **増やす** mutation だけを `413 PlanningCapacityExceeded` で拒否します。Row 数を増やさない mutation（既存 entity の編集、link や dependency の解除、move、archive）は容量を超えていても受け付けるので、運用者は常に容量内へ戻せます
-- 読み取りは容量より大きい 25,000 row / 32 MB を安全上限とし、これを超えた場合だけ `413 PlanningReadLimitExceeded` で fail-closed にします。書き込みが容量で止まるため、通常の運用で読み取りが失敗することはありません
-- Snapshot は `capacity: { level, liveRowCount, liveRowCapacity, warningRowCount }` を返します。`level` は 16,000 row 以上で `warning`、20,000 row 以上で `full` です。値は Workspace 全体の row 数で、entity ID や scope を含まないため、Planning を読めるすべての member に返します
-- Planning 画面はヘッダーに使用量（`計画データの使用量: n / 20,000 行`）を常に表示し、`warning` では注意、`full` では row を増やす変更が保存できないことを案内します
+- 容量は row 数と byte 数（各 row を保存する UTF-8 JSON の合計、24 MB）の両方で測ります。`UPDATE_TARGET#` row の `latestContextSnapshot` のように snapshot に出ない属性も byte 数に含めます
+- 容量を超えて row 数または byte 数を **増やす** mutation だけを `413 PlanningCapacityExceeded` で拒否します。増やさない mutation（既存 entity の編集、link や dependency の解除、move、archive）は容量を超えていても受け付けるので、運用者は常に容量内へ戻せます
+- Project / Initiative の update target は 2,000 件までです。Update Feed の projection と target ごとの activity 読み取りが同じ 2,000 件で上限を設けているため、2,001 件目を作る cadence 設定や publish を `413 PlanningCapacityExceeded` で拒否します
+- 読み取りは容量より大きい 25,000 row / 32 MB を安全上限とし、これを超えた場合だけ `413 PlanningReadLimitExceeded` で fail-closed にします。書き込みが同じ数え方の容量で止まるため、通常の運用で読み取りが失敗することはありません
+- Snapshot は `capacity: { level, liveRowCount, liveRowCapacity, warningRowCount, liveByteCount, liveByteCapacity, warningByteCount }` を返します。`level` は row 数か byte 数の一方が 80%（16,000 row / 19.2 MB）以上で `warning`、容量以上で `full` です。値は Workspace 全体の量で、entity ID や scope を含まないため、Planning を読めるすべての member に返します
+- Planning 画面はヘッダーに使用量（`計画データの使用量: n / 20,000 行 · x / 24.0 MB`）を常に表示し、`warning` では注意、`full` では row を増やす変更が保存できないことを案内します
 - 100 Project・link 済み Work Item 5,000 件（約 5,500 row、閲覧可能な Work Item 5,000 件）の Workspace で snapshot は約 3.1 MB に収まることを `planning.test.ts` で確認しています。閲覧可能な Work Item が 1 万件近い場合や、長い description を持つ entity が数千件ある場合は、row 数が容量内でも snapshot が 4 MB を超えて `413 PlanningSnapshotSizeLimitExceeded` になります。Snapshot に載せる Work Item を link 済みと依存の端点に絞る作業は Issue #459 で行います
 
 DynamoDB client は、デコード済みの graph を META の `revision` と `updatedAt` が一致する間だけ Lambda の memory 上で再利用します（最大 8 Workspace、LRU）。`UPDATE_TARGET#` 以外の graph row は `META` の revision CAS と同じ transaction でしか書かれないため、強整合 read した `META` が一致すれば内容も一致します。`UPDATE_TARGET#` row は通知 schedule worker が `META` を進めずに due-index 属性を更新するので、cache hit 時も毎回強整合 Query で読み直し、Initiative entity との整合を再検証します。Tenant 削除は Planning row を `META` を進めずに消しますが、revocation の後に実行されるため、削除中の Workspace の Planning を読める principal はいません。Cache した graph は deep freeze し、読み取り側が共有 state を変更できないようにしています（in-memory client も同じく freeze した state を返し、テストで変更を検出します）。
