@@ -123,6 +123,7 @@ export const accountSecurityMessages = {
   'memberSecurity.mfa.unknown': 'MFA状況不明',
   'memberSecurity.summary': 'MFA 未登録のアクティブメンバー: {count} 人',
   'memberSecurity.loadError': 'MFA の登録状況を読み込めませんでした。',
+  'memberSecurity.retry': '再読み込み',
   'memberSecurity.action.passwordReset': 'パスワード再設定を送る',
   'memberSecurity.action.mfaReset': 'MFAをリセット',
   'memberSecurity.dialog.passwordResetTitle': 'パスワード再設定を送りますか？',

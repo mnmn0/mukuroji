@@ -10,18 +10,18 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   ApiError,
   completeMfaChallenge,
-  completeMfaSetupChallenge,
   completeNewPasswordChallenge,
   discoverEnterpriseSso,
   loginWithPassword,
   startEnterpriseSso,
-  startMfaSetupChallenge,
-  startSoftwareTokenSetup,
-  verifySoftwareTokenSetup,
   type AuthenticationChallenge,
   type MfaRequiredChallenge,
   type MfaSetupChallenge,
 } from '../../auth/api'
+import {
+  useLoginAuthenticatorSetup,
+  type LoginAuthenticatorSetupResult,
+} from '../../features/account-security/mutations/useLoginAuthenticatorSetup'
 import { AuthenticatorSetup } from '../../features/account-security/ui/AuthenticatorSetup'
 import {
   isSafeEnterpriseSsoAuthorizationUrl,
@@ -421,32 +421,23 @@ export function LoginPage({
   const mfaSetupChallenge = challenge?.challenge === 'MFA_SETUP' ? challenge : undefined
 
   /**
-   * Finishes authenticator registration during sign-in.
+   * Continues the sign-in after the authenticator app is registered.
    *
-   * Cognito's own challenge signs in directly. A setup token only registers the app, so the
-   * user signs in again and answers the new MFA challenge with a code.
+   * @param setupChallenge - Challenge the registration answered.
+   * @param result - Whether the session was issued or the user signs in again with a code.
    */
-  const completeAuthenticatorSetup = async (
+  const finishAuthenticatorSetup = (
     setupChallenge: MfaSetupChallenge,
-    code: string,
-    session: string | undefined,
+    result: LoginAuthenticatorSetupResult,
   ) => {
-    if (setupChallenge.setupAccessToken) {
-      await verifySoftwareTokenSetup(setupChallenge.setupAccessToken, code)
-      returnToPasswordLogin()
-      setEmail(setupChallenge.email)
-      setLoginStep('password')
-      setNoticeKey('mfaSetup.loginDone')
+    if (result === 'signed-in') {
+      navigate(returnPath, { replace: true })
       return
     }
-    const authSession = await completeMfaSetupChallenge({
-      code,
-      email: setupChallenge.email,
-      remember,
-      session: session ?? setupChallenge.session ?? '',
-    })
-    saveAuthSession(authSession)
-    navigate(returnPath, { replace: true })
+    returnToPasswordLogin()
+    setEmail(setupChallenge.email)
+    setLoginStep('password')
+    setNoticeKey('mfaSetup.loginDone')
   }
 
   return (
@@ -511,22 +502,13 @@ export function LoginPage({
               <p className="m-0 rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]">
                 {t('mfaSetup.policyNotice')}
               </p>
-              <AuthenticatorSetup
-                cancelLabel={t('login.mfa.restart')}
+              <LoginAuthenticatorSetup
+                challenge={mfaSetupChallenge}
                 key={mfaSetupChallenge.setupAccessToken ?? mfaSetupChallenge.session}
+                remember={remember}
                 t={t}
                 onCancel={returnToPasswordLogin}
-                onStart={() =>
-                  mfaSetupChallenge.setupAccessToken
-                    ? startSoftwareTokenSetup(mfaSetupChallenge.setupAccessToken)
-                    : startMfaSetupChallenge({
-                        email: mfaSetupChallenge.email,
-                        session: mfaSetupChallenge.session ?? '',
-                      })
-                }
-                onVerify={(code, setup) =>
-                  completeAuthenticatorSetup(mfaSetupChallenge, code, setup.session)
-                }
+                onFinished={(result) => finishAuthenticatorSetup(mfaSetupChallenge, result)}
               />
             </div>
           ) : (
@@ -1056,6 +1038,38 @@ function resolveMfaErrorKey(error: unknown): MessageKey {
   }
 
   return 'login.mfa.errorUnknown'
+}
+
+/**
+ * Registers an authenticator app during sign-in, before the session is issued.
+ *
+ * @param props - Challenge, remember choice, translator, and what happens next.
+ * @returns The registration steps.
+ */
+function LoginAuthenticatorSetup({
+  challenge,
+  remember,
+  t,
+  onCancel,
+  onFinished,
+}: {
+  challenge: MfaSetupChallenge
+  remember: boolean
+  t: (key: MessageKey) => string
+  onCancel: () => void
+  onFinished: (result: LoginAuthenticatorSetupResult) => void
+}) {
+  const setup = useLoginAuthenticatorSetup(challenge, remember)
+
+  return (
+    <AuthenticatorSetup
+      cancelLabel={t('login.mfa.restart')}
+      t={t}
+      onCancel={onCancel}
+      onStart={setup.start}
+      onVerify={async (code, started) => onFinished(await setup.verify(code, started.session))}
+    />
+  )
 }
 
 function isMfaChallenge(

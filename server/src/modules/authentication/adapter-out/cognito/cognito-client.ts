@@ -158,37 +158,37 @@ export type GetUserResponse = {
     Value?: string
   }>
   /**
-   * Cognito が優先する MFA 方式です。未設定なら空です。
+   * MFA method Cognito prefers, or empty when none is set.
    */
   PreferredMfaSetting?: string
   /**
-   * User が有効にしている MFA 方式の一覧です（例: `SOFTWARE_TOKEN_MFA`）。
+   * MFA methods the user has enabled (for example `SOFTWARE_TOKEN_MFA`).
    */
   UserMFASettingList?: string[]
 }
 
 /**
- * Authenticator app (TOTP) の登録対象です。
+ * Whose authenticator app (TOTP) is being registered.
  *
- * ログイン中は access token、Cognito の MFA_SETUP challenge 中は challenge session で指定します。
+ * A signed-in user is identified by the access token, a user in Cognito's MFA_SETUP challenge by the challenge session.
  */
 export type SoftwareTokenTarget =
   | {
-      /** 登録する user 自身の Cognito access token です。 */
+      /** Cognito access token of the user registering. */
       accessToken: string
     }
   | {
-      /** MFA_SETUP challenge で Cognito が返した session です。 */
+      /** Session Cognito returned in the MFA_SETUP challenge. */
       session: string
     }
 
 /**
- * Authenticator app (TOTP) の登録開始結果です。
+ * Result of starting an authenticator app (TOTP) registration.
  */
 export type SoftwareTokenAssociation = {
-  /** Authenticator app に登録する Base32 の共有 secret です。 */
+  /** Base32 shared secret to enter in the authenticator app. */
   secretCode: string
-  /** MFA_SETUP challenge 中に更新された session です。access token で開始した場合は返りません。 */
+  /** Session updated during the MFA_SETUP challenge; absent when started with an access token. */
   session?: string
 }
 
@@ -536,25 +536,25 @@ export type CognitoClient = {
    */
   revokeRefreshToken?(refreshToken: string, clientId?: string): Promise<void>
   /**
-   * Password 再設定用の確認 code を user の確認済み email へ送ります（ForgotPassword）。
+   * Sends a password reset code to the user's verified email (ForgotPassword).
    *
-   * @param email - 再設定する user の email address です。
+   * @param email - Email address of the user resetting the password.
    */
   requestPasswordReset?(email: string): Promise<void>
   /**
-   * 確認 code で password を再設定します（ConfirmForgotPassword）。
+   * Sets a new password with the reset code (ConfirmForgotPassword).
    *
-   * @param email - 再設定する user の email address です。
-   * @param code - email で届いた確認 code です。
-   * @param newPassword - 新しい password です。
+   * @param email - Email address of the user resetting the password.
+   * @param code - Confirmation code from the email.
+   * @param newPassword - New password.
    */
   confirmPasswordReset?(email: string, code: string, newPassword: string): Promise<void>
   /**
-   * ログイン中の user が自分の password を変更します（ChangePassword）。
+   * Changes the signed-in user's own password (ChangePassword).
    *
-   * @param accessToken - User 自身の Cognito access token です。
-   * @param previousPassword - 現在の password です。
-   * @param proposedPassword - 新しい password です。
+   * @param accessToken - Cognito access token of the user.
+   * @param previousPassword - Current password.
+   * @param proposedPassword - New password.
    */
   changePassword?(
     accessToken: string,
@@ -562,48 +562,48 @@ export type CognitoClient = {
     proposedPassword: string,
   ): Promise<void>
   /**
-   * Authenticator app (TOTP) の登録を開始し、共有 secret を発行します（AssociateSoftwareToken）。
+   * Starts registering an authenticator app (TOTP) and issues the shared secret (AssociateSoftwareToken).
    *
-   * @param target - 登録対象の access token または MFA_SETUP challenge session です。
-   * @returns 共有 secret と、challenge 中なら更新後の session です。
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @returns The shared secret and, during a challenge, the updated session.
    */
   associateSoftwareToken?(target: SoftwareTokenTarget): Promise<SoftwareTokenAssociation>
   /**
-   * Authenticator app が表示した code で TOTP の登録を確定します（VerifySoftwareToken）。
+   * Confirms the TOTP registration with a code from the authenticator app (VerifySoftwareToken).
    *
-   * @param target - 登録対象の access token または MFA_SETUP challenge session です。
-   * @param code - Authenticator app が表示した 6 桁の code です。
-   * @returns Challenge 中なら更新後の session です。
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @param code - Six-digit code shown by the authenticator app.
+   * @returns The updated session during a challenge.
    */
   verifySoftwareToken?(
     target: SoftwareTokenTarget,
     code: string,
   ): Promise<{ session?: string }>
   /**
-   * User 自身の TOTP MFA を有効または無効にします（SetUserMFAPreference）。
+   * Enables or disables the user's own TOTP MFA (SetUserMFAPreference).
    *
-   * @param accessToken - User 自身の Cognito access token です。
-   * @param enabled - 有効にして優先方式にするなら true、無効にするなら false です。
+   * @param accessToken - Cognito access token of the user.
+   * @param enabled - True to enable TOTP and make it preferred, false to disable it.
    */
   setSoftwareTokenMfaEnabled?(accessToken: string, enabled: boolean): Promise<void>
   /**
-   * TOTP 登録を終えた MFA_SETUP challenge に応答して token を受け取ります。
+   * Answers an MFA_SETUP challenge whose TOTP registration finished and receives the tokens.
    *
-   * @param email - Challenge 対象の email address です。
-   * @param session - VerifySoftwareToken が返した session です。
+   * @param email - Email address the challenge belongs to.
+   * @param session - Session returned by VerifySoftwareToken.
    */
   respondToMfaSetupChallenge?(email: string, session: string): Promise<InitiateAuthResponse>
   /**
-   * 管理者操作で user の password を無効にし、再設定用の確認 code を送ります
-   * （AdminResetUserPassword）。
+   * Invalidates a user's password as an administrator and sends a reset code
+   * (AdminResetUserPassword).
    *
-   * @param userId - 対象 user の email address です。
+   * @param userId - Email address of the target user.
    */
   adminResetUserPassword?(userId: string): Promise<void>
   /**
-   * 管理者操作で user の TOTP MFA を無効にします（AdminSetUserMFAPreference）。
+   * Disables a user's TOTP MFA as an administrator (AdminSetUserMFAPreference).
    *
-   * @param userId - 対象 user の email address です。
+   * @param userId - Email address of the target user.
    */
   adminDisableSoftwareTokenMfa?(userId: string): Promise<void>
   /**
@@ -877,9 +877,9 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * Password 再設定用の確認 code を user の確認済み email へ送ります。
+   * Sends a password reset code to the user's verified email.
    *
-   * @param email - 再設定する user の email address です。
+   * @param email - Email address of the user resetting the password.
    */
   async requestPasswordReset(email: string): Promise<void> {
     const { clientId } = this.readRequiredConfiguration()
@@ -895,11 +895,11 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * 確認 code で password を再設定します。
+   * Sets a new password with the reset code.
    *
-   * @param email - 再設定する user の email address です。
-   * @param code - email で届いた確認 code です。
-   * @param newPassword - 新しい password です。
+   * @param email - Email address of the user resetting the password.
+   * @param code - Confirmation code from the email.
+   * @param newPassword - New password.
    */
   async confirmPasswordReset(email: string, code: string, newPassword: string): Promise<void> {
     const { clientId } = this.readRequiredConfiguration()
@@ -917,11 +917,11 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * ログイン中の user が自分の password を変更します。
+   * Changes the signed-in user's own password.
    *
-   * @param accessToken - User 自身の Cognito access token です。
-   * @param previousPassword - 現在の password です。
-   * @param proposedPassword - 新しい password です。
+   * @param accessToken - Cognito access token of the user.
+   * @param previousPassword - Current password.
+   * @param proposedPassword - New password.
    */
   async changePassword(
     accessToken: string,
@@ -942,10 +942,10 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * Authenticator app (TOTP) の登録を開始し、共有 secret を発行します。
+   * Starts registering an authenticator app (TOTP) and issues the shared secret.
    *
-   * @param target - 登録対象の access token または MFA_SETUP challenge session です。
-   * @returns 共有 secret と、challenge 中なら更新後の session です。
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @returns The shared secret and, during a challenge, the updated session.
    */
   async associateSoftwareToken(target: SoftwareTokenTarget): Promise<SoftwareTokenAssociation> {
     this.readRequiredConfiguration()
@@ -963,11 +963,11 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * Authenticator app が表示した code で TOTP の登録を確定します。
+   * Confirms the TOTP registration with a code from the authenticator app.
    *
-   * @param target - 登録対象の access token または MFA_SETUP challenge session です。
-   * @param code - Authenticator app が表示した 6 桁の code です。
-   * @returns Challenge 中なら更新後の session です。
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @param code - Six-digit code shown by the authenticator app.
+   * @returns The updated session during a challenge.
    */
   async verifySoftwareToken(target: SoftwareTokenTarget, code: string) {
     this.readRequiredConfiguration()
@@ -987,10 +987,10 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * User 自身の TOTP MFA を有効または無効にします。
+   * Enables or disables the user's own TOTP MFA.
    *
-   * @param accessToken - User 自身の Cognito access token です。
-   * @param enabled - 有効にして優先方式にするなら true、無効にするなら false です。
+   * @param accessToken - Cognito access token of the user.
+   * @param enabled - True to enable TOTP and make it preferred, false to disable it.
    */
   async setSoftwareTokenMfaEnabled(accessToken: string, enabled: boolean): Promise<void> {
     this.readRequiredConfiguration()
@@ -1006,11 +1006,11 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * TOTP 登録を終えた MFA_SETUP challenge に応答して token を受け取ります。
+   * Answers an MFA_SETUP challenge whose TOTP registration finished and receives the tokens.
    *
-   * @param email - Challenge 対象の email address です。
-   * @param session - VerifySoftwareToken が返した session です。
-   * @returns Cognito の認証結果です。
+   * @param email - Email address the challenge belongs to.
+   * @param session - Session returned by VerifySoftwareToken.
+   * @returns The Cognito authentication result.
    */
   async respondToMfaSetupChallenge(email: string, session: string): Promise<InitiateAuthResponse> {
     const { clientId } = this.readRequiredConfiguration()
@@ -1034,9 +1034,9 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * 管理者操作で user の password を無効にし、再設定用の確認 code を送ります。
+   * Invalidates a user's password as an administrator and sends a reset code.
    *
-   * @param userId - 対象 user の email address です。
+   * @param userId - Email address of the target user.
    */
   async adminResetUserPassword(userId: string): Promise<void> {
     const { userPoolId } = this.readRequiredConfiguration()
@@ -1052,9 +1052,9 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
-   * 管理者操作で user の TOTP MFA を無効にします。
+   * Disables a user's TOTP MFA as an administrator.
    *
-   * @param userId - 対象 user の email address です。
+   * @param userId - Email address of the target user.
    */
   async adminDisableSoftwareTokenMfa(userId: string): Promise<void> {
     const { userPoolId } = this.readRequiredConfiguration()
@@ -1785,9 +1785,9 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * Password 再設定用の確認 code を user の確認済み email へ送ります。
+   * Sends a password reset code to the user's verified email.
    *
-   * @param email - 再設定する user の email address です。
+   * @param email - Email address of the user resetting the password.
    */
   async requestPasswordReset(email: string) {
     await this.request<Record<string, unknown>>('ForgotPassword', {
@@ -1797,11 +1797,11 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * 確認 code で password を再設定します。
+   * Sets a new password with the reset code.
    *
-   * @param email - 再設定する user の email address です。
-   * @param code - email で届いた確認 code です。
-   * @param newPassword - 新しい password です。
+   * @param email - Email address of the user resetting the password.
+   * @param code - Confirmation code from the email.
+   * @param newPassword - New password.
    */
   async confirmPasswordReset(email: string, code: string, newPassword: string) {
     await this.request<Record<string, never>>('ConfirmForgotPassword', {
@@ -1813,11 +1813,11 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * ログイン中の user が自分の password を変更します。
+   * Changes the signed-in user's own password.
    *
-   * @param accessToken - User 自身の Cognito access token です。
-   * @param previousPassword - 現在の password です。
-   * @param proposedPassword - 新しい password です。
+   * @param accessToken - Cognito access token of the user.
+   * @param previousPassword - Current password.
+   * @param proposedPassword - New password.
    */
   async changePassword(accessToken: string, previousPassword: string, proposedPassword: string) {
     await this.request<Record<string, never>>('ChangePassword', {
@@ -1828,10 +1828,10 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * Authenticator app (TOTP) の登録を開始し、共有 secret を発行します。
+   * Starts registering an authenticator app (TOTP) and issues the shared secret.
    *
-   * @param target - 登録対象の access token または MFA_SETUP challenge session です。
-   * @returns 共有 secret と、challenge 中なら更新後の session です。
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @returns The shared secret and, during a challenge, the updated session.
    */
   async associateSoftwareToken(target: SoftwareTokenTarget) {
     const response = await this.request<{ SecretCode?: string; Session?: string }>(
@@ -1844,11 +1844,11 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * Authenticator app が表示した code で TOTP の登録を確定します。
+   * Confirms the TOTP registration with a code from the authenticator app.
    *
-   * @param target - 登録対象の access token または MFA_SETUP challenge session です。
-   * @param code - Authenticator app が表示した 6 桁の code です。
-   * @returns Challenge 中なら更新後の session です。
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @param code - Six-digit code shown by the authenticator app.
+   * @returns The updated session during a challenge.
    */
   async verifySoftwareToken(target: SoftwareTokenTarget, code: string) {
     const response = await this.request<{ Status?: string; Session?: string }>(
@@ -1865,10 +1865,10 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * User 自身の TOTP MFA を有効または無効にします。
+   * Enables or disables the user's own TOTP MFA.
    *
-   * @param accessToken - User 自身の Cognito access token です。
-   * @param enabled - 有効にして優先方式にするなら true、無効にするなら false です。
+   * @param accessToken - Cognito access token of the user.
+   * @param enabled - True to enable TOTP and make it preferred, false to disable it.
    */
   async setSoftwareTokenMfaEnabled(accessToken: string, enabled: boolean) {
     await this.request<Record<string, never>>('SetUserMFAPreference', {
@@ -1878,11 +1878,11 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * TOTP 登録を終えた MFA_SETUP challenge に応答して token を受け取ります。
+   * Answers an MFA_SETUP challenge whose TOTP registration finished and receives the tokens.
    *
-   * @param email - Challenge 対象の email address です。
-   * @param session - VerifySoftwareToken が返した session です。
-   * @returns Cognito の認証結果です。
+   * @param email - Email address the challenge belongs to.
+   * @param session - Session returned by VerifySoftwareToken.
+   * @returns The Cognito authentication result.
    */
   async respondToMfaSetupChallenge(email: string, session: string) {
     return this.request<InitiateAuthResponse>('RespondToAuthChallenge', {
@@ -1894,9 +1894,9 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * 管理者操作で user の password を無効にし、再設定用の確認 code を送ります。
+   * Invalidates a user's password as an administrator and sends a reset code.
    *
-   * @param userId - 対象 user の email address です。
+   * @param userId - Email address of the target user.
    */
   async adminResetUserPassword(userId: string) {
     await this.request<Record<string, never>>('AdminResetUserPassword', {
@@ -1906,9 +1906,9 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
-   * 管理者操作で user の TOTP MFA を無効にします。
+   * Disables a user's TOTP MFA as an administrator.
    *
-   * @param userId - 対象 user の email address です。
+   * @param userId - Email address of the target user.
    */
   async adminDisableSoftwareTokenMfa(userId: string) {
     await this.request<Record<string, never>>('AdminSetUserMFAPreference', {

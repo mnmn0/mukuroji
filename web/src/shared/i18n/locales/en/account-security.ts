@@ -116,6 +116,7 @@ export const accountSecurityMessages = {
   'memberSecurity.mfa.unknown': 'MFA unknown',
   'memberSecurity.summary': 'Active members without MFA: {count}',
   'memberSecurity.loadError': 'MFA status could not be loaded.',
+  'memberSecurity.retry': 'Reload',
   'memberSecurity.action.passwordReset': 'Send password reset',
   'memberSecurity.action.mfaReset': 'Reset MFA',
   'memberSecurity.dialog.passwordResetTitle': 'Send a password reset?',

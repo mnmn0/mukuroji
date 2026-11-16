@@ -3,11 +3,11 @@ import { createApiTestHarness } from '../../../../api/test-support/api-test-harn
 import { CognitoServiceError, type CognitoClient } from '../..'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { InMemoryEnterpriseSessionActivityClient } from '../../../enterprise-identity/enterprise-session-activity'
-import type { MutationAuditContext } from '../../../audit/audit'
+import type { MutationAuditContext } from '../../../audit'
 import type {
   WorkspaceAccessClient,
   WorkspaceMemberCredentialAction,
-} from '../../../workspace-access/workspace-access'
+} from '../../../workspace-access'
 
 const {
   app,
@@ -234,6 +234,55 @@ test('asks a guest to register when only the external-access policy requires MFA
 
   expect(response.status).toBe(200)
   expect((await response.json()).challenge).toBe('MFA_SETUP')
+})
+
+test('asks an invited guest to register on the first sign-in, before the invitation is accepted', async () => {
+  configureFakeProjectClients(true, { passwordAuthTokens: true })
+  await installSecurityPolicy('optional', true)
+  overrideWorkspaceAccess({
+    getActiveMember: async () => undefined,
+    getInvitation: async (_workspaceId, invitationId) => ({
+      id: invitationId,
+      email: invitationId,
+      role: 'guest',
+      status: 'pending',
+      deliveryStatus: 'sent',
+      identityOwnership: 'workspace-created',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+      version: 1,
+    }),
+  })
+
+  const response = await sendJson('/api/auth/login', {
+    email: 'demo@example.com',
+    password: 'Password123!',
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).challenge).toBe('MFA_SETUP')
+})
+
+test('lets a user with only SMS MFA register an authenticator app', async () => {
+  configureFakeProjectClients(true)
+  const getUser = getTestAppDependencies().authentication.cognito.getUser
+  overrideCognito({
+    async getUser(accessToken) {
+      return { ...await getUser(accessToken), UserMFASettingList: ['SMS_MFA'] }
+    },
+    async associateSoftwareToken() {
+      return { secretCode: 'JBSWY3DPEHPK3PXP' }
+    },
+  })
+
+  const status = await app.request('/api/auth/account-security', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const setup = await sendJson('/api/auth/mfa/totp/associate', {}, 'test-token')
+
+  expect((await status.json()).softwareTokenMfaEnabled).toBe(false)
+  expect(setup.status).toBe(200)
 })
 
 test('completes the sign-in when the policy requires MFA and Cognito already verified it', async () => {
@@ -592,9 +641,6 @@ test('does not reset the password of a member who has not accepted the invitatio
     },
   })
   overrideWorkspaceAccess({
-    async hasRecordedMemberCredentialAction() {
-      return false
-    },
     async recordMemberCredentialAction() {
       throw new Error('Nothing must be recorded for a pending invitation.')
     },
@@ -633,6 +679,48 @@ test('resets the authenticator of a member who lost it', async () => {
   expect(resets).toEqual(['sato@example.com'])
 })
 
+/**
+ * Replaces the credential action store with one that keeps progress per idempotency key.
+ *
+ * @returns The progress of each idempotency key hash.
+ */
+function trackCredentialActionProgress() {
+  const progress = new Map<string, 'recorded' | 'completed'>()
+  const keyOf = (auditContext?: MutationAuditContext) => auditContext?.idempotencyKeyHash ?? ''
+  overrideWorkspaceAccess({
+    async readMemberCredentialActionProgress(_workspaceId, _target, _action, auditContext) {
+      return progress.get(keyOf(auditContext)) ?? 'none'
+    },
+    async recordMemberCredentialAction(_workspaceId, _actor, target, _action, auditContext) {
+      const alreadyRecorded = progress.has(keyOf(auditContext))
+      if (!alreadyRecorded) progress.set(keyOf(auditContext), 'recorded')
+      const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
+      return { member, alreadyRecorded }
+    },
+    async completeMemberCredentialAction(_workspaceId, _target, _action, auditContext) {
+      progress.set(keyOf(auditContext), 'completed')
+    },
+  })
+  return progress
+}
+
+/**
+ * Sends an administrator authenticator reset with a fixed idempotency key.
+ *
+ * @returns The response.
+ */
+function sendMfaResetWithKey() {
+  return app.request('/api/workspace/members/sato%40example.com/mfa-reset', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'mfa-reset-retry-1',
+    },
+    body: '{}',
+  })
+}
+
 test('resumes an interrupted authenticator reset when the same request is retried', async () => {
   configureFakeProjectClients(true)
   let mfaEnrolled = true
@@ -647,37 +735,38 @@ test('resumes an interrupted authenticator reset when the same request is retrie
       if (resets.length === 1) throw new Error('Connection lost after Cognito removed the app.')
     },
   })
-  const recordedKeys = new Set<string>()
-  overrideWorkspaceAccess({
-    async hasRecordedMemberCredentialAction(_workspaceId, _target, _action, auditContext) {
-      return recordedKeys.has(auditContext?.idempotencyKeyHash ?? '')
-    },
-    async recordMemberCredentialAction(_workspaceId, _actor, target, _action, auditContext) {
-      const key = auditContext?.idempotencyKeyHash ?? ''
-      const alreadyRecorded = recordedKeys.has(key)
-      recordedKeys.add(key)
-      const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
-      return { member, alreadyRecorded }
-    },
-  })
-  const send = () => app.request('/api/workspace/members/sato%40example.com/mfa-reset', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer test-token',
-      'Content-Type': 'application/json',
-      'Idempotency-Key': 'mfa-reset-retry-1',
-    },
-    body: '{}',
-  })
+  const progress = trackCredentialActionProgress()
 
-  expect((await send()).status).toBe(500)
-  const retry = await send()
+  expect((await sendMfaResetWithKey()).status).toBe(500)
+  const retry = await sendMfaResetWithKey()
 
-  // The first attempt removed the app before failing, so the retry reports success.
+  // The first attempt removed the app before failing; the retry resumes instead of reporting
+  // "not enrolled", and turning off an app that is already off changes nothing.
   expect(retry.status).toBe(200)
   expect(await retry.json()).toEqual({ reset: true })
+  expect(resets).toEqual(['sato@example.com', 'sato@example.com'])
+  expect([...progress.values()]).toEqual(['completed'])
+})
+
+test('does not remove an authenticator registered after a completed reset when the request is replayed', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  trackCredentialActionProgress()
+
+  expect((await sendMfaResetWithKey()).status).toBe(200)
+  // The member registers a new app, and the same request arrives again.
+  const replay = await sendMfaResetWithKey()
+
+  expect(replay.status).toBe(200)
   expect(resets).toEqual(['sato@example.com'])
-  expect(recordedKeys.size).toBe(1)
 })
 
 test('denies member credential resets to non-administrators', async () => {

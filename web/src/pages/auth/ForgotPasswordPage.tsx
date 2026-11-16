@@ -1,22 +1,10 @@
-import { useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import {
-  ApiError,
-  confirmPasswordReset,
-  requestPasswordReset,
-} from '../../auth/api'
+  usePasswordRecovery,
+  type PasswordResetStep,
+} from '../../features/account-security/mutations/usePasswordRecovery'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
-import { isValidEmailAddress } from '../../shared/lib/publicPage'
 import { PublicPageShell } from '../../features/public-site/ui/PublicPageShell'
-
-/**
- * Step of the password reset flow.
- *
- * - `request`: enter the email address and send a code
- * - `confirm`: enter the emailed code and a new password
- * - `done`: the password is reset
- */
-export type PasswordResetStep = 'request' | 'confirm' | 'done'
 
 /**
  * Initial state of the password reset page, for Storybook and tests.
@@ -47,75 +35,26 @@ export function ForgotPasswordPage({
 }: ForgotPasswordPageProps = {}) {
   const [searchParams] = useSearchParams()
   const adminReset = searchParams.get('reason') === 'admin-reset'
-  const [email, setEmail] = useState(() => initialEmail ?? searchParams.get('email')?.trim() ?? '')
-  const [step, setStep] = useState<PasswordResetStep>(
-    () => initialStep ?? (adminReset && searchParams.get('email') ? 'confirm' : 'request'),
-  )
-  const [codeSent, setCodeSent] = useState(false)
-  const [code, setCode] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [newPasswordConfirmation, setNewPasswordConfirmation] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [errorKey, setErrorKey] = useState<MessageKey | undefined>()
-
-  /** Sends a reset code to the entered address. */
-  const sendCode = async (event?: FormEvent<HTMLFormElement>) => {
-    event?.preventDefault()
-    if (isSubmitting) return
-    const normalizedEmail = email.trim().toLowerCase()
-    if (!isValidEmailAddress(normalizedEmail)) {
-      setErrorKey('passwordReset.emailError')
-      return
-    }
-    setIsSubmitting(true)
-    setErrorKey(undefined)
-    try {
-      await requestPasswordReset(normalizedEmail)
-      setEmail(normalizedEmail)
-      setCodeSent(true)
-      setCode('')
-      setStep('confirm')
-    } catch (error) {
-      setErrorKey(resolvePasswordResetErrorKey(error))
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
-  /** Sets the new password with the emailed code. */
-  const confirm = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (isSubmitting) return
-    if (!/^\d{6,8}$/u.test(code)) {
-      setErrorKey('passwordReset.codeError')
-      return
-    }
-    if (!newPassword) {
-      setErrorKey('passwordReset.error.passwordPolicy')
-      return
-    }
-    if (newPassword !== newPasswordConfirmation) {
-      setErrorKey('passwordReset.mismatch')
-      return
-    }
-    setIsSubmitting(true)
-    setErrorKey(undefined)
-    try {
-      await confirmPasswordReset({
-        email: email.trim().toLowerCase(),
-        code,
-        newPassword,
-      })
-      setNewPassword('')
-      setNewPasswordConfirmation('')
-      setCode('')
-      setStep('done')
-    } catch (error) {
-      setErrorKey(resolvePasswordResetErrorKey(error))
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
+  const {
+    email,
+    step,
+    codeSent,
+    code,
+    newPassword,
+    newPasswordConfirmation,
+    isSubmitting,
+    errorKey,
+    sendCode,
+    confirm,
+    setEmail,
+    setCode,
+    setNewPassword,
+    setNewPasswordConfirmation,
+    editEmail,
+  } = usePasswordRecovery({
+    initialEmail: initialEmail ?? searchParams.get('email')?.trim() ?? '',
+    initialStep: initialStep ?? (adminReset && searchParams.get('email') ? 'confirm' : 'request'),
+  })
 
   return (
     <PublicPageShell initialLocale={initialLocale} titleKey="passwordReset.title">
@@ -180,10 +119,7 @@ export function ForgotPasswordPage({
                       placeholder={t('passwordReset.emailPlaceholder')}
                       type="email"
                       value={email}
-                      onChange={(event) => {
-                        setEmail(event.target.value)
-                        setErrorKey(undefined)
-                      }}
+                      onChange={(event) => setEmail(event.target.value)}
                     />
                   </div>
                   <PasswordResetError errorKey={errorKey} t={t} />
@@ -215,10 +151,7 @@ export function ForgotPasswordPage({
                     placeholder={t('passwordReset.codePlaceholder')}
                     type="text"
                     value={code}
-                    onChange={(value) => {
-                      setCode(value.replace(/\D/gu, '').slice(0, 8))
-                      setErrorKey(undefined)
-                    }}
+                    onChange={setCode}
                   />
                   <PasswordField
                     autoComplete="new-password"
@@ -228,10 +161,7 @@ export function ForgotPasswordPage({
                     label={t('passwordReset.newPassword')}
                     type="password"
                     value={newPassword}
-                    onChange={(value) => {
-                      setNewPassword(value)
-                      setErrorKey(undefined)
-                    }}
+                    onChange={setNewPassword}
                   />
                   <PasswordField
                     autoComplete="new-password"
@@ -240,10 +170,7 @@ export function ForgotPasswordPage({
                     label={t('passwordReset.confirmPassword')}
                     type="password"
                     value={newPasswordConfirmation}
-                    onChange={(value) => {
-                      setNewPasswordConfirmation(value)
-                      setErrorKey(undefined)
-                    }}
+                    onChange={setNewPasswordConfirmation}
                   />
                   <PasswordResetError errorKey={errorKey} t={t} />
                   <button
@@ -266,11 +193,7 @@ export function ForgotPasswordPage({
                       className="cursor-pointer border-0 bg-transparent p-0 text-sm font-bold text-[var(--workbench-primary-text)] hover:underline disabled:opacity-60"
                       disabled={isSubmitting}
                       type="button"
-                      onClick={() => {
-                        setStep('request')
-                        setCodeSent(false)
-                        setErrorKey(undefined)
-                      }}
+                      onClick={editEmail}
                     >
                       {t('passwordReset.changeEmail')}
                     </button>
@@ -385,22 +308,4 @@ function PasswordResetError({
       {t(errorKey)}
     </p>
   )
-}
-
-/**
- * Maps a failed reset call to a message.
- *
- * @param error - Error from the API.
- * @returns The message key.
- */
-function resolvePasswordResetErrorKey(error: unknown): MessageKey {
-  if (!(error instanceof ApiError)) return 'passwordReset.error.unavailable'
-  if (error.code === 'PasswordResetCodeInvalid') return 'passwordReset.error.codeInvalid'
-  if (error.code === 'InvalidNewPassword') return 'passwordReset.error.passwordPolicy'
-  if (error.code === 'SsoRequired') return 'passwordReset.error.sso'
-  if (error.code === 'AccountSecurityRateLimited' || error.status === 429) {
-    return 'passwordReset.error.rateLimited'
-  }
-  if (error.code === 'InvalidPasswordResetRequest') return 'passwordReset.emailError'
-  return 'passwordReset.error.unavailable'
 }

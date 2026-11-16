@@ -2942,7 +2942,7 @@ test('records a member credential reset with actor and target conditions', async
   expect(record).toMatchObject({ member: { memberKey: 'sato@example.com' }, alreadyRecorded: false })
   expect(transactions).toHaveLength(1)
   const items = transactions[0].TransactItems as Array<Record<string, Record<string, unknown>>>
-  expect(items).toHaveLength(3)
+  expect(items).toHaveLength(4)
   expect(items[0].ConditionCheck?.Key).toEqual({
     workspaceId,
     recordKey: 'MEMBER#demo@example.com',
@@ -2959,6 +2959,14 @@ test('records a member credential reset with actor and target conditions', async
     workspaceAuditPseudonymKey,
   ))
   expect(JSON.stringify(auditItem)).not.toContain('sato@example.com')
+  expect(items[3].Put?.Item).toMatchObject({
+    workspaceId,
+    recordKey: `CREDENTIAL_ACTION#${String(auditItem.eventId)}`,
+    memberKey: 'sato@example.com',
+    action: 'password-reset-requested',
+    status: 'recorded',
+  })
+  expect(items[3].Put?.ConditionExpression).toBe('attribute_not_exists(recordKey)')
 })
 
 test('lets an admin reset members but not owners, and nobody reset themselves', async () => {
@@ -3014,8 +3022,8 @@ test('reports a member that changed during a credential reset as a conflict', as
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
 })
 
-test('finds the recorded credential reset when the same request is retried', async () => {
-  const auditEvents = new Map<string, Record<string, unknown>>()
+test('tracks a credential reset by its idempotency key so that a retry resumes or skips it', async () => {
+  const progressRecords = new Map<string, Record<string, unknown>>()
   const members = [
     createWorkspaceMember('demo@example.com', 'admin'),
     createWorkspaceMember('sato@example.com', 'member', 'active', 3),
@@ -3024,26 +3032,36 @@ test('finds the recorded credential reset when the same request is retried', asy
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       const input: Record<string, unknown> = command.input
-      if (command.constructor.name === 'GetCommand' && input.TableName === 'AuditTable') {
-        const key = JSON.stringify(input.Key)
-        return auditEvents.has(key) ? { Item: auditEvents.get(key) } : {}
+      const key = command.input.Key as { recordKey?: string } | undefined
+      if (command.constructor.name === 'GetCommand' && key?.recordKey?.startsWith('CREDENTIAL_ACTION#')) {
+        const record = progressRecords.get(key.recordKey)
+        return record ? { Item: record } : {}
       }
       if (command.constructor.name === 'GetCommand') {
-        const key = command.input.Key as { recordKey?: string }
-        const member = members.find((candidate) => `MEMBER#${candidate.memberKey}` === key.recordKey)
+        const member = members.find((candidate) => `MEMBER#${candidate.memberKey}` === key?.recordKey)
         return member ? { Item: toMemberItem(member) } : {}
       }
+      if (command.constructor.name === 'UpdateCommand' && key?.recordKey) {
+        const record = progressRecords.get(key.recordKey)
+        if (record) progressRecords.set(key.recordKey, { ...record, status: 'completed' })
+        return {}
+      }
       if (command.constructor.name === 'TransactWriteCommand') {
-        const items = command.input.TransactItems as Array<{ Put?: { Item: Record<string, unknown> } }>
-        const audit = items[2]?.Put?.Item
-        const key = JSON.stringify({ directoryId: audit?.directoryId, eventId: audit?.eventId })
-        if (auditEvents.has(key)) {
+        const items = input.TransactItems as Array<{ Put?: { Item: Record<string, unknown> } }>
+        const progress = items[3]?.Put?.Item
+        const recordKey = String(progress?.recordKey)
+        if (progressRecords.has(recordKey)) {
           throw Object.assign(new Error('Transaction cancelled.'), {
             name: 'TransactionCanceledException',
-            CancellationReasons: [{ Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+            CancellationReasons: [
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'ConditionalCheckFailed' },
+            ],
           })
         }
-        if (audit) auditEvents.set(key, audit)
+        if (progress) progressRecords.set(recordKey, progress)
       }
       return {}
     }),
@@ -3062,21 +3080,19 @@ test('finds the recorded credential reset when the same request is retried', asy
     'mfa-reset',
     auditContext,
   )
+  const readProgress = () => client.readMemberCredentialActionProgress(
+    workspaceId,
+    'sato@example.com',
+    'mfa-reset',
+    auditContext,
+  )
 
-  await expect(client.hasRecordedMemberCredentialAction(
-    workspaceId,
-    'sato@example.com',
-    'mfa-reset',
-    auditContext,
-  )).resolves.toBe(false)
+  await expect(readProgress()).resolves.toBe('none')
   await expect(record()).resolves.toMatchObject({ alreadyRecorded: false })
+  await expect(readProgress()).resolves.toBe('recorded')
   await expect(record()).resolves.toMatchObject({ alreadyRecorded: true })
-  await expect(client.hasRecordedMemberCredentialAction(
-    workspaceId,
-    'sato@example.com',
-    'mfa-reset',
-    auditContext,
-  )).resolves.toBe(true)
+  await client.completeMemberCredentialAction(workspaceId, 'sato@example.com', 'mfa-reset', auditContext)
+  await expect(readProgress()).resolves.toBe('completed')
   // Reusing the key for a different action is a conflict, not a silent success.
   await expect(client.recordMemberCredentialAction(
     workspaceId,
@@ -3085,5 +3101,5 @@ test('finds the recorded credential reset when the same request is retried', asy
     'password-reset-requested',
     auditContext,
   )).rejects.toMatchObject({ code: 'WorkspaceIdempotencyConflict', status: 409 })
-  expect(auditEvents.size).toBe(1)
+  expect(progressRecords.size).toBe(1)
 })

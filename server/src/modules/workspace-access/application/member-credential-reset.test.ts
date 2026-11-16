@@ -34,9 +34,12 @@ function createPorts(
     getActiveMember: async (_workspaceId, memberKey) => memberKey === member.memberKey ? member : undefined,
     isSsoManagedEmail: async () => false,
     readSignInAccount: async () => account,
-    hasRecordedAction: async () => false,
+    readActionProgress: async () => 'none',
     async recordAction(_workspaceId, actor, memberKey, action) {
       calls.push(`record:${actor}:${memberKey}:${action}`)
+    },
+    async completeAction(_workspaceId, memberKey, action) {
+      calls.push(`complete:${memberKey}:${action}`)
     },
     async resetPassword(memberKey) {
       calls.push(`reset:${memberKey}`)
@@ -70,6 +73,7 @@ test('records a password reset before resetting and signing the member out', asy
     'record:demo@example.com:sato@example.com:password-reset-requested',
     'reset:sato@example.com',
     'sign-out:sato@example.com',
+    'complete:sato@example.com:password-reset-requested',
   ])
 })
 
@@ -82,7 +86,10 @@ test('keeps a completed password reset when signing out fails', async () => {
 
   await resetMemberCredential(ports, { ...input, action: 'password-reset-requested' })
 
-  expect(calls.at(-1)).toBe('failure:Failed to sign the member out after a password reset.')
+  expect(calls.slice(-2)).toEqual([
+    'failure:Failed to sign the member out after a password reset.',
+    'complete:sato@example.com:password-reset-requested',
+  ])
 })
 
 test('records an authenticator reset before removing the app', async () => {
@@ -93,6 +100,7 @@ test('records an authenticator reset before removing the app', async () => {
   expect(calls).toEqual([
     'record:demo@example.com:sato@example.com:mfa-reset',
     'disable:sato@example.com',
+    'complete:sato@example.com:mfa-reset',
   ])
 })
 
@@ -107,15 +115,35 @@ test('rejects a reset that does not apply and records nothing', async () => {
   expect([...pending.calls, ...withoutMfa.calls]).toEqual([])
 })
 
-test('reports success for a retry whose earlier attempt already removed the app', async () => {
+test('resumes a recorded reset whose earlier attempt stopped before finishing', async () => {
   const { ports, calls } = createPorts(
-    { hasRecordedAction: async () => true },
+    { readActionProgress: async () => 'recorded' },
     { invitationPending: false, mfaEnrolled: false },
   )
 
   await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
 
+  expect(calls).toEqual(['disable:sato@example.com', 'complete:sato@example.com:mfa-reset'])
+})
+
+test('does nothing for a retry of a completed reset', async () => {
+  const { ports, calls } = createPorts({ readActionProgress: async () => 'completed' })
+
+  await resetMemberCredential(ports, { ...input, action: 'password-reset-requested' })
+
   expect(calls).toEqual([])
+})
+
+test('keeps a finished reset when marking it completed fails', async () => {
+  const { ports, calls } = createPorts({
+    async completeAction() {
+      throw new Error('DynamoDB is unavailable.')
+    },
+  })
+
+  await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
+
+  expect(calls.at(-1)).toBe('failure:Failed to mark the credential reset as completed.')
 })
 
 test('leaves single sign-on members and missing members untouched', async () => {

@@ -26,6 +26,7 @@ export {
   type WorkspaceInvitationStatus,
   type WorkspaceMember,
   type WorkspaceMemberCredentialAction,
+  type WorkspaceMemberCredentialProgress,
   type WorkspaceMemberCredentialRecord,
   type WorkspaceMemberProvisioningSource,
   type WorkspaceMemberResponse,

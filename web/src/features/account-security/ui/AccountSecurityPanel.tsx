@@ -1,16 +1,12 @@
 import { useMemo, useState, type FormEvent } from 'react'
 import {
   ApiError,
-  changePassword,
-  disableSoftwareToken,
-  startSoftwareTokenSetup,
-  verifySoftwareTokenSetup,
   type AccountSecurityStatus,
   type ChangePasswordInput,
   type SoftwareTokenSetupStart,
 } from '../../../auth/api'
 import { createTranslator, type Locale, type MessageKey } from '../../../shared/i18n/i18n'
-import { useAccountSecurity } from '../queries/useAccountSecurity'
+import { useAccountSecurityController } from '../mutations/useAccountSecurityController'
 import { AuthenticatorSetup } from './AuthenticatorSetup'
 
 /**
@@ -33,27 +29,9 @@ export function AccountSecurityPanelContainer({
   accessToken,
   locale,
 }: AccountSecurityPanelContainerProps) {
-  const { data, error, isLoading, mutate } = useAccountSecurity(accessToken)
+  const controller = useAccountSecurityController(accessToken)
 
-  return (
-    <AccountSecurityPanel
-      isLoading={isLoading}
-      loadFailed={Boolean(error) && !data}
-      locale={locale}
-      status={data}
-      onChangePassword={(input) => changePassword(accessToken, input)}
-      onDisableMfa={async () => {
-        await disableSoftwareToken(accessToken)
-        await mutate()
-      }}
-      onRetry={() => void mutate()}
-      onStartMfaSetup={() => startSoftwareTokenSetup(accessToken)}
-      onVerifyMfaSetup={async (code) => {
-        await verifySoftwareTokenSetup(accessToken, code)
-        await mutate()
-      }}
-    />
-  )
+  return <AccountSecurityPanel locale={locale} {...controller} />
 }
 
 /**

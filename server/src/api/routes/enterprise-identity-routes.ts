@@ -2661,10 +2661,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
   })
 
   /**
-   * IP allowlist 保存前に現在の caller が締め出されるかを preview します。
+   * Previews whether saving the IP allowlist would lock out the current caller.
    *
-   * MFA を必須に変える場合は、authenticator app を登録していない active member の数も
-   * `mfaImpact` で返します。その member は次回ログイン時に登録を求められます。
+   * When the change makes MFA required, `mfaImpact` also returns how many active members have
+   * no authenticator app; they are asked to register one at their next sign-in.
    */
   routeApp.post('/api/enterprise/security/policy/preview', async (c) => {
     try {

@@ -16,7 +16,6 @@ import {
   createWorkspaceInvitation,
   getWorkspaceAccess,
   reinviteWorkspaceInvitation,
-  resetWorkspaceMemberCredential,
   resendWorkspaceInvitation,
   revokeWorkspaceInvitation,
   updateWorkspaceMember,
@@ -34,6 +33,7 @@ import {
 } from '../api'
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
+import { useWorkspaceMemberCredentialReset } from '../mutations/useWorkspaceMemberCredentialReset'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -115,6 +115,10 @@ type WorkspaceAccessPanelProps = {
    * Whether loading the sign-in security failed.
    */
   signInSecurityLoadFailed?: boolean
+  /**
+   * Loads the sign-in security again after a failure.
+   */
+  onRetrySignInSecurity?: () => void
   /**
    * Sends a password reset code to a member or resets the member's authenticator app.
    */
@@ -284,6 +288,12 @@ export function WorkspaceAccessPanelContainer({
     access?.capabilities.canManageMembers === true,
   )
 
+  const resetMemberCredential = useWorkspaceMemberCredentialReset({
+    accessToken: mutationSession.accessToken,
+    requestRunner: mutationRequestRunner,
+    revalidateSignInSecurity: mutateSignInSecurity,
+  })
+
   const refresh = async () => {
     if (!accessKey) {
       return
@@ -366,23 +376,7 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
-      onResetMemberCredential={async (memberKey, credentialAction) => {
-        try {
-          await mutationRequestRunner.run(
-            `workspace-member:${credentialAction}:${memberKey}`,
-            JSON.stringify({ memberKey, credentialAction }),
-            (context) => resetWorkspaceMemberCredential(
-              accessToken,
-              memberKey,
-              credentialAction,
-              context,
-            ),
-            shouldRetainWorkspaceMutationContext,
-          )
-        } finally {
-          void mutateSignInSecurity()
-        }
-      }}
+      onResetMemberCredential={resetMemberCredential}
       onRetry={retryLoad}
       onRevokeInvitation={async (invitationId) => {
         await mutationRequestRunner.run(
@@ -401,9 +395,12 @@ export function WorkspaceAccessPanelContainer({
           shouldRetainWorkspaceMutationContext,
         )
         await refresh()
+        // Members reactivated or given another role change who the MFA list covers.
+        void mutateSignInSecurity()
       }}
       signInSecurity={signInSecurity}
       signInSecurityLoadFailed={Boolean(signInSecurityError)}
+      onRetrySignInSecurity={() => void mutateSignInSecurity()}
     />
   )
 }
@@ -426,6 +423,7 @@ export function WorkspaceAccessPanel({
   onResetMemberCredential,
   signInSecurity,
   signInSecurityLoadFailed = false,
+  onRetrySignInSecurity,
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>('member')
@@ -711,6 +709,7 @@ export function WorkspaceAccessPanel({
           signInSecurityLoadFailed={signInSecurityLoadFailed}
           t={t}
           onRequestAction={requestAction}
+          onRetrySignInSecurity={onRetrySignInSecurity}
         />
 
         <WorkspaceInvitationLedger
@@ -784,6 +783,7 @@ function WorkspaceMemberLedger({
   signInSecurityLoadFailed,
   t,
   onRequestAction,
+  onRetrySignInSecurity,
 }: {
   access: WorkspaceAccess
   canResetCredentials: boolean
@@ -792,6 +792,7 @@ function WorkspaceMemberLedger({
   signInSecurityLoadFailed: boolean
   t: (key: MessageKey) => string
   onRequestAction: (action: WorkspaceAccessAction) => void
+  onRetrySignInSecurity?: () => void
 }) {
   const activeOwners = access.members.filter(
     (member) => member.role === 'owner' && member.status === 'active',
@@ -808,9 +809,21 @@ function WorkspaceMemberLedger({
         title={t('workspace.access.members.title')}
       />
       {signInSecurityLoadFailed ? (
-        <p className="border-t border-[var(--workbench-border)] px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
-          {t('memberSecurity.loadError')}
-        </p>
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('memberSecurity.loadError')}
+          </p>
+          {onRetrySignInSecurity ? (
+            <button
+              className="workbench-button-secondary min-h-9 px-3"
+              data-testid="workspace-member-mfa-retry"
+              type="button"
+              onClick={onRetrySignInSecurity}
+            >
+              {t('memberSecurity.retry')}
+            </button>
+          ) : null}
+        </div>
       ) : unenrolledMemberCount !== undefined ? (
         <p
           className="border-t border-[var(--workbench-border)] px-4 py-3 text-sm font-semibold text-[var(--workbench-muted)]"

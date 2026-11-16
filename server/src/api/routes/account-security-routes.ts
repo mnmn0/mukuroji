@@ -11,14 +11,14 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   EnterpriseIdentityError,
 } from '../../modules/enterprise-identity'
+import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
 import {
   resetMemberCredential,
   WorkspaceAccessError,
-  type MemberCredentialResetPorts,
   type WorkspaceMemberCredentialAction,
 } from '../../modules/workspace-access'
 import {
-  hasEnabledMfa,
+  hasSoftwareTokenMfa,
   isRecentlyAuthenticated,
   isSsoSessionAccessToken,
   readMfaRequirement,
@@ -60,8 +60,35 @@ const attemptLimits = {
 /** Kind of request that the in-process rate limit counts separately. */
 type AttemptScope = keyof typeof attemptLimits
 
-/** Attempts counted per hashed client and email key. */
+/** Attempts counted per hashed client and email key, oldest first. */
 const attemptCounters = new Map<string, { attempts: number; resetAt: number }>()
+
+/** Most keys the rate limit keeps, so that many distinct addresses cannot grow memory without bound. */
+const maxAttemptCounters = 10_000
+
+/** Shortest interval between sweeps of expired rate-limit keys. */
+const attemptSweepIntervalMs = 60_000
+
+/** When expired rate-limit keys were last swept. */
+let lastAttemptSweepAt = 0
+
+/**
+ * Drops expired rate-limit keys, at most once a minute, and the oldest keys over the size cap.
+ *
+ * @param now - Current time in milliseconds.
+ */
+function pruneAttemptCounters(now: number) {
+  if (now - lastAttemptSweepAt >= attemptSweepIntervalMs) {
+    lastAttemptSweepAt = now
+    for (const [candidate, state] of attemptCounters) {
+      if (state.resetAt <= now) attemptCounters.delete(candidate)
+    }
+  }
+  for (const candidate of attemptCounters.keys()) {
+    if (attemptCounters.size < maxAttemptCounters) break
+    attemptCounters.delete(candidate)
+  }
+}
 
 /**
  * Counts one attempt and reports whether it is still within the limit.
@@ -86,16 +113,16 @@ function consumeAttempt(c: Context, scope: AttemptScope, subject: string) {
     .update(`${scope}\0${transportSource}\0${subject}`)
     .digest('base64url')
   const now = Date.now()
-  for (const [candidate, state] of attemptCounters) {
-    if (state.resetAt <= now) attemptCounters.delete(candidate)
-  }
-  const current = attemptCounters.get(key)
+  const stored = attemptCounters.get(key)
+  const current = stored && stored.resetAt > now ? stored : undefined
   if (current && current.attempts >= attempts) {
     return {
       allowed: false as const,
       retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1_000)),
     }
   }
+  attemptCounters.delete(key)
+  pruneAttemptCounters(now)
   attemptCounters.set(key, {
     attempts: (current?.attempts ?? 0) + 1,
     resetAt: current?.resetAt ?? now + windowMs,
@@ -362,7 +389,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
       const status: AccountSecurityStatus = {
         passwordManaged: !isSsoSessionAccessToken(caller.accessToken),
-        softwareTokenMfaEnabled: hasEnabledMfa(caller.user),
+        softwareTokenMfaEnabled: hasSoftwareTokenMfa(caller.user),
         mfaRequiredByPolicy: (await readMfaRequirement(caller.user, caller.accessToken)).mfaRequired,
       }
       return c.json(status)
@@ -674,7 +701,7 @@ function isUndisclosedResetFailure(code: string) {
 function rejectSoftwareTokenSetup(
   c: Context,
   accessToken: string,
-  user: Parameters<typeof hasEnabledMfa>[0],
+  user: Parameters<typeof hasSoftwareTokenMfa>[0],
 ) {
   if (isSsoSessionAccessToken(accessToken)) {
     return c.json({
@@ -682,7 +709,7 @@ function rejectSoftwareTokenSetup(
       message: 'Your identity provider manages MFA for this account.',
     }, 409)
   }
-  if (hasEnabledMfa(user)) {
+  if (hasSoftwareTokenMfa(user)) {
     return c.json({
       code: 'MfaAlreadyEnabled' as const,
       message: 'An authenticator app is already registered. Turn it off first.',
@@ -709,7 +736,11 @@ async function handleMemberCredentialAction(
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceAdministration(principal)
     const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
-    const ports = createMemberCredentialResetPorts(action)
+    const ports = createMemberCredentialResetPorts({
+      cognito: authenticationDependencies.cognito,
+      workspaceAccess: workspaceDependencies.workspaceAccess,
+      isSsoManagedEmail,
+    }, action)
     if (!ports) return unavailableResponse(c)
 
     await resetMemberCredential(ports, {
@@ -739,65 +770,5 @@ async function handleMemberCredentialAction(
       }
     }
     return toAccountSecurityErrorResponse(c, error)
-  }
-}
-
-/**
- * Creates the error for a credential reset this deployment cannot perform.
- *
- * @returns The error.
- */
-function createCredentialResetUnavailableError() {
-  return new WorkspaceAccessError(503, 'AccountSecurityUnavailable', 'This sign-in operation is not available.')
-}
-
-/**
- * Connects the credential reset use case to the Workspace store and Cognito.
- *
- * @param action - Reset the request asks for.
- * @returns The ports, or undefined when this deployment cannot perform that reset.
- */
-function createMemberCredentialResetPorts(
-  action: WorkspaceMemberCredentialAction,
-): MemberCredentialResetPorts | undefined {
-  const cognito = authenticationDependencies.cognito
-  const workspaceAccess = workspaceDependencies.workspaceAccess
-  const { adminResetUserPassword, adminDisableSoftwareTokenMfa } = cognito
-  const { recordMemberCredentialAction, hasRecordedMemberCredentialAction } = workspaceAccess
-  const changeCredential = action === 'password-reset-requested'
-    ? adminResetUserPassword
-    : adminDisableSoftwareTokenMfa
-  if (!changeCredential || !recordMemberCredentialAction) {
-    return undefined
-  }
-
-  return {
-    getActiveMember: (workspaceId, memberKey) => workspaceAccess.getActiveMember(workspaceId, memberKey),
-    isSsoManagedEmail,
-    async readSignInAccount(memberKey) {
-      const profile = await cognito.getUserProfile(memberKey)
-      return {
-        invitationPending: profile.status === 'FORCE_CHANGE_PASSWORD',
-        mfaEnrolled: profile.mfaConfigured === true,
-      }
-    },
-    async hasRecordedAction(...args) {
-      return await hasRecordedMemberCredentialAction?.apply(workspaceAccess, args) ?? false
-    },
-    recordAction: (...args) => recordMemberCredentialAction.apply(workspaceAccess, args),
-    async resetPassword(memberKey) {
-      if (!adminResetUserPassword) throw createCredentialResetUnavailableError()
-      await adminResetUserPassword.call(cognito, memberKey)
-    },
-    async disableAuthenticator(memberKey) {
-      if (!adminDisableSoftwareTokenMfa) throw createCredentialResetUnavailableError()
-      await adminDisableSoftwareTokenMfa.call(cognito, memberKey)
-    },
-    async signOutEverywhere(memberKey) {
-      await cognito.globallySignOutWorkspaceUser?.(memberKey)
-    },
-    reportFailure(message, error) {
-      console.error(message, error instanceof Error ? error.name : 'UnknownError')
-    },
   }
 }

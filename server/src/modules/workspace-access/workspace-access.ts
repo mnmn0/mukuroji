@@ -10,6 +10,7 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
@@ -123,12 +124,21 @@ export type WorkspaceMember = {
 }
 
 /**
- * 管理者が member の sign-in 資格情報に対して行う操作です。
+ * Sign-in credential action an administrator takes on a member.
  *
- * - `password-reset-requested`: password を無効にし、再設定 code を送った
- * - `mfa-reset`: 登録済みの authenticator app (TOTP) を解除した
+ * - `password-reset-requested`: invalidated the password and sent a reset code
+ * - `mfa-reset`: removed the registered authenticator app (TOTP)
  */
 export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-reset'
+
+/**
+ * How far an administrator credential action under one idempotency key got.
+ *
+ * - `none`: nothing was recorded
+ * - `recorded`: the audit event was written, but the Cognito change was not confirmed
+ * - `completed`: the Cognito change finished
+ */
+export type WorkspaceMemberCredentialProgress = 'none' | 'recorded' | 'completed'
 
 /** Result of recording a credential action for a member. */
 export type WorkspaceMemberCredentialRecord = {
@@ -354,17 +364,18 @@ export interface WorkspaceAccessClient {
   /** 指定 member を取得します。 */
   getMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /**
-   * 管理者が active member の sign-in 資格情報を操作する権限を確認し、操作を audit に記録します。
+   * Checks that an administrator may change an active member's sign-in credentials and records
+   * the action in the audit log.
    *
-   * Cognito を変更する前に呼び、記録できなければ操作を中止します。
-   * 同じ idempotency key の retry では既存の記録を検出し、`alreadyRecorded` を返します。
+   * Call it before changing Cognito, and stop when it cannot record. A retry with the same
+   * idempotency key finds the existing record and returns `alreadyRecorded`.
    *
-   * @param workspaceId - 対象 Workspace ID です。
-   * @param actorMemberKey - 操作する管理者の member key です。
-   * @param targetMemberKey - 対象 member の member key です。
-   * @param action - 記録する操作です。
-   * @param auditContext - Request の audit context です。
-   * @returns 確認した対象 member と、既に記録済みだったかどうかです。
+   * @param workspaceId - Workspace of the action.
+   * @param actorMemberKey - Member key of the administrator.
+   * @param targetMemberKey - Member key of the target member.
+   * @param action - Action to record.
+   * @param auditContext - Audit context of the request.
+   * @returns The checked target member, and whether the action was already recorded.
    */
   recordMemberCredentialAction?(
     workspaceId: string,
@@ -374,20 +385,36 @@ export interface WorkspaceAccessClient {
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMemberCredentialRecord>
   /**
-   * 同じ idempotency key の資格情報操作が既に audit に記録されているかを確認します。
+   * Reads how far an administrator credential action under the same idempotency key got.
    *
-   * @param workspaceId - 対象 Workspace ID です。
-   * @param targetMemberKey - 対象 member の member key です。
-   * @param action - 確認する操作です。
-   * @param auditContext - Request の audit context です。
-   * @returns 同じ actor・対象・操作で記録済みなら true です。
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns `none` when nothing was recorded, `recorded` when the action was recorded but not
+   *   confirmed done, and `completed` when it finished.
+   * @throws WorkspaceAccessError 409 when the key was used for a different operation.
    */
-  hasRecordedMemberCredentialAction?(
+  readMemberCredentialActionProgress?(
     workspaceId: string,
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
-  ): Promise<boolean>
+  ): Promise<WorkspaceMemberCredentialProgress>
+  /**
+   * Marks a recorded administrator credential action as finished in Cognito.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   */
+  completeMemberCredentialAction?(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<void>
   /** 指定 member が active な場合だけ返します。 */
   getActiveMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /** 管理画面用の member / invitation snapshot を取得します。 */
@@ -1675,17 +1702,18 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
-   * 管理者が active member の sign-in 資格情報を操作する権限を確認し、操作を audit に記録します。
+   * Checks that an administrator may change an active member's sign-in credentials and records
+   * the action in the audit log, together with a progress record for retries.
    *
-   * Owner はすべての member を、admin は member と guest を操作できます。自分自身は対象にできません
-   * （自分の password と MFA はアカウント設定から変更します）。
+   * Owners may act on every member, admins on members and guests. Nobody may act on themselves;
+   * they change their own password and MFA in their account settings.
    *
-   * @param workspaceId - 対象 Workspace ID です。
-   * @param actorMemberKey - 操作する管理者の member key です。
-   * @param targetMemberKey - 対象 member の member key です。
-   * @param action - 記録する操作です。
-   * @param auditContext - Request の audit context です。
-   * @returns 確認した対象 member です。
+   * @param workspaceId - Workspace of the action.
+   * @param actorMemberKey - Member key of the administrator.
+   * @param targetMemberKey - Member key of the target member.
+   * @param action - Action to record.
+   * @param auditContext - Audit context of the request.
+   * @returns The checked target member, and whether the action was already recorded.
    */
   async recordMemberCredentialAction(
     workspaceId: string,
@@ -1719,7 +1747,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       auditContext,
     )
 
-    if (!auditPut) {
+    const auditItem = auditPut?.Put?.Item
+    if (!auditPut || !auditItem) {
       return { member: target, alreadyRecorded: false }
     }
 
@@ -1743,22 +1772,45 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             },
           },
           auditPut,
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                workspaceId: normalizedWorkspaceId,
+                recordKey: createCredentialActionRecordKey(auditItem.eventId),
+                entryType: 'workspace-member-credential-action',
+                memberKey: target.memberKey,
+                actorKey: auditItem.actorKey,
+                action,
+                status: 'recorded',
+                recordedAt: this.clock().toISOString(),
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
         ],
       }))
       return { member: target, alreadyRecorded: false }
     } catch (error) {
-      if (
-        isTransactionConditionalFailureAt(error, 2) &&
-        !isTransactionConditionalFailureAt(error, 0) &&
+      const replayed = !isTransactionConditionalFailureAt(error, 0) &&
         !isTransactionConditionalFailureAt(error, 1) &&
-        await this.hasRecordedMemberCredentialAction(
+        (isTransactionConditionalFailureAt(error, 2) || isTransactionConditionalFailureAt(error, 3))
+      if (replayed) {
+        const progress = await this.readMemberCredentialActionProgress(
           normalizedWorkspaceId,
           target.memberKey,
           action,
           auditContext,
         )
-      ) {
-        return { member: target, alreadyRecorded: true }
+        if (progress !== 'none') {
+          return { member: target, alreadyRecorded: true }
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceIdempotencyConflict',
+          'This idempotency key was already used for a different operation.',
+          { cause: error },
+        )
       }
       if (isConditionalTransactionCancellation(error)) {
         throw new WorkspaceAccessError(
@@ -1773,12 +1825,76 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
-   * 同じ idempotency key の資格情報操作が既に audit に記録されているかを確認します。
+   * Reads how far a credential action under the same idempotency key got.
    *
-   * Audit event ID は idempotency key から決まるため、同じ key の retry は同じ event を指します。
-   * 別の actor・対象・操作の event だった場合は key の使い回しとして conflict にします。
+   * The progress record is written in the same transaction as the audit event and marked
+   * completed after the Cognito change. A record for another actor, member, or action means
+   * the key was reused, which is a conflict.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   * @returns The progress of the action.
    */
-  async hasRecordedMemberCredentialAction(
+  async readMemberCredentialActionProgress(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMemberCredentialProgress> {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const expected = this.createMemberCredentialAuditPut(
+      normalizedWorkspaceId,
+      normalizeMemberKey(targetMemberKey),
+      action,
+      auditContext,
+    )?.Put?.Item
+    if (!expected) {
+      return 'none'
+    }
+
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createCredentialActionRecordKey(expected.eventId),
+        },
+        ConsistentRead: true,
+      }))
+      const recorded = response.Item
+      if (!recorded) {
+        return 'none'
+      }
+      if (
+        recorded.memberKey !== normalizeMemberKey(targetMemberKey) ||
+        recorded.action !== action ||
+        recorded.actorKey !== expected.actorKey
+      ) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceIdempotencyConflict',
+          'This idempotency key was already used for a different operation.',
+        )
+      }
+      return recorded.status === 'completed' ? 'completed' : 'recorded'
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) throw error
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Marks a credential action as finished in Cognito, so that a retry with the same
+   * idempotency key does not change the account again.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   */
+  async completeMemberCredentialAction(
     workspaceId: string,
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
@@ -1790,40 +1906,32 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       normalizeMemberKey(targetMemberKey),
       action,
       auditContext,
-    )?.Put
-    if (!expected?.Item) {
-      return false
+    )?.Put?.Item
+    if (!expected) {
+      return
     }
 
     try {
-      const response = await this.documentClient.send(new GetCommand({
-        TableName: expected.TableName,
-        Key: { directoryId: expected.Item.directoryId, eventId: expected.Item.eventId },
-        ConsistentRead: true,
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createCredentialActionRecordKey(expected.eventId),
+        },
+        UpdateExpression: 'SET #status = :completed, completedAt = :completedAt',
+        ConditionExpression: 'attribute_exists(recordKey)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':completed': 'completed',
+          ':completedAt': this.clock().toISOString(),
+        },
       }))
-      const recorded = response.Item
-      if (!recorded) {
-        return false
-      }
-      if (
-        recorded.eventType !== expected.Item.eventType ||
-        recorded.entityId !== expected.Item.entityId ||
-        recorded.actorKey !== expected.Item.actorKey
-      ) {
-        throw new WorkspaceAccessError(
-          409,
-          'WorkspaceIdempotencyConflict',
-          'This idempotency key was already used for a different operation.',
-        )
-      }
-      return true
     } catch (error) {
-      if (error instanceof WorkspaceAccessError) throw error
       throw toWorkspaceAccessError(error)
     }
   }
 
-  /** 資格情報操作の audit Put を作ります。audit が無効なら undefined です。 */
+  /** Builds the audit Put of a credential action, or undefined when auditing is off. */
   private createMemberCredentialAuditPut(
     workspaceId: string,
     targetMemberKey: string,
@@ -3099,6 +3207,11 @@ function createMemberRecordKey(memberKey: string) {
 
 function createInvitationRecordKey(invitationId: string) {
   return `INVITATION#${normalizeEmail(invitationId)}`
+}
+
+/** Key of the record that tracks one administrator credential action, named by its audit event. */
+function createCredentialActionRecordKey(auditEventId: unknown) {
+  return `CREDENTIAL_ACTION#${String(auditEventId)}`
 }
 
 function requireWorkspaceRole(value: unknown): WorkspaceRole {

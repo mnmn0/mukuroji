@@ -48,14 +48,14 @@ function renderPublicPage(element: ReactElement, initialEntry: string) {
 }
 
 /**
- * 確認コードを送る前のパスワード再設定画面です。
+ * Password reset page before the confirmation code is sent.
  */
 export const ForgotPassword: Story = {
   render: () => renderPublicPage(<ForgotPasswordPage initialLocale="ja" />, '/forgot-password'),
 }
 
 /**
- * 確認コードと新しいパスワードを入力するパスワード再設定画面です。
+ * Password reset page that takes the confirmation code and the new password.
  */
 export const ForgotPasswordConfirm: Story = {
   render: () => renderPublicPage(

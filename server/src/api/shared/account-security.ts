@@ -29,6 +29,19 @@ export function hasEnabledMfa(user: GetUserResponse) {
 }
 
 /**
+ * Checks whether a Cognito user has an authenticator app (TOTP) registered.
+ *
+ * Unlike {@link hasEnabledMfa}, SMS or email MFA does not count.
+ *
+ * @param user - Cognito GetUser response.
+ * @returns Whether TOTP MFA is enabled.
+ */
+export function hasSoftwareTokenMfa(user: GetUserResponse) {
+  return user.PreferredMfaSetting === 'SOFTWARE_TOKEN_MFA' ||
+    user.UserMFASettingList?.includes('SOFTWARE_TOKEN_MFA') === true
+}
+
+/**
  * Checks whether an access token belongs to an enterprise SSO session.
  *
  * SSO users have no mukuroji password and get MFA from their identity provider.
@@ -47,7 +60,8 @@ export function isSsoSessionAccessToken(accessToken: string) {
  *
  * It applies the same rule as session validation: MFA is required when the policy requires it
  * for everyone, or when the user is external (a guest, or outside every verified domain) and
- * the external-access policy requires it.
+ * the external-access policy requires it. An invited user who has not signed in yet is
+ * classified by the invitation, so the first sign-in already asks for an authenticator app.
  *
  * @param user - Cognito GetUser response.
  * @param accessToken - Access token of the user.
@@ -62,10 +76,11 @@ export async function readMfaRequirement(user: GetUserResponse, accessToken: str
   if (!policy) return { policy, mfaRequired: false }
   if (policy.mfaRequirement === 'required') return { policy, mfaRequired: true }
   if (!policy.externalAccess.requireMfa) return { policy, mfaRequired: false }
-  const member = await workspaceDependencies.workspaceAccess.getActiveMember(
-    principal.directoryId,
-    principal.userKey,
-  )
+  const workspaceAccess = workspaceDependencies.workspaceAccess
+  const member = await workspaceAccess.getActiveMember(principal.directoryId, principal.userKey) ??
+    // Before the first sign-in accepts the invitation there is no member yet; the invitation
+    // carries the role the member will get.
+    await workspaceAccess.getInvitation(principal.directoryId, principal.userKey)
   return {
     policy,
     mfaRequired: member !== undefined && isEnterpriseExternalMember(snapshot, member),

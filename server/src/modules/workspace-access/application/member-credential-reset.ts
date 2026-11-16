@@ -3,6 +3,7 @@ import {
   WorkspaceAccessError,
   type WorkspaceMember,
   type WorkspaceMemberCredentialAction,
+  type WorkspaceMemberCredentialProgress,
 } from '../workspace-access'
 
 /** Sign-in state of a member's password account that decides whether a reset applies. */
@@ -21,13 +22,13 @@ export type MemberCredentialResetPorts = {
   isSsoManagedEmail(email: string): Promise<boolean>
   /** Reads the member's password account state. */
   readSignInAccount(memberKey: string): Promise<MemberSignInAccount>
-  /** Tells whether a request with the same idempotency key already recorded this action. */
-  hasRecordedAction(
+  /** Reads how far a request with the same idempotency key got with this action. */
+  readActionProgress(
     workspaceId: string,
     memberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext: MutationAuditContext | undefined,
-  ): Promise<boolean>
+  ): Promise<WorkspaceMemberCredentialProgress>
   /** Checks the actor's authority and records the action in the audit log. */
   recordAction(
     workspaceId: string,
@@ -36,6 +37,13 @@ export type MemberCredentialResetPorts = {
     action: WorkspaceMemberCredentialAction,
     auditContext: MutationAuditContext | undefined,
   ): Promise<unknown>
+  /** Marks the recorded action as finished, so that a retry does not change the account again. */
+  completeAction(
+    workspaceId: string,
+    memberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<void>
   /** Invalidates the password and emails a reset code. */
   resetPassword(memberKey: string): Promise<void>
   /** Removes the member's authenticator app. */
@@ -63,10 +71,11 @@ export type MemberCredentialResetInput = {
 /**
  * Sends a password reset to a member, or removes a lost authenticator app, for an administrator.
  *
- * The action is recorded in the audit log before the account changes. A retry with the same
- * idempotency key resumes after the recorded audit event, so a request interrupted between the
- * audit write and the account change still completes. When the earlier attempt already removed
- * the authenticator, the retry reports success instead of "not enrolled".
+ * The action is recorded in the audit log before the account changes, and marked completed
+ * after it. A retry with the same idempotency key does nothing once the action completed, so a
+ * late retry cannot undo an app or password the member set up since. A retry of an action that
+ * was recorded but not completed resumes it without the eligibility checks, because the earlier
+ * attempt may already have changed the account.
  *
  * @param ports - Member, identity, and audit ports.
  * @param input - Actor, member, action, and audit context.
@@ -88,33 +97,44 @@ export async function resetMemberCredential(
     )
   }
 
-  const account = await ports.readSignInAccount(member.memberKey)
-  const blocked = resolveBlockedReset(input.action, account)
-  if (blocked) {
-    if (await ports.hasRecordedAction(input.workspaceId, member.memberKey, input.action, input.auditContext)) {
-      return
-    }
-    throw blocked
-  }
-
-  await ports.recordAction(
+  const progress = await ports.readActionProgress(
     input.workspaceId,
-    input.actorMemberKey,
     member.memberKey,
     input.action,
     input.auditContext,
   )
+  if (progress === 'completed') {
+    return
+  }
+  if (progress === 'none') {
+    const blocked = resolveBlockedReset(input.action, await ports.readSignInAccount(member.memberKey))
+    if (blocked) {
+      throw blocked
+    }
+    await ports.recordAction(
+      input.workspaceId,
+      input.actorMemberKey,
+      member.memberKey,
+      input.action,
+      input.auditContext,
+    )
+  }
 
   if (input.action === 'mfa-reset') {
     await ports.disableAuthenticator(member.memberKey)
-    return
+  } else {
+    await ports.resetPassword(member.memberKey)
+    try {
+      await ports.signOutEverywhere(member.memberKey)
+    } catch (error) {
+      ports.reportFailure('Failed to sign the member out after a password reset.', error)
+    }
   }
 
-  await ports.resetPassword(member.memberKey)
   try {
-    await ports.signOutEverywhere(member.memberKey)
+    await ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext)
   } catch (error) {
-    ports.reportFailure('Failed to sign the member out after a password reset.', error)
+    ports.reportFailure('Failed to mark the credential reset as completed.', error)
   }
 }
 
