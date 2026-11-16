@@ -794,7 +794,8 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     error.code === 'ProjectLifecycleTransitionNotAllowed' ||
     error.code === 'ProjectArchived' ||
     error.code === 'ProjectClosedForNewWorkItems' ||
-    error.code === 'ProjectCharterPersonInactive'
+    error.code === 'ProjectCharterPersonInactive' ||
+    error.code === 'ProjectCharterAuthorizationChanged'
   ) {
     return c.json({ code: error.code, message: error.message }, 409)
   }

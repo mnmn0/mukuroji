@@ -19,10 +19,24 @@ export type ProjectCharterScope = {
 }
 
 /**
+ * Commit-time proof that the caller is still authorized as it was when the route checked it.
+ *
+ * The fences fail the write when the caller's membership, Project role, or Enterprise grants
+ * change between the authorization check and the commit.
+ */
+export type ProjectCharterCallerAuthorization<TFence> = {
+  /** Member key whose membership the fences pin, when the caller is a Workspace member. */
+  memberKey?: string
+  /** Opaque condition checks committed with the write. */
+  fences: readonly TFence[]
+}
+
+/**
  * Charter persistence required by the use cases.
  *
- * `TFence` is an opaque commit-time proof built by the person resolver and checked by the store
- * in the same transaction; `TAudit` is the audit context the inbound adapter captured.
+ * `TFence` is an opaque commit-time proof built by the person resolver or the caller
+ * authorization and checked by the store in the same transaction; `TAudit` is the audit context
+ * the inbound adapter captured.
  */
 export type ProjectCharterStore<TFence, TAudit> = {
   /** Strongly reads the charter and lifecycle state. */
@@ -36,6 +50,7 @@ export type ProjectCharterStore<TFence, TAudit> = {
     charter: ProjectCharter,
     auditContext: TAudit,
     personFences: TFence[],
+    authorizationFences: TFence[],
   ): Promise<ProjectCharterState>
   /** Stores an already decided lifecycle state, guarded by the same revision. */
   transitionProjectLifecycle(
@@ -45,6 +60,7 @@ export type ProjectCharterStore<TFence, TAudit> = {
     expectedRevision: number,
     state: StoredProjectLifecycleState,
     auditContext: TAudit,
+    authorizationFences: TFence[],
   ): Promise<ProjectCharterState>
 }
 
@@ -67,6 +83,8 @@ export type UpdateProjectCharterPorts<TFence, TAudit> = {
   resolvePerson(workspaceId: string, userId: string): Promise<ResolvedProjectCharterPerson<TFence>>
   /** Best-effort projection of the committed charter into Workspace search. */
   projectSearchDocument(workspaceId: string, state: ProjectCharterState): Promise<void>
+  /** Fences of the caller's authorization, committed with the charter. */
+  callerAuthorization: ProjectCharterCallerAuthorization<TFence>
 }
 
 /**
@@ -74,8 +92,9 @@ export type UpdateProjectCharterPorts<TFence, TAudit> = {
  *
  * The owner and sponsor are resolved to active members, and their membership fences commit with
  * the charter, so a deactivation that lands after the read cannot be saved as owner or sponsor.
+ * The caller's authorization fences commit with it too, so a revoked grant cannot still write.
  *
- * @param ports - Persistence, person resolution, and search projection.
+ * @param ports - Persistence, person resolution, search projection, and caller fences.
  * @param scope - Project whose charter is replaced; the caller already authorized it.
  * @param body - Untrusted request body.
  * @param auditContext - Builds the audit context of the request.
@@ -99,11 +118,18 @@ export async function updateProjectCharterUseCase<TFence, TAudit>(
     ...(owner === undefined ? {} : { owner: owner.person }),
     ...(sponsor === undefined ? {} : { sponsor: sponsor.person }),
   })
-  // One fence per member: DynamoDB rejects a transaction naming one item twice.
+  // One fence per member: DynamoDB rejects a transaction naming one item twice. The caller's own
+  // membership fence already pins the caller as an active member, so it covers the caller as a
+  // charter person too.
+  const callerMemberKey = ports.callerAuthorization.memberKey === undefined
+    ? undefined
+    : normalizeCharterMemberKey(ports.callerAuthorization.memberKey)
   const personFences = [...new Map(
-    [owner, sponsor].flatMap((resolved) =>
-      resolved?.fence === undefined ? [] : [[resolved.person.userId, resolved.fence] as const]
-    ),
+    [owner, sponsor].flatMap((resolved) => {
+      if (resolved?.fence === undefined) return []
+      const memberKey = normalizeCharterMemberKey(resolved.person.userId)
+      return memberKey === callerMemberKey ? [] : [[memberKey, resolved.fence] as const]
+    }),
   ).values()]
   const state = await ports.store.updateProjectCharter(
     scope.workspaceId,
@@ -113,33 +139,47 @@ export async function updateProjectCharterUseCase<TFence, TAudit>(
     charter,
     auditContext({ teamId: scope.teamId, projectId: scope.projectId, ...update.value }),
     personFences,
+    [...ports.callerAuthorization.fences],
   )
   await ports.projectSearchDocument(scope.workspaceId, state)
   return state
 }
 
+/**
+ * Normalizes a member key the way Workspace membership rows are keyed.
+ *
+ * @param memberKey - Member key from a person or the caller.
+ * @returns The key used to tell whether two fences name the same membership row.
+ */
+function normalizeCharterMemberKey(memberKey: string) {
+  return memberKey.trim().toLowerCase()
+}
+
 /** Ports used by the lifecycle transition use case. */
-export type TransitionProjectLifecyclePorts<TAudit> = {
+export type TransitionProjectLifecyclePorts<TFence, TAudit> = {
   /** Charter persistence. */
-  store: Pick<ProjectCharterStore<never, TAudit>, 'getProjectCharter' | 'transitionProjectLifecycle'>
+  store: Pick<ProjectCharterStore<TFence, TAudit>, 'getProjectCharter' | 'transitionProjectLifecycle'>
   /** Rejects when the caller may not approve or reject a proposed Project. */
   requireProposalDecision(): void
+  /** Fences of the caller's authorization, committed with the transition. */
+  callerAuthorization: ProjectCharterCallerAuthorization<TFence>
 }
 
 /**
  * Moves a Project to another lifecycle state.
  *
  * Deciding on a `proposed` Project is the approval step and needs its own permission. The store
- * guards the write with the revision the decision was based on.
+ * guards the write with the revision the decision was based on and with the caller's
+ * authorization fences.
  *
- * @param ports - Persistence and the proposal-decision permission check.
+ * @param ports - Persistence, the proposal-decision permission check, and caller fences.
  * @param scope - Project to move; the caller already authorized managing it.
  * @param body - Untrusted request body.
  * @param auditContext - Builds the audit context of the request.
  * @returns The committed charter state.
  */
-export async function transitionProjectLifecycleUseCase<TAudit>(
-  ports: TransitionProjectLifecyclePorts<TAudit>,
+export async function transitionProjectLifecycleUseCase<TFence, TAudit>(
+  ports: TransitionProjectLifecyclePorts<TFence, TAudit>,
   scope: ProjectCharterScope,
   body: unknown,
   auditContext: (transition: Record<string, unknown>) => TAudit,
@@ -157,5 +197,6 @@ export async function transitionProjectLifecycleUseCase<TAudit>(
     transition.value.expectedRevision,
     decision.to,
     auditContext({ teamId: scope.teamId, projectId: scope.projectId, ...transition.value }),
+    [...ports.callerAuthorization.fences],
   )
 }

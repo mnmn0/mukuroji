@@ -804,6 +804,7 @@ export type ProjectDirectoryClient = {
    * @param charter - Validated next charter with resolved people.
    * @param auditContext - Audit context of the mutation.
    * @param personConditionChecks - Membership fences of the owner and sponsor, checked at commit.
+   * @param authorizationConditionChecks - Fences of the caller's authorization, checked at commit.
    * @returns The committed charter state.
    */
   updateProjectCharter(
@@ -814,6 +815,7 @@ export type ProjectDirectoryClient = {
     charter: ProjectCharter,
     auditContext?: MutationAuditContext,
     personConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ProjectCharterState>
   /**
    * Stores a lifecycle state the application already decided is allowed.
@@ -827,6 +829,7 @@ export type ProjectDirectoryClient = {
    * @param expectedRevision - Charter revision the decision was based on.
    * @param state - Lifecycle state to store.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Fences of the caller's authorization, checked at commit.
    * @returns The committed charter state.
    */
   transitionProjectLifecycle(
@@ -836,6 +839,7 @@ export type ProjectDirectoryClient = {
     expectedRevision: number,
     state: StoredProjectLifecycleState,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ProjectCharterState>
 }
 
@@ -2362,10 +2366,12 @@ export class DynamoDbProjectDirectoryClient {
     charter: ProjectCharter,
     auditContext?: MutationAuditContext,
     personConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     await this.ensureLocalAuditTable()
     let codeReservationIndex: number | undefined
     let personConditionStartIndex: number | undefined
+    let authorizationConditionStartIndex: number | undefined
     try {
       const project = await this.readMutableTeamProjectItem(
         directoryId,
@@ -2434,6 +2440,8 @@ export class DynamoDbProjectDirectoryClient {
       }
       personConditionStartIndex = transactItems.length
       transactItems.push(...personConditionChecks)
+      authorizationConditionStartIndex = transactItems.length
+      transactItems.push(...authorizationConditionChecks)
       const changedFields = listChangedProjectCharterFields(before, charter)
       transactItems.push(...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
         directoryId,
@@ -2465,11 +2473,10 @@ export class DynamoDbProjectDirectoryClient {
           'The Project code is already used in this Workspace.',
         )
       }
-      const personStart = personConditionStartIndex
-      if (
-        personStart !== undefined &&
-        personConditionChecks.some((_, index) => isTransactionConditionalFailureAt(error, personStart + index))
-      ) {
+      if (failedAnyConditionFrom(error, authorizationConditionStartIndex, authorizationConditionChecks)) {
+        throw createProjectCharterAuthorizationChangedError()
+      }
+      if (failedAnyConditionFrom(error, personConditionStartIndex, personConditionChecks)) {
         throw new ProjectDataError(
           409,
           'ProjectCharterPersonInactive',
@@ -2492,8 +2499,11 @@ export class DynamoDbProjectDirectoryClient {
     expectedRevision: number,
     state: StoredProjectLifecycleState,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     await this.ensureLocalAuditTable()
+    // The Project update comes first, so the caller's fences start at index 1.
+    const authorizationConditionStartIndex = 1
     try {
       const project = await this.readMutableTeamProjectItem(
         directoryId,
@@ -2527,6 +2537,7 @@ export class DynamoDbProjectDirectoryClient {
               },
             },
           },
+          ...authorizationConditionChecks,
           ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
             directoryId,
             eventType: 'project.lifecycle_changed',
@@ -2549,6 +2560,9 @@ export class DynamoDbProjectDirectoryClient {
         charterUpdatedAt: updatedAt,
       })
     } catch (error) {
+      if (failedAnyConditionFrom(error, authorizationConditionStartIndex, authorizationConditionChecks)) {
+        throw createProjectCharterAuthorizationChangedError()
+      }
       if (hasTransactionConditionalFailure(error)) {
         throw createProjectCharterRevisionConflictError()
       }
@@ -3440,6 +3454,36 @@ function requireDynamoDbTransactionCapacity(
         `the supported maximum is ${DYNAMODB_TRANSACTION_MAX_ACTIONS}.`,
     )
   }
+}
+
+/**
+ * Creates the error raised when the caller's authorization changed before the write committed.
+ *
+ * @returns A 409 error that asks the caller to reload.
+ */
+function createProjectCharterAuthorizationChangedError() {
+  return new ProjectDataError(
+    409,
+    'ProjectCharterAuthorizationChanged',
+    'Your access to this Project changed. Reload and try again.',
+  )
+}
+
+/**
+ * Checks whether a transaction failed on one of a run of condition checks.
+ *
+ * @param error - Transaction failure.
+ * @param start - Index of the first check in the transaction, if the checks were added.
+ * @param checks - The run of condition checks.
+ * @returns Whether one of those checks failed.
+ */
+function failedAnyConditionFrom(
+  error: unknown,
+  start: number | undefined,
+  checks: readonly unknown[],
+) {
+  return start !== undefined &&
+    checks.some((_, index) => isTransactionConditionalFailureAt(error, start + index))
 }
 
 /**

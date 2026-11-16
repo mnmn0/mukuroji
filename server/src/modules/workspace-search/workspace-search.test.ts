@@ -222,6 +222,42 @@ test('derives document keys from entity identity instead of trusting producer in
   })).toThrow('record key does not match')
 })
 
+test('keeps the stored creator when a Project projection is rebuilt without one', async () => {
+  const created = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    creatorUserId: 'creator@example.com',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([created]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const replaced = await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  }), { sourceRevision: 1, preserveCreator: true })
+  const withoutOption = await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    sourceRevision: 2,
+  }), { sourceRevision: 2 })
+
+  expect(createWorkspaceSearchDocument(replaced)).toEqual(replaced)
+  expect(replaced).toMatchObject({ creatorUserId: 'creator@example.com', body: 'OPS' })
+  expect(withoutOption.creatorUserId).toBeUndefined()
+})
+
 test('does not let an older source projection replace or remove a newer document', async () => {
   const current = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',

@@ -273,6 +273,42 @@ describe('Project charter persistence', () => {
     expect(readTransactItems(writes[0])[1]).toEqual(personCheck)
   })
 
+  test('fences the caller authorization in the charter and lifecycle transactions', async () => {
+    const callerCheck = {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId, recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#status = :active AND #version = :version',
+      },
+    }
+    const charterWrite = createFakeDocumentClient([teamRow(), projectRow()], createCancellation(1, 2))
+    const charterClient = new DynamoDbProjectDirectoryClient('DirectoryTable', charterWrite.documentClient)
+    await expect(charterClient.updateProjectCharter(
+      workspaceId,
+      'core-team',
+      'refero',
+      0,
+      { tags: [], repositoryUrls: [] },
+      undefined,
+      [],
+      [callerCheck],
+    )).rejects.toMatchObject({ code: 'ProjectCharterAuthorizationChanged', status: 409 })
+    expect(readTransactItems(charterWrite.writes[0])[1]).toEqual(callerCheck)
+
+    const lifecycleWrite = createFakeDocumentClient([teamRow(), projectRow()], createCancellation(1, 2))
+    const lifecycleClient = new DynamoDbProjectDirectoryClient('DirectoryTable', lifecycleWrite.documentClient)
+    await expect(lifecycleClient.transitionProjectLifecycle(
+      workspaceId,
+      'core-team',
+      'refero',
+      0,
+      'on-hold',
+      undefined,
+      [callerCheck],
+    )).rejects.toMatchObject({ code: 'ProjectCharterAuthorizationChanged', status: 409 })
+    expect(readTransactItems(lifecycleWrite.writes[0])[1]).toEqual(callerCheck)
+  })
+
   test('rejects charter and lifecycle changes on an archived Project', async () => {
     const { documentClient, writes } = createFakeDocumentClient([
       teamRow(),

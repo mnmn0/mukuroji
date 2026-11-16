@@ -11,6 +11,7 @@ import {
   type TaskViewAccessScope,
   type WorkspaceSearchAccessScope,
   type WorkspaceSearchDocument,
+  type WorkspaceSearchProjectionWriteOptions,
 } from '../../modules/workspace-search/workspace-search'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import {
@@ -526,12 +527,13 @@ export function toWorkspaceSearchErrorResponse(c: Context, error: unknown) {
  *
  * @param createDocument - Factory for the search document.
  * @param operation - Operation name used in logs.
- * @param options - Optional source revision; an older projection then never replaces a newer one.
+ * @param options - Optional source revision, so an older projection never replaces a newer one,
+ *   and whether the stored creator is kept.
  */
 export async function projectWorkspaceSearchDocumentBestEffort(
   createDocument: () => WorkspaceSearchDocument,
   operation: string,
-  options?: { sourceRevision?: number },
+  options?: WorkspaceSearchProjectionWriteOptions,
 ) {
   if (!isWorkspaceSearchProjectionEnabled()) return
   try {

@@ -475,6 +475,11 @@ export class WorkspaceSearchError extends Error {
 export type WorkspaceSearchProjectionWriteOptions = {
   /** Only replace or remove a document whose stored source revision is not newer. */
   sourceRevision?: number
+  /**
+   * Keeps the creator and creation time of the stored document when the replacement has none,
+   * for projections whose source row does not record who created the entity.
+   */
+  preserveCreator?: boolean
 }
 
 /** Marks persisted projection content that disagrees with its server-owned digest. */
@@ -1505,7 +1510,10 @@ export class DynamoDbWorkspaceSearchClient {
     options?: WorkspaceSearchProjectionWriteOptions,
   ) {
     await this.ensureLocalTable()
-    const document = createWorkspaceSearchDocument(input)
+    const replacement = createWorkspaceSearchDocument(input)
+    const document = options?.preserveCreator && replacement.creatorUserId === undefined
+      ? await this.withStoredCreator(replacement)
+      : replacement
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -1534,6 +1542,30 @@ export class DynamoDbWorkspaceSearchClient {
       }
     }
     return document
+  }
+
+  /**
+   * Copies the creator and creation time of the stored document onto a replacement without them.
+   *
+   * @param document - Replacement document that lacks a creator.
+   * @returns The replacement, with the stored creator when the stored document has one.
+   */
+  private async withStoredCreator(document: WorkspaceSearchDocument) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId: document.workspaceId, recordKey: document.recordKey },
+      ConsistentRead: true,
+    }))
+    const stored = response.Item
+    const creatorUserId = typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined
+    if (!creatorUserId) return document
+    const createdAt = document.createdAt ??
+      (typeof stored?.createdAt === 'string' ? stored.createdAt : undefined)
+    return createWorkspaceSearchDocument({
+      ...document,
+      creatorUserId,
+      ...(createdAt ? { createdAt } : {}),
+    })
   }
 
   /** Search document を entity key で削除します。 */

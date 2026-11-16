@@ -89,7 +89,13 @@ describe('Project charter API', () => {
       },
     })
     expect(calls.projectCharterUpdates).toEqual([
-      expect.objectContaining({ teamId: 'core-team', projectId: 'refero', expectedRevision: 0, audited: true }),
+      expect.objectContaining({
+        teamId: 'core-team',
+        projectId: 'refero',
+        expectedRevision: 0,
+        audited: true,
+        authorizationRecordKeys: ['MEMBER#demo@example.com'],
+      }),
     ])
   })
 
@@ -170,7 +176,12 @@ describe('Project charter API', () => {
     const unknown = await send(lifecyclePath, 'POST', { expectedRevision: 1, state: 'done' })
     expect(unknown.status).toBe(400)
     expect(calls.projectLifecycleTransitions).toEqual([
-      expect.objectContaining({ state: 'on-hold', expectedRevision: 0, audited: true }),
+      expect.objectContaining({
+        state: 'on-hold',
+        expectedRevision: 0,
+        audited: true,
+        authorizationRecordKeys: ['MEMBER#demo@example.com'],
+      }),
     ])
   })
 

@@ -110,6 +110,7 @@ export const projectsMessages = {
   'projects.charter.error.codeUsed': 'This Project code is already in use.',
   'projects.charter.error.invalid': 'Check the values: {reason}',
   'projects.charter.error.person': 'Choose active Workspace members as the owner and sponsor.',
+  'projects.charter.error.authorization': 'Your access to this Project changed. Reload and try again.',
   'projects.charter.error.transition': 'The lifecycle could not be changed.',
   'projects.charter.staleDraft': 'Someone else updated this charter. Your unsaved edits are kept, but saving them now will report a conflict.',
   'projects.charter.discardDraft': 'Discard edits and show the latest',

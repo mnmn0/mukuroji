@@ -6,6 +6,7 @@ import {
   ProjectDataError,
   transitionProjectLifecycleUseCase,
   updateProjectCharterUseCase,
+  type ProjectCharterCallerAuthorization,
   type ProjectDirectoryProjectResponse,
   type ProjectDirectoryTeamResponse,
   type ResolvedProjectCharterPerson,
@@ -19,6 +20,7 @@ import {
 type ProjectCharterPersonConditionCheck = WorkspaceAccessTransactWriteItem
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createProjectSearchDocument } from '../shared/document-access'
+import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
@@ -81,6 +83,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
           store: workspaceDependencies.projectDirectory,
           resolvePerson: resolveCharterPerson,
           projectSearchDocument: projectCharterSearchDocumentBestEffort,
+          callerAuthorization: createCharterCallerAuthorization(principal),
         },
         { workspaceId: principal.directoryId, teamId, projectId },
         await readJson<unknown>(c.req),
@@ -106,6 +109,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
         {
           store: workspaceDependencies.projectDirectory,
           requireProposalDecision: () => requireProjectProposalDecision(principal),
+          callerAuthorization: createCharterCallerAuthorization(principal),
         },
         { workspaceId: principal.directoryId, teamId, projectId },
         await readJson<unknown>(c.req),
@@ -147,6 +151,27 @@ async function requireProjectCharterManagement(principal: WorkspacePrincipal, pr
     if (!(error instanceof WorkspaceAccessError)) throw error
   }
   await requireProjectPermission(principal, projectId, 'manager')
+}
+
+/**
+ * Builds the commit-time fences of the caller's authorization.
+ *
+ * The caller's membership row is pinned at the version read for this request, and Project role
+ * changes advance that version, so a downgraded manager fails the write. Enterprise principals
+ * also pin the Workspace CONTROL revision, which every role or assignment change advances.
+ * Service accounts have no membership row, so only the CONTROL revision applies to them.
+ *
+ * @param principal - Principal the route authorized.
+ * @returns The fences and the member key they pin.
+ */
+function createCharterCallerAuthorization(
+  principal: WorkspacePrincipal,
+): ProjectCharterCallerAuthorization<ProjectCharterPersonConditionCheck> {
+  const isMember = principal.principalKind !== 'service-account'
+  return {
+    ...(isMember ? { memberKey: principal.userKey } : {}),
+    fences: createPlanningCallerAuthorizationConditionChecks(principal, [], isMember),
+  }
 }
 
 /**
@@ -302,7 +327,8 @@ async function projectCharterSearchDocumentBestEffort(workspaceId: string, state
       sourceRevision,
     ),
     'project charter update',
-    { sourceRevision },
+    // The Project row does not record its creator, so the creator projected at creation is kept.
+    { sourceRevision, preserveCreator: true },
   )
 }
 

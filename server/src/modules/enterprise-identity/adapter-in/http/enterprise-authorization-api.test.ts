@@ -1081,6 +1081,61 @@ test.each([
   },
 )
 
+test('keeps the Team qualifier when the directory lists the Project only under another Team', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
+    // design-team's own shared-launch is archived, so the active directory lists the Project
+    // only under core-team.
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+      additionalTeams: [{ id: 'design-team', name: 'Design Team', projects: [] }],
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readSnapshot = identity.getSnapshot.bind(identity)
+    identity.getSnapshot = async (currentWorkspaceId) => {
+      const snapshot = await readSnapshot(currentWorkspaceId)
+      return {
+        ...snapshot,
+        roleAssignments: [{
+          workspaceId,
+          assignmentId: 'core-project-grant',
+          principalKind: 'member',
+          principalId: 'demo@example.com',
+          roleId: 'project:manager',
+          scope: {
+            workspaceId,
+            kind: 'project',
+            targetId: 'shared-launch',
+            parentTeamId: 'core-team',
+          },
+          source: 'direct',
+        }],
+      }
+    }
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    const response = await app.request('/api/teams/design-team/projects/shared-launch/charter', {
+      headers: {
+        Authorization: `Bearer ${createAccessToken([], {
+          client_id: 'mukuroji-main-client',
+          token_use: 'access',
+        })}`,
+      },
+    })
+
+    expect(response.status).toBe(403)
+  })
+})
+
 test('hides Workspace-scoped immutable Planning context after an Initiative moves to a Project', async () => {
   await withTestEnvironment({
     COGNITO_CLIENT_ID: 'mukuroji-main-client',

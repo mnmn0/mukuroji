@@ -1618,6 +1618,8 @@ function configureFakeProjectClients(
       expectedRevision: number
       charter: ProjectCharter
       audited: boolean
+      /** Record keys named by the caller's authorization fences. */
+      authorizationRecordKeys: string[]
     }>,
     projectLifecycleTransitions: [] as Array<{
       directoryId: string
@@ -1626,6 +1628,8 @@ function configureFakeProjectClients(
       expectedRevision: number
       state: ProjectLifecycleState
       audited: boolean
+      /** Record keys named by the caller's authorization fences. */
+      authorizationRecordKeys: string[]
     }>,
     cognitoIdentityProviderDescriptions: [] as string[],
     cognitoSsoAppClientDescriptions: [] as string[],
@@ -2419,7 +2423,16 @@ function configureFakeProjectClients(
       async getProjectCharter(_directoryId, teamId, projectId) {
         return structuredClone(readProjectCharterState(teamId, projectId))
       },
-      async updateProjectCharter(directoryId, teamId, projectId, expectedRevision, charter, auditContext) {
+      async updateProjectCharter(
+        directoryId,
+        teamId,
+        projectId,
+        expectedRevision,
+        charter,
+        auditContext,
+        _personConditionChecks,
+        authorizationConditionChecks,
+      ) {
         const current = requireMutableProjectCharterState(teamId, projectId, expectedRevision)
         calls.projectCharterUpdates.push({
           directoryId,
@@ -2428,6 +2441,7 @@ function configureFakeProjectClients(
           expectedRevision,
           charter: structuredClone(charter),
           audited: auditContext !== undefined,
+          authorizationRecordKeys: readConditionCheckRecordKeys(authorizationConditionChecks),
         })
         const next: ProjectCharterState = {
           ...current,
@@ -2438,7 +2452,15 @@ function configureFakeProjectClients(
         projectCharterStates.set(`${teamId}/${projectId}`, next)
         return structuredClone(next)
       },
-      async transitionProjectLifecycle(directoryId, teamId, projectId, expectedRevision, state, auditContext) {
+      async transitionProjectLifecycle(
+        directoryId,
+        teamId,
+        projectId,
+        expectedRevision,
+        state,
+        auditContext,
+        authorizationConditionChecks,
+      ) {
         const current = requireMutableProjectCharterState(teamId, projectId, expectedRevision)
         calls.projectLifecycleTransitions.push({
           directoryId,
@@ -2447,6 +2469,7 @@ function configureFakeProjectClients(
           expectedRevision,
           state,
           audited: auditContext !== undefined,
+          authorizationRecordKeys: readConditionCheckRecordKeys(authorizationConditionChecks),
         })
         const next: ProjectCharterState = {
           ...current,
@@ -3471,6 +3494,18 @@ function createCognitoSdkTestError(name: string, status: number) {
   return Object.assign(error, {
     $metadata: { httpStatusCode: status },
   })
+}
+
+/**
+ * Lists the record keys a fake store received as condition checks.
+ *
+ * @param checks - Transaction condition checks passed to the store.
+ * @returns The `recordKey` of each check, in order.
+ */
+function readConditionCheckRecordKeys(
+  checks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+) {
+  return checks.map((check) => String(check.ConditionCheck?.Key?.recordKey ?? ''))
 }
 
 function createWorkspaceBootstrapItems() {

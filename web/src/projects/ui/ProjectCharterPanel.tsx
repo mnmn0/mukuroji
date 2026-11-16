@@ -70,6 +70,7 @@ function describeCharterError(error: unknown, t: (key: MessageKey) => string, fa
   if (code === 'ProjectCharterRevisionConflict') return t('projects.charter.error.conflict')
   if (code === 'ProjectCodeAlreadyUsed') return t('projects.charter.error.codeUsed')
   if (code === 'ProjectCharterPersonInactive') return t('projects.charter.error.person')
+  if (code === 'ProjectCharterAuthorizationChanged') return t('projects.charter.error.authorization')
   if (code === 'InvalidProjectCharter' && error instanceof Error) {
     return t('projects.charter.error.invalid').replace('{reason}', error.message)
   }

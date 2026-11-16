@@ -45,6 +45,7 @@ export { ProjectDataError } from './project-data-error'
 export {
   transitionProjectLifecycleUseCase,
   updateProjectCharterUseCase,
+  type ProjectCharterCallerAuthorization,
   type ProjectCharterScope,
   type ProjectCharterStore,
   type ResolvedProjectCharterPerson,

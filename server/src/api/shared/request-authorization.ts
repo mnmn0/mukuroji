@@ -1640,11 +1640,13 @@ async function resolveEnterpriseAuthorizationResource(
         .map((team) => team.id),
     )
     // A Team-qualified path names the owner directly, which also tells apart two Teams that use
-    // the same Project ID. The qualifier counts only when that Team really owns the Project.
+    // the same Project ID. The route reads the Project under that Team, so the qualifier stays
+    // authoritative even when the directory lists the Project only under another Team (for
+    // example, when the qualified Team's Project is archived); a grant on the other Team's
+    // Project then never covers it.
     const qualifiedTeamId = path?.match(/\/teams\/([^/]+)\/projects\/[^/]+/u)?.[1]
-    const decodedQualifiedTeamId = qualifiedTeamId ? decodePathSegment(qualifiedTeamId) : undefined
-    const parentTeamId = decodedQualifiedTeamId && ownerTeamIds.has(decodedQualifiedTeamId)
-      ? decodedQualifiedTeamId
+    const parentTeamId = qualifiedTeamId
+      ? decodePathSegment(qualifiedTeamId)
       : ownerTeamIds.size === 1
         ? ownerTeamIds.values().next().value
         : undefined
