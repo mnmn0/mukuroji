@@ -1440,6 +1440,7 @@ export function createNotificationProjectionItem(
     createdAt: event.occurredAt,
     dueDate: event.dueDate,
     workItemUpdatedAt: event.workItemUpdatedAt,
+    daysUntilDue: event.daysUntilDue,
     expiresAt,
   }
 }

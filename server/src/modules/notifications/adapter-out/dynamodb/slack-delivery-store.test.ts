@@ -38,9 +38,9 @@ describe('Slack DynamoDB delivery queue', () => {
     expect((await f.store.listDue(shard, now, 2)).deliveries[0]).toMatchObject({ fileId: 'file-1', targetId: 'approval-1' })
   })
   test('keeps the scheduled due date and stale reminder baseline for authorization', async () => {
-    const f = fixture({ ...row, dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z' })
+    const f = fixture({ ...row, dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z', daysUntilDue: -7 })
     expect((await f.store.listDue(shard, now, 2)).deliveries[0])
-      .toMatchObject({ dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z' })
+      .toMatchObject({ dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z', daysUntilDue: -7 })
   })
   test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
     const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]

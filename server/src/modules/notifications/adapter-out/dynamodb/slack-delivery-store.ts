@@ -178,6 +178,9 @@ function parseDelivery(row: Record<string, unknown> | undefined, recipientKey: s
     ...(typeof row.workItemUpdatedAt === 'string'
       ? { workItemUpdatedAt: row.workItemUpdatedAt }
       : {}),
+    ...(typeof row.daysUntilDue === 'number' && Number.isSafeInteger(row.daysUntilDue)
+      ? { daysUntilDue: row.daysUntilDue }
+      : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
     ...(typeof row.targetId === 'string' ? { targetId: row.targetId } : {}),
   }

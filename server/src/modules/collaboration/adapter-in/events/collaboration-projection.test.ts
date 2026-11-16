@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from 'bun:test'
+import { describe, expect, setSystemTime, spyOn, test } from 'bun:test'
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
@@ -578,6 +578,50 @@ describe('collaboration projection pure helpers', () => {
       event.notificationCandidates = [{ memberKey, reason: 'assignment' }, { memberKey, reason: 'mention' }]
       expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
     } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('re-evaluates scanned due-soon and escalation stages in the current schedule time zone at delivery', async () => {
+    const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const schedule = createDefaultDueDateWorkItemSchedule('2026-07-15')
+    const current = createRealtimeWorkItem({ dueDate: '2026-07-15', schedule })
+    const withTimeZone = (timeZone: string) => {
+      current.schedule = { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, timeZone } }
+    }
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    cache.directories.set('workspace-1', Promise.resolve([
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+    ]))
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      return { Item: command.input.TableName === 'WORK_ITEMS_TABLE_NAME' ? current
+        : { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    // Shaped as the Slack worker rebuilds it from the queued notification row.
+    const dueSoon = createProjectionEvent({
+      eventType: 'work-item.due-soon', teamId: 'core', projectId: 'platform', issueId: 'example',
+      dueDate: '2026-07-15', daysUntilDue: 3,
+      notificationCandidates: [{ memberKey, reason: 'due-soon' }],
+    })
+    try {
+      // 2026-07-12T03:00Z is 07-12 in Tokyo (3 days out) but still 07-11 in Los Angeles (4 days out).
+      setSystemTime(new Date('2026-07-12T03:00:00.000Z'))
+      withTimeZone('Asia/Tokyo')
+      expect(await authorizeNotificationDelivery(dueSoon, memberKey, identity, cache)).toBe(true)
+      withTimeZone('America/Los_Angeles')
+      expect(await authorizeNotificationDelivery(dueSoon, memberKey, identity, cache)).toBe(false)
+    } finally {
+      setSystemTime()
       send.mockRestore()
       groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
@@ -1911,6 +1955,14 @@ describe('collaboration projection pure helpers', () => {
       ...event,
       metadata: { dueDate: '2026/07/12' },
     })?.dueDate).toBeUndefined()
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026-07-12', daysUntilDue: -7 },
+    })?.daysUntilDue).toBe(-7)
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { daysUntilDue: '3' },
+    })?.daysUntilDue).toBeUndefined()
   })
 
   test('tolerates legacy events without collaboration metadata', () => {
