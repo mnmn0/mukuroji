@@ -2501,6 +2501,8 @@ function createEvidenceInput(
     metric: result.metric,
     slaTargetHours: widget?.slaTargetHours,
     timeZone: snapshot.timeZone,
+    // The drill-down explains the displayed value, so it uses the widget's weighting.
+    ...(widget?.weighting === 'effort' ? { weighting: 'effort' as const } : {}),
   } satisfies AnalyticsEvidenceInput
 }
 

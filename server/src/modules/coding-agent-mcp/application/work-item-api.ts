@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicWorkItemEffort, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -8,7 +8,7 @@ import type {
 export type AgentTask = Pick<CanonicalWorkItem,
   'id' | 'teamId' | 'revision' | 'title' | 'description' | 'assigneeUserId' |
   'assignedProjectId' | 'workflowStatusId' | 'statusCategory' | 'workItemTypeId' |
-  'priority' | 'dueDate' | 'schedule' | 'remainingEffortMinutes' | 'progressPercent' |
+  'priority' | 'dueDate' | 'schedule' |
   'createdAt' | 'updatedAt' | 'relationIds' | 'customFieldValues'>
 
 /** Bounded public API page; an empty page can still have a continuation. */
@@ -240,7 +240,19 @@ export interface AgentWorkItemApi {
    * @returns Criteria in order; empty when none or when the server predates acceptance criteria.
    */
   acceptanceCriteria(id: string): Promise<WorkItemAcceptanceCriterion[]>
+  /**
+   * Reads the estimate, recorded remaining effort, and recorded progress of a task.
+   * @param id - Task ID.
+   * @returns The values with the revision they were read at, or undefined when the server predates the endpoint.
+   */
+  effort(id: string): Promise<AgentTaskEffort | undefined>
 }
+
+/** Estimate, recorded remaining effort, and recorded progress of a task, as get_task shows them. */
+export type AgentTaskEffort = Pick<
+  PublicWorkItemEffort,
+  'revision' | 'plannedEffortMinutes' | 'remainingEffortMinutes' | 'progressPercent'
+>
 
 /** Safe, transport-independent error that may be returned to the MCP client. */
 export class AgentTaskError extends Error {

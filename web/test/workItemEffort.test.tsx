@@ -5,6 +5,7 @@ import { isCanonicalWorkItem } from '../src/work-items/api/contractValidation'
 import {
   isWorkItemEffortColumnField,
   resolveWorkItemEffortColumnValue,
+  toWorkItemEffortPatch,
 } from '../src/work-items/model/workItemEffort'
 import { WorkItemEffortCell } from '../src/work-items/ui/WorkItemEffortCells'
 import { WorkItemEffortProgressEditor } from '../src/work-items/ui/WorkItemEffortProgressEditor'
@@ -62,5 +63,19 @@ describe('Work Item effort and progress', () => {
     expect(renderToStaticMarkup(
       <WorkItemEffortProgressEditor editorIdentity="x" item={estimated} locale="en" readOnly />,
     )).not.toContain('name="remainingEffortHours"')
+  })
+
+  test('writes an estimate change into the same schedule placement and passes other changes through', () => {
+    expect(toWorkItemEffortPatch({ remainingEffortMinutes: 60 }, estimated.schedule)).toEqual({ remainingEffortMinutes: 60 })
+    expect(toWorkItemEffortPatch({ plannedEffortMinutes: 600, progressPercent: null }, estimated.schedule)).toEqual({
+      progressPercent: null,
+      schedule: { ...estimated.schedule, plannedEffortMinutes: 600 },
+    })
+    expect(toWorkItemEffortPatch({ plannedEffortMinutes: null }, estimated.schedule).schedule).toEqual(baseWorkItem.schedule)
+    const withEstimate = renderToStaticMarkup(
+      <WorkItemEffortProgressEditor canEditEstimate editorIdentity="x" item={estimated} locale="en" onSave={async () => undefined} />,
+    )
+    expect(withEstimate).toContain('name="estimateHours"')
+    expect(withEstimate).toContain('value="8"')
   })
 })

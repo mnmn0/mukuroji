@@ -9,6 +9,7 @@ import {
   type AgentContext,
   type PublicAgentSettings,
   type PublicWorkItemAcceptanceCriteria,
+  type PublicWorkItemEffort,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -256,6 +257,18 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<PublicWorkItemAcceptanceCriteria>
+  /**
+   * Reads the estimate, remaining effort, and recorded progress of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The values with the Work Item revision they were read at.
+   */
+  getEffort(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemEffort>
   /**
    * Returns active Work Item Types and creation field schemas after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -959,6 +972,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items/:workItemId/acceptance-criteria', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.getAcceptanceCriteria(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/effort', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getEffort(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),

@@ -127,6 +127,9 @@ function createDefaultWorkItemService(
     async getAcceptanceCriteria(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, items: [] }
     },
+    async getEffort(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -704,7 +707,10 @@ describe('public API router', () => {
     expect(paths['/api/v1/agent-settings']).toHaveProperty('get')
     expect(paths['/api/v1/agent-context']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/acceptance-criteria']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/effort']).toHaveProperty('get')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('remainingEffortMinutes')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('progressPercent')
     expect(components.schemas.UpdatePublicWorkItemRequest.properties).toHaveProperty('agentInstanceId')
     expect(components.schemas.CreatePublicWorkItemCommentRequest.properties).toHaveProperty('agentRunId')
     expect(
@@ -969,6 +975,31 @@ describe('public API router', () => {
       { expectedRevision: 1, remainingEffortMinutes: 90, progressPercent: 40 },
       { expectedRevision: 1, remainingEffortMinutes: null, progressPercent: null },
     ])
+  })
+
+  test('reads the effort of a Work Item from its own endpoint with the read scope', async () => {
+    const reads: string[] = []
+    const workItems = createDefaultWorkItemService({
+      async getEffort(_credential, teamId, workItemId) {
+        reads.push(`${teamId}/${workItemId}`)
+        return { schemaVersion: 1, teamId, workItemId, revision: 3, plannedEffortMinutes: 480, remainingEffortMinutes: 120, progressPercent: 75 }
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/effort?teamId=team-1', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', revision: 3,
+      plannedEffortMinutes: 480, remainingEffortMinutes: 120, progressPercent: 75,
+    })
+    expect(reads).toEqual(['team-1/work-item-1'])
+    const missingTeam = await router.request('http://localhost/v1/work-items/work-item-1/effort', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+    expect(missingTeam.status).toBe(400)
   })
 
   test('rejects oversized calendar collections before invoking the Work Item service', async () => {

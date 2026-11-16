@@ -104,3 +104,25 @@ export function deriveWorkItemProgressPercent(
   }
   return item.statusCategory === 'started' ? WORK_ITEM_STARTED_PROGRESS_PERCENT : 0
 }
+
+/**
+ * Estimate, remaining effort, and recorded progress of one Work Item, returned by
+ * `GET /api/v1/work-items/{workItemId}/effort`; the closed public Work Item schema omits the
+ * remaining effort and progress fields.
+ */
+export type PublicWorkItemEffort = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item the values belong to. */
+  workItemId: string
+  /** Work Item revision the values were read at; send it as `expectedRevision` when changing them. */
+  revision: number
+  /** Canonical estimate in minutes (`schedule.plannedEffortMinutes`); absent when not set. */
+  plannedEffortMinutes?: number
+  /** Recorded remaining effort in minutes; absent when not recorded. */
+  remainingEffortMinutes?: number
+  /** Manually recorded progress percentage; absent when not recorded. */
+  progressPercent?: number
+}

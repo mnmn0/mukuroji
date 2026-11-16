@@ -11,6 +11,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   createSearchWorkItemTypeKey,
   deriveWorkItemRemainingEffortMinutes,
+  isWorkItemEffortMinutes,
   readSearchWorkItemTypeKey,
   type AnalyticsCustomFieldFilter,
   type AnalyticsDateRange,
@@ -492,8 +493,8 @@ type AnalyticsWorkItemState = {
   dueDate: string
   /** Canonical estimate (`schedule.plannedEffortMinutes`) です。 */
   plannedEffortMinutes?: number
-  /** Recorded remaining effort, otherwise the estimate, and 0 once terminal です。 */
-  remainingEffortMinutes?: number
+  /** Remaining effort recorded on the Work Item (not derived), rewound with its audit history です。 */
+  recordedRemainingEffortMinutes?: number
   /** Work Item creation instant です。 */
   createdAt: string
   /** Work Item update instant です。 */
@@ -1661,7 +1662,9 @@ function createCurrentAnalyticsState(item: CanonicalWorkItem): AnalyticsWorkItem
     ...(item.schedule.plannedEffortMinutes === undefined
       ? {}
       : { plannedEffortMinutes: item.schedule.plannedEffortMinutes }),
-    ...withRemainingEffort(deriveWorkItemRemainingEffortMinutes(item)),
+    ...(item.remainingEffortMinutes === undefined
+      ? {}
+      : { recordedRemainingEffortMinutes: item.remainingEffortMinutes }),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     ...(item.archivedAt === undefined ? {} : { archivedAt: item.archivedAt }),
@@ -1669,13 +1672,22 @@ function createCurrentAnalyticsState(item: CanonicalWorkItem): AnalyticsWorkItem
 }
 
 /**
- * Builds the optional remaining effort field of an analytics state.
+ * Derives the remaining effort of a reconstructed analytics state.
  *
- * @param remainingEffortMinutes - Derived remaining minutes, when known.
- * @returns The field, or an empty object.
+ * Derived after the state is rewound to `asOf`, so the status, estimate, and recorded remaining
+ * effort all describe the same moment.
+ *
+ * @param state - Analytics state at `asOf`.
+ * @returns Remaining minutes, when known.
  */
-function withRemainingEffort(remainingEffortMinutes: number | undefined) {
-  return remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes }
+function deriveAnalyticsRemainingEffortMinutes(state: AnalyticsWorkItemState): number | undefined {
+  return deriveWorkItemRemainingEffortMinutes({
+    statusCategory: state.statusCategory,
+    schedule: state.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: state.plannedEffortMinutes },
+    ...(state.recordedRemainingEffortMinutes === undefined
+      ? {}
+      : { remainingEffortMinutes: state.recordedRemainingEffortMinutes }),
+  })
 }
 
 function rewindStateChanges(
@@ -1719,7 +1731,9 @@ function normalizeAnalyticsFieldPath(field: string) {
     field === 'updatedAt' ||
     field === 'archivedAt' ||
     field === 'customFieldValues' ||
-    field.startsWith('customFieldValues.')
+    field.startsWith('customFieldValues.') ||
+    field === 'schedule' ||
+    field === 'remainingEffortMinutes'
   ) {
     return field
   }
@@ -1750,6 +1764,24 @@ function setAnalyticsStateField(
       state[field] = value
     } else {
       delete state[field]
+    }
+    return
+  }
+  if (field === 'schedule') {
+    // Only the estimate of the schedule feeds analytics; dates come from `dueDate`.
+    const plannedEffortMinutes = isRecord(value) ? value.plannedEffortMinutes : undefined
+    if (isWorkItemEffortMinutes(plannedEffortMinutes)) {
+      state.plannedEffortMinutes = plannedEffortMinutes
+    } else {
+      delete state.plannedEffortMinutes
+    }
+    return
+  }
+  if (field === 'remainingEffortMinutes') {
+    if (isWorkItemEffortMinutes(value)) {
+      state.recordedRemainingEffortMinutes = value
+    } else {
+      delete state.recordedRemainingEffortMinutes
     }
     return
   }
@@ -2422,7 +2454,7 @@ function createForecast(
   )
   const remainingWorkItems = openFacts.length
   const remainingEffortHours = roundMetric(
-    openFacts.reduce((sum, fact) => sum + effortHours(fact.state.remainingEffortMinutes), 0),
+    openFacts.reduce((sum, fact) => sum + effortHours(deriveAnalyticsRemainingEffortMinutes(fact.state)), 0),
   )
   const remainingAmount = effortWeighted ? remainingEffortHours : remainingWorkItems
   const dailyBuckets = createCalendarBuckets(

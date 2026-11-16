@@ -222,6 +222,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
     async acceptanceCriteria() { return [] },
+    async effort() { return undefined },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -302,7 +303,7 @@ describe('agent task lifecycle', () => {
     expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
     // The custom field is checked first, so only the bare task needed a criteria read.
     expect(criteriaReads).toEqual(['bare'])
-    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria })
+    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria, effort: null })
     expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
     // Only the marks are sent; the server applies them to the stored list, so a retry has the same body.
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
@@ -654,6 +655,21 @@ describe('agent task lifecycle', () => {
     expect(writes).toBe(0)
   })
 
+  test('shows the estimate, remaining effort, and progress read from their own endpoint', async () => {
+    const effortReads: string[] = []
+    const { service } = fixture([task('one')], {
+      async effort(id) {
+        effortReads.push(id)
+        return { revision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 }
+      },
+    })
+    expect(await service.get('one')).toMatchObject({
+      task: { id: 'one' },
+      effort: { revision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 },
+    })
+    expect(effortReads).toEqual(['one'])
+  })
+
   test('writes the estimate into the read schedule and passes remaining effort and progress through', async () => {
     const sent: unknown[] = []
     const stored = task('one', {
@@ -677,7 +693,20 @@ describe('agent task lifecycle', () => {
         schedule: { mode: 'due-date', dueDate: '2026-09-10', calendarPolicy: stored.schedule.calendarPolicy },
       },
     ])
-    await expect(service.update('one', { expectedRevision: 0, plannedEffortMinutes: 60 }, 'stale')).rejects.toMatchObject({ code: 'conflict' })
+  })
+
+  test('lets an estimate retry reach the server receipt after the first write advanced the revision', async () => {
+    const sent: unknown[] = []
+    const schedule = {
+      mode: 'due-date' as const, dueDate: '2026-09-10',
+      calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday' as const], holidays: [] },
+    }
+    // The first write succeeded, so the stored task already carries the estimate at revision 2.
+    const { service } = fixture([task('one', { revision: 2, schedule: { ...schedule, plannedEffortMinutes: 480 } })], {
+      async update(_id, input) { sent.push(input); return task('one', { revision: 2 }) },
+    })
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')
+    expect(sent).toEqual([{ expectedRevision: 1, schedule: { ...schedule, plannedEffortMinutes: 480 } }])
   })
 
   test('replays stale metadata updates and forwards comment scope to the canonical API', async () => {

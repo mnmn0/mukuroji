@@ -423,14 +423,15 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const page = await api.list(filters(input), cursor, limit)
       return { ...page, items: page.items.map(inScope) }
     },
-    /** Returns canonical details, dependency readiness, and the task's active run. */
+    /** Returns canonical details, acceptance criteria, effort, dependency readiness, and the task's active run. */
     async get(id: string) {
       const task = inScope(await api.get(id))
       // The claim is read directly, so a run started moments ago or before a restart is found.
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      return { task, acceptanceCriteria: await api.acceptanceCriteria(id), blockers: await blockers(task), activeRun }
+      const [acceptanceCriteria, effort] = await Promise.all([api.acceptanceCriteria(id), api.effort(id)])
+      return { task, acceptanceCriteria, effort: effort ?? null, blockers: await blockers(task), activeRun }
     },
     /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
     async next(input: AgentTaskFilters) {
@@ -492,10 +493,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
       const { acceptanceCriteria: marks, plannedEffortMinutes, ...fields } = input
-      if (plannedEffortMinutes !== undefined && input.expectedRevision !== task.revision) {
-        // The estimate is written as a complete schedule, so it must replace the schedule the caller read.
-        throw new AgentTaskError('conflict', 'The task changed after it was read. Reload it before changing the estimate.')
-      }
+      // The estimate is written into the schedule read now. The server's revision check rejects it when
+      // the task changed after the caller read it, and a retry after a lost response sends the same
+      // schedule again (only the estimate differed), so the server replays its idempotency receipt.
       // The server applies the marks to the stored list inside the request's idempotency boundary, so a
       // retry with the same arguments replays even if a person edited the criteria meanwhile.
       return api.update(id, {

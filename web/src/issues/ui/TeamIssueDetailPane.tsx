@@ -32,10 +32,8 @@ import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkIte
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
-import {
-  WorkItemEffortProgressEditor,
-  type WorkItemEffortProgressChange,
-} from '../../work-items/ui/WorkItemEffortProgressEditor'
+import { toWorkItemEffortPatch, type WorkItemEffortProgressChange } from '../../work-items/model/workItemEffort'
+import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import {
   isCustomFieldApplicable,
@@ -680,7 +678,7 @@ function IssueDetailContent({
   }
 
   /**
-   * Saves remaining effort and manual progress on their own, outside the editor form.
+   * Saves the estimate, remaining effort, and manual progress on their own, outside the editor form.
    *
    * @param change - Validated effort and progress change.
    */
@@ -688,7 +686,7 @@ function IssueDetailContent({
     if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) return
     setIssueUpdatePending(true)
     try {
-      await onUpdateIssue(issue.id, change)
+      await onUpdateIssue(issue.id, toWorkItemEffortPatch(change, issue.schedule))
     } finally {
       setIssueUpdatePending(false)
     }
@@ -995,6 +993,7 @@ function IssueDetailContent({
                 item={issue}
                 locale={locale}
                 {...(configuration?.progressMode ? { progressMode: configuration.progressMode } : {})}
+                canEditEstimate
                 {...(onUpdateIssue ? { onSave: saveEffortProgress } : {})}
                 readOnly={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
               />

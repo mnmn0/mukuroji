@@ -8,6 +8,7 @@ import {
 import { useId, useState, type FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { formatPlannedEffortHours } from '../model/contributorAssignments'
+import type { WorkItemEffortProgressChange } from '../model/workItemEffort'
 
 /** Help text describing how each Team progress mode derives the shown percentage. */
 const progressModeHelpKeys = {
@@ -16,13 +17,7 @@ const progressModeHelpKeys = {
   manual: 'workItems.effort.mode.manual.help',
 } as const satisfies Record<WorkItemProgressMode, MessageKey>
 
-/** Remaining effort and manual progress change saved by the editor; null clears a value. */
-export type WorkItemEffortProgressChange = {
-  /** Recorded remaining minutes, or null to clear it. */
-  remainingEffortMinutes: number | null
-  /** Manually recorded progress, or null to clear it; sent only under the `manual` mode. */
-  progressPercent?: number | null
-}
+export type { WorkItemEffortProgressChange } from '../model/workItemEffort'
 
 /** Props of the Work Item effort and progress editor. */
 export type WorkItemEffortProgressEditorProps = {
@@ -36,7 +31,12 @@ export type WorkItemEffortProgressEditorProps = {
   editorIdentity: string
   /** Shows the values without inputs. */
   readOnly?: boolean
-  /** Saves the remaining effort (and manual progress under the `manual` mode). */
+  /**
+   * Shows an estimate input. Set it where the estimate has no other editor, such as a Team Work Item
+   * detail whose schedule is read-only.
+   */
+  canEditEstimate?: boolean
+  /** Saves the changed values: remaining effort, manual progress under the `manual` mode, and the estimate when editable. */
   onSave?: (change: WorkItemEffortProgressChange) => Promise<unknown>
 }
 
@@ -72,13 +72,14 @@ function parsePercent(value: FormDataEntryValue | null): number | null | undefin
  * Shows a Work Item's canonical estimate, remaining effort, and progress, and edits the
  * remaining effort and (under the Team's `manual` mode) the recorded progress.
  *
- * The estimate itself is edited with the schedule (`schedule.plannedEffortMinutes`), so the
- * editor only displays it.
+ * The estimate is the schedule's `plannedEffortMinutes`. Where the schedule has its own editor
+ * the estimate is only displayed here; otherwise `canEditEstimate` adds an input for it.
  *
  * @param props - Work Item effort fields, Team progress mode, and the save callback.
  * @returns Effort and progress section.
  */
 export function WorkItemEffortProgressEditor({
+  canEditEstimate = false,
   editorIdentity,
   item,
   locale,
@@ -105,6 +106,11 @@ export function WorkItemEffortProgressEditor({
     event.preventDefault()
     if (!onSave || pending) return
     const formData = new FormData(event.currentTarget)
+    const plannedEffortMinutes = canEditEstimate ? parseHours(formData.get('estimateHours')) : null
+    if (plannedEffortMinutes === undefined) {
+      setErrorMessage(t('workItems.effort.estimateInvalid'))
+      return
+    }
     const remainingEffortMinutes = parseHours(formData.get('remainingEffortHours'))
     if (remainingEffortMinutes === undefined) {
       setErrorMessage(t('workItems.effort.remainingInvalid'))
@@ -115,11 +121,13 @@ export function WorkItemEffortProgressEditor({
       setErrorMessage(t('workItems.effort.progressInvalid'))
       return
     }
-    // Saving unchanged values would only advance the revision, so it is skipped.
-    if (
-      remainingEffortMinutes === (item.remainingEffortMinutes ?? null) &&
-      (!isManual || progressPercent === (item.progressPercent ?? null))
-    ) {
+    // Only changed values are sent; saving nothing would only advance the revision.
+    const change: WorkItemEffortProgressChange = {
+      ...(canEditEstimate && plannedEffortMinutes !== (planned ?? null) ? { plannedEffortMinutes } : {}),
+      ...(remainingEffortMinutes === (item.remainingEffortMinutes ?? null) ? {} : { remainingEffortMinutes }),
+      ...(isManual && progressPercent !== (item.progressPercent ?? null) ? { progressPercent } : {}),
+    }
+    if (Object.keys(change).length === 0) {
       setErrorMessage(undefined)
       return
     }
@@ -127,7 +135,7 @@ export function WorkItemEffortProgressEditor({
     setErrorMessage(undefined)
     try {
       // The owning editor announces the saved Work Item, so only a failure is reported here.
-      await onSave({ remainingEffortMinutes, ...(isManual ? { progressPercent } : {}) })
+      await onSave(change)
     } catch {
       setErrorMessage(t('workItems.effort.saveError'))
     } finally {
@@ -166,6 +174,20 @@ export function WorkItemEffortProgressEditor({
       <p className="text-xs font-medium text-[var(--workbench-muted)]">{t(progressModeHelpKeys[progressMode])}</p>
       {canEdit ? (
         <form className="flex min-w-0 flex-wrap items-end gap-2" key={editorIdentity} onSubmit={(event) => { void submit(event) }}>
+          {canEditEstimate ? (
+            <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workItems.effort.estimateHours')}
+              <input
+                className="workbench-input h-9 w-32 px-3"
+                defaultValue={planned === undefined ? '' : formatPlannedEffortHours(planned)}
+                inputMode="decimal"
+                min="0"
+                name="estimateHours"
+                step="any"
+                type="number"
+              />
+            </label>
+          ) : null}
           <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
             {t('workItems.effort.remainingHours')}
             <input
@@ -196,7 +218,9 @@ export function WorkItemEffortProgressEditor({
           <button className="workbench-button-secondary min-h-9 px-3" disabled={pending} type="submit">
             {t('workItems.effort.save')}
           </button>
-          <span className="w-full text-xs text-[var(--workbench-muted)]">{t('workItems.effort.clearHint')}</span>
+          <span className="w-full text-xs text-[var(--workbench-muted)]">
+            {t(canEditEstimate ? 'workItems.effort.clearHintWithEstimate' : 'workItems.effort.clearHint')}
+          </span>
         </form>
       ) : null}
       {errorMessage ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{errorMessage}</p> : null}

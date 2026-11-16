@@ -1153,6 +1153,38 @@ describe('Analytics metric engine', () => {
     })).toThrow('Only throughput and velocity widgets can be weighted by effort.')
   })
 
+  test('rewinds the estimate, remaining effort, and status before deriving historical remaining effort', () => {
+    const schedule = (minutes: number) => ({ ...createDefaultDueDateWorkItemSchedule('2026-03-10'), plannedEffortMinutes: minutes })
+    // Today the item is completed with a larger estimate and a recorded remaining effort, all set after `asOf`.
+    const item = createWorkItem('effort-history', {
+      schedule: schedule(600),
+      dueDate: '2026-03-10',
+      remainingEffortMinutes: 0,
+      updatedAt: '2026-03-12T12:00:00.000Z',
+    })
+    const events = [
+      createAuditEvent('effort-history-estimate', item, '2026-03-11T12:00:00.000Z', [
+        { field: 'schedule', before: schedule(300), after: schedule(600) },
+        { field: 'remainingEffortMinutes', after: 120 },
+      ]),
+      createAuditEvent('effort-history-complete', item, '2026-03-12T12:00:00.000Z', [
+        { field: 'statusCategory', before: 'started', after: 'completed' },
+        { field: 'remainingEffortMinutes', before: 120, after: 0 },
+      ]),
+    ]
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [item],
+      events,
+      query: createQuery([], {
+        filter: { period: { from: '2026-03-02T00:00:00.000Z', to: '2026-03-08T23:59:59.999Z' } },
+        asOf: '2026-03-08T23:59:59.999Z',
+        forecastWeighting: 'effort',
+      }),
+    })
+    // At `asOf` the item was open with a 5 hour estimate and no recorded remaining effort.
+    expect(snapshot.forecast).toMatchObject({ weighting: 'effort', remainingWorkItems: 1, remainingEffortHours: 5 })
+  })
+
   test('excludes facts and evidence whose as-of Project is outside the current allowlist', () => {
     const item = createWorkItem('cross-project-history', {
       assignedProjectId: 'project-a',

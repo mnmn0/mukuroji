@@ -44,6 +44,7 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import { toWorkItemEffortPatch } from '../../work-items/model/workItemEffort'
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -1279,7 +1280,7 @@ export function TaskDetailPane({
                 item={effortItem}
                 locale={locale}
                 {...(resolvedConfiguration?.progressMode ? { progressMode: resolvedConfiguration.progressMode } : {})}
-                onSave={(change) => submitIssueUpdate(change)}
+                onSave={(change) => submitIssueUpdate(toWorkItemEffortPatch(change, schedule))}
                 readOnly={isReadOnly || isWorkItemMutationPending}
               />
             </div>

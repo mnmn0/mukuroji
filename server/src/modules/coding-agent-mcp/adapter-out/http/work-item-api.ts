@@ -37,11 +37,15 @@ const taskSchema: z.ZodType<AgentTask> = z.object({
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
   workItemTypeId: identifier.optional(), statusCategory: category,
   priority: z.enum(['high', 'medium', 'low']), dueDate: z.union([z.literal(''), z.iso.date()]),
-  schedule: scheduleSchema, remainingEffortMinutes: effortMinutes.optional(),
-  progressPercent: z.number().int().min(0).max(100).optional(),
+  schedule: scheduleSchema,
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),
+})
+const effortSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
+  plannedEffortMinutes: effortMinutes.optional(), remainingEffortMinutes: effortMinutes.optional(),
+  progressPercent: z.number().int().min(0).max(100).optional(),
 })
 const acceptanceCriteriaSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
@@ -372,6 +376,25 @@ export function createAgentWorkItemApi(
         throw new AgentTaskError('invalid_response', 'The API returned acceptance criteria of another task.')
       }
       return criteria.items
+    },
+    /** Reads a task's estimate, remaining effort, and progress; a server older than the endpoint has none. */
+    async effort(id) {
+      let effort: z.infer<typeof effortSchema>
+      try {
+        effort = await request(`work-items/${encodeURIComponent(id)}/effort`, effortSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (effort.teamId !== config.teamId || effort.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the effort of another task.')
+      }
+      return {
+        revision: effort.revision,
+        ...(effort.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: effort.plannedEffortMinutes }),
+        ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
+        ...(effort.progressPercent === undefined ? {} : { progressPercent: effort.progressPercent }),
+      }
     },
   }
 

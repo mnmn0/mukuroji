@@ -319,30 +319,43 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // Contributors are internal planning data, and acceptance criteria have their own endpoint
-    // because the public Work Item schema is closed, so both are excluded from export rows.
+    // Contributors are internal planning data, and acceptance criteria, remaining effort, and
+    // progress have their own endpoints because the public Work Item schema is closed, so all of
+    // them are excluded from export rows.
     items: page.issues.map(omitWorkItemExportExcludedFields),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
 }
 
+/** Work Item fields that export rows leave out. */
+type WorkItemExportExcludedField =
+  | 'contributorAssignments'
+  | 'acceptanceCriteria'
+  | 'remainingEffortMinutes'
+  | 'progressPercent'
+
 /**
- * Removes contributor assignments and acceptance criteria from a Work Item export row.
+ * Removes contributor assignments, acceptance criteria, remaining effort, and progress from a
+ * Work Item export row.
  *
  * @param workItem - Work Item read for the export page.
  * @returns The Work Item without the fields excluded from exports.
  */
 function omitWorkItemExportExcludedFields<
-  T extends { readonly contributorAssignments?: unknown; readonly acceptanceCriteria?: unknown },
->(workItem: T): Omit<T, 'contributorAssignments' | 'acceptanceCriteria'> {
+  T extends { readonly [Field in WorkItemExportExcludedField]?: unknown },
+>(workItem: T): Omit<T, WorkItemExportExcludedField> {
   const {
     contributorAssignments: _contributorAssignments,
     acceptanceCriteria: _acceptanceCriteria,
+    remainingEffortMinutes: _remainingEffortMinutes,
+    progressPercent: _progressPercent,
     ...exported
   } = workItem
   void _contributorAssignments
   void _acceptanceCriteria
+  void _remainingEffortMinutes
+  void _progressPercent
   return exported
 }
 
@@ -524,8 +537,6 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'assigneeName',
   'dueDate',
   'schedule',
-  'remainingEffortMinutes',
-  'progressPercent',
   'priority',
   'creatorMemberKey',
   'workflowStatusId',
@@ -563,10 +574,6 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
     ...(workItem.assigneeName === undefined ? {} : { assigneeName: workItem.assigneeName }),
     dueDate: workItem.dueDate,
     schedule: projectPublicWorkItemSchedule(workItem.schedule),
-    ...(workItem.remainingEffortMinutes === undefined
-      ? {}
-      : { remainingEffortMinutes: workItem.remainingEffortMinutes }),
-    ...(workItem.progressPercent === undefined ? {} : { progressPercent: workItem.progressPercent }),
     priority: workItem.priority,
     creatorMemberKey: workItem.creatorMemberKey,
     workflowStatusId: workItem.workflowStatusId,
@@ -1211,6 +1218,33 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId: issue.id,
         revision: issue.revision,
         items: (issue.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion })),
+      }
+    },
+
+    /**
+     * Reads the estimate, remaining effort, and recorded progress of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The schema version, Team ID, Work Item ID, the Work Item revision the values were read at,
+     * and each value that is set.
+     */
+    async getEffort(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        ...(issue.schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: issue.schedule.plannedEffortMinutes }),
+        ...(issue.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: issue.remainingEffortMinutes }),
+        ...(issue.progressPercent === undefined ? {} : { progressPercent: issue.progressPercent }),
       }
     },
 

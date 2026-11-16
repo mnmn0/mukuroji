@@ -134,7 +134,7 @@ import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workI
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { taskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui'
-import { isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
+import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -586,6 +586,7 @@ export function TaskPage() {
   const taskViewColumns = useMemo(
     () => [
       ...standardTaskViewFields,
+      ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
       ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
       ...taskViewCustomFields.map((field) => `custom:${field.id}`),
     ],
