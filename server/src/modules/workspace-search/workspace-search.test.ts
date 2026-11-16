@@ -258,6 +258,47 @@ test('keeps the stored creator when a Project projection is rebuilt without one'
   expect(withoutOption.creatorUserId).toBeUndefined()
 })
 
+test('does not let an unrevisioned Project projection replace a revisioned one', async () => {
+  const revisioned = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const creation = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    creatorUserId: 'creator@example.com',
+  })
+
+  await client.upsertDocument(creation, { unrevisioned: true })
+  await client.upsertDocument(revisioned, { sourceRevision: 1, preserveCreator: true })
+  await client.upsertDocument(creation, { unrevisioned: true })
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: true,
+      projectIds: new Set(['refero']),
+      teamIds: new Set(['core']),
+    },
+  })
+  expect(response.results).toEqual([
+    expect.objectContaining({ body: 'OPS', creatorUserId: 'creator@example.com' }),
+  ])
+})
+
 test('does not let an older source projection replace or remove a newer document', async () => {
   const current = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',

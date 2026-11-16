@@ -476,6 +476,8 @@ async function executeAutomationTemplateApplication(
           )
         },
         'automation template Project creation',
+        // A charter saved before this projection lands carries a revision; keep it.
+        { unrevisioned: true },
       )
       return await requireCompletedTemplateApplication(application)
     }

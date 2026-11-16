@@ -3456,6 +3456,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           )
         },
         'project creation',
+        // A charter saved before this projection lands carries a revision; keep it.
+        { unrevisioned: true },
       )
       return c.json(response, 201)
     } catch (error) {

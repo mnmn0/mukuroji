@@ -480,6 +480,11 @@ export type WorkspaceSearchProjectionWriteOptions = {
    * for projections whose source row does not record who created the entity.
    */
   preserveCreator?: boolean
+  /**
+   * The source has no revision yet, so the write never replaces a document projected from a
+   * revisioned source. Ignored when `sourceRevision` is given.
+   */
+  unrevisioned?: boolean
 }
 
 /** Marks persisted projection content that disagrees with its server-owned digest. */
@@ -1515,15 +1520,15 @@ export class DynamoDbWorkspaceSearchClient {
       ? await this.withStoredCreator(replacement)
       : replacement
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    const fenced = sourceRevision !== undefined || options?.unrevisioned === true
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [{
           Put: {
             TableName: this.tableName,
             Item: document,
-            ...(sourceRevision === undefined
-              ? {}
-              : {
+            ...(sourceRevision !== undefined
+              ? {
                   ConditionExpression:
                     'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
                     '#sourceRevision <= :sourceRevision',
@@ -1532,12 +1537,18 @@ export class DynamoDbWorkspaceSearchClient {
                     '#sourceRevision': 'sourceRevision',
                   },
                   ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
-                }),
+                }
+              : options?.unrevisioned === true
+                ? {
+                    ConditionExpression: 'attribute_not_exists(#sourceRevision)',
+                    ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+                  }
+                : {}),
           },
         }],
       }))
     } catch (error) {
-      if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
+      if (!fenced || !isTransactionConditionalCheckFailed(error)) {
         throw error
       }
     }
