@@ -4736,6 +4736,26 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('Issue #463: teamId なしリンクの参照で session が失効したらログインへ戻す', async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-09-15T03:00:00.000Z'))
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(page.getByTestId('task-calendar-month-navigation')).toBeVisible()
+    const calendarUrl = new URL(page.url())
+    calendarUrl.searchParams.delete('teamId')
+    calendarUrl.searchParams.set('issueId', 'wireframe')
+    await page.route(/.*\/api\/teams\/core-team\/issues\/wireframe(?:\?.*)?$/u, async (route) => {
+      await route.fulfill({
+        status: 403,
+        json: { code: 'EnterpriseSessionExpired', message: 'Enterprise session expired.' },
+      })
+    })
+
+    await page.goto(`${calendarUrl.pathname}${calendarUrl.search}`)
+
+    await expect(page).toHaveURL(/\/login\?returnTo=/u)
+  })
+
   test('Issue #463: 表示中の月の外へ移したカードの後は月ナビゲーションへフォーカスを移す', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')

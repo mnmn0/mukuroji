@@ -780,6 +780,7 @@ export function TaskPage() {
       ...workItemConfigurationLoadResult.errors,
       relationCandidatesError,
       detailError,
+      issueLinkCandidatesError,
       ...(issueArtifacts.sessionErrors ?? []),
       ...(projectFiles.sessionErrors ?? []),
       ...(collaboration.sessionErrors ?? []),

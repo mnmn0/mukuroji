@@ -6,6 +6,7 @@ import {
   getTeamIssueDetail,
   getWorkspaceWorkItemSummary,
 } from '../api/workItems'
+import { resolveEnterpriseSessionErrorAction } from '../../auth/enterpriseSessionErrors'
 import { TeamIssuesApiError } from '../api/errors'
 import {
   loadProjectIssues,
@@ -247,7 +248,8 @@ export function useProjectIssues(
  * A calendar or Gantt list holds only its visible period, so it cannot tell which Team owns a
  * routed Work Item outside that period, or whether two Teams use the same local ID. Each Team
  * that has the Project is asked for the ID directly; a Work Item counts when it is assigned to
- * the Project. A missing or unreadable Work Item of one Team is not a match.
+ * the Project. A missing or unreadable Work Item of one Team is not a match; an enterprise
+ * session policy denial fails the lookup so the page can start its login or recovery flow.
  *
  * @param accessToken - Work Item API access token.
  * @param projectId - Project the link points into.
@@ -273,7 +275,13 @@ export function useProjectIssueLinkCandidates(
         try {
           return (await getTeamIssueDetail(teamId, currentIssueId, token)).issue
         } catch (error) {
-          if (error instanceof TeamIssuesApiError && (error.status === 403 || error.status === 404)) {
+          // A resource that is missing or not readable in one Team is not a match, but a session
+          // policy denial must reach the page's login or recovery flow.
+          if (
+            error instanceof TeamIssuesApiError &&
+            (error.status === 403 || error.status === 404) &&
+            resolveEnterpriseSessionErrorAction(error, '/').kind === 'stay'
+          ) {
             return undefined
           }
           throw error
