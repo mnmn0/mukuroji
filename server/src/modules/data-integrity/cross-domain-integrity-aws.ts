@@ -92,6 +92,7 @@ const tableScanOrder: readonly CrossDomainIntegrityTableTarget[] = [
 const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'email-alias',
   'planning-meta',
+  'project-code',
   'project-member',
   'project-quick-access',
   'webhook-team-grant',
@@ -1160,6 +1161,18 @@ function validateProjectDirectoryAuxiliaryRow(
       !isProjectQuickAccessItems(items) ||
       directoryId !== `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
       entryKey !== 'PREFERENCE'
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'project-code') {
+    const workspaceId = requireText(row.workspaceId)
+    requireText(row.teamId)
+    requireText(row.projectId)
+    const code = requireText(row.code)
+    requireCanonicalTimestamp(row.createdAt)
+    if (
+      directoryId !== `PROJECT_CODE#${encodeURIComponent(workspaceId)}` ||
+      entryKey !== `CODE#${code}`
     ) normalizationFailure()
     return
   }

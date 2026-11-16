@@ -55,7 +55,13 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  canTransitionProjectLifecycle,
+  isProjectLifecycleState,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
+  type ProjectCharter,
+  type ProjectCharterState,
+  type ProjectCharterSummary,
+  type ProjectLifecycleState,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
@@ -65,6 +71,15 @@ import {
   PLANNING_STORAGE_SCHEMA_VERSION,
 } from '../../../planning'
 import { createDirectoryResourceId } from '../../domain/resource-id'
+import {
+  createEmptyProjectCharter,
+  isStoredProjectCharter,
+  listChangedProjectCharterFields,
+  readInitialProjectLifecycleState,
+  resolveProjectLifecycleState,
+  toProjectCharterSummary,
+  type StoredProjectLifecycleState,
+} from '../../domain/project-charter'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -229,6 +244,14 @@ type ProjectDirectoryProjectItem = {
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
   archivedAt?: string
+  /** Stored lifecycle state. Legacy rows without it are `active`. */
+  lifecycleState?: StoredProjectLifecycleState
+  /** Stored Project charter. Legacy rows without it have an empty charter. */
+  charter?: ProjectCharter
+  /** Compare-and-swap revision shared by charter and lifecycle changes. */
+  charterRevision?: number
+  /** ISO 8601 timestamp of the last charter or lifecycle change. */
+  charterUpdatedAt?: string
 }
 
 /**
@@ -340,6 +363,10 @@ export type ProjectDirectoryProjectResponse = {
    * サイドバー上のプロジェクトアイコン色です。
    */
   tone?: ProjectTone
+  /** Current lifecycle state of the Project. */
+  lifecycleState: ProjectLifecycleState
+  /** Charter fields shown in the Project directory, when any is set. */
+  charter?: ProjectCharterSummary
 }
 
 /**
@@ -428,6 +455,8 @@ export type CreateProjectRequestBody = {
    * サイドバー上のプロジェクト表示色です。
    */
   tone?: unknown
+  /** Optional initial lifecycle state: proposed, approved, or active (default). */
+  lifecycleState?: unknown
 }
 
 /**
@@ -740,6 +769,57 @@ export type ProjectDirectoryClient = {
     expectedPlanningRevision: number,
     workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[],
   ): Promise<ArchiveProjectResponse>
+  /**
+   * Reads the charter and lifecycle of one Team-owned Project, including an archived one.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The current charter state.
+   */
+  getProjectCharter(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<ProjectCharterState>
+  /**
+   * Replaces the charter of an unarchived Project and reserves its Workspace-unique code.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @param expectedRevision - Charter revision read by the caller.
+   * @param charter - Validated next charter with resolved people.
+   * @param auditContext - Audit context of the mutation.
+   * @returns The committed charter state.
+   */
+  updateProjectCharter(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    expectedRevision: number,
+    charter: ProjectCharter,
+    auditContext?: MutationAuditContext,
+  ): Promise<ProjectCharterState>
+  /**
+   * Moves an unarchived Project to another lifecycle state allowed by the transition rules.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @param expectedRevision - Charter revision read by the caller.
+   * @param state - Requested lifecycle state.
+   * @param auditContext - Audit context of the mutation.
+   * @returns The committed charter state.
+   */
+  transitionProjectLifecycle(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    expectedRevision: number,
+    state: ProjectLifecycleState,
+    auditContext?: MutationAuditContext,
+  ): Promise<ProjectCharterState>
 }
 
 /**
@@ -1655,6 +1735,11 @@ export class DynamoDbProjectDirectoryClient {
     await this.ensureLocalAuditTable()
     const names = readLocalizedNames(input)
     const tone = readProjectTone(input.tone)
+    const initialLifecycle = readInitialProjectLifecycleState(input.lifecycleState)
+    if (!initialLifecycle.ok) {
+      throw new ProjectDataError(400, initialLifecycle.code, initialLifecycle.message)
+    }
+    const lifecycleState = initialLifecycle.value
     const idempotencyResourceId = readIdempotencyResourceId(input.idempotencyResourceId)
     const creatorMemberKey = normalizeProjectMemberKey(creator.userKey)
 
@@ -1686,6 +1771,7 @@ export class DynamoDbProjectDirectoryClient {
             existingProject.nameJa !== names.nameJa ||
             existingProject.nameEn !== names.nameEn ||
             (existingProject.tone ?? 'blue') !== tone ||
+            resolveProjectLifecycleState(existingProject) !== lifecycleState ||
             existingProject.archivedAt
           ) {
             throw createProjectDataConflictError()
@@ -1730,11 +1816,7 @@ export class DynamoDbProjectDirectoryClient {
             }
           }
           return {
-            project: {
-              id: existingProject.projectId,
-              name: existingProject.nameJa,
-              tone: existingProject.tone,
-            },
+            project: toProjectDirectoryProjectResponse(existingProject, 'ja'),
           } satisfies CreateProjectResponse
         }
       }
@@ -1757,7 +1839,7 @@ export class DynamoDbProjectDirectoryClient {
             )
             .map((item) => item.projectSortOrder ?? 0),
         ) + 10
-      const item: ProjectDirectoryItem = {
+      const item: ProjectDirectoryProjectItem = {
         directoryId,
         entryKey: createProjectEntryKey(team.teamSortOrder, projectSortOrder, projectId),
         entryType: 'project',
@@ -1770,6 +1852,7 @@ export class DynamoDbProjectDirectoryClient {
         projectId,
         projectSortOrder,
         tone,
+        ...(lifecycleState === 'active' ? {} : { lifecycleState }),
       }
       const updatedAt = new Date().toISOString()
       const creatorMemberItem: ProjectMemberItem = {
@@ -1852,6 +1935,7 @@ export class DynamoDbProjectDirectoryClient {
               teamId,
               name: names.nameJa,
               tone,
+              lifecycleState,
               creatorMemberKey,
               creatorRole: 'manager',
             }),
@@ -1884,11 +1968,7 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       return {
-        project: {
-          id: item.projectId,
-          name: item.nameJa,
-          tone: item.tone,
-        },
+        project: toProjectDirectoryProjectResponse(item, 'ja'),
       } satisfies CreateProjectResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -2178,6 +2258,299 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /** Reads the charter and lifecycle of one Team-owned Project, including an archived one. */
+  async getProjectCharter(directoryId: string, teamId: string, projectId: string) {
+    try {
+      return toProjectCharterState(await this.readTeamProjectItem(directoryId, teamId, projectId))
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Replaces the charter of an unarchived Project.
+   *
+   * The Project row, the Workspace-unique code reservation, and the audit event commit in one
+   * transaction guarded by the charter revision, so a stale editor or a concurrent code claim
+   * cannot overwrite a newer charter.
+   */
+  async updateProjectCharter(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    expectedRevision: number,
+    charter: ProjectCharter,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.ensureLocalAuditTable()
+    let codeReservationIndex: number | undefined
+    try {
+      const project = await this.readMutableTeamProjectItem(
+        directoryId,
+        teamId,
+        projectId,
+        expectedRevision,
+      )
+      const before = project.charter ?? createEmptyProjectCharter()
+      const updatedAt = new Date().toISOString()
+      const nextRevision = expectedRevision + 1
+      const condition = this.createCharterRevisionCondition(teamId, projectId, expectedRevision)
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: project.entryKey },
+          UpdateExpression:
+            'SET #charter = :charter, #charterRevision = :nextRevision, #charterUpdatedAt = :updatedAt',
+          ConditionExpression: condition.ConditionExpression,
+          ExpressionAttributeNames: {
+            ...condition.ExpressionAttributeNames,
+            '#charter': 'charter',
+            '#charterUpdatedAt': 'charterUpdatedAt',
+          },
+          ExpressionAttributeValues: {
+            ...condition.ExpressionAttributeValues,
+            ':charter': charter,
+            ':nextRevision': nextRevision,
+            ':updatedAt': updatedAt,
+          },
+        },
+      }]
+      if (before.code !== charter.code) {
+        if (charter.code !== undefined) {
+          codeReservationIndex = transactItems.length
+          transactItems.push({
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                directoryId: createProjectCodeDirectoryId(directoryId),
+                entryKey: createProjectCodeEntryKey(charter.code),
+                entryType: 'project-code',
+                workspaceId: directoryId,
+                teamId,
+                projectId,
+                code: charter.code,
+                createdAt: updatedAt,
+              },
+              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+            },
+          })
+        }
+        if (before.code !== undefined) {
+          transactItems.push({
+            Delete: {
+              TableName: this.tableName,
+              Key: {
+                directoryId: createProjectCodeDirectoryId(directoryId),
+                entryKey: createProjectCodeEntryKey(before.code),
+              },
+              ConditionExpression: '#teamId = :teamId AND #projectId = :projectId',
+              ExpressionAttributeNames: { '#projectId': 'projectId', '#teamId': 'teamId' },
+              ExpressionAttributeValues: { ':projectId': projectId, ':teamId': teamId },
+            },
+          })
+        }
+      }
+      const changedFields = listChangedProjectCharterFields(before, charter)
+      transactItems.push(...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.charter_updated',
+        entityType: 'project',
+        entityId: projectId,
+        action: 'charter_updated',
+        occurredAt: updatedAt,
+        changes: createAuditFieldChanges(
+          { ...before, revision: expectedRevision },
+          { ...charter, revision: nextRevision },
+          [...changedFields, 'revision'],
+          ['owner', 'sponsor'],
+        ),
+        metadata: { kind: 'project', projectId, teamId },
+      }))
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return toProjectCharterState({
+        ...project,
+        charter,
+        charterRevision: nextRevision,
+        charterUpdatedAt: updatedAt,
+      })
+    } catch (error) {
+      if (codeReservationIndex !== undefined && isTransactionConditionalFailureAt(error, codeReservationIndex)) {
+        throw new ProjectDataError(
+          409,
+          'ProjectCodeAlreadyUsed',
+          'The Project code is already used in this Workspace.',
+        )
+      }
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectCharterRevisionConflictError()
+      }
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /** Moves an unarchived Project to another lifecycle state allowed by the transition rules. */
+  async transitionProjectLifecycle(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    expectedRevision: number,
+    state: ProjectLifecycleState,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.ensureLocalAuditTable()
+    try {
+      const project = await this.readMutableTeamProjectItem(
+        directoryId,
+        teamId,
+        projectId,
+        expectedRevision,
+      )
+      const from = resolveProjectLifecycleState(project)
+      if (state === 'archived' || !canTransitionProjectLifecycle(from, state)) {
+        throw new ProjectDataError(
+          409,
+          'ProjectLifecycleTransitionNotAllowed',
+          `A Project cannot move from "${from}" to "${state}".`,
+        )
+      }
+      const updatedAt = new Date().toISOString()
+      const nextRevision = expectedRevision + 1
+      const condition = this.createCharterRevisionCondition(teamId, projectId, expectedRevision)
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { directoryId, entryKey: project.entryKey },
+              UpdateExpression:
+                'SET #lifecycleState = :lifecycleState, #charterRevision = :nextRevision, #charterUpdatedAt = :updatedAt',
+              ConditionExpression: condition.ConditionExpression,
+              ExpressionAttributeNames: {
+                ...condition.ExpressionAttributeNames,
+                '#charterUpdatedAt': 'charterUpdatedAt',
+                '#lifecycleState': 'lifecycleState',
+              },
+              ExpressionAttributeValues: {
+                ...condition.ExpressionAttributeValues,
+                ':lifecycleState': state,
+                ':nextRevision': nextRevision,
+                ':updatedAt': updatedAt,
+              },
+            },
+          },
+          ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+            directoryId,
+            eventType: 'project.lifecycle_changed',
+            entityType: 'project',
+            entityId: projectId,
+            action: 'lifecycle_changed',
+            occurredAt: updatedAt,
+            changes: createAuditFieldChanges(
+              { lifecycleState: from, revision: expectedRevision },
+              { lifecycleState: state, revision: nextRevision },
+            ),
+            metadata: { kind: 'project', projectId, teamId },
+          }),
+        ],
+      }))
+      return toProjectCharterState({
+        ...project,
+        lifecycleState: state,
+        charterRevision: nextRevision,
+        charterUpdatedAt: updatedAt,
+      })
+    } catch (error) {
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectCharterRevisionConflictError()
+      }
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Strongly reads one Team-owned Project row, including an archived one.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The validated Project row.
+   */
+  private async readTeamProjectItem(directoryId: string, teamId: string, projectId: string) {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId
+    )
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+    return project
+  }
+
+  /**
+   * Reads an unarchived Project row whose charter revision matches the caller's revision.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @param expectedRevision - Charter revision read by the caller.
+   * @returns The validated Project row.
+   */
+  private async readMutableTeamProjectItem(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    expectedRevision: number,
+  ) {
+    const project = await this.readTeamProjectItem(directoryId, teamId, projectId)
+    if (project.archivedAt !== undefined) {
+      throw new ProjectDataError(409, 'ProjectArchived', 'An archived Project cannot be changed.')
+    }
+    if ((project.charterRevision ?? 0) !== expectedRevision) {
+      throw createProjectCharterRevisionConflictError()
+    }
+    return project
+  }
+
+  /**
+   * Builds the commit-time guard binding a charter write to the revision the caller read.
+   *
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @param expectedRevision - Charter revision read by the caller.
+   * @returns Condition expression parts for an Update.
+   */
+  private createCharterRevisionCondition(teamId: string, projectId: string, expectedRevision: number) {
+    const ExpressionAttributeValues: Record<string, unknown> = {
+      ':expectedRevision': expectedRevision,
+      ':projectEntryType': 'project',
+      ':projectId': projectId,
+      ':teamId': teamId,
+    }
+    const revisionCondition = expectedRevision === 0
+      ? '(attribute_not_exists(#charterRevision) OR #charterRevision = :expectedRevision)'
+      : '#charterRevision = :expectedRevision'
+    return {
+      ConditionExpression:
+        '#entryType = :projectEntryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+        `attribute_not_exists(#archivedAt) AND ${revisionCondition}`,
+      ExpressionAttributeNames: {
+        '#archivedAt': 'archivedAt',
+        '#charterRevision': 'charterRevision',
+        '#entryType': 'entryType',
+        '#projectId': 'projectId',
+        '#teamId': 'teamId',
+      },
+      ExpressionAttributeValues,
     }
   }
 
@@ -2985,6 +3358,19 @@ function requireDynamoDbTransactionCapacity(
   }
 }
 
+/**
+ * Creates the conflict raised when a charter or lifecycle write used a stale revision.
+ *
+ * @returns A retry-after-reload conflict error.
+ */
+function createProjectCharterRevisionConflictError() {
+  return new ProjectDataError(
+    409,
+    'ProjectCharterRevisionConflict',
+    'The Project charter changed. Reload and try again.',
+  )
+}
+
 function createProjectDataConflictError() {
   return new ProjectDataError(
     409,
@@ -3198,14 +3584,68 @@ function toProjectDirectoryResponse(
       continue
     }
 
-    team.projects.push({
-      id: item.projectId,
-      name: localizedName(item, locale),
-      tone: item.tone,
-    })
+    team.projects.push(toProjectDirectoryProjectResponse(item, locale))
   }
 
   return teams
+}
+
+/**
+ * Maps a stored Project row to its directory response.
+ *
+ * @param item - Validated Project row.
+ * @param locale - Display locale of the name.
+ * @returns The directory row with lifecycle and charter summary.
+ */
+function toProjectDirectoryProjectResponse(
+  item: ProjectDirectoryProjectItem,
+  locale: Locale,
+): ProjectDirectoryProjectResponse {
+  const charter = toProjectCharterSummary(item.charter)
+  return {
+    id: item.projectId,
+    name: localizedName(item, locale),
+    tone: item.tone,
+    lifecycleState: resolveProjectLifecycleState(item),
+    ...(charter === undefined ? {} : { charter }),
+  }
+}
+
+/**
+ * Maps a stored Project row to its full charter state.
+ *
+ * @param item - Validated Project row.
+ * @returns The charter state.
+ */
+function toProjectCharterState(item: ProjectDirectoryProjectItem): ProjectCharterState {
+  return {
+    teamId: item.teamId,
+    projectId: item.projectId,
+    lifecycleState: resolveProjectLifecycleState(item),
+    charter: item.charter ?? createEmptyProjectCharter(),
+    revision: item.charterRevision ?? 0,
+    ...(item.charterUpdatedAt === undefined ? {} : { updatedAt: item.charterUpdatedAt }),
+  }
+}
+
+/**
+ * Creates the sidecar partition that reserves Workspace-unique Project codes.
+ *
+ * @param workspaceId - Workspace that owns the codes.
+ * @returns A partition key that cannot overlap canonical directory rows.
+ */
+function createProjectCodeDirectoryId(workspaceId: string) {
+  return `PROJECT_CODE#${encodeURIComponent(workspaceId)}`
+}
+
+/**
+ * Creates the reservation key of one normalized Project code.
+ *
+ * @param code - Normalized upper-case code.
+ * @returns The sort key of the reservation row.
+ */
+function createProjectCodeEntryKey(code: string) {
+  return `CODE#${code}`
 }
 
 function toProjectMemberResponseItem(item: ProjectMemberItem): ProjectMemberResponseItem {
@@ -3473,7 +3913,19 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
   return (
     typeof value.projectId === 'string' &&
     typeof value.projectSortOrder === 'number' &&
-    isProjectTone(value.tone)
+    isProjectTone(value.tone) &&
+    (
+      value.lifecycleState === undefined ||
+      (isProjectLifecycleState(value.lifecycleState) && value.lifecycleState !== 'archived')
+    ) &&
+    (value.charter === undefined || isStoredProjectCharter(value.charter)) &&
+    (
+      value.charterRevision === undefined ||
+      (Number.isSafeInteger(value.charterRevision) &&
+        typeof value.charterRevision === 'number' &&
+        value.charterRevision >= 0)
+    ) &&
+    (value.charterUpdatedAt === undefined || typeof value.charterUpdatedAt === 'string')
   )
 }
 

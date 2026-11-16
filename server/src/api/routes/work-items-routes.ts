@@ -258,6 +258,7 @@ import {
   filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
 import {
@@ -3699,6 +3700,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
+      requireAssignedProjectAcceptsNewWorkItems(
+        teamContext.team,
+        readAssignedProjectId(normalized.assignedProjectId),
+      )
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         conversion.target.teamId,
@@ -4319,6 +4324,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const body = normalizeTeamIssueInput(
         requestBody,
         context.team,
+      )
+      requireAssignedProjectAcceptsNewWorkItems(
+        context.team,
+        readAssignedProjectId(body.assignedProjectId),
       )
       requireAssignedProjectPermission(
         principal,

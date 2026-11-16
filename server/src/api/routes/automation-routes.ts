@@ -147,7 +147,10 @@ import {
   projectWorkspaceSearchDocumentBestEffort,
 } from '../shared/search-access'
 import { isRecord, stableDigestStringify } from '../shared/value-guards'
-import { normalizeTeamIssueInput } from '../shared/work-item-access'
+import {
+  normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
+} from '../shared/work-item-access'
 import {
   prepareConfiguredCreateWorkItem,
   validateWorkItemConfigurationReferences,
@@ -1615,10 +1618,15 @@ async function executeAutomationWorkItemCreate(
     teamId,
     dependencies,
   )
+  const normalizedBody = normalizeTeamIssueInput(body, team)
+  requireAssignedProjectAcceptsNewWorkItems(
+    team,
+    readAssignedProjectId(normalizedBody.assignedProjectId),
+  )
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
     teamId,
-    normalizeTeamIssueInput(body, team),
+    normalizedBody,
     await dependencies.workItemConfigurations.getTeamConfiguration(
       context.execution.workspaceId,
       teamId,

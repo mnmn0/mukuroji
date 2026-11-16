@@ -736,6 +736,24 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (
+    error.code === 'InvalidProjectCharter' ||
+    error.code === 'InvalidProjectLifecycleTransition'
+  ) {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (
+    error.code === 'ProjectCharterRevisionConflict' ||
+    error.code === 'ProjectCodeAlreadyUsed' ||
+    error.code === 'ProjectLifecycleTransitionNotAllowed' ||
+    error.code === 'ProjectArchived' ||
+    error.code === 'ProjectClosedForNewWorkItems' ||
+    error.code === 'ProjectCharterPersonInactive'
+  ) {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
+  if (
     error.code === 'AmbiguousProjectOwnerTeam' ||
     error.code === 'AmbiguousProjectWorkItem'
   ) {

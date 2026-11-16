@@ -852,7 +852,7 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
       id: 'core-team',
       name: 'コアチーム',
       expanded: true,
-      projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      projects: [{ id: 'refero', name: 'Refero', tone: 'blue', lifecycleState: 'active' }],
     }],
   })
   expect(quickAccessResponse.status).toBe(200)

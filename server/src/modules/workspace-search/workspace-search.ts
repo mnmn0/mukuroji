@@ -60,6 +60,7 @@ import {
   type WorkspaceSearchHighlight,
   type WorkspaceSearchResponse,
   type WorkspaceSearchResult,
+  type ProjectCharter,
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
@@ -1097,6 +1098,8 @@ export function createProjectWorkspaceSearchDocument(input: {
   title: string
   /** Project の補助表示名です。 */
   subtitle?: string
+  /** Project charter whose code, purpose, description, and tags become searchable. */
+  charter?: ProjectCharter
   /** Project row を作成した user ID です。 */
   creatorUserId?: string
   /** Project row の作成日時です。 */
@@ -1105,12 +1108,14 @@ export function createProjectWorkspaceSearchDocument(input: {
   updatedAt?: string
 }) {
   const query = new URLSearchParams({ teamId: input.teamId })
+  const body = createProjectCharterSearchBody(input.charter)
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
     entityType: 'project',
     entityId: `team/${input.teamId}/project/${input.projectId}`,
     title: input.title,
     ...(input.subtitle ? { subtitle: input.subtitle } : {}),
+    ...(body ? { body } : {}),
     url: `/projects/${encodeURIComponent(input.projectId)}/issues?${query.toString()}`,
     teamId: input.teamId,
     projectId: input.projectId,
@@ -1118,6 +1123,26 @@ export function createProjectWorkspaceSearchDocument(input: {
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
   })
+}
+
+/**
+ * Builds the searchable body of a Project from its charter.
+ *
+ * People are left out so that searching a name does not reveal who owns which Project beyond
+ * what the directory already shows.
+ *
+ * @param charter - Optional Project charter.
+ * @returns Searchable text, or undefined when the charter has no searchable field.
+ */
+function createProjectCharterSearchBody(charter: ProjectCharter | undefined): string | undefined {
+  if (!charter) return undefined
+  const text = [
+    charter.code,
+    charter.purpose,
+    charter.description,
+    charter.tags.join(' '),
+  ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n')
+  return text.length === 0 ? undefined : text.slice(0, WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH)
 }
 
 /**

@@ -21,6 +21,7 @@ import {
 } from '@mukuroji/contracts'
 import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
 import { validateDocumentPayload } from '../../src/modules/documents'
+import { isStoredProjectCharter } from '../../src/modules/directory'
 import {
   createCommentWorkspaceSearchDocument,
   createCommentWorkspaceSearchEntityId,
@@ -643,6 +644,7 @@ function mapProjectDirectoryItemRow(
       subtitle,
       teamId,
       projectId,
+      ...(isStoredProjectCharter(item.charter) ? { charter: item.charter } : {}),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
     }),

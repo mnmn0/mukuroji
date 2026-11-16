@@ -23,6 +23,7 @@ import {
   requireTeamPermission,
   type WorkspacePrincipal,
 } from './project-access'
+import { projectLifecycleAcceptsNewWorkItems } from '@mukuroji/contracts'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
 import { projectAccessAllows, type TeamPermissionContext } from './workspace-access'
@@ -234,6 +235,30 @@ export function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBod
   return {
     ...input,
     assignedProjectId,
+  }
+}
+
+/**
+ * Rejects creating a Work Item in a Project whose lifecycle no longer accepts new work.
+ *
+ * Existing Work Items of a `closed` Project stay readable and editable; only creation is
+ * rejected. Archived Projects are already absent from the active Team directory.
+ *
+ * @param team - Active Team row whose Projects carry their lifecycle state.
+ * @param assignedProjectId - Normalized Project the new Work Item is assigned to.
+ */
+export function requireAssignedProjectAcceptsNewWorkItems(
+  team: ProjectDirectoryTeamResponse,
+  assignedProjectId: string | null | undefined,
+): void {
+  if (!assignedProjectId) return
+  const project = team.projects.find((candidate) => candidate.id === assignedProjectId)
+  if (project && !projectLifecycleAcceptsNewWorkItems(project.lifecycleState)) {
+    throw new ProjectDataError(
+      409,
+      'ProjectClosedForNewWorkItems',
+      `Project "${assignedProjectId}" is ${project.lifecycleState} and does not accept new Work Items.`,
+    )
   }
 }
 
