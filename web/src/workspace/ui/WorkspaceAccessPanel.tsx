@@ -1448,6 +1448,10 @@ function resolveMemberCredentialErrorMessage(
       return t('memberSecurity.error.inProgress')
     }
 
+    if (error.code === 'WorkspaceCredentialActionExpired') {
+      return t('memberSecurity.error.expired')
+    }
+
     if (
       error.code === 'MemberPasswordResetUnavailable' ||
       error.code === 'MemberSignInUnavailable'

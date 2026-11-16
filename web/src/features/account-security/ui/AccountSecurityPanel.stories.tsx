@@ -64,6 +64,11 @@ export const LoadError: Story = {
   args: { loadFailed: true, status: undefined },
 }
 
+/** A reload failed after a change; the earlier settings stay with a way to reload. */
+export const ReloadError: Story = {
+  args: { reloadFailed: true },
+}
+
 /** English copy. */
 export const English: Story = {
   args: { locale: 'en' },

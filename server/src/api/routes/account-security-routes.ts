@@ -6,12 +6,19 @@ import type {
   SoftwareTokenSetupStart,
   WorkspaceMembersSignInSecurityResponse,
 } from '@mukuroji/contracts'
-import { CognitoServiceError } from '../../modules/authentication'
+import {
+  CognitoServiceError,
+  confirmSoftwareTokenEnrollment,
+  SoftwareTokenEnrollmentError,
+  startSoftwareTokenEnrollment,
+  type GetUserResponse,
+} from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import {
   EnterpriseIdentityError,
 } from '../../modules/enterprise-identity'
 import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
+import { createSoftwareTokenEnrollmentPorts } from '../../app/composition/software-token-enrollment'
 import {
   resetMemberCredential,
   WorkspaceAccessError,
@@ -252,6 +259,9 @@ function toAccountSecurityErrorResponse(c: Context, error: unknown) {
       return rateLimitedResponse(c, 60)
     }
   }
+  if (error instanceof SoftwareTokenEnrollmentError) {
+    return c.json({ code: error.code, message: error.message }, error.status)
+  }
   if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
   if (error instanceof ProjectDataError) return toProjectDataErrorResponse(c, error)
   if (error instanceof EnterpriseIdentityError) return toEnterpriseIdentityErrorResponse(c, error)
@@ -465,11 +475,10 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const caller = await readCognitoCaller(c)
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
-      const blocked = rejectSoftwareTokenSetup(c, caller.accessToken, caller.user)
-      if (blocked) return blocked
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.associateSoftwareToken) return unavailableResponse(c)
-      const association = await cognito.associateSoftwareToken({ accessToken: caller.accessToken })
+      const association = await startSoftwareTokenEnrollment(
+        createSoftwareTokenEnrollmentPorts(authenticationDependencies.cognito),
+        toSoftwareTokenEnrollee(caller.accessToken, caller.user),
+      )
       const response: SoftwareTokenSetupStart = {
         secretCode: association.secretCode,
         accountName: readUserAttribute(caller.user, 'email')?.trim().toLowerCase() ||
@@ -498,14 +507,11 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
       const limit = consumeAttempt(c, 'mfa-setup-verify', caller.user.Username ?? caller.accessToken)
       if (!limit.allowed) return rateLimitedResponse(c, limit.retryAfterSeconds)
-      const blocked = rejectSoftwareTokenSetup(c, caller.accessToken, caller.user)
-      if (blocked) return blocked
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.verifySoftwareToken || !cognito.setSoftwareTokenMfaEnabled) {
-        return unavailableResponse(c)
-      }
-      await cognito.verifySoftwareToken({ accessToken: caller.accessToken }, code)
-      await cognito.setSoftwareTokenMfaEnabled(caller.accessToken, true)
+      await confirmSoftwareTokenEnrollment(
+        createSoftwareTokenEnrollmentPorts(authenticationDependencies.cognito),
+        toSoftwareTokenEnrollee(caller.accessToken, caller.user),
+        code,
+      )
       return c.json({ softwareTokenMfaEnabled: true as const })
     } catch (error) {
       return toAccountSecurityErrorResponse(c, error)
@@ -697,31 +703,18 @@ function isUndisclosedResetFailure(code: string) {
 }
 
 /**
- * Rejects authenticator registration for an SSO session or a user who already has TOTP.
+ * Describes the signed-in user for the authenticator registration use case.
  *
- * @param c - Hono request context.
  * @param accessToken - Access token of the caller.
  * @param user - Cognito user of the caller.
- * @returns The 409 response, or undefined when registration may continue.
+ * @returns The enrollee.
  */
-function rejectSoftwareTokenSetup(
-  c: Context,
-  accessToken: string,
-  user: Parameters<typeof hasSoftwareTokenMfa>[0],
-) {
-  if (isSsoSessionAccessToken(accessToken)) {
-    return c.json({
-      code: 'MfaManagedBySso' as const,
-      message: 'Your identity provider manages MFA for this account.',
-    }, 409)
+function toSoftwareTokenEnrollee(accessToken: string, user: GetUserResponse) {
+  return {
+    accessToken,
+    ssoSession: isSsoSessionAccessToken(accessToken),
+    softwareTokenEnabled: hasSoftwareTokenMfa(user),
   }
-  if (hasSoftwareTokenMfa(user)) {
-    return c.json({
-      code: 'MfaAlreadyEnabled' as const,
-      message: 'An authenticator app is already registered. Turn it off first.',
-    }, 409)
-  }
-  return undefined
 }
 
 /**

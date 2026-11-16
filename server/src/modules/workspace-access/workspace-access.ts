@@ -1926,6 +1926,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         recordKey,
         status: recorded.status === 'completed' ? 'completed' as const : 'recorded' as const,
         leaseUntil: typeof recorded.leaseUntil === 'number' ? recorded.leaseUntil : undefined,
+        recordedAt: typeof recorded.recordedAt === 'string' ? Date.parse(recorded.recordedAt) : Number.NaN,
       }
     } catch (error) {
       if (error instanceof WorkspaceAccessError) throw error
@@ -1937,19 +1938,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * Takes over a recorded credential action whose earlier attempt stopped, once its lease ran out.
    *
    * The conditional update succeeds for one caller only, so two retries cannot both change
-   * Cognito.
+   * Cognito. An action recorded longer ago than the resume window is not repeated: the member
+   * may have set up a new password or app since, so the administrator sends a new request.
    *
    * @param workspaceId - Normalized Workspace ID.
    * @param recorded - Progress record that the caller read.
    * @param recorded.recordKey - Key of the progress record.
    * @param recorded.leaseUntil - Lease end the caller observed, if any.
+   * @param recorded.recordedAt - When the action was recorded, in milliseconds.
    * @param now - Current time.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
-   *   holds the lease or took it over first.
+   *   holds the lease or took it over first, and 409 `WorkspaceCredentialActionExpired` when the
+   *   resume window has passed.
    */
   private async renewCredentialActionLease(
     workspaceId: string,
-    recorded: { recordKey: string; leaseUntil: number | undefined },
+    recorded: { recordKey: string; leaseUntil: number | undefined; recordedAt: number },
     now: Date,
   ) {
     const inProgress = () => new WorkspaceAccessError(
@@ -1959,6 +1963,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     )
     if (recorded.leaseUntil !== undefined && recorded.leaseUntil > now.getTime()) {
       throw inProgress()
+    }
+    if (!(recorded.recordedAt + credentialActionResumeWindowMs > now.getTime())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceCredentialActionExpired',
+        'The earlier request stopped before it finished. Check the member\'s sign-in and send a new request.',
+      )
     }
 
     try {
@@ -3313,6 +3324,12 @@ function createInvitationRecordKey(invitationId: string) {
  * over. It is longer than the API Lambda's run time, so a live attempt keeps its claim.
  */
 const credentialActionLeaseMs = 60_000
+
+/**
+ * How long after recording a stopped credential action a retry may still resume it. Later, the
+ * member may have set up a new password or app, which a repeated reset would undo.
+ */
+const credentialActionResumeWindowMs = 10 * 60_000
 
 /** Key of the record that tracks one administrator credential action, named by its audit event. */
 function createCredentialActionRecordKey(auditEventId: unknown) {

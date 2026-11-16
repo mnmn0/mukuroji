@@ -3106,6 +3106,9 @@ test('tracks a credential reset by its idempotency key so that a retry resumes o
   clock = new Date(now.getTime() + 61_000)
   await expect(record()).resolves.toMatchObject({ alreadyRecorded: true, completed: false })
   await expect(record()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionInProgress' })
+  // An action left unfinished past the resume window is not repeated automatically.
+  clock = new Date(now.getTime() + 11 * 60_000)
+  await expect(record()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionExpired' })
   await client.completeMemberCredentialAction(workspaceId, 'sato@example.com', 'mfa-reset', auditContext)
   await expect(readProgress()).resolves.toBe('completed')
   await expect(record()).resolves.toMatchObject({ alreadyRecorded: true, completed: true })

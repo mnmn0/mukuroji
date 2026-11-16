@@ -46,6 +46,8 @@ export type AccountSecurityPanelProps = {
   isLoading?: boolean
   /** Whether loading failed. */
   loadFailed?: boolean
+  /** Whether reloading failed while the earlier settings are shown. */
+  reloadFailed?: boolean
   /** Changes the password. */
   onChangePassword?: (input: ChangePasswordInput) => Promise<void>
   /** Starts authenticator registration. */
@@ -69,6 +71,7 @@ export function AccountSecurityPanel({
   status,
   isLoading = false,
   loadFailed = false,
+  reloadFailed = false,
   onChangePassword,
   onStartMfaSetup,
   onVerifyMfaSetup,
@@ -85,6 +88,21 @@ export function AccountSecurityPanel({
           {t('accountSecurity.description')}
         </p>
       </div>
+      {status && reloadFailed ? (
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-5 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('accountSecurity.reloadError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-10 px-4"
+            data-testid="account-security-reload"
+            type="button"
+            onClick={onRetry}
+          >
+            {t('accountSecurity.retry')}
+          </button>
+        </div>
+      ) : null}
       {status ? (
         <div className="grid border-t border-[var(--workbench-border)] min-[900px]:grid-cols-2">
           <PasswordSection status={status} t={t} onChangePassword={onChangePassword} />

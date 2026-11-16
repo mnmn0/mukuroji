@@ -77,6 +77,7 @@ export const accountSecurityMessages = {
   'accountSecurity.description': 'Manage your password and multi-factor authentication.',
   'accountSecurity.loading': 'Loading',
   'accountSecurity.loadError': 'Sign-in settings could not be loaded.',
+  'accountSecurity.reloadError': 'Sign-in settings could not be reloaded. They may be out of date.',
   'accountSecurity.retry': 'Reload',
   'accountSecurity.password.title': 'Password',
   'accountSecurity.password.sso':
@@ -133,6 +134,8 @@ export const accountSecurityMessages = {
   'memberSecurity.error.unavailable':
     'The action could not be completed. Check that the member\'s email is verified.',
   'memberSecurity.error.inProgress': 'The previous request is still running. Try again in a minute.',
+  'memberSecurity.error.expired':
+    'The earlier request stopped before it finished. Check the member\'s sign-in status and try again.',
   'memberSecurity.error.notEnrolled': 'This member has no authenticator app registered.',
   'security.sessions.mfaImpact.count':
     '{count} active members have no MFA. After you save, they must register an authenticator app at their next sign-in.',

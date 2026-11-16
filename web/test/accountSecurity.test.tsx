@@ -11,6 +11,10 @@ import {
   startSoftwareTokenSetup,
   verifySoftwareTokenSetup,
 } from '../src/auth/api'
+import {
+  resolveAccountSecurityLoadFailure,
+  withAuthenticatorState,
+} from '../src/features/account-security/mutations/useAccountSecurityController'
 import { AccountSecurityPanel } from '../src/features/account-security/ui/AccountSecurityPanel'
 import { LoginPage } from '../src/pages/auth/LoginPage'
 import { ForgotPasswordPage } from '../src/pages/auth/ForgotPasswordPage'
@@ -253,5 +257,25 @@ describe('account security screens', () => {
     )
 
     expect(html).not.toContain('Current password')
+  })
+
+  test('keeps the confirmed authenticator state when the reload after a change fails', () => {
+    const before = { mfaRequiredByPolicy: false, passwordManaged: true, softwareTokenMfaEnabled: false }
+    const registered = withAuthenticatorState(before, true)
+    const failure = resolveAccountSecurityLoadFailure(true, new Error('Network error'))
+
+    expect(registered).toEqual({ ...before, softwareTokenMfaEnabled: true })
+    expect(withAuthenticatorState(undefined, true)).toBeUndefined()
+    expect(failure).toEqual({ loadFailed: false, reloadFailed: true })
+    expect(resolveAccountSecurityLoadFailure(false, new Error('Network error')))
+      .toEqual({ loadFailed: true, reloadFailed: false })
+
+    const html = renderToStaticMarkup(
+      <AccountSecurityPanel locale="en" status={registered} {...failure} onRetry={() => undefined} />,
+    )
+
+    expect(html).toContain('Sign-in settings could not be reloaded.')
+    expect(html).toContain('data-testid="account-security-reload"')
+    expect(html).toContain('On')
   })
 })

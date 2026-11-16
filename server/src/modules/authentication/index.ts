@@ -24,3 +24,11 @@ export {
   type SoftwareTokenAssociation,
   type SoftwareTokenTarget,
 } from './adapter-out/cognito/cognito-client'
+export {
+  confirmSoftwareTokenEnrollment,
+  SoftwareTokenEnrollmentError,
+  startSoftwareTokenEnrollment,
+  type SoftwareTokenEnrollee,
+  type SoftwareTokenEnrollmentErrorCode,
+  type SoftwareTokenEnrollmentPorts,
+} from './application/software-token-enrollment'

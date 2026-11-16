@@ -83,6 +83,7 @@ export const accountSecurityMessages = {
   'accountSecurity.description': 'パスワードと多要素認証（認証アプリ）を管理します。',
   'accountSecurity.loading': '読み込み中',
   'accountSecurity.loadError': 'ログイン設定を読み込めませんでした。',
+  'accountSecurity.reloadError': 'ログイン設定を再読み込みできませんでした。表示が古い可能性があります。',
   'accountSecurity.retry': '再読み込み',
   'accountSecurity.password.title': 'パスワード',
   'accountSecurity.password.sso':
@@ -140,6 +141,8 @@ export const accountSecurityMessages = {
   'memberSecurity.error.unavailable':
     '操作できませんでした。メンバーのメールアドレスが確認済みか確かめてください。',
   'memberSecurity.error.inProgress': '前回の操作をまだ処理しています。1 分ほど待ってからもう一度お試しください。',
+  'memberSecurity.error.expired':
+    '前回の操作は途中で止まりました。メンバーのログイン状況を確認してから、もう一度実行してください。',
   'memberSecurity.error.notEnrolled': 'このメンバーは認証アプリを登録していません。',
   'security.sessions.mfaImpact.count':
     'MFA を登録していないアクティブメンバーが {count} 人います。保存すると、その人は次回ログイン時に認証アプリの登録を求められます。',
