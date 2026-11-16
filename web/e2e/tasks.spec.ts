@@ -8075,6 +8075,12 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('project-charter-purpose').fill('問い合わせ対応を一元化する')
     await expect(page.getByTestId('project-charter-owner').locator('option', { hasText: '佐藤 花子' }))
       .toHaveCount(1)
+    // Leaving the tab unmounts the panel; the unsaved charter comes back with it.
+    await page.getByRole('tab', { name: 'ファイル' }).click()
+    await expect(panel).toHaveCount(0)
+    await page.getByRole('tab', { name: '権限' }).click()
+    await expect(page.getByTestId('project-charter-code')).toHaveValue('ops-1')
+    await expect(page.getByTestId('project-charter-purpose')).toHaveValue('問い合わせ対応を一元化する')
     await page.getByTestId('project-lifecycle-on-hold').click()
     await expect(page.getByTestId('project-charter-lifecycle')).toHaveText('保留')
     await expect(page.getByTestId('project-charter-code')).toHaveValue('ops-1')
