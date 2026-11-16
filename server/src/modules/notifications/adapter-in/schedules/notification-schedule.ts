@@ -915,9 +915,9 @@ export function parseUtcDateOnly(value: unknown): string | undefined {
  *
  * Dates use the Work Item schedule's local calendar. The owner gets `due-soon` within the
  * configured window, `due` on the due date, `overdue` on the first overdue run, and
- * `overdue-reminder` once per reminder interval after that. A started Work Item that has not
- * been updated for the stale window gets one `stale` reminder per window. Project managers are
- * resolved by the caller for the escalation stage.
+ * `overdue-reminder` once per reminder interval after that. A started Work Item that is not
+ * overdue and has not been updated for the stale window gets one `stale` reminder per window.
+ * Project managers are resolved by the caller for the escalation stage.
  *
  * @param item - Candidate canonical Work Item row.
  * @param now - Absolute schedule execution instant.
@@ -972,7 +972,9 @@ export function evaluateScheduledWorkItemNotifications(
     }
   }
 
-  if (item.statusCategory === 'started') {
+  // Overdue reminders already nag the owner, so a stale reminder only covers open-dated work.
+  const overdue = dueDate !== undefined && daysBetweenDateOnly(today, dueDate) < 0
+  if (item.statusCategory === 'started' && !overdue) {
     const updatedAt = Date.parse(item.updatedAt)
     const idleDays = Number.isFinite(updatedAt)
       ? Math.floor((now.getTime() - updatedAt) / 86_400_000)

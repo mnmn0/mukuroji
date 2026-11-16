@@ -175,6 +175,9 @@ function parseDelivery(row: Record<string, unknown> | undefined, recipientKey: s
     scheduledAt: typeof row.deliveryAfter === 'string' ? row.deliveryAfter : row.slackNextAttemptAt,
     notification, expiresAt: row.expiresAt,
     ...(typeof row.dueDate === 'string' ? { dueDate: row.dueDate } : {}),
+    ...(typeof row.workItemUpdatedAt === 'string'
+      ? { workItemUpdatedAt: row.workItemUpdatedAt }
+      : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
     ...(typeof row.targetId === 'string' ? { targetId: row.targetId } : {}),
   }

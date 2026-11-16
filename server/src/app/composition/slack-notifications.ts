@@ -48,6 +48,7 @@ export function createProductionSlackNotificationHandler() {
           workspaceId: delivery.workspaceId,
           notificationCandidates: notification.reasons.map((reason) => ({ memberKey: delivery.memberKey, reason })),
           dueDate: delivery.dueDate,
+          workItemUpdatedAt: delivery.workItemUpdatedAt,
           targetId: delivery.targetId,
           fileId: delivery.fileId,
           outboxStatus: 'pending',

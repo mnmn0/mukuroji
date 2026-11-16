@@ -1423,6 +1423,7 @@ export function createNotificationProjectionItem(
     occurredAt: event.occurredAt,
     createdAt: event.occurredAt,
     dueDate: event.dueDate,
+    workItemUpdatedAt: event.workItemUpdatedAt,
     expiresAt,
   }
 }
@@ -1462,7 +1463,7 @@ export function refreshScheduledNotificationEvent(
     if (
       scope.statusCategory !== 'started' ||
       !event.workItemUpdatedAt ||
-      scope.updatedAt !== event.workItemUpdatedAt
+      readTimestamp(scope.updatedAt) !== event.workItemUpdatedAt
     ) {
       return undefined
     }

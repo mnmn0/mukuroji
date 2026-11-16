@@ -569,6 +569,13 @@ describe('notification schedule handler', () => {
             createWorkItem({ issueId: 'stale', dueDate: '2026-08-31', updatedAt: '2026-07-05T08:00:00.000Z' }),
             createWorkItem({ issueId: 'fresh', dueDate: '2026-08-31', updatedAt: '2026-07-06T10:00:00.000Z' }),
             createWorkItem({
+              issueId: 'stale-and-overdue',
+              assignedProjectId: undefined,
+              directoryProjectId: undefined,
+              dueDate: '2026-07-11',
+              updatedAt: '2026-07-02T08:00:00.000Z',
+            }),
+            createWorkItem({
               issueId: 'not-started',
               dueDate: '2026-08-31',
               statusCategory: 'unstarted',
@@ -582,7 +589,14 @@ describe('notification schedule handler', () => {
     const result = await runNotificationSchedule(createRunOptions(recording.client))
     const puts = recording.commands.filter(({ name }) => name === 'PutCommand')
 
-    expect(result).toMatchObject({ emittedEvents: 1, skippedItems: 2 })
+    expect(result).toMatchObject({ emittedEvents: 2, skippedItems: 2 })
+    expect(puts.map(({ input }) => {
+      const item = input.Item as Record<string, unknown>
+      return [item.entityId, item.eventType]
+    })).toEqual([
+      ['team/core-team/issue/stale', 'work-item.stale'],
+      ['team/core-team/issue/stale-and-overdue', 'work-item.overdue'],
+    ])
     expect(puts[0]?.input.Item).toMatchObject({
       eventType: 'work-item.stale',
       entityId: 'team/core-team/issue/stale',

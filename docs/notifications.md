@@ -183,7 +183,7 @@ EventBridge の定期 rule が canonical Work Item を bounded pagination で走
 | `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3） | 期限・責任者 |
 | `work-item.overdue-reminder` | 責任者 | 超過から interval 日ごと（`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、7）。初回の超過は従来どおり `work-item.overdue` | 期限・責任者・何回目か |
 | `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外 | 期限・Project |
-| `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知 | 最終更新時刻・責任者・何回目か |
+| `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知。期限超過中は超過の再通知に任せて送らない | 最終更新時刻・責任者・何回目か |
 
 再通知は `work-item.overdue` と別の event type にしているため、Automation の `due` trigger（`overdue`）は初回だけ発火します。projection は配送時に Work Item を強整合で読み直し、完了・期限変更・責任者変更・更新済みの段階を捨てます。escalation は配送時点でも Project manager であることを確認します。
 

@@ -314,6 +314,8 @@ describe('collaboration projection pure helpers', () => {
       .toBeUndefined()
     expect(refreshScheduledNotificationEvent(stale, scope)?.notificationCandidates)
       .toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, updatedAt: '2026-07-01T18:00:00+09:00' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
     expect(refreshScheduledNotificationEvent(stale, { ...scope, updatedAt: '2026-07-10T00:00:00.000Z' }))
       .toBeUndefined()
     expect(refreshScheduledNotificationEvent(stale, { ...scope, statusCategory: 'unstarted' }))

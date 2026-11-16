@@ -24,6 +24,8 @@ export type SlackDelivery = {
   expiresAt: number
   /** Original scheduled due date, when this is a due/overdue notification. */
   dueDate?: string
+  /** Work Item `updatedAt` a stale reminder was computed from, when this is one. */
+  workItemUpdatedAt?: string
   /** Original approval target, retained independently from its parent Work Item. */
   targetId?: string
   /** Original file subject, when the source is file-backed. */
