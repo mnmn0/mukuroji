@@ -323,7 +323,8 @@ describe('agent task lifecycle', () => {
     expect(await service.get('keyed')).toMatchObject({ task: { id: 'keyed', key: 'TEAM-7' } })
     expect((await service.get('legacy')).task).not.toHaveProperty('key')
     expect((await service.get('old-server')).task).not.toHaveProperty('key')
-    expect(keyReads).toEqual(['keyed', 'legacy', 'old-server'])
+    // The key is read before and after the task, so the pair belongs to one Work Item.
+    expect(keyReads).toEqual(['keyed', 'keyed', 'legacy', 'legacy', 'old-server', 'old-server'])
   })
 
   test('refuses to pair a task with the key of a Work Item created again under the same ID', async () => {
@@ -332,6 +333,16 @@ describe('agent task lifecycle', () => {
       async taskKey() { return { key: 'TEAM-9', createdAt: '2026-09-02T00:00:00.000Z' } },
     })
     await expect(service.get('replaced')).rejects.toMatchObject({ code: 'conflict', retryable: true })
+  })
+
+  test('refuses a task whose key changed during the read even when the creation time is the same', async () => {
+    const createdAt = task('same-instant').createdAt
+    const keys = ['TEAM-9', 'TEAM-10']
+    const { service } = fixture([task('same-instant')], {
+      // Another Work Item was created under the same ID in the same millisecond while the task was read.
+      async taskKey() { return { key: keys.shift() ?? 'TEAM-10', createdAt } },
+    })
+    await expect(service.get('same-instant')).rejects.toMatchObject({ code: 'conflict', retryable: true })
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {
