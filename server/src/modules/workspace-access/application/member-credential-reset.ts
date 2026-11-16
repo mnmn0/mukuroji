@@ -139,12 +139,22 @@ export async function resetMemberCredential(
     }
   }
 
-  try {
-    await ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext)
-  } catch (error) {
-    ports.reportFailure('Failed to mark the credential reset as completed.', error)
+  // An unmarked action can be resumed by a retry within the resume window, which would repeat
+  // the reset, so marking it is worth a few attempts.
+  let lastError: unknown
+  for (let attempt = 0; attempt < completionAttempts; attempt += 1) {
+    try {
+      await ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext)
+      return
+    } catch (error) {
+      lastError = error
+    }
   }
+  ports.reportFailure('Failed to mark the credential reset as completed.', lastError)
 }
+
+/** How many times the use case tries to mark a finished reset as completed. */
+const completionAttempts = 3
 
 /**
  * Explains why a reset does not apply to the member's current account.

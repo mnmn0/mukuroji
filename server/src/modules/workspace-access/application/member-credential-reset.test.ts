@@ -168,15 +168,51 @@ test('does nothing for a retry of a completed reset', async () => {
 })
 
 test('keeps a finished reset when marking it completed fails', async () => {
+  let completionCalls = 0
   const { ports, calls } = createPorts({
     async completeAction() {
+      completionCalls += 1
       throw new Error('DynamoDB is unavailable.')
     },
   })
 
   await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
 
+  expect(completionCalls).toBe(3)
   expect(calls.at(-1)).toBe('failure:Failed to mark the credential reset as completed.')
+})
+
+test('marks a finished reset completed after a transient failure', async () => {
+  let completionCalls = 0
+  const { ports, calls } = createPorts({
+    async completeAction() {
+      completionCalls += 1
+      if (completionCalls === 1) throw new Error('DynamoDB throttled the write.')
+    },
+  })
+
+  await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
+
+  expect(completionCalls).toBe(2)
+  expect(calls.filter((call) => call.startsWith('failure:'))).toEqual([])
+})
+
+test('repeats an unmarked reset when its key is replayed inside the resume window', async () => {
+  // Accepted behaviour: when the completion mark failed, the store still reports the action as
+  // recorded, and a replay that the store lets resume changes the account again, even if the
+  // member set up a new app in between. The store bounds this to its resume window.
+  const { ports, calls } = createPorts(
+    { readActionProgress: async () => 'recorded' },
+    { invitationPending: false, mfaEnrolled: true },
+  )
+
+  await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
+
+  expect(calls).toEqual([
+    'record:demo@example.com:sato@example.com:mfa-reset',
+    'disable:sato@example.com',
+    'complete:sato@example.com:mfa-reset',
+  ])
 })
 
 test('leaves single sign-on members and missing members untouched', async () => {
