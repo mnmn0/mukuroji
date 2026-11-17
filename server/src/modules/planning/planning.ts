@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -17,6 +18,8 @@ import {
   PLANNING_UPDATE_CONTENT_VERSION,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
+  type ArchivedPlanningEntityPage,
+  type ArchivedPlanningEntitySummary,
   type ConfigurePlanningUpdateCadenceInput,
   type CreatePlanningUpdateCommentInput,
   type CreatePlanningDependencyInput,
@@ -37,6 +40,7 @@ import {
   type PlanningEntityType,
   type PlanningHealth,
   type PlanningMutationResponse,
+  type PlanningRestoreSummary,
   type PlanningRevisionInput,
   type PlanningRisk,
   type PlanningSnapshot,
@@ -63,6 +67,7 @@ import {
   type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
   type PublishPlanningUpdateInput,
+  type RestorePlanningEntityResponse,
   type UpdatePlanningEntityInput,
   type UpdateWorkItemScheduleDependencyInput,
   type WorkItemAffectedProject,
@@ -96,6 +101,30 @@ const UPDATE_ID_RECORD_PREFIX = 'UPDATE_ID#'
 const UPDATE_COMMENT_RECORD_PREFIX = 'UPDATE_COMMENT#'
 const UPDATE_COMMENT_ID_RECORD_PREFIX = 'UPDATE_COMMENT_ID#'
 const UPDATE_REACTION_RECORD_PREFIX = 'UPDATE_REACTION#'
+/**
+ * Archived entities that left the live graph. No live graph prefix is a prefix of it, so live
+ * reads never return these rows and they never count toward the live capacity.
+ */
+const ARCHIVED_ENTITY_RECORD_PREFIX = 'ARCHIVE_ENTITY#'
+/** Dependencies and Work Item link references kept with an archived entity until it is restored. */
+const ARCHIVED_REFERENCE_RECORD_PREFIX = 'ARCHIVE_REF#'
+const PLANNING_ARCHIVE_SCHEMA_VERSION = 1
+/**
+ * Transaction items one archive or restore revision may write besides META. Each revision keeps
+ * the live graph valid, so a large Cycle moves in several small revisions.
+ */
+const PLANNING_ARCHIVE_STEP_ITEM_BUDGET = 90
+/**
+ * Serialized bytes one archive or restore step may write, leaving headroom under
+ * `MAX_PLANNING_TRANSACTION_BYTES` for the META fence, conditions and request envelope.
+ */
+const PLANNING_ARCHIVE_STEP_BYTE_BUDGET = 2_000_000
+/** Archive or restore revisions one request commits before it leaves the rest for a later request. */
+const PLANNING_ARCHIVE_REQUEST_STEP_LIMIT = 40
+/** Attempts per archive or restore revision when a concurrent mutation advances META first. */
+const PLANNING_ARCHIVE_STEP_ATTEMPTS = 3
+/** Maximum archived entities returned by one archive list page. */
+const PLANNING_ARCHIVE_PAGE_LIMIT = 50
 /** Mutable graph row prefixes and their canonical persisted entry types. */
 const PLANNING_GRAPH_ROW_QUERIES = [
   { recordPrefix: ENTITY_RECORD_PREFIX, entryType: 'planning-entity' },
@@ -345,13 +374,34 @@ export type PlanningClient = {
     input: UpdatePlanningEntityInput,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
-  /** Planning entity を soft archive します。 */
+  /**
+   * Planning entity を archive し、archive 済み entity とその link 参照・dependency を live graph から
+   * 退避します。退避は live graph を整合させたまま数十 row ずつ別 revision で進みます。
+   */
   archive(
     workspaceId: string,
     entityId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
+  /** 退避済み entity を active に戻し、戻せる link 参照と dependency を live graph へ戻します。 */
+  restore(
+    workspaceId: string,
+    entityId: string,
+    input: PlanningRevisionInput,
+    workItemState: PlanningWorkItemState,
+    options?: PlanningRestoreOptions,
+  ): Promise<RestorePlanningEntityResponse>
+  /** 退避済み entity を ID 順の cursor page で返します。呼び出し側が scope を認可します。 */
+  listArchivedEntities(
+    workspaceId: string,
+    input: { limit?: number; cursor?: string },
+  ): Promise<ArchivedPlanningEntityPage>
+  /** 退避済み entity の summary を返します。退避されていなければ `undefined` です。 */
+  getArchivedEntity(
+    workspaceId: string,
+    entityId: string,
+  ): Promise<ArchivedPlanningEntitySummary | undefined>
   /** Planning entity を履歴・link・edge なしで複製します。 */
   duplicate(
     workspaceId: string,
@@ -605,6 +655,92 @@ type PlanningMutationResult = {
   publishedUpdate?: PlanningUpdate
   /** Target whose summary is retained for a durable cadence receipt. */
   planningUpdateCadenceTransactionTarget?: PlanningUpdateTarget
+  /** Archive rows written or removed in the same transaction as the live graph change. */
+  archiveChanges?: PlanningArchiveChange[]
+}
+
+/** One archive row write that commits with a Planning revision. */
+type PlanningArchiveChange =
+  | {
+      /** Writes or replaces the row. */
+      kind: 'put'
+      /** Complete archive row, including its Workspace partition and sort key. */
+      row: Record<string, unknown>
+      /** Fails the transaction instead of replacing a row another archive already wrote. */
+      requireAbsent?: boolean
+    }
+  | {
+      /** Removes the row. */
+      kind: 'delete'
+      /** Sort key of the archive row in the Workspace partition. */
+      recordKey: string
+      /**
+       * Fails the transaction when the row is already gone, so a reference consumed by a
+       * concurrent restore is never applied twice.
+       */
+      requireExisting?: boolean
+    }
+
+/** Which field of a Work Item link pointed at an archived entity. */
+type PlanningArchivedLinkReferenceKind = 'cycle' | 'milestone' | 'goal'
+
+/** A Work Item link reference removed from the live graph together with its archived entity. */
+type PlanningArchivedLinkReference = {
+  /** Kind of archive reference row. */
+  kind: 'link'
+  /** Archived entity that owns this reference. */
+  entityId: string
+  /** Link field that pointed at the entity. */
+  reference: PlanningArchivedLinkReferenceKind
+  /** Link as it was when the reference was removed. */
+  link: PlanningWorkItemLink
+}
+
+/** A dependency removed from the live graph together with one of its archived endpoints. */
+type PlanningArchivedDependency = {
+  /** Kind of archive reference row. */
+  kind: 'dependency'
+  /** Archived endpoint that owns this dependency until it is restored. */
+  entityId: string
+  /** Dependency as it was when it left the live graph. */
+  dependency: PlanningDependency
+}
+
+/** Archive rows of one entity. */
+type PlanningArchivedEntityBundle = {
+  /** Archived entity row, absent when the entity is not in the archive. */
+  entity?: StoredPlanningEntity
+  /** Dependencies and link references owned by the entity. */
+  references: (PlanningArchivedDependency | PlanningArchivedLinkReference)[]
+}
+
+/** Caller-specific checks a restore applies to the references it brings back. */
+export type PlanningRestoreOptions = {
+  /**
+   * Whether the caller may manage an entity at its current scope. Checked for the restored entity
+   * and each live dependency counterpart on every step; a denied counterpart's edge stays
+   * archived, and a denied restored entity stops the restore.
+   */
+  canManageEntity?: (
+    counterpart: Pick<PlanningEntity, 'id' | 'teamId' | 'projectId'>,
+  ) => Promise<boolean>
+  /** Whether the caller may write links of Work Items in this scope; denied links stay archived. */
+  canRestoreLinkTo?: (workItem: { teamId: string; projectId?: string }) => Promise<boolean>
+  /**
+   * Caller authorization rows guarded by every restore revision, so a membership or Enterprise
+   * control change during the restore stops it instead of letting later steps use the old grant.
+   */
+  authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[]
+}
+
+/** One archive or restore revision planned against a fresh live graph. */
+type PlanningArchiveStep = {
+  /** Valid live graph after the step. */
+  state: PlanningWorkspaceState
+  /** Archive rows written with the step. */
+  archiveChanges: PlanningArchiveChange[]
+  /** Canonical Work Item revisions the step relies on. */
+  workItemConditions?: PlanningWorkItemCondition[]
 }
 
 /** Storage 非依存の Planning mutation 実装です。 */
@@ -690,6 +826,8 @@ abstract class BasePlanningClient implements PlanningClient {
    * @param workItemConditions - Canonical endpoint revision guards.
    * @param authorizationConditionChecks - Caller authorization source guards.
    * @param transactionContribution - Optional external action committed after Planning row writes.
+   * @param publishedUpdate - Optional immutable update appended in the same transaction.
+   * @param archiveChanges - Archive rows written or removed in the same transaction.
    */
   protected abstract commitState(
     workspaceId: string,
@@ -699,7 +837,46 @@ abstract class BasePlanningClient implements PlanningClient {
     authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
     transactionContribution?: PlanningMutationTransactionContribution,
     publishedUpdate?: PlanningUpdate,
+    archiveChanges?: readonly PlanningArchiveChange[],
   ): Promise<void>
+
+  /**
+   * Reads the archive rows of one entity.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param entityId - Archived entity identifier.
+   * @returns The archived entity, when present, and every reference it owns.
+   */
+  protected abstract readArchivedEntityBundle(
+    workspaceId: string,
+    entityId: string,
+  ): Promise<PlanningArchivedEntityBundle>
+
+  /**
+   * Reads one archived entity row without its references.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param entityId - Archived entity identifier.
+   * @returns The archived entity, or `undefined` when it is not in the archive.
+   */
+  protected abstract readArchivedEntity(
+    workspaceId: string,
+    entityId: string,
+  ): Promise<StoredPlanningEntity | undefined>
+
+  /**
+   * Reads archived entities in ID order.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param limit - Maximum entities in the page.
+   * @param afterEntityId - Exclusive ID the page starts after.
+   * @returns The page and whether more entities follow it.
+   */
+  protected abstract readArchivedEntityPage(
+    workspaceId: string,
+    limit: number,
+    afterEntityId?: string,
+  ): Promise<{ entities: StoredPlanningEntity[]; hasMore: boolean }>
 
   /** Workspace planning snapshot を返します。 */
   async get(workspaceIdValue: string, workItemState: PlanningWorkItemState) {
@@ -768,6 +945,7 @@ abstract class BasePlanningClient implements PlanningClient {
     input: CreatePlanningEntityInput,
     workItemState: PlanningWorkItemState,
   ) {
+    await this.requireIdNotArchived(workspaceId, input.id)
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       if (findEntity(state, input.id)) {
         throw conflict('PlanningEntityExists', `Planning entity "${input.id}" already exists.`)
@@ -832,8 +1010,371 @@ abstract class BasePlanningClient implements PlanningClient {
     })
   }
 
-  /** Planning entity を soft archive します。 */
+  /**
+   * Planning entity を archive し、archive 済み entity を live graph から退避します。
+   *
+   * Archive 自体は 1 revision で確定します。退避はその後の別 revision で進み、途中で失敗しても
+   * archive は取り消さず、次の archive が続きを退避します。
+   */
   async archive(
+    workspaceId: string,
+    entityId: string,
+    input: PlanningRevisionInput,
+    workItemState: PlanningWorkItemState,
+  ) {
+    const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const current = await this.readState(normalizedWorkspaceId)
+    const live = findEntity(current, entityId)
+    let response: PlanningMutationResponse | undefined
+    if (live?.archivedAt === undefined) {
+      response = await this.archiveInLiveGraph(normalizedWorkspaceId, entityId, input, workItemState)
+    } else if (current.revision !== readRevision(input.expectedRevision)) {
+      throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    }
+    // An entity archived earlier but still live resumes moving its rows out of the live graph.
+    let compacted = false
+    try {
+      for (let step = 0; step < PLANNING_ARCHIVE_REQUEST_STEP_LIMIT; step += 1) {
+        const committed = await this.commitArchiveStep(
+          normalizedWorkspaceId,
+          (state) => planArchiveCompactionStep(normalizedWorkspaceId, state),
+          undefined,
+        )
+        if (!committed) break
+        compacted = true
+      }
+    } catch (error) {
+      // The archive revision is committed. Remaining rows move on the next archive request.
+      if (!(error instanceof PlanningError) || error.status >= 500) console.error(error)
+    }
+    if (response && !compacted) return response
+    try {
+      return {
+        movedWorkItemIds: [],
+        retainedWorkItemIds: [],
+        ...response,
+        planning: await this.get(normalizedWorkspaceId, workItemState),
+      }
+    } catch (error) {
+      if (response) return response
+      throw error
+    }
+  }
+
+  /**
+   * 退避済み entity を active に戻し、戻せる link 参照と dependency を live graph に戻します。
+   *
+   * 最初の revision は呼び出し元の `expectedRevision` で entity を戻します。参照はその後の revision で
+   * 数十件ずつ戻します。途中で止まった場合、同じ entity の復元を再実行すると続きを戻します。
+   */
+  async restore(
+    workspaceIdValue: string,
+    entityIdValue: string,
+    input: PlanningRevisionInput,
+    workItemState: PlanningWorkItemState,
+    options: PlanningRestoreOptions = {},
+  ): Promise<RestorePlanningEntityResponse> {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const entityId = readIdentifier(entityIdValue, 'Planning entity ID')
+    const authorizationChecks = options.authorizationConditionChecks ?? []
+    const bundle = await this.readArchivedEntityBundle(workspaceId, entityId)
+    const archivedEntity = bundle.entity
+    if (archivedEntity) {
+      await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
+        state: restoreArchivedEntity(state, archivedEntity, now),
+        archiveChanges: [{
+          kind: 'delete',
+          recordKey: createArchivedEntityRecordKey(entityId),
+          requireExisting: true,
+        }],
+      }), authorizationChecks)
+    } else {
+      const live = findEntity(await this.readState(workspaceId), entityId)
+      if (!live) {
+        throw notFound('PlanningArchivedEntityNotFound', 'Archived Planning entity was not found.')
+      }
+      if (live.archivedAt) {
+        // Archived but still live: kept for its update target, kept for a live child, or not yet
+        // moved out. Clearing the archive state restores it in place.
+        await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
+          state: unarchiveLiveEntity(state, entityId, now),
+        }), authorizationChecks)
+      }
+    }
+    const summary: PlanningRestoreSummary = {
+      restoredLinkCount: 0,
+      droppedLinkCount: 0,
+      restoredDependencyCount: 0,
+      retainedDependencyCount: 0,
+      droppedDependencyCount: 0,
+      pendingReferenceCount: 0,
+    }
+    // Only grows: an archived counterpart leaves the archive solely by becoming live again.
+    const archivedCounterpartIds = new Set<string>()
+    const workItems = createWorkItemMap(workItemState)
+    const linkDecisions = new Map<string, boolean>()
+    // A link whose Work Item the caller cannot see or write (or that no longer exists) stays
+    // archived, so a restore by a caller with narrower Work Item access never discards it.
+    const isRestorable = async (
+      reference: PlanningArchivedDependency | PlanningArchivedLinkReference,
+    ) => {
+      if (reference.kind !== 'link') return true
+      const summary = workItems.get(createWorkItemKey(reference.link.teamId, reference.link.workItemId))
+      if (!summary) return false
+      if (!options.canRestoreLinkTo) return true
+      const scope = {
+        teamId: reference.link.teamId,
+        ...(summary.projectId === undefined ? {} : { projectId: summary.projectId }),
+      }
+      const scopeKey = JSON.stringify([scope.teamId, scope.projectId ?? null])
+      let allowed = linkDecisions.get(scopeKey)
+      if (allowed === undefined) {
+        allowed = await options.canRestoreLinkTo(scope)
+        linkDecisions.set(scopeKey, allowed)
+      }
+      return allowed
+    }
+    const scopeDecisions = new Map<string, boolean>()
+    try {
+      for (
+        let step = 0;
+        step < PLANNING_ARCHIVE_REQUEST_STEP_LIMIT && bundle.references.length > 0;
+        step += 1
+      ) {
+        let planned: PlanningArchiveRestorePlan | undefined
+        await this.commitArchiveStep(workspaceId, async (state, now) => {
+          planned = undefined
+          // A concurrent archive may have taken the entity out again; its references then stay
+          // archived with it instead of being consumed against a missing target.
+          const target = findEntity(state, entityId)
+          if (!target || target.archivedAt !== undefined) return undefined
+          // Keyed by scope, not ID: a counterpart moved to another scope is authorized again.
+          const canManage = async (entity: StoredPlanningEntity) => {
+            if (!options.canManageEntity) return true
+            const scopeKey = JSON.stringify([entity.teamId ?? null, entity.projectId ?? null])
+            let allowed = scopeDecisions.get(scopeKey)
+            if (allowed === undefined) {
+              allowed = await options.canManageEntity(entity)
+              scopeDecisions.set(scopeKey, allowed)
+            }
+            return allowed
+          }
+          // The restored entity may have moved to a scope the caller does not manage.
+          if (!await canManage(target)) return undefined
+          // Read after the revision-bound graph, like the counterparts below: every archive row
+          // change moves the revision, so a committed step consumed exactly the rows it read. A
+          // reference restored, recreated and archived again by another request is planned from
+          // its current row, never from the copy this request read first.
+          const pending: (PlanningArchivedDependency | PlanningArchivedLinkReference)[] = []
+          for (const reference of (await this.readArchivedEntityBundle(workspaceId, entityId)).references) {
+            if (await isRestorable(reference)) pending.push(reference)
+          }
+          // Read after the revision-bound graph: a counterpart archived later moves the revision,
+          // so the CAS rejects this step instead of dropping a dependency it could have kept.
+          await this.collectArchivedCounterparts(
+            workspaceId,
+            state,
+            entityId,
+            pending,
+            archivedCounterpartIds,
+          )
+          const deniedCounterpartIds = new Set<string>()
+          for (const reference of pending) {
+            if (reference.kind !== 'dependency') continue
+            const counterpart = findEntity(state, reference.dependency.predecessorId === entityId
+              ? reference.dependency.successorId
+              : reference.dependency.predecessorId)
+            if (counterpart && !await canManage(counterpart)) deniedCounterpartIds.add(counterpart.id)
+          }
+          // Edges kept for a counterpart the caller cannot manage are skipped before planning, so
+          // they never take the budget of a step from the references that can still be restored.
+          const plannable = pending.filter((reference) =>
+            reference.kind !== 'dependency' ||
+            !deniedCounterpartIds.has(reference.dependency.predecessorId === entityId
+              ? reference.dependency.successorId
+              : reference.dependency.predecessorId)
+          )
+          planned = planArchiveRestoreStep(workspaceId, state, entityId, plannable, {
+            archivedCounterpartIds,
+            deniedCounterpartIds,
+            workItems,
+            now,
+          })
+          // Only skipped references: nothing to commit, and no empty revision.
+          return planned.step.archiveChanges.length === 0 ? undefined : planned.step
+        }, workItemState, authorizationChecks)
+        if (!planned) break
+        summary.restoredLinkCount += planned.counts.restoredLinkCount
+        summary.droppedLinkCount += planned.counts.droppedLinkCount
+        summary.restoredDependencyCount += planned.counts.restoredDependencyCount
+        summary.retainedDependencyCount += planned.counts.retainedDependencyCount
+        summary.droppedDependencyCount += planned.counts.droppedDependencyCount
+      }
+    } catch (error) {
+      if (!(error instanceof PlanningError) || error.status >= 500) throw error
+      // A revoked grant fails the request: the snapshot would be filtered with the old grant.
+      if (error.code === 'PlanningAuthorizationChanged') throw error
+      // Capacity or a concurrent mutation stopped the restore; the rest stays in the archive.
+    }
+    // Re-read so references consumed by a concurrent restore are not reported as pending.
+    summary.pendingReferenceCount =
+      (await this.readArchivedEntityBundle(workspaceId, entityId)).references.length
+    return { planning: await this.get(workspaceId, workItemState), restore: summary }
+  }
+
+  /** 退避済み entity を ID 順の cursor page で返します。 */
+  async listArchivedEntities(
+    workspaceIdValue: string,
+    input: { limit?: number; cursor?: string },
+  ): Promise<ArchivedPlanningEntityPage> {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const limit = input.limit === undefined ? PLANNING_ARCHIVE_PAGE_LIMIT : input.limit
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > PLANNING_ARCHIVE_PAGE_LIMIT) {
+      throw invalid('PlanningArchivePageLimitInvalid', 'Archived Planning page limit is invalid.')
+    }
+    const afterEntityId = input.cursor === undefined
+      ? undefined
+      : readArchivedEntityCursor(input.cursor)
+    const page = await this.readArchivedEntityPage(workspaceId, limit, afterEntityId)
+    const last = page.entities.at(-1)
+    return {
+      entities: page.entities.map(createArchivedEntitySummary),
+      ...(page.hasMore && last ? { nextCursor: createArchivedEntityCursor(last.id) } : {}),
+    }
+  }
+
+  /** 退避済み entity の summary を返します。 */
+  async getArchivedEntity(workspaceIdValue: string, entityIdValue: string) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const entityId = readIdentifier(entityIdValue, 'Planning entity ID')
+    const entity = await this.readArchivedEntity(workspaceId, entityId)
+    return entity ? createArchivedEntitySummary(entity) : undefined
+  }
+
+  /**
+   * Rejects a new entity ID that an archived entity still owns, so the archived entity stays restorable.
+   *
+   * An ID enters the archive only from the live graph, where the same check already rejects it, so
+   * reading the archive before the revision CAS cannot race with an archive of the same ID.
+   *
+   * @param workspaceIdValue - Owning Workspace identifier.
+   * @param entityIdValue - Requested new entity ID.
+   */
+  private async requireIdNotArchived(workspaceIdValue: string, entityIdValue: unknown) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const entityId = readIdentifier(entityIdValue, 'Planning entity ID')
+    if (await this.readArchivedEntity(workspaceId, entityId)) {
+      throw conflict(
+        'PlanningEntityExists',
+        `Planning entity "${entityId}" is archived. Restore it or choose another ID.`,
+      )
+    }
+  }
+
+  /**
+   * Adds the dependency counterparts that are absent from the live graph but still archived.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param state - Live graph the next restore step is planned against.
+   * @param entityId - Entity being restored.
+   * @param pending - Archived references not yet processed.
+   * @param archivedCounterpartIds - Known archived counterparts; updated in place.
+   */
+  private async collectArchivedCounterparts(
+    workspaceId: string,
+    state: PlanningWorkspaceState,
+    entityId: string,
+    pending: readonly (PlanningArchivedDependency | PlanningArchivedLinkReference)[],
+    archivedCounterpartIds: Set<string>,
+  ) {
+    const checked = new Set<string>()
+    for (const reference of pending) {
+      if (reference.kind !== 'dependency') continue
+      const counterpartId = reference.dependency.predecessorId === entityId
+        ? reference.dependency.successorId
+        : reference.dependency.predecessorId
+      if (
+        checked.has(counterpartId) ||
+        archivedCounterpartIds.has(counterpartId) ||
+        findEntity(state, counterpartId)
+      ) {
+        continue
+      }
+      checked.add(counterpartId)
+      if (await this.readArchivedEntity(workspaceId, counterpartId)) {
+        archivedCounterpartIds.add(counterpartId)
+      }
+    }
+  }
+
+  /**
+   * Commits one archive or restore revision planned against the current live graph.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param plan - Pure planner; returns `undefined` when nothing is left to do.
+   * @param growth - Work Items of a step that may grow the live graph; the step must then fit the
+   * live capacity and the snapshot response limit. Omitted for steps that only shrink the graph.
+   * @param authorizationConditionChecks - Caller authorization rows guarded by the revision.
+   * @returns Whether a revision was committed.
+   */
+  private async commitArchiveStep(
+    workspaceId: string,
+    plan: (
+      state: PlanningWorkspaceState,
+      now: string,
+    ) => PlanningArchiveStep | undefined | Promise<PlanningArchiveStep | undefined>,
+    growth: PlanningWorkItemState | undefined,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+  ) {
+    for (let attempt = 1; ; attempt += 1) {
+      const before = await this.readState(workspaceId)
+      const now = this.now().toISOString()
+      const step = await plan(structuredClone(before), now)
+      if (!step) return false
+      validatePlanningState(step.state)
+      if (growth) {
+        const afterUsage = measurePlanningLiveGraph(workspaceId, step.state)
+        requirePlanningLiveCapacity(
+          before,
+          measurePlanningLiveGraph(workspaceId, before),
+          step.state,
+          afterUsage,
+        )
+        // Like `mutate`, never commit a graph whose snapshot can no longer be returned.
+        createPlanningSnapshot(
+          { ...step.state, revision: before.revision + 1, updatedAt: now },
+          growth,
+          now,
+          createPlanningCapacity(afterUsage),
+        )
+      }
+      try {
+        await this.commitState(
+          workspaceId,
+          before,
+          { ...step.state, revision: before.revision + 1, updatedAt: now },
+          step.workItemConditions ?? [],
+          authorizationConditionChecks,
+          undefined,
+          undefined,
+          step.archiveChanges,
+        )
+        return true
+      } catch (error) {
+        if (
+          attempt < PLANNING_ARCHIVE_STEP_ATTEMPTS &&
+          error instanceof PlanningError &&
+          error.code === 'PlanningRevisionConflict'
+        ) {
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
+  /** Planning entity を live graph の中で soft archive します。 */
+  private async archiveInLiveGraph(
     workspaceId: string,
     entityId: string,
     input: PlanningRevisionInput,
@@ -894,6 +1435,7 @@ abstract class BasePlanningClient implements PlanningClient {
     input: DuplicatePlanningEntityInput,
     workItemState: PlanningWorkItemState,
   ) {
+    await this.requireIdNotArchived(workspaceId, input.targetId)
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const source = requireActiveEntity(state, entityId)
       const targetId = readIdentifier(input.targetId, 'Target entity ID')
@@ -1795,6 +2337,7 @@ abstract class BasePlanningClient implements PlanningClient {
       authorizationConditionChecks,
       transactionContribution,
       result.publishedUpdate,
+      result.archiveChanges ?? [],
     )
     return {
       planning,
@@ -1916,9 +2459,58 @@ export class InMemoryPlanningClient extends BasePlanningClient {
   private readonly updateComments = new Map<string, PlanningUpdateComment[]>()
   /** Immutable update ごとの member reactions です。 */
   private readonly updateReactions = new Map<string, PlanningUpdateReaction[]>()
+  /** Workspace ごとの archive row です。DynamoDB と同じ row shape で保存します。 */
+  private readonly archives = new Map<string, Map<string, Record<string, unknown>>>()
 
   constructor(now: () => Date = () => new Date()) {
     super(now)
+  }
+
+  /** In-memory archive から entity とその参照を返します。 */
+  protected async readArchivedEntityBundle(
+    workspaceId: string,
+    entityId: string,
+  ): Promise<PlanningArchivedEntityBundle> {
+    const rows = this.archives.get(workspaceId) ?? new Map<string, Record<string, unknown>>()
+    const entityRow = rows.get(createArchivedEntityRecordKey(entityId))
+    const prefix = createArchivedReferenceRecordPrefix(entityId)
+    return {
+      ...(entityRow === undefined
+        ? {}
+        : { entity: readArchivedEntityRow(structuredClone(entityRow), workspaceId) }),
+      references: [...rows.entries()]
+        .filter(([recordKey]) => recordKey.startsWith(prefix))
+        .sort(([first], [second]) => compareText(first, second))
+        .map(([, row]) => readArchivedReferenceRow(structuredClone(row), workspaceId, entityId)),
+    }
+  }
+
+  /** In-memory archive から entity row を返します。 */
+  protected async readArchivedEntity(workspaceId: string, entityId: string) {
+    const row = this.archives.get(workspaceId)?.get(createArchivedEntityRecordKey(entityId))
+    return row === undefined ? undefined : readArchivedEntityRow(structuredClone(row), workspaceId)
+  }
+
+  /** In-memory archive の entity を record key 順に返します。 */
+  protected async readArchivedEntityPage(
+    workspaceId: string,
+    limit: number,
+    afterEntityId?: string,
+  ) {
+    const after = afterEntityId === undefined
+      ? undefined
+      : createArchivedEntityRecordKey(afterEntityId)
+    const rows = [...(this.archives.get(workspaceId) ?? new Map<string, Record<string, unknown>>())]
+      .filter(([recordKey]) =>
+        recordKey.startsWith(ARCHIVED_ENTITY_RECORD_PREFIX) && (after === undefined || recordKey > after)
+      )
+      .sort(([first], [second]) => compareText(first, second))
+    return {
+      entities: rows.slice(0, limit).map(([, row]) =>
+        readArchivedEntityRow(structuredClone(row), workspaceId)
+      ),
+      hasMore: rows.length > limit,
+    }
   }
 
   /** In-memory state を返します。DynamoDB の revision cache と同じく、読み取り側は変更できません。 */
@@ -2104,10 +2696,23 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     _authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
     _transactionContribution?: PlanningMutationTransactionContribution,
     publishedUpdate?: PlanningUpdate,
+    archiveChanges: readonly PlanningArchiveChange[] = [],
   ) {
     const current = this.states.get(workspaceId) ?? createEmptyPlanningState()
     if (current.revision !== before.revision) {
       throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    }
+    if (archiveChanges.some((change) =>
+      change.kind === 'delete'
+        ? change.requireExisting === true &&
+          !this.archives.get(workspaceId)?.has(change.recordKey)
+        : change.requireAbsent === true &&
+          this.archives.get(workspaceId)?.has(String(change.row.recordKey)) === true
+    )) {
+      throw conflict(
+        'PlanningArchiveChanged',
+        'Archived Planning references changed. Run the restore again.',
+      )
     }
     if (publishedUpdate) {
       const key = createPlanningUpdateHistoryMapKey(workspaceId, publishedUpdate.target)
@@ -2118,6 +2723,17 @@ export class InMemoryPlanningClient extends BasePlanningClient {
         throw conflict('PlanningUpdateExists', 'Planning update version or ID already exists.')
       }
       this.updateHistories.set(key, [structuredClone(publishedUpdate), ...currentHistory])
+    }
+    if (archiveChanges.length > 0) {
+      const archive = this.archives.get(workspaceId) ?? new Map<string, Record<string, unknown>>()
+      for (const change of archiveChanges) {
+        if (change.kind === 'put') {
+          archive.set(String(change.row.recordKey), structuredClone(change.row))
+        } else {
+          archive.delete(change.recordKey)
+        }
+      }
+      this.archives.set(workspaceId, archive)
     }
     this.states.set(workspaceId, structuredClone(after))
   }
@@ -2332,6 +2948,93 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (oldest === undefined) break
       this.graphCache.delete(oldest)
     }
+  }
+
+  /** Archive の entity row と、その entity が持つ参照 row を強整合で読みます。 */
+  protected async readArchivedEntityBundle(
+    workspaceId: string,
+    entityId: string,
+  ): Promise<PlanningArchivedEntityBundle> {
+    await this.ensureTable()
+    const entity = await this.readArchivedEntity(workspaceId, entityId)
+    const prefix = createArchivedReferenceRecordPrefix(entityId)
+    const references: PlanningArchivedEntityBundle['references'] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':recordPrefix': prefix },
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+        ConsistentRead: true,
+      }))
+      const items = response.Items ?? []
+      for (const item of items) {
+        if (typeof item.recordKey !== 'string' || !item.recordKey.startsWith(prefix)) {
+          throw persistenceInvalid('Archived Planning reference query returned an invalid row.')
+        }
+        references.push(readArchivedReferenceRow(item, workspaceId, entityId))
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+      if (exclusiveStartKey !== undefined && items.length === 0) {
+        throw persistenceInvalid('Archived Planning reference query returned an empty continuation page.')
+      }
+    } while (exclusiveStartKey)
+    return { ...(entity === undefined ? {} : { entity }), references }
+  }
+
+  /** Archive の entity row を強整合で読みます。 */
+  protected async readArchivedEntity(workspaceId: string, entityId: string) {
+    await this.ensureTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: createArchivedEntityRecordKey(entityId) },
+      ConsistentRead: true,
+    }))
+    return response.Item === undefined
+      ? undefined
+      : readArchivedEntityRow(response.Item, workspaceId)
+  }
+
+  /** Archive の entity row を record key 順に 1 page 読みます。 */
+  protected async readArchivedEntityPage(
+    workspaceId: string,
+    limit: number,
+    afterEntityId?: string,
+  ) {
+    await this.ensureTable()
+    const entities: StoredPlanningEntity[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined = afterEntityId === undefined
+      ? undefined
+      : { workspaceId, recordKey: createArchivedEntityRecordKey(afterEntityId) }
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':recordPrefix': ARCHIVED_ENTITY_RECORD_PREFIX,
+        },
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+        ConsistentRead: true,
+        Limit: limit + 1 - entities.length,
+      }))
+      const items = response.Items ?? []
+      for (const item of items) {
+        if (
+          typeof item.recordKey !== 'string' ||
+          !item.recordKey.startsWith(ARCHIVED_ENTITY_RECORD_PREFIX)
+        ) {
+          throw persistenceInvalid('Archived Planning entity query returned an invalid row.')
+        }
+        entities.push(readArchivedEntityRow(item, workspaceId))
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+      if (exclusiveStartKey !== undefined && items.length === 0) {
+        throw persistenceInvalid('Archived Planning entity query returned an empty continuation page.')
+      }
+    } while (exclusiveStartKey && entities.length <= limit)
+    return { entities: entities.slice(0, limit), hasMore: entities.length > limit }
   }
 
   /** DynamoDB target prefix から append-only update history の1 pageを返します。 */
@@ -2745,6 +3448,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
     transactionContribution?: PlanningMutationTransactionContribution,
     publishedUpdate?: PlanningUpdate,
+    archiveChanges: readonly PlanningArchiveChange[] = [],
   ) {
     await this.ensureTable()
     const beforeRows = createPlanningRowMap(workspaceId, before)
@@ -2764,6 +3468,42 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     for (const recordKey of beforeRows.keys()) {
       if (recordKey === META_RECORD_KEY || afterRows.has(recordKey)) continue
       mutations.push({ Delete: { TableName: this.tableName, Key: { workspaceId, recordKey } } })
+    }
+    const guardedArchiveDeleteOffsets: number[] = []
+    for (const change of archiveChanges) {
+      if (change.kind === 'delete') {
+        if (change.requireExisting) guardedArchiveDeleteOffsets.push(mutations.length)
+        mutations.push({
+          Delete: {
+            TableName: this.tableName,
+            Key: { workspaceId, recordKey: change.recordKey },
+            ...(change.requireExisting
+              ? { ConditionExpression: 'attribute_exists(recordKey)' }
+              : {}),
+          },
+        })
+        continue
+      }
+      if (change.row.workspaceId !== workspaceId) {
+        throw persistenceInvalid('Planning archive row belongs to another Workspace.')
+      }
+      if (utf8ByteLength(JSON.stringify(change.row)) > MAX_PLANNING_ROW_BYTES) {
+        throw new PlanningError(
+          413,
+          'PlanningRowSizeLimitExceeded',
+          'A Planning archive row exceeds the safe DynamoDB item size limit.',
+        )
+      }
+      if (change.requireAbsent) guardedArchiveDeleteOffsets.push(mutations.length)
+      mutations.push({
+        Put: {
+          TableName: this.tableName,
+          Item: change.row,
+          ...(change.requireAbsent
+            ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+            : {}),
+        },
+      })
     }
     const canonicalConditions = workItemConditions.map((condition) => ({
       ConditionCheck: {
@@ -2878,6 +3618,16 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         throw conflict(
           'PlanningWorkItemChanged',
           'A canonical Work Item changed. Reload Planning and try again.',
+        )
+      }
+      const mutationStartIndex =
+        1 + canonicalConditions.length + authorizationConditionChecks.length
+      if (guardedArchiveDeleteOffsets.some((offset) =>
+        isPlanningTransactionConditionalFailureAt(error, mutationStartIndex + offset)
+      )) {
+        throw conflict(
+          'PlanningArchiveChanged',
+          'Archived Planning references changed. Run the restore again.',
         )
       }
       const publishedUpdateIndex =
@@ -5954,6 +6704,777 @@ function readStoredPlanningWorkItemLink(row: Record<string, unknown>): PlanningW
     goalIds: readUniqueIdentifiers(row.goalIds, 'Goal ID'),
     createdAt: readTimestamp(row.createdAt, 'Work Item link timestamp'),
   }
+}
+
+/** Result of planning one restore revision, with what it did to each processed reference. */
+type PlanningArchiveRestorePlan = {
+  /** Revision to commit. */
+  step: PlanningArchiveStep
+  /** Per-outcome counts of the consumed references. */
+  counts: Omit<PlanningRestoreSummary, 'pendingReferenceCount'>
+}
+
+/**
+ * Returns the next archived entity whose rows may leave the live graph.
+ *
+ * An entity leaves only after its children, because an active or archived child in the live graph
+ * still resolves its parent there. Initiatives with an update target stay live: their target row
+ * and immutable update history are resolved through the live graph by notifications and the
+ * Update Feed, and the target cap already bounds them.
+ *
+ * @param state - Current live graph.
+ * @returns The archived entity with the smallest ID that can move, or `undefined`.
+ */
+function findCompactableArchivedEntity(state: PlanningWorkspaceState) {
+  const parentIds = new Set(state.entities.flatMap((entity) =>
+    entity.parentId === undefined ? [] : [entity.parentId]
+  ))
+  let candidate: StoredPlanningEntity | undefined
+  for (const entity of state.entities) {
+    if (entity.archivedAt === undefined || parentIds.has(entity.id)) continue
+    if (
+      entity.type === 'initiative' &&
+      findStoredPlanningUpdateTarget(state, { type: 'initiative', entityId: entity.id })
+    ) {
+      continue
+    }
+    if (!candidate || entity.id < candidate.id) candidate = entity
+  }
+  return candidate
+}
+
+/**
+ * Returns which field of a Work Item link points at an entity.
+ *
+ * @param link - Live Work Item link.
+ * @param entityId - Entity identifier.
+ * @returns The referencing field, or `undefined` when the link does not point at the entity.
+ */
+function readLinkReferenceKind(
+  link: PlanningWorkItemLink,
+  entityId: string,
+): PlanningArchivedLinkReferenceKind | undefined {
+  if (link.cycleId === entityId) return 'cycle'
+  if (link.milestoneId === entityId) return 'milestone'
+  if (link.goalIds.includes(entityId)) return 'goal'
+  return undefined
+}
+
+/**
+ * Removes one entity reference from a Work Item link.
+ *
+ * @param link - Live Work Item link.
+ * @param reference - Field that points at the entity.
+ * @param entityId - Entity identifier.
+ * @returns The remaining link, or `undefined` when it no longer has a Cycle, Milestone, or Goal.
+ */
+function removeLinkReference(
+  link: PlanningWorkItemLink,
+  reference: PlanningArchivedLinkReferenceKind,
+  entityId: string,
+): PlanningWorkItemLink | undefined {
+  const next: PlanningWorkItemLink = { ...link, goalIds: [...link.goalIds] }
+  if (reference === 'cycle') delete next.cycleId
+  else if (reference === 'milestone') delete next.milestoneId
+  else next.goalIds = next.goalIds.filter((goalId) => goalId !== entityId)
+  return next.cycleId === undefined && next.milestoneId === undefined && next.goalIds.length === 0
+    ? undefined
+    : next
+}
+
+/**
+ * Plans one revision that moves archived rows out of the live graph.
+ *
+ * Dependencies and link references of the chosen entity move first, a bounded number per revision.
+ * The entity row moves in the revision that leaves nothing in the live graph pointing at it, so
+ * every intermediate revision passes {@link validatePlanningState}.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param state - Current live graph; not mutated.
+ * @returns The next revision, or `undefined` when no archived entity can move.
+ */
+function planArchiveCompactionStep(
+  workspaceId: string,
+  state: PlanningWorkspaceState,
+): PlanningArchiveStep | undefined {
+  const entity = findCompactableArchivedEntity(state)
+  if (!entity) return undefined
+  let budget = PLANNING_ARCHIVE_STEP_ITEM_BUDGET
+  let bytes = 0
+  const archiveChanges: PlanningArchiveChange[] = []
+  /** Whether a change of this many bytes still fits; the first change always does. */
+  const fits = (cost: number) =>
+    archiveChanges.length === 0 || bytes + cost <= PLANNING_ARCHIVE_STEP_BYTE_BUDGET
+  const movedDependencyIds = new Set<string>()
+  for (const dependency of state.dependencies) {
+    if (budget < 2) break
+    if (dependency.predecessorId !== entity.id && dependency.successorId !== entity.id) continue
+    const row = createArchivedReferenceRow(workspaceId, {
+      kind: 'dependency',
+      entityId: entity.id,
+      dependency,
+    })
+    const cost = estimateArchiveStepBytes(row)
+    if (!fits(cost)) break
+    archiveChanges.push({ kind: 'put', row })
+    movedDependencyIds.add(dependency.id)
+    budget -= 2
+    bytes += cost
+  }
+  const dependencies = state.dependencies.filter((dependency) =>
+    !movedDependencyIds.has(dependency.id)
+  )
+  const workItemLinks: PlanningWorkItemLink[] = []
+  for (const link of state.workItemLinks) {
+    const reference = readLinkReferenceKind(link, entity.id)
+    if (reference === undefined || budget < 2) {
+      workItemLinks.push(link)
+      continue
+    }
+    const row = createArchivedReferenceRow(workspaceId, {
+      kind: 'link',
+      entityId: entity.id,
+      reference,
+      link,
+    })
+    const remaining = removeLinkReference(link, reference, entity.id)
+    const cost = estimateArchiveStepBytes(row) + (remaining ? estimateArchiveStepBytes(remaining) : 0)
+    if (!fits(cost)) {
+      workItemLinks.push(link)
+      continue
+    }
+    archiveChanges.push({ kind: 'put', row })
+    budget -= 2
+    bytes += cost
+    if (remaining) workItemLinks.push(remaining)
+  }
+  const referenced = dependencies.some((dependency) =>
+    dependency.predecessorId === entity.id || dependency.successorId === entity.id
+  ) || workItemLinks.some((link) => readLinkReferenceKind(link, entity.id) !== undefined)
+  let entities = state.entities
+  const entityRow = createArchivedEntityRow(workspaceId, entity)
+  if (!referenced && budget >= 2 && fits(estimateArchiveStepBytes(entityRow))) {
+    entities = entities.filter((candidate) => candidate.id !== entity.id)
+    archiveChanges.push({ kind: 'put', row: entityRow })
+  }
+  return { state: { ...state, entities, dependencies, workItemLinks }, archiveChanges }
+}
+
+/**
+ * Returns the live graph with an archived entity active again.
+ *
+ * @param state - Current live graph.
+ * @param archived - Entity read from the archive.
+ * @param now - Restore timestamp.
+ * @returns The live graph with the entity added without `archivedAt`.
+ */
+function restoreArchivedEntity(
+  state: PlanningWorkspaceState,
+  archived: StoredPlanningEntity,
+  now: string,
+): PlanningWorkspaceState {
+  if (findEntity(state, archived.id)) {
+    throw conflict('PlanningEntityExists', `Planning entity "${archived.id}" already exists.`)
+  }
+  if (archived.parentId !== undefined) {
+    const parent = findEntity(state, archived.parentId)
+    if (!parent || parent.archivedAt) {
+      throw conflict(
+        'PlanningRestoreParentUnavailable',
+        'Restore the parent Planning entity before this entity.',
+      )
+    }
+  }
+  const restored: StoredPlanningEntity = { ...structuredClone(archived), updatedAt: now }
+  delete restored.archivedAt
+  return { ...state, entities: [...state.entities, restored] }
+}
+
+/**
+ * Returns the live graph with an archived entity that is still live made active again.
+ *
+ * @param state - Current live graph.
+ * @param entityId - Archived live entity.
+ * @param now - Restore timestamp.
+ * @returns The live graph with `archivedAt` cleared on the entity and its update target.
+ */
+function unarchiveLiveEntity(
+  state: PlanningWorkspaceState,
+  entityId: string,
+  now: string,
+): PlanningWorkspaceState {
+  const current = findEntity(state, entityId)
+  if (!current?.archivedAt) {
+    throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+  }
+  if (current.parentId !== undefined) {
+    const parent = findEntity(state, current.parentId)
+    if (!parent || parent.archivedAt) {
+      throw conflict(
+        'PlanningRestoreParentUnavailable',
+        'Restore the parent Planning entity before this entity.',
+      )
+    }
+  }
+  const restored: StoredPlanningEntity = { ...current, updatedAt: now }
+  delete restored.archivedAt
+  let next = replaceEntity(state, restored)
+  if (current.type === 'initiative') {
+    const target = findStoredPlanningUpdateTarget(next, { type: 'initiative', entityId })
+    if (target?.archivedAt !== undefined) {
+      const active: StoredPlanningUpdateTarget = { ...target, updatedAt: now }
+      delete active.archivedAt
+      // The schedule index is derived again from the cadence when the row is written.
+      delete active.nextNotificationAtRecordKey
+      next = replacePlanningUpdateTarget(next, active)
+    }
+  }
+  return next
+}
+
+/**
+ * Returns whether adding a dependency keeps the live dependency graph valid.
+ *
+ * @param state - Current live graph.
+ * @param dependency - Candidate dependency whose endpoints are both live.
+ * @returns Whether the dependency is new, not a duplicate edge, acyclic, and satisfies its constraint.
+ */
+function canRestoreDependency(state: PlanningWorkspaceState, dependency: PlanningDependency) {
+  if (state.dependencies.some((candidate) =>
+    candidate.id === dependency.id ||
+    candidate.predecessorId === dependency.predecessorId &&
+      candidate.successorId === dependency.successorId
+  )) {
+    return false
+  }
+  const successor = findEntity(state, dependency.successorId)
+  if (!successor) return false
+  if (dependency.constraint !== undefined) {
+    try {
+      requirePlanningDependencyConstraintIsSatisfied(successor, dependency.constraint)
+    } catch {
+      return false
+    }
+  }
+  const adjacency = new Map<string, string[]>()
+  for (const candidate of state.dependencies) {
+    const targets = adjacency.get(candidate.predecessorId) ?? []
+    targets.push(candidate.successorId)
+    adjacency.set(candidate.predecessorId, targets)
+  }
+  const visited = new Set<string>()
+  const queue = [dependency.successorId]
+  while (queue.length > 0) {
+    const id = queue.pop()!
+    if (id === dependency.predecessorId) return false
+    if (visited.has(id)) continue
+    visited.add(id)
+    queue.push(...adjacency.get(id) ?? [])
+  }
+  return true
+}
+
+/**
+ * Returns the live link after putting one archived reference back, or `undefined` when it cannot return.
+ *
+ * A reference returns only when the Work Item still exists, its link has no other value in the same
+ * field, and the result passes link and Cycle capacity validation.
+ *
+ * @param state - Current live graph that already contains the restored entity.
+ * @param reference - Archived link reference.
+ * @param summary - Current canonical Work Item, when it still exists.
+ * @param now - Restore timestamp for a newly created link.
+ * @returns The link to store.
+ */
+function restoreLinkReference(
+  state: PlanningWorkspaceState,
+  reference: PlanningArchivedLinkReference,
+  summary: PlanningWorkItemSummary | undefined,
+  now: string,
+): PlanningWorkItemLink | undefined {
+  if (!summary) return undefined
+  const { teamId, workItemId } = reference.link
+  const current = state.workItemLinks.find((link) =>
+    link.teamId === teamId && link.workItemId === workItemId
+  )
+  if (current && current.projectId !== summary.projectId) return undefined
+  const link: PlanningWorkItemLink = current
+    ? { ...current, goalIds: [...current.goalIds] }
+    : {
+        teamId,
+        workItemId,
+        ...(summary.projectId === undefined ? {} : { projectId: summary.projectId }),
+        goalIds: [],
+        createdAt: now,
+      }
+  if (reference.reference === 'cycle') {
+    if (link.cycleId !== undefined) return undefined
+    link.cycleId = reference.entityId
+  } else if (reference.reference === 'milestone') {
+    if (link.milestoneId !== undefined) return undefined
+    link.milestoneId = reference.entityId
+  } else {
+    if (link.goalIds.includes(reference.entityId) || link.goalIds.length >= 100) return undefined
+    link.goalIds = [...link.goalIds, reference.entityId].sort()
+  }
+  try {
+    validateWorkItemLink(state, link)
+  } catch {
+    return undefined
+  }
+  if (reference.reference === 'cycle') {
+    const cycle = findEntity(state, reference.entityId)
+    const linked = state.workItemLinks.filter((candidate) =>
+      candidate.cycleId === reference.entityId
+    ).length
+    if (!cycle || linked + 1 > (cycle.capacity ?? 0)) return undefined
+  }
+  return link
+}
+
+/**
+ * Plans one revision that returns archived references of a restored entity to the live graph.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param state - Current live graph; not mutated.
+ * @param entityId - Restored entity identifier.
+ * @param pending - Archive references not yet processed, in archive order.
+ * @param context - Archived counterparts, canonical Work Items, and the restore timestamp.
+ * @returns The revision and the outcome of the references it consumes.
+ */
+function planArchiveRestoreStep(
+  workspaceId: string,
+  state: PlanningWorkspaceState,
+  entityId: string,
+  pending: readonly (PlanningArchivedDependency | PlanningArchivedLinkReference)[],
+  context: {
+    /** Dependency counterparts that are still archived. */
+    archivedCounterpartIds: ReadonlySet<string>
+    /** Live dependency counterparts the caller may not manage. */
+    deniedCounterpartIds: ReadonlySet<string>
+    /** Canonical Work Items by qualified key. */
+    workItems: ReadonlyMap<string, PlanningWorkItemSummary>
+    /** Restore timestamp. */
+    now: string
+  },
+): PlanningArchiveRestorePlan {
+  const counts = {
+    restoredLinkCount: 0,
+    droppedLinkCount: 0,
+    restoredDependencyCount: 0,
+    retainedDependencyCount: 0,
+    droppedDependencyCount: 0,
+  }
+  const archiveChanges: PlanningArchiveChange[] = []
+  const workItemConditions: PlanningWorkItemCondition[] = []
+  let next: PlanningWorkspaceState = { ...state }
+  let budget = PLANNING_ARCHIVE_STEP_ITEM_BUDGET
+  let bytes = 0
+  let processedCount = 0
+  for (const reference of pending) {
+    if (budget < 3) break
+    // Size by the rows this reference writes: a restored link merges into the current live row,
+    // which may have grown since the reference was archived.
+    const merged = reference.kind === 'link'
+      ? restoreLinkReference(
+        next,
+        reference,
+        context.workItems.get(createWorkItemKey(reference.link.teamId, reference.link.workItemId)),
+        context.now,
+      )
+      : undefined
+    const cost = estimateArchiveStepBytes(reference) + (merged ? estimateArchiveStepBytes(merged) : 0)
+    if (processedCount > 0 && bytes + cost > PLANNING_ARCHIVE_STEP_BYTE_BUDGET) break
+    bytes += cost
+    const recordKey = createArchivedReferenceRecordKey(reference)
+    if (reference.kind === 'dependency') {
+      const { dependency } = reference
+      const counterpartId = dependency.predecessorId === entityId
+        ? dependency.successorId
+        : dependency.predecessorId
+      if (context.deniedCounterpartIds.has(counterpartId) && findEntity(next, counterpartId)) {
+        // The caller cannot manage the counterpart, so the edge stays archived for someone who can.
+        processedCount += 1
+        continue
+      }
+      if (findEntity(next, counterpartId)) {
+        if (canRestoreDependency(next, dependency)) {
+          next = { ...next, dependencies: [...next.dependencies, dependency] }
+          counts.restoredDependencyCount += 1
+        } else {
+          counts.droppedDependencyCount += 1
+        }
+        budget -= 2
+      } else if (context.archivedCounterpartIds.has(counterpartId)) {
+        archiveChanges.push({
+          kind: 'put',
+          row: createArchivedReferenceRow(workspaceId, { ...reference, entityId: counterpartId }),
+          requireAbsent: true,
+        })
+        counts.retainedDependencyCount += 1
+        budget -= 2
+      } else {
+        counts.droppedDependencyCount += 1
+        budget -= 1
+      }
+    } else {
+      const summary = context.workItems.get(
+        createWorkItemKey(reference.link.teamId, reference.link.workItemId),
+      )
+      const link = merged
+      if (link && summary) {
+        next = {
+          ...next,
+          workItemLinks: [
+            ...next.workItemLinks.filter((candidate) =>
+              candidate.teamId !== link.teamId || candidate.workItemId !== link.workItemId
+            ),
+            link,
+          ],
+        }
+        workItemConditions.push({
+          teamId: link.teamId,
+          workItemId: link.workItemId,
+          revision: readRevision(summary.revision),
+        })
+        counts.restoredLinkCount += 1
+        budget -= 3
+      } else {
+        counts.droppedLinkCount += 1
+        budget -= 1
+        if (summary) {
+          // The drop is decided against this Work Item summary, so a later change to the Work Item
+          // must abort the step instead of losing a reference that has become valid again.
+          workItemConditions.push({
+            teamId: reference.link.teamId,
+            workItemId: reference.link.workItemId,
+            revision: readRevision(summary.revision),
+          })
+          budget -= 1
+        }
+      }
+    }
+    archiveChanges.push({ kind: 'delete', recordKey, requireExisting: true })
+    processedCount += 1
+  }
+  return {
+    step: { state: next, archiveChanges, workItemConditions },
+    counts,
+  }
+}
+
+/**
+ * Builds the public summary of an archived entity.
+ *
+ * @param entity - Archived entity.
+ * @returns Summary fields shown in the archive list.
+ */
+function createArchivedEntitySummary(entity: StoredPlanningEntity): ArchivedPlanningEntitySummary {
+  return {
+    id: entity.id,
+    type: entity.type,
+    title: entity.title,
+    ...(entity.parentId === undefined ? {} : { parentId: entity.parentId }),
+    ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
+    ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
+    ownerMemberKey: entity.ownerMemberKey,
+    archivedAt: entity.archivedAt ?? entity.updatedAt,
+  }
+}
+
+/**
+ * Encodes the exclusive start of the next archive list page.
+ *
+ * @param entityId - Last entity ID of the current page.
+ * @returns Opaque cursor.
+ */
+function createArchivedEntityCursor(entityId: string) {
+  return Buffer.from(JSON.stringify({ v: 1, after: entityId }), 'utf8').toString('base64url')
+}
+
+/**
+ * Estimates the serialized bytes one archive row adds to a step transaction.
+ *
+ * @param value - Row or record written by the step.
+ * @returns JSON size plus a fixed allowance for the table name, key and condition envelope.
+ */
+function estimateArchiveStepBytes(value: unknown) {
+  return utf8ByteLength(JSON.stringify(value)) + 512
+}
+
+/**
+ * Decodes an archive list cursor.
+ *
+ * @param cursor - Untrusted opaque cursor.
+ * @returns The exclusive entity ID the next page starts after.
+ */
+function readArchivedEntityCursor(cursor: unknown) {
+  // A 256-character ID JSON-escapes to at most 1,536 bytes, about 2,100 base64url characters.
+  if (typeof cursor !== 'string' || cursor.length === 0 || cursor.length > 4_096) {
+    throw invalid('PlanningArchiveCursorInvalid', 'Archived Planning cursor is invalid.')
+  }
+  try {
+    const payload: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    if (
+      typeof payload !== 'object' || payload === null ||
+      !('v' in payload) || payload.v !== 1 || !('after' in payload)
+    ) {
+      throw new Error('Invalid cursor payload.')
+    }
+    return readIdentifier(payload.after, 'Archived Planning cursor')
+  } catch {
+    throw invalid('PlanningArchiveCursorInvalid', 'Archived Planning cursor is invalid.')
+  }
+}
+
+/**
+ * Creates the sort key of an archived entity row.
+ *
+ * @param entityId - Archived entity identifier.
+ * @returns Size-checked sort key.
+ */
+function createArchivedEntityRecordKey(entityId: string) {
+  return readRecordKey(
+    `${ARCHIVED_ENTITY_RECORD_PREFIX}${
+      boundArchivedKeyPart(ARCHIVED_ENTITY_RECORD_PREFIX, encodeRecordKeyIdentifier(entityId), 0, entityId)
+    }`,
+    'Archived Planning entity record key',
+  )
+}
+
+/** Bytes kept free after an archived reference prefix for the longest digested reference suffix. */
+const ARCHIVED_REFERENCE_SUFFIX_RESERVE = 'DEPENDENCY#'.length + 65
+
+/**
+ * Keeps an archive key part within the DynamoDB sort-key limit.
+ *
+ * Archive keys concatenate identifiers that each fit their live key, so a long encoded part is
+ * replaced by `#` and its SHA-256 digest. `encodeURIComponent` never emits `#`, so a digest
+ * cannot collide with an encoded identifier; the row itself keeps the full identifiers.
+ *
+ * @param prefix - Key text before the part.
+ * @param encoded - URI-encoded part.
+ * @param reservedBytes - Bytes that must stay free after the part.
+ * @param source - Unencoded value digested when the part does not fit.
+ * @returns The encoded part, or its digest form.
+ */
+function boundArchivedKeyPart(prefix: string, encoded: string, reservedBytes: number, source: string) {
+  return utf8ByteLength(prefix) + utf8ByteLength(encoded) + reservedBytes <= 1_024
+    ? encoded
+    : `#${createHash('sha256').update(source).digest('hex')}`
+}
+
+/**
+ * Creates the sort-key prefix of every reference an archived entity owns.
+ *
+ * @param entityId - Archived entity identifier.
+ * @returns Sort-key prefix ending with `#`.
+ */
+function createArchivedReferenceRecordPrefix(entityId: string) {
+  return readRecordKey(
+    `${ARCHIVED_REFERENCE_RECORD_PREFIX}${
+      boundArchivedKeyPart(
+        ARCHIVED_REFERENCE_RECORD_PREFIX,
+        encodeRecordKeyIdentifier(entityId),
+        1 + ARCHIVED_REFERENCE_SUFFIX_RESERVE,
+        entityId,
+      )
+    }#`,
+    'Archived Planning reference record prefix',
+  )
+}
+
+/**
+ * Creates the sort key of one archived dependency or link reference.
+ *
+ * @param reference - Archived reference.
+ * @returns Size-checked sort key under the owning entity's prefix.
+ */
+function createArchivedReferenceRecordKey(
+  reference: PlanningArchivedDependency | PlanningArchivedLinkReference,
+) {
+  const prefix = createArchivedReferenceRecordPrefix(reference.entityId)
+  const kindPrefix = `${prefix}${reference.kind === 'dependency' ? 'DEPENDENCY#' : 'LINK#'}`
+  return readRecordKey(
+    `${kindPrefix}${
+      reference.kind === 'dependency'
+        // A dependency ID can be reused once its edge left the live graph, so the archived key
+        // also names the endpoints, which no other edge with the same ID can share.
+        ? boundArchivedKeyPart(
+          kindPrefix,
+          [
+            reference.dependency.id,
+            reference.dependency.predecessorId,
+            reference.dependency.successorId,
+          ].map(encodeRecordKeyIdentifier).join('#'),
+          0,
+          JSON.stringify([
+            reference.dependency.id,
+            reference.dependency.predecessorId,
+            reference.dependency.successorId,
+          ]),
+        )
+        : boundArchivedKeyPart(
+          kindPrefix,
+          `${encodeRecordKeyIdentifier(reference.link.teamId)}#${
+            encodeRecordKeyIdentifier(reference.link.workItemId)
+          }`,
+          0,
+          JSON.stringify([reference.link.teamId, reference.link.workItemId]),
+        )
+    }`,
+    'Archived Planning reference record key',
+  )
+}
+
+/**
+ * Creates an archived entity row.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param entity - Archived entity.
+ * @returns DynamoDB row.
+ */
+function createArchivedEntityRow(workspaceId: string, entity: StoredPlanningEntity) {
+  return {
+    workspaceId,
+    recordKey: createArchivedEntityRecordKey(entity.id),
+    entryType: 'planning-archived-entity',
+    schemaVersion: PLANNING_ARCHIVE_SCHEMA_VERSION,
+    entity,
+  }
+}
+
+/**
+ * Creates an archived dependency or link reference row.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param reference - Archived reference.
+ * @returns DynamoDB row.
+ */
+function createArchivedReferenceRow(
+  workspaceId: string,
+  reference: PlanningArchivedDependency | PlanningArchivedLinkReference,
+) {
+  return {
+    workspaceId,
+    recordKey: createArchivedReferenceRecordKey(reference),
+    entryType: reference.kind === 'dependency'
+      ? 'planning-archived-dependency'
+      : 'planning-archived-link-reference',
+    schemaVersion: PLANNING_ARCHIVE_SCHEMA_VERSION,
+    ...reference,
+  }
+}
+
+/**
+ * Decodes an archived entity row.
+ *
+ * @param row - Untrusted DynamoDB row.
+ * @param workspaceId - Expected Workspace identifier.
+ * @returns The archived entity.
+ */
+function readArchivedEntityRow(
+  row: Record<string, unknown>,
+  workspaceId: string,
+): StoredPlanningEntity {
+  try {
+    if (
+      row.workspaceId !== workspaceId ||
+      row.entryType !== 'planning-archived-entity' ||
+      row.schemaVersion !== PLANNING_ARCHIVE_SCHEMA_VERSION ||
+      typeof row.entity !== 'object' || row.entity === null || Array.isArray(row.entity)
+    ) {
+      throw persistenceInvalid('Archived Planning entity row is invalid.')
+    }
+    const source = row.entity as Record<string, unknown>
+    const entity = readStoredPlanningEntity({
+      ...source,
+      recordKey: createEntityRecordKey(readIdentifier(source.id, 'Planning entity ID')),
+    })
+    if (row.recordKey !== createArchivedEntityRecordKey(entity.id) || entity.archivedAt === undefined) {
+      throw persistenceInvalid('Archived Planning entity row is invalid.')
+    }
+    return entity
+  } catch {
+    throw persistenceInvalid('Archived Planning entity row is invalid.')
+  }
+}
+
+/**
+ * Decodes an archived dependency or link reference row.
+ *
+ * @param row - Untrusted DynamoDB row.
+ * @param workspaceId - Expected Workspace identifier.
+ * @param entityId - Expected owning entity.
+ * @returns The archived reference.
+ */
+function readArchivedReferenceRow(
+  row: Record<string, unknown>,
+  workspaceId: string,
+  entityId: string,
+): PlanningArchivedDependency | PlanningArchivedLinkReference {
+  try {
+    if (
+      row.workspaceId !== workspaceId ||
+      row.schemaVersion !== PLANNING_ARCHIVE_SCHEMA_VERSION ||
+      row.entityId !== entityId
+    ) {
+      throw persistenceInvalid('Archived Planning reference row is invalid.')
+    }
+    let reference: PlanningArchivedDependency | PlanningArchivedLinkReference
+    if (row.entryType === 'planning-archived-dependency' && row.kind === 'dependency') {
+      const source = readRecordObject(row.dependency)
+      reference = {
+        kind: 'dependency',
+        entityId,
+        dependency: readStoredPlanningDependency({
+          ...source,
+          recordKey: createDependencyRecordKey(readIdentifier(source.id, 'Dependency ID')),
+        }),
+      }
+      const { predecessorId, successorId } = reference.dependency
+      if (predecessorId !== entityId && successorId !== entityId) {
+        throw persistenceInvalid('Archived Planning dependency does not touch its entity.')
+      }
+    } else if (row.entryType === 'planning-archived-link-reference' && row.kind === 'link') {
+      const source = readRecordObject(row.link)
+      const link = readStoredPlanningWorkItemLink({
+        ...source,
+        recordKey: createLinkRecordKey(
+          readIdentifier(source.teamId, 'Team ID'),
+          readIdentifier(source.workItemId, 'Work Item ID'),
+        ),
+      })
+      if (
+        row.reference !== 'cycle' && row.reference !== 'milestone' && row.reference !== 'goal' ||
+        readLinkReferenceKind(link, entityId) !== row.reference
+      ) {
+        throw persistenceInvalid('Archived Planning link reference is invalid.')
+      }
+      reference = { kind: 'link', entityId, reference: row.reference, link }
+    } else {
+      throw persistenceInvalid('Archived Planning reference row is invalid.')
+    }
+    if (row.recordKey !== createArchivedReferenceRecordKey(reference)) {
+      throw persistenceInvalid('Archived Planning reference record key is invalid.')
+    }
+    return reference
+  } catch {
+    throw persistenceInvalid('Archived Planning reference row is invalid.')
+  }
+}
+
+/**
+ * Returns a nested stored object.
+ *
+ * @param value - Untrusted nested value.
+ * @returns The value as a record.
+ */
+function readRecordObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw persistenceInvalid('Archived Planning row has an invalid nested value.')
+  }
+  return value as Record<string, unknown>
 }
 
 function replaceEntity(state: PlanningWorkspaceState, entity: StoredPlanningEntity) {

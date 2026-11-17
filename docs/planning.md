@@ -47,15 +47,44 @@ DynamoDB client は、デコード済みの graph を META の `revision` と `u
 #### 容量に近づいたときの運用手順
 
 1. Planning 画面のヘッダー、または `GET /api/planning` の `capacity` で使用量を確認します
-2. 使用量の大半は通常 Work Item link（Work Item ごとに 1 row）です。終了した Cycle や不要になった Milestone / Goal への link を、Project / Team manager が `DELETE /api/planning/work-item-links/:teamId/:workItemId` で解除します。Work Item 自体と Work Item の履歴は残ります
-3. 不要な entity dependency と Work Item schedule dependency を解除します
-4. 容量超過中も row を増やさない変更は保存できるため、上の操作は `full` の状態でも実行できます
+2. 使用量の大半は通常 Work Item link（Work Item ごとに 1 row）です。終了した Cycle、不要になった Milestone / Goal を archive すると、その entity と entity への link 参照・dependency が live graph から退避され、容量を消費しなくなります（下の「Archive と復元」）
+3. Archive できない entity への link は、Project / Team manager が `DELETE /api/planning/work-item-links/:teamId/:workItemId` で解除します。Work Item 自体と Work Item の履歴は残ります
+4. 不要な entity dependency と Work Item schedule dependency を解除します
+5. 容量超過中も row を増やさない変更は保存できるため、上の操作は `full` の状態でも実行できます
 
-Archive 済み entity と終了済み Cycle の link を live graph から外して容量を消費しないようにする変更と、Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の後続の変更で行います。それまでは、critical path、roll-up、cross-Project dependency はこれまでどおり Workspace 全体の graph から計算します。
+Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の後続の変更で行います。それまでは、critical path、roll-up、cross-Project dependency はこれまでどおり Workspace 全体の live graph から計算します。退避済みの entity と参照は計算に含めません。
+
+#### Archive と復元
+
+`POST /api/planning/entities/:entityId/archive` は、entity を archive した revision を確定したあと、archive 済み entity を live graph から同じ Workspace partition の退避用 row へ移します。退避用 row の prefix（`ARCHIVE_ENTITY#`、`ARCHIVE_REF#`）は live graph の prefix と重ならないため、live の読み取りでは読まれず、容量にも数えません。退避用 row の key は複数の ID をつなぐため、DynamoDB の sort key の上限（1,024 byte）を超える部分は `#` と SHA-256 digest に置き換えます。ID そのものは row に保存します。
+
+- 退避は entity ごとに、先に dependency と Work Item link の参照、最後に entity を移します。1 revision で書く item は 90 まで、書き込む row の合計は約 2 MB までなので（transaction の上限 3 MB に余裕を残すため）、link の多い Cycle や Goal は数 revision に分かれます（Goal と link 100 件なら archive を含めて 4 revision）。各 revision は live graph を検証してから META の revision CAS と同じ transaction で書くため、途中のどの revision でも live graph は整合しています
+- Work Item link は Work Item ごとに 1 row で、Cycle・Milestone・Goal を同時に持てます。退避するのは archive した entity を指す参照だけです。ほかの参照が残る link は live graph に残り、残らない link は削除します。退避した参照は `ARCHIVE_REF#<entity>#LINK#<team>#<workItem>` に、参照を外す前の link とともに保存します
+- 子 entity が live graph に残っている entity は退避しません（子は親を live graph で解決するため）。子を退避したあとに親を退避します
+- Update target を持つ Initiative は archive しても live graph に残します。Update target と immutable update 履歴は通知 schedule と Update Feed が live graph から解決しており、update target は 2,000 件の上限で抑えられているためです。その親も live graph に残ります
+- 1 request で進める退避は 40 revision までです。途中で止まった分（link が数千件ある場合や、同時編集による revision 競合が 3 回続いた場合など）は live graph で archive 済みのまま残ります。同じ entity の archive を再実行すると、archive の revision を作らずに続きを退避します（ほかの entity の archive でも続きが進みます）。Archive の response は退避後の snapshot を返します
+- 退避中の entity と同じ ID の entity は作成・複製できません（`409 PlanningEntityExists`）。復元するか別の ID を使います
+
+`GET /api/planning/archived-entities?limit=&cursor=` は退避済み entity を ID 順に返します（1 page 最大 50 件）。各 entity の Team / Project scope を manager 権限で確認し、呼び出し元が復元できるものだけを返します。そのため page の件数が `limit` より少なくても `nextCursor` が続くことがあります。Enterprise 認可では、一覧の route は Workspace 単位で認可されるため、各 entity の Team / Project（scope が無ければ Workspace）を resource として `planning.manage` を評価し直します。Team / Project 単位の付与だけを持つ利用者にも、復元できる entity が一覧に出ます。
+
+`POST /api/planning/entities/:entityId/restore` は `{ expectedRevision }` を受け取り、退避済み entity を active に戻します。権限は archive と同じく entity の scope の manager で、親が live graph にある場合は親の member 権限も確認します。Enterprise 認可では、退避済み entity の Team / Project scope を認可対象の resource とします。Archive 中に owner が無効になった entity は、作成・複製と同じく `409 PlanningOwnerInactive` で拒否します。復元のすべての revision は、呼び出し元の Workspace membership（Enterprise 認可では control revision も）を同じ transaction で条件検証します。Service account には Workspace membership の row がないため、Enterprise の control revision だけを条件にします。復元の途中で membership や Enterprise の設定が変わると、その revision は失敗し、request は `409 PlanningAuthorizationChanged` になります。残りの参照は退避先に残ります。
+
+Live graph に残っている archive 済み entity（update target を持つ Initiative とその親、退避の途中のもの）も同じ API で戻せます。この場合は live graph の中で `archivedAt` を外し、Initiative の update target も active に戻します（通知の due-index は cadence から作り直します）。
+
+- 最初の revision は呼び出し元の `expectedRevision` で entity を戻します。親が live graph にないか archive 済みなら `409 PlanningRestoreParentUnavailable`、親の Team / Project scope が変わっていれば scope 不一致の 409 になり、entity は退避されたままです。先に親を戻すか、親を元の scope に戻します
+- 続く revision で参照を最大 30 件ずつ戻します。Link の参照は Work Item の revision を同じ transaction で条件検証し、消費する退避用 row が残っていることも条件にします（同時に走った復元が同じ参照を二重に戻さないため）。各 revision は対象の entity が live graph で active なことを確かめ、復元の途中で別の操作が entity を archive し直した場合は参照を消費せずに止めます。Work Item の同じ欄が別の Cycle / Milestone を指している、link の Project が Work Item の現在の Project と違う、Cycle の capacity を超える、Goal が 100 件を超えるなど、戻すと整合しない参照は破棄します。破棄の判断も Work Item の revision を同じ transaction で条件検証し、途中で Work Item が変わった場合は参照を残して止めます。呼び出し元から見えない、または link を書けない（Work Item の Team と Project に member 権限がない）Work Item の参照と、削除・archive 済みの Work Item の参照は破棄せず退避先に残し、書ける人が復元を再実行すると戻ります
+- Dependency は、相手の entity が live graph にあれば戻します（重複や循環になるもの、constraint を満たさないものは破棄）。Dependency の作成と同じく相手の entity の manager 権限も必要で（Enterprise 認可では相手の Team / Project を resource として評価します）、権限がなければ戻さずに退避先へ残し、両方を管理できる人が復元を再実行すると戻ります。参照を戻す各 revision では、戻す entity 自身の現在の scope でも manager 権限を確かめ直し、途中で管理できない scope へ移されていれば止めます。相手の退避先へ移す dependency は、ID と両端の entity を key に含め、同じ ID が別の edge に再利用されていても上書きしません。相手がまだ退避中なら相手の退避先に移し、相手を復元したときに戻します。相手が退避中かどうかは各 revision で live graph を読んだ後に確かめるので、復元中に相手が archive されても dependency は破棄されません
+- 戻す参照は、各 revision で live graph を読んだ後に退避先から読み直します。退避用 row の変更はすべて revision を進めるので、確定した revision はその時点の row を消費します。同時に別の復元が参照を戻し、同じ ID で作り直されて再び退避された場合も、最初に読んだ古い内容ではなく現在の row を戻します
+- 容量（20,000 row / 24 MB）や Planning snapshot の応答上限を超える分は戻さず退避先に残します。容量を空けてから同じ復元を再実行すると、active な entity に残っている参照の続きを戻します
+- Response は `{ planning, restore }` です。`restore` は `restoredLinkCount`、`droppedLinkCount`、`restoredDependencyCount`、`retainedDependencyCount`、`droppedDependencyCount`、`pendingReferenceCount` を返します。`pendingReferenceCount` は復元の最後に退避先を読み直した件数です
+
+Team / Project の archive は、live graph に残る link と active な entity だけを確認します。退避済みの参照は確認しないため、archive 済み Cycle の link だけが残っていた Team / Project も archive できます。その Team / Project の entity を復元するには、先に Team / Project を戻す必要があります。
+
+画面からの退避済み entity の一覧と復元は後続の変更で追加します。それまでは上の API を使います。
 
 ## 階層と roll-up
 
-許可する基本階層は `Portfolio → Roadmap → Initiative → Goal/OKR` で、OKR は `Objective → Key Result` を表現できます。その下に `Phase → Milestone/Release` を配置します。Project 計画の実用性のため、Phase は Roadmap / Initiative の直下、Milestone / Release は Roadmap / Initiative / Goal の直下にも配置できます。Cycle と Portfolio は root です。Self reference、存在しないまたは archive 済みの親、循環は保存しません。親を archive する前に active な子を移動または archive する必要があり、dependency と Work Item link は履歴として保持します。
+許可する基本階層は `Portfolio → Roadmap → Initiative → Goal/OKR` で、OKR は `Objective → Key Result` を表現できます。その下に `Phase → Milestone/Release` を配置します。Project 計画の実用性のため、Phase は Roadmap / Initiative の直下、Milestone / Release は Roadmap / Initiative / Goal の直下にも配置できます。Cycle と Portfolio は root です。Self reference、存在しないまたは archive 済みの親、循環は保存しません。親を archive する前に active な子を移動または archive する必要があります。Archive した entity の dependency と Work Item link の参照は、entity と一緒に退避用 row へ移り、復元すると戻ります（「Archive と復元」）。
 
 Automatic progress は、関連 Work Item と子孫の現在状態から on-read で決定します。`completed` は 100、`started` は 50、`backlog` / `unstarted` は 0 とし、`canceled` は分母から除外します。同じ Work Item が複数経路から辿れる場合も、ancestor ごとに一度だけ数えます。Manual progress を指定した entity は 0〜100 の保存値を使います。Health は entity 自身の risk で補正し、`high` / `critical` は `off-track`、`medium` は少なくとも `at-risk`、`none` / `low` は報告された health を effective health とします。`rollupHealth` は自身と active な子孫の effective health のうち最も悪い値を返します。
 
