@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { matchRoutes } from 'react-router'
+import { matchRoutes, MemoryRouter } from 'react-router'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { appRoutes } from '../src/app/router'
 import { getWorkItemByKey, TeamIssuesApiError } from '../src/issues/api'
 import { findWorkItemKeys, readWorkItemKeyInput } from '../src/issues/model/workItemKeys'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 import { WorkItemKeyActions } from '../src/issues/ui/WorkItemKeyActions'
+import { WorkItemKeyStatus } from '../src/issues/ui/WorkItemKeyStatus'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createWorkItemKeyPath } from '../src/shared/routing/paths'
 
@@ -72,5 +73,21 @@ describe('WorkItemKeyActions', () => {
     expect(html).toContain('PT-12')
     expect(html).toContain('Copy key')
     expect(html).toContain('Copy link')
+  })
+})
+
+describe('WorkItemKeyStatus', () => {
+  const renderStatus = (status: 'loading' | 'invalid' | 'not-found' | 'failed') => renderToStaticMarkup(
+    <MemoryRouter>
+      <WorkItemKeyStatus onRetry={() => {}} status={status} t={createTranslator('en')} workItemKey="PT-12" />
+    </MemoryRouter>,
+  )
+
+  test('offers a retry only after a failed lookup', () => {
+    expect(renderStatus('loading')).not.toContain('Try again')
+    expect(renderStatus('loading')).not.toContain('Search instead')
+    expect(renderStatus('not-found')).not.toContain('Try again')
+    expect(renderStatus('not-found')).toContain('Search instead')
+    expect(renderStatus('failed')).toContain('Try again')
   })
 })
