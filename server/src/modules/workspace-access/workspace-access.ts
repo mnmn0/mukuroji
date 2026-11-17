@@ -1770,21 +1770,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           this.actorCondition(normalizedWorkspaceId, actor),
-          {
-            ConditionCheck: {
-              TableName: this.tableName,
-              Key: {
-                workspaceId: normalizedWorkspaceId,
-                recordKey: createMemberRecordKey(target.memberKey),
-              },
-              ConditionExpression: '#status = :active AND version = :version',
-              ExpressionAttributeNames: { '#status': 'status' },
-              ExpressionAttributeValues: {
-                ':active': 'active',
-                ':version': target.version,
-              },
-            },
-          },
+          this.credentialTargetCondition(normalizedWorkspaceId, target),
           auditPut,
           {
             Put: {
@@ -1821,7 +1807,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           if (recorded.status === 'completed') {
             return { member: target, alreadyRecorded: true, completed: true }
           }
-          await this.renewCredentialActionLease(normalizedWorkspaceId, recorded, now)
+          await this.renewCredentialActionLease(normalizedWorkspaceId, actor, target, recorded, now)
           return { member: target, alreadyRecorded: true, completed: false }
         }
         throw new WorkspaceAccessError(
@@ -1840,6 +1826,32 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         )
       }
       throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Builds the transaction check that the target of a credential action is still the active
+   * member version the authority check read.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param target - Target member as read.
+   * @returns The DynamoDB transaction item.
+   */
+  private credentialTargetCondition(workspaceId: string, target: WorkspaceMember) {
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey: createMemberRecordKey(target.memberKey),
+        },
+        ConditionExpression: '#status = :active AND version = :version',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':version': target.version,
+        },
+      },
     }
   }
 
@@ -1938,21 +1950,28 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * Takes over a recorded credential action whose earlier attempt stopped, once its lease ran out.
    *
    * The conditional update succeeds for one caller only, so two retries cannot both change
-   * Cognito. An action recorded longer ago than the resume window is not repeated: the member
-   * may have set up a new password or app since, so the administrator sends a new request.
+   * Cognito. It runs in one transaction with the checks that the actor and the target are still
+   * the versions the authority check read, so a role change in between stops the takeover. An
+   * action recorded longer ago than the resume window is not repeated: the member may have set
+   * up a new password or app since, so the administrator sends a new request.
    *
    * @param workspaceId - Normalized Workspace ID.
+   * @param actor - Administrator as read by the authority check.
+   * @param target - Target member as read by the authority check.
    * @param recorded - Progress record that the caller read.
    * @param recorded.recordKey - Key of the progress record.
    * @param recorded.leaseUntil - Lease end the caller observed, if any.
    * @param recorded.recordedAt - When the action was recorded, in milliseconds.
    * @param now - Current time.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
-   *   holds the lease or took it over first, and 409 `WorkspaceCredentialActionExpired` when the
-   *   resume window has passed.
+   *   holds the lease or took it over first, 409 `WorkspaceCredentialActionExpired` when the
+   *   resume window has passed, and 409 `WorkspaceVersionConflict` when the actor or the target
+   *   changed.
    */
   private async renewCredentialActionLease(
     workspaceId: string,
+    actor: WorkspaceMember,
+    target: WorkspaceMember,
     recorded: { recordKey: string; leaseUntil: number | undefined; recordedAt: number },
     now: Date,
   ) {
@@ -1973,23 +1992,39 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     try {
-      await this.documentClient.send(new UpdateCommand({
-        TableName: this.tableName,
-        Key: { workspaceId, recordKey: recorded.recordKey },
-        UpdateExpression: 'SET leaseUntil = :leaseUntil',
-        ConditionExpression: recorded.leaseUntil === undefined
-          ? '#status = :recorded AND attribute_not_exists(leaseUntil)'
-          : '#status = :recorded AND leaseUntil = :observedLeaseUntil',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: {
-          ':recorded': 'recorded',
-          ':leaseUntil': now.getTime() + credentialActionLeaseMs,
-          ...(recorded.leaseUntil === undefined ? {} : { ':observedLeaseUntil': recorded.leaseUntil }),
-        },
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          this.actorCondition(workspaceId, actor),
+          this.credentialTargetCondition(workspaceId, target),
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { workspaceId, recordKey: recorded.recordKey },
+              UpdateExpression: 'SET leaseUntil = :leaseUntil',
+              ConditionExpression: recorded.leaseUntil === undefined
+                ? '#status = :recorded AND attribute_not_exists(leaseUntil)'
+                : '#status = :recorded AND leaseUntil = :observedLeaseUntil',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':recorded': 'recorded',
+                ':leaseUntil': now.getTime() + credentialActionLeaseMs,
+                ...(recorded.leaseUntil === undefined ? {} : { ':observedLeaseUntil': recorded.leaseUntil }),
+              },
+            },
+          },
+        ],
       }))
     } catch (error) {
-      if (isAwsError(error, 'ConditionalCheckFailedException')) {
+      if (isTransactionConditionalFailureAt(error, 2)) {
         throw inProgress()
+      }
+      if (isConditionalTransactionCancellation(error)) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceVersionConflict',
+          'Workspace member changed. Reload and try again.',
+          { cause: error },
+        )
       }
       throw toWorkspaceAccessError(error)
     }

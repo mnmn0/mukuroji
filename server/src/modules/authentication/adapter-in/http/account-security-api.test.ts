@@ -623,7 +623,7 @@ test('lists the MFA state of active members for administrators', async () => {
   })
 })
 
-test('records the administrator password reset before Cognito resets and signs the member out', async () => {
+test('records the administrator password reset and signs the member out around the Cognito reset', async () => {
   configureFakeProjectClients(true)
   const events: string[] = []
   const recorded: Array<{
@@ -652,7 +652,12 @@ test('records the administrator password reset before Cognito resets and signs t
   const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
 
   expect(response.status).toBe(202)
-  expect(events).toEqual(['audit', 'reset:sato@example.com', 'sign-out:sato@example.com'])
+  expect(events).toEqual([
+    'audit',
+    'sign-out:sato@example.com',
+    'reset:sato@example.com',
+    'sign-out:sato@example.com',
+  ])
   expect(recorded[0]).toMatchObject({
     actor: 'demo@example.com',
     target: 'sato@example.com',

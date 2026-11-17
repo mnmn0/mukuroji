@@ -131,11 +131,15 @@ export async function resetMemberCredential(
   if (input.action === 'mfa-reset') {
     await ports.disableAuthenticator(member.memberKey)
   } else {
+    // Signing out first must succeed: if it fails, nothing changed yet and a retry with the same
+    // key resumes safely, whereas repeating the reset could undo a password the member already
+    // set. The second sign-out closes sessions started in between and is best effort.
+    await ports.signOutEverywhere(member.memberKey)
     await ports.resetPassword(member.memberKey)
     try {
       await ports.signOutEverywhere(member.memberKey)
     } catch (error) {
-      ports.reportFailure('Failed to sign the member out after a password reset.', error)
+      ports.reportFailure('Failed to sign the member out again after a password reset.', error)
     }
   }
 

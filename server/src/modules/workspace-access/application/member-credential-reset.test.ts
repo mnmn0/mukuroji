@@ -65,30 +65,47 @@ const input = {
   memberKey: 'sato@example.com',
 } as const
 
-test('records a password reset before resetting and signing the member out', async () => {
+test('records a password reset and signs the member out before and after resetting', async () => {
   const { ports, calls } = createPorts()
 
   await resetMemberCredential(ports, { ...input, action: 'password-reset-requested' })
 
   expect(calls).toEqual([
     'record:demo@example.com:sato@example.com:password-reset-requested',
+    'sign-out:sato@example.com',
     'reset:sato@example.com',
     'sign-out:sato@example.com',
     'complete:sato@example.com:password-reset-requested',
   ])
 })
 
-test('keeps a completed password reset when signing out fails', async () => {
+test('leaves the password and the progress unchanged when the first sign-out fails', async () => {
   const { ports, calls } = createPorts({
     async signOutEverywhere() {
       throw new Error('Cognito is unavailable.')
     },
   })
 
+  await expect(resetMemberCredential(ports, { ...input, action: 'password-reset-requested' }))
+    .rejects.toThrow('Cognito is unavailable.')
+
+  // The action stays recorded but not completed, so a retry with the same key signs out again.
+  expect(calls).toEqual(['record:demo@example.com:sato@example.com:password-reset-requested'])
+})
+
+test('keeps a completed password reset when only the second sign-out fails', async () => {
+  let signOuts = 0
+  const { ports, calls } = createPorts({
+    async signOutEverywhere() {
+      signOuts += 1
+      if (signOuts === 2) throw new Error('Cognito is unavailable.')
+    },
+  })
+
   await resetMemberCredential(ports, { ...input, action: 'password-reset-requested' })
 
   expect(calls.slice(-2)).toEqual([
-    'failure:Failed to sign the member out after a password reset.',
+    'failure:Failed to sign the member out again after a password reset.',
     'complete:sato@example.com:password-reset-requested',
   ])
 })
