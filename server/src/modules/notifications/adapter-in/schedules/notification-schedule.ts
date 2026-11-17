@@ -933,6 +933,7 @@ function createScheduledNotificationAuditEvent(
         ? { workItemUpdatedAt: candidate.workItemUpdatedAt }
         : {}),
       ...(candidate.daysUntilDue === undefined ? {} : { daysUntilDue: candidate.daysUntilDue }),
+      ...(candidate.reopenedAt ? { workItemReopenedAt: candidate.reopenedAt } : {}),
       ...(candidate.repetition === undefined ? {} : { repetition: candidate.repetition }),
       notificationCandidates,
     },

@@ -50,6 +50,7 @@ export function createProductionSlackNotificationHandler() {
           dueDate: delivery.dueDate,
           workItemUpdatedAt: delivery.workItemUpdatedAt,
           daysUntilDue: delivery.daysUntilDue,
+          workItemReopenedAt: delivery.workItemReopenedAt,
           targetId: delivery.targetId,
           fileId: delivery.fileId,
           outboxStatus: 'pending',
