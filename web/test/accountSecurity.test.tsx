@@ -27,7 +27,10 @@ import {
   resetWorkspaceMemberCredential,
   WorkspaceAccessApiError,
 } from '../src/workspace/api'
-import { shouldRetainCredentialResetContext } from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
+import {
+  shouldCloseCredentialResetDialog,
+  shouldRetainCredentialResetContext,
+} from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
 import {
   createWorkspaceAccessMutationSession,
   getCredentialResetRunner,
@@ -178,6 +181,16 @@ describe('member credential reset retry', () => {
     expect(shouldRetainCredentialResetContext(
       new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
     )).toBe(false)
+  })
+
+  test('closes the confirmation only when the reset expired', () => {
+    expect(shouldCloseCredentialResetDialog(
+      new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
+    )).toBe(true)
+    expect(shouldCloseCredentialResetDialog(
+      new WorkspaceAccessApiError(409, 'Running', 'WorkspaceCredentialActionInProgress'),
+    )).toBe(false)
+    expect(shouldCloseCredentialResetDialog(new TypeError('Failed to fetch'))).toBe(false)
   })
 
   test('keeps an unknown reset outcome across a snapshot refresh and an access token refresh', async () => {

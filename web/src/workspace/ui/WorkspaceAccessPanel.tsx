@@ -32,7 +32,10 @@ import {
 } from '../api'
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
-import { useWorkspaceMemberCredentialReset } from '../mutations/useWorkspaceMemberCredentialReset'
+import {
+  shouldCloseCredentialResetDialog,
+  useWorkspaceMemberCredentialReset,
+} from '../mutations/useWorkspaceMemberCredentialReset'
 import {
   createWorkspaceAccessMutationSession,
   getCredentialResetRunner,
@@ -539,6 +542,8 @@ export function WorkspaceAccessPanel({
             .replace('{name}', action.member.name?.trim() || action.member.email),
         )
       } catch (error) {
+        // The dialog closes on an expired reset, so the error shows in the panel instead.
+        if (shouldCloseCredentialResetDialog(error)) setAction(undefined)
         setOperationErrorMessage(resolveMemberCredentialErrorMessage(error, t))
       } finally {
         setIsActionBusy(false)

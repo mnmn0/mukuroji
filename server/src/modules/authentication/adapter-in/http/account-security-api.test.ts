@@ -1053,7 +1053,8 @@ test('previews how many active members must register an authenticator before MFA
     async getUserProfile(userId) {
       return {
         ...createFakeCognitoProfile(userId),
-        mfaConfigured: userId === 'demo@example.com',
+        // Sign-in lets a member with SMS MFA through without the authenticator setup.
+        mfaConfigured: userId === 'demo@example.com' || userId === 'suzuki@example.com',
         softwareTokenMfaConfigured: userId === 'demo@example.com',
       }
     },
@@ -1068,7 +1069,7 @@ test('previews how many active members must register an authenticator before MFA
   expect(response.status).toBe(200)
   expect((await response.json()).impact.mfaImpact).toEqual({
     activeMemberCount: 4,
-    unenrolledMemberCount: 3,
+    unenrolledMemberCount: 2,
     unknownMemberCount: 0,
   })
 })

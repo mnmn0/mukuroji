@@ -33,6 +33,18 @@ export function shouldRetainCredentialResetContext(error: unknown) {
 }
 
 /**
+ * Tells whether a failed reset closes its confirmation dialog. An expired reset cannot be
+ * resumed, so confirming the same dialog again would only repeat the expired request; the
+ * administrator checks the member's state and starts a new reset instead.
+ *
+ * @param error - Error of the failed request.
+ * @returns Whether to close the dialog and show the error outside it.
+ */
+export function shouldCloseCredentialResetDialog(error: unknown) {
+  return error instanceof WorkspaceAccessApiError && error.code === 'WorkspaceCredentialActionExpired'
+}
+
+/**
  * Sends a password reset code to a member or resets the member's authenticator app, and
  * reloads the members' MFA enrollment afterwards, whether the reset succeeded or not.
  *
