@@ -204,6 +204,15 @@ describe('archived Planning entities', () => {
     updateStoredPlanningRestoreResults(storage, 'member-1', 'goal-d', (current) =>
       dropPlanningRestoreResult(current, 'goal-d'))
     expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([pending])
+
+    // Interleaved: both tabs read the same saved state before either writes.
+    const seenByBoth = readStoredPlanningRestoreResults(storage, 'member-1')
+    const tabA = recordUncertainPlanningRestore(seenByBoth, { entityId: 'goal-e', title: 'Goal E' })
+    const tabB = recordUncertainPlanningRestore(seenByBoth, { entityId: 'goal-f', title: 'Goal F' })
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-e', tabA.find((result) => result.entityId === 'goal-e'), 10)
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-f', tabB.find((result) => result.entityId === 'goal-f'), 11)
+    expect(readStoredPlanningRestoreResults(storage, 'member-1').map((result) => result.entityId))
+      .toEqual(['goal-f', 'goal-e', 'goal-a'])
   })
 
   test('treats only failures that may follow a committed restore as uncertain', () => {
