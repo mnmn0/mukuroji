@@ -11,7 +11,7 @@ import {
   recordUncertainPlanningRestore,
   selectRestorablePlanningEntities,
   updateStoredPlanningRestoreResults,
-  writeStoredPlanningRestoreResults,
+  writeStoredPlanningRestoreResult,
   type PlanningRestoreResultView,
 } from '../src/planning/model/archive'
 
@@ -119,10 +119,14 @@ describe('archived Planning entities', () => {
     expect(hasPendingPlanningRestore(restored[0]!)).toBe(false)
   })
 
-  test('saves unfinished restores per member and reads back only valid pending ones', () => {
+  test('saves unfinished restores per member and entity and reads back only valid pending ones', () => {
     const values = new Map<string, string>()
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
+      key: (index: number) => [...values.keys()][index] ?? null,
+      get length() {
+        return values.size
+      },
       removeItem: (key: string) => void values.delete(key),
       setItem: (key: string, value: string) => void values.set(key, value),
     }
@@ -142,51 +146,64 @@ describe('archived Planning entities', () => {
       summary: { ...summary, pendingReferenceCount: 0 },
     }
 
-    writeStoredPlanningRestoreResults(storage, 'member-1', [finished, unknown, pending])
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-a', pending, 1)
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-b', unknown, 2)
+    // A finished outcome is not saved.
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-c', finished, 3)
     expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([unknown, pending])
-    // Every unfinished restore is kept, however many there are.
-    const many = Array.from({ length: 60 }, (_, index) => ({ ...unknown, entityId: `goal-${index}` }))
-    writeStoredPlanningRestoreResults(storage, 'member-3', many)
-    expect(readStoredPlanningRestoreResults(storage, 'member-3')).toHaveLength(60)
-    writeStoredPlanningRestoreResults(storage, 'member-3', [])
     expect(readStoredPlanningRestoreResults(storage, 'member-2')).toEqual([])
-    // Nothing left to continue clears the saved entry.
-    writeStoredPlanningRestoreResults(storage, 'member-1', [finished])
+    // Every unfinished restore is kept, however many there are.
+    for (let index = 0; index < 60; index += 1) {
+      writeStoredPlanningRestoreResult(storage, 'member-3', `goal-${index}`, { ...unknown, entityId: `goal-${index}` })
+    }
+    expect(readStoredPlanningRestoreResults(storage, 'member-3')).toHaveLength(60)
+    for (let index = 0; index < 60; index += 1) {
+      writeStoredPlanningRestoreResult(storage, 'member-3', `goal-${index}`, undefined)
+    }
+    // Finishing an entity removes only its own entry.
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-b', undefined)
+    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([pending])
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-a', { ...pending, summary: finished.summary })
     expect(values.size).toBe(0)
 
-    values.set('mukuroji.planning.pendingRestores:member-1', JSON.stringify([
-      { entityId: 'goal-a', title: 'Goal A', summary: { ...summary, pendingReferenceCount: -1 } },
-      { entityId: '', title: 'Empty' },
-      unknown,
-      { ...unknown, title: 'Duplicate' },
-    ]))
+    // Invalid, finished, misplaced and unreadable entries are skipped without hiding valid ones.
+    const prefix = 'mukuroji.planning.pendingRestore:member-1:'
+    values.set(`${prefix}goal-a`, JSON.stringify({
+      result: { ...pending, summary: { ...summary, pendingReferenceCount: -1 } },
+      savedAt: 1,
+    }))
+    values.set(`${prefix}goal-x`, JSON.stringify({ result: unknown, savedAt: 1 }))
+    values.set(`${prefix}goal-y`, '{not json')
+    values.set(`${prefix}goal-b`, JSON.stringify({ result: unknown, savedAt: 5 }))
     expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([unknown])
-    values.set('mukuroji.planning.pendingRestores:member-1', '{not json')
-    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([])
+    values.clear()
+
     // Unavailable or failing storage reads as empty and ignores writes.
     expect(readStoredPlanningRestoreResults(undefined, 'member-1')).toEqual([])
     const failing = {
       getItem: () => { throw new Error('blocked') },
+      key: () => { throw new Error('blocked') },
+      length: 1,
       removeItem: () => { throw new Error('blocked') },
       setItem: () => { throw new Error('blocked') },
     }
     expect(readStoredPlanningRestoreResults(failing, 'member-1')).toEqual([])
-    expect(() => writeStoredPlanningRestoreResults(failing, 'member-1', [pending])).not.toThrow()
+    expect(() => writeStoredPlanningRestoreResult(failing, 'member-1', 'goal-a', pending)).not.toThrow()
 
     expect(dropPlanningRestoreResult([unknown, pending], 'goal-b')).toEqual([pending])
 
-    // Another tab of the same member saved goal-a; this tab, which never showed it, finishes
-    // goal-c and loses track of goal-b, and goal-a stays saved.
-    writeStoredPlanningRestoreResults(storage, 'member-1', [pending, unknown])
-    updateStoredPlanningRestoreResults(storage, 'member-1', (current) =>
+    // Two tabs that read the same saved list and change different entities keep each other's
+    // entries: each writes only its own entity's key.
+    writeStoredPlanningRestoreResult(storage, 'member-1', 'goal-a', pending, 1)
+    updateStoredPlanningRestoreResults(storage, 'member-1', 'goal-c', (current) =>
       recordPlanningRestoreResult(current, finished))
-    updateStoredPlanningRestoreResults(storage, 'member-1', (current) =>
-      dropPlanningRestoreResult(current, 'goal-b'))
-    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([pending])
-    updateStoredPlanningRestoreResults(storage, 'member-1', (current) =>
+    updateStoredPlanningRestoreResults(storage, 'member-1', 'goal-d', (current) =>
       recordUncertainPlanningRestore(current, { entityId: 'goal-d', title: 'Goal D' }))
     expect(readStoredPlanningRestoreResults(storage, 'member-1').map((result) => result.entityId))
       .toEqual(['goal-d', 'goal-a'])
+    updateStoredPlanningRestoreResults(storage, 'member-1', 'goal-d', (current) =>
+      dropPlanningRestoreResult(current, 'goal-d'))
+    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([pending])
   })
 
   test('treats only failures that may follow a committed restore as uncertain', () => {

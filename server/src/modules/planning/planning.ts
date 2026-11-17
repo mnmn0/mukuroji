@@ -2842,6 +2842,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     this.sharesRevisionWithWorkItems = sharesRevisionWithWorkItems
   }
 
+  /**
+   * Returns whether the deployed Work Item writers advance this table's META revision.
+   *
+   * @returns True when the Planning table name is configured, so Work Item writers share this META.
+   */
   protected override workItemWritesAdvanceRevision() {
     return this.sharesRevisionWithWorkItems
   }

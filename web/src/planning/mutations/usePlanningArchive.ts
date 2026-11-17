@@ -127,16 +127,18 @@ export function usePlanningArchive({
   }
 
   /**
-   * Applies one outcome change to the shown outcomes and to the saved ones.
+   * Applies one entity's outcome change to the shown outcomes and to its saved one.
    *
+   * @param entityId - Entity the change is about.
    * @param update - Outcome change, such as recording a restore result.
    */
   const applyResults = (
+    entityId: string,
     update: (current: readonly PlanningRestoreResultView[]) => readonly PlanningRestoreResultView[],
   ) => {
     setResults(update)
     if (loadedScope !== undefined) {
-      updateStoredPlanningRestoreResults(getPlanningRestoreStorage(), loadedScope, update)
+      updateStoredPlanningRestoreResults(getPlanningRestoreStorage(), loadedScope, entityId, update)
     }
   }
 
@@ -165,9 +167,9 @@ export function usePlanningArchive({
       // can leave the archived list, so an outcome without a summary keeps a way to retry it.
       if (error instanceof PlanningApiError && error.status === 404) {
         // Neither archived nor live any more: a saved outcome must stop offering it.
-        applyResults((current) => dropPlanningRestoreResult(current, entity.id))
+        applyResults(entity.id, (current) => dropPlanningRestoreResult(current, entity.id))
       } else if (isUncertainPlanningRestoreFailure(error)) {
-        applyResults((current) => recordUncertainPlanningRestore(
+        applyResults(entity.id, (current) => recordUncertainPlanningRestore(
           current,
           { entityId: entity.id, title: entity.title },
         ))
@@ -178,7 +180,7 @@ export function usePlanningArchive({
     }
     const { summary } = outcome
     if (summary) {
-      applyResults((current) => recordPlanningRestoreResult(
+      applyResults(entity.id, (current) => recordPlanningRestoreResult(
         current,
         { entityId: entity.id, title: entity.title, summary },
       ))

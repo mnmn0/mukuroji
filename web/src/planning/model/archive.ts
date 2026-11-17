@@ -134,10 +134,23 @@ export function recordPlanningRestoreResult(
 }
 
 /** Browser storage operations the unfinished restore list needs. */
-export type PlanningRestoreResultStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+export type PlanningRestoreResultStorage = Pick<
+  Storage,
+  'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'
+>
 
-/** Storage key prefix of the unfinished restores kept per Workspace member. */
-const pendingRestoreStoragePrefix = 'mukuroji.planning.pendingRestores:'
+/** Storage key prefix of the unfinished restores; each entity of a member has its own key. */
+const pendingRestoreStoragePrefix = 'mukuroji.planning.pendingRestore:'
+
+/**
+ * Returns the storage key prefix of a Workspace member's unfinished restores.
+ *
+ * @param scope - Workspace member the outcomes belong to.
+ * @returns The prefix every key of that member starts with.
+ */
+function pendingRestoreScopePrefix(scope: string) {
+  return `${pendingRestoreStoragePrefix}${encodeURIComponent(scope)}:`
+}
 
 /** Count fields of a stored restore summary. */
 const restoreSummaryCountKeys = [
@@ -167,7 +180,7 @@ function isStoredPlanningRestoreSummary(value: unknown): value is PlanningRestor
 /**
  * Returns whether a stored value is a restore outcome.
  *
- * @param value - One element of the stored array.
+ * @param value - The `result` field of a stored entry.
  * @returns True when the entity ID and title are strings and the summary, if any, is valid.
  */
 function isStoredPlanningRestoreResult(value: unknown): value is PlanningRestoreResultView {
@@ -177,6 +190,34 @@ function isStoredPlanningRestoreResult(value: unknown): value is PlanningRestore
     record.entityId.length > 0 &&
     typeof record.title === 'string' &&
     (record.summary === undefined || isStoredPlanningRestoreSummary(record.summary))
+}
+
+/** One unfinished restore as saved, with when it was saved for newest-first order. */
+type StoredPlanningRestoreResult = {
+  /** The saved outcome. */
+  result: PlanningRestoreResultView
+  /** Milliseconds since the epoch when the outcome was saved. */
+  savedAt: number
+}
+
+/**
+ * Reads one saved unfinished restore.
+ *
+ * @param text - Stored JSON text.
+ * @returns The saved outcome, or `undefined` when the text is not a pending outcome.
+ */
+function readStoredPlanningRestoreResult(text: string | null): StoredPlanningRestoreResult | undefined {
+  if (!text) return undefined
+  const parsed: unknown = JSON.parse(text)
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const record = parsed as Record<string, unknown>
+  const savedAt = record.savedAt
+  if (typeof savedAt !== 'number' || !Number.isFinite(savedAt)) return undefined
+  if (!isStoredPlanningRestoreResult(record.result) || !hasPendingPlanningRestore(record.result)) {
+    return undefined
+  }
+  const { entityId, summary, title } = record.result
+  return { result: { entityId, title, ...(summary === undefined ? {} : { summary }) }, savedAt }
 }
 
 /**
@@ -193,68 +234,82 @@ export function readStoredPlanningRestoreResults(
   storage: PlanningRestoreResultStorage | undefined,
   scope: string,
 ): PlanningRestoreResultView[] {
+  if (!storage) return []
+  const prefix = pendingRestoreScopePrefix(scope)
+  const saved: StoredPlanningRestoreResult[] = []
   try {
-    const text = storage?.getItem(`${pendingRestoreStoragePrefix}${scope}`)
-    if (!text) return []
-    const parsed: unknown = JSON.parse(text)
-    if (!Array.isArray(parsed)) return []
-    const seen = new Set<string>()
-    return parsed.filter((value): value is PlanningRestoreResultView => {
-      if (!isStoredPlanningRestoreResult(value) || seen.has(value.entityId)) return false
-      seen.add(value.entityId)
-      return hasPendingPlanningRestore(value)
-    }).map((result) => ({
-      entityId: result.entityId,
-      title: result.title,
-      ...(result.summary === undefined ? {} : { summary: result.summary }),
-    }))
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index)
+      if (key === null || !key.startsWith(prefix)) continue
+      try {
+        const entry = readStoredPlanningRestoreResult(storage.getItem(key))
+        // The key names the entity, so an entry copied under another key is ignored.
+        if (entry && key === `${prefix}${encodeURIComponent(entry.result.entityId)}`) saved.push(entry)
+      } catch {
+        // One unreadable entry does not hide the others.
+      }
+    }
   } catch {
     return []
   }
+  return saved
+    .sort((first, second) =>
+      second.savedAt - first.savedAt || first.result.entityId.localeCompare(second.result.entityId)
+    )
+    .map((entry) => entry.result)
 }
 
 /**
- * Saves the unfinished restores of a Workspace member, dropping finished ones.
+ * Saves or removes one entity's unfinished restore.
+ *
+ * Each entity has its own key, so tabs of the same member that change different entities never
+ * overwrite each other.
  *
  * @param storage - Browser storage; a failed write is ignored.
- * @param scope - Workspace member the outcomes belong to.
- * @param results - Outcomes shown now, newest first.
+ * @param scope - Workspace member the outcome belongs to.
+ * @param entityId - Entity whose outcome changes.
+ * @param result - The entity's outcome now; a finished or missing one removes the saved entry.
+ * @param savedAt - When the outcome is saved, for newest-first order.
  */
-export function writeStoredPlanningRestoreResults(
+export function writeStoredPlanningRestoreResult(
   storage: PlanningRestoreResultStorage | undefined,
   scope: string,
-  results: readonly PlanningRestoreResultView[],
+  entityId: string,
+  result: PlanningRestoreResultView | undefined,
+  savedAt = Date.now(),
 ) {
-  const key = `${pendingRestoreStoragePrefix}${scope}`
-  const pending = results.filter(hasPendingPlanningRestore)
+  const key = `${pendingRestoreScopePrefix(scope)}${encodeURIComponent(entityId)}`
   try {
-    if (pending.length === 0) storage?.removeItem(key)
-    else storage?.setItem(key, JSON.stringify(pending))
+    if (result === undefined || result.entityId !== entityId || !hasPendingPlanningRestore(result)) {
+      storage?.removeItem(key)
+    } else {
+      storage?.setItem(key, JSON.stringify({ result, savedAt } satisfies StoredPlanningRestoreResult))
+    }
   } catch {
     // Storage may be full or disabled; the outcomes still show until the page is left.
   }
 }
 
 /**
- * Applies one restore outcome change to the saved unfinished restores.
+ * Applies one entity's restore outcome change to the saved unfinished restores.
  *
- * The change is applied to what storage holds now, not to the outcomes one page shows, so an
- * unfinished restore saved by another tab of the same member is kept.
+ * The change is computed from what storage holds now and only that entity's entry is written, so
+ * an unfinished restore that another tab of the same member saved is kept.
  *
  * @param storage - Browser storage; unavailable storage is left alone.
  * @param scope - Workspace member the outcomes belong to.
+ * @param entityId - Entity the change is about.
  * @param update - The same outcome change the page applies to its own outcomes.
  */
 export function updateStoredPlanningRestoreResults(
   storage: PlanningRestoreResultStorage | undefined,
   scope: string,
+  entityId: string,
   update: (results: readonly PlanningRestoreResultView[]) => readonly PlanningRestoreResultView[],
 ) {
-  writeStoredPlanningRestoreResults(
-    storage,
-    scope,
-    update(readStoredPlanningRestoreResults(storage, scope)),
-  )
+  const next = update(readStoredPlanningRestoreResults(storage, scope))
+    .find((result) => result.entityId === entityId)
+  writeStoredPlanningRestoreResult(storage, scope, entityId, next)
 }
 
 /**
