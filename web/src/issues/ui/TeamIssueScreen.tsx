@@ -90,6 +90,7 @@ import { TaskActionContextMenu } from '../../task-views/ui/TaskActionContextMenu
 import {
   isWorkItemRelationGraphConflict,
   matchesTeamIssueKeyword,
+  resolveIssueTitle,
   resolveTeamIssueStatusFilter,
 } from '../model/teamIssueDisplay'
 import { CreateIssuePanel } from './CreateTeamIssuePanel'
@@ -103,7 +104,29 @@ import {
   type TeamIssueScreenProps,
 } from './teamIssueScreenShared'
 import { IssueTable } from './TeamIssueTable'
+import {
+  createWorkItemOutlineRows,
+  planWorkItemHierarchyMove,
+  readWorkItemHierarchyMoveShortcut,
+  type WorkItemHierarchyMoveBlockReason,
+  type WorkItemHierarchyMoveDirection,
+} from '../../work-items/model/workItemHierarchy'
+import {
+  readCollapsedWorkItemOutlineIds,
+  writeCollapsedWorkItemOutlineIds,
+} from '../../shared/lib/preferences/workItemOutlineCollapse'
+import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
+
+/** Message shown when a hierarchy move cannot be made. */
+const outlineMoveBlockMessageKeys = {
+  'not-in-hierarchy': 'issues.outline.move.not-in-hierarchy',
+  'parent-hidden': 'issues.outline.move.parent-hidden',
+  'no-previous-sibling': 'issues.outline.move.no-previous-sibling',
+  'no-next-sibling': 'issues.outline.move.no-next-sibling',
+  'top-level': 'issues.outline.move.top-level',
+  'rank-exhausted': 'issues.outline.move.rank-exhausted',
+} as const satisfies Record<WorkItemHierarchyMoveBlockReason, MessageKey>
 
 /** Transient Team Issue context-menu target retained independently from keyboard selection. */
 type TeamIssueActionContextMenuState = {
@@ -150,6 +173,7 @@ export function TeamIssueScreen({
   focusedRootCommentId,
   initialViewMode = 'table',
   issueErrorMessage,
+  issueOutline,
   issues = [],
   isLoading = false,
   isPlanningLoading = false,
@@ -439,14 +463,75 @@ export function TeamIssueScreen({
       taskViewDefinition,
     ],
   )
+  const [collapsedOutlineIds, setCollapsedOutlineIds] = useState(
+    () => readCollapsedWorkItemOutlineIds(teamId),
+  )
+  const [outlineStatusMessage, setOutlineStatusMessage] = useState<string>()
+  const outlineMovePendingRef = useRef(false)
+  const isOutlineRequested = viewMode === 'table' &&
+    (taskViewPresentation?.display.showOutline ?? false) &&
+    !taskViewPresentation?.groupBy
+  const outlineNodes = isOutlineRequested ? issueOutline?.nodes : undefined
+  const outlineRows = useMemo(
+    () => outlineNodes
+      ? createWorkItemOutlineRows(visibleIssues, outlineNodes, collapsedOutlineIds)
+      : undefined,
+    [collapsedOutlineIds, outlineNodes, visibleIssues],
+  )
+  // Rows hidden under a collapsed parent are left out of keyboard navigation and selection.
+  const navigableIssues = useMemo(
+    () => outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
+    [outlineRows, visibleIssues],
+  )
   const visibleIssueActionTargets = useMemo(
-    () => visibleIssues.map((issue) => ({
+    () => navigableIssues.map((issue) => ({
       expectedRevision: issue.revision,
       teamId: issue.teamId,
       workItemId: issue.id,
     })),
-    [visibleIssues],
+    [navigableIssues],
   )
+
+  /** Shows or hides the rows nested under one outline row and remembers the choice. */
+  const toggleOutlineCollapsed = useCallback((issueId: string) => {
+    const next = new Set(collapsedOutlineIds)
+    if (!next.delete(issueId)) next.add(issueId)
+    writeCollapsedWorkItemOutlineIds(teamId, next)
+    setCollapsedOutlineIds(next)
+  }, [collapsedOutlineIds, teamId])
+
+  const saveOutlineMove = issueOutline?.onMove
+  /** Plans and saves one indent, outdent, or sibling move, then reports the outcome. */
+  const moveIssueInOutline = useCallback((issue: TeamIssue, direction: WorkItemHierarchyMoveDirection) => {
+    if (!outlineNodes || !saveOutlineMove || outlineMovePendingRef.current) return
+    const plan = planWorkItemHierarchyMove(outlineNodes, issue.id, direction)
+    if (!plan.ok) {
+      setOutlineStatusMessage(t(outlineMoveBlockMessageKeys[plan.reason]))
+      return
+    }
+    outlineMovePendingRef.current = true
+    setOutlineStatusMessage(undefined)
+    saveOutlineMove(issue.id, {
+      parentWorkItemId: plan.parentWorkItemId,
+      hierarchyRank: plan.hierarchyRank,
+    }).then(() => {
+      // Indenting under a collapsed row would hide the moved row, so the new parent opens.
+      if (plan.parentWorkItemId !== null && collapsedOutlineIds.has(plan.parentWorkItemId)) {
+        toggleOutlineCollapsed(plan.parentWorkItemId)
+      }
+      setOutlineStatusMessage(t('issues.outline.moved').replace('{title}', resolveIssueTitle(issue, t)))
+      // Moving the row in the DOM drops focus; return it so repeated moves keep working.
+      globalThis.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
+      })
+    }, (error: unknown) => {
+      setOutlineStatusMessage(
+        error instanceof Error && error.message ? error.message : t('issues.outline.move.failed'),
+      )
+    }).finally(() => {
+      outlineMovePendingRef.current = false
+    })
+  }, [collapsedOutlineIds, outlineNodes, saveOutlineMove, t, toggleOutlineCollapsed])
   const visibleIssueKeys = useMemo(
     () => visibleIssueActionTargets.map((target) =>
       createTaskViewItemKey(target.teamId, target.workItemId)
@@ -1108,6 +1193,19 @@ export function TeamIssueScreen({
         event,
         isCreateOpen || Boolean(taskActionContextMenuState),
       )
+      const outlineDirection = outlineRows && !input.isEditableTarget && !input.isModalOpen
+        ? readWorkItemHierarchyMoveShortcut(event)
+        : undefined
+      const outlineIssue = outlineDirection
+        ? outlineRows?.find((row) =>
+            createTaskViewItemKey(row.item.teamId, row.item.id) === taskViewSelection.focusedKey
+          )?.item
+        : undefined
+      if (outlineDirection && outlineIssue) {
+        event.preventDefault()
+        moveIssueInOutline(outlineIssue, outlineDirection)
+        return
+      }
       const selectionAction = createTaskViewSelectionKeyboardAction(
         input,
         taskViewSelection,
@@ -1137,6 +1235,8 @@ export function TeamIssueScreen({
     return () => document.removeEventListener('keydown', handleTeamKeyboard)
   }, [
     isCreateOpen,
+    moveIssueInOutline,
+    outlineRows,
     taskActionContextMenuState,
     taskActionCompletion,
     taskViewSelection,
@@ -1346,6 +1446,22 @@ export function TeamIssueScreen({
                     {taskActionErrorMessage}
                   </p>
                 ) : null}
+                {isOutlineRequested && issueOutline?.errorMessage ? (
+                  <p className="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800" data-testid="team-issue-outline-unavailable">
+                    {issueOutline.errorMessage}
+                  </p>
+                ) : null}
+                {outlineRows ? (
+                  <p
+                    className={outlineStatusMessage
+                      ? 'mt-5 text-sm font-semibold text-[var(--workbench-muted)]'
+                      : 'sr-only'}
+                    data-testid="team-issue-outline-status"
+                    role="status"
+                  >
+                    {outlineStatusMessage}
+                  </p>
+                ) : null}
                 <div
                   aria-label={t(`issues.view.${viewMode}`)}
                   id={issueViewPanelId}
@@ -1363,6 +1479,13 @@ export function TeamIssueScreen({
                       locale={locale}
                       onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
+                      outline={outlineRows
+                        ? {
+                            rows: outlineRows,
+                            onToggleCollapsed: toggleOutlineCollapsed,
+                            ...(saveOutlineMove ? { onMove: moveIssueInOutline } : {}),
+                          }
+                        : undefined}
                       selectedIssueKeys={taskViewSelection.selectedKeys}
                       selectedIssueId={selectedIssueId}
                       t={t}

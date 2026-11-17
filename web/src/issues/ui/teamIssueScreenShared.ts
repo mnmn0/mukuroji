@@ -1,6 +1,7 @@
 import type {
   PlanningSnapshot,
   ResolvedWorkItemConfiguration,
+  TeamWorkItemHierarchyNode,
   TaskViewDefinition,
   WorkItemRelation,
   WorkItemDependencyEndpoint,
@@ -81,6 +82,28 @@ export type TeamIssueTypeChangeState = {
   targetWorkItemTypeId: string
 }
 
+/** Where a hierarchy move places a Work Item. */
+export type TeamIssueHierarchyPlacement = {
+  /** Parent after the move; `null` makes the Work Item top-level. */
+  parentWorkItemId: string | null
+  /** Sibling order rank after the move. */
+  hierarchyRank: string
+}
+
+/** Team Work Item hierarchy the table shows as an outline. */
+export type TeamIssueOutlineSource = {
+  /** Hierarchy nodes in outline order; absent while loading or after a failed read. */
+  nodes?: readonly TeamWorkItemHierarchyNode[]
+  /** Message shown instead of the outline when the hierarchy could not be read. */
+  errorMessage?: string
+  /**
+   * Saves a planned hierarchy move and refreshes the hierarchy.
+   *
+   * Absent when the viewer cannot change the hierarchy.
+   */
+  onMove?: (issueId: string, placement: TeamIssueHierarchyPlacement) => Promise<void>
+}
+
 /**
  * チーム所有 Issue 画面を描画する props です。
  */
@@ -95,6 +118,8 @@ export type TeamIssueScreenProps = {
   taskViewDefinition?: TaskViewDefinition
   /** Presentation settings rendered by Team table and board layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Hierarchy shown as an outline when the table view turns the outline on. */
+  issueOutline?: TeamIssueOutlineSource
   /** Optional route-controlled Team Issue view state. */
   viewState?: TeamIssueViewState
   /** Persists one complete next route-controlled Team Issue view state. */

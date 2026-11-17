@@ -1,5 +1,5 @@
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
-import type { WorkItemRelation } from '@mukuroji/contracts'
+import type { TeamWorkItemHierarchyNode, WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState, type ComponentProps } from 'react'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
@@ -425,5 +425,100 @@ export const LoadingError: Story = {
     issueErrorMessage: 'Issue 一覧を取得できませんでした',
     issues: [],
     selectedIssueId: undefined,
+  },
+}
+
+/** Hierarchy where the second Work Item sits under the first and the third is top-level. */
+const outlineNodes: TeamWorkItemHierarchyNode[] = [
+  {
+    workItemId: 'onboarding-friction',
+    parentWorkItemId: null,
+    depth: 0,
+    wbsNumber: '1',
+    hierarchyRank: 'b',
+    childWorkItemIds: [configuredIssues[1].id],
+    rollup: {
+      childCount: 1,
+      descendantCount: 1,
+      statusCategoryCounts: { backlog: 0, unstarted: 1, started: 0, completed: 0, canceled: 0 },
+      openDescendantCount: 1,
+      plannedEffortMinutes: 120,
+      estimatedDescendantCount: 1,
+      remainingEffortMinutes: 120,
+      startDate: '2026-12-01',
+      endDate: '2026-12-10',
+    },
+  },
+  {
+    workItemId: configuredIssues[1].id,
+    parentWorkItemId: 'onboarding-friction',
+    depth: 1,
+    wbsNumber: '1.1',
+    hierarchyRank: 'b',
+    childWorkItemIds: [],
+  },
+  {
+    workItemId: 'release-readiness',
+    parentWorkItemId: null,
+    depth: 0,
+    wbsNumber: '2',
+    hierarchyRank: 'd',
+    childWorkItemIds: [],
+  },
+]
+
+/** Table shown as a hierarchy outline: collapse a parent, then indent a Work Item from the keyboard. */
+export const HierarchyOutline: Story = {
+  args: {
+    issueOutline: {
+      nodes: outlineNodes,
+      onMove: fn(async () => undefined),
+    },
+    issues: configuredIssues.slice(0, 3),
+    selectedIssueId: undefined,
+    taskViewPresentation: {
+      columns: [{ field: 'title' }, { field: 'status' }, { field: 'dueDate' }],
+      density: 'comfortable',
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: false,
+        showCompleted: true,
+        showEmptyGroups: true,
+        showSubtasks: true,
+        wrapTitles: false,
+        showOutline: true,
+      },
+    },
+  },
+  beforeEach: () => {
+    try {
+      window.localStorage.removeItem('mukuroji.workItemOutline.collapsed.core-team')
+    } catch {
+      // Storage may be unavailable; the outline then starts expanded anyway.
+    }
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const childId = configuredIssues[1].id
+    await expect(canvas.getByTestId(`issue-row-wbs-${childId}`)).toHaveTextContent('1.1')
+    await expect(canvas.getByTestId('work-item-hierarchy-rollup')).toHaveTextContent('完了 0/1')
+
+    const toggle = canvas.getByTestId('issue-outline-toggle-onboarding-friction')
+    await userEvent.click(toggle)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByTestId(`issue-row-${childId}`)).not.toBeInTheDocument()
+    await userEvent.click(toggle)
+    await expect(canvas.getByTestId(`issue-row-${childId}`)).toBeInTheDocument()
+
+    canvas.getByTestId('issue-row-release-readiness').focus()
+    await userEvent.keyboard('{Alt>}{Shift>}{ArrowRight}{/Shift}{/Alt}')
+    await waitFor(() => expect(args.issueOutline?.onMove).toHaveBeenCalledWith(
+      'release-readiness',
+      expect.objectContaining({ parentWorkItemId: 'onboarding-friction' }),
+    ))
+    await waitFor(() => expect(canvas.getByTestId('team-issue-outline-status')).toHaveTextContent('移動しました'))
+
+    await userEvent.keyboard('{Alt>}{Shift>}{ArrowLeft}{/Shift}{/Alt}')
+    await expect(canvas.getByTestId('team-issue-outline-status')).toHaveTextContent('最上位の Work Item')
   },
 }

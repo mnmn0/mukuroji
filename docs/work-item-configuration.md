@@ -175,7 +175,7 @@ Relation row の sort key は source Work Item ID から始まるため、`REL#<
 
 ### 親子関係と上限
 
-`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。付け替えは宣言的な操作で、子の親がすでに指定された親（`null` なら親なし）であれば graph revision に関係なく書き込まずに成功を返す。これで応答が失われた後の再送も成功として扱える。Transaction が取り消され、再読み取りで graph・現在の親・endpoint のどれも変わっていない場合は、競合ではなく再試行可能な `503 WorkItemRelationUnavailable` を返す。
+`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision, hierarchyRank? }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。付け替えは宣言的な操作で、子の親がすでに指定された親（`null` なら親なし）であれば graph revision に関係なく書き込まずに成功を返す。これで応答が失われた後の再送も成功として扱える。Transaction が取り消され、再読み取りで graph・現在の親・endpoint のどれも変わっていない場合は、競合ではなく再試行可能な `503 WorkItemRelationUnavailable` を返す。
 
 残る上限は次のとおりで、`@mukuroji/contracts` の定数と一致させる。
 
@@ -186,6 +186,25 @@ Relation row の sort key は source Work Item ID から始まるため、`REL#<
 | 1 つの Team の relation link（reciprocal 2 row で 1 link） | 10,000 | `WORK_ITEM_TEAM_RELATION_LINK_LIMIT` |
 
 Team の link 数は `RELATION_GRAPH` row の `edgeCount`（directed row 数）で数え、mutation ごとに同じ transaction で更新する。上限を超える作成・付け替えは `413 WorkItemRelationGraphLimitExceeded` で拒否する。`edgeCount` を持たない旧い graph row は、次の mutation で relation row を COUNT Query で数え直してから保存する。この上限は Focus など Team の graph を一括で読む処理の読み取り量を抑えるためのもので、relation mutation の読み取り量には影響しない。
+
+### 兄弟の順序（`hierarchyRank`）
+
+同じ親の子どうしの並び（最上位の Work Item どうしも含む）は、Work Item row の `hierarchyRank` で決める。値は `0-9a-z` の文字列で、最大 64 文字、末尾は `0` 以外とする（`isWorkItemHierarchyRank`）。辞書順に並べ、同じ値なら Work Item ID の順にする。2 つの rank の間には必ず別の rank を作れる（`createWorkItemHierarchyRankBetween`）。64 文字に収まらない場合だけ作れず、Web は「この位置にはこれ以上並べられません」と伝える。
+
+`hierarchyRank` を持たない Work Item は、作成順の `sortOrder` から作る既定の rank（`createDefaultWorkItemHierarchyRank`）で並ぶ。`sortOrder` は一覧の paging に使う GSI の range key なので、階層の並び替えには使わない。
+
+`PUT .../parent` に `hierarchyRank` を付けると、親の付け替えと同じ transaction で子の rank を書く。親を変えずに rank だけを変える（上下の並び替え）と、子の row だけを revision と所属 Project を条件に更新し、graph revision は進めない。親を変えて rank を付けない場合は保存済みの rank を消し、既定の順に戻す。不正な rank は `400 InvalidWorkItemHierarchyRank` で拒否する。`relationIds` と同じく、rank の更新は Work Item の `revision` を進めない。
+
+### 親の完了ポリシー
+
+Configuration の `parentCompletionPolicy` は、完了でもキャンセルでもない子が残る親を完了にするときの扱いを決める。省略時は `warn` とする。
+
+| 値 | 動き |
+| --- | --- |
+| `warn` | server は許可する。Web は未完了の子の数を示して確認してから更新する。 |
+| `reject` | Work Item が completed category の status に移るとき、server が直接の子を読み、archive されていない未完了の子があれば `409 WorkItemOpenChildren` で拒否する。Web・Public API・MCP・自動化のどの経路でも同じ。 |
+
+子は relation graph の `child` row から読み、各子の詳細を 16 件ずつ読む。数えるのは直接の子だけで、孫は数えない。ポリシーの変更は他の configuration と同じく監査に残る。
 
 ### Reciprocal transaction と graph CAS
 

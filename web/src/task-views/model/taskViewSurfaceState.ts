@@ -431,6 +431,9 @@ export function taskViewDefinitionToPresentationSettings(
       showEmptyGroups: definition.layout.displayOptions.showEmptyGroups ?? true,
       showSubtasks: definition.layout.displayOptions.showSubItems ?? true,
       wrapTitles: definition.layout.displayOptions.wrapText ?? false,
+      ...(definition.layout.displayOptions.showOutline === undefined
+        ? {}
+        : { showOutline: definition.layout.displayOptions.showOutline }),
     },
     ...(definition.layout.group ? { groupBy: definition.layout.group.field } : {}),
     ...(definition.layout.group
@@ -484,6 +487,9 @@ export function presentationSettingsToTaskViewDefinition(
         showEmptyGroups: settings.display.showEmptyGroups,
         showSubItems: settings.display.showSubtasks,
         wrapText: settings.display.wrapTitles,
+        ...(settings.display.showOutline === undefined
+          ? {}
+          : { showOutline: settings.display.showOutline }),
       },
       ...(settings.groupBy
         ? { group: { direction: settings.groupDirection ?? 'asc', field: settings.groupBy } }

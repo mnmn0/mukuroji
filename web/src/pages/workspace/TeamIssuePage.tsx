@@ -1,7 +1,9 @@
-import type {
-  TaskViewScope,
-  WorkItemRelation,
-  WorkItemDependencyEndpoint,
+import {
+  DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+  isWorkItemHierarchyClosedCategory,
+  type TaskViewScope,
+  type WorkItemRelation,
+  type WorkItemDependencyEndpoint,
 } from '@mukuroji/contracts'
 import {
   useCallback,
@@ -75,10 +77,13 @@ import {
   replaceWorkItemParent,
 } from '../../work-items/api'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
+import { useTeamWorkItemHierarchy } from '../../work-items/queries/useTeamWorkItemHierarchy'
+import { countOpenWorkItemChildren } from '../../work-items/model/workItemHierarchy'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveWorkflowStatusDefinition,
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import {
@@ -98,7 +103,11 @@ import {
   formatTaskViewMigrationWarning,
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
-import { emptyWorkspaceMembers } from '../../issues/ui/teamIssueScreenShared'
+import {
+  emptyWorkspaceMembers,
+  type TeamIssueHierarchyPlacement,
+} from '../../issues/ui/teamIssueScreenShared'
+import { isWorkItemRelationGraphConflict } from '../../issues/model/teamIssueDisplay'
 import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -483,6 +492,14 @@ export function TeamIssuePage() {
   ])
   const canCreateTeamIssue = canCreateUnassignedIssue || createIssueProjects.length > 0
   const taskViewState = taskViewDefinitionToTeamState(taskViewController.effectiveDefinition)
+  const isOutlineShown = taskViewState.viewMode === 'table' &&
+    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false) &&
+    !taskViewController.effectiveDefinition.layout.group
+  const {
+    data: hierarchy,
+    error: hierarchyError,
+    mutate: mutateHierarchy,
+  } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
   const taskViewTeams = useMemo(
     () => {
       const writableTeamIds = new Set(taskViewController.writableTeamIds)
@@ -566,6 +583,32 @@ export function TeamIssuePage() {
     return { issue, navigationPath }
   }
 
+  /**
+   * Asks before completing a Work Item whose loaded children are still open, when the Team only warns.
+   *
+   * Under the reject policy the server refuses the change, so no question is asked.
+   *
+   * @param currentIssue - Work Item being updated.
+   * @param input - Requested change.
+   * @returns Whether the update should go ahead.
+   */
+  const confirmCompletingParent = (currentIssue: TeamIssue, input: UpdateTeamIssueInput) => {
+    if (input.workflowStatusId === undefined || isWorkItemHierarchyClosedCategory(currentIssue.statusCategory)) {
+      return true
+    }
+    const policy = taskViewConfiguration?.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY
+    if (policy !== 'warn') return true
+    const nextStatus = resolveWorkflowStatusDefinition({
+      ...currentIssue,
+      workflowStatusId: input.workflowStatusId,
+      workItemTypeId: input.workItemTypeId ?? currentIssue.workItemTypeId,
+    }, taskViewConfiguration)
+    if (nextStatus?.category !== 'completed') return true
+    const openChildren = countOpenWorkItemChildren(currentIssue.id, issues)
+    return openChildren === 0 ||
+      globalThis.window.confirm(t('issues.outline.completeWarning').replace('{count}', String(openChildren)))
+  }
+
   const handleUpdateIssue = async (issueId: string, input: UpdateTeamIssueInput) => {
     if (!accessToken) {
       return
@@ -591,6 +634,7 @@ export function TeamIssuePage() {
         'TeamTaskActionAccessDenied',
       )
     }
+    if (!confirmCompletingParent(currentIssue, input)) return currentIssue
 
     try {
       const updatedIssue = await guardEnterpriseSession(mutationRequestRunner.run(
@@ -669,11 +713,49 @@ export function TeamIssuePage() {
           ),
         ))
       }
-      await mutateIssueDetail()
+      await Promise.all([mutateIssueDetail(), mutateHierarchy()])
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
       throw error
     }
+  }
+
+  /**
+   * Saves an indent, outdent, or sibling move planned on the outline.
+   *
+   * @param issueId - Work Item to move.
+   * @param placement - Parent and sibling rank after the move.
+   * @returns Nothing; rejects when the move is not allowed or the hierarchy changed meanwhile.
+   */
+  const handleMoveIssueInHierarchy = async (issueId: string, placement: TeamIssueHierarchyPlacement) => {
+    const currentIssue = issues.find((issue) => issue.id === issueId)
+    if (!accessToken || !hierarchy || !currentIssue || !canMutateTeamIssue(currentIssue)) {
+      throw new TeamIssuesApiError(403, t('taskViews.action.unavailable'), 'TeamTaskActionAccessDenied')
+    }
+    try {
+      await guardEnterpriseSession(mutationRequestRunner.run(
+        `issue:hierarchy:move:${teamId}:${issueId}`,
+        JSON.stringify([hierarchy.graphRevision, placement]),
+        (context) => replaceWorkItemParent(
+          teamId,
+          issueId,
+          accessToken,
+          {
+            parentWorkItemId: placement.parentWorkItemId,
+            expectedGraphRevision: hierarchy.graphRevision,
+            hierarchyRank: placement.hierarchyRank,
+          },
+          context,
+        ),
+      ))
+    } catch (error) {
+      if (isWorkItemRelationGraphConflict(error)) {
+        await mutateHierarchy()
+        throw new Error(t('issues.error.conflict'), { cause: error })
+      }
+      throw error
+    }
+    await Promise.all([mutateHierarchy(), mutateIssues(), mutateIssueDetail()])
   }
 
   const handleDeleteRelation = async (issueId: string, relation: WorkItemRelation) => {
@@ -710,7 +792,7 @@ export function TeamIssuePage() {
           context,
         ),
       ))
-      await mutateIssueDetail()
+      await Promise.all([mutateIssueDetail(), mutateHierarchy()])
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
       throw error
@@ -795,6 +877,7 @@ export function TeamIssuePage() {
       )}
       supportsColumnLayoutMetadata={taskViewState.viewMode === 'table'}
       supportsEmptyGroups={taskViewState.viewMode === 'board'}
+      supportsOutline={taskViewState.viewMode === 'table'}
       t={t}
       teams={taskViewTeams}
       views={taskViewOptions}
@@ -833,6 +916,13 @@ export function TeamIssuePage() {
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       issueErrorMessage={issueErrorMessage}
+      issueOutline={isOutlineShown
+        ? {
+            ...(hierarchy ? { nodes: hierarchy.nodes } : {}),
+            ...(hierarchyError ? { errorMessage: t('issues.outline.unavailable') } : {}),
+            ...(hasWritableWorkItemScope ? { onMove: handleMoveIssueInHierarchy } : {}),
+          }
+        : undefined}
       issues={screenIssues}
       isLoading={isLoading}
       isPlanningLoading={isPlanningLoading}

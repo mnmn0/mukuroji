@@ -18,35 +18,6 @@ const RANK_DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
 const DEFAULT_RANK_SORT_ORDER_DIGITS = 11
 
 /**
- * How a Team treats completing a parent Work Item whose children are not all completed or canceled.
- *
- * - `warn`: the Web asks for confirmation; the server allows the change.
- * - `reject`: the server rejects the change with `409 WorkItemOpenChildren`.
- */
-export type WorkItemParentCompletionPolicy = 'warn' | 'reject'
-
-/** Parent completion policies in the order settings screens present them. */
-export const WORK_ITEM_PARENT_COMPLETION_POLICIES: readonly WorkItemParentCompletionPolicy[] = [
-  'warn',
-  'reject',
-]
-
-/** Parent completion policy used when a Work Item configuration does not choose one. */
-export const DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY: WorkItemParentCompletionPolicy = 'warn'
-
-/**
- * Returns whether a value is a supported parent completion policy.
- *
- * @param value - Candidate value.
- * @returns Whether it names one of {@link WORK_ITEM_PARENT_COMPLETION_POLICIES}.
- */
-export function isWorkItemParentCompletionPolicy(
-  value: unknown,
-): value is WorkItemParentCompletionPolicy {
-  return value === 'warn' || value === 'reject'
-}
-
-/**
  * Returns whether a status category leaves no work open under a parent.
  *
  * @param category - Workflow status category of a child.

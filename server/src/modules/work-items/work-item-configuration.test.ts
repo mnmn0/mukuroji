@@ -1846,8 +1846,13 @@ test('stores the sibling order rank with a parent change and reorders under the 
   store.seedGraph(5, 2)
   const client = store.createClient()
   /** Reads the child endpoint update of one transaction. */
-  const childUpdate = (index: number) =>
-    (store.transactions[index]?.TransactItems as Array<Record<string, Record<string, unknown>>>)[0]?.Update
+  const childUpdate = (index: number): Record<string, unknown> | undefined => {
+    const items = store.transactions[index]?.TransactItems
+    const first: unknown = Array.isArray(items) ? items[0] : undefined
+    if (typeof first !== 'object' || first === null || !('Update' in first)) return undefined
+    const update: unknown = first.Update
+    return typeof update === 'object' && update !== null ? Object.fromEntries(Object.entries(update)) : undefined
+  }
 
   await client.replaceParent('workspace-1', 'core-team', {
     child: { workItemId: 'task', expectedRevision: 3 },

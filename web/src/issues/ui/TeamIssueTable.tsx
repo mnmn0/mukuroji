@@ -1,6 +1,6 @@
 import type { WorkItemConfiguration } from '@mukuroji/contracts'
 import { Fragment, type CSSProperties } from 'react'
-import { MoreHorizontalIcon } from '../../shared/ui/icons'
+import { ChevronIcon, MoreHorizontalIcon } from '../../shared/ui/icons'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam } from '../../projects/api'
@@ -36,6 +36,26 @@ import { IssueCustomFieldSummary, IssuePriorityBadge, IssueStatusBadge } from '.
 import { type TeamIssueActionMenuOpenHandler } from './teamIssueScreenShared'
 import { WORK_ITEM_EFFORT_COLUMN_FIELDS } from '../../work-items/model/workItemEffort'
 import { WorkItemEffortCell } from '../../work-items/ui/WorkItemEffortCells'
+import {
+  readWorkItemHierarchyMoveShortcut,
+  WORK_ITEM_HIERARCHY_MOVE_KEY_SHORTCUTS,
+  type WorkItemHierarchyMoveDirection,
+  type WorkItemOutlineRow,
+} from '../../work-items/model/workItemHierarchy'
+import { WorkItemHierarchyRollupSummary } from '../../work-items/ui/WorkItemHierarchyRollupSummary'
+
+/** Hierarchy outline shown by the Team Work Item table instead of groups. */
+export type IssueTableOutline = {
+  /** Visible rows in outline order. */
+  rows: readonly WorkItemOutlineRow<TeamIssue>[]
+  /** Shows or hides the rows nested under a Work Item. */
+  onToggleCollapsed: (issueId: string) => void
+  /** Moves a Work Item in the hierarchy; absent when the viewer cannot change it. */
+  onMove?: (issue: TeamIssue, direction: WorkItemHierarchyMoveDirection) => void
+}
+
+/** Widest indentation step count, so deep outlines keep room for the title. */
+const maxOutlineIndentLevels = 8
 
 /**
  * Renders the Team Work Items as a grouped, keyboard-navigable table.
@@ -53,6 +73,7 @@ export function IssueTable({
   locale,
   onIssueActionMenuOpen,
   onOpenIssue,
+  outline,
   presentation,
   selectedIssueKeys,
   selectedIssueId,
@@ -70,6 +91,8 @@ export function IssueTable({
   /** Opens the canonical action menu for one Team Issue row. */
   onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
   onOpenIssue?: (issue: TeamIssue) => void
+  /** Hierarchy outline; when present, rows nest by hierarchy and grouping is not applied. */
+  outline?: IssueTableOutline
   presentation?: TaskViewPresentationSettings
   selectedIssueKeys: readonly string[]
   selectedIssueId?: string
@@ -100,7 +123,7 @@ export function IssueTable({
   const titleCellPadding = resolveIssueTableCellPadding(presentation?.density, true)
   const wrapText = presentation?.display.wrapTitles ?? false
   const showAssigneeAvatar = presentation?.display.showAssigneeAvatars ?? false
-  const groups = presentation?.groupBy
+  const groups = presentation?.groupBy && !outline
     ? groupTaskViewItems(
         issues,
         presentation.groupBy,
@@ -127,7 +150,12 @@ export function IssueTable({
       : undefined,
   }))
   // Thousands of rows are rendered in steps; groups keep counting every Work Item.
-  const displayOrderedIssues = groupedRows
+  const outlineRowById = outline
+    ? new Map(outline.rows.map((row) => [row.item.id, row]))
+    : undefined
+  const displayOrderedIssues = outline
+    ? outline.rows.map((row) => row.item)
+    : groupedRows
     ? groupedRows.flatMap(({ group, subgroups }) =>
         subgroups ? subgroups.flatMap((subgroup) => subgroup.items) : group.items
       )
@@ -163,6 +191,9 @@ export function IssueTable({
         (entry) => [entry.definition.id, entry.value],
       ),
     )
+    const outlineRow = outlineRowById?.get(issue.id)
+    const issueTitle = resolveIssueTitle(issue, t)
+    const onMove = outline?.onMove
     return (
       <tr
         className={`border-b border-slate-100 transition last:border-b-0 ${
@@ -194,8 +225,28 @@ export function IssueTable({
           switch (field) {
             case 'title': return (
               <td {...columnCellProps} className={`${titleCellPadding} text-sm font-semibold text-[var(--workbench-text)]`} key={field}>
-                <div className="flex min-w-0 items-start gap-2">
+                <div
+                  className="flex min-w-0 items-start gap-2"
+                  style={outlineRow
+                    ? { paddingInlineStart: `${Math.min(outlineRow.depth, maxOutlineIndentLevels) * 1.25}rem` }
+                    : undefined}
+                >
+                  {outlineRow ? (
+                    outlineRow.hasChildren ? (
+                      <button
+                        aria-expanded={!outlineRow.collapsed}
+                        aria-label={`${t(outlineRow.collapsed ? 'issues.outline.expand' : 'issues.outline.collapse')}: ${issueTitle}`}
+                        className="-my-1.5 grid h-8 w-6 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tone-2563eb/10"
+                        data-testid={`issue-outline-toggle-${issue.id}`}
+                        onClick={() => outline?.onToggleCollapsed(issue.id)}
+                        type="button"
+                      >
+                        <ChevronIcon className={`h-4 w-4 fill-none stroke-current stroke-2 transition-transform ${outlineRow.collapsed ? '-rotate-90' : ''}`} />
+                      </button>
+                    ) : <span aria-hidden="true" className="w-6 flex-none" />
+                  ) : null}
                   <button
+                    aria-keyshortcuts={outlineRow && onMove ? WORK_ITEM_HIERARCHY_MOVE_KEY_SHORTCUTS : undefined}
                     aria-pressed={selectedForAction || selectedIssueId === issue.id}
                     className={`min-w-0 flex-1 rounded-sm text-left font-semibold transition hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tone-2563eb/10 disabled:cursor-default disabled:text-[var(--workbench-text)] ${
                       wrapText ? 'whitespace-normal break-words' : 'truncate'
@@ -203,8 +254,30 @@ export function IssueTable({
                     data-testid={`issue-row-${issue.id}`}
                     disabled={isAiOperationPending || !onOpenIssue}
                     onClick={() => onOpenIssue?.(issue)}
+                    onKeyDown={outlineRow && onMove ? (event) => {
+                      const direction = readWorkItemHierarchyMoveShortcut(event)
+                      if (!direction || isAiOperationPending) return
+                      event.preventDefault()
+                      event.stopPropagation()
+                      onMove(issue, direction)
+                    } : undefined}
+                    title={outlineRow && onMove ? t('issues.outline.moveHint') : undefined}
                     type="button"
                   >
+                    {outlineRow ? (
+                      <span className="sr-only">
+                        {`${t('issues.outline.level').replace('{level}', String(outlineRow.depth + 1))} `}
+                      </span>
+                    ) : null}
+                    {outlineRow?.node ? (
+                      <span
+                        className="mr-2 font-mono text-xs font-semibold tabular-nums text-[var(--workbench-muted)]"
+                        data-testid={`issue-row-wbs-${issue.id}`}
+                      >
+                        <span className="sr-only">{`${t('issues.outline.wbs')} `}</span>
+                        {outlineRow.node.wbsNumber}
+                      </span>
+                    ) : null}
                     {issue.key ? (
                       <span
                         className="mr-2 font-mono text-xs font-semibold text-[var(--workbench-muted)]"
@@ -213,11 +286,11 @@ export function IssueTable({
                         {issue.key}
                       </span>
                     ) : null}
-                    {resolveIssueTitle(issue, t)}
+                    {issueTitle}
                   </button>
                   {onIssueActionMenuOpen ? (
                     <button
-                      aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
+                      aria-label={`${t('tasks.action.more')}: ${issueTitle}`}
                       className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
                       data-testid={`team-issue-row-actions-${issue.id}`}
                       disabled={isAiOperationPending}
@@ -237,6 +310,22 @@ export function IssueTable({
                     </button>
                   ) : null}
                 </div>
+                {outlineRow?.node?.rollup ? (
+                  <div
+                    className="pt-1"
+                    style={{ paddingInlineStart: `${Math.min(outlineRow.depth, maxOutlineIndentLevels) * 1.25 + 2}rem` }}
+                  >
+                    <WorkItemHierarchyRollupSummary
+                      labels={{
+                        summary: t('issues.outline.rollup.summary'),
+                        closed: t('issues.outline.rollup.closed'),
+                        estimate: t('issues.outline.rollup.estimate'),
+                        span: t('issues.outline.rollup.span'),
+                      }}
+                      rollup={outlineRow.node.rollup}
+                    />
+                  </div>
+                ) : null}
                 <WorkItemDependencyChips
                   className="pt-2"
                   summary={resolveWorkItemDependencySummary(

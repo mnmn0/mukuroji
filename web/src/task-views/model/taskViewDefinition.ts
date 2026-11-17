@@ -83,6 +83,7 @@ const taskViewDisplayOptionIds: readonly (keyof TaskViewDisplayOptions)[] = [
   'showEmptyGroups',
   'wrapText',
   'showAssigneeAvatars',
+  'showOutline',
 ]
 const taskViewFilterIds: readonly string[] = [
   'keyword',
