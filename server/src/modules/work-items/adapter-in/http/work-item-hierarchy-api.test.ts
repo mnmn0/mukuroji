@@ -9,8 +9,11 @@ const {
   createTestWorkItemConfiguration,
   getTestAppDependencies,
   resetTestApp,
+  runWithTestAppDependencies,
   setTestAppDependencies,
 } = createApiTestHarness()
+import { readWorkItemHierarchyLinks } from '../../../../api/shared/work-item-hierarchy'
+import { ProjectDataError } from '../../../directory'
 import {
   WORK_ITEM_HIERARCHY_MAX_ITEMS,
   createDefaultDueDateWorkItemSchedule,
@@ -109,6 +112,8 @@ test('returns the Team hierarchy with WBS numbers and roll-ups of readable Work 
             parentId: 'phase-1',
             schedule: { ...createDefaultDueDateWorkItemSchedule('2026-12-01'), plannedEffortMinutes: 60 },
           }),
+          // Its parent is archived, so it is not in the tree.
+          hierarchyEntry(base, 'stray', 'z', { parentId: 'archived-phase' }),
         ]
       },
     }),
@@ -134,7 +139,13 @@ test('returns the Team hierarchy with WBS numbers and roll-ups of readable Work 
     ['task-1', '1.1', 1],
     ['task-2', '1.3', 1],
     ['phase-2', '2', 0],
+    ['stray', '3', 0],
   ])
+  expect(body.nodes.find((node) => node.workItemId === 'stray')).toMatchObject({
+    parentWorkItemId: null,
+    parentHidden: true,
+  })
+  expect(body.nodes.find((node) => node.workItemId === 'phase-2')?.parentHidden).toBeUndefined()
   expect(body.nodes[0]).toMatchObject({
     parentWorkItemId: null,
     childWorkItemIds: ['task-1', 'task-2'],
@@ -200,14 +211,19 @@ test('passes a sibling order rank to the parent replacement and rejects an inval
 })
 
 /**
- * Configures a Team whose Work Item has one open child under a completion policy.
+ * Configures a Team whose Work Item has one child under a completion policy.
  *
  * @param policy - Team parent completion policy.
+ * @param teamIssues - Work Item persistence to use; the default fake when omitted.
  * @returns Child relation reads made by the update.
  */
-function configureParentWithOpenChild(policy: WorkItemParentCompletionPolicy) {
+function configureParentWithOpenChild(
+  policy: WorkItemParentCompletionPolicy,
+  teamIssues?: ReturnType<typeof createTeamIssuesFake>,
+) {
   const childReads: string[] = []
   setTestAppDependencies({
+    ...(teamIssues ? { teamIssues } : {}),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async getTeamConfiguration(_workspaceId, teamId) {
         return {
@@ -223,7 +239,7 @@ function configureParentWithOpenChild(policy: WorkItemParentCompletionPolicy) {
           relations: options?.types?.includes('child')
             ? [{ sourceWorkItemId: workItemId, targetWorkItemId: 'open-child', type: 'child' }]
             : [],
-          graphRevision: 1,
+          graphRevision: 6,
         }
       },
     }),
@@ -256,4 +272,82 @@ test('allows completing a parent with an open child when the Team only warns', a
 
   expect(response.status).toBe(200)
   expect(childReads).toEqual([])
+})
+
+test('fences the relation graph and the closed children into completing a parent the Team guards', async () => {
+  configureFakeProjectClients(true)
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const fenceChecks: unknown[] = []
+  configureParentWithOpenChild('reject', createTeamIssuesFake({
+    async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+      if (issueId !== 'open-child') return teamIssues.getTeamIssueDetail(directoryId, teamId, issueId, options)
+      const detail = await teamIssues.getTeamIssueDetail(directoryId, teamId, 'onboarding-friction', options)
+      return { ...detail, issue: { ...detail.issue, id: 'open-child', statusCategory: 'completed', revision: 4 } }
+    },
+    async updateTeamIssue(directoryId, teamId, issueId, input, ...rest) {
+      fenceChecks.push(...(input.configurationConditionChecks ?? []))
+      return teamIssues.updateTeamIssue(directoryId, teamId, issueId, input, ...rest)
+    },
+  }))
+
+  const response = await request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    body: { workflowStatusId: 'done', expectedRevision: 1 },
+  })
+
+  expect(response.status).toBe(200)
+  expect(fenceChecks).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      ConditionExpression: expect.stringContaining('#revision = :expectedRevision'),
+      ExpressionAttributeValues: expect.objectContaining({ ':expectedRevision': 6 }),
+    }),
+  })
+  expect(fenceChecks).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      Key: expect.objectContaining({ issueId: 'open-child' }),
+      ExpressionAttributeValues: { ':expectedRevision': 4 },
+    }),
+  })
+})
+
+test('reads the readable parent and children of one Work Item without the Team tree', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const issues: Record<string, TeamIssueResponseItem> = {
+    parent: { ...base, id: 'parent' },
+    'child-b': { ...base, id: 'child-b' },
+    'child-a': { ...base, id: 'child-a' },
+    archived: { ...base, id: 'archived', archivedAt: '2026-11-01T00:00:00.000Z' },
+    secret: { ...base, id: 'secret', assignedProjectId: 'secret-project' },
+  }
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail(_directoryId, _teamId, issueId) {
+        const issue = issues[issueId]
+        if (!issue) throw new ProjectDataError(404, 'TeamIssueNotFound', 'Missing.')
+        return { issue, activity: [] }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          relations: ['child-b', 'archived', 'missing', 'secret', 'child-a'].map((targetWorkItemId) => ({
+            sourceWorkItemId: workItemId,
+            targetWorkItemId,
+            type: 'child' as const,
+          })),
+          graphRevision: 3,
+        }
+      },
+    }),
+  })
+
+  const links = await runWithTestAppDependencies(() => readWorkItemHierarchyLinks(
+    'user#demo@example.com',
+    'core-team',
+    { ...base, id: 'middle', relationIds: ['parent:parent'] },
+    (issue) => issue.assignedProjectId !== 'secret-project',
+  ))
+
+  expect(links).toEqual({ parentWorkItemId: 'parent', childWorkItemIds: ['child-a', 'child-b'] })
 })

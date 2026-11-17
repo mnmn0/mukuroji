@@ -579,7 +579,8 @@ export function TeamIssuePage() {
       searchParams,
     )
     navigate(navigationPath)
-    await mutateIssues()
+    // The outline places the new Work Item and the parent roll-ups count it.
+    await Promise.all([mutateIssues(), mutateHierarchy()])
     return { issue, navigationPath }
   }
 
@@ -653,6 +654,8 @@ export function TeamIssuePage() {
       ))
       await mutateIssues()
       await mutateIssueDetail()
+      // Status, estimate, and dates feed the parent roll-ups shown in the outline.
+      await mutateHierarchy()
       return updatedIssue
     } catch (error) {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {

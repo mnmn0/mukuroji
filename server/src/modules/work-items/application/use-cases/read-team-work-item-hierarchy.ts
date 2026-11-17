@@ -43,8 +43,12 @@ export type CreateTeamWorkItemHierarchyInput<Issue extends CanonicalWorkItem = C
 export function createTeamWorkItemHierarchyResponse<Issue extends CanonicalWorkItem>(
   input: CreateTeamWorkItemHierarchyInput<Issue>,
 ): TeamWorkItemHierarchyResponse {
+  // A stored parent that is archived, missing, or part of a broken cycle leaves the Work Item at
+  // the top of the tree; it is still marked so that a move cannot silently drop that parent.
+  const storedParentIds = new Map<string, string>()
   const placements = buildWorkItemHierarchy(input.entries.map((entry) => {
     const parentWorkItemId = readWorkItemParentId(entry.issue.relationIds)
+    if (parentWorkItemId !== undefined) storedParentIds.set(entry.issue.id, parentWorkItemId)
     return {
       id: entry.issue.id,
       hierarchyRank: entry.hierarchyRank,
@@ -64,11 +68,14 @@ export function createTeamWorkItemHierarchyResponse<Issue extends CanonicalWorkI
     const depth = readVisibleDepth(placement, placementById, visibleDepth, sources)
     visibleDepth.set(placement.workItemId, depth)
     const parentReadable = placement.parentWorkItemId !== null && sources.has(placement.parentWorkItemId)
+    const parentHidden = placement.parentWorkItemId === null
+      ? storedParentIds.has(placement.workItemId)
+      : !parentReadable
     const rollup = rollups.get(placement.workItemId)
     nodes.push({
       workItemId: placement.workItemId,
       parentWorkItemId: parentReadable ? placement.parentWorkItemId : null,
-      ...(placement.parentWorkItemId !== null && !parentReadable ? { parentHidden: true } : {}),
+      ...(parentHidden ? { parentHidden: true } : {}),
       depth,
       wbsNumber: placement.wbsNumber,
       hierarchyRank: placement.hierarchyRank,

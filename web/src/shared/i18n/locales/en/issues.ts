@@ -56,7 +56,7 @@ export const issuesMessages = {
   'issues.outline.move.no-previous-sibling': 'There is no Work Item above at the same level, so this move is not possible.',
   'issues.outline.move.no-next-sibling': 'There is no Work Item below at the same level, so it cannot move down.',
   'issues.outline.move.top-level': 'A top-level Work Item cannot move one level up.',
-  'issues.outline.move.parent-hidden': 'Its parent is not visible to you, so its level cannot change.',
+  'issues.outline.move.parent-hidden': 'Its parent is archived or not visible to you, so its place in the hierarchy cannot change.',
   'issues.outline.move.rank-exhausted': 'No more Work Items fit at this position. Move it elsewhere first, then reorder it.',
   'issues.outline.move.not-in-hierarchy': 'This Work Item is not in the hierarchy. Reload and try again.',
   'issues.outline.unavailable': 'The hierarchy could not be loaded, so the list is shown without it.',

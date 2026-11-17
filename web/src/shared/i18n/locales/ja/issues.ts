@@ -56,7 +56,7 @@ export const issuesMessages = {
   'issues.outline.move.no-previous-sibling': '上に同じ階層の Work Item がないため、この操作はできません。',
   'issues.outline.move.no-next-sibling': '下に同じ階層の Work Item がないため、下へ移動できません。',
   'issues.outline.move.top-level': '最上位の Work Item は 1 つ上の階層に移せません。',
-  'issues.outline.move.parent-hidden': '閲覧できない親の下にあるため、階層を変えられません。',
+  'issues.outline.move.parent-hidden': '親を閲覧できないか、親がアーカイブされているため、階層を変えられません。',
   'issues.outline.move.rank-exhausted': 'この位置にはこれ以上並べられません。別の位置に移してから並べ直してください。',
   'issues.outline.move.not-in-hierarchy': 'この Work Item は階層に含まれていません。再読み込みしてください。',
   'issues.outline.unavailable': '階層を読み込めませんでした。一覧は階層なしで表示しています。',

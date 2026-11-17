@@ -172,7 +172,7 @@ import {
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
-import { readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
+import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
@@ -1298,11 +1298,21 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         evaluateProjectScopes: true,
       })
       const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
-      const hierarchy = await readTeamWorkItemHierarchy(
-        principal.directoryId,
-        context.team.id,
-        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
-      )
+      const isReadable = (issue: TeamIssueResponseItem) =>
+        filterAccessibleTeamIssues([issue], principal, context).length > 0
+      let hierarchy
+      try {
+        hierarchy = await readTeamWorkItemHierarchy(principal.directoryId, context.team.id, isReadable)
+      } catch (error) {
+        if (!(error instanceof ProjectDataError && error.code === 'WorkItemListLimitExceeded')) throw error
+        // A Team too large for the tree still answers for one Work Item, without a WBS number.
+        return {
+          schemaVersion: 1,
+          teamId: detail.issue.teamId,
+          workItemId: detail.issue.id,
+          ...await readWorkItemHierarchyLinks(principal.directoryId, context.team.id, detail.issue, isReadable),
+        }
+      }
       const node = hierarchy.nodes.find((candidate) => candidate.workItemId === detail.issue.id)
       return {
         schemaVersion: 1,

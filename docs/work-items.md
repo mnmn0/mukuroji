@@ -287,7 +287,7 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 `GET /api/teams/{teamId}/issues/hierarchy` は Team の Work Item を親子の木として返す（`TeamWorkItemHierarchyResponse`）。各 node は `parentWorkItemId`、木の中の `depth`、`1.2.3` 形式の `wbsNumber`、兄弟の順序 `hierarchyRank`、子の ID（兄弟順）を持ち、子を持つ node は `rollup` を持つ。応答の `graphRevision` は、並び替えや indent / outdent で `PUT .../parent` に渡す `expectedGraphRevision` に使う。
 
 - 親は各 Work Item の `relationIds` にある `parent:<id>` から読む。兄弟は `hierarchyRank` の順に並ぶ（[兄弟の順序](work-item-configuration.md#兄弟の順序hierarchyrank)）。
-- 木と WBS 番号は archive されていない Team の全 Work Item から作るので、誰が読んでも同じ番号になる。応答には読める Work Item だけを入れる。親を読めない Work Item は `parentWorkItemId: null` と `parentHidden: true` を持ち（Web はその階層を変えさせない）、`depth` は読める祖先だけを数える。親が見つからない Work Item は最上位に置き、保存済みの循環は切って最上位に置く。
+- 木と WBS 番号は archive されていない Team の全 Work Item から作るので、誰が読んでも同じ番号になる。応答には読める Work Item だけを入れる。親を読めない Work Item は `parentWorkItemId: null` と `parentHidden: true` を持ち（Web はその階層を変えさせない）、`depth` は読める祖先だけを数える。親が archive 済みか見つからない Work Item と、保存済みの循環を切った Work Item は最上位に置き、同じく `parentHidden: true` を付ける。並べ替えで保存済みの親を黙って外さないためである。
 - `rollup` は読める子孫だけ（読める親を通って届くもの）を数える：子の数、子孫の数、status category ごとの数、未完了の子孫の数、見積（`plannedEffortMinutes`）の合計と見積を持つ子孫の数、残工数の合計、子孫の日付の最小と最大（`startDate` / `endDate`）。親自身の値は含めない。期限だけの Work Item は期限を両端として数える。
 - 1 Team 1,000 件（`WORK_ITEM_HIERARCHY_MAX_ITEMS`）を超えると `413 WorkItemListLimitExceeded` を返す。
 

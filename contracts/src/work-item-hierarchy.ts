@@ -453,8 +453,9 @@ export type TeamWorkItemHierarchyNode = {
    */
   parentWorkItemId: string | null
   /**
-   * `true` when the Work Item has a parent the reader may not see. Such a Work Item cannot be
-   * moved in the hierarchy by this reader.
+   * `true` when the Work Item has a stored parent that is not in the reader's tree: one the reader
+   * may not see, or one that is archived or missing. Such a Work Item cannot be moved in the
+   * hierarchy by this reader, so a move never drops that parent silently.
    */
   parentHidden?: true
   /** Outline depth among the Work Items the reader sees; top-level is 0. */

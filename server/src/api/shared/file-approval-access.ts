@@ -12,6 +12,8 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import {
   applyWorkItemStatusTransitionToActualDates,
+  createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemRevisionConditionCheck,
   readAssignedProjectId,
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
@@ -45,7 +47,7 @@ import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readJson } from './http'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
-import { loadAuthorizedTeamIssue } from './work-item-access'
+import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from './work-item-access'
 import {
   createWorkItemTypeRelationConfigurationTransactionItems,
   getWorkItemConfigurationTableName,
@@ -442,19 +444,6 @@ export async function prepareConfiguredUpdateWorkItem(
     targetWorkItemType.id,
     { allowArchived: true },
   )
-  if (
-    current.statusCategory !== 'completed' &&
-    nextWorkflowStatus.statusCategory === 'completed' &&
-    (resolved.configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY) ===
-      'reject'
-  ) {
-    await assertWorkItemChildrenClosed(
-      directoryId,
-      teamId,
-      current.id,
-      options.relationDependencies ?? workItemDependencies,
-    )
-  }
   if (!typeChanged || currentWorkflow.id === targetWorkflow.id) {
     assertWorkflowTransitionAllowed(
       resolved.configuration,
@@ -523,6 +512,21 @@ export async function prepareConfiguredUpdateWorkItem(
         resolved.configuration,
       )
     : []
+  const childCompletionConditionChecks = (
+    current.statusCategory !== 'completed' &&
+    nextWorkflowStatus.statusCategory === 'completed' &&
+    (resolved.configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY) ===
+      'reject'
+  )
+    ? await assertWorkItemChildrenClosed(
+        directoryId,
+        teamId,
+        current.id,
+        options.relationDependencies ?? workItemDependencies,
+        // A Type change already fences the graph revision it read before this one.
+        relationTransactionItems.length === 0,
+      )
+    : []
   return {
     ...inputWithoutTypeChangeResolution,
     workItemTypeId: targetWorkItemType.id,
@@ -535,7 +539,7 @@ export async function prepareConfiguredUpdateWorkItem(
       directoryId,
       teamId,
       resolved,
-    ).concat(relationTransactionItems, approvalTransitionConditionChecks),
+    ).concat(relationTransactionItems, approvalTransitionConditionChecks, childCompletionConditionChecks),
   }
 }
 
@@ -543,15 +547,26 @@ export async function prepareConfiguredUpdateWorkItem(
 const CHILD_COMPLETION_READ_CONCURRENCY = 16
 
 /**
- * Rejects completing a parent while one of its non-archived children is still open.
+ * Most children whose revisions fence a parent's completion.
  *
- * The check reads the children when the request is prepared; a child reopened while the parent's
- * update commits is not detected.
+ * DynamoDB allows 100 items per transaction and the Work Item update needs some of them.
+ */
+const CHILD_COMPLETION_FENCE_LIMIT = 64
+
+/**
+ * Rejects completing a parent while one of its non-archived children is still open, and fences
+ * what it read into the parent's update transaction.
+ *
+ * The relation graph revision fences a child attached meanwhile, and each child's revision fences
+ * a child reopened meanwhile. Beyond {@link CHILD_COMPLETION_FENCE_LIMIT} children only the graph
+ * is fenced, so a child reopened while the parent's update commits is not detected.
  *
  * @param directoryId - Workspace directory ID.
  * @param teamId - Team that owns the parent.
  * @param parentWorkItemId - Parent about to be completed.
  * @param dependencies - Relation and Work Item persistence.
+ * @param fenceGraph - Whether to fence the graph revision; false when the update already does.
+ * @returns Condition checks to commit with the parent's update.
  * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is neither completed nor canceled.
  */
 async function assertWorkItemChildrenClosed(
@@ -559,7 +574,8 @@ async function assertWorkItemChildrenClosed(
   teamId: string,
   parentWorkItemId: string,
   dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
-) {
+  fenceGraph: boolean,
+): Promise<WorkItemConfigurationTransactionItems> {
   const children = await dependencies.workItemConfigurations.listRelations(
     directoryId,
     teamId,
@@ -567,6 +583,7 @@ async function assertWorkItemChildrenClosed(
     { types: ['child'] },
   )
   const childIds = children.relations.map((relation) => relation.targetWorkItemId)
+  const childRevisions: { workItemId: string, revision: number }[] = []
   let openChildCount = 0
   for (let index = 0; index < childIds.length; index += CHILD_COMPLETION_READ_CONCURRENCY) {
     const details = await Promise.all(childIds
@@ -577,9 +594,12 @@ async function assertWorkItemChildrenClosed(
         childId,
         { consistentIssueRead: true, includeEvents: false },
       )))
-    openChildCount += details.filter(({ issue }) =>
-      issue.archivedAt === undefined && !isWorkItemHierarchyClosedCategory(issue.statusCategory)
-    ).length
+    for (const { issue } of details) {
+      childRevisions.push({ workItemId: issue.id, revision: issue.revision })
+      if (issue.archivedAt === undefined && !isWorkItemHierarchyClosedCategory(issue.statusCategory)) {
+        openChildCount += 1
+      }
+    }
   }
   if (openChildCount > 0) {
     throw new WorkItemConfigurationError(
@@ -588,6 +608,25 @@ async function assertWorkItemChildrenClosed(
       `${openChildCount} child Work Item(s) are still open. Complete or cancel them before completing the parent.`,
     )
   }
+  return [
+    ...(fenceGraph
+      ? [createWorkItemRelationGraphRevisionConditionCheck(
+          getWorkItemConfigurationTableName(),
+          directoryId,
+          teamId,
+          children.graphRevision,
+        )]
+      : []),
+    ...(childRevisions.length <= CHILD_COMPLETION_FENCE_LIMIT
+      ? childRevisions.map((child) => createWorkItemRevisionConditionCheck(
+          getTeamIssuesTableName(),
+          directoryId,
+          teamId,
+          child.workItemId,
+          child.revision,
+        ))
+      : []),
+  ]
 }
 
 /**

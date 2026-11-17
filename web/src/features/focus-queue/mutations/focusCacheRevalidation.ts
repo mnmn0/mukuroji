@@ -22,6 +22,8 @@ export type FocusCacheRevalidationScope = {
 const teamListCacheScopes: ReadonlySet<string> = new Set([
   'project-relation-candidates',
   'team-issues',
+  // Hierarchy roll-ups total the status, estimate, and dates of the Team's Work Items.
+  'team-work-item-hierarchy',
 ])
 
 const workItemDetailCacheScopes: ReadonlySet<string> = new Set([
