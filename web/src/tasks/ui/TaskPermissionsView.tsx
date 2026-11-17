@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type {
   ProjectMember,
@@ -13,6 +14,8 @@ type TaskPermissionsTranslator = (key: MessageKey) => string
 export type TaskPermissionsViewProps = {
   /** Whether the current user can manage project member roles. */
   canManageProjectMembers: boolean
+  /** Project charter section rendered above member permissions. */
+  charterPanel?: ReactNode
   /** Whether project members are loading. */
   isProjectMembersLoading: boolean
   /** Whether project user candidates are loading. */
@@ -59,6 +62,7 @@ export type TaskPermissionsViewProps = {
  */
 export function TaskPermissionsView({
   canManageProjectMembers,
+  charterPanel,
   isProjectMembersLoading,
   isProjectUsersLoading,
   isSystemAdmin,
@@ -77,7 +81,8 @@ export function TaskPermissionsView({
   onUpdateProjectMember,
 }: TaskPermissionsViewProps) {
   return (
-    <div className="px-[clamp(18px,2.5vw,30px)] py-4">
+    <div className="grid gap-5 px-[clamp(18px,2.5vw,30px)] py-4">
+      {charterPanel}
       <ProjectPermissionsPanel
         canManageMembers={canManageProjectMembers}
         errorMessage={projectMembersErrorMessage}

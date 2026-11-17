@@ -33,6 +33,66 @@ export const WORK_ITEM_SCHEDULE_MAX_HOLIDAYS = 512 as const
 /** Earliest four-digit Gregorian year accepted by every Work Item schedule boundary. */
 export const WORK_ITEM_SCHEDULE_MIN_YEAR = 1_000 as const
 
+/** Maximum Work Item title length in Unicode code points, matching the coding-agent MCP limit. */
+export const WORK_ITEM_TITLE_MAX_LENGTH = 256 as const
+
+/**
+ * Shortens text from another source, such as a Triage entry or a request form answer, to a Work Item title.
+ *
+ * @param title - Trimmed source title.
+ * @returns The title itself, or its first code points followed by an ellipsis when it is too long.
+ */
+export function fitWorkItemTitle(title: string): string {
+  const codePoints = [...title]
+  if (codePoints.length <= WORK_ITEM_TITLE_MAX_LENGTH) return title
+  return `${codePoints.slice(0, WORK_ITEM_TITLE_MAX_LENGTH - 1).join('').trimEnd()}…`
+}
+
+/** Highest sequence number a Work Item key can carry within one Team prefix. */
+export const WORK_ITEM_KEY_MAX_NUMBER = 999_999_999 as const
+
+/**
+ * Short, immutable Work Item reference such as `ABC-123`: a Team key prefix of two to ten
+ * uppercase letters or digits that starts with a letter, a hyphen, and a sequence number
+ * without leading zeros.
+ */
+const WORK_ITEM_KEY_PATTERN = /^([A-Z][A-Z0-9]{1,9})-([1-9][0-9]{0,8})$/u
+
+/** The two parts of a parsed Work Item key. */
+export type ParsedWorkItemKey = {
+  /** Team key prefix, such as `ABC`. */
+  prefix: string
+  /** Positive sequence number allocated by the Team counter. */
+  number: number
+  /** Canonical uppercase key text, such as `ABC-123`. */
+  key: string
+}
+
+/**
+ * Parses a Work Item key, accepting surrounding whitespace and lowercase letters.
+ *
+ * @param value - Untrusted key text, for example from a URL or a search box.
+ * @returns The canonical key parts, or `undefined` when the text is not a Work Item key.
+ */
+export function parseWorkItemKey(value: unknown): ParsedWorkItemKey | undefined {
+  if (typeof value !== 'string') return undefined
+  const match = WORK_ITEM_KEY_PATTERN.exec(value.trim().toUpperCase())
+  if (!match?.[1] || !match[2]) return undefined
+  const number = Number(match[2])
+  if (!Number.isSafeInteger(number) || number > WORK_ITEM_KEY_MAX_NUMBER) return undefined
+  return { prefix: match[1], number, key: `${match[1]}-${number}` }
+}
+
+/**
+ * Reports whether a value is a Work Item key in its canonical uppercase form.
+ *
+ * @param value - Candidate stored or received key.
+ * @returns Whether the value is already canonical, so it can be stored or compared as is.
+ */
+export function isCanonicalWorkItemKey(value: unknown): value is string {
+  return typeof value === 'string' && parseWorkItemKey(value)?.key === value
+}
+
 /** Weekday names used by a Work Item schedule calendar policy. */
 export type WorkItemScheduleWeekday =
   | 'monday'
@@ -387,6 +447,11 @@ export type CanonicalWorkItem = {
    */
   id: string
   /**
+   * Short immutable reference such as `ABC-123`, unique in the Workspace. Work Items created
+   * before keys existed omit it until they are backfilled.
+   */
+  key?: string
+  /**
    * Work Item を所有する Team ID です。
    */
   teamId: string
@@ -690,4 +755,37 @@ export type WorkItemRelationsResponse = {
   relations: WorkItemRelation[]
   /** 読み込み時点の Team relation graph revision です。 */
   graphRevision: number
+}
+
+/**
+ * Response of `GET /api/work-items/keys/{key}`, which resolves a Work Item key to the Work Item
+ * it names so a client can open it.
+ */
+export type WorkItemKeyLookupResponse = {
+  /** Canonical uppercase key that was resolved. */
+  key: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item ID within the Team. */
+  workItemId: string
+}
+
+/**
+ * Response of `GET /api/v1/work-items/{workItemId}/key`, which tells a Public API client the
+ * Work Item key without adding a property to the stable `WorkItem` schema.
+ */
+export type PublicWorkItemKey = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item ID within the Team. */
+  workItemId: string
+  /**
+   * When the Work Item was created. A Work Item ID created again after deletion has a new value,
+   * so a client can tell which Work Item the key belongs to.
+   */
+  createdAt: string
+  /** Canonical key such as `ABC-123`, absent on Work Items created before keys existed. */
+  key?: string
 }

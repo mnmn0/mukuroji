@@ -31,6 +31,7 @@ import {
 import {
   createWorkItemConfigurationScopeKey,
   isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
   validateWorkItemConfiguration,
 } from '../work-items'
 import {
@@ -92,6 +93,7 @@ const tableScanOrder: readonly CrossDomainIntegrityTableTarget[] = [
 const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'email-alias',
   'planning-meta',
+  'project-code',
   'project-member',
   'project-quick-access',
   'webhook-team-grant',
@@ -843,8 +845,9 @@ async function normalizeRow(
   })
 }
 
-/** Strictly normalizes one canonical Work Item row. */
+/** Strictly normalizes one canonical Work Item row or a Work Item key registry row. */
 function normalizeWorkItem(row: Record<string, unknown>): CrossDomainIntegrityItem[] {
+  if (isWorkItemKeyRegistryRecord(row)) return []
   if (!isCanonicalWorkItemRecord(row)) {
     throw new CrossDomainIntegrityAwsBridgeFailure('NORMALIZATION_FAILED')
   }
@@ -1160,6 +1163,18 @@ function validateProjectDirectoryAuxiliaryRow(
       !isProjectQuickAccessItems(items) ||
       directoryId !== `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
       entryKey !== 'PREFERENCE'
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'project-code') {
+    const workspaceId = requireText(row.workspaceId)
+    requireText(row.teamId)
+    requireText(row.projectId)
+    const code = requireText(row.code)
+    requireCanonicalTimestamp(row.createdAt)
+    if (
+      directoryId !== `PROJECT_CODE#${encodeURIComponent(workspaceId)}` ||
+      entryKey !== `CODE#${code}`
     ) normalizationFailure()
     return
   }

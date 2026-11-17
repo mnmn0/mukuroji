@@ -107,6 +107,8 @@ export type TaskWorkspaceProps = {
   assigneeOptions: ProjectMember[]
   /** Whether the current user may manage project members. */
   canManageProjectMembers: boolean
+  /** Project charter section rendered above member permissions on the settings tab. */
+  projectCharterPanel?: ReactNode
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
   canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Determines whether the current user may manage one canonical dependency endpoint. */
@@ -297,6 +299,7 @@ export function TaskWorkspace({
   assigneeFilter,
   assigneeOptions,
   canManageProjectMembers,
+  projectCharterPanel,
   canManageScheduleDependencyEndpoint,
   canMutateTask,
   configuration,
@@ -449,6 +452,7 @@ export function TaskWorkspace({
     return (
       <TaskPermissionsView
         canManageProjectMembers={canManageProjectMembers}
+        charterPanel={projectCharterPanel}
         isProjectMembersLoading={isProjectMembersLoading}
         isProjectUsersLoading={isProjectUsersLoading}
         isSystemAdmin={isSystemAdmin}

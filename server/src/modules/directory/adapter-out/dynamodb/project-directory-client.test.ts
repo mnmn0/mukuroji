@@ -467,7 +467,7 @@ test('DynamoDB directory client validates and ignores workspace bootstrap rows f
         id: 'core-team',
         name: 'Core Team',
         expanded: true,
-        projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+        projects: [{ id: 'refero', name: 'Refero', tone: 'blue', lifecycleState: 'active' }],
       },
     ],
   })
@@ -725,6 +725,7 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
       id: 'new-project-2',
       name: 'New Project',
       tone: 'green',
+      lifecycleState: 'active',
     },
   })
   expect(sentInputs[1]).toMatchObject({
@@ -917,7 +918,7 @@ test('DynamoDB directory client strongly replays a deterministic Project and kee
 
   await expect(create()).rejects.toMatchObject({ status: 502, code: 'TimeoutError' })
   await expect(create()).resolves.toEqual({
-    project: { id: projectId, name: '障害対応', tone: 'purple' },
+    project: { id: projectId, name: '障害対応', tone: 'purple', lifecycleState: 'active' },
   })
   const queryInputs = sentInputs.filter((input) => 'KeyConditionExpression' in input)
   expect(queryInputs).toHaveLength(2)
@@ -1153,6 +1154,7 @@ test('DynamoDB directory client reads every page from the user partition', async
             id: 'refero',
             name: 'Refero',
             tone: 'blue',
+            lifecycleState: 'active',
           },
         ],
       },
@@ -1274,6 +1276,7 @@ test('DynamoDB directory client omits archived teams and projects', async () => 
             id: 'refero',
             name: 'Refero',
             tone: 'blue',
+            lifecycleState: 'active',
           },
         ],
       },

@@ -1,3 +1,8 @@
+import {
+  isProjectLifecycleState,
+  type ProjectCharterSummary,
+  type ProjectLifecycleState,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { SidebarProjectTone } from '../../shared/ui/sidebar'
 import type { Locale } from '../../shared/i18n/i18n'
@@ -20,6 +25,10 @@ export type ProjectDirectoryProject = {
    * サイドバー上のプロジェクトアイコン色です。
    */
   tone?: SidebarProjectTone
+  /** Current lifecycle state. Responses from older servers omit it, which means `active`. */
+  lifecycleState?: ProjectLifecycleState
+  /** Charter fields shown in the Project directory, when any is set. */
+  charter?: ProjectCharterSummary
 }
 
 /**
@@ -367,8 +376,32 @@ function isProjectDirectoryProject(value: unknown): value is ProjectDirectoryPro
     typeof value.id === 'string' &&
     'name' in value &&
     typeof value.name === 'string' &&
-    (!('tone' in value) || isProjectTone(value.tone))
+    (!('tone' in value) || isProjectTone(value.tone)) &&
+    (!('lifecycleState' in value) || isProjectLifecycleState(value.lifecycleState)) &&
+    (!('charter' in value) || isProjectCharterSummary(value.charter))
   )
+}
+
+/**
+ * API から返った値が Project directory の charter summary として扱えるかどうかを判定します。
+ *
+ * @param value - Untrusted response value.
+ * @returns Whether the value is a charter summary.
+ */
+function isProjectCharterSummary(value: unknown): value is ProjectCharterSummary {
+  if (typeof value !== 'object' || value === null) return false
+  const optionalText = (key: string) => !(key in value) ||
+    typeof Reflect.get(value, key) === 'string'
+  const owner: unknown = Reflect.get(value, 'owner')
+  return optionalText('code') &&
+    optionalText('plannedStartDate') &&
+    optionalText('plannedEndDate') &&
+    (owner === undefined || (
+      typeof owner === 'object' &&
+      owner !== null &&
+      typeof Reflect.get(owner, 'userId') === 'string' &&
+      typeof Reflect.get(owner, 'displayName') === 'string'
+    ))
 }
 
 /**
