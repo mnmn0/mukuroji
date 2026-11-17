@@ -896,12 +896,18 @@ test('does not repeat an authenticator reset that stopped after it started chang
 test('keeps an app registered after a reset whose completion mark failed', async () => {
   configureFakeProjectClients(true)
   const resets: string[] = []
+  let appRegistered = true
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: appRegistered,
+        softwareTokenMfaConfigured: appRegistered,
+      }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
+      appRegistered = false
     },
   })
   trackCredentialActionProgress()
@@ -912,33 +918,45 @@ test('keeps an app registered after a reset whose completion mark failed', async
   })
 
   expect((await sendMfaResetWithKey()).status).toBe(200)
+  expect(appRegistered).toBe(false)
   // The member registers a new app, and the same request arrives again.
+  appRegistered = true
   const replay = await sendMfaResetWithKey()
 
   expect(replay.status).toBe(409)
   expect((await replay.json()).code).toBe('WorkspaceCredentialActionExpired')
   expect(resets).toEqual(['sato@example.com'])
+  expect(appRegistered).toBe(true)
 })
 
 test('does not remove an authenticator registered after a completed reset when the request is replayed', async () => {
   configureFakeProjectClients(true)
   const resets: string[] = []
+  let appRegistered = true
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: appRegistered,
+        softwareTokenMfaConfigured: appRegistered,
+      }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
+      appRegistered = false
     },
   })
   trackCredentialActionProgress()
 
   expect((await sendMfaResetWithKey()).status).toBe(200)
+  expect(appRegistered).toBe(false)
   // The member registers a new app, and the same request arrives again.
+  appRegistered = true
   const replay = await sendMfaResetWithKey()
 
   expect(replay.status).toBe(200)
   expect(resets).toEqual(['sato@example.com'])
+  expect(appRegistered).toBe(true)
 })
 
 test('does not report SMS-only MFA as an authenticator that an administrator can reset', async () => {
