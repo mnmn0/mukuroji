@@ -1,6 +1,6 @@
 import type { ArchivedPlanningEntityPage } from '@mukuroji/contracts'
 import useSWRInfinite from 'swr/infinite'
-import { listArchivedPlanningEntities } from '../api'
+import { listArchivedPlanningEntities } from '../api/entities'
 
 const archivedPlanningQueryConfig = {
   dedupingInterval: 10_000,

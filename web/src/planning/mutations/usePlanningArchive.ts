@@ -6,7 +6,8 @@ import type {
 } from '@mukuroji/contracts'
 import { useState } from 'react'
 import type { MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { PlanningApiError, restorePlanningEntity } from '../api'
+import { restorePlanningEntity } from '../api/entities'
+import { PlanningApiError } from '../api/errors'
 import {
   recordPlanningRestoreResult,
   recordUncertainPlanningRestore,
