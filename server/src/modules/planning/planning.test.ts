@@ -3672,7 +3672,7 @@ describe('planning persistence', () => {
     expect(transactionCalls).toBe(1)
   })
 
-  test('condition-checks completed Work Item revisions when archiving a Cycle', async () => {
+  test('fences a Cycle archive on the META revision instead of each linked Work Item', async () => {
     let transaction: Record<string, unknown> | undefined
     const storedCycle = createStoredCycle('cycle-1')
     const storedLink = {
@@ -3717,8 +3717,8 @@ describe('planning persistence', () => {
         transaction = command.input
         throw {
           name: 'TransactionCanceledException',
+          // A canonical Work Item write advanced META after the caller's snapshot.
           CancellationReasons: [
-            { Code: 'None' },
             { Code: 'ConditionalCheckFailed' },
             { Code: 'None' },
           ],
@@ -3739,20 +3739,14 @@ describe('planning persistence', () => {
       'cycle-1',
       { expectedRevision: 1 },
       { workItems: [{ ...createWorkItem('work-1', 'completed'), revision: 7 }] },
-    )).rejects.toMatchObject({ status: 409, code: 'PlanningWorkItemChanged' })
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningRevisionConflict' })
 
     expect(transaction?.TransactItems).toEqual([
-      expect.objectContaining({ Put: expect.any(Object) }),
-      {
-        ConditionCheck: expect.objectContaining({
-          TableName: 'WorkItemsTable',
-          Key: {
-            directoryTeamId: 'workspace-1#team#team-1',
-            issueId: 'work-1',
-          },
-          ExpressionAttributeValues: { ':expectedRevision': 7 },
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({ recordKey: 'META', revision: 2 }),
         }),
-      },
+      }),
       expect.objectContaining({
         Put: expect.objectContaining({
           Item: expect.objectContaining({
@@ -4224,6 +4218,53 @@ describe('planning persistence', () => {
     expect(overBound.queries.filter((input) =>
       (input.ExpressionAttributeValues as Record<string, unknown>)[':recordPrefix'] === 'LINK#'
     )).toHaveLength(3)
+  })
+
+  test('archives a Cycle with more links than one transaction can condition-check', async () => {
+    const linkCount = 150
+    const rows: Record<string, unknown>[] = [
+      { ...createStoredCycle('cycle-1'), capacity: linkCount },
+      ...Array.from({ length: linkCount }, (_, index) => ({
+        workspaceId: 'workspace-1',
+        recordKey: `LINK#team-1#item-${index}`,
+        entryType: 'planning-work-item-link',
+        teamId: 'team-1',
+        workItemId: `item-${index}`,
+        projectId: 'project-1',
+        cycleId: 'cycle-1',
+        goalIds: [],
+        createdAt: NOW.toISOString(),
+      })),
+    ]
+    const workItems = (statusCategory: PlanningWorkItemSummary['statusCategory']) => ({
+      workItems: Array.from({ length: linkCount }, (_, index) =>
+        createWorkItem(`item-${index}`, index === 0 ? statusCategory : 'completed')
+      ),
+    })
+    const { client, writes } = createFakePlanningTable(rows)
+
+    await expect(client.archive('workspace-1', 'cycle-1', { expectedRevision: 1 }, workItems('started')))
+      .rejects.toMatchObject({ status: 409, code: 'PlanningCycleHasIncompleteWorkItems' })
+    expect(writes).toHaveLength(0)
+
+    const archived = await client.archive(
+      'workspace-1',
+      'cycle-1',
+      { expectedRevision: 1 },
+      workItems('canceled'),
+    )
+    expect(archived.planning.entities).toEqual([])
+    expect(archived.planning.workItemLinks).toEqual([])
+    expect(rows.filter((row) => row.entryType === 'planning-archived-link-reference'))
+      .toHaveLength(linkCount)
+    const [archiveWrite] = writes
+    const archiveItems = archiveWrite?.TransactItems as Array<Record<string, unknown>>
+    // The caller's expectedRevision on META stands in for one condition per linked Work Item,
+    // because every canonical Work Item write advances META.
+    expect(archiveItems.some((item) => 'ConditionCheck' in item)).toBeFalse()
+    for (const write of writes) {
+      expect((write.TransactItems as unknown[]).length).toBeLessThanOrEqual(100)
+    }
   })
 
   test('moves an archived Goal and its links out of the live graph and restores them', async () => {

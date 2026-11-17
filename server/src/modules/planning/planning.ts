@@ -1388,8 +1388,11 @@ abstract class BasePlanningClient implements PlanningClient {
           'Move or archive active child entities before archiving their parent.',
         )
       }
-      const workItemConditions: PlanningWorkItemCondition[] = []
       if (current.type === 'cycle') {
+        // No per-Work Item condition: every canonical Work Item write advances META in its own
+        // transaction, so the caller's expectedRevision CAS already fails if a linked Work Item
+        // changed after the caller's snapshot. That keeps a Cycle with any number of links within
+        // one transaction.
         const summaries = createWorkItemMap(workItemState)
         for (const link of state.workItemLinks) {
           if (link.cycleId !== current.id) continue
@@ -1403,11 +1406,6 @@ abstract class BasePlanningClient implements PlanningClient {
               'Rollover or unlink incomplete Work Items before archiving this Cycle.',
             )
           }
-          workItemConditions.push({
-            teamId: link.teamId,
-            workItemId: link.workItemId,
-            revision: readRevision(summary.revision),
-          })
         }
       }
       let next = replaceEntity(state, { ...current, archivedAt: now, updatedAt: now })
@@ -1424,7 +1422,7 @@ abstract class BasePlanningClient implements PlanningClient {
           })
         }
       }
-      return { state: next, workItemConditions }
+      return { state: next }
     })
   }
 
