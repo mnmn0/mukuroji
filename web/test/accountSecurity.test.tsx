@@ -28,6 +28,7 @@ import {
   WorkspaceAccessApiError,
 } from '../src/workspace/api'
 import { shouldRetainCredentialResetContext } from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
+import { createWorkspaceAccessMutationSession } from '../src/workspace/mutations/workspaceAccessMutationSession'
 
 const originalFetch = globalThis.fetch
 const mutationContext = { idempotencyKey: 'credential-1', correlationId: 'correlation-1' }
@@ -174,6 +175,29 @@ describe('member credential reset retry', () => {
     expect(shouldRetainCredentialResetContext(
       new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
     )).toBe(false)
+  })
+
+  test('keeps an unknown reset outcome when another Workspace mutation refreshes the snapshot', async () => {
+    const session = createWorkspaceAccessMutationSession('token-1')
+    const keys: string[] = []
+    const reset = () => session.credentialResetRunner.run(
+      'workspace-member:mfa-reset:sato@example.com',
+      'fingerprint',
+      async (context) => {
+        keys.push(context.idempotencyKey)
+        if (keys.length === 1) throw new TypeError('Failed to fetch')
+      },
+      shouldRetainCredentialResetContext,
+    )
+
+    await expect(reset()).rejects.toThrow('Failed to fetch')
+    // An invitation succeeds and its snapshot refresh discards the retained membership contexts.
+    await session.requestRunner.run('workspace-invitation', 'fingerprint', async () => undefined)
+    session.requestRunner.discardRetainedContexts()
+    await reset()
+
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
   })
 })
 

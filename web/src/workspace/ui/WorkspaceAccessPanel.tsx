@@ -9,7 +9,6 @@ import {
   type RefObject,
 } from 'react'
 import { useSWRConfig } from 'swr'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -34,6 +33,7 @@ import {
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
 import { useWorkspaceMemberCredentialReset } from '../mutations/useWorkspaceMemberCredentialReset'
+import { createWorkspaceAccessMutationSession } from '../mutations/workspaceAccessMutationSession'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -268,10 +268,10 @@ export function WorkspaceAccessPanelContainer({
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { mutate: mutateCache } = useSWRConfig()
-  const mutationSession = useMemo(() => ({
-    accessToken,
-    requestRunner: createMutationRequestRunner(),
-  }), [accessToken])
+  const mutationSession = useMemo(
+    () => createWorkspaceAccessMutationSession(accessToken),
+    [accessToken],
+  )
   const mutationRequestRunner = mutationSession.requestRunner
   const {
     data: access,
@@ -290,7 +290,7 @@ export function WorkspaceAccessPanelContainer({
 
   const resetMemberCredential = useWorkspaceMemberCredentialReset({
     accessToken: mutationSession.accessToken,
-    requestRunner: mutationRequestRunner,
+    requestRunner: mutationSession.credentialResetRunner,
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
