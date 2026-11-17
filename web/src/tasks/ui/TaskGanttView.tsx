@@ -309,13 +309,20 @@ export function TaskGanttView({
   const timelineColumns = useMemo(
     () => timelineWindow
       ? createGanttWindowColumns(timelineWindow)
-      : createGanttTimelineColumns([
-          ...rows.map((row) => row.schedule),
-          ...dependencyRows.flatMap((row) => [
-            ...(row.predecessor ? [row.predecessor.schedule] : []),
-            ...(row.successor ? [row.successor.schedule] : []),
-          ]),
-        ]),
+      : createGanttTimelineColumns(
+          [
+            ...rows.map((row) => row.schedule),
+            ...dependencyRows.flatMap((row) => [
+              ...(row.predecessor ? [row.predecessor.schedule] : []),
+              ...(row.successor ? [row.successor.schedule] : []),
+            ]),
+          ],
+          // Actual work outside the planned horizon still widens the automatic timeline.
+          rows.flatMap((row) => {
+            const range = resolveGanttActualDateRange(row.task, row.schedule)
+            return range ? [range.startDate, range.endDate] : []
+          }),
+        ),
     [dependencyRows, rows, timelineWindow],
   )
   // Thousands of rows are rendered in steps; connectors are laid out for rendered rows only.
@@ -1241,13 +1248,19 @@ function createGanttRows(tasks: readonly CanonicalWorkItem[]): GanttTaskRow[] {
  * dates remain available through the row editors and through pointer position within a column.
  *
  * @param schedules - Schedules rendered on the Gantt chart.
- * @returns Ordered timeline columns covering the complete observed planning horizon.
+ * @param actualDates - Actual start and end dates that the timeline must also cover.
+ * @returns Ordered timeline columns covering the planned horizon and the actual work.
  */
 function createGanttTimelineColumns(
   schedules: readonly WorkItemSchedule[],
+  actualDates: readonly string[] = [],
 ): GanttTimelineColumn[] {
   const today = new Date().toISOString().slice(0, 10)
-  const range = createTaskTimelineDateRange(schedules, today)
+  // Without planned dates the range starts from the first actual date instead of today.
+  const range = extendGanttTimelineDateRange(
+    createTaskTimelineDateRange(schedules, actualDates[0] ?? today),
+    actualDates,
+  )
   const totalDays = differenceGanttCalendarDays(range.startDate, range.endDate) + 1
   const daysPerColumn = Math.max(
     1,
@@ -1266,6 +1279,26 @@ function createGanttTimelineColumns(
       startDate,
     }
   })
+}
+
+/**
+ * Widens a planned timeline range so it also covers the given actual dates.
+ *
+ * @param range - Range derived from the planned schedules.
+ * @param actualDates - Actual dates to cover.
+ * @returns The inclusive range covering both.
+ */
+function extendGanttTimelineDateRange(
+  range: { startDate: string, endDate: string },
+  actualDates: readonly string[],
+): { startDate: string, endDate: string } {
+  return actualDates.reduce(
+    (current, date) => ({
+      startDate: date < current.startDate ? date : current.startDate,
+      endDate: current.endDate < date ? date : current.endDate,
+    }),
+    range,
+  )
 }
 
 /**
@@ -1445,29 +1478,43 @@ function createGanttBar(
 }
 
 /**
- * Calculates the actual bar from the recorded start to the actual end, or to today while the
- * work is still in progress.
+ * Resolves the date range the actual bar covers: the recorded start to the actual end, or to
+ * today while the work is still in progress.
  *
  * Only a `started` Work Item is in progress: a canceled or reopened-to-unstarted Work Item keeps
- * its recorded start without an end, so it gets no open-ended bar.
+ * its recorded start without an end, so it gets no open-ended range.
+ *
+ * @param task - Work Item with recorded actual dates.
+ * @param schedule - Schedule whose calendar policy defines today.
+ * @returns The inclusive actual range, or undefined before work starts or without ongoing work.
+ */
+function resolveGanttActualDateRange(
+  task: CanonicalWorkItem,
+  schedule: WorkItemSchedule,
+): { startDate: string, endDate: string } | undefined {
+  if (!task.actualStartDate) return undefined
+  if (!task.actualEndDate && task.statusCategory !== 'started') return undefined
+  const endDate = task.actualEndDate ??
+    taskScheduleInstantToLocalDate(new Date(), schedule.calendarPolicy)
+  if (endDate < task.actualStartDate) return undefined
+  return { startDate: task.actualStartDate, endDate }
+}
+
+/**
+ * Calculates the actual bar for the range from `resolveGanttActualDateRange`.
  *
  * @param task - Work Item with recorded actual dates.
  * @param schedule - Schedule whose calendar policy defines today.
  * @param columns - Ordered bounded timeline columns.
- * @returns Bar geometry, or undefined before work starts, without ongoing work, or outside the
- *   visible period.
+ * @returns Bar geometry, or undefined without an actual range or outside the visible period.
  */
 function createGanttActualBar(
   task: CanonicalWorkItem,
   schedule: WorkItemSchedule,
   columns: readonly GanttTimelineColumn[],
 ): GanttBar | undefined {
-  if (!task.actualStartDate) return undefined
-  if (!task.actualEndDate && task.statusCategory !== 'started') return undefined
-  const endDate = task.actualEndDate ??
-    taskScheduleInstantToLocalDate(new Date(), schedule.calendarPolicy)
-  if (endDate < task.actualStartDate) return undefined
-  return createGanttDateRangeBar(task.actualStartDate, endDate, columns)
+  const range = resolveGanttActualDateRange(task, schedule)
+  return range ? createGanttDateRangeBar(range.startDate, range.endDate, columns) : undefined
 }
 
 /**

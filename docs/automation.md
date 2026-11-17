@@ -115,7 +115,7 @@ Slot event は Team、template ID/version、scheduled instant を固定して保
 
 Bulk は UI の選択内容を直接 N 個の通常 API に fan-out しない。最初に preview を作り、対象 ID、読み込み時 revision、権限、workflow/custom field validation、undo 可否を固定する。Edit 対象 field は通常 Work Item update と同じ allowlist に限定する。Apply は item ごとの receipt と before snapshot を保存するが、before/undo payload は API response へ返さない。
 
-Operation 状態は `running`、`succeeded`、`partial`、`failed`、`undone` を持つ。部分失敗時は item ごとに success、conflict、validation failure、permission failure、infrastructure failure を表示する。Retry は失敗 item だけを処理し、成功 receipt がある item を再実行しない。Undo は期限内かつ after revision が変わっていない item だけに before snapshot を戻し、競合 item を部分失敗として返す。
+Operation 状態は `running`、`succeeded`、`partial`、`failed`、`undone` を持つ。部分失敗時は item ごとに success、conflict、validation failure、permission failure、infrastructure failure を表示する。Retry は失敗 item だけを処理し、成功 receipt がある item を再実行しない。Undo は期限内かつ after revision が変わっていない item だけに before snapshot を戻し、競合 item を部分失敗として返す。Status を変える Edit の before snapshot には実績開始日・実績終了日も含める。Undo の status 遷移だけで実績日が戻らない場合、Project manager か Team manager の undo は snapshot の実績日を補正として戻す。それ以外の member の undo は、実績終了日が戻らないときに `BulkUndoUnavailable` の部分失敗にする（初回着手の取り消しのように実績開始日だけが残る場合は undo できる）。
 
 Operation ID と downstream mutation key は開始 actor に束縛する。Retry/undo は operation を開始した member だけが実行でき、管理者 override は設けない。各再実行では owner の現在の Team/Project 権限も再検証する。同じ apply の再配送で durable operation が `running` の場合は残った `ready` item から CAS 付きで再開する。Item mutation または undo の commit 後に応答が失われた場合は、保存済み before snapshot、deterministic mutation key、期待 revision のちょうど 1 増加、適用後 state の一致を確認して成功を回収する。
 

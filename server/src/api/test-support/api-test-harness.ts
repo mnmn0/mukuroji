@@ -1495,6 +1495,10 @@ function configureFakeProjectClients(
     detailWorkflowStatusId?: string
     /** Status category the detail fake returns instead of the one derived from the status ID. */
     detailStatusCategory?: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled'
+    /** Actual start date of the returned Work Item detail. */
+    detailActualStartDate?: string
+    /** Actual end date of the returned Work Item detail. */
+    detailActualEndDate?: string
     /** Detail fake が read ごとに返す workflow status ID です。 */
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
@@ -2916,6 +2920,8 @@ function configureFakeProjectClients(
               (workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
                 ? 'completed'
                 : 'started'),
+            ...(options.detailActualStartDate ? { actualStartDate: options.detailActualStartDate } : {}),
+            ...(options.detailActualEndDate ? { actualEndDate: options.detailActualEndDate } : {}),
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
