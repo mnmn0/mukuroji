@@ -1742,7 +1742,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param auditContext - Audit context of the request.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
-   *   holds the lease.
+   *   holds the lease, and 503 `AccountSecurityUnavailable` when no audit table is configured,
+   *   because the progress record that keeps retries safe lives beside the audit event.
    */
   async recordMemberCredentialAction(
     workspaceId: string,
@@ -1778,7 +1779,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 
     const auditItem = auditPut?.Put?.Item
     if (!auditPut || !auditItem) {
-      return { member: target, alreadyRecorded: false, completed: false }
+      // Without the audit log there is no progress record, so a retry could repeat a change the
+      // member has since undone. Refuse rather than change Cognito without that protection.
+      throw new WorkspaceAccessError(
+        503,
+        'AccountSecurityUnavailable',
+        'Administrator credential resets need the audit log, which is not configured.',
+      )
     }
 
     const now = this.clock()

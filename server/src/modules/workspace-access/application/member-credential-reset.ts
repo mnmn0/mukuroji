@@ -64,8 +64,11 @@ export type MemberCredentialResetPorts = {
   disableAuthenticator(memberKey: string): Promise<void>
   /** Signs the member out of every session. */
   signOutEverywhere(memberKey: string): Promise<void>
-  /** Records a failure that does not undo the completed reset. */
-  reportFailure(message: string, error: unknown): void
+  /**
+   * Records a failure that does not undo the completed reset, with the request's correlation
+   * ID so that an operator can find the action to recover.
+   */
+  reportFailure(message: string, error: unknown, correlationId: string | undefined): void
 }
 
 /** Input of {@link resetMemberCredential}. */
@@ -160,6 +163,7 @@ export async function resetMemberCredential(
       ports,
       () => ports.signOutEverywhere(member.memberKey),
       'Failed to sign the member out again after a password reset.',
+      input.auditContext?.correlationId,
     )
   }
 
@@ -169,6 +173,7 @@ export async function resetMemberCredential(
     ports,
     () => ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext),
     'Failed to mark the credential reset as completed.',
+    input.auditContext?.correlationId,
   )
 }
 
@@ -182,11 +187,13 @@ const bestEffortAttempts = 3
  * @param ports - Ports that report the failure.
  * @param step - Step to run.
  * @param failureMessage - Message reported when every attempt fails.
+ * @param correlationId - Correlation ID of the request, reported with the failure.
  */
 async function retryBestEffort(
   ports: Pick<MemberCredentialResetPorts, 'reportFailure'>,
   step: () => Promise<void>,
   failureMessage: string,
+  correlationId: string | undefined,
 ) {
   let lastError: unknown
   for (let attempt = 0; attempt < bestEffortAttempts; attempt += 1) {
@@ -197,7 +204,7 @@ async function retryBestEffort(
       lastError = error
     }
   }
-  ports.reportFailure(failureMessage, lastError)
+  ports.reportFailure(failureMessage, lastError, correlationId)
 }
 
 /**

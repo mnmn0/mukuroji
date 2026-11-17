@@ -4,9 +4,10 @@ import { CognitoServiceError, type CognitoClient } from '../..'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { InMemoryEnterpriseSessionActivityClient } from '../../../enterprise-identity/enterprise-session-activity'
 import type { MutationAuditContext } from '../../../audit'
-import type {
-  WorkspaceAccessClient,
-  WorkspaceMemberCredentialAction,
+import {
+  WorkspaceAccessError,
+  type WorkspaceAccessClient,
+  type WorkspaceMemberCredentialAction,
 } from '../../../workspace-access'
 
 const {
@@ -810,17 +811,30 @@ test('resets the authenticator of a member who lost it', async () => {
  * @returns The progress of each idempotency key hash.
  */
 function trackCredentialActionProgress() {
-  const progress = new Map<string, 'recorded' | 'completed'>()
+  const progress = new Map<string, 'recorded' | 'applying' | 'completed'>()
   const keyOf = (auditContext?: MutationAuditContext) => auditContext?.idempotencyKeyHash ?? ''
   overrideWorkspaceAccess({
     async readMemberCredentialActionProgress(_workspaceId, _target, _action, auditContext) {
-      return progress.get(keyOf(auditContext)) ?? 'none'
+      const current = progress.get(keyOf(auditContext))
+      return current === 'applying' ? 'recorded' : current ?? 'none'
     },
     async recordMemberCredentialAction(_workspaceId, _actor, target, _action, auditContext) {
       const current = progress.get(keyOf(auditContext))
+      // Like the store once the lease ran out: an attempt that started changing Cognito is not
+      // repeated.
+      if (current === 'applying') {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceCredentialActionExpired',
+          'The earlier request stopped before it finished.',
+        )
+      }
       if (!current) progress.set(keyOf(auditContext), 'recorded')
       const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
       return { member, alreadyRecorded: current !== undefined, completed: current === 'completed' }
+    },
+    async markMemberCredentialActionApplying(_workspaceId, _target, _action, auditContext) {
+      progress.set(keyOf(auditContext), 'applying')
     },
     async completeMemberCredentialAction(_workspaceId, _target, _action, auditContext) {
       progress.set(keyOf(auditContext), 'completed')
@@ -846,7 +860,7 @@ function sendMfaResetWithKey() {
   })
 }
 
-test('resumes an interrupted authenticator reset when the same request is retried', async () => {
+test('does not repeat an authenticator reset that stopped after it started changing Cognito', async () => {
   configureFakeProjectClients(true)
   let mfaEnrolled = true
   const resets: string[] = []
@@ -867,14 +881,43 @@ test('resumes an interrupted authenticator reset when the same request is retrie
   const progress = trackCredentialActionProgress()
 
   expect((await sendMfaResetWithKey()).status).toBe(500)
+  // The member registers a new app before the same request arrives again.
+  mfaEnrolled = true
   const retry = await sendMfaResetWithKey()
 
-  // The first attempt removed the app before failing; the retry resumes instead of reporting
-  // "not enrolled", and turning off an app that is already off changes nothing.
-  expect(retry.status).toBe(200)
-  expect(await retry.json()).toEqual({ reset: true })
-  expect(resets).toEqual(['sato@example.com', 'sato@example.com'])
-  expect([...progress.values()]).toEqual(['completed'])
+  // The first attempt may already have removed the app, so the retry asks the administrator to
+  // check the member instead of removing the new app.
+  expect(retry.status).toBe(409)
+  expect((await retry.json()).code).toBe('WorkspaceCredentialActionExpired')
+  expect(resets).toEqual(['sato@example.com'])
+  expect([...progress.values()]).toEqual(['applying'])
+})
+
+test('keeps an app registered after a reset whose completion mark failed', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  trackCredentialActionProgress()
+  overrideWorkspaceAccess({
+    async completeMemberCredentialAction() {
+      throw new Error('DynamoDB is unavailable.')
+    },
+  })
+
+  expect((await sendMfaResetWithKey()).status).toBe(200)
+  // The member registers a new app, and the same request arrives again.
+  const replay = await sendMfaResetWithKey()
+
+  expect(replay.status).toBe(409)
+  expect((await replay.json()).code).toBe('WorkspaceCredentialActionExpired')
+  expect(resets).toEqual(['sato@example.com'])
 })
 
 test('does not remove an authenticator registered after a completed reset when the request is replayed', async () => {

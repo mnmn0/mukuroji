@@ -86,8 +86,11 @@ export function createMemberCredentialResetPorts(
       if (!globallySignOutWorkspaceUser) throw createCredentialResetUnavailableError()
       await globallySignOutWorkspaceUser.call(cognito, memberKey)
     },
-    reportFailure(message, error) {
-      console.error(message, error instanceof Error ? error.name : 'UnknownError')
+    reportFailure(message, error, correlationId) {
+      console.error(message, {
+        error: error instanceof Error ? error.name : 'UnknownError',
+        correlationId,
+      })
     },
   }
 }

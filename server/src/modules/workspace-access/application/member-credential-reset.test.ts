@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { createMutationAuditContext } from '../../audit'
 import type { WorkspaceMember } from '../workspace-access'
 import {
   resetMemberCredential,
@@ -209,17 +210,36 @@ test('does nothing for a retry of a completed reset', async () => {
 
 test('keeps a finished reset when marking it completed fails', async () => {
   let completionCalls = 0
+  const reported: Array<string | undefined> = []
   const { ports, calls } = createPorts({
     async completeAction() {
       completionCalls += 1
       throw new Error('DynamoDB is unavailable.')
     },
   })
+  const report = ports.reportFailure
+  ports.reportFailure = (message, error, correlationId) => {
+    reported.push(correlationId)
+    report(message, error, correlationId)
+  }
 
-  await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
+  await resetMemberCredential(ports, {
+    ...input,
+    action: 'mfa-reset',
+    auditContext: createMutationAuditContext({
+      workspaceId,
+      actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
+      idempotencyKey: 'mfa-reset-1',
+      correlationId: 'correlation-1',
+      request: { method: 'POST', path: '/api/workspace/members/sato%40example.com/mfa-reset', body: {} },
+      source: { kind: 'api', requestId: 'request-1' },
+    }),
+  })
 
   expect(completionCalls).toBe(3)
   expect(calls.at(-1)).toBe('failure:Failed to mark the credential reset as completed.')
+  // The correlation ID lets an operator find the action whose completion was not recorded.
+  expect(reported).toEqual(['correlation-1'])
 })
 
 test('marks a finished reset completed after a transient failure', async () => {

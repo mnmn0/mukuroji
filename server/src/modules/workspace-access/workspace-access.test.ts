@@ -2994,6 +2994,23 @@ test('lets an admin reset members but not owners, and nobody reset themselves', 
   expect(transactions).toEqual([])
 })
 
+test('refuses a member credential reset when no audit table keeps its progress', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('sato@example.com', 'member'),
+  ], transactions, null)
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'mfa-reset',
+    createAuditContext('credential-no-audit'),
+  )).rejects.toMatchObject({ status: 503, code: 'AccountSecurityUnavailable' })
+  expect(transactions).toEqual([])
+})
+
 test('reports a member that changed during a credential reset as a conflict', async () => {
   const client = new DynamoDbWorkspaceAccessClient(
     'WorkspaceAccessTable',
