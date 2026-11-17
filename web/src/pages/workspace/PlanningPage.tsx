@@ -1,4 +1,6 @@
 import type {
+  ArchivedPlanningEntitySummary,
+  PlanningRestoreSummary,
   PlanningSnapshot,
   PlanningUpdate,
   PlanningUpdateComment,
@@ -44,6 +46,7 @@ import {
   publishPlanningUpdate,
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
+  restorePlanningEntity,
   rolloverPlanningCycle,
   removePlanningUpdateReaction,
   updatePlanningEntity,
@@ -63,6 +66,11 @@ import {
 } from '../../planning/model/statusUpdateView'
 import { createPlanningUpdateTargetKey } from '../../planning/model/targetKey'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { usePlanningArchivedEntities } from '../../planning/queries/usePlanningArchivedEntities'
+import {
+  selectRestorablePlanningEntities,
+  type PlanningRestoreResultView,
+} from '../../planning/model/archive'
 import {
   hasPlanningUpdateViewerReaction,
   revalidatePlanningUpdateHistoryAfterPublish,
@@ -120,6 +128,9 @@ export function PlanningPage() {
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
   const [isUpdateCollaborationPending, setIsUpdateCollaborationPending] = useState(false)
+  const [isArchiveListOpen, setIsArchiveListOpen] = useState(false)
+  const [restoringEntityId, setRestoringEntityId] = useState<string>()
+  const [restoreResult, setRestoreResult] = useState<PlanningRestoreResultView>()
   const t = useMemo(() => createTranslator(locale), [locale])
   const labels = useMemo(() => createPlanningLabels(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
@@ -228,6 +239,10 @@ export function PlanningPage() {
     [selectedUpdateTarget, snapshot, teams, updateHistory.data?.updates],
   )
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
+  const archivedEntities = usePlanningArchivedEntities(
+    accessToken,
+    Boolean(user && !currentUserError && canManagePlanning && isArchiveListOpen),
+  )
   const canMutatePlanningContent = canMutateWorkspaceContent(user)
   const currentPath = `${location.pathname}${location.search}${location.hash}`
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
@@ -239,6 +254,7 @@ export function PlanningPage() {
       updateHistory.error,
       updateWatch.error,
       updateAnnotations.error,
+      archivedEntities.error,
       ...(projectRolesResult?.errors ?? []),
     ],
     currentPath,
@@ -289,6 +305,8 @@ export function PlanningPage() {
   type PlanningMutationOptions = {
     /** Re-throws a handled failure so a local draft can remain available to the caller. */
     rethrowOnFailure?: boolean
+    /** Operation whose failure reasons the error message explains; a generic mutation by default. */
+    errorOperation?: 'mutation' | 'restore'
   }
 
   /** Runs one Planning mutation and updates the authoritative bounded snapshot on success. */
@@ -329,13 +347,47 @@ export function PlanningPage() {
         return
       }
 
-      const messageKey = resolvePlanningErrorMessageKey(error, 'mutation')
+      const messageKey = resolvePlanningErrorMessageKey(
+        error,
+        options?.errorOperation ?? 'mutation',
+      )
       setMutationErrorMessage(t(messageKey))
       if (messageKey === 'planning.conflict') {
         await mutatePlanning()
       }
       if (options?.rethrowOnFailure) throw error
     }
+  }
+
+  /**
+   * Restores an archived entity, or continues a restore that left references in the archive, and
+   * reports how many references came back.
+   */
+  const restoreEntity = async (entity: Pick<ArchivedPlanningEntitySummary, 'id' | 'title'>) => {
+    if (!snapshot || !accessToken || restoringEntityId !== undefined) return
+    const outcome: { summary?: PlanningRestoreSummary } = {}
+    setRestoringEntityId(entity.id)
+    setRestoreResult(undefined)
+    try {
+      await runMutation(
+        `planning:entity:${entity.id}:restore`,
+        snapshot.revision,
+        (context) => restorePlanningEntity(accessToken, entity.id, {
+          expectedRevision: snapshot.revision,
+        }, context).then((result) => {
+          outcome.summary = result.restore
+          return result.planning
+        }),
+        undefined,
+        { errorOperation: 'restore' },
+      )
+    } finally {
+      setRestoringEntityId(undefined)
+    }
+    if (outcome.summary) {
+      setRestoreResult({ entityId: entity.id, title: entity.title, summary: outcome.summary })
+    }
+    await archivedEntities.mutate()
   }
 
   /** Toggles the current viewer's watch state for the route-selected update target. */
@@ -752,13 +804,35 @@ export function PlanningPage() {
               )
             : undefined}
           onArchiveEntity={canManagePlanning && snapshot && accessToken
-            ? (entity) => runMutation(
-                `planning:entity:${entity.id}:archive`,
-                snapshot.revision,
-                (context) => archivePlanningEntity(accessToken, entity.id, {
-                  expectedRevision: snapshot.revision,
-                }, context),
-              )
+            ? async (entity) => {
+                await runMutation(
+                  `planning:entity:${entity.id}:archive`,
+                  snapshot.revision,
+                  (context) => archivePlanningEntity(accessToken, entity.id, {
+                    expectedRevision: snapshot.revision,
+                  }, context),
+                )
+                await archivedEntities.mutate()
+              }
+            : undefined}
+          archive={canManagePlanning && snapshot && accessToken
+            ? {
+                entities: selectRestorablePlanningEntities(
+                  snapshot.entities,
+                  archivedEntities.entities,
+                  (entity) => canManagePlanningScope(user, entity, planningAccess),
+                ),
+                errorMessage: archivedEntities.error ? labels.archivedPlans.error : undefined,
+                hasMore: archivedEntities.hasMore,
+                isLoading: !isArchiveListOpen || archivedEntities.isLoading,
+                isLoadingMore: archivedEntities.isLoadingMore,
+                onLoadMore: archivedEntities.loadMore,
+                onOpen: () => setIsArchiveListOpen(true),
+                onRestore: restoreEntity,
+                onRetry: () => void archivedEntities.mutate(),
+                restoringEntityId,
+                result: restoreResult,
+              }
             : undefined}
           onDuplicateEntity={canManagePlanning && snapshot && accessToken
             ? (entity, targetId) => runMutation(

@@ -1,4 +1,15 @@
-import type { CreatePlanningEntityInput, DuplicatePlanningEntityInput, MovePlanningEntityInput, PlanningRevisionInput, PlanningSnapshot, UpdatePlanningEntityInput } from '@mukuroji/contracts'
+import type {
+  ArchivedPlanningEntityPage,
+  ArchivedPlanningEntitySummary,
+  CreatePlanningEntityInput,
+  DuplicatePlanningEntityInput,
+  MovePlanningEntityInput,
+  PlanningRestoreSummary,
+  PlanningRevisionInput,
+  PlanningSnapshot,
+  RestorePlanningEntityResponse,
+  UpdatePlanningEntityInput,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { PlanningApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -78,6 +89,79 @@ export function archivePlanningEntity(
 }
 
 /**
+ * Live graph から退避した archive 済み entity を active に戻します。
+ *
+ * 1 回の request で戻しきれなかった参照は `restore.pendingReferenceCount` に残り、同じ entity を
+ * もう一度復元すると続きを戻します。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param entityId - 復元する entity ID です。
+ * @param input - 読み込み時点の revision です。
+ * @param mutationContext - retry 間で共有する mutation request context です。
+ * @returns 復元後の planning snapshot と、戻した参照の件数です。
+ */
+export async function restorePlanningEntity(
+  accessToken: string,
+  entityId: string,
+  input: PlanningRevisionInput,
+  mutationContext: MutationRequestContext,
+): Promise<RestorePlanningEntityResponse> {
+  const response = await requestEntityAction<unknown>(
+    entityId,
+    'restore',
+    accessToken,
+    input,
+    mutationContext,
+  )
+  if (
+    !isRecord(response) ||
+    !isRecord(response.planning) ||
+    !isPlanningRestoreSummary(response.restore)
+  ) {
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage)
+  }
+  return {
+    planning: response.planning as PlanningSnapshot,
+    restore: response.restore,
+  }
+}
+
+/**
+ * 呼び出し元が復元できる archive 済み entity を ID 順の cursor page で返します。
+ *
+ * Server は権限のない entity を page から除くため、`nextCursor` があっても page が空のことがあります。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param input - 1 page の件数と、前の page が返した cursor です。
+ * @returns 検証済みの archive 済み entity page です。
+ */
+export async function listArchivedPlanningEntities(
+  accessToken: string,
+  input: { limit?: number; cursor?: string } = {},
+): Promise<ArchivedPlanningEntityPage> {
+  const query = new URLSearchParams()
+  if (input.limit !== undefined) query.set('limit', String(input.limit))
+  if (input.cursor !== undefined) query.set('cursor', input.cursor)
+  const search = query.toString()
+  const response = await requestJson<unknown>(
+    `${planningApiBaseUrl}/planning/archived-entities${search ? `?${search}` : ''}`,
+    accessToken,
+  )
+  if (
+    !isRecord(response) ||
+    !Array.isArray(response.entities) ||
+    !response.entities.every(isArchivedPlanningEntitySummary) ||
+    (response.nextCursor !== undefined && typeof response.nextCursor !== 'string')
+  ) {
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage)
+  }
+  return {
+    entities: response.entities,
+    ...(typeof response.nextCursor === 'string' ? { nextCursor: response.nextCursor } : {}),
+  }
+}
+
+/**
  * Planning entity を複製します。
  *
  * @param accessToken - Authorization header に使う access token です。
@@ -137,7 +221,7 @@ export function movePlanningEntity(
  */
 function requestEntityAction<T>(
   entityId: string,
-  action: 'archive' | 'duplicate' | 'move',
+  action: 'archive' | 'duplicate' | 'move' | 'restore',
   accessToken: string,
   input: unknown,
   mutationContext: MutationRequestContext,
@@ -215,4 +299,49 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+const planningEntityTypes = new Set<string>([
+  'cycle',
+  'milestone',
+  'release',
+  'phase',
+  'goal',
+  'initiative',
+  'roadmap',
+  'portfolio',
+])
+
+function isOptionalString(value: unknown) {
+  return value === undefined || typeof value === 'string'
+}
+
+function isArchivedPlanningEntitySummary(value: unknown): value is ArchivedPlanningEntitySummary {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.type === 'string' &&
+    planningEntityTypes.has(value.type) &&
+    typeof value.title === 'string' &&
+    typeof value.ownerMemberKey === 'string' &&
+    typeof value.archivedAt === 'string' &&
+    isOptionalString(value.parentId) &&
+    isOptionalString(value.teamId) &&
+    isOptionalString(value.projectId)
+}
+
+function isPlanningRestoreSummary(value: unknown): value is PlanningRestoreSummary {
+  if (!isRecord(value)) return false
+  const counts = [
+    value.restoredLinkCount,
+    value.droppedLinkCount,
+    value.restoredDependencyCount,
+    value.retainedDependencyCount,
+    value.droppedDependencyCount,
+    value.pendingReferenceCount,
+  ]
+  return counts.every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)
 }
