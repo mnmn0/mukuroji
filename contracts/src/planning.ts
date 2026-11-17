@@ -476,6 +476,27 @@ export type PlanningCriticalPath = {
   slackByEntityId: Record<string, number>
 }
 
+/** Live Planning graph の使用量の段階です。 */
+export type PlanningCapacityLevel = 'normal' | 'warning' | 'full'
+
+/** Workspace の live Planning graph が使っている row 数と上限です。 */
+export type PlanningCapacity = {
+  /** 使用量の段階です。row 数か byte 数の一方が閾値を超えると上がり、`full` ではそれを増やす変更を拒否します。 */
+  level: PlanningCapacityLevel
+  /** Live graph に保存されている row 数です（revision META は含みません）。 */
+  liveRowCount: number
+  /** Live graph の row を増やす mutation が到達できる上限 row 数です。 */
+  liveRowCapacity: number
+  /** この row 数以上で `warning` になる閾値です。 */
+  warningRowCount: number
+  /** Live graph の row を保存した UTF-8 JSON の合計 byte 数です。 */
+  liveByteCount: number
+  /** Live graph の byte 数を増やす mutation が到達できる上限 byte 数です。 */
+  liveByteCapacity: number
+  /** この byte 数以上で `warning` になる閾値です。 */
+  warningByteCount: number
+}
+
 /** Planning API が返す Workspace 単位の整合した snapshot です。 */
 export type PlanningSnapshot = {
   /** Snapshot schema version です。 */
@@ -498,6 +519,8 @@ export type PlanningSnapshot = {
   criticalPath: PlanningCriticalPath
   /** Work Item dependency graph summary derived from this exact snapshot. */
   workItemDependencySummary: PlanningWorkItemDependencySummary
+  /** Live Planning graph の使用量です。 */
+  capacity: PlanningCapacity
   /** 永続化済み graph の最終更新日時です。 */
   updatedAt?: string
 }
@@ -866,4 +889,59 @@ export type PlanningMutationResponse = {
   movedWorkItemIds: string[]
   /** Cycle rollover で元 Cycle に残した Work Item ID 一覧です。 */
   retainedWorkItemIds: string[]
+}
+
+/** Live graph から退避した archive 済み Planning entity の一覧用 summary です。 */
+export type ArchivedPlanningEntitySummary = {
+  /** Workspace 内で entity を識別する ID です。 */
+  id: string
+  /** Entity の種別です。 */
+  type: PlanningEntityType
+  /** 表示名です。 */
+  title: string
+  /** Archive 時点の親 entity ID です。復元にはこの親が live で active である必要があります。 */
+  parentId?: string
+  /** Archive 時点の Team scope です。 */
+  teamId?: string
+  /** Archive 時点の Project scope です。 */
+  projectId?: string
+  /** Entity owner の member key です。復元には owner が active な member である必要があります。 */
+  ownerMemberKey: string
+  /** Archive した日時の ISO 8601 timestamp です。 */
+  archivedAt: string
+}
+
+/** 退避済み Planning entity 一覧の cursor page です。 */
+export type ArchivedPlanningEntityPage = {
+  /** 呼び出し元が復元できる退避済み entity です。 */
+  entities: ArchivedPlanningEntitySummary[]
+  /** 次の page を読む opaque cursor です。最後の page では省略します。 */
+  nextCursor?: string
+}
+
+/** 退避済み entity を復元した結果です。 */
+export type PlanningRestoreSummary = {
+  /** Live graph に戻した Work Item link の参照数です。 */
+  restoredLinkCount: number
+  /** Work Item が別の Cycle や Milestone に移っていたなど、戻すと整合しないため破棄した link の参照数です。 */
+  droppedLinkCount: number
+  /** Live graph に戻した dependency 数です。 */
+  restoredDependencyCount: number
+  /** 相手の entity がまだ退避中のため、相手と一緒に退避したままにした dependency 数です。 */
+  retainedDependencyCount: number
+  /** 相手の entity が存在しない、または循環になるため破棄した dependency 数です。 */
+  droppedDependencyCount: number
+  /**
+   * 退避先に残っている参照数です。容量不足でこの request では戻しきれなかったものと、呼び出し元から
+   * 見えない（または削除・archive 済みの）Work Item の link を含みます。同じ復元を再実行すると続きを戻します。
+   */
+  pendingReferenceCount: number
+}
+
+/** Planning entity 復元 API の response です。 */
+export type RestorePlanningEntityResponse = {
+  /** 復元後に再計算した snapshot です。 */
+  planning: PlanningSnapshot
+  /** 戻した参照と戻せなかった参照の件数です。 */
+  restore: PlanningRestoreSummary
 }

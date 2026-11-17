@@ -33,18 +33,29 @@ export class PlanningApiError extends Error {
  *
  * @param error - Planning の load または mutation で発生した error です。
  * @param operation - Error が発生した操作です。
- * @returns Revision conflict は競合用、それ以外は汎用 error の翻訳 key です。
+ * @returns Revision conflict は競合用、復元の前提条件の失敗はその理由、それ以外は汎用 error の翻訳 key です。
  */
 export function resolvePlanningErrorMessageKey(
   error: unknown,
-  operation: 'load' | 'mutation' = 'load',
-): 'planning.conflict' | 'planning.error' | 'planning.mutationError' {
-  if (typeof error !== 'object' || error === null) {
-    return operation === 'mutation' ? 'planning.mutationError' : 'planning.error'
-  }
+  operation: 'load' | 'mutation' | 'restore' = 'load',
+):
+  | 'planning.conflict'
+  | 'planning.error'
+  | 'planning.mutationError'
+  | 'planning.restore.ownerInactive'
+  | 'planning.restore.parentUnavailable' {
+  const fallback = operation === 'load' ? 'planning.error' : 'planning.mutationError'
+  if (typeof error !== 'object' || error === null) return fallback
 
   if (isPlanningSnapshotConflict(error)) return 'planning.conflict'
-  return operation === 'mutation' ? 'planning.mutationError' : 'planning.error'
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
+  if (operation === 'restore' && code === 'PlanningRestoreParentUnavailable') {
+    return 'planning.restore.parentUnavailable'
+  }
+  if (operation === 'restore' && code === 'PlanningOwnerInactive') {
+    return 'planning.restore.ownerInactive'
+  }
+  return fallback
 }
 
 /**

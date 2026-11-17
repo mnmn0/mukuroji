@@ -18,6 +18,7 @@ const {
 } = createApiTestHarness()
 import {
   InMemoryPlanningClient,
+  PlanningError,
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../../../authentication'
@@ -27,6 +28,7 @@ import { DynamoDbInboxDigestStore } from '../../../update-feed'
 import { CollaborationError } from '../../../collaboration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
+import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 import type {
   EnterpriseCustomRole,
   EnterpriseRoleAssignment,
@@ -197,6 +199,51 @@ test('persists service-account read state using Enterprise control without a syn
     await identity.revokeServiceAccountToken(workspaceId, issued.account.accountId)
     const revoked = await app.request('/api/planning/update-feed/read-state', { method: 'PUT', headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, read: false, expectedRevision: 1 }) })
     expect(revoked.status).toBe(401)
+  })
+})
+
+test('restores as a service account with only the Enterprise control fence', async () => {
+  const workspaceId = 'workspace-service-restore'
+  await withTestEnvironment({ ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable', MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceId }, async () => {
+    configureFakeProjectClients(false)
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const timestamp = new Date().toISOString()
+    const issued = await identity.createServiceAccountWithToken({
+      workspaceId, accountId: 'planning-restorer', displayName: 'Planning restorer',
+      permissions: ['planning.read', 'planning.manage', 'projects.read', 'service-accounts.use'], roleId: 'workspace:admin',
+      scope: { workspaceId, kind: 'workspace' }, credentialLifetimeDays: 30,
+      allowedSourceCidrs: [], status: 'active', credentialGeneration: 0, revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    }, 'create-planning-restorer', 'create-planning-restorer-fingerprint')
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    await planning.create(workspaceId, {
+      id: 'portfolio-service', type: 'portfolio', title: 'Service portfolio', ownerMemberKey: 'demo@example.com',
+      status: 'planned', health: 'on-track', risk: 'none', progressMode: 'automatic',
+      baseline: { startDate: '2026-08-01', endDate: '2026-08-01' }, forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      expectedRevision: 0,
+    }, { workItems: [] })
+    const archived = await planning.archive(workspaceId, 'portfolio-service', { expectedRevision: 1 }, { workItems: [] })
+    const restore = planning.restore.bind(planning)
+    let checks: unknown
+    planning.restore = async (...input) => {
+      checks = input[4]?.authorizationConditionChecks
+      return restore(...input)
+    }
+    setTestAppDependencies({ planning, enterpriseIdentity: identity })
+    const response = await app.request('/api/planning/entities/portfolio-service/restore', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: archived.planning.revision }),
+    })
+    expect(response.status).toBe(200)
+    // The synthetic member of a service account has no row a membership fence could match.
+    expect(checks).toEqual([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'EnterpriseIdentityTable',
+          Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' },
+        }),
+      }),
+    ])
   })
 })
 
@@ -485,6 +532,45 @@ test('preserves direct Enterprise Team access for an Initiative in an empty Team
   const revoked = await planningApiRequest('/api/planning/update-feed?view=recent')
   expect(revoked.status).toBe(200)
   expect(await revoked.json()).toMatchObject({ total: 0, entries: [] })
+})
+
+test('lists archived entities that an Enterprise Team grant can restore', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [], teamProjects: [] })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  const workspaceId = 'user#demo@example.com'
+  await seedPlanningUpdateInitiative(planning, 'team-initiative', 'core-team')
+  let revision = 3
+  for (const entityId of ['team-initiative', 'team-initiative-roadmap', 'team-initiative-portfolio']) {
+    revision = (await planning.archive(workspaceId, entityId, { expectedRevision: revision }, { workItems: [] }))
+      .planning.revision
+  }
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:planning-manager', name: 'Planning manager',
+    permissions: ['planning.read', 'planning.manage'], guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'team-planning-manager',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({ planning, enterpriseIdentity: identity })
+
+  const response = await planningApiRequest('/api/planning/archived-entities')
+  expect(response.status).toBe(200)
+  // The Workspace-scoped Portfolio needs a Workspace grant, so only the Team entities are listed.
+  expect(await response.json()).toEqual({
+    entities: [
+      expect.objectContaining({ id: 'team-initiative' }),
+      expect.objectContaining({ id: 'team-initiative-roadmap' }),
+    ],
+  })
 })
 
 test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
@@ -2139,6 +2225,17 @@ test('enforces Planning revisions and structural permissions before mutations', 
     structuralCalls.move += 1
     return move(...input)
   }
+  const restore = planningClient.restore.bind(planningClient)
+  const restoreAuthorizationChecks: unknown[] = []
+  let restoreAuthorizationRevoked = false
+  planningClient.restore = async (...input) => {
+    restoreAuthorizationChecks.push(input[4]?.authorizationConditionChecks)
+    if (restoreAuthorizationRevoked) {
+      // What the client throws once a restore revision fails its caller authorization checks.
+      throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed.')
+    }
+    return restore(...input)
+  }
 
   const futureRevision = await planningApiRequest(
     '/api/planning/entities/cycle-structural/archive',
@@ -2199,10 +2296,68 @@ test('enforces Planning revisions and structural permissions before mutations', 
   )
   expect(managerArchive.status).toBe(200)
   const archivedPlanning = await managerArchive.json() as PlanningSnapshot
-  expect(archivedPlanning.revision).toBe(4)
-  expect(archivedPlanning.entities.find((entity) => entity.id === 'cycle-structural')?.archivedAt)
-    .toBeDefined()
+  // Archive commits revision 4; moving the archived Cycle out of the live graph commits 5.
+  expect(archivedPlanning.revision).toBe(5)
+  expect(archivedPlanning.entities.some((entity) => entity.id === 'cycle-structural')).toBe(false)
   expect(structuralCalls).toEqual({ archive: 1, duplicate: 1, move: 1 })
+
+  const archivedList = await planningApiRequest('/api/planning/archived-entities')
+  expect(archivedList.status).toBe(200)
+  expect(await archivedList.json()).toMatchObject({
+    entities: [{ id: 'cycle-structural', type: 'cycle', archivedAt: expect.any(String) }],
+  })
+  const invalidLimit = await planningApiRequest('/api/planning/archived-entities?limit=0')
+  expect(invalidLimit.status).toBe(400)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const memberList = await planningApiRequest('/api/planning/archived-entities')
+  expect(memberList.status).toBe(200)
+  expect(await memberList.json()).toEqual({ entities: [] })
+  const memberRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(memberRestore.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const staleRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 4 },
+  )
+  expect(staleRestore.status).toBe(409)
+  const managerRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(managerRestore.status).toBe(200)
+  const restored: unknown = await managerRestore.json()
+  expect(restored).toMatchObject({ planning: { revision: 6 }, restore: { pendingReferenceCount: 0 } })
+  const restoredEntities = isRecord(restored) && isRecord(restored.planning) &&
+      Array.isArray(restored.planning.entities)
+    ? restored.planning.entities
+    : []
+  const restoredCycle = restoredEntities.find((entity) => isRecord(entity) && entity.id === 'cycle-structural')
+  expect(restoredCycle).toMatchObject({ id: 'cycle-structural' })
+  expect(restoredCycle).not.toHaveProperty('archivedAt')
+  restoreAuthorizationRevoked = true
+  const revokedRestore = await planningApiRequest(
+    '/api/planning/entities/cycle-structural/restore',
+    'POST',
+    { expectedRevision: 6 },
+  )
+  expect(revokedRestore.status).toBe(409)
+  expect(await revokedRestore.json()).toMatchObject({ code: 'PlanningAuthorizationChanged' })
+  // Each restore revision guards the caller's Workspace membership.
+  expect(restoreAuthorizationChecks.at(-1)).toEqual([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({
+        Key: expect.objectContaining({ recordKey: expect.stringMatching(/^MEMBER#/) }),
+      }),
+    }),
+  ])
 })
 
 test('rejects an inactive Planning owner before invoking the mutation client', async () => {
@@ -2237,6 +2392,121 @@ test('rejects an inactive Planning owner before invoking the mutation client', a
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
   expect(createCalls).toBe(0)
+})
+
+test('rejects restoring an archived entity whose owner became inactive', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  setTestAppDependencies({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-archived-owner', 0),
+      ownerMemberKey: 'former-owner@example.com',
+    },
+  )
+  expect(created.status).toBe(201)
+  const archived = await planningApiRequest(
+    '/api/planning/entities/cycle-archived-owner/archive',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(archived.status).toBe(200)
+
+  let restoreCalls = 0
+  const restore = planningClient.restore.bind(planningClient)
+  planningClient.restore = async (...input) => {
+    restoreCalls += 1
+    return restore(...input)
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    inactiveWorkspaceMemberKeys: ['former-owner@example.com'],
+  })
+
+  const response = await planningApiRequest(
+    '/api/planning/entities/cycle-archived-owner/restore',
+    'POST',
+    { expectedRevision: 3 },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningOwnerInactive' })
+  expect(restoreCalls).toBe(0)
+  expect(await planningClient.getArchivedEntity('user#demo@example.com', 'cycle-archived-owner'))
+    .toMatchObject({ ownerMemberKey: 'former-owner@example.com' })
+})
+
+test('checks the parent scope before restoring an archived entity kept in the live graph', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const workspaceId = 'user#demo@example.com'
+  const scope = { teamId: undefined, projectId: undefined, cadence: undefined, capacity: undefined, carryOverPolicy: undefined }
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 0),
+    ...scope,
+    id: 'retained-portfolio',
+    type: 'portfolio',
+    title: 'Retained portfolio',
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 1),
+    ...scope,
+    id: 'retained-roadmap',
+    type: 'roadmap',
+    title: 'Workspace roadmap',
+    parentId: 'retained-portfolio',
+  }, { workItems: [] })
+  await planningClient.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 2),
+    ...scope,
+    id: 'retained-initiative',
+    type: 'initiative',
+    title: 'Project initiative',
+    parentId: 'retained-roadmap',
+    teamId: 'core-team',
+    projectId: 'refero',
+  }, { workItems: [] })
+  await planningClient.configureUpdateCadence(workspaceId, {
+    target: { type: 'initiative', entityId: 'retained-initiative' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-01T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  }, { workItems: [] })
+  // The update target keeps the archived Initiative in the live graph.
+  await planningClient.archive(workspaceId, 'retained-initiative', { expectedRevision: 4 }, { workItems: [] })
+  expect(await planningClient.getArchivedEntity(workspaceId, 'retained-initiative')).toBeUndefined()
+  let restoreCalls = 0
+  const restore = planningClient.restore.bind(planningClient)
+  planningClient.restore = async (...input) => {
+    restoreCalls += 1
+    return restore(...input)
+  }
+  setTestAppDependencies({ planning: planningClient })
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const projectManager = await planningApiRequest(
+    '/api/planning/entities/retained-initiative/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(projectManager.status).toBe(403)
+  expect(restoreCalls).toBe(0)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const workspaceOwner = await planningApiRequest(
+    '/api/planning/entities/retained-initiative/restore',
+    'POST',
+    { expectedRevision: 5 },
+  )
+  expect(workspaceOwner.status).toBe(200)
+  expect(restoreCalls).toBe(1)
 })
 
 test('rejects duplicate when the source Planning owner became inactive', async () => {

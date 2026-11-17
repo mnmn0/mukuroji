@@ -9,12 +9,14 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(456)
-  expect(new Set(inventory).size).toBe(452)
+  expect(inventory).toHaveLength(458)
+  expect(new Set(inventory).size).toBe(454)
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
   expect(inventory).toContain('GET /api/planning/update-feed')
+  expect(inventory).toContain('GET /api/planning/archived-entities')
+  expect(inventory).toContain('POST /api/planning/entities/:entityId/restore')
   expect(inventory).toContain('PUT /api/planning/update-feed/read-state')
   expect(inventory).toContain('GET /api/planning/update-feed/saved')
   expect(inventory).toContain('PUT /api/planning/update-feed/saved')
@@ -62,6 +64,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '13d770df78799c9ccfcc6ba4243df7914e7a76f77d9b613523a47aaab9cb7a67',
+    'dfadc0bb3b58fdb6293615897bd6bbb31c9abd03e0896ad4c0c8aa9d35eab624',
   )
 })

@@ -19,6 +19,7 @@ import {
   exportPlanningUpdates,
   getPlanningUpdateWatch,
   getPlanningSnapshot,
+  listArchivedPlanningEntities,
   listPlanningUpdateComments,
   listPlanningUpdateReactions,
   listPlanningUpdates,
@@ -27,6 +28,7 @@ import {
   publishPlanningUpdate,
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
+  restorePlanningEntity,
   rolloverPlanningCycle,
   removePlanningUpdateReaction,
   subscribePlanningUpdateWatch,
@@ -157,6 +159,99 @@ describe('Planning API', () => {
         'X-Correlation-Id': 'correlation-planning',
       })
     }
+  })
+
+  test('restores an archived entity and lists archived entities by cursor', async () => {
+    const restoreSummary = {
+      restoredLinkCount: 30,
+      droppedLinkCount: 1,
+      restoredDependencyCount: 2,
+      retainedDependencyCount: 0,
+      droppedDependencyCount: 0,
+      pendingReferenceCount: 40,
+    }
+    const archivedEntity = {
+      id: 'goal/old',
+      type: 'goal',
+      title: 'Old goal',
+      parentId: 'initiative-onboarding',
+      ownerMemberKey: 'owner@example.com',
+      archivedAt: '2026-11-01T00:00:00.000Z',
+    }
+    const requests = installFetchRecorder((url) => url.includes('/restore')
+      ? { planning: planningSnapshotFixture, restore: restoreSummary }
+      : { entities: [archivedEntity], nextCursor: 'cursor/2' })
+
+    await expect(restorePlanningEntity('access-token', 'goal/old', {
+      expectedRevision: 12,
+    }, mutationContext)).resolves.toEqual({
+      planning: planningSnapshotFixture,
+      restore: restoreSummary,
+    })
+    await expect(listArchivedPlanningEntities('access-token', { limit: 50 })).resolves.toEqual({
+      entities: [archivedEntity],
+      nextCursor: 'cursor/2',
+    })
+    await listArchivedPlanningEntities('access-token', { cursor: 'cursor/2', limit: 50 })
+
+    expect(requests.map((request) => [request.init.method ?? 'GET', request.url])).toEqual([
+      ['POST', '/api/planning/entities/goal%2Fold/restore'],
+      ['GET', '/api/planning/archived-entities?limit=50'],
+      ['GET', '/api/planning/archived-entities?limit=50&cursor=cursor%2F2'],
+    ])
+    expect(requests[0]?.init.headers).toMatchObject({
+      Authorization: 'Bearer access-token',
+      'Idempotency-Key': 'idempotency-planning',
+      'X-Correlation-Id': 'correlation-planning',
+    })
+    expect(requests[0]?.init.body).toBe(JSON.stringify({ expectedRevision: 12 }))
+    expect(requests[1]?.init.headers).toMatchObject({ Authorization: 'Bearer access-token' })
+  })
+
+  test('rejects malformed restore and archived list success responses', async () => {
+    installFetchRecorder({ planning: planningSnapshotFixture, restore: { restoredLinkCount: -1 } })
+    await expect(restorePlanningEntity('token', 'goal', {
+      expectedRevision: 1,
+    }, mutationContext)).rejects.toMatchObject({ status: 502 })
+
+    // A valid summary next to a snapshot that is not a Planning snapshot is rejected too.
+    installFetchRecorder({
+      planning: { ...planningSnapshotFixture, entities: 'none' },
+      restore: {
+        restoredLinkCount: 0,
+        droppedLinkCount: 0,
+        restoredDependencyCount: 0,
+        retainedDependencyCount: 0,
+        droppedDependencyCount: 0,
+        pendingReferenceCount: 0,
+      },
+    })
+    await expect(restorePlanningEntity('token', 'goal', {
+      expectedRevision: 1,
+    }, mutationContext)).rejects.toMatchObject({ status: 502, code: 'InvalidPlanningRestoreResponse' })
+
+    installFetchRecorder({
+      entities: [{ id: 'goal', type: 'unknown', title: 'Goal', ownerMemberKey: 'owner', archivedAt: 'now' }],
+    })
+    await expect(listArchivedPlanningEntities('token')).rejects.toMatchObject({ status: 502 })
+
+    installFetchRecorder({ entities: [], nextCursor: 7 })
+    await expect(listArchivedPlanningEntities('token')).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('explains restore preconditions only for a restore', () => {
+    const parentArchived = new PlanningApiError(409, 'raw', 'PlanningRestoreParentUnavailable')
+    const ownerInactive = new PlanningApiError(409, 'raw', 'PlanningOwnerInactive')
+    expect(resolvePlanningErrorMessageKey(parentArchived, 'restore'))
+      .toBe('planning.restore.parentUnavailable')
+    expect(resolvePlanningErrorMessageKey(ownerInactive, 'restore'))
+      .toBe('planning.restore.ownerInactive')
+    expect(resolvePlanningErrorMessageKey(ownerInactive, 'mutation')).toBe('planning.mutationError')
+    expect(resolvePlanningErrorMessageKey(
+      new PlanningApiError(409, 'raw', 'PlanningRevisionConflict'),
+      'restore',
+    )).toBe('planning.conflict')
+    expect(resolvePlanningErrorMessageKey(new Error('raw'), 'restore')).toBe('planning.mutationError')
   })
 
   test('mutates dependencies, Work Item links, and cycle rollover through encoded paths', async () => {

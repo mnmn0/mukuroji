@@ -7,6 +7,7 @@ import type {
   PlanningGoalFramework,
   PlanningHealth,
   PlanningRisk,
+  PlanningCapacity,
   PlanningSnapshot,
   ScheduleDependencyConstraint,
   ScheduleDependencyType,
@@ -52,6 +53,11 @@ import {
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
+import {
+  PlanningArchivePanel,
+  type PlanningArchiveController,
+  type PlanningArchiveLabels,
+} from './PlanningArchivePanel'
 import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
@@ -176,6 +182,14 @@ export type PlanningLabels = PlanningUpdateLabels & {
   move: string
   /** 操作権限がない場合の文言です。 */
   readOnly: string
+  /** Live Planning graph の使用量を表示する formatter です。 */
+  capacityUsage: (capacity: PlanningCapacity) => string
+  /** 使用量が警告閾値を超えたときの案内です。 */
+  capacityWarning: string
+  /** 使用量が上限に達したときの案内です。 */
+  capacityFull: string
+  /** Archive 済みの計画の一覧と復元の文言です。 */
+  archivedPlans: PlanningArchiveLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -346,6 +360,8 @@ export type PlanningScreenProps = {
   ) => void | Promise<void>
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
+  /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
+  archive?: PlanningArchiveController
   /** Entity duplicate callback です。 */
   onDuplicateEntity?: (entity: PlanningEntity, targetId: string) => void | Promise<void>
   /** Entity move callback です。 */
@@ -405,6 +421,7 @@ export function PlanningScreen({
   accessErrorMessage,
   activeView,
   aiAssistance,
+  archive,
   canCreateInScope,
   canLinkEntity,
   canManageUpdateCadence,
@@ -546,6 +563,14 @@ export function PlanningScreen({
         <p className="workbench-eyebrow">{labels.eyebrow}</p>
         <h1 className="workbench-title mt-2 text-page-title">{labels.title}</h1>
         <p className="workbench-description mt-2 max-w-[820px]">{labels.description}</p>
+        {snapshot ? (
+          <p
+            className="mt-2 text-xs font-medium text-[var(--workbench-muted)]"
+            data-testid="planning-capacity-usage"
+          >
+            {labels.capacityUsage(snapshot.capacity)}
+          </p>
+        ) : null}
         <div
           aria-label={labels.viewTabs}
           className="mt-5 flex flex-wrap gap-2"
@@ -580,6 +605,23 @@ export function PlanningScreen({
         role="tabpanel"
         tabIndex={0}
       >
+        {snapshot && snapshot.capacity.level !== 'normal' ? (
+          <div
+            className={snapshot.capacity.level === 'full'
+              ? 'rounded-lg border border-red-200 bg-red-50 px-4 py-3'
+              : 'rounded-lg border border-amber-300 bg-amber-50 px-4 py-3'}
+            data-testid="planning-capacity-warning"
+            role="status"
+          >
+            <p
+              className={snapshot.capacity.level === 'full'
+                ? 'max-w-[820px] text-sm font-semibold text-fg-red-800'
+                : 'max-w-[820px] text-sm font-semibold text-fg-amber-900'}
+            >
+              {snapshot.capacity.level === 'full' ? labels.capacityFull : labels.capacityWarning}
+            </p>
+          </div>
+        ) : null}
         {errorMessage ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
             <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.error}</p>
@@ -688,6 +730,14 @@ export function PlanningScreen({
                 labels={labels}
                 onCreate={onCreateEntity}
               />
+              {archive ? (
+                <PlanningArchivePanel
+                  archive={archive}
+                  entityTypes={labels.entityTypes}
+                  labels={labels.archivedPlans}
+                  retry={labels.retry}
+                />
+              ) : null}
             </div>
             {selectedUpdateSummary && selectedUpdateView && resolvedSelectedUpdateTarget ? (
               <PlanningUpdateDetailPane
