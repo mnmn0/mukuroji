@@ -32,7 +32,11 @@ import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkIte
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
-import { toWorkItemEffortPatch, type WorkItemEffortProgressChange } from '../../work-items/model/workItemEffort'
+import {
+  resolveWorkItemDraftRevision,
+  toWorkItemEffortPatch,
+  type WorkItemEffortProgressChange,
+} from '../../work-items/model/workItemEffort'
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import {
@@ -375,11 +379,16 @@ function IssueDetailContent({
         sessionKey: createAiAssistantSessionKey(aiSummarySource),
       }
     : undefined
+  // The other forms keep their unsaved input when only the estimate, remaining effort, or progress
+  // changed, such as after the effort editor saved on its own; any change to a field they edit resets them.
+  const [draftBase, setDraftBase] = useState({ item: issue, revision: issue.revision })
+  const draftRevision = resolveWorkItemDraftRevision(draftBase, issue, pickTeamIssueDraftFields)
+  if (draftBase.item !== issue) setDraftBase({ item: issue, revision: draftRevision })
   const [selectedProject, setSelectedProject] = useState({
     revision: issue.revision,
     value: issue.assignedProjectId ?? '',
   })
-  const selectedProjectId = selectedProject.revision === issue.revision
+  const selectedProjectId = selectedProject.revision === draftRevision
     ? selectedProject.value
     : issue.assignedProjectId ?? ''
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
@@ -390,7 +399,7 @@ function IssueDetailContent({
     revision: issue.revision,
     value: currentWorkItemTypeId,
   })
-  const selectedWorkItemTypeId = selectedWorkItemType.revision === issue.revision
+  const selectedWorkItemTypeId = selectedWorkItemType.revision === draftRevision
     ? selectedWorkItemType.value
     : currentWorkItemTypeId
   const workItemTypeSelectionIdentity = `${issue.teamId}:${issue.id}:${issue.revision}`
@@ -537,7 +546,7 @@ function IssueDetailContent({
       handleCommentDraftDirtyChange(false)
     }
     setSelectedWorkItemType({
-      revision: issue.revision,
+      revision: draftRevision,
       value: nextWorkItemTypeId,
     })
     setFieldErrors((current) => ({ ...current, typeChange: undefined }))
@@ -554,14 +563,6 @@ function IssueDetailContent({
     void requestWorkItemTypePreview(nextWorkItemTypeId)
   }
   const editorFormId = useId()
-  // The other forms keep their unsaved input when only the estimate, remaining effort, or progress
-  // changed, such as after the effort editor saved on its own; any change to a field they edit resets them.
-  const [draftBase, setDraftBase] = useState({ issue, revision: issue.revision })
-  const draftRevision = draftBase.issue === issue ||
-    (draftBase.issue.id === issue.id && !haveDraftFieldsChanged(draftBase.issue, issue))
-    ? draftBase.revision
-    : issue.revision
-  if (draftBase.issue !== issue) setDraftBase({ issue, revision: draftRevision })
   const editorIdentity = [issue.teamId, issue.id, draftRevision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
@@ -870,7 +871,7 @@ function IssueDetailContent({
                     form={editorFormId}
                     name="assignedProjectId"
                     onChange={(event) => setSelectedProject({
-                      revision: issue.revision,
+                      revision: draftRevision,
                       value: event.target.value,
                     })}
                     value={selectedProjectId}
@@ -1197,15 +1198,13 @@ function IssueDetailContent({
 }
 
 /**
- * Returns whether a field edited by the detail forms (other than the effort editor) changed.
+ * Picks the fields edited by the detail forms other than the effort editor, in a fixed order.
  *
- * @param before - Work Item the forms were last reset to.
- * @param after - Current Work Item.
- * @returns Whether the forms must reset to the current values.
+ * @param item - Team Issue to read.
+ * @returns The fields, compared to decide whether the forms' unsaved input must reset.
  */
-function haveDraftFieldsChanged(before: TeamIssue, after: TeamIssue): boolean {
-  /** Picks the fields the detail forms edit, in a fixed order for comparison. */
-  const draftFields = (item: TeamIssue) => JSON.stringify([
+function pickTeamIssueDraftFields(item: TeamIssue): unknown {
+  return [
     item.teamId,
     item.title,
     item.description,
@@ -1217,6 +1216,5 @@ function haveDraftFieldsChanged(before: TeamIssue, after: TeamIssue): boolean {
     item.customFieldValues,
     item.contributorAssignments,
     item.acceptanceCriteria,
-  ])
-  return draftFields(before) !== draftFields(after)
+  ]
 }

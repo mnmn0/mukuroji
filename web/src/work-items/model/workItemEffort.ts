@@ -77,3 +77,34 @@ export function resolveWorkItemEffortColumnValue(
     case 'progress': return deriveWorkItemProgressPercent(item, configuration?.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE)
   }
 }
+
+/** The Work Item a detail form's drafts started from, and the revision those drafts are keyed by. */
+export type WorkItemDraftBase<T> = {
+  /** Work Item the forms last rendered. */
+  item: T
+  /** Revision that keys the forms' unsaved input. */
+  revision: number
+}
+
+/**
+ * Resolves the revision that keys a detail form's unsaved input.
+ *
+ * Saving only the estimate, remaining effort, or progress bumps the Work Item revision; the other
+ * forms keep their drafts, such as a typed title or a chosen Project or Work Item Type, unless a
+ * field they edit changed or another Work Item is shown.
+ *
+ * @param base - Work Item and revision the drafts started from.
+ * @param item - Work Item now shown.
+ * @param draftFields - Picks the fields the forms edit, compared as JSON.
+ * @returns The revision the drafts keep, or the current revision when they must reset.
+ */
+export function resolveWorkItemDraftRevision<T extends { id: string; revision: number }>(
+  base: WorkItemDraftBase<T>,
+  item: T,
+  draftFields: (item: T) => unknown,
+): number {
+  if (base.item === item) return base.revision
+  const isSameDraft = base.item.id === item.id &&
+    JSON.stringify(draftFields(base.item)) === JSON.stringify(draftFields(item))
+  return isSameDraft ? base.revision : item.revision
+}

@@ -4,6 +4,7 @@ import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { isCanonicalWorkItem } from '../src/work-items/api/contractValidation'
 import {
   isWorkItemEffortColumnField,
+  resolveWorkItemDraftRevision,
   resolveWorkItemEffortColumnValue,
   toWorkItemEffortPatch,
 } from '../src/work-items/model/workItemEffort'
@@ -29,6 +30,20 @@ const estimated: CanonicalWorkItem = {
 }
 
 describe('Work Item effort and progress', () => {
+  test('keeps unsaved Project and Work Item Type choices after an effort-only save', () => {
+    /** Picks the fields the other detail forms edit. */
+    const draftFields = (item: CanonicalWorkItem) => [item.title, item.assignedProjectId, item.workItemTypeId]
+    const base = { item: estimated, revision: estimated.revision }
+    const effortSaved = { ...estimated, revision: estimated.revision + 1, remainingEffortMinutes: 60, progressPercent: 50 }
+    const titleSaved = { ...estimated, revision: estimated.revision + 1, title: `${estimated.title} (renamed)` }
+
+    // A choice stamped with the draft revision stays selected while only effort changed.
+    expect(resolveWorkItemDraftRevision(base, estimated, draftFields)).toBe(estimated.revision)
+    expect(resolveWorkItemDraftRevision(base, effortSaved, draftFields)).toBe(estimated.revision)
+    expect(resolveWorkItemDraftRevision(base, titleSaved, draftFields)).toBe(titleSaved.revision)
+    expect(resolveWorkItemDraftRevision(base, { ...effortSaved, id: 'other' }, draftFields)).toBe(effortSaved.revision)
+  })
+
   test('accepts canonical Work Items with remaining effort and progress and rejects malformed values', () => {
     expect(isCanonicalWorkItem(estimated)).toBe(true)
     expect(isCanonicalWorkItem({ ...estimated, remainingEffortMinutes: -1 })).toBe(false)
