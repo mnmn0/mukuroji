@@ -136,29 +136,49 @@ export async function resetMemberCredential(
     // set. The second sign-out closes sessions started in between and is best effort.
     await ports.signOutEverywhere(member.memberKey)
     await ports.resetPassword(member.memberKey)
-    try {
-      await ports.signOutEverywhere(member.memberKey)
-    } catch (error) {
-      ports.reportFailure('Failed to sign the member out again after a password reset.', error)
-    }
+    await retryBestEffort(
+      ports,
+      () => ports.signOutEverywhere(member.memberKey),
+      'Failed to sign the member out again after a password reset.',
+    )
   }
 
   // An unmarked action can be resumed by a retry within the resume window, which would repeat
   // the reset, so marking it is worth a few attempts.
+  await retryBestEffort(
+    ports,
+    () => ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext),
+    'Failed to mark the credential reset as completed.',
+  )
+}
+
+/** How many times the use case tries a best-effort step after the credential changed. */
+const bestEffortAttempts = 3
+
+/**
+ * Runs a step that follows a finished credential change, retrying it a few times and reporting
+ * the last failure instead of throwing, because the change itself already happened.
+ *
+ * @param ports - Ports that report the failure.
+ * @param step - Step to run.
+ * @param failureMessage - Message reported when every attempt fails.
+ */
+async function retryBestEffort(
+  ports: Pick<MemberCredentialResetPorts, 'reportFailure'>,
+  step: () => Promise<void>,
+  failureMessage: string,
+) {
   let lastError: unknown
-  for (let attempt = 0; attempt < completionAttempts; attempt += 1) {
+  for (let attempt = 0; attempt < bestEffortAttempts; attempt += 1) {
     try {
-      await ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext)
+      await step()
       return
     } catch (error) {
       lastError = error
     }
   }
-  ports.reportFailure('Failed to mark the credential reset as completed.', lastError)
+  ports.reportFailure(failureMessage, lastError)
 }
-
-/** How many times the use case tries to mark a finished reset as completed. */
-const completionAttempts = 3
 
 /**
  * Explains why a reset does not apply to the member's current account.

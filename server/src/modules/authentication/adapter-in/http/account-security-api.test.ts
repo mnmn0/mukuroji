@@ -666,6 +666,25 @@ test('records the administrator password reset and signs the member out around t
   expect(recorded[0].auditContext?.workspaceId).toBe(workspaceId)
 })
 
+test('does not reset a password when the deployment cannot sign the member out first', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({
+    async adminResetUserPassword() {
+      throw new Error('The password must not be reset without signing the member out first.')
+    },
+    globallySignOutWorkspaceUser: undefined,
+  })
+  overrideWorkspaceAccess({
+    async recordMemberCredentialAction() {
+      throw new Error('Nothing must be recorded when the reset cannot run.')
+    },
+  })
+
+  const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
+
+  expect(response.status).toBe(503)
+})
+
 test('does not reset the password of a member who has not accepted the invitation', async () => {
   configureFakeProjectClients(true)
   overrideCognito({
@@ -673,6 +692,9 @@ test('does not reset the password of a member who has not accepted the invitatio
       return { ...createFakeCognitoProfile(userId), status: 'FORCE_CHANGE_PASSWORD' }
     },
     async adminResetUserPassword() {
+      throw new Error('Cognito must not be called for a pending invitation.')
+    },
+    async globallySignOutWorkspaceUser() {
       throw new Error('Cognito must not be called for a pending invitation.')
     },
   })

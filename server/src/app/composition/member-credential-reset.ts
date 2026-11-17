@@ -45,7 +45,9 @@ export function createMemberCredentialResetPorts(
   const changeCredential = action === 'password-reset-requested'
     ? adminResetUserPassword
     : adminDisableSoftwareTokenMfa
-  if (!changeCredential || !recordMemberCredentialAction) {
+  // A password reset must sign the member out before it changes anything.
+  const signOutAvailable = action !== 'password-reset-requested' || cognito.globallySignOutWorkspaceUser
+  if (!changeCredential || !recordMemberCredentialAction || !signOutAvailable) {
     return undefined
   }
 
@@ -76,7 +78,9 @@ export function createMemberCredentialResetPorts(
       await adminDisableSoftwareTokenMfa.call(cognito, memberKey)
     },
     async signOutEverywhere(memberKey) {
-      await cognito.globallySignOutWorkspaceUser?.(memberKey)
+      const { globallySignOutWorkspaceUser } = cognito
+      if (!globallySignOutWorkspaceUser) throw createCredentialResetUnavailableError()
+      await globallySignOutWorkspaceUser.call(cognito, memberKey)
     },
     reportFailure(message, error) {
       console.error(message, error instanceof Error ? error.name : 'UnknownError')
