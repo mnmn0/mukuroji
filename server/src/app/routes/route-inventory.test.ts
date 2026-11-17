@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(469)
-  expect(new Set(inventory).size).toBe(465)
+  expect(inventory).toHaveLength(471)
+  expect(new Set(inventory).size).toBe(467)
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('POST /api/auth/refresh')
   expect(inventory).toContain('POST /api/auth/logout')
@@ -27,6 +27,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/password-reset')
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/mfa-reset')
   expect(inventory).toContain('GET /api/planning/update-feed')
+  expect(inventory).toContain('GET /api/planning/archived-entities')
+  expect(inventory).toContain('POST /api/planning/entities/:entityId/restore')
   expect(inventory).toContain('PUT /api/planning/update-feed/read-state')
   expect(inventory).toContain('GET /api/planning/update-feed/saved')
   expect(inventory).toContain('PUT /api/planning/update-feed/saved')
@@ -71,6 +73,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/developer/credential-policy')
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'c883ee948ed567440053a21927d146b07bbd6e64260e590a5c04588c6a24dbdc',
+    '6693b698fb55d9a8727e5996ae8e5a1a826df8776e826f40945726714aa9d343',
   )
 })

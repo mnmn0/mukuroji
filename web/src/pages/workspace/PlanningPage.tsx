@@ -63,6 +63,7 @@ import {
 } from '../../planning/model/statusUpdateView'
 import { createPlanningUpdateTargetKey } from '../../planning/model/targetKey'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { usePlanningArchive } from '../../planning/mutations/usePlanningArchive'
 import {
   hasPlanningUpdateViewerReaction,
   revalidatePlanningUpdateHistoryAfterPublish,
@@ -228,6 +229,25 @@ export function PlanningPage() {
     [selectedUpdateTarget, snapshot, teams, updateHistory.data?.updates],
   )
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
+  const archive = usePlanningArchive({
+    accessToken,
+    canManageEntity: (entity) => canManagePlanningScope(user, entity, planningAccess),
+    canRestore: Boolean(user && !currentUserError && canManagePlanning),
+    listErrorMessage: labels.archivedPlans.error,
+    revalidatePlanning: () => mutatePlanning(),
+    // runMutation is declared below; the restore runs only after render.
+    runMutation: (key, payload, request) => runMutation(
+      key,
+      payload,
+      request,
+      undefined,
+      { errorOperation: 'restore', rethrowOnFailure: true },
+    ),
+    snapshot,
+    storageScope: user
+      ? JSON.stringify([user.attributes['custom:workspace_id'] ?? '', user.username])
+      : undefined,
+  })
   const canMutatePlanningContent = canMutateWorkspaceContent(user)
   const currentPath = `${location.pathname}${location.search}${location.hash}`
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
@@ -239,6 +259,7 @@ export function PlanningPage() {
       updateHistory.error,
       updateWatch.error,
       updateAnnotations.error,
+      archive.error,
       ...(projectRolesResult?.errors ?? []),
     ],
     currentPath,
@@ -289,6 +310,8 @@ export function PlanningPage() {
   type PlanningMutationOptions = {
     /** Re-throws a handled failure so a local draft can remain available to the caller. */
     rethrowOnFailure?: boolean
+    /** Operation whose failure reasons the error message explains; a generic mutation by default. */
+    errorOperation?: 'mutation' | 'restore'
   }
 
   /** Runs one Planning mutation and updates the authoritative bounded snapshot on success. */
@@ -329,7 +352,10 @@ export function PlanningPage() {
         return
       }
 
-      const messageKey = resolvePlanningErrorMessageKey(error, 'mutation')
+      const messageKey = resolvePlanningErrorMessageKey(
+        error,
+        options?.errorOperation ?? 'mutation',
+      )
       setMutationErrorMessage(t(messageKey))
       if (messageKey === 'planning.conflict') {
         await mutatePlanning()
@@ -752,14 +778,18 @@ export function PlanningPage() {
               )
             : undefined}
           onArchiveEntity={canManagePlanning && snapshot && accessToken
-            ? (entity) => runMutation(
-                `planning:entity:${entity.id}:archive`,
-                snapshot.revision,
-                (context) => archivePlanningEntity(accessToken, entity.id, {
-                  expectedRevision: snapshot.revision,
-                }, context),
-              )
+            ? async (entity) => {
+                await runMutation(
+                  `planning:entity:${entity.id}:archive`,
+                  snapshot.revision,
+                  (context) => archivePlanningEntity(accessToken, entity.id, {
+                    expectedRevision: snapshot.revision,
+                  }, context),
+                )
+                await archive.revalidate()
+              }
             : undefined}
+          archive={archive.controller}
           onDuplicateEntity={canManagePlanning && snapshot && accessToken
             ? (entity, targetId) => runMutation(
                 `planning:entity:${entity.id}:duplicate:${targetId}`,
