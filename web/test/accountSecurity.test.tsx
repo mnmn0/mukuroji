@@ -28,6 +28,10 @@ import {
   WorkspaceAccessApiError,
 } from '../src/workspace/api'
 import { shouldRetainCredentialResetContext } from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
+import {
+  createWorkspaceAccessMutationSession,
+  getCredentialResetRunner,
+} from '../src/workspace/mutations/workspaceAccessMutationSession'
 
 const originalFetch = globalThis.fetch
 const mutationContext = { idempotencyKey: 'credential-1', correlationId: 'correlation-1' }
@@ -174,6 +178,36 @@ describe('member credential reset retry', () => {
     expect(shouldRetainCredentialResetContext(
       new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
     )).toBe(false)
+  })
+
+  test('keeps an unknown reset outcome across a snapshot refresh and an access token refresh', async () => {
+    const session = createWorkspaceAccessMutationSession('token-1')
+    const keys: string[] = []
+    const reset = () => getCredentialResetRunner('owner@example.com').run(
+      'workspace-member:mfa-reset:sato@example.com',
+      'fingerprint',
+      async (context) => {
+        keys.push(context.idempotencyKey)
+        if (keys.length === 1) throw new TypeError('Failed to fetch')
+      },
+      shouldRetainCredentialResetContext,
+    )
+
+    await expect(reset()).rejects.toThrow('Failed to fetch')
+    // An invitation succeeds and its snapshot refresh discards the retained membership contexts.
+    await session.requestRunner.run('workspace-invitation', 'fingerprint', async () => undefined)
+    session.requestRunner.discardRetainedContexts()
+    // The access token is refreshed, which starts a new session for the same administrator.
+    createWorkspaceAccessMutationSession('token-2')
+    await reset()
+
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  test('keeps the reset keys of each administrator apart', () => {
+    expect(getCredentialResetRunner('owner@example.com')).toBe(getCredentialResetRunner('owner@example.com'))
+    expect(getCredentialResetRunner('admin@example.com')).not.toBe(getCredentialResetRunner('owner@example.com'))
   })
 })
 

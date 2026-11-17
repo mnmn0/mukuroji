@@ -49,6 +49,9 @@ function overrideCognito(overrides: Partial<CognitoClient>) {
 function overrideWorkspaceAccess(overrides: Partial<WorkspaceAccessClient>) {
   setTestAppDependencies({
     workspaceAccess: {
+      // Spreading the store instance leaves out its class methods, so the credential reset
+      // gets an applying stage unless an earlier override, such as a progress tracker, set one.
+      markMemberCredentialActionApplying: async () => undefined,
       ...getTestAppDependencies().workspace.workspaceAccess,
       ...overrides,
     },
@@ -691,6 +694,35 @@ test('lists the MFA state of active members for administrators', async () => {
   })
 })
 
+test.each([
+  ['workspace:member', 403],
+  ['workspace:admin', 200],
+] as const)('lets only administrators list sign-in security under a %s role assignment', async (roleId, status) => {
+  configureFakeProjectClients(true)
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => ({
+    ...await readSnapshot(currentWorkspaceId),
+    // An assigned role replaces the legacy owner role, and members.read alone is not enough.
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'demo-workspace-role',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId,
+      scope: { workspaceId, kind: 'workspace' },
+      source: 'direct',
+    }],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+
+  const response = await app.request('/api/workspace/members/sign-in-security', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(status)
+})
+
 test('records the administrator password reset and signs the member out around the Cognito reset', async () => {
   configureFakeProjectClients(true)
   const events: string[] = []
@@ -805,6 +837,28 @@ test('resets the authenticator of a member who lost it', async () => {
   expect(resets).toEqual(['sato@example.com'])
 })
 
+
+test('refuses an authenticator reset when the store cannot mark the change as started', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  trackCredentialActionProgress()
+  const { markMemberCredentialActionApplying: _omitted, ...withoutApplying } =
+    getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({ workspaceAccess: withoutApplying })
+
+  const response = await sendMfaResetWithKey()
+
+  expect(response.status).toBe(503)
+  expect(resets).toEqual([])
+})
 /**
  * Replaces the credential action store with one that keeps progress per idempotency key.
  *
@@ -896,12 +950,18 @@ test('does not repeat an authenticator reset that stopped after it started chang
 test('keeps an app registered after a reset whose completion mark failed', async () => {
   configureFakeProjectClients(true)
   const resets: string[] = []
+  let appRegistered = true
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: appRegistered,
+        softwareTokenMfaConfigured: appRegistered,
+      }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
+      appRegistered = false
     },
   })
   trackCredentialActionProgress()
@@ -912,33 +972,45 @@ test('keeps an app registered after a reset whose completion mark failed', async
   })
 
   expect((await sendMfaResetWithKey()).status).toBe(200)
+  expect(appRegistered).toBe(false)
   // The member registers a new app, and the same request arrives again.
+  appRegistered = true
   const replay = await sendMfaResetWithKey()
 
   expect(replay.status).toBe(409)
   expect((await replay.json()).code).toBe('WorkspaceCredentialActionExpired')
   expect(resets).toEqual(['sato@example.com'])
+  expect(appRegistered).toBe(true)
 })
 
 test('does not remove an authenticator registered after a completed reset when the request is replayed', async () => {
   configureFakeProjectClients(true)
   const resets: string[] = []
+  let appRegistered = true
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: appRegistered,
+        softwareTokenMfaConfigured: appRegistered,
+      }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
+      appRegistered = false
     },
   })
   trackCredentialActionProgress()
 
   expect((await sendMfaResetWithKey()).status).toBe(200)
+  expect(appRegistered).toBe(false)
   // The member registers a new app, and the same request arrives again.
+  appRegistered = true
   const replay = await sendMfaResetWithKey()
 
   expect(replay.status).toBe(200)
   expect(resets).toEqual(['sato@example.com'])
+  expect(appRegistered).toBe(true)
 })
 
 test('does not report SMS-only MFA as an authenticator that an administrator can reset', async () => {
