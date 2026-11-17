@@ -34,6 +34,7 @@ import { createMfaSetupChallengePorts } from '../../app/composition/mfa-setup-ch
 import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
 import { createSoftwareTokenEnrollmentPorts } from '../../app/composition/software-token-enrollment'
 import {
+  listMembersSignInSecurity,
   resetMemberCredential,
   WorkspaceAccessError,
   type WorkspaceMemberCredentialAction,
@@ -53,7 +54,7 @@ import {
 } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
-  inspectMembersSignInSecurity,
+  createRequestMemberSignInSecurityPorts,
   isSsoManagedEmail,
 } from '../shared/member-sign-in-security'
 import {
@@ -631,11 +632,11 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceAdministration(principal)
-      const members = await workspaceDependencies.workspaceAccess.listActiveMembers(
-        principal.directoryId,
-      )
       const response: WorkspaceMembersSignInSecurityResponse = {
-        members: await inspectMembersSignInSecurity(members),
+        members: await listMembersSignInSecurity(
+          createRequestMemberSignInSecurityPorts(),
+          principal.directoryId,
+        ),
       }
       return c.json(response)
     } catch (error) {
