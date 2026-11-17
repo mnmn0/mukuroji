@@ -3,6 +3,7 @@ import type {
   FocusPolicyOverrides,
   FocusPolicyTarget,
   FocusQueueResponse,
+  ResolvedWorkItemConfiguration,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
@@ -14,7 +15,13 @@ import {
   previewTeamIssueSchedule,
   updateTeamIssue,
 } from '../../../issues/api/workItems'
+import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../../issues/mutations/confirmParentCompletion'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
+import type { MessageKey } from '../../../shared/i18n/i18n'
+import { resolveWorkItemTypeWorkflow } from '../../../work-items/model/workItemDisplay'
 import {
   updateFocusPolicy,
   updateFocusSnooze,
@@ -64,6 +71,10 @@ export type UseFocusQueueActionsOptions = {
   guardAuthenticatedRequest: <Result>(request: Promise<Result>) => Promise<Result>
   /** Revalidates the authoritative Focus queue snapshot. */
   mutateFocusQueue: KeyedMutator<FocusQueueResponse>
+  /** Team configurations, used to warn before completing a parent with open children. */
+  configurationsByTeam?: Readonly<Record<string, ResolvedWorkItemConfiguration>>
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
 }
 
 /** Actions and transient feedback consumed by the Focus queue view. */
@@ -119,8 +130,10 @@ export type FocusQueueMutationController = {
  */
 export function useFocusQueueActions({
   accessToken,
+  configurationsByTeam,
   guardAuthenticatedRequest,
   mutateFocusQueue,
+  t,
 }: UseFocusQueueActionsOptions): FocusQueueMutationController {
   const { mutate: mutateSWR } = useSWRConfig()
   const mutationRunnerRef = useRef<ReturnType<typeof createMutationRequestRunner> | null>(null)
@@ -190,6 +203,19 @@ export function useFocusQueueActions({
     patch: { assigneeUserId?: string; workflowStatusId?: string },
   ): Promise<void> => {
     if (!accessToken) return
+    if (patch.workflowStatusId !== undefined) {
+      const configuration = configurationsByTeam?.[item.workItem.teamId]?.configuration
+      const nextStatus = resolveWorkItemTypeWorkflow(configuration, item.workItem.workItemTypeId)
+        ?.statuses.find((status) => status.id === patch.workflowStatusId)
+      const confirmed = await confirmParentCompletion({
+        workItem: item.workItem,
+        nextStatusCategory: nextStatus?.category,
+        configuration,
+        accessToken,
+        confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+      })
+      if (!confirmed) return
+    }
     const cacheScope = createFocusItemCacheRevalidationScope(item, true)
     await runItemAction(item.id, action, cacheScope, async () => {
       await guardAuthenticatedRequest(mutationRunner.run(
@@ -207,10 +233,12 @@ export function useFocusQueueActions({
     })
   }, [
     accessToken,
+    configurationsByTeam,
     guardAuthenticatedRequest,
     mutationRunner,
     refreshAffectedCaches,
     runItemAction,
+    t,
   ])
 
   /** Assigns the item to the viewer identifier authorized by the Focus response. */

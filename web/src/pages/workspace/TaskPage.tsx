@@ -76,6 +76,10 @@ import { describeScopedWorkItemListError } from '../../issues/model/workItemList
 import { useProjectCustomerImpact } from '../../customers/queries/useCustomers'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../issues/mutations/confirmParentCompletion'
+import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
   issueCollaborationTargetSearchParams,
@@ -134,6 +138,7 @@ import {
 import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveWorkflowStatusDefinition,
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
@@ -1470,6 +1475,19 @@ export function TaskPage() {
 
     const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??
       selectedIssueDetail?.resolvedConfiguration?.configuration
+    if (input.workflowStatusId !== undefined && !await confirmParentCompletion({
+      workItem: latestKnownTask,
+      nextStatusCategory: resolveWorkflowStatusDefinition({
+        ...latestKnownTask,
+        workflowStatusId: input.workflowStatusId,
+        workItemTypeId: input.workItemTypeId ?? latestKnownTask.workItemTypeId,
+      }, configuration)?.category,
+      configuration,
+      accessToken,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+    })) {
+      return latestKnownTask
+    }
     const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
     /** Returns whether a candidate is the same Team-local Work Item. */
     const matchesTask = (candidate: CanonicalWorkItem) =>

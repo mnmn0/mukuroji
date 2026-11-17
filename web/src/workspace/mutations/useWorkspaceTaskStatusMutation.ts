@@ -5,6 +5,10 @@ import type {
 import { useCallback, useRef, useState } from 'react'
 import type { KeyedMutator } from 'swr'
 import { TeamIssuesApiError } from '../../issues/api'
+import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../issues/mutations/confirmParentCompletion'
 import { updateWorkspaceTaskRemote } from '../../issues/mutations/updateWorkspaceTask'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -99,9 +103,21 @@ export function useWorkspaceTaskStatusMutation({
     if (pendingTaskMoveKeysRef.current.has(taskKey)) {
       return
     }
+    // Hold the move while the person decides, so a second drag cannot start another one.
+    pendingTaskMoveKeysRef.current.add(taskKey)
+    const confirmed = await confirmParentCompletion({
+      workItem: canonicalTask,
+      nextStatusCategory: nextStatus.category,
+      configuration,
+      accessToken,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+    })
+    if (!confirmed) {
+      pendingTaskMoveKeysRef.current.delete(taskKey)
+      return
+    }
 
     setErrorMessage(undefined)
-    pendingTaskMoveKeysRef.current.add(taskKey)
     const nextTasks = updateWorkspaceTaskStatus(
       tasks,
       canonicalTask,

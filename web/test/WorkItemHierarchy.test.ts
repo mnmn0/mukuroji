@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test'
 import type { TeamWorkItemHierarchyNode } from '@mukuroji/contracts'
 import { parseTeamWorkItemHierarchyResponse } from '../src/work-items/api/hierarchy'
 import {
-  countOpenWorkItemChildren,
   createWorkItemOutlineRows,
   planWorkItemHierarchyMove,
   readWorkItemHierarchyMoveShortcut,
@@ -152,17 +151,6 @@ describe('createWorkItemOutlineRows', () => {
     expect(createWorkItemOutlineRows(items, withHidden, new Set(['root']))
       .map((row) => row.item.id)).toEqual(['root'])
   })
-})
-
-test('counts open direct children among loaded Work Items', () => {
-  const items = [
-    { relationIds: ['parent:phase-1'], statusCategory: 'started' as const },
-    { relationIds: ['parent:phase-1', 'blocks:x'], statusCategory: 'completed' as const },
-    { relationIds: ['parent:phase-1'], statusCategory: 'canceled' as const },
-    { relationIds: ['parent:phase-2'], statusCategory: 'backlog' as const },
-  ]
-  expect(countOpenWorkItemChildren('phase-1', items)).toBe(1)
-  expect(countOpenWorkItemChildren('phase-3', items)).toBe(0)
 })
 
 test('reads hierarchy move shortcuts only with Alt+Shift and an arrow key', () => {

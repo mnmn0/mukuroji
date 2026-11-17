@@ -12,6 +12,8 @@ const workItemsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultHierarchyErrorMessage = 'Unable to load the Work Item hierarchy.'
 
+const defaultOpenChildCountErrorMessage = 'Unable to count the open child Work Items.'
+
 const statusCategories: readonly WorkflowStatusCategory[] = [
   'backlog',
   'unstarted',
@@ -50,6 +52,40 @@ export async function getTeamWorkItemHierarchy(
     throw new WorkItemConfigurationApiError(502, defaultHierarchyErrorMessage, 'InvalidWorkItemHierarchy')
   }
   return hierarchy
+}
+
+/**
+ * Counts the open direct children of a Work Item that the reader may see.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Parent Work Item ID.
+ * @param accessToken - Access token sent as the bearer token.
+ * @returns Number of readable, non-archived children that are neither completed nor canceled.
+ * @throws WorkItemConfigurationApiError when the request fails or the response is malformed.
+ */
+export async function getWorkItemOpenChildCount(
+  teamId: string,
+  workItemId: string,
+  accessToken: string,
+): Promise<number> {
+  const response = await fetch(
+    `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(workItemId)}/children/open-count`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  )
+  const data = await readJson(response)
+  if (!response.ok) {
+    const message = readStringProperty(data, 'message')?.trim()
+    throw new WorkItemConfigurationApiError(
+      response.status,
+      message || defaultOpenChildCountErrorMessage,
+      readStringProperty(data, 'code'),
+    )
+  }
+  const openChildCount = isRecord(data) ? data.openChildCount : undefined
+  if (!isNonNegativeInteger(openChildCount)) {
+    throw new WorkItemConfigurationApiError(502, defaultOpenChildCountErrorMessage, 'InvalidOpenChildCount')
+  }
+  return openChildCount
 }
 
 /**

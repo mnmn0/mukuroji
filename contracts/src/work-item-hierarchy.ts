@@ -495,6 +495,15 @@ export type TeamWorkItemHierarchyNode = {
   rollup?: WorkItemHierarchyRollup
 }
 
+/** Response of `GET /api/teams/{teamId}/issues/{issueId}/children/open-count`. */
+export type WorkItemOpenChildCountResponse = {
+  /**
+   * Number of direct children the reader may see that are not archived and are neither
+   * completed nor canceled.
+   */
+  openChildCount: number
+}
+
 /** Response of `GET /api/teams/{teamId}/issues/hierarchy`. */
 export type TeamWorkItemHierarchyResponse = {
   /** Response schema version. */

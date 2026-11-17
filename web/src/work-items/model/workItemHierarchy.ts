@@ -1,9 +1,6 @@
 import {
   createWorkItemHierarchyRankBetween,
-  isWorkItemHierarchyClosedCategory,
-  readWorkItemParentId,
   type TeamWorkItemHierarchyNode,
-  type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 
 /** Ways a Work Item can move in the hierarchy. */
@@ -193,26 +190,6 @@ export function createWorkItemOutlineRows<Item extends { id: string }>(
     rows.push({ ...entry, hasChildren, collapsed })
   })
   return rows
-}
-
-/**
- * Counts the direct children of a Work Item that are neither completed nor canceled.
- *
- * Only Work Items the viewer has loaded are counted; the server still enforces a Team's reject
- * policy over every child.
- *
- * @param parentWorkItemId - Parent whose children are counted.
- * @param workItems - Loaded Work Items with their relation projection and status category.
- * @returns Number of open direct children.
- */
-export function countOpenWorkItemChildren(
-  parentWorkItemId: string,
-  workItems: readonly { relationIds: readonly string[], statusCategory: WorkflowStatusCategory }[],
-): number {
-  return workItems.filter((workItem) =>
-    readWorkItemParentId(workItem.relationIds) === parentWorkItemId &&
-    !isWorkItemHierarchyClosedCategory(workItem.statusCategory)
-  ).length
 }
 
 /** Keyboard state read to detect a hierarchy move shortcut. */

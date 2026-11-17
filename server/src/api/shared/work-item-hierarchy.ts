@@ -1,5 +1,6 @@
 import {
   WORK_ITEM_HIERARCHY_MAX_ITEMS,
+  isWorkItemHierarchyClosedCategory,
   readWorkItemParentId,
   type TeamWorkItemHierarchyResponse,
 } from '@mukuroji/contracts'
@@ -80,39 +81,95 @@ export async function readWorkItemHierarchyLinks(
   isReadable: (issue: TeamIssueResponseItem) => boolean,
 ): Promise<{ parentWorkItemId: string | null, childWorkItemIds: string[] }> {
   if (issue.archivedAt !== undefined) return { parentWorkItemId: null, childWorkItemIds: [] }
-  const { teamIssues, workItemConfigurations } = workItemDependencies
-  /** Reads a linked Work Item, or `undefined` when it no longer exists. */
-  const readLinked = async (workItemId: string) => {
-    try {
-      return (await teamIssues.getTeamIssueDetail(
-        directoryId,
-        teamId,
-        workItemId,
-        { consistentIssueRead: true, includeEvents: false },
-      )).issue
-    } catch (error) {
-      if (isTeamIssueNotFoundError(error)) return undefined
-      throw error
-    }
-  }
   const parentId = readWorkItemParentId(issue.relationIds)
-  const parent = parentId === undefined ? undefined : await readLinked(parentId)
-  const children = await workItemConfigurations.listRelations(
+  const parent = parentId === undefined ? undefined : await readLinkedWorkItem(directoryId, teamId, parentId)
+  const children = await readReadableWorkItemChildren(directoryId, teamId, issue, isReadable)
+  return {
+    parentWorkItemId: parent && parent.archivedAt === undefined && isReadable(parent) ? parent.id : null,
+    childWorkItemIds: children.map((child) => child.id).sort(),
+  }
+}
+
+/**
+ * Counts the readable direct children of a Work Item that are still open.
+ *
+ * Archived children are outside the hierarchy and are not counted, as in the server's `reject`
+ * check. The Web asks with this count before completing a parent under the `warn` policy.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param issue - Parent Work Item.
+ * @param isReadable - Whether the reader may see a Work Item.
+ * @returns Number of readable, non-archived children that are neither completed nor canceled.
+ */
+export async function readOpenWorkItemChildCount(
+  directoryId: string,
+  teamId: string,
+  issue: TeamIssueResponseItem,
+  isReadable: (issue: TeamIssueResponseItem) => boolean,
+): Promise<number> {
+  const children = await readReadableWorkItemChildren(directoryId, teamId, issue, isReadable)
+  return children.filter((child) => !isWorkItemHierarchyClosedCategory(child.statusCategory)).length
+}
+
+/**
+ * Reads the readable, non-archived direct children of a Work Item.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param issue - Parent Work Item; an archived one has no children in the hierarchy.
+ * @param isReadable - Whether the reader may see a Work Item.
+ * @returns The children in relation order.
+ */
+async function readReadableWorkItemChildren(
+  directoryId: string,
+  teamId: string,
+  issue: TeamIssueResponseItem,
+  isReadable: (issue: TeamIssueResponseItem) => boolean,
+): Promise<TeamIssueResponseItem[]> {
+  if (issue.archivedAt !== undefined) return []
+  const children = await workItemDependencies.workItemConfigurations.listRelations(
     directoryId,
     teamId,
     issue.id,
     { types: ['child'] },
   )
   const childIds = children.relations.map((relation) => relation.targetWorkItemId)
-  const childWorkItemIds: string[] = []
+  const readable: TeamIssueResponseItem[] = []
   for (let index = 0; index < childIds.length; index += LINK_READ_CONCURRENCY) {
-    const details = await Promise.all(childIds.slice(index, index + LINK_READ_CONCURRENCY).map(readLinked))
+    const details = await Promise.all(
+      childIds.slice(index, index + LINK_READ_CONCURRENCY)
+        .map((childId) => readLinkedWorkItem(directoryId, teamId, childId)),
+    )
     for (const child of details) {
-      if (child && child.archivedAt === undefined && isReadable(child)) childWorkItemIds.push(child.id)
+      if (child && child.archivedAt === undefined && isReadable(child)) readable.push(child)
     }
   }
-  return {
-    parentWorkItemId: parent && parent.archivedAt === undefined && isReadable(parent) ? parent.id : null,
-    childWorkItemIds: childWorkItemIds.sort(),
+  return readable
+}
+
+/**
+ * Reads a linked Work Item.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns The Work Item, or `undefined` when it no longer exists.
+ */
+async function readLinkedWorkItem(
+  directoryId: string,
+  teamId: string,
+  workItemId: string,
+): Promise<TeamIssueResponseItem | undefined> {
+  try {
+    return (await workItemDependencies.teamIssues.getTeamIssueDetail(
+      directoryId,
+      teamId,
+      workItemId,
+      { consistentIssueRead: true, includeEvents: false },
+    )).issue
+  } catch (error) {
+    if (isTeamIssueNotFoundError(error)) return undefined
+    throw error
   }
 }

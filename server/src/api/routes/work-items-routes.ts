@@ -31,6 +31,7 @@ import {
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
   type WorkItemKeyLookupResponse,
+  type WorkItemOpenChildCountResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -264,7 +265,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
-import { readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
+import { readOpenWorkItemChildCount, readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
 import {
   readScopedWorkItemPage,
   readScopedWorkItemPageQuery,
@@ -4492,6 +4493,45 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         return toCognitoDirectoryErrorResponse(c, error)
       }
       return toProjectDataErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Counts the open direct children of a Work Item, so the Web can ask before completing a
+   * parent under the Team's `warn` completion policy.
+   */
+  routeApp.get('/api/teams/:teamId/issues/:issueId/children/open-count', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    if (!teamId || !issueId) {
+      return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+    }
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        context.team.id,
+        issueId,
+        { consistentIssueRead: true, includeEvents: false },
+      )
+      requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+      const openChildCount = await readOpenWorkItemChildCount(
+        principal.directoryId,
+        context.team.id,
+        detail.issue,
+        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+      )
+      return c.json({ openChildCount } satisfies WorkItemOpenChildCountResponse)
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toCognitoDirectoryErrorResponse(c, error)
+      }
+      return toWorkItemConfigurationErrorResponse(c, error)
     }
   })
 

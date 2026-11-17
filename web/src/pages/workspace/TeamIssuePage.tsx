@@ -1,6 +1,4 @@
 import {
-  DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
-  isWorkItemHierarchyClosedCategory,
   type TaskViewScope,
   type WorkItemRelation,
   type WorkItemDependencyEndpoint,
@@ -43,6 +41,10 @@ import { useTeamIssueDetail, useTeamIssues } from '../../issues/queries/useWorkI
 import { describeScopedWorkItemListError } from '../../issues/model/workItemListError'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../issues/mutations/confirmParentCompletion'
+import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
   resolveIssueCollaborationTab,
@@ -78,7 +80,6 @@ import {
 } from '../../work-items/api'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { useTeamWorkItemHierarchy } from '../../work-items/queries/useTeamWorkItemHierarchy'
-import { countOpenWorkItemChildren } from '../../work-items/model/workItemHierarchy'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import {
   readSelectedRelationGraphRevision,
@@ -585,30 +586,26 @@ export function TeamIssuePage() {
   }
 
   /**
-   * Asks before completing a Work Item whose loaded children are still open, when the Team only warns.
-   *
-   * Under the reject policy the server refuses the change, so no question is asked.
+   * Asks before completing a Work Item whose children are still open, when the Team only warns.
    *
    * @param currentIssue - Work Item being updated.
    * @param input - Requested change.
    * @returns Whether the update should go ahead.
    */
-  const confirmCompletingParent = (currentIssue: TeamIssue, input: UpdateTeamIssueInput) => {
-    if (input.workflowStatusId === undefined || isWorkItemHierarchyClosedCategory(currentIssue.statusCategory)) {
-      return true
-    }
-    const policy = taskViewConfiguration?.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY
-    if (policy !== 'warn') return true
-    const nextStatus = resolveWorkflowStatusDefinition({
-      ...currentIssue,
-      workflowStatusId: input.workflowStatusId,
-      workItemTypeId: input.workItemTypeId ?? currentIssue.workItemTypeId,
-    }, taskViewConfiguration)
-    if (nextStatus?.category !== 'completed') return true
-    const openChildren = countOpenWorkItemChildren(currentIssue.id, issues)
-    return openChildren === 0 ||
-      globalThis.window.confirm(t('issues.outline.completeWarning').replace('{count}', String(openChildren)))
-  }
+  const confirmCompletingParent = (currentIssue: TeamIssue, input: UpdateTeamIssueInput) =>
+    !accessToken || input.workflowStatusId === undefined
+      ? Promise.resolve(true)
+      : confirmParentCompletion({
+          workItem: currentIssue,
+          nextStatusCategory: resolveWorkflowStatusDefinition({
+            ...currentIssue,
+            workflowStatusId: input.workflowStatusId,
+            workItemTypeId: input.workItemTypeId ?? currentIssue.workItemTypeId,
+          }, taskViewConfiguration)?.category,
+          configuration: taskViewConfiguration,
+          accessToken,
+          confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+        })
 
   const handleUpdateIssue = async (issueId: string, input: UpdateTeamIssueInput) => {
     if (!accessToken) {
@@ -635,7 +632,7 @@ export function TeamIssuePage() {
         'TeamTaskActionAccessDenied',
       )
     }
-    if (!confirmCompletingParent(currentIssue, input)) return currentIssue
+    if (!await confirmCompletingParent(currentIssue, input)) return currentIssue
 
     try {
       const updatedIssue = await guardEnterpriseSession(mutationRequestRunner.run(

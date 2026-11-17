@@ -358,3 +358,46 @@ test('reads the readable parent and children of one Work Item without the Team t
   ))
   expect(archivedLinks).toEqual({ parentWorkItemId: null, childWorkItemIds: [] })
 })
+
+test('counts the open readable children of a Work Item for the completion warning', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const issues: Record<string, TeamIssueResponseItem> = {
+    parent: { ...base, id: 'parent' },
+    open: { ...base, id: 'open', statusCategory: 'started' },
+    done: { ...base, id: 'done', statusCategory: 'completed' },
+    canceled: { ...base, id: 'canceled', statusCategory: 'canceled' },
+    archived: { ...base, id: 'archived', statusCategory: 'started', archivedAt: '2026-11-01T00:00:00.000Z' },
+    secret: { ...base, id: 'secret', statusCategory: 'started', assignedProjectId: 'secret-project' },
+  }
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail(_directoryId, _teamId, issueId) {
+        const issue = issues[issueId]
+        if (!issue) throw new ProjectDataError(404, 'TeamIssueNotFound', 'Missing.')
+        return { issue, activity: [] }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          relations: ['open', 'done', 'canceled', 'archived', 'missing', 'secret'].map((targetWorkItemId) => ({
+            sourceWorkItemId: workItemId,
+            targetWorkItemId,
+            type: 'child' as const,
+          })),
+          graphRevision: 3,
+        }
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/issues/parent/children/open-count')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  // Only `open` counts: the others are closed, archived, missing, or in a Project the reader cannot see.
+  expect(body).toEqual({ openChildCount: 1 })
+  const missing = await request('/api/teams/core-team/issues/missing/children/open-count')
+  expect(missing.status).toBe(404)
+})
