@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import {
+  isCanonicalWorkItemKey,
   AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
@@ -28,6 +29,10 @@ const acceptanceCriteriaSchema = z.object({
     text: z.string().min(1).max(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH),
     satisfied: z.boolean(),
   })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
+})
+const keySchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, createdAt: z.iso.datetime(),
+  key: z.string().refine(isCanonicalWorkItemKey).optional(),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
@@ -350,6 +355,20 @@ export function createAgentWorkItemApi(
         throw new AgentTaskError('invalid_response', 'The API returned acceptance criteria of another task.')
       }
       return criteria.items
+    },
+    /** Reads a task's key and its Work Item's creation time; a server older than the endpoint has neither. */
+    async taskKey(id) {
+      let found: z.infer<typeof keySchema>
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/key`, keySchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the key of another task.')
+      }
+      return { createdAt: found.createdAt, ...(found.key === undefined ? {} : { key: found.key }) }
     },
   }
 

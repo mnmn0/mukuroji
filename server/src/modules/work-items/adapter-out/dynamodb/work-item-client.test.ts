@@ -9,6 +9,7 @@ import {
   createWorkItemNotificationCandidates,
   DynamoDbTeamIssuesClient,
 } from './work-item-client'
+import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
 import {
   createMutationAuditContext,
 } from '../../../audit/audit'
@@ -39,6 +40,18 @@ import {
 afterEach(() => {
   resetTestApp()
 })
+
+/**
+ * Reads the Work Item ID a fake GetCommand asks for, so a fake can answer only for the Work Item
+ * it holds and report other IDs (such as a new Work Item's candidate ID) as absent.
+ *
+ * @param command - Command sent to the fake document client.
+ * @returns The requested `issueId`, or `undefined` when the command has none.
+ */
+function readGetCommandIssueId(command: { input: Record<string, unknown> }): unknown {
+  const key = command.input.Key
+  return typeof key === 'object' && key !== null ? Reflect.get(key, 'issueId') : undefined
+}
 
 /** Creates a canonical deadline-only schedule for DynamoDB Work Item fixtures. */
 function createDueDateSchedule(dueDate: string): DueDateWorkItemSchedule {
@@ -1147,7 +1160,7 @@ test('DynamoDB Work Item list limits count visible rows instead of archived rows
   })
 })
 
-test('DynamoDB Work Item creation allocates IDs and sort order across archived rows', async () => {
+test('DynamoDB Work Item creation takes its ID from a new key and sorts after archived rows', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
   const archivedWorkItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -1187,7 +1200,7 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
   const client = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -1209,14 +1222,40 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
     'demo@example.com',
   )
 
-  expect(response.issue.id).toBe('wireframe-2')
+  expect(response.issue).toMatchObject({ id: 'ct-1', key: 'CT-1' })
+  // Only the highest sort order is read, not the whole Team.
+  expect(sentCommands.filter((command) => command.name === 'QueryCommand')).toEqual([{
+    name: 'QueryCommand',
+    input: expect.objectContaining({
+      IndexName: 'TeamIssueSortOrderIndex',
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  }])
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactionItems = (transaction?.input as TransactWriteCommandInput | undefined)
     ?.TransactItems
+  expect(transactionItems?.at(-1)).toEqual({
+    Put: {
+      TableName: 'WorkItemsTable',
+      Item: {
+        directoryTeamId: 'user#demo@example.com#work-item-key-registry',
+        issueId: 'key#CT-1',
+        entryType: 'work-item-key',
+        directoryId: 'user#demo@example.com',
+        key: 'CT-1',
+        teamId: 'core-team',
+        workItemId: 'ct-1',
+        registeredAt: expect.any(String),
+      },
+      ConditionExpression: 'attribute_not_exists(issueId)',
+    },
+  })
   expect(transactionItems?.[0]).toMatchObject({
     Put: {
       Item: {
-        issueId: 'wireframe-2',
+        issueId: 'ct-1',
+        key: 'CT-1',
         sortOrder: 20,
         schemaVersion: 2,
         dueDate: '2026-06-03',
@@ -1242,7 +1281,7 @@ test('DynamoDB Work Item creation persists a Customer preparation marker for com
   const client = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -1610,7 +1649,7 @@ test('DynamoDB Work Item creation commits a deterministic Triage acceptance cont
   const client = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -1691,13 +1730,19 @@ test('DynamoDB Work Item creation commits a deterministic Triage acceptance cont
       },
     },
   })
-  expect(transactionItems?.at(-1)).toEqual(contribution)
+  // The key reservation is appended after the caller's contribution.
+  expect(transactionItems?.at(-2)).toEqual(contribution)
+  expect(transactionItems?.at(-1)).toMatchObject({
+    Put: { Item: { entryType: 'work-item-key', key: 'CT-1' } },
+  })
   expect(sentCommands.filter((command) =>
     command.name === 'TransactWriteCommand'
   )).toHaveLength(2)
+  // Each create first checks whether the deterministic ID exists; the replay then reads it back.
   expect(sentCommands.filter((command) =>
     command.name === 'GetCommand'
-  )).toHaveLength(1)
+  )).toHaveLength(3)
+  expect(replay.issue.key).toBe('CT-1')
 })
 
 /**
@@ -1741,7 +1786,7 @@ function createIdempotentReplayClient() {
   return new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -1854,7 +1899,7 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
   const client = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -2558,7 +2603,7 @@ test('DynamoDB Work Item client classifies configuration conflicts from the actu
             return { Items: [] }
           }
           if (command.constructor.name === 'GetCommand') {
-            return { Item: currentIssue }
+            return readGetCommandIssueId(command) === currentIssue.issueId ? { Item: currentIssue } : {}
           }
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
@@ -2582,7 +2627,7 @@ test('DynamoDB Work Item client classifies configuration conflicts from the actu
       const client = new DynamoDbTeamIssuesClient(
         'IssuesTable',
         'IssueEventsTable',
-        documentClient,
+        withWorkItemKeyCounter(documentClient),
         {} as DynamoDBClient,
         false,
         auditEnabled ? 'AuditTable' : undefined,
@@ -2649,7 +2694,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
     const client = new DynamoDbTeamIssuesClient(
       'IssuesTable',
       'IssueEventsTable',
-      documentClient,
+      withWorkItemKeyCounter(documentClient),
       {} as DynamoDBClient,
       false,
     )
@@ -2677,7 +2722,8 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
       'demo@example.com',
     )
 
-    expect(transactItems?.slice(2)).toMatchObject([
+    // The trailing key reservation is covered by the creation tests.
+    expect(transactItems?.slice(2, -1)).toMatchObject([
       {
         ConditionCheck: expect.objectContaining({
           TableName: 'WorkspaceAccessTable',
@@ -2747,7 +2793,7 @@ test('DynamoDB Work Item client keeps the snapshot membership version when the a
     const client = new DynamoDbTeamIssuesClient(
       'IssuesTable',
       'IssueEventsTable',
-      documentClient,
+      withWorkItemKeyCounter(documentClient),
       {} as DynamoDBClient,
       false,
     )
@@ -2902,7 +2948,7 @@ test('DynamoDB Work Item create and update classify snapshot Planning races', as
       const documentClient = {
         async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
           if (command.constructor.name === 'QueryCommand') return { Items: [] }
-          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          if (command.constructor.name === 'GetCommand') return readGetCommandIssueId(command) === currentIssue.issueId ? { Item: currentIssue } : {}
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
               ConditionCheck?: { TableName?: string }
@@ -2927,7 +2973,7 @@ test('DynamoDB Work Item create and update classify snapshot Planning races', as
       const client = new DynamoDbTeamIssuesClient(
         'IssuesTable',
         'IssueEventsTable',
-        documentClient,
+        withWorkItemKeyCounter(documentClient),
         {} as DynamoDBClient,
         false,
       )
@@ -3026,7 +3072,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
     const documentClient = {
       async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
         if (command.constructor.name === 'QueryCommand') return { Items: [] }
-        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'GetCommand') return readGetCommandIssueId(command) === currentIssue.issueId ? { Item: currentIssue } : {}
         if (command.constructor.name === 'TransactWriteCommand') {
           const transactItems = command.input.TransactItems as Array<{
             ConditionCheck?: { TableName?: string }
@@ -3055,7 +3101,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
     const client = new DynamoDbTeamIssuesClient(
       'IssuesTable',
       'IssueEventsTable',
-      documentClient,
+      withWorkItemKeyCounter(documentClient),
       {} as DynamoDBClient,
       false,
     )
@@ -3129,7 +3175,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
   const deleteClient = new DynamoDbTeamIssuesClient(
     'IssuesTable',
     'IssueEventsTable',
-    deleteDocumentClient,
+    withWorkItemKeyCounter(deleteDocumentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -4129,4 +4175,175 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
     status: 502,
   })
   expect(mixedReasons.sentInputs).toHaveLength(2)
+})
+
+/** Minimal create input shared by the Work Item key tests. */
+function createKeyTestInput(title: string) {
+  return {
+    title,
+    assigneeUserId: 'sato@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    schedule: createDueDateSchedule('2026-07-20'),
+    priority: 'medium',
+  } as const
+}
+
+test('DynamoDB Work Item creation skips a key whose ID an older title-based Work Item uses', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') {
+        // A Work Item titled "CT 1" got the ID `ct-1` before keys existed.
+        return readGetCommandIssueId(command) === 'ct-1'
+          ? { Item: { ...createScheduleCascadeIssue('core-team', 'ct-1'), title: 'CT 1' } }
+          : {}
+      }
+      return command.constructor.name === 'QueryCommand' ? { Items: [] } : {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    withWorkItemKeyCounter(documentClient),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createKeyTestInput('New Work Item'),
+    'demo@example.com',
+  )
+
+  expect(response.issue).toMatchObject({ id: 'ct-2', key: 'CT-2' })
+  // No Team-wide read is needed to pick the ID or the sort order.
+  expect(sentCommands.filter((command) => command.name === 'QueryCommand')).toHaveLength(1)
+})
+
+test('DynamoDB Work Item creation rejects titles longer than the limit on create and update', async () => {
+  const documentClient = {
+    async send() {
+      throw new Error('Nothing should reach DynamoDB.')
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createKeyTestInput('あ'.repeat(257)),
+    'demo@example.com',
+  )).rejects.toMatchObject({ status: 400, code: 'WorkItemTitleTooLong' })
+  await expect(client.updateTeamIssue(
+    'workspace-1',
+    'core-team',
+    'ct-1',
+    { title: 'x'.repeat(257), expectedRevision: 1 },
+    'demo@example.com',
+  )).rejects.toMatchObject({ status: 400, code: 'WorkItemTitleTooLong' })
+})
+
+test('DynamoDB Request conversion replay returns the existing Work Item without a new key', async () => {
+  const sentCommands: string[] = []
+  const existing = {
+    ...createScheduleCascadeIssue('core-team', 'request-req-20260716-replay'),
+    key: 'CT-4',
+    sourceRequestId: 'req_20260716_replay',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push(command.constructor.name)
+      if (command.constructor.name === 'GetCommand') {
+        return readGetCommandIssueId(command) === existing.issueId ? { Item: existing } : {}
+      }
+      throw new Error(`Unexpected command: ${command.constructor.name}`)
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    createKeyTestInput('Request-created Work Item'),
+    'admin@example.com',
+    undefined,
+    {
+      tableName: 'RequestIntakeTable',
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'SUBMISSION#req_20260716_replay',
+      expectedRevision: 3,
+      actorId: 'admin@example.com',
+      submissionId: 'req_20260716_replay',
+      events: [],
+    },
+  )
+
+  expect(response.issue).toMatchObject({ id: existing.issueId, key: 'CT-4' })
+  expect(sentCommands).toEqual(['GetCommand'])
+})
+
+test('DynamoDB idempotent Work Item create retry replays without using up a key number', async () => {
+  const existing = {
+    ...createScheduleCascadeIssue('core-team', `api-${'c'.repeat(48)}`),
+    key: 'CT-9',
+    importRequestDigest: 'd'.repeat(64),
+  }
+  const sentCommands: string[] = []
+  const issueConditions: unknown[] = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push(command.constructor.name)
+      if (command.constructor.name === 'GetCommand') return { Item: existing }
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const items: Array<{ Put?: { ConditionExpression?: string } }> = Object(command.input).TransactItems
+        issueConditions.push(items[0]?.Put?.ConditionExpression)
+        throw Object.assign(new Error('Transaction cancelled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+        })
+      }
+      throw new Error(`Unexpected command: ${command.constructor.name}`)
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const replay = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      ...createKeyTestInput('Imported Work Item'),
+      idempotentIssueId: existing.issueId,
+      idempotentRequestDigest: existing.importRequestDigest,
+    },
+    'demo@example.com',
+  )
+
+  expect(replay.issue).toMatchObject({ id: existing.issueId, key: 'CT-9' })
+  expect(sentCommands).not.toContain('UpdateCommand')
+  // The keyless insert can never succeed, even if the Work Item was deleted after the read.
+  expect(issueConditions).toEqual(['attribute_exists(issueId) AND attribute_not_exists(issueId)'])
 })

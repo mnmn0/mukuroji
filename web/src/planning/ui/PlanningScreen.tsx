@@ -54,6 +54,11 @@ import {
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
 import {
+  PlanningArchivePanel,
+  type PlanningArchiveController,
+  type PlanningArchiveLabels,
+} from './PlanningArchivePanel'
+import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
@@ -183,6 +188,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   capacityWarning: string
   /** 使用量が上限に達したときの案内です。 */
   capacityFull: string
+  /** Archive 済みの計画の一覧と復元の文言です。 */
+  archivedPlans: PlanningArchiveLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -353,6 +360,8 @@ export type PlanningScreenProps = {
   ) => void | Promise<void>
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
+  /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
+  archive?: PlanningArchiveController
   /** Entity duplicate callback です。 */
   onDuplicateEntity?: (entity: PlanningEntity, targetId: string) => void | Promise<void>
   /** Entity move callback です。 */
@@ -412,6 +421,7 @@ export function PlanningScreen({
   accessErrorMessage,
   activeView,
   aiAssistance,
+  archive,
   canCreateInScope,
   canLinkEntity,
   canManageUpdateCadence,
@@ -720,6 +730,14 @@ export function PlanningScreen({
                 labels={labels}
                 onCreate={onCreateEntity}
               />
+              {archive ? (
+                <PlanningArchivePanel
+                  archive={archive}
+                  entityTypes={labels.entityTypes}
+                  labels={labels.archivedPlans}
+                  retry={labels.retry}
+                />
+              ) : null}
             </div>
             {selectedUpdateSummary && selectedUpdateView && resolvedSelectedUpdateTarget ? (
               <PlanningUpdateDetailPane
