@@ -518,6 +518,15 @@ export function WorkspaceAccessPanel({
     setOperationErrorMessage(originalErrorMessage)
   }
 
+  /**
+   * Returns focus to another control of the member's row, because the reload after an
+   * authenticator reset removes the reset button that opened the dialog.
+   */
+  const moveReturnFocusOffResetButton = () => {
+    actionReturnFocusRef.current = findRowFocusFallback(actionReturnFocusRef.current) ??
+      actionReturnFocusRef.current
+  }
+
   const confirmAction = async () => {
     if (!action || isActionBusy) {
       return
@@ -529,11 +538,7 @@ export function WorkspaceAccessPanel({
     if (action.kind === 'member-credential') {
       try {
         await onResetMemberCredential?.(action.member.memberKey, action.action)
-        if (action.action === 'mfa-reset') {
-          // The reload removes the reset button, so focus returns to another control of the row.
-          actionReturnFocusRef.current = findRowFocusFallback(actionReturnFocusRef.current) ??
-            actionReturnFocusRef.current
-        }
+        if (action.action === 'mfa-reset') moveReturnFocusOffResetButton()
         setAction(undefined)
         setNoticeMessage(
           t(action.action === 'password-reset'
@@ -543,7 +548,11 @@ export function WorkspaceAccessPanel({
         )
       } catch (error) {
         // The dialog closes on an expired reset, so the error shows in the panel instead.
-        if (shouldCloseCredentialResetDialog(error)) setAction(undefined)
+        if (shouldCloseCredentialResetDialog(error)) {
+          // The reload that follows may remove the reset button, as after a completed reset.
+          if (action.action === 'mfa-reset') moveReturnFocusOffResetButton()
+          setAction(undefined)
+        }
         setOperationErrorMessage(resolveMemberCredentialErrorMessage(error, t))
       } finally {
         setIsActionBusy(false)
