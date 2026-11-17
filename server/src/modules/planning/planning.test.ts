@@ -37,10 +37,13 @@ import {
 const NOW = new Date('2026-07-16T09:00:00.000Z')
 const EMPTY_WORK_ITEMS: PlanningWorkItemState = { workItems: [] }
 
-/** Archives one entity just before a chosen commit, as a concurrent request would. */
+/** Runs concurrent requests (by default, archives one entity) just before a chosen commit. */
 class RacingPlanningClient extends InMemoryPlanningClient {
+  /** Commits attempted so far, including those that fail. */
   commitCount = 0
+  /** 1-based commit before which the concurrent requests run; 0 runs none. */
   raceAtCommit = 0
+  /** Entity archived at `raceAtCommit` when `race` is unset. */
   raceEntityId = ''
   /** Work Item revision conditions of every commit, in order. */
   workItemConditions: unknown[] = []
@@ -49,6 +52,11 @@ class RacingPlanningClient extends InMemoryPlanningClient {
   /** Concurrent requests run at `raceAtCommit`; archives `raceEntityId` when unset. */
   race?: () => Promise<void>
 
+  /**
+   * Records each commit's guards and runs the concurrent requests before the chosen commit.
+   *
+   * @param args - Arguments of the in-memory commit.
+   */
   protected override async commitState(
     ...args: Parameters<InMemoryPlanningClient['commitState']>
   ) {

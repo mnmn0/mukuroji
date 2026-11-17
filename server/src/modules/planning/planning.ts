@@ -714,7 +714,6 @@ type PlanningArchivedEntityBundle = {
   references: (PlanningArchivedDependency | PlanningArchivedLinkReference)[]
 }
 
-/** One archive or restore revision planned against a fresh live graph. */
 /** Caller-specific checks a restore applies to the references it brings back. */
 export type PlanningRestoreOptions = {
   /**
@@ -734,6 +733,7 @@ export type PlanningRestoreOptions = {
   authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[]
 }
 
+/** One archive or restore revision planned against a fresh live graph. */
 type PlanningArchiveStep = {
   /** Valid live graph after the step. */
   state: PlanningWorkspaceState
