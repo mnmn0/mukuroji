@@ -2203,6 +2203,15 @@ async function isEligibleRecipient(
       }
       const snapshot = await snapshotPromise
       if (snapshot.workspaceId !== event.workspaceId) return false
+      if (!enforceContentAuthorization && snapshotHasDirectoryGroupAssignments(snapshot)) {
+        // Projection does not otherwise read groups, so a role assigned to one of the recipient's
+        // directory groups would be missed and the Planning notification dropped.
+        const currentGroups = await readNotificationCognitoGroups(
+          readString(member.username) ?? readString(member.email) ?? memberKey,
+        )
+        if (currentGroups === undefined) return false
+        cognitoGroupIds = currentGroups
+      }
       enterpriseAuthorization = resolveEnterpriseNotificationAuthorization(
         event,
         memberKey,
@@ -2237,6 +2246,16 @@ async function isEligibleRecipient(
   }
 
   return currentSystemAdmin
+}
+
+/**
+ * Reports whether any role in the Enterprise snapshot is assigned to a directory group.
+ *
+ * @param snapshot - Current Enterprise Identity snapshot.
+ * @returns Whether recipient groups can change the authorization result.
+ */
+function snapshotHasDirectoryGroupAssignments(snapshot: EnterpriseIdentitySnapshot) {
+  return snapshot.roleAssignments.some((assignment) => assignment.principalKind === 'directory-group')
 }
 
 /** Authorization snapshots for one delivery; production creates a fresh instance for each notification. */

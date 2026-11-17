@@ -2361,6 +2361,100 @@ describe('collaboration projection pure helpers', () => {
     )).toEqual({ authoritative: true, allowed: false })
   })
 
+  test('reads recipient Cognito groups when projecting Planning activity under group role assignments', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    let memberGroups: string[] = ['planning-readers']
+    const groupReads: string[] = []
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof AdminListGroupsForUserCommand)) throw new Error('Unexpected Cognito command')
+      groupReads.push(String(command.input.Username))
+      return { Groups: memberGroups.map((GroupName) => ({ GroupName })), $metadata: {} }
+    })
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        const table = command.input.TableName
+        if (table === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        if (table === 'PLANNING_TABLE_NAME') {
+          return { Item: {
+            workspaceId: 'workspace-1', recordKey: 'UPDATE_TARGET#PROJECT#core#platform', entryType: 'planning-update-target',
+            target: { type: 'project', teamId: 'core', projectId: 'platform' }, latestVersion: 1, updatedAt: '2026-07-12T12:00:00.000Z',
+          }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') return { Items: [], $metadata: {} }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+          return { Items: [
+            { entryType: 'team', teamId: 'core' },
+            { entryType: 'project', teamId: 'core', projectId: 'platform' },
+          ], $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        for (const item of command.input.TransactItems ?? []) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:planning-reader', name: 'Planning reader',
+        permissions: ['planning.read'], guestAssignable: false, revision: 1,
+        createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'planning-readers', principalKind: 'directory-group',
+        principalId: 'planning-readers', roleId: 'custom:planning-reader', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }],
+    })
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+      enterpriseIdentity: { getSnapshot: async () => snapshot },
+    }
+    const record = (eventId: string) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: 'planning-update.commented' }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'planning-update' }, entityId: { S: 'project/core/platform' },
+        occurredAt: { S: '2026-07-12T12:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'actor@example.com' }, teamId: { S: 'core' }, projectId: { S: 'platform' },
+          planningTargetType: { S: 'project' }, planningTargetId: { S: 'platform' },
+          planningTargetRecordKey: { S: 'UPDATE_TARGET#PROJECT#core#platform' },
+          notificationCandidates: { L: [{ M: { memberKey: { S: 'reader@example.com' }, reason: { S: 'mention' } } }] },
+        } },
+      } },
+    })
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [record('group-reader')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.map((item) => [item.eventId, item.recipientMemberKey]))
+        .toEqual([['group-reader', 'reader@example.com']])
+      expect(groupReads).toContain('reader@example.com')
+
+      // Without the group, neither the Enterprise role nor a legacy membership grants access.
+      memberGroups = []
+      expect(await processCollaborationProjectionBatch({ Records: [record('no-group')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.some((item) => item.eventId === 'no-group')).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
   test('authorizes Planning update activity through Enterprise Planning read grants', () => {
     const snapshot = createRealtimeEnterpriseSnapshot({
       customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:planning-reader', name: 'Planning reader',
