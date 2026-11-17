@@ -3503,6 +3503,48 @@
         ],
         "type": "object"
       },
+      "WorkItemHierarchy": {
+        "description": "Position of one Work Item in its Team's tree of non-archived Work Items. Only Work Items the client may read are listed. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "childWorkItemIds": {
+            "description": "Readable non-archived child Work Item IDs in sibling order; empty for an archived Work Item.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "parentWorkItemId": {
+            "description": "Parent Work Item ID; null when the Work Item has no parent the client may read, and for an archived Work Item.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "wbsNumber": {
+            "description": "WBS number such as 1.2.3, derived from sibling order when read. Absent for an archived Work Item.",
+            "pattern": "^[1-9][0-9]*(\\.[1-9][0-9]*)*$",
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "parentWorkItemId",
+          "childWorkItemIds"
+        ],
+        "type": "object"
+      },
       "WorkItemKey": {
         "description": "Short immutable reference of one Work Item. Properties may be added later, so clients must ignore those they do not know.",
         "properties": {
@@ -10695,6 +10737,99 @@
         "summary": "Work Item の外部 resource link を削除する",
         "tags": [
           "External Links"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/hierarchy": {
+      "get": {
+        "operationId": "getPublicWorkItemHierarchy",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemHierarchy"
+                }
+              }
+            },
+            "description": "Work Item hierarchy",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the parent, children, and WBS number of a Work Item",
+        "tags": [
+          "Work Items"
         ]
       }
     },

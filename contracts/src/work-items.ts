@@ -815,6 +815,11 @@ export type WorkItemParentMutationInput = {
   parentWorkItemId: string | null
   /** 読み込み時点の Team relation graph revision です。 */
   expectedGraphRevision: number
+  /**
+   * 兄弟の中での新しい順序 rank です（`createWorkItemHierarchyRankBetween` で作ります）。
+   * 省略すると順序を変えません。親が変わらない場合は並べ替えだけを行います。
+   */
+  hierarchyRank?: string
 }
 
 /**

@@ -1,4 +1,6 @@
 import {
+  DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+  isWorkItemHierarchyClosedCategory,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type ApprovalSummary,
   type ResolvedWorkItemConfiguration,
@@ -440,6 +442,19 @@ export async function prepareConfiguredUpdateWorkItem(
     targetWorkItemType.id,
     { allowArchived: true },
   )
+  if (
+    current.statusCategory !== 'completed' &&
+    nextWorkflowStatus.statusCategory === 'completed' &&
+    (resolved.configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY) ===
+      'reject'
+  ) {
+    await assertWorkItemChildrenClosed(
+      directoryId,
+      teamId,
+      current.id,
+      options.relationDependencies ?? workItemDependencies,
+    )
+  }
   if (!typeChanged || currentWorkflow.id === targetWorkflow.id) {
     assertWorkflowTransitionAllowed(
       resolved.configuration,
@@ -521,6 +536,57 @@ export async function prepareConfiguredUpdateWorkItem(
       teamId,
       resolved,
     ).concat(relationTransactionItems, approvalTransitionConditionChecks),
+  }
+}
+
+/** Child Work Items read at once while checking that a parent can be completed. */
+const CHILD_COMPLETION_READ_CONCURRENCY = 16
+
+/**
+ * Rejects completing a parent while one of its non-archived children is still open.
+ *
+ * The check reads the children when the request is prepared; a child reopened while the parent's
+ * update commits is not detected.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the parent.
+ * @param parentWorkItemId - Parent about to be completed.
+ * @param dependencies - Relation and Work Item persistence.
+ * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is neither completed nor canceled.
+ */
+async function assertWorkItemChildrenClosed(
+  directoryId: string,
+  teamId: string,
+  parentWorkItemId: string,
+  dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
+) {
+  const children = await dependencies.workItemConfigurations.listRelations(
+    directoryId,
+    teamId,
+    parentWorkItemId,
+    { types: ['child'] },
+  )
+  const childIds = children.relations.map((relation) => relation.targetWorkItemId)
+  let openChildCount = 0
+  for (let index = 0; index < childIds.length; index += CHILD_COMPLETION_READ_CONCURRENCY) {
+    const details = await Promise.all(childIds
+      .slice(index, index + CHILD_COMPLETION_READ_CONCURRENCY)
+      .map((childId) => dependencies.teamIssues.getTeamIssueDetail(
+        directoryId,
+        teamId,
+        childId,
+        { consistentIssueRead: true, includeEvents: false },
+      )))
+    openChildCount += details.filter(({ issue }) =>
+      issue.archivedAt === undefined && !isWorkItemHierarchyClosedCategory(issue.statusCategory)
+    ).length
+  }
+  if (openChildCount > 0) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemOpenChildren',
+      `${openChildCount} child Work Item(s) are still open. Complete or cancel them before completing the parent.`,
+    )
   }
 }
 

@@ -224,6 +224,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async acceptanceCriteria() { return [] },
     async effort() { return undefined },
     async taskKey() { return undefined },
+    async hierarchy() { return undefined },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -304,7 +305,7 @@ describe('agent task lifecycle', () => {
     expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
     // The custom field is checked first, so only the bare task needed a criteria read.
     expect(criteriaReads).toEqual(['bare'])
-    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria, effort: null })
+    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria, effort: null, hierarchy: null })
     expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
     // Only the marks are sent; the server applies them to the stored list, so a retry has the same body.
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
@@ -704,6 +705,18 @@ describe('agent task lifecycle', () => {
       effort: { revision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 },
     })
     expect(effortReads).toEqual(['one'])
+  })
+
+  test('shows the parent, children, and WBS number read from their own endpoint', async () => {
+    const { service } = fixture([task('one')], {
+      async hierarchy() {
+        return { parentWorkItemId: 'phase', childWorkItemIds: ['sub'], wbsNumber: '2.1' }
+      },
+    })
+    expect(await service.get('one')).toMatchObject({
+      task: { id: 'one' },
+      hierarchy: { parentWorkItemId: 'phase', childWorkItemIds: ['sub'], wbsNumber: '2.1' },
+    })
   })
 
   test('writes the estimate into the read schedule and passes remaining effort and progress through', async () => {

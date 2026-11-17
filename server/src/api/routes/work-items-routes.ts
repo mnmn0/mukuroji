@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  isWorkItemHierarchyRank,
   readSearchWorkItemTypeKey,
   type AcceptCreateTriageAction,
   type ApprovalSummary,
@@ -263,6 +264,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
+import { readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
 import {
   readScopedWorkItemPage,
   readScopedWorkItemPageQuery,
@@ -4051,6 +4053,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         body.expectedGraphRevision,
         'Relation graph revision',
       )
+      if (body.hierarchyRank !== undefined && !isWorkItemHierarchyRank(body.hierarchyRank)) {
+        throw new WorkItemConfigurationError(
+          400,
+          'InvalidWorkItemHierarchyRank',
+          'The hierarchy rank must be 1 to 64 lowercase base-36 digits that do not end in 0.',
+        )
+      }
+      const hierarchyRank = body.hierarchyRank
       const currentParents = await workItemDependencies.workItemConfigurations.listRelations(
         principal.directoryId,
         teamId,
@@ -4097,6 +4107,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             : {}),
           ...(nextParent ? { nextParent } : {}),
           expectedGraphRevision,
+          ...(hierarchyRank === undefined ? {} : { hierarchyRank }),
         },
         resolvedConfiguration
           ? createWorkItemConfigurationGuardConditionChecks(
@@ -4450,6 +4461,36 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         return toAuthErrorResponse(c, error)
       }
 
+      return toProjectDataErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Team の Work Item 階層（outline 順、WBS 番号、親への roll-up）を返します。
+   *
+   * Archive 済みの Work Item は含みません。閲覧できない Work Item は返さず、roll-up にも数えません。
+   */
+  routeApp.get('/api/teams/:teamId/issues/hierarchy', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    if (!teamId) {
+      return c.json({ message: 'Team ID is required.' }, 400)
+    }
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      return c.json(await readTeamWorkItemHierarchy(
+        principal.directoryId,
+        context.team.id,
+        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+      ))
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toCognitoDirectoryErrorResponse(c, error)
+      }
       return toProjectDataErrorResponse(c, error)
     }
   })

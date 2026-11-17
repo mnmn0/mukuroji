@@ -12,11 +12,15 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
   DEFAULT_WORK_ITEM_PROGRESS_MODE,
   isWorkItemProgressMode,
+  isWorkItemHierarchyRank,
+  isWorkItemParentCompletionPolicy,
+  DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
   WORK_ITEM_RELATION_ID_LIMIT,
@@ -304,6 +308,11 @@ export type ReplaceWorkItemParentInput = {
   nextParent?: WorkItemRelationEndpointSnapshot
   /** Team relation graph revision observed by the caller. */
   expectedGraphRevision: number
+  /**
+   * Sibling order rank to store on the child. With an unchanged parent it only reorders the child;
+   * omitted with a new parent, the stored rank is removed so the child follows creation order.
+   */
+  hierarchyRank?: string
 }
 
 /** Graph metadata read before a relation mutation. */
@@ -326,6 +335,11 @@ type RelationProjectionChange = {
 type RelationTransactionEndpoint = WorkItemRelationEndpointSnapshot & {
   /** Next projection; omitted only checks the endpoint snapshot. */
   relationIds?: readonly string[]
+  /**
+   * Sibling order rank written with the projection; `null` removes the stored rank and
+   * `undefined` leaves it unchanged.
+   */
+  hierarchyRank?: string | null
 }
 
 /** Items committed by one relation transaction. */
@@ -569,6 +583,13 @@ export function validateWorkItemConfiguration(
     throw invalidConfiguration('Progress mode must be status-category, remaining-effort, or manual.')
   }
   const progressMode = value.progressMode
+  if (
+    value.parentCompletionPolicy !== undefined &&
+    !isWorkItemParentCompletionPolicy(value.parentCompletionPolicy)
+  ) {
+    throw invalidConfiguration('Parent completion policy must be warn or reject.')
+  }
+  const parentCompletionPolicy = value.parentCompletionPolicy
 
   return {
     scopeType,
@@ -581,6 +602,7 @@ export function validateWorkItemConfiguration(
     ...(workItemTypes === undefined ? {} : { workItemTypes }),
     ...(jobRoles === undefined ? {} : { jobRoles }),
     ...(progressMode === undefined ? {} : { progressMode }),
+    ...(parentCompletionPolicy === undefined ? {} : { parentCompletionPolicy }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
@@ -1499,6 +1521,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       storedParents.length === (parentWorkItemId ? 1 : 0) &&
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
+      if (normalized.hierarchyRank !== undefined) {
+        await this.writeHierarchyRank(workspaceId, teamId, child, normalized.hierarchyRank)
+      }
       return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
     }
     assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
@@ -1578,7 +1603,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       expectedRevision: graph.revision,
       nextEdgeCount,
       endpoints: [
-        { ...child, relationIds: childRelationIds },
+        { ...child, relationIds: childRelationIds, hierarchyRank: normalized.hierarchyRank ?? null },
         ...(normalized.currentParent ? [normalized.currentParent] : []),
         ...(normalized.nextParent ? [normalized.nextParent] : []),
       ],
@@ -1594,6 +1619,42 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       ),
     })
     return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision + 1 }
+  }
+
+  /**
+   * Stores a child's sibling order rank without changing its parent.
+   *
+   * @param workspaceId - Workspace that owns the Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param child - Child snapshot whose revision and Project assignment fence the write.
+   * @param hierarchyRank - Validated rank to store.
+   */
+  private async writeHierarchyRank(
+    workspaceId: string,
+    teamId: string,
+    child: WorkItemRelationEndpointSnapshot,
+    hierarchyRank: string,
+  ) {
+    const item = createRelationEndpointTransactionItem(
+      this.workItemsTableName,
+      `${workspaceId}#team#${teamId}`,
+      { ...child, hierarchyRank },
+    )
+    if (!item.Update) {
+      throw new WorkItemConfigurationError(500, 'WorkItemHierarchyRankWriteInvalid', 'The rank write is invalid.')
+    }
+    try {
+      await this.documentClient.send(new UpdateCommand(item.Update))
+    } catch (error) {
+      if (isNamedError(error, 'ConditionalCheckFailedException')) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemRelationGraphConflict',
+          'The Work Item changed. Reload and try again.',
+        )
+      }
+      throw toPersistenceError(error)
+    }
   }
 
   private async ensureTable() {
@@ -2423,6 +2484,9 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
     revision: configuration.revision,
     // The calculation policy changes every displayed progress percentage, so its value is audited.
     progressMode: configuration.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE,
+    // Whether open children block completing a parent is a Team policy, so its value is audited.
+    parentCompletionPolicy:
+      configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),
@@ -3220,18 +3284,33 @@ function createRelationEndpointTransactionItem(
         : { ':assignedProjectId': endpoint.assignedProjectId }),
     },
   }
-  if (endpoint.relationIds === undefined) {
+  if (endpoint.relationIds === undefined && endpoint.hierarchyRank === undefined) {
     return { ConditionCheck: guard }
+  }
+  const setExpressions: string[] = []
+  const names: Record<string, string> = { ...guard.ExpressionAttributeNames }
+  const values: Record<string, unknown> = { ...guard.ExpressionAttributeValues }
+  if (endpoint.relationIds !== undefined) {
+    setExpressions.push('#relationIds = :relationIds')
+    names['#relationIds'] = 'relationIds'
+    values[':relationIds'] = [...endpoint.relationIds]
+  }
+  if (typeof endpoint.hierarchyRank === 'string') {
+    setExpressions.push('#hierarchyRank = :hierarchyRank')
+    names['#hierarchyRank'] = 'hierarchyRank'
+    values[':hierarchyRank'] = endpoint.hierarchyRank
+  } else if (endpoint.hierarchyRank === null) {
+    names['#hierarchyRank'] = 'hierarchyRank'
   }
   return {
     Update: {
       ...guard,
-      UpdateExpression: 'SET #relationIds = :relationIds',
-      ExpressionAttributeNames: { ...guard.ExpressionAttributeNames, '#relationIds': 'relationIds' },
-      ExpressionAttributeValues: {
-        ...guard.ExpressionAttributeValues,
-        ':relationIds': [...endpoint.relationIds],
-      },
+      UpdateExpression: [
+        setExpressions.length > 0 ? `SET ${setExpressions.join(', ')}` : undefined,
+        endpoint.hierarchyRank === null ? 'REMOVE #hierarchyRank' : undefined,
+      ].filter((part) => part !== undefined).join(' '),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
     },
   }
 }
@@ -3407,7 +3486,27 @@ function normalizeReplaceParentInput(input: ReplaceWorkItemParentInput): Replace
     ...(input.currentParent ? { currentParent: readEndpoint(input.currentParent, 'Current parent') } : {}),
     ...(input.nextParent ? { nextParent: readEndpoint(input.nextParent, 'Parent') } : {}),
     expectedGraphRevision: readNonNegativeInteger(input.expectedGraphRevision, 'Relation graph revision'),
+    ...(input.hierarchyRank === undefined
+      ? {}
+      : { hierarchyRank: readWorkItemHierarchyRank(input.hierarchyRank) }),
   }
+}
+
+/**
+ * Validates a requested sibling order rank.
+ *
+ * @param value - Untrusted rank.
+ * @returns The rank.
+ */
+function readWorkItemHierarchyRank(value: unknown): string {
+  if (!isWorkItemHierarchyRank(value)) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemHierarchyRank',
+      'The hierarchy rank must be 1 to 64 lowercase base-36 digits that do not end in 0.',
+    )
+  }
+  return value
 }
 
 function assertExpectedGraphRevision(current: number, expected: number) {

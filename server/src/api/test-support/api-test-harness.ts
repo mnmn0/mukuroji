@@ -840,6 +840,7 @@ function createTeamIssuesFake(
       throw new Error('Unexpected Team Issues client call.')
     },
     getTeamIssues: unsupported,
+    getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
     getWorkItemKeyLocation: unsupported,
     getProjectIssues: unsupported,

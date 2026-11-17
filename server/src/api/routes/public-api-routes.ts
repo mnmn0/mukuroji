@@ -167,10 +167,12 @@ import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
   createWorkItemAuthorizationSnapshot,
   createWorkItemIdempotencyTransaction,
+  filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
+import { readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
@@ -1277,6 +1279,38 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId: issue.id,
         createdAt: issue.createdAt,
         ...(issue.key === undefined ? {} : { key: issue.key }),
+      }
+    },
+
+    /**
+     * Reads the parent, children, and WBS number of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The readable parent and children and the WBS number; an archived Work Item is
+     * outside the tree and has no parent, children, or number.
+     */
+    async getHierarchy(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      const hierarchy = await readTeamWorkItemHierarchy(
+        principal.directoryId,
+        context.team.id,
+        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+      )
+      const node = hierarchy.nodes.find((candidate) => candidate.workItemId === detail.issue.id)
+      return {
+        schemaVersion: 1,
+        teamId: detail.issue.teamId,
+        workItemId: detail.issue.id,
+        parentWorkItemId: node?.parentWorkItemId ?? null,
+        childWorkItemIds: node?.childWorkItemIds ?? [],
+        ...(node ? { wbsNumber: node.wbsNumber } : {}),
       }
     },
 

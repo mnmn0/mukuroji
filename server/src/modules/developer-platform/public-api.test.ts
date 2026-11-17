@@ -133,6 +133,9 @@ function createDefaultWorkItemService(
     async getKey(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, createdAt: workItem.createdAt, key: 'TEAM-1' }
     },
+    async getHierarchy(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, parentWorkItemId: null, childWorkItemIds: [], wbsNumber: '1' }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -449,6 +452,46 @@ describe('public API router', () => {
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       schedule: { mode: 'unscheduled' },
     })
+  })
+
+  test('returns the Work Item hierarchy from its own read-scoped endpoint', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async getHierarchy(_credential, teamId, workItemId) {
+          reads.push(`${teamId}/${workItemId}`)
+          return {
+            schemaVersion: 1,
+            teamId,
+            workItemId,
+            parentWorkItemId: 'phase-1',
+            childWorkItemIds: ['task-1'],
+            wbsNumber: '1.2',
+          }
+        },
+      }),
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/hierarchy?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/hierarchy?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      schemaVersion: 1,
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      parentWorkItemId: 'phase-1',
+      childWorkItemIds: ['task-1'],
+      wbsNumber: '1.2',
+    })
+    expect(denied.status).toBe(403)
+    expect(reads).toEqual(['team-1/work-item-1'])
   })
 
   test('returns the Work Item key from its own read-scoped endpoint', async () => {

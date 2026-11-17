@@ -82,6 +82,7 @@ import type {
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  createDefaultWorkItemHierarchyRank,
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
   parseWorkItemKey,
@@ -530,6 +531,8 @@ type TeamIssueItem = {
    * チーム内の表示順です。
    */
   sortOrder: number
+  /** Sibling order rank under the parent; absent until the Work Item is reordered. */
+  hierarchyRank?: string
   /**
    * Issue タイトルです。
    */
@@ -676,6 +679,14 @@ export type TeamIssueResponseItem = CanonicalWorkItem & {
    * Issue 作成者の Workspace member key です。
    */
   creatorMemberKey: string
+}
+
+/** One Work Item read for the Team hierarchy read model. */
+export type TeamWorkItemHierarchyEntry = {
+  /** Canonical Work Item. */
+  issue: TeamIssueResponseItem
+  /** Stored rank, or the rank derived from the Team creation order when none is stored. */
+  hierarchyRank: string
 }
 
 /** Work Item 一覧 client の読み込み量を制御します。 */
@@ -1233,6 +1244,20 @@ export type TeamIssuesClient = {
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
   /**
+   * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks for
+   * the hierarchy read model.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Most Work Items to read; one more is read to detect a larger Team.
+   * @returns Up to `limit + 1` Work Items with their ranks.
+   */
+  getTeamHierarchyEntries?(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamWorkItemHierarchyEntry[]>
+  /**
    * Resolves a Work Item key to the Team and Work Item that hold it, without authorizing them.
    *
    * @param directoryId - Workspace ID.
@@ -1652,6 +1677,37 @@ export class DynamoDbTeamIssuesClient {
         throw error
       }
 
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Most Work Items to read; one more is read to detect a larger Team.
+   * @returns Up to `limit + 1` Work Items with their ranks.
+   */
+  async getTeamHierarchyEntries(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamWorkItemHierarchyEntry[]> {
+    await this.ensureLocalTables()
+    try {
+      const { items } = await this.queryTeamIssueItems(directoryId, teamId, {
+        limit: limit + 1,
+        consistentRead: true,
+      })
+      return items.map((item) => ({
+        issue: toTeamIssueResponseItem(item),
+        hierarchyRank: item.hierarchyRank ?? createDefaultWorkItemHierarchyRank(item.sortOrder),
+      }))
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
       throw toProjectDataError(error)
     }
   }

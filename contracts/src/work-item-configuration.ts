@@ -169,6 +169,10 @@ export type WorkItemConfiguration = {
   jobRoles?: import('./work-item-contributors').WorkItemJobRoleDefinition[]
   /** How Work Item progress percentages are derived; absent means `status-category`. */
   progressMode?: import('./work-item-effort').WorkItemProgressMode
+  /**
+   * What happens when a parent is completed while a child is still open; absent means `warn`.
+   */
+  parentCompletionPolicy?: import('./work-item-hierarchy').WorkItemParentCompletionPolicy
   /** 最終更新日時の ISO 8601 timestamp です。 */
   updatedAt?: string
 }

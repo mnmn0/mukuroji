@@ -1840,6 +1840,58 @@ test('replaces, removes, and sets a parent atomically', async () => {
   expect(store.transactions).toHaveLength(3)
 })
 
+test('stores the sibling order rank with a parent change and reorders under the same parent', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+  /** Reads the child endpoint update of one transaction. */
+  const childUpdate = (index: number) =>
+    (store.transactions[index]?.TransactItems as Array<Record<string, Record<string, unknown>>>)[0]?.Update
+
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'k',
+  })
+  expect(childUpdate(0)).toMatchObject({
+    UpdateExpression: 'SET #relationIds = :relationIds, #hierarchyRank = :hierarchyRank',
+    ExpressionAttributeValues: expect.objectContaining({ ':hierarchyRank': 'k' }),
+  })
+
+  expect(await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 6,
+    hierarchyRank: 'm',
+  })).toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: 'phase-b', graphRevision: 6 })
+  expect(store.transactions).toHaveLength(1)
+  expect(store.updates).toEqual([expect.objectContaining({
+    TableName: 'work-items-table',
+    UpdateExpression: 'SET #hierarchyRank = :hierarchyRank',
+    ExpressionAttributeValues: expect.objectContaining({ ':hierarchyRank': 'm', ':revision': 3 }),
+  })])
+
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    expectedGraphRevision: 6,
+  })
+  expect(childUpdate(1)?.UpdateExpression).toBe('SET #relationIds = :relationIds REMOVE #hierarchyRank')
+
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    expectedGraphRevision: 7,
+    hierarchyRank: 'k0',
+  })).rejects.toMatchObject({ code: 'InvalidWorkItemHierarchyRank', status: 400 })
+})
+
 test('returns success without writing when a lost-response retry finds the requested parent', async () => {
   const store = createInMemoryRelationStore()
   store.seedRelation('task', 'phase-a', 'parent')
@@ -2041,6 +2093,8 @@ test('classifies a canceled relation transaction when an endpoint disappeared', 
 
 /** Relation rows and graph metadata held by the in-memory configuration table fake. */
 type InMemoryRelationStore = {
+  /** Single-item UpdateCommand inputs sent outside transactions. */
+  updates: Record<string, unknown>[]
   /** Committed TransactWrite inputs. */
   transactions: Array<Record<string, unknown>>
   /** Key prefixes of every attribute Query in call order. */
@@ -2090,6 +2144,7 @@ function createInMemoryRelationStore(
   }
   let rowsSinceTransaction = 0
   const store: InMemoryRelationStore = {
+    updates: [],
     transactions: [],
     queryPrefixes: [],
     countQueries: 0,
@@ -2158,6 +2213,10 @@ function createInMemoryRelationStore(
             store.rowsRead += items.length
             rowsSinceTransaction += items.length
             return { Items: items }
+          }
+          if (command.constructor.name === 'UpdateCommand') {
+            store.updates.push(input)
+            return {}
           }
           if (command.constructor.name === 'TransactWriteCommand' && options.cancelTransactions) {
             throw { name: 'TransactionCanceledException' }
@@ -2272,3 +2331,13 @@ function expectConfigurationError(callback: () => unknown, code: string, message
   }
   expect(thrown).toMatchObject({ code, message, status: 400 })
 }
+
+test('validates the parent completion policy', () => {
+  expect(createConfiguration({ parentCompletionPolicy: 'reject' }).parentCompletionPolicy).toBe('reject')
+  expect(createConfiguration().parentCompletionPolicy).toBeUndefined()
+  expect(() => validateWorkItemConfiguration({
+    ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+    scopeId: 'workspace-1',
+    parentCompletionPolicy: 'block',
+  })).toThrow('Parent completion policy must be warn or reject.')
+})
