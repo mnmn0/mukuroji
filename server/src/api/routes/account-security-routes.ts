@@ -11,9 +11,12 @@ import {
   changeAccountPassword,
   CognitoServiceError,
   confirmAccountPasswordReset,
+  confirmMfaSetupChallenge,
   confirmSoftwareTokenEnrollment,
+  MfaSetupChallengeError,
   removeSoftwareToken,
   requestAccountPasswordReset,
+  startMfaSetupChallenge,
   SoftwareTokenEnrollmentError,
   startSoftwareTokenEnrollment,
   type GetUserResponse,
@@ -27,6 +30,7 @@ import {
   createPasswordResetPorts,
   createSoftwareTokenRemovalPorts,
 } from '../../app/composition/account-credential-changes'
+import { createMfaSetupChallengePorts } from '../../app/composition/mfa-setup-challenge'
 import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
 import { createSoftwareTokenEnrollmentPorts } from '../../app/composition/software-token-enrollment'
 import {
@@ -273,6 +277,9 @@ function toAccountSecurityErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, error.status)
   }
   if (error instanceof AccountCredentialChangeError) {
+    return c.json({ code: error.code, message: error.message }, error.status)
+  }
+  if (error instanceof MfaSetupChallengeError) {
     return c.json({ code: error.code, message: error.message }, error.status)
   }
   if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
@@ -540,13 +547,14 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const sso = await ssoRequiredResponse(c, email)
       if (sso) return sso
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.associateSoftwareToken) return unavailableResponse(c)
-      const association = await cognito.associateSoftwareToken({ session })
+      const association = await startMfaSetupChallenge(
+        createMfaSetupChallengePorts(authenticationDependencies.cognito),
+        { email, session },
+      )
       const response: SoftwareTokenSetupStart = {
         secretCode: association.secretCode,
         accountName: email,
-        session: association.session ?? session,
+        session: association.session,
       }
       return c.json(response)
     } catch (error) {
@@ -579,21 +587,11 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const sso = await ssoRequiredResponse(c, email)
       if (sso) return sso
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.verifySoftwareToken || !cognito.respondToMfaSetupChallenge) {
-        return unavailableResponse(c)
-      }
-      const verified = await cognito.verifySoftwareToken({ session }, code)
-      const response = await cognito.respondToMfaSetupChallenge(email, verified.session ?? session)
-      const tokens = response.AuthenticationResult
-      if (!tokens?.AccessToken) {
-        return c.json({
-          code: 'UnsupportedAuthenticationChallenge' as const,
-          message: response.ChallengeName
-            ? `Unsupported Cognito challenge: ${response.ChallengeName}`
-            : 'Cognito did not return an access token.',
-        }, 409)
-      }
+      const tokens = await confirmMfaSetupChallenge(
+        createMfaSetupChallengePorts(authenticationDependencies.cognito),
+        { email, session },
+        code,
+      )
       return c.json(await createAuthenticationResponse(
         tokens,
         c,

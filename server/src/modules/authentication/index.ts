@@ -46,3 +46,12 @@ export {
   type SoftwareTokenRemovalPorts,
   type SoftwareTokenRemover,
 } from './application/account-credential-changes'
+export {
+  confirmMfaSetupChallenge,
+  MfaSetupChallengeError,
+  startMfaSetupChallenge,
+  type MfaSetupChallengeAnswer,
+  type MfaSetupChallengeErrorCode,
+  type MfaSetupChallengePorts,
+  type MfaSetupChallengeSignIn,
+} from './application/mfa-setup-challenge'
