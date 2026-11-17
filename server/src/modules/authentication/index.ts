@@ -55,3 +55,8 @@ export {
   type MfaSetupChallengePorts,
   type MfaSetupChallengeSignIn,
 } from './application/mfa-setup-challenge'
+export {
+  decidePolicyMfaSetup,
+  type PolicyMfaSetupDecision,
+  type PolicyMfaSetupPorts,
+} from './application/policy-mfa-setup'
