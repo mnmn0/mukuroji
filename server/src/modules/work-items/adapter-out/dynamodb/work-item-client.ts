@@ -1700,10 +1700,13 @@ export class DynamoDbTeamIssuesClient {
         limit: limit + 1,
         consistentRead: true,
       })
-      return items.map((item) => ({
-        issue: toTeamIssueResponseItem(item),
-        hierarchyRank: item.hierarchyRank ?? createDefaultWorkItemHierarchyRank(item.sortOrder),
-      }))
+      return items.map((item) => {
+        const issue = toTeamIssueResponseItem(item)
+        return {
+          issue,
+          hierarchyRank: item.hierarchyRank ?? createDefaultWorkItemHierarchyRank(item.sortOrder, issue.id),
+        }
+      })
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error

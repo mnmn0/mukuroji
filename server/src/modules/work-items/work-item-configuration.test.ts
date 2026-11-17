@@ -1875,6 +1875,15 @@ test('stores the sibling order rank with a parent change and reorders under the 
   })).toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: 'phase-b', graphRevision: 6 })
   // The reorder writes only the child's rank, fenced by the graph revision it read.
   expect(store.transactions).toHaveLength(2)
+  // A rank chosen from a stale outline is refused instead of being written.
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'n',
+  })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+  expect(store.transactions).toHaveLength(2)
   expect(childUpdate(1)).toMatchObject({
     TableName: 'work-items-table',
     UpdateExpression: 'SET #hierarchyRank = :hierarchyRank',

@@ -17,6 +17,9 @@ const RANK_DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
 /** Number of base-36 digits that encode a Team creation order in a default rank. */
 const DEFAULT_RANK_SORT_ORDER_DIGITS = 11
 
+/** Number of base-36 digits that hold the Work Item ID hash in a default rank. */
+const DEFAULT_RANK_ID_HASH_DIGITS = 7
+
 /**
  * Returns whether a status category leaves no work open under a parent.
  *
@@ -48,16 +51,35 @@ export function isWorkItemHierarchyRank(value: unknown): value is string {
  * Derives the rank of a Work Item that has never been reordered.
  *
  * The rank encodes the Team creation order (`sortOrder`), so unordered siblings keep the order
- * in which they were created and a new Work Item is placed after its existing siblings.
+ * in which they were created and a new Work Item is placed after its existing siblings. A hash
+ * of the Work Item ID follows, so two siblings that share a `sortOrder` still get different
+ * ranks and a move between them always finds room.
  *
  * @param sortOrder - Team creation order stored with the Work Item.
+ * @param workItemId - ID of the Work Item.
  * @returns A valid rank that starts with `1`.
  */
-export function createDefaultWorkItemHierarchyRank(sortOrder: number): string {
+export function createDefaultWorkItemHierarchyRank(sortOrder: number, workItemId: string): string {
   const encoded = Number.isSafeInteger(sortOrder) && sortOrder >= 0
     ? sortOrder.toString(36)
     : ''
-  return `1${encoded.padStart(DEFAULT_RANK_SORT_ORDER_DIGITS, '0')}i`
+  const idHash = hashWorkItemId(workItemId).toString(36)
+  return `1${encoded.padStart(DEFAULT_RANK_SORT_ORDER_DIGITS, '0')}${idHash.padStart(DEFAULT_RANK_ID_HASH_DIGITS, '0')}i`
+}
+
+/**
+ * Hashes a Work Item ID with 32-bit FNV-1a.
+ *
+ * @param workItemId - ID to hash.
+ * @returns An unsigned 32-bit hash, which fits in {@link DEFAULT_RANK_ID_HASH_DIGITS} base-36 digits.
+ */
+function hashWorkItemId(workItemId: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < workItemId.length; index += 1) {
+    hash ^= workItemId.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
 }
 
 /**

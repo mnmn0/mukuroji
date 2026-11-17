@@ -49,10 +49,20 @@ describe('hierarchy ranks', () => {
   })
 
   test('derives default ranks in creation order', () => {
-    const ranks = [0, 1, 35, 36, 1_000_000, Number.MAX_SAFE_INTEGER].map(createDefaultWorkItemHierarchyRank)
+    const ranks = [0, 1, 35, 36, 1_000_000, Number.MAX_SAFE_INTEGER]
+      .map((sortOrder, index) => createDefaultWorkItemHierarchyRank(sortOrder, `item-${5 - index}`))
     expect(ranks.every(isWorkItemHierarchyRank)).toBe(true)
     expect([...ranks].sort()).toEqual(ranks)
-    expect(createDefaultWorkItemHierarchyRank(-1)).toBe(createDefaultWorkItemHierarchyRank(Number.NaN))
+    expect(createDefaultWorkItemHierarchyRank(-1, 'a')).toBe(createDefaultWorkItemHierarchyRank(Number.NaN, 'a'))
+  })
+
+  test('gives siblings with the same creation order different default ranks', () => {
+    const first = createDefaultWorkItemHierarchyRank(7, 'item-a')
+    const second = createDefaultWorkItemHierarchyRank(7, 'item-b')
+    expect(first).not.toBe(second)
+    expect(createDefaultWorkItemHierarchyRank(7, 'item-a')).toBe(first)
+    const [lower, upper] = [first, second].sort()
+    expect(createWorkItemHierarchyRankBetween(lower, upper)).toBeDefined()
   })
 
   test('creates ranks strictly between neighbours', () => {
@@ -80,8 +90,8 @@ describe('hierarchy ranks', () => {
   })
 
   test('keeps inserting between the same neighbours', () => {
-    let lower = createDefaultWorkItemHierarchyRank(1)
-    const upper = createDefaultWorkItemHierarchyRank(2)
+    let lower = createDefaultWorkItemHierarchyRank(1, 'item-z')
+    const upper = createDefaultWorkItemHierarchyRank(2, 'item-a')
     for (let index = 0; index < 40; index += 1) {
       const rank = createWorkItemHierarchyRankBetween(lower, upper)
       expect(rank).toBeDefined()

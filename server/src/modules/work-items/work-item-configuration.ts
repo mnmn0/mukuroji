@@ -1521,6 +1521,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
       if (normalized.hierarchyRank !== undefined) {
+        // The rank was chosen among the siblings the caller saw, so it needs their graph revision.
+        assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
         await this.writeHierarchyRank(workspaceId, teamId, child, normalized.hierarchyRank, graph.revision)
       }
       return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }

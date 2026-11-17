@@ -5,6 +5,7 @@ import {
   type ApprovalSummary,
   type ResolvedWorkItemConfiguration,
   type WorkItemConfiguration,
+  type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
 import { type WorkItemDependencies } from '../../app/composition/app-dependencies'
@@ -321,6 +322,16 @@ export async function resolveFileApprovalCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
+    // An approval that completes a parent follows the Team's completion policy like any update.
+    const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
+      directoryId,
+      teamId,
+      workItem,
+      nextStatus.statusCategory,
+      resolved.configuration,
+      dependencies,
+      true,
+    )
     return {
       workflowStatusId: nextStatus.workflowStatusId,
       statusCategory: nextStatus.statusCategory,
@@ -340,7 +351,7 @@ export async function resolveFileApprovalCompletionTransition(
         directoryId,
         teamId,
         resolved,
-      ),
+      ).concat(childCompletionConditionChecks),
     }
   } catch (error) {
     if (error instanceof WorkItemConfigurationError) {
@@ -512,21 +523,16 @@ export async function prepareConfiguredUpdateWorkItem(
         resolved.configuration,
       )
     : []
-  const childCompletionConditionChecks = (
-    current.statusCategory !== 'completed' &&
-    nextWorkflowStatus.statusCategory === 'completed' &&
-    (resolved.configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY) ===
-      'reject'
+  const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
+    directoryId,
+    teamId,
+    current,
+    nextWorkflowStatus.statusCategory,
+    resolved.configuration,
+    options.relationDependencies ?? workItemDependencies,
+    // A Type change already fences the graph revision it read before this one.
+    relationTransactionItems.length === 0,
   )
-    ? await assertWorkItemChildrenClosed(
-        directoryId,
-        teamId,
-        current.id,
-        options.relationDependencies ?? workItemDependencies,
-        // A Type change already fences the graph revision it read before this one.
-        relationTransactionItems.length === 0,
-      )
-    : []
   return {
     ...inputWithoutTypeChangeResolution,
     workItemTypeId: targetWorkItemType.id,
@@ -541,6 +547,35 @@ export async function prepareConfiguredUpdateWorkItem(
       resolved,
     ).concat(relationTransactionItems, approvalTransitionConditionChecks, childCompletionConditionChecks),
   }
+}
+
+/**
+ * Applies the Team's parent completion policy to a status change.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param current - Work Item before the change.
+ * @param nextStatusCategory - Status category after the change.
+ * @param configuration - Team Work Item configuration.
+ * @param dependencies - Relation and Work Item persistence.
+ * @param fenceGraph - Whether to fence the graph revision; false when the change already does.
+ * @returns Condition checks to commit with the change; none unless a `reject` Team completes it.
+ * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is still open.
+ */
+async function prepareParentCompletionConditionChecks(
+  directoryId: string,
+  teamId: string,
+  current: TeamIssueResponseItem,
+  nextStatusCategory: WorkflowStatusCategory,
+  configuration: WorkItemConfiguration,
+  dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
+  fenceGraph: boolean,
+): Promise<WorkItemConfigurationTransactionItems> {
+  const policy = configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY
+  if (current.statusCategory === 'completed' || nextStatusCategory !== 'completed' || policy !== 'reject') {
+    return []
+  }
+  return assertWorkItemChildrenClosed(directoryId, teamId, current.id, dependencies, fenceGraph)
 }
 
 /** Child Work Items read at once while checking that a parent can be completed. */
