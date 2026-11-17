@@ -77,6 +77,12 @@ describe('WorkItemKeyActions', () => {
 })
 
 describe('WorkItemKeyStatus', () => {
+  /**
+   * Renders the key page status in English for one lookup status.
+   *
+   * @param status - Lookup status to show.
+   * @returns The rendered HTML.
+   */
   const renderStatus = (status: 'loading' | 'invalid' | 'not-found' | 'failed') => renderToStaticMarkup(
     <MemoryRouter>
       <WorkItemKeyStatus onRetry={() => {}} status={status} t={createTranslator('en')} workItemKey="PT-12" />
