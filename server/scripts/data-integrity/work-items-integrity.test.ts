@@ -1088,6 +1088,55 @@ describe('Work Items integrity manifest core', () => {
     expect(attempt.reader.scanCalls).toHaveLength(1)
   })
 
+  test('digests Work Item key registry rows and still rejects malformed ones', async () => {
+    const counterRow: Record<string, AttributeValue> = {
+      directoryTeamId: { S: 'workspace-1#work-item-key-registry' },
+      issueId: { S: 'team#core' },
+      entryType: { S: 'work-item-key-counter' },
+      directoryId: { S: 'workspace-1' },
+      teamId: { S: 'core' },
+      keyPrefix: { S: 'CORE' },
+      lastNumber: { N: '1' },
+      registeredAt: { S: '2026-07-01T00:00:00.000Z' },
+    }
+    const source = await createManifestFixture({
+      role: 'source',
+      items: [{ ...createCanonicalItem({ issueId: 'core-1' }), key: { S: 'CORE-1' } }, counterRow],
+    })
+    expect(source.manifest.scan.itemCount).toBe(2)
+
+    const attempt = startManifestCreation({
+      role: 'source',
+      items: [createCanonicalItem(), { ...counterRow, keyPrefix: { S: 'core' } }],
+    })
+    await expect(attempt.promise).rejects.toMatchObject({
+      code: 'INVALID_WORK_ITEM_RECORD',
+    })
+  })
+
+  test.each([
+    ['a counter number that decoding would round', { N: '1.0000000000000001' }],
+    ['a fractional counter number', { N: '1.5' }],
+    ['a counter number with a leading zero', { N: '01' }],
+  ])('rejects a key registry row with %s', async (_case, lastNumber) => {
+    const attempt = startManifestCreation({
+      role: 'source',
+      items: [createCanonicalItem(), {
+        directoryTeamId: { S: 'workspace-1#work-item-key-registry' },
+        issueId: { S: 'team#core' },
+        entryType: { S: 'work-item-key-counter' },
+        directoryId: { S: 'workspace-1' },
+        teamId: { S: 'core' },
+        keyPrefix: { S: 'CORE' },
+        lastNumber,
+        registeredAt: { S: '2026-07-01T00:00:00.000Z' },
+      }],
+    })
+    await expect(attempt.promise).rejects.toMatchObject({
+      code: 'INVALID_WORK_ITEM_RECORD',
+    })
+  })
+
   test('rejects duplicate primary keys after scanning the table', async () => {
     const attempt = startManifestCreation({
       role: 'source',

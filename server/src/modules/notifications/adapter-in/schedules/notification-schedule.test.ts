@@ -472,6 +472,60 @@ describe('notification schedule handler', () => {
     }
   })
 
+  test('skips Work Item key registry rows that share the Work Items table', async () => {
+    const registryRows = [
+      {
+        directoryTeamId: 'workspace-1#work-item-key-registry',
+        issueId: 'team#core-team',
+        entryType: 'work-item-key-counter',
+        directoryId: 'workspace-1',
+        teamId: 'core-team',
+        keyPrefix: 'CT',
+        lastNumber: 3,
+        registeredAt: '2026-07-01T00:00:00.000Z',
+      },
+      {
+        directoryTeamId: 'workspace-1#work-item-key-registry',
+        issueId: 'key#CT-3',
+        entryType: 'work-item-key',
+        directoryId: 'workspace-1',
+        key: 'CT-3',
+        teamId: 'core-team',
+        workItemId: 'ct-3',
+        registeredAt: '2026-07-01T00:00:00.000Z',
+      },
+    ]
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? { ScannedCount: 3, Items: [...registryRows, createWorkItem()] }
+      : {})
+
+    const result = await runNotificationSchedule(createRunOptions(recording.client))
+
+    expect(result).toMatchObject({ scannedItems: 3, emittedEvents: 1 })
+  })
+
+  test('still fails closed for a malformed row that claims to be a key registry row', async () => {
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? {
+          ScannedCount: 1,
+          Items: [{
+            directoryTeamId: 'workspace-1#work-item-key-registry',
+            issueId: 'key#ct-3',
+            entryType: 'work-item-key',
+            directoryId: 'workspace-1',
+            key: 'ct-3',
+            teamId: 'core-team',
+            workItemId: 'ct-3',
+            registeredAt: '2026-07-01T00:00:00.000Z',
+          }],
+        }
+      : {})
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client))).rejects.toThrow(
+      'Notification schedule encountered a non-canonical Work Item row.',
+    )
+  })
+
   test('paginates a bounded strongly consistent Work Item scan', async () => {
     let scanCount = 0
     const recording = createRecordingDocumentClient((name) => {

@@ -22,6 +22,7 @@ import {
   createDefaultDueDateWorkItemSchedule,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  parseWorkItemKey,
   readSearchWorkItemTypeKey,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
@@ -88,6 +89,7 @@ import {
   type UpdateTeamIssueRequestBody,
   type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
+  type WorkItemKeyLocation,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
 import { InMemoryPlanningClient } from '../../modules/planning/planning'
@@ -833,6 +835,7 @@ function createTeamIssuesFake(
     },
     getTeamIssues: unsupported,
     getPublicWorkItemPage: unsupported,
+    getWorkItemKeyLocation: unsupported,
     getProjectIssues: unsupported,
     getTeamIssuePage: unsupported,
     getProjectIssuePage: unsupported,
@@ -1455,6 +1458,8 @@ function configureFakeProjectClients(
      * When set, an update increments the stored revision so later reads observe it.
      */
     detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
+    /** Work Item key the detail fake returns, by Work Item ID; Work Items not listed have none. */
+    detailKeys?: Record<string, string>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
@@ -1496,6 +1501,8 @@ function configureFakeProjectClients(
       /** Canonical dependency endpoint revisions checked by the transaction. */
       workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[]
     }) => Promise<void> | void
+    /** Work Item key registry rows, by canonical key, returned by key lookups. */
+    workItemKeyLocations?: Readonly<Record<string, WorkItemKeyLocation>>
     /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
     issueCreateHook?: (input: CreateTeamIssueRequestBody) => Promise<void> | void
     /** Canonical Work Item update transaction 直前の認可競合を再現する hook です。 */
@@ -2687,6 +2694,10 @@ function configureFakeProjectClients(
         })
         return readFakeSortedPage(createFakeProjectIssues(projectId), readOptions)
       },
+      async getWorkItemKeyLocation(_directoryId, key) {
+        const parsed = parseWorkItemKey(key)
+        return parsed ? options.workItemKeyLocations?.[parsed.key] : undefined
+      },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({
           directoryId,
@@ -2737,6 +2748,7 @@ function configureFakeProjectClients(
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: options.detailRevisions?.[`${teamId}\0${issueId}`] ?? 1,
             id: issueId,
+            ...(options.detailKeys?.[issueId] === undefined ? {} : { key: options.detailKeys[issueId] }),
             teamId,
             assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
               (options.unassignedIssue

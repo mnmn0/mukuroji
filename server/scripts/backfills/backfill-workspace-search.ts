@@ -19,7 +19,10 @@ import {
   type SearchCustomFieldValue,
   type SearchEntityType,
 } from '@mukuroji/contracts'
-import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
+import {
+  isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
+} from '../../src/modules/work-items'
 import { validateDocumentPayload } from '../../src/modules/documents'
 import {
   createCommentWorkspaceSearchDocument,
@@ -653,6 +656,8 @@ function mapProjectDirectoryItemRow(
  * Canonical Work Item row を Team scope を保持した search document 操作へ変換します。
  */
 export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOperation | undefined {
+  // The Work Item key registry shares the table; its rows are not searchable Work Items.
+  if (isWorkItemKeyRegistryRecord(item)) return undefined
   if (!isCanonicalWorkItemRecord(item)) {
     throw new TypeError(
       'Workspace search backfill encountered a non-canonical Work Item row.',

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   createDefaultUnscheduledWorkItemSchedule,
+  WORK_ITEM_TITLE_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import {
   validateApplyAutomationTemplateInput,
@@ -50,6 +51,19 @@ describe('Automation management validation domain', () => {
         expectedRevision: 0,
       },
     })).toMatchObject({ target: { kind: 'workflow', expectedRevision: 0 } })
+  })
+
+  test('bounds a Work Item template title like a Work Item title', () => {
+    const template = (title: string) => ({
+      kind: 'work-item',
+      name: 'Long title',
+      enabled: true,
+      payload: { title, schedule: createDefaultUnscheduledWorkItemSchedule() },
+    })
+    expect(validateCreateAutomationTemplateInput(template('🙂'.repeat(WORK_ITEM_TITLE_MAX_LENGTH))))
+      .toMatchObject({ payload: { title: '🙂'.repeat(WORK_ITEM_TITLE_MAX_LENGTH) } })
+    expect(() => validateCreateAutomationTemplateInput(template('a'.repeat(WORK_ITEM_TITLE_MAX_LENGTH + 1))))
+      .toThrow(`Work Item template title must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`)
   })
 
   test('validates webhook and recurring inputs at a transport-neutral boundary', () => {

@@ -327,6 +327,24 @@ describe('Workspace search backfill mapping', () => {
     }
   })
 
+  test('skips Work Item key registry rows and rejects malformed ones', () => {
+    const keyRow = {
+      directoryTeamId: 'mukuroji-local#work-item-key-registry',
+      issueId: 'key#CT-1',
+      entryType: 'work-item-key',
+      directoryId: 'mukuroji-local',
+      key: 'CT-1',
+      teamId: 'core-team',
+      workItemId: 'ct-1',
+      registeredAt: '2026-07-01T00:00:00.000Z',
+    }
+
+    expect(mapWorkItem(keyRow)).toBeUndefined()
+    expect(() => mapWorkItem({ ...keyRow, key: 'ct-1' })).toThrow(
+      'Workspace search backfill encountered a non-canonical Work Item row.',
+    )
+  })
+
   test('strictly parses comment scope and deletes soft-deleted projections', () => {
     const entityKey =
       'workspace#mukuroji-local#work-item#team/core-team/issue/release-check'

@@ -1,6 +1,7 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   createDefaultUnscheduledWorkItemSchedule,
+  fitWorkItemTitle,
   type CreateManualTriageEntryInput,
   type TriageBulkActionInput,
   type TriageBulkActionResult,
@@ -1040,7 +1041,8 @@ async function acceptTriageEntryAsNewWorkItem(
           priority: 'medium',
         }
       : {
-          title: entry.sourcePreview.title,
+          // Triage accepts titles up to 500 code points; a Work Item title is shorter.
+          title: fitWorkItemTitle(entry.sourcePreview.title),
           ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
           schedule: createDefaultUnscheduledWorkItemSchedule(),
           priority: 'medium',
