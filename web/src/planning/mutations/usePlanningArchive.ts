@@ -47,8 +47,8 @@ export type UsePlanningArchiveOptions = {
   listErrorMessage: string
   /** Runs the restore request; see {@link PlanningArchiveMutationRunner}. */
   runMutation: PlanningArchiveMutationRunner
-  /** Reloads the Planning snapshot after a restore whose outcome is unknown. */
-  revalidatePlanning: () => Promise<unknown>
+  /** Reloads the Planning snapshot after a failed restore and returns it, to see whether the entity came back. */
+  revalidatePlanning: () => Promise<PlanningSnapshot | undefined>
   /**
    * Workspace member whose unfinished restores are saved in browser storage; omitted until the
    * current user is known, which keeps them only while the page is open.
@@ -92,6 +92,27 @@ function getPlanningRestoreStorage(): PlanningRestoreResultStorage | undefined {
 export function isUncertainPlanningRestoreFailure(error: unknown) {
   if (!(error instanceof PlanningApiError)) return true
   return error.status >= 500 || error.code === 'PlanningAuthorizationChanged'
+}
+
+/**
+ * Returns whether a failed restore may have brought the entity back, so its outcome must offer a retry.
+ *
+ * A reloaded snapshot answers it: the entity is active again only when a restore revision
+ * committed, whatever the error was (a revision conflict can come from the final read after the
+ * commit). Without a reloaded snapshot the error decides; see {@link isUncertainPlanningRestoreFailure}.
+ *
+ * @param error - Rejection of the restore request.
+ * @param entityId - Entity the restore was for.
+ * @param reloaded - Planning snapshot read after the failure, if it could be read.
+ * @returns True when the entity may be active with references still archived.
+ */
+export function planningRestoreMayHaveCommitted(
+  error: unknown,
+  entityId: string,
+  reloaded: PlanningSnapshot | undefined,
+) {
+  if (!reloaded) return isUncertainPlanningRestoreFailure(error)
+  return reloaded.entities.some((entity) => entity.id === entityId && entity.archivedAt === undefined)
 }
 
 /**
@@ -168,12 +189,14 @@ export function usePlanningArchive({
       if (error instanceof PlanningApiError && error.status === 404) {
         // Neither archived nor live any more: a saved outcome must stop offering it.
         applyResults(entity.id, (current) => dropPlanningRestoreResult(current, entity.id))
-      } else if (isUncertainPlanningRestoreFailure(error)) {
-        applyResults(entity.id, (current) => recordUncertainPlanningRestore(
-          current,
-          { entityId: entity.id, title: entity.title },
-        ))
-        await revalidatePlanning().catch(() => undefined)
+      } else {
+        const reloaded = await revalidatePlanning().catch(() => undefined)
+        if (planningRestoreMayHaveCommitted(error, entity.id, reloaded)) {
+          applyResults(entity.id, (current) => recordUncertainPlanningRestore(
+            current,
+            { entityId: entity.id, title: entity.title },
+          ))
+        }
       }
     } finally {
       setRestoringEntityId(undefined)

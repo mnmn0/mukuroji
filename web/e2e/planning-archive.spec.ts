@@ -44,8 +44,13 @@ const archivedCycle = {
  *
  * - `continuation-fails`: the first "restore the rest" fails before changing anything.
  * - `initial-outcome-unknown`: the first restore commits, then the response is lost as a 503.
+ * - `initial-commit-then-conflict`: the first restore commits, then its final read reports a
+ *   revision conflict (409).
  */
-type RestoreFailureScenario = 'continuation-fails' | 'initial-outcome-unknown'
+type RestoreFailureScenario =
+  | 'continuation-fails'
+  | 'initial-outcome-unknown'
+  | 'initial-commit-then-conflict'
 
 /**
  * Installs authenticated Workspace and Planning API stubs with two pages of archived plans.
@@ -163,6 +168,14 @@ async function mockPlanningArchivePage(page: Page, scenario: RestoreFailureScena
         ? planning.entities
         : [...planning.entities, { ...structuredClone(fixtureGoal), id: archivedGoal.id, title: archivedGoal.title }],
     }
+    if (fails && scenario === 'initial-commit-then-conflict') {
+      // The restore committed, but the read after it lost a race with another mutation.
+      await route.fulfill({
+        json: { code: 'PlanningRevisionConflict', message: 'Revision changed.' },
+        status: 409,
+      })
+      return
+    }
     if (fails) {
       // The restore committed, but the client only sees a server error.
       await route.fulfill({ json: { code: 'PlanningUnavailable', message: 'Unavailable.' }, status: 503 })
@@ -215,27 +228,40 @@ test('Issue #369: lists archived plans, restores one, and retries the references
   ])
 })
 
-test('Issue #369: keeps a way to finish a restore whose response was lost', async ({ page }) => {
-  const restoreRequests = await mockPlanningArchivePage(page, 'initial-outcome-unknown')
-  await page.goto('/planning/roadmap', { waitUntil: 'domcontentloaded' })
+for (const { name, scenario, message } of [
+  {
+    name: 'whose response was lost',
+    scenario: 'initial-outcome-unknown',
+    message: '計画の変更を保存できませんでした。もう一度お試しください。',
+  },
+  {
+    name: 'that committed before a revision conflict',
+    scenario: 'initial-commit-then-conflict',
+    message: '他のユーザーが計画を更新しました。再読み込みしてください。',
+  },
+] as const) {
+  test(`Issue #369: keeps a way to finish a restore ${name}`, async ({ page }) => {
+    const restoreRequests = await mockPlanningArchivePage(page, scenario)
+    await page.goto('/planning/roadmap', { waitUntil: 'domcontentloaded' })
 
-  const panel = page.getByTestId('planning-archived-entities')
-  await panel.getByText('アーカイブ済みの計画', { exact: true }).click()
-  await panel.getByRole('button', { name: '復元: 過去の目標' }).click()
+    const panel = page.getByTestId('planning-archived-entities')
+    await panel.getByText('アーカイブ済みの計画', { exact: true }).click()
+    await panel.getByRole('button', { name: '復元: 過去の目標' }).click()
 
-  // The goal left the archive although the request failed; only the result can reach it now.
-  await expect(page.getByText('計画の変更を保存できませんでした。もう一度お試しください。')).toBeVisible()
-  const result = panel.getByTestId('planning-restore-result')
-  await expect(result).toContainText('「過去の目標」の復元が完了したか確認できませんでした。')
-  await expect(panel.getByTestId('planning-archived-entity-goal-archived')).toHaveCount(0)
+    // The goal left the archive although the request failed; only the result can reach it now.
+    await expect(page.getByText(message)).toBeVisible()
+    const result = panel.getByTestId('planning-restore-result')
+    await expect(result).toContainText('「過去の目標」の復元が完了したか確認できませんでした。')
+    await expect(panel.getByTestId('planning-archived-entity-goal-archived')).toHaveCount(0)
 
-  await panel.getByTestId('planning-restore-continue').click()
-  await expect(result).toContainText('Work Item の関連付け 5 件と依存関係 0 件を戻しました。')
-  await expect(panel.getByTestId('planning-restore-continue')).toHaveCount(0)
+    await panel.getByTestId('planning-restore-continue').click()
+    await expect(result).toContainText('Work Item の関連付け 5 件と依存関係 0 件を戻しました。')
+    await expect(panel.getByTestId('planning-restore-continue')).toHaveCount(0)
 
-  // The snapshot reloaded after the lost response, so the retry carries the committed revision.
-  expect(restoreRequests).toEqual([
-    { body: { expectedRevision: 30 }, pathname: '/api/planning/entities/goal-archived/restore' },
-    { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
-  ])
-})
+    // The snapshot reloaded after the failure, so the retry carries the committed revision.
+    expect(restoreRequests).toEqual([
+      { body: { expectedRevision: 30 }, pathname: '/api/planning/entities/goal-archived/restore' },
+      { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
+    ])
+  })
+}

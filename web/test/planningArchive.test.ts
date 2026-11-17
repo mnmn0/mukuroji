@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import type { ArchivedPlanningEntitySummary, PlanningEntity } from '@mukuroji/contracts'
 import { PlanningApiError } from '../src/planning/api/errors'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
-import { isUncertainPlanningRestoreFailure } from '../src/planning/mutations/usePlanningArchive'
+import {
+  isUncertainPlanningRestoreFailure,
+  planningRestoreMayHaveCommitted,
+} from '../src/planning/mutations/usePlanningArchive'
 import {
   dropPlanningRestoreResult,
   hasPendingPlanningRestore,
@@ -228,5 +231,27 @@ describe('archived Planning entities', () => {
     expect(isUncertainPlanningRestoreFailure(
       new PlanningApiError(409, 'Inactive.', 'PlanningOwnerInactive'),
     )).toBe(false)
+  })
+
+  test('decides from the reloaded snapshot whether a failed restore brought the entity back', () => {
+    const conflict = new PlanningApiError(409, 'Conflict.', 'PlanningRevisionConflict')
+    const fixtureEntity = planningSnapshotFixture.entities[0]
+    if (!fixtureEntity) throw new Error('Planning fixture is incomplete.')
+    const active = { ...planningSnapshotFixture }
+    const stillArchived = {
+      ...planningSnapshotFixture,
+      entities: planningSnapshotFixture.entities.map((entity) =>
+        entity.id === fixtureEntity.id ? { ...entity, archivedAt: '2026-11-01T00:00:00.000Z' } : entity),
+    }
+    // A conflict from the final read after the commit: the entity is active again.
+    expect(planningRestoreMayHaveCommitted(conflict, fixtureEntity.id, active)).toBe(true)
+    // A rejected restore leaves the entity archived or out of the live graph.
+    expect(planningRestoreMayHaveCommitted(conflict, fixtureEntity.id, stillArchived)).toBe(false)
+    expect(planningRestoreMayHaveCommitted(new PlanningApiError(503, 'Down.'), 'goal-compacted', active))
+      .toBe(false)
+    // Without a reloaded snapshot the error decides.
+    expect(planningRestoreMayHaveCommitted(conflict, fixtureEntity.id, undefined)).toBe(false)
+    expect(planningRestoreMayHaveCommitted(new PlanningApiError(503, 'Down.'), fixtureEntity.id, undefined))
+      .toBe(true)
   })
 })
