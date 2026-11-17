@@ -10,6 +10,7 @@ import {
   recordPlanningRestoreResult,
   recordUncertainPlanningRestore,
   selectRestorablePlanningEntities,
+  updateStoredPlanningRestoreResults,
   writeStoredPlanningRestoreResults,
   type PlanningRestoreResultView,
 } from '../src/planning/model/archive'
@@ -173,6 +174,19 @@ describe('archived Planning entities', () => {
     expect(() => writeStoredPlanningRestoreResults(failing, 'member-1', [pending])).not.toThrow()
 
     expect(dropPlanningRestoreResult([unknown, pending], 'goal-b')).toEqual([pending])
+
+    // Another tab of the same member saved goal-a; this tab, which never showed it, finishes
+    // goal-c and loses track of goal-b, and goal-a stays saved.
+    writeStoredPlanningRestoreResults(storage, 'member-1', [pending, unknown])
+    updateStoredPlanningRestoreResults(storage, 'member-1', (current) =>
+      recordPlanningRestoreResult(current, finished))
+    updateStoredPlanningRestoreResults(storage, 'member-1', (current) =>
+      dropPlanningRestoreResult(current, 'goal-b'))
+    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([pending])
+    updateStoredPlanningRestoreResults(storage, 'member-1', (current) =>
+      recordUncertainPlanningRestore(current, { entityId: 'goal-d', title: 'Goal D' }))
+    expect(readStoredPlanningRestoreResults(storage, 'member-1').map((result) => result.entityId))
+      .toEqual(['goal-d', 'goal-a'])
   })
 
   test('treats only failures that may follow a committed restore as uncertain', () => {

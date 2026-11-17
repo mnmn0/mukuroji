@@ -4,7 +4,7 @@ import type {
   PlanningRestoreSummary,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { restorePlanningEntity } from '../api/entities'
 import { PlanningApiError } from '../api/errors'
@@ -14,7 +14,7 @@ import {
   recordPlanningRestoreResult,
   recordUncertainPlanningRestore,
   selectRestorablePlanningEntities,
-  writeStoredPlanningRestoreResults,
+  updateStoredPlanningRestoreResults,
   type PlanningArchiveController,
   type PlanningRestoreResultStorage,
   type PlanningRestoreResultView,
@@ -125,10 +125,20 @@ export function usePlanningArchive({
       ? []
       : readStoredPlanningRestoreResults(getPlanningRestoreStorage(), storageScope))
   }
-  useEffect(() => {
-    if (loadedScope === undefined) return
-    writeStoredPlanningRestoreResults(getPlanningRestoreStorage(), loadedScope, results)
-  }, [loadedScope, results])
+
+  /**
+   * Applies one outcome change to the shown outcomes and to the saved ones.
+   *
+   * @param update - Outcome change, such as recording a restore result.
+   */
+  const applyResults = (
+    update: (current: readonly PlanningRestoreResultView[]) => readonly PlanningRestoreResultView[],
+  ) => {
+    setResults(update)
+    if (loadedScope !== undefined) {
+      updateStoredPlanningRestoreResults(getPlanningRestoreStorage(), loadedScope, update)
+    }
+  }
 
   /**
    * Restores an archived entity, or continues a restore that left references in the archive.
@@ -155,9 +165,9 @@ export function usePlanningArchive({
       // can leave the archived list, so an outcome without a summary keeps a way to retry it.
       if (error instanceof PlanningApiError && error.status === 404) {
         // Neither archived nor live any more: a saved outcome must stop offering it.
-        setResults((current) => dropPlanningRestoreResult(current, entity.id))
+        applyResults((current) => dropPlanningRestoreResult(current, entity.id))
       } else if (isUncertainPlanningRestoreFailure(error)) {
-        setResults((current) => recordUncertainPlanningRestore(
+        applyResults((current) => recordUncertainPlanningRestore(
           current,
           { entityId: entity.id, title: entity.title },
         ))
@@ -168,7 +178,7 @@ export function usePlanningArchive({
     }
     const { summary } = outcome
     if (summary) {
-      setResults((current) => recordPlanningRestoreResult(
+      applyResults((current) => recordPlanningRestoreResult(
         current,
         { entityId: entity.id, title: entity.title, summary },
       ))

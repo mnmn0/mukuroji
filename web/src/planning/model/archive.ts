@@ -236,6 +236,28 @@ export function writeStoredPlanningRestoreResults(
 }
 
 /**
+ * Applies one restore outcome change to the saved unfinished restores.
+ *
+ * The change is applied to what storage holds now, not to the outcomes one page shows, so an
+ * unfinished restore saved by another tab of the same member is kept.
+ *
+ * @param storage - Browser storage; unavailable storage is left alone.
+ * @param scope - Workspace member the outcomes belong to.
+ * @param update - The same outcome change the page applies to its own outcomes.
+ */
+export function updateStoredPlanningRestoreResults(
+  storage: PlanningRestoreResultStorage | undefined,
+  scope: string,
+  update: (results: readonly PlanningRestoreResultView[]) => readonly PlanningRestoreResultView[],
+) {
+  writeStoredPlanningRestoreResults(
+    storage,
+    scope,
+    update(readStoredPlanningRestoreResults(storage, scope)),
+  )
+}
+
+/**
  * Removes the outcome of an entity that no longer exists, so it stops offering a restore.
  *
  * @param results - Outcomes shown so far, newest first.
