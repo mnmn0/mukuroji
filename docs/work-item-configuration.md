@@ -193,7 +193,7 @@ Team の link 数は `RELATION_GRAPH` row の `edgeCount`（directed row 数）�
 
 `hierarchyRank` を持たない Work Item は、作成順の `sortOrder` から作る既定の rank（`createDefaultWorkItemHierarchyRank`）で並ぶ。`sortOrder` は一覧の paging に使う GSI の range key なので、階層の並び替えには使わない。
 
-`PUT .../parent` に `hierarchyRank` を付けると、親の付け替えと同じ transaction で子の rank を書く。親を変えずに rank だけを変える（上下の並び替え）と、子の row だけを revision と所属 Project を条件に更新し、graph revision は進めない。親を変えて rank を付けない場合は保存済みの rank を消し、既定の順に戻す。不正な rank は `400 InvalidWorkItemHierarchyRank` で拒否する。`relationIds` と同じく、rank の更新は Work Item の `revision` を進めない。
+`PUT .../parent` に `hierarchyRank` を付けると、親の付け替えと同じ transaction で子の rank を書く。親を変えずに rank だけを変える（上下の並び替え）と、子の row だけを revision と所属 Project、読んだ graph revision を条件に更新し、graph revision は進めない。その間に親が変わっていれば `409 WorkItemRelationGraphConflict` を返す。親を変えて rank を付けない場合は保存済みの rank を消し、既定の順に戻す。不正な rank は `400 InvalidWorkItemHierarchyRank` で拒否する。`relationIds` と同じく、rank の更新は Work Item の `revision` を進めない。
 
 ### 親の完了ポリシー
 

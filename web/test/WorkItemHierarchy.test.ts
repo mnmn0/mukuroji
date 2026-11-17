@@ -44,9 +44,9 @@ function node(
 // 3 phase-3 (f)
 const nodes = [
   node('phase-1', null, 'b', ['task-1', 'task-2', 'task-3']),
-  node('task-1', 'phase-1', 'b'),
-  node('task-2', 'phase-1', 'd'),
-  node('task-3', 'phase-1', 'f'),
+  node('task-1', 'phase-1', 'b', [], { depth: 1 }),
+  node('task-2', 'phase-1', 'd', [], { depth: 1 }),
+  node('task-3', 'phase-1', 'f', [], { depth: 1 }),
   node('phase-2', null, 'd'),
   node('phase-3', null, 'f'),
 ]
@@ -125,11 +125,32 @@ describe('createWorkItemOutlineRows', () => {
   test('nests a Work Item under its nearest shown ancestor when a filter hides its parent', () => {
     const deep = [
       node('root', null, 'b', ['middle']),
-      node('middle', 'root', 'b', ['leaf']),
-      node('leaf', 'middle', 'b'),
+      node('middle', 'root', 'b', ['leaf'], { depth: 1 }),
+      node('leaf', 'middle', 'b', [], { depth: 2 }),
     ]
     const rows = createWorkItemOutlineRows([{ id: 'root' }, { id: 'leaf' }], deep, new Set())
     expect(rows.map((row) => [row.item.id, row.depth])).toEqual([['root', 0], ['leaf', 1]])
+  })
+
+  test('keeps a Work Item under an unreadable parent inside its readable ancestor', () => {
+    // root > (unreadable) > hidden-child, and root > sibling: the server omits the unreadable node.
+    const withHidden = [
+      node('root', null, 'b', ['sibling']),
+      node('hidden-child', null, 'b', [], { depth: 1, parentHidden: true }),
+      node('sibling', 'root', 'd', [], { depth: 1 }),
+    ]
+    const items = [{ id: 'root' }, { id: 'hidden-child' }, { id: 'sibling' }]
+    expect(createWorkItemOutlineRows(items, withHidden, new Set())
+      .map((row) => [row.item.id, row.depth, row.hasChildren])).toEqual([
+      ['root', 0, true],
+      ['hidden-child', 1, false],
+      ['sibling', 1, false],
+    ])
+    // Collapsing the root hides both; nothing else hides the sibling.
+    expect(createWorkItemOutlineRows(items, withHidden, new Set(['hidden-child']))
+      .map((row) => row.item.id)).toEqual(['root', 'hidden-child', 'sibling'])
+    expect(createWorkItemOutlineRows(items, withHidden, new Set(['root']))
+      .map((row) => row.item.id)).toEqual(['root'])
   })
 })
 

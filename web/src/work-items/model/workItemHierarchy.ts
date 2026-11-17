@@ -149,11 +149,14 @@ export type WorkItemOutlineRow<Item> = {
  * Orders shown Work Items as an outline and hides the rows under collapsed parents.
  *
  * A Work Item nests under its nearest shown ancestor, so a filter that hides a parent keeps its
- * shown children under the next shown ancestor. Work Items missing from the hierarchy (archived,
- * or created after it was read) follow at the top level in their given order.
+ * shown children under the next shown ancestor. Ancestors come from the nodes' outline order and
+ * depth rather than from `parentWorkItemId`, because a Work Item under a parent the reader may not
+ * see has no parent ID but still sits inside its readable ancestor's subtree. Work Items missing
+ * from the hierarchy (archived, or created after it was read) follow at the top level in their
+ * given order.
  *
  * @param items - Shown Work Items.
- * @param nodes - Hierarchy nodes in outline order.
+ * @param nodes - Hierarchy nodes in outline order, with depths counting readable ancestors.
  * @param collapsedIds - Work Items whose nested rows are hidden.
  * @returns Visible rows in outline order.
  */
@@ -163,27 +166,20 @@ export function createWorkItemOutlineRows<Item extends { id: string }>(
   collapsedIds: ReadonlySet<string>,
 ): WorkItemOutlineRow<Item>[] {
   const itemsById = new Map(items.map((item) => [item.id, item]))
-  const nodesById = new Map(nodes.map((node) => [node.workItemId, node]))
-  const depthById = new Map<string, number>()
+  const nodeIds = new Set(nodes.map((node) => node.workItemId))
+  // Readable ancestors of the current node: their hierarchy depth and, when shown, row depth.
+  const ancestors: { depth: number, rowDepth?: number }[] = []
   const ordered: { item: Item, node?: TeamWorkItemHierarchyNode, depth: number }[] = []
   for (const node of nodes) {
+    while ((ancestors.at(-1)?.depth ?? -1) >= node.depth) ancestors.pop()
+    const shownAncestor = ancestors.findLast((ancestor) => ancestor.rowDepth !== undefined)
+    const depth = shownAncestor?.rowDepth === undefined ? 0 : shownAncestor.rowDepth + 1
     const item = itemsById.get(node.workItemId)
-    if (!item) continue
-    let depth = 0
-    let ancestorId = node.parentWorkItemId
-    while (ancestorId !== null) {
-      const ancestorDepth = depthById.get(ancestorId)
-      if (ancestorDepth !== undefined) {
-        depth = ancestorDepth + 1
-        break
-      }
-      ancestorId = nodesById.get(ancestorId)?.parentWorkItemId ?? null
-    }
-    depthById.set(node.workItemId, depth)
-    ordered.push({ item, node, depth })
+    ancestors.push({ depth: node.depth, ...(item ? { rowDepth: depth } : {}) })
+    if (item) ordered.push({ item, node, depth })
   }
   for (const item of items) {
-    if (!nodesById.has(item.id)) ordered.push({ item, depth: 0 })
+    if (!nodeIds.has(item.id)) ordered.push({ item, depth: 0 })
   }
 
   const rows: WorkItemOutlineRow<Item>[] = []

@@ -350,4 +350,11 @@ test('reads the readable parent and children of one Work Item without the Team t
   ))
 
   expect(links).toEqual({ parentWorkItemId: 'parent', childWorkItemIds: ['child-a', 'child-b'] })
+  const archivedLinks = await runWithTestAppDependencies(() => readWorkItemHierarchyLinks(
+    'user#demo@example.com',
+    'core-team',
+    { ...base, id: 'middle', relationIds: ['parent:parent'], archivedAt: '2026-11-01T00:00:00.000Z' },
+    () => true,
+  ))
+  expect(archivedLinks).toEqual({ parentWorkItemId: null, childWorkItemIds: [] })
 })

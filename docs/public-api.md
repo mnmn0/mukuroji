@@ -48,7 +48,7 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 
 ## Work Item の階層
 
-`GET /api/v1/work-items/{workItemId}/hierarchy?teamId={teamId}` は Work Item の親と子を `{ schemaVersion, teamId, workItemId, parentWorkItemId, childWorkItemIds, wbsNumber? }` で返します（`WorkItemHierarchy`）。`childWorkItemIds` は読める子だけを兄弟の順に並べます。`wbsNumber` は Team の木の中の番号（`1.2.3`）です。`parentWorkItemId` は、親がない場合と、credential が親を読めない場合に `null` です。Team の Work Item が階層の上限（1,000 件）を超える場合は木を作らず、この Work Item の relation から親と子を返します。このときは `wbsNumber` を省き、`childWorkItemIds` は ID 順です。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
+`GET /api/v1/work-items/{workItemId}/hierarchy?teamId={teamId}` は Work Item の親と子を `{ schemaVersion, teamId, workItemId, parentWorkItemId, childWorkItemIds, wbsNumber? }` で返します（`WorkItemHierarchy`）。`childWorkItemIds` は読める子だけを兄弟の順に並べます。`wbsNumber` は Team の木の中の番号（`1.2.3`）です。`parentWorkItemId` は、親がない場合と、credential が親を読めない場合に `null` です。Team の Work Item が階層の上限（1,000 件）を超える場合は木を作らず、この Work Item の relation から親と子を返します。このときは `wbsNumber` を省き、`childWorkItemIds` は ID 順です。archive 済みの Work Item は、どちらの場合も階層の外として親 `null`・子なしを返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
 ## Work Item Type catalog
 

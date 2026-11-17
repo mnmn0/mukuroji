@@ -12,7 +12,6 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
-  UpdateCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
@@ -1522,7 +1521,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
       if (normalized.hierarchyRank !== undefined) {
-        await this.writeHierarchyRank(workspaceId, teamId, child, normalized.hierarchyRank)
+        await this.writeHierarchyRank(workspaceId, teamId, child, normalized.hierarchyRank, graph.revision)
       }
       return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
     }
@@ -1624,16 +1623,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   /**
    * Stores a child's sibling order rank without changing its parent.
    *
+   * The graph revision read before the parent was compared fences the write, so a parent changed
+   * meanwhile makes the reorder fail instead of overwriting the rank chosen under the new parent.
+   * The graph revision itself does not advance for a rank-only change.
+   *
    * @param workspaceId - Workspace that owns the Work Item.
    * @param teamId - Team that owns the Work Item.
    * @param child - Child snapshot whose revision and Project assignment fence the write.
    * @param hierarchyRank - Validated rank to store.
+   * @param graphRevision - Relation graph revision read before the unchanged parent was observed.
    */
   private async writeHierarchyRank(
     workspaceId: string,
     teamId: string,
     child: WorkItemRelationEndpointSnapshot,
     hierarchyRank: string,
+    graphRevision: number,
   ) {
     const item = createRelationEndpointTransactionItem(
       this.workItemsTableName,
@@ -1644,9 +1649,17 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       throw new WorkItemConfigurationError(500, 'WorkItemHierarchyRankWriteInvalid', 'The rank write is invalid.')
     }
     try {
-      await this.documentClient.send(new UpdateCommand(item.Update))
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          item,
+          createWorkItemRelationGraphRevisionConditionCheck(this.tableName, workspaceId, teamId, graphRevision),
+        ],
+      }))
     } catch (error) {
-      if (isNamedError(error, 'ConditionalCheckFailedException')) {
+      if (
+        isTransactionConditionalFailureAt(error, 0) ||
+        isTransactionConditionalFailureAt(error, 1)
+      ) {
         throw new WorkItemConfigurationError(
           409,
           'WorkItemRelationGraphConflict',

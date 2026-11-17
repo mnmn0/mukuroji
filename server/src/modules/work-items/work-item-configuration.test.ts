@@ -1873,12 +1873,19 @@ test('stores the sibling order rank with a parent change and reorders under the 
     expectedGraphRevision: 6,
     hierarchyRank: 'm',
   })).toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: 'phase-b', graphRevision: 6 })
-  expect(store.transactions).toHaveLength(1)
-  expect(store.updates).toEqual([expect.objectContaining({
+  // The reorder writes only the child's rank, fenced by the graph revision it read.
+  expect(store.transactions).toHaveLength(2)
+  expect(childUpdate(1)).toMatchObject({
     TableName: 'work-items-table',
     UpdateExpression: 'SET #hierarchyRank = :hierarchyRank',
     ExpressionAttributeValues: expect.objectContaining({ ':hierarchyRank': 'm', ':revision': 3 }),
-  })])
+  })
+  expect(store.transactions[1]?.TransactItems).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'configuration-table',
+      ExpressionAttributeValues: expect.objectContaining({ ':expectedRevision': 6 }),
+    }),
+  })
 
   await client.replaceParent('workspace-1', 'core-team', {
     child: { workItemId: 'task', expectedRevision: 3 },
@@ -1886,7 +1893,7 @@ test('stores the sibling order rank with a parent change and reorders under the 
     nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
     expectedGraphRevision: 6,
   })
-  expect(childUpdate(1)?.UpdateExpression).toBe('SET #relationIds = :relationIds REMOVE #hierarchyRank')
+  expect(childUpdate(2)?.UpdateExpression).toBe('SET #relationIds = :relationIds REMOVE #hierarchyRank')
 
   await expect(client.replaceParent('workspace-1', 'core-team', {
     child: { workItemId: 'task', expectedRevision: 3 },
@@ -2098,8 +2105,6 @@ test('classifies a canceled relation transaction when an endpoint disappeared', 
 
 /** Relation rows and graph metadata held by the in-memory configuration table fake. */
 type InMemoryRelationStore = {
-  /** Single-item UpdateCommand inputs sent outside transactions. */
-  updates: Record<string, unknown>[]
   /** Committed TransactWrite inputs. */
   transactions: Array<Record<string, unknown>>
   /** Key prefixes of every attribute Query in call order. */
@@ -2149,7 +2154,6 @@ function createInMemoryRelationStore(
   }
   let rowsSinceTransaction = 0
   const store: InMemoryRelationStore = {
-    updates: [],
     transactions: [],
     queryPrefixes: [],
     countQueries: 0,
@@ -2218,10 +2222,6 @@ function createInMemoryRelationStore(
             store.rowsRead += items.length
             rowsSinceTransaction += items.length
             return { Items: items }
-          }
-          if (command.constructor.name === 'UpdateCommand') {
-            store.updates.push(input)
-            return {}
           }
           if (command.constructor.name === 'TransactWriteCommand' && options.cancelTransactions) {
             throw { name: 'TransactionCanceledException' }

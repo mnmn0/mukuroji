@@ -70,7 +70,8 @@ const LINK_READ_CONCURRENCY = 16
  * @param teamId - Team that owns the Work Item.
  * @param issue - Work Item whose links are read.
  * @param isReadable - Whether the reader may see a Work Item.
- * @returns The readable parent, or `null`, and the readable non-archived children.
+ * @returns The readable parent, or `null`, and the readable non-archived children; nothing for an
+ *   archived Work Item, which is outside the hierarchy as in the Team tree.
  */
 export async function readWorkItemHierarchyLinks(
   directoryId: string,
@@ -78,6 +79,7 @@ export async function readWorkItemHierarchyLinks(
   issue: TeamIssueResponseItem,
   isReadable: (issue: TeamIssueResponseItem) => boolean,
 ): Promise<{ parentWorkItemId: string | null, childWorkItemIds: string[] }> {
+  if (issue.archivedAt !== undefined) return { parentWorkItemId: null, childWorkItemIds: [] }
   const { teamIssues, workItemConfigurations } = workItemDependencies
   /** Reads a linked Work Item, or `undefined` when it no longer exists. */
   const readLinked = async (workItemId: string) => {
