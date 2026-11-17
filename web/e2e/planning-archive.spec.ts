@@ -195,6 +195,11 @@ test('Issue #369: lists archived plans, restores one, and retries the references
   await expect(result).toContainText('5 件はまだ戻っていません。')
   await expect(panel.getByTestId('planning-archived-entity-goal-archived')).toHaveCount(0)
 
+  // The goal is live again and no longer listed, so the unfinished restore must survive a reload.
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await panel.getByText('アーカイブ済みの計画', { exact: true }).click()
+  await expect(result).toContainText('5 件はまだ戻っていません。')
+
   await panel.getByTestId('planning-restore-continue').click()
   await expect(page.getByText('計画の変更を保存できませんでした。もう一度お試しください。')).toBeVisible()
   await expect(result).toContainText('5 件はまだ戻っていません。')

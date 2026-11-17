@@ -127,3 +127,122 @@ export function recordPlanningRestoreResult(
     ),
   ]
 }
+
+/** Browser storage operations the unfinished restore list needs. */
+export type PlanningRestoreResultStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+
+/** Storage key prefix of the unfinished restores kept per Workspace member. */
+const pendingRestoreStoragePrefix = 'mukuroji.planning.pendingRestores:'
+
+/** Most unfinished restores kept in storage; older ones fall back to the API. */
+const pendingRestoreStorageLimit = 50
+
+/** Count fields of a stored restore summary. */
+const restoreSummaryCountKeys = [
+  'restoredLinkCount',
+  'droppedLinkCount',
+  'restoredDependencyCount',
+  'retainedDependencyCount',
+  'droppedDependencyCount',
+  'pendingReferenceCount',
+] as const satisfies readonly (keyof PlanningRestoreSummary)[]
+
+/**
+ * Returns whether a stored value is a restore summary.
+ *
+ * @param value - Parsed stored value.
+ * @returns True when every count is a non-negative safe integer.
+ */
+function isStoredPlanningRestoreSummary(value: unknown): value is PlanningRestoreSummary {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return restoreSummaryCountKeys.every((key) => {
+    const count = record[key]
+    return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0
+  })
+}
+
+/**
+ * Returns whether a stored value is a restore outcome.
+ *
+ * @param value - One element of the stored array.
+ * @returns True when the entity ID and title are strings and the summary, if any, is valid.
+ */
+function isStoredPlanningRestoreResult(value: unknown): value is PlanningRestoreResultView {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return typeof record.entityId === 'string' &&
+    record.entityId.length > 0 &&
+    typeof record.title === 'string' &&
+    (record.summary === undefined || isStoredPlanningRestoreSummary(record.summary))
+}
+
+/**
+ * Reads the unfinished restores saved for a Workspace member.
+ *
+ * A restored entity leaves the archived list, so these outcomes are the way back to references
+ * still in the archive after a reload or a visit to another page.
+ *
+ * @param storage - Browser storage; unavailable storage reads as empty.
+ * @param scope - Workspace member the outcomes belong to.
+ * @returns The saved outcomes that still have pending references, newest first.
+ */
+export function readStoredPlanningRestoreResults(
+  storage: PlanningRestoreResultStorage | undefined,
+  scope: string,
+): PlanningRestoreResultView[] {
+  try {
+    const text = storage?.getItem(`${pendingRestoreStoragePrefix}${scope}`)
+    if (!text) return []
+    const parsed: unknown = JSON.parse(text)
+    if (!Array.isArray(parsed)) return []
+    const seen = new Set<string>()
+    return parsed.filter((value): value is PlanningRestoreResultView => {
+      if (!isStoredPlanningRestoreResult(value) || seen.has(value.entityId)) return false
+      seen.add(value.entityId)
+      return hasPendingPlanningRestore(value)
+    }).map((result) => ({
+      entityId: result.entityId,
+      title: result.title,
+      ...(result.summary === undefined ? {} : { summary: result.summary }),
+    }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Saves the unfinished restores of a Workspace member, dropping finished ones.
+ *
+ * @param storage - Browser storage; a failed write is ignored.
+ * @param scope - Workspace member the outcomes belong to.
+ * @param results - Outcomes shown now, newest first.
+ */
+export function writeStoredPlanningRestoreResults(
+  storage: PlanningRestoreResultStorage | undefined,
+  scope: string,
+  results: readonly PlanningRestoreResultView[],
+) {
+  const key = `${pendingRestoreStoragePrefix}${scope}`
+  const pending = results.filter(hasPendingPlanningRestore).slice(0, pendingRestoreStorageLimit)
+  try {
+    if (pending.length === 0) storage?.removeItem(key)
+    else storage?.setItem(key, JSON.stringify(pending))
+  } catch {
+    // Storage may be full or disabled; the outcomes still show until the page is left.
+  }
+}
+
+/**
+ * Removes the outcome of an entity that no longer exists, so it stops offering a restore.
+ *
+ * @param results - Outcomes shown so far, newest first.
+ * @param entityId - Entity the server no longer has.
+ * @returns The outcomes without that entity.
+ */
+export function dropPlanningRestoreResult(
+  results: readonly PlanningRestoreResultView[],
+  entityId: string,
+): PlanningRestoreResultView[] {
+  return results.filter((result) => result.entityId !== entityId)
+}

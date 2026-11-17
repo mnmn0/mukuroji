@@ -2,10 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import type { ArchivedPlanningEntitySummary, PlanningEntity } from '@mukuroji/contracts'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import {
+  dropPlanningRestoreResult,
   hasPendingPlanningRestore,
+  readStoredPlanningRestoreResults,
   recordPlanningRestoreResult,
   recordUncertainPlanningRestore,
   selectRestorablePlanningEntities,
+  writeStoredPlanningRestoreResults,
   type PlanningRestoreResultView,
 } from '../src/planning/model/archive'
 
@@ -102,5 +105,57 @@ describe('archived Planning entities', () => {
     })
     expect(restored.map((result) => result.entityId)).toEqual(['goal-b', 'goal-a'])
     expect(hasPendingPlanningRestore(restored[0]!)).toBe(false)
+  })
+
+  test('saves unfinished restores per member and reads back only valid pending ones', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      removeItem: (key: string) => void values.delete(key),
+      setItem: (key: string, value: string) => void values.set(key, value),
+    }
+    const summary = {
+      restoredLinkCount: 1,
+      droppedLinkCount: 0,
+      restoredDependencyCount: 0,
+      retainedDependencyCount: 0,
+      droppedDependencyCount: 0,
+      pendingReferenceCount: 2,
+    }
+    const pending: PlanningRestoreResultView = { entityId: 'goal-a', title: 'Goal A', summary }
+    const unknown: PlanningRestoreResultView = { entityId: 'goal-b', title: 'Goal B' }
+    const finished: PlanningRestoreResultView = {
+      entityId: 'goal-c',
+      title: 'Goal C',
+      summary: { ...summary, pendingReferenceCount: 0 },
+    }
+
+    writeStoredPlanningRestoreResults(storage, 'member-1', [finished, unknown, pending])
+    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([unknown, pending])
+    expect(readStoredPlanningRestoreResults(storage, 'member-2')).toEqual([])
+    // Nothing left to continue clears the saved entry.
+    writeStoredPlanningRestoreResults(storage, 'member-1', [finished])
+    expect(values.size).toBe(0)
+
+    values.set('mukuroji.planning.pendingRestores:member-1', JSON.stringify([
+      { entityId: 'goal-a', title: 'Goal A', summary: { ...summary, pendingReferenceCount: -1 } },
+      { entityId: '', title: 'Empty' },
+      unknown,
+      { ...unknown, title: 'Duplicate' },
+    ]))
+    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([unknown])
+    values.set('mukuroji.planning.pendingRestores:member-1', '{not json')
+    expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([])
+    // Unavailable or failing storage reads as empty and ignores writes.
+    expect(readStoredPlanningRestoreResults(undefined, 'member-1')).toEqual([])
+    const failing = {
+      getItem: () => { throw new Error('blocked') },
+      removeItem: () => { throw new Error('blocked') },
+      setItem: () => { throw new Error('blocked') },
+    }
+    expect(readStoredPlanningRestoreResults(failing, 'member-1')).toEqual([])
+    expect(() => writeStoredPlanningRestoreResults(failing, 'member-1', [pending])).not.toThrow()
+
+    expect(dropPlanningRestoreResult([unknown, pending], 'goal-b')).toEqual([pending])
   })
 })

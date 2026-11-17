@@ -4,15 +4,19 @@ import type {
   PlanningRestoreSummary,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { restorePlanningEntity } from '../api/entities'
 import { PlanningApiError } from '../api/errors'
 import {
+  dropPlanningRestoreResult,
+  readStoredPlanningRestoreResults,
   recordPlanningRestoreResult,
   recordUncertainPlanningRestore,
   selectRestorablePlanningEntities,
+  writeStoredPlanningRestoreResults,
   type PlanningArchiveController,
+  type PlanningRestoreResultStorage,
   type PlanningRestoreResultView,
 } from '../model/archive'
 import { usePlanningArchivedEntities } from '../queries/usePlanningArchivedEntities'
@@ -45,6 +49,11 @@ export type UsePlanningArchiveOptions = {
   runMutation: PlanningArchiveMutationRunner
   /** Reloads the Planning snapshot after a restore whose outcome is unknown. */
   revalidatePlanning: () => Promise<unknown>
+  /**
+   * Workspace member whose unfinished restores are saved in browser storage; omitted until the
+   * current user is known, which keeps them only while the page is open.
+   */
+  storageScope?: string
 }
 
 /** Archived plans state and actions for the Planning page. */
@@ -55,6 +64,19 @@ export type UsePlanningArchiveResult = {
   error: unknown
   /** Reloads the archived list, for example after archiving an entity. */
   revalidate: () => Promise<unknown>
+}
+
+/**
+ * Returns the browser's local storage, or `undefined` where it is unavailable or blocked.
+ *
+ * @returns Local storage when it can be used.
+ */
+function getPlanningRestoreStorage(): PlanningRestoreResultStorage | undefined {
+  try {
+    return typeof window === 'undefined' ? undefined : window.localStorage
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -85,11 +107,26 @@ export function usePlanningArchive({
   revalidatePlanning,
   runMutation,
   snapshot,
+  storageScope,
 }: UsePlanningArchiveOptions): UsePlanningArchiveResult {
   const [isOpen, setIsOpen] = useState(false)
   const [restoringEntityId, setRestoringEntityId] = useState<string>()
   const [results, setResults] = useState<readonly PlanningRestoreResultView[]>([])
+  const [loadedScope, setLoadedScope] = useState<string>()
   const archived = usePlanningArchivedEntities(accessToken, canRestore && isOpen)
+
+  // A restored entity leaves the archived list, so unfinished restores are saved per member and
+  // read back when the page mounts again or the member changes.
+  if (storageScope !== loadedScope) {
+    setLoadedScope(storageScope)
+    setResults(storageScope === undefined
+      ? []
+      : readStoredPlanningRestoreResults(getPlanningRestoreStorage(), storageScope))
+  }
+  useEffect(() => {
+    if (loadedScope === undefined) return
+    writeStoredPlanningRestoreResults(getPlanningRestoreStorage(), loadedScope, results)
+  }, [loadedScope, results])
 
   /**
    * Restores an archived entity, or continues a restore that left references in the archive.
@@ -114,7 +151,10 @@ export function usePlanningArchive({
     } catch (error) {
       // The page has already reported the failure. When the restore may have committed, the entity
       // can leave the archived list, so an outcome without a summary keeps a way to retry it.
-      if (isUncertainPlanningRestoreFailure(error)) {
+      if (error instanceof PlanningApiError && error.status === 404) {
+        // Neither archived nor live any more: a saved outcome must stop offering it.
+        setResults((current) => dropPlanningRestoreResult(current, entity.id))
+      } else if (isUncertainPlanningRestoreFailure(error)) {
         setResults((current) => recordUncertainPlanningRestore(
           current,
           { entityId: entity.id, title: entity.title },

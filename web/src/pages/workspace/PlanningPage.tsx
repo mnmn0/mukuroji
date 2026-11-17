@@ -244,6 +244,9 @@ export function PlanningPage() {
       { errorOperation: 'restore', rethrowOnFailure: true },
     ),
     snapshot,
+    storageScope: user
+      ? JSON.stringify([user.attributes['custom:workspace_id'] ?? '', user.username])
+      : undefined,
   })
   const canMutatePlanningContent = canMutateWorkspaceContent(user)
   const currentPath = `${location.pathname}${location.search}${location.hash}`
