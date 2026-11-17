@@ -284,7 +284,10 @@ export function requireCanonicalFileProofingWorkItem(
 }
 
 /**
- * Resolves an approval completion transition against current workflow state.
+ * Resolves an approval completion transition against current workflow state, when an approval
+ * decision is about to apply it.
+ *
+ * The Team's parent completion policy applies here, because this is when the status changes.
  *
  * @param directoryId - Owning Workspace directory identifier.
  * @param teamId - Owning Team identifier.
@@ -293,13 +296,59 @@ export function requireCanonicalFileProofingWorkItem(
  * @param dependencies - Ports used to read workflow configuration.
  * @returns A transaction-ready completion transition snapshot.
  */
-export async function resolveFileApprovalCompletionTransition(
+export function resolveFileApprovalCompletionTransition(
   directoryId: string,
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
+) {
+  return resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, true)
+}
+
+/**
+ * Checks that an approval request may name a completion transition.
+ *
+ * Requesting an approval does not change the status, so open children do not block it; the
+ * parent completion policy is checked when the decision applies the transition.
+ *
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Owning Team identifier.
+ * @param workItem - Canonical Work Item being approved.
+ * @param completionTransition - Requested target workflow status.
+ * @param dependencies - Ports used to read workflow configuration.
+ * @throws FileProofingError when the status is unknown or the transition is not allowed.
+ */
+export async function validateFileApprovalCompletionTransition(
+  directoryId: string,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  completionTransition: string,
+  dependencies: AutomationActionExecutorDependencies =
+    ambientAutomationActionExecutorDependencies,
+): Promise<void> {
+  await resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, false)
+}
+
+/**
+ * Resolves an approval completion transition against current workflow state.
+ *
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Owning Team identifier.
+ * @param workItem - Canonical Work Item being approved.
+ * @param completionTransition - Requested target workflow status.
+ * @param dependencies - Ports used to read workflow configuration.
+ * @param applyParentCompletionPolicy - Whether to check and fence the Work Item's open children.
+ * @returns A transaction-ready completion transition snapshot.
+ */
+async function resolveCompletionTransition(
+  directoryId: string,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  completionTransition: string,
+  dependencies: AutomationActionExecutorDependencies,
+  applyParentCompletionPolicy: boolean,
 ) {
   try {
     const resolved = await dependencies.workItemConfigurations.getTeamConfiguration(
@@ -323,15 +372,17 @@ export async function resolveFileApprovalCompletionTransition(
       workItem.workItemTypeId,
     )
     // An approval that completes a parent follows the Team's completion policy like any update.
-    const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
-      directoryId,
-      teamId,
-      workItem,
-      nextStatus.statusCategory,
-      resolved.configuration,
-      dependencies,
-      true,
-    )
+    const childCompletionConditionChecks = applyParentCompletionPolicy
+      ? await prepareParentCompletionConditionChecks(
+          directoryId,
+          teamId,
+          workItem,
+          nextStatus.statusCategory,
+          resolved.configuration,
+          dependencies,
+          true,
+        )
+      : []
     return {
       workflowStatusId: nextStatus.workflowStatusId,
       statusCategory: nextStatus.statusCategory,

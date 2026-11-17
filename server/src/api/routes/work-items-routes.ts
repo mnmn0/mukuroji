@@ -199,6 +199,7 @@ import {
   requireApprovalReviewers,
   requireCanonicalFileProofingWorkItem,
   resolveFileApprovalCompletionTransition,
+  validateFileApprovalCompletionTransition,
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import {
@@ -5798,7 +5799,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         }
       }
       if (body.completionTransition !== undefined) {
-        await resolveFileApprovalCompletionTransition(
+        await validateFileApprovalCompletionTransition(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,

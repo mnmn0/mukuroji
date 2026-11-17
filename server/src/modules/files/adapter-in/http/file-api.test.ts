@@ -296,7 +296,12 @@ test('rejects excessive approval reviewers before external member fan-out', asyn
 
 test('validates and stores an approval completion target from the current workflow', async () => {
   configureFakeProjectClients(true, { role: 'member' })
-  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  // Requesting an approval does not complete the Work Item, so open children do not block it.
+  const configuration = {
+    ...createTestWorkItemConfiguration('team', 'core-team'),
+    parentCompletionPolicy: 'reject' as const,
+  }
+  let childReads = 0
   configuration.workflow.statuses.push({
     id: 'approval-complete',
     name: 'Approval complete',
@@ -331,6 +336,13 @@ test('validates and stores an approval completion target from the current workfl
       async getTeamConfiguration() {
         return { configuration }
       },
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        childReads += 1
+        return {
+          relations: [{ sourceWorkItemId: workItemId, targetWorkItemId: 'open-child', type: 'child' }],
+          graphRevision: 2,
+        }
+      },
     }),
   })
 
@@ -351,6 +363,7 @@ test('validates and stores an approval completion target from the current workfl
 
   expect(response.status).toBe(201)
   expect(receivedTransitions).toEqual(['approval-complete'])
+  expect(childReads).toBe(0)
 })
 
 test('resolves approval completion with workflow metadata and configuration guards', async () => {

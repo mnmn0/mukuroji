@@ -126,7 +126,7 @@ import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import {
   prepareConfiguredUpdateWorkItem,
   requireApprovalReviewers,
-  resolveFileApprovalCompletionTransition,
+  validateFileApprovalCompletionTransition,
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import { createAgentRunReleaseOnRemovalItems } from '../shared/agent-run-access'
@@ -1848,7 +1848,7 @@ async function executeAutomationApproval(
     dependencies,
   )
   if (action.completionStatusId) {
-    await resolveFileApprovalCompletionTransition(
+    await validateFileApprovalCompletionTransition(
       context.execution.workspaceId,
       target.teamId,
       detail.issue,
