@@ -574,6 +574,8 @@ export async function createNotificationVisibilityFilter(
       } else {
         delete notification.projectId
       }
+      // Planning read access is enough; the generic checks below require Work Item read access.
+      return true
     } else if (requiresCurrentPlanningUpdateTarget(notification)) {
       planningAuthorizationState ??=
         workItemDependencies.planning.getAuthorizationState(principal.directoryId)

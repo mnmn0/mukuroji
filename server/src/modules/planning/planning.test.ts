@@ -27,6 +27,8 @@ import {
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningMutationTransaction,
+  type PlanningUpdatePublishNotificationContext,
+  type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from './planning'
 import {
@@ -2292,6 +2294,70 @@ describe('planning structured updates', () => {
     })
     expect(secondPage.updates.map((update) => update.version)).toEqual([1])
     expect(secondPage.nextCursor).toBeUndefined()
+  })
+
+  test('records the health transition and cadence recipients with each publish', async () => {
+    const client = new InMemoryPlanningClient(() => new Date('2026-02-28T12:00:00.000Z'))
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        escalationMemberKey: 'lead@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-03-01T15:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 12,
+      },
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)
+    const contexts: PlanningUpdatePublishNotificationContext[] = []
+    const transaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> = {
+      async prepare(result) {
+        contexts.push(result.notification)
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'AuditEventsTable',
+              Item: { eventId: `publish-${result.revision}` },
+            },
+          },
+        }
+      },
+    }
+    const publish = (revision: number, health: PublishPlanningUpdateInput['health']) =>
+      client.publishUpdate(
+        'workspace-1',
+        createPlanningUpdateInput(revision, { target, id: `update-${revision}`, health }),
+        'owner@example.com',
+        EMPTY_WORK_ITEMS,
+        [],
+        transaction,
+      )
+
+    await publish(1, 'on-track')
+    await publish(2, 'at-risk')
+    await publish(3, 'at-risk')
+    await publish(4, 'on-track')
+
+    expect(contexts).toEqual([
+      { healthDegraded: false, updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com' },
+      {
+        previousHealth: 'on-track', healthDegraded: true,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+      },
+      {
+        previousHealth: 'at-risk', healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+      },
+      {
+        previousHealth: 'at-risk', healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+      },
+    ])
   })
 
   test('retains the original monthly day across shorter calendar months', async () => {

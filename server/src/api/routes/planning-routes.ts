@@ -3250,14 +3250,6 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         principal,
         targetScope,
       )
-      const previousHealth = configuredTarget.latestUpdate?.health ?? (
-        input.target.type === 'initiative'
-          ? snapshot.entities.find((entity) =>
-              input.target.type === 'initiative' && entity.id === input.target.entityId
-            )?.health
-          : undefined
-      )
-      const cadence = configuredTarget.cadence
       const response = await workItemDependencies.planning.publishUpdate(
         principal.directoryId,
         input,
@@ -3273,12 +3265,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           (result) => createPlanningUpdatePublishAuditEvent({
             workspaceId: principal.directoryId,
             update: result.update,
-            previousHealth,
-            ownerMemberKey: cadence.updateOwnerMemberKey,
-            ...(cadence.escalationMemberKey
-              ? { escalationMemberKey: cadence.escalationMemberKey }
-              : {}),
-            scope: targetScope ?? {},
+            notification: result.notification,
           }),
         ),
       )

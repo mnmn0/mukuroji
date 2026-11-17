@@ -262,6 +262,43 @@ export type PlanningUpdatePublishTransactionResult = {
   revision: number
   /** Complete immutable update value committed by the publish. */
   update: PlanningUpdate
+  /** Health transition and cadence recipients read from the state the publish committed against. */
+  notification: PlanningUpdatePublishNotificationContext
+}
+
+/** Health transition and cadence recipients of one committed update publish. */
+export type PlanningUpdatePublishNotificationContext = {
+  /** Health of the previous update, or of the Initiative before its first update. */
+  previousHealth?: PlanningHealth
+  /** Whether the new health is at-risk or off-track and worse than the previous health. */
+  healthDegraded: boolean
+  /** Update owner of the cadence the publish covered. */
+  updateOwnerMemberKey: string
+  /** Escalation recipient of the cadence the publish covered, when configured. */
+  escalationMemberKey?: string
+}
+
+/** Severity order used to decide whether a health change is a degradation. */
+const planningHealthSeverity: Record<PlanningHealth, number> = {
+  unknown: 0,
+  'on-track': 0,
+  'at-risk': 1,
+  'off-track': 2,
+}
+
+/**
+ * Reports whether a newly published health is worse than the previous one and needs attention.
+ *
+ * @param previous - Health before the publish, when known.
+ * @param next - Health of the new update.
+ * @returns True when the new health is at-risk or off-track and more severe than before.
+ */
+export function isPlanningHealthDegraded(
+  previous: PlanningHealth | undefined,
+  next: PlanningHealth,
+) {
+  return planningHealthSeverity[next] > 0 &&
+    planningHealthSeverity[next] > planningHealthSeverity[previous ?? 'unknown']
 }
 
 /** Minimal result exposed while preparing a durable Planning cadence receipt. */
@@ -655,6 +692,8 @@ type PlanningMutationResult = {
   workItemDependencyTransactionSource?: PlanningWorkItemDependencyTransactionSource
   /** 同じ transaction で append-only 保存する structured update です。 */
   publishedUpdate?: PlanningUpdate
+  /** Health transition and cadence recipients of the published update. */
+  publishedUpdateNotification?: PlanningUpdatePublishNotificationContext
   /** Target whose summary is retained for a durable cadence receipt. */
   planningUpdateCadenceTransactionTarget?: PlanningUpdateTarget
   /** Archive rows written or removed in the same transaction as the live graph change. */
@@ -1664,12 +1703,25 @@ abstract class BasePlanningClient implements PlanningClient {
           latestContextSnapshot: structuredClone(contextSnapshot),
           updatedAt: now,
         }
+        const previousHealth = current.latestUpdate?.health ?? (
+          target.type === 'initiative'
+            ? requireActiveEntity(state, target.entityId).health
+            : undefined
+        )
+        const publishedUpdateNotification: PlanningUpdatePublishNotificationContext = {
+          ...(previousHealth ? { previousHealth } : {}),
+          healthDegraded: isPlanningHealthDegraded(previousHealth, health),
+          updateOwnerMemberKey: current.cadence.updateOwnerMemberKey,
+          ...(current.cadence.escalationMemberKey
+            ? { escalationMemberKey: current.cadence.escalationMemberKey }
+            : {}),
+        }
         let next = replacePlanningUpdateTarget(state, updatedTarget)
         if (target.type === 'initiative') {
           const entity = requireActiveEntity(next, target.entityId)
           next = replaceEntity(next, { ...entity, health, risk, updatedAt: now })
         }
-        return { state: next, publishedUpdate: update }
+        return { state: next, publishedUpdate: update, publishedUpdateNotification }
       },
       authorizationConditionChecks,
       transaction,
@@ -2340,6 +2392,7 @@ abstract class BasePlanningClient implements PlanningClient {
             kind: 'publish',
             revision: after.revision,
             update: structuredClone(result.publishedUpdate),
+            notification: requirePublishedUpdateNotification(result.publishedUpdateNotification),
           }
     const transactionContribution = transaction
       ? await preparePlanningMutationTransactionContribution(
@@ -7726,6 +7779,22 @@ function createPlanningUpdateTargetRecordSuffix(target: PlanningUpdateTarget) {
   return target.type === 'project'
     ? `PROJECT#${encodeRecordKeyIdentifier(target.teamId)}#${encodeRecordKeyIdentifier(target.projectId)}`
     : `INITIATIVE#${encodeRecordKeyIdentifier(target.entityId)}`
+}
+
+/**
+ * Returns the notification context that every publish mutation records with its update.
+ *
+ * @param value - Context returned by the publish mutation.
+ * @returns A copy of the context.
+ * @throws PlanningError when the publish mutation did not record it.
+ */
+function requirePublishedUpdateNotification(
+  value: PlanningUpdatePublishNotificationContext | undefined,
+): PlanningUpdatePublishNotificationContext {
+  if (!value) {
+    throw new PlanningError(503, 'PlanningUpdateUnavailable', 'Published update is unavailable.')
+  }
+  return { ...value }
 }
 
 /**

@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import type { PlanningUpdate, PlanningUpdateComment } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../../modules/audit/audit'
+import { isPlanningHealthDegraded } from '../../modules/planning'
 import {
   createPlanningUpdateCommentAuditEvent,
   createPlanningUpdatePublishAuditEvent,
-  isPlanningHealthDegraded,
   readPlanningUpdateCommentMentions,
   withPlanningAuditOutbox,
 } from './planning-update-notifications'
@@ -19,6 +19,7 @@ function createUpdate(overrides: Partial<PlanningUpdate> = {}): PlanningUpdate {
     summary: 'Vendor delay pushes the launch.\nNeed a decision.',
     authorMemberKey: 'owner@example.com',
     createdAt: '2026-07-16T09:00:00.000Z',
+    contextSnapshot: { scope: { teamId: 'core', projectId: 'platform' } },
     ...overrides,
   }
   // The builders read only the fields above; the rest of the snapshot is irrelevant here.
@@ -51,10 +52,12 @@ describe('Planning update notifications', () => {
     expect(createPlanningUpdatePublishAuditEvent({
       workspaceId: 'workspace-1',
       update: createUpdate(),
-      previousHealth: 'on-track',
-      ownerMemberKey: 'Owner@Example.com',
-      escalationMemberKey: 'Lead@Example.com',
-      scope: { teamId: 'core', projectId: 'platform' },
+      notification: {
+        previousHealth: 'on-track',
+        healthDegraded: true,
+        updateOwnerMemberKey: 'Owner@Example.com',
+        escalationMemberKey: 'Lead@Example.com',
+      },
     })).toMatchObject({
       eventType: 'planning-update.health-degraded',
       entityType: 'planning-update',
@@ -83,10 +86,13 @@ describe('Planning update notifications', () => {
       update: createUpdate({
         health: 'on-track',
         target: { type: 'initiative', entityId: 'launch' },
+        contextSnapshot: { scope: {} } as PlanningUpdate['contextSnapshot'],
       }),
-      previousHealth: 'on-track',
-      ownerMemberKey: 'owner@example.com',
-      scope: {},
+      notification: {
+        previousHealth: 'on-track',
+        healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com',
+      },
     })
     expect(event).toMatchObject({
       eventType: 'planning-update.published',
@@ -152,12 +158,20 @@ describe('Planning update notifications', () => {
     const previous = process.env.AUDIT_EVENTS_TABLE_NAME
     process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEventsTable'
     try {
-      const result = { kind: 'publish' as const, revision: 2, update: createUpdate() }
+      const result = {
+        kind: 'publish' as const,
+        revision: 2,
+        update: createUpdate(),
+        notification: {
+          previousHealth: 'on-track' as const,
+          healthDegraded: true,
+          updateOwnerMemberKey: 'owner@example.com',
+        },
+      }
       const event = () => createPlanningUpdatePublishAuditEvent({
         workspaceId: 'workspace-1',
         update: result.update,
-        previousHealth: 'on-track',
-        scope: {},
+        notification: result.notification,
       })
       const receipt = { Put: { TableName: 'IdempotencyTable', Item: { key: 'receipt' } } }
       const withReceipt = await withPlanningAuditOutbox(

@@ -1447,3 +1447,65 @@ test('requires both the captured and current Initiative scope for Planning updat
     unreadCount: 1,
   })
 })
+
+test('shows Planning update activity to an Enterprise member with only Planning read access', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (requestedWorkspaceId) => ({
+    ...await readSnapshot(requestedWorkspaceId),
+    customRoles: [{
+      workspaceId,
+      roleId: 'custom:planning-reader',
+      name: 'Planning reader',
+      permissions: ['planning.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    }],
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'notification-planning-reader',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId: 'custom:planning-reader',
+      scope: { workspaceId, kind: 'project', targetId: 'refero' },
+      source: 'direct',
+    }],
+  })
+  await getTestAppDependencies().workItems.planning.configureUpdateCadence(workspaceId, {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'sato@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const comment = createNotificationItem({
+    id: 'enterprise-planning-comment',
+    eventType: 'planning-update.commented',
+    reasons: ['mention'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+  })
+  const probe = createNotificationVisibilityProbe([comment])
+  setTestAppDependencies({ enterpriseIdentity: identity, notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(comment.id)).toBe(true)
+})

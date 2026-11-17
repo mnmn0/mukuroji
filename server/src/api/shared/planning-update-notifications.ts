@@ -1,5 +1,4 @@
 import type {
-  PlanningHealth,
   PlanningUpdate,
   PlanningUpdateComment,
   PlanningUpdateTarget,
@@ -16,6 +15,7 @@ import {
   PlanningError,
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
+  type PlanningUpdatePublishNotificationContext,
 } from '../../modules/planning'
 import { isRecord } from './value-guards'
 
@@ -27,14 +27,6 @@ export const PLANNING_UPDATE_HEALTH_DEGRADED_EVENT_TYPE = 'planning-update.healt
 export const PLANNING_UPDATE_COMMENTED_EVENT_TYPE = 'planning-update.commented'
 /** Maximum number of members one update comment may mention. */
 export const MAX_PLANNING_UPDATE_COMMENT_MENTIONS = 20
-
-/** Severity order used to decide whether a health change is a degradation. */
-const healthSeverity: Record<PlanningHealth, number> = {
-  unknown: 0,
-  'on-track': 0,
-  'at-risk': 1,
-  'off-track': 2,
-}
 
 /** Authorization scope stored on Planning notification events. */
 export type PlanningNotificationScope = {
@@ -48,16 +40,10 @@ export type PlanningNotificationScope = {
 export type PlanningUpdatePublishAuditInput = {
   /** Canonical Workspace ID. */
   workspaceId: string
-  /** Committed immutable update. */
+  /** Committed immutable update; its context snapshot scope is the captured scope. */
   update: PlanningUpdate
-  /** Health of the previous update, or of the Initiative before the first update. */
-  previousHealth: PlanningHealth | undefined
-  /** Current update owner from the cadence. */
-  ownerMemberKey?: string
-  /** Current escalation recipient from the cadence. */
-  escalationMemberKey?: string
-  /** Team / Project scope used to authorize recipients. */
-  scope: PlanningNotificationScope
+  /** Health transition and cadence recipients decided by the Planning publish use case. */
+  notification: PlanningUpdatePublishNotificationContext
 }
 
 /** Inputs for the audit event written with an update comment. */
@@ -72,20 +58,6 @@ export type PlanningUpdateCommentAuditInput = {
   mentionMemberKeys: readonly string[]
   /** Team / Project scope used to authorize recipients. */
   scope: PlanningNotificationScope
-}
-
-/**
- * Reports whether a newly published health is worse than the previous one and needs attention.
- *
- * @param previous - Health before the publish, when known.
- * @param next - Health of the new update.
- * @returns True when the new health is at-risk or off-track and more severe than before.
- */
-export function isPlanningHealthDegraded(
-  previous: PlanningHealth | undefined,
-  next: PlanningHealth,
-) {
-  return healthSeverity[next] > 0 && healthSeverity[next] > healthSeverity[previous ?? 'unknown']
 }
 
 /**
@@ -108,21 +80,22 @@ export function createPlanningUpdateDeepLink(target: PlanningUpdateTarget) {
  * notification projection adds current target watchers and, for a Project target, current
  * Project members. The publishing member is removed there.
  *
- * @param input - Committed update, previous health, cadence recipients, and scope.
+ * @param input - Committed update and the publish use case's notification context.
  * @returns Audit event input for {@link createMutationAuditEventPut}.
  */
 export function createPlanningUpdatePublishAuditEvent(
   input: PlanningUpdatePublishAuditInput,
 ): MutationAuditEventInput {
-  const { update } = input
-  const degraded = isPlanningHealthDegraded(input.previousHealth, update.health)
+  const { update, notification } = input
+  const degraded = notification.healthDegraded
+  const previousHealth = notification.previousHealth
   const targetKey = createPlanningUpdatePublicTargetKey(update.target)
   const candidates = [
-    ...(input.escalationMemberKey
-      ? [{ memberKey: input.escalationMemberKey.toLowerCase(), reason: 'escalation' }]
+    ...(notification.escalationMemberKey
+      ? [{ memberKey: notification.escalationMemberKey.toLowerCase(), reason: 'escalation' }]
       : []),
-    ...(degraded && input.ownerMemberKey
-      ? [{ memberKey: input.ownerMemberKey.toLowerCase(), reason: 'update-owner' }]
+    ...(degraded
+      ? [{ memberKey: notification.updateOwnerMemberKey.toLowerCase(), reason: 'update-owner' }]
       : []),
   ]
   return {
@@ -136,17 +109,17 @@ export function createPlanningUpdatePublishAuditEvent(
     action: 'published',
     occurredAt: update.createdAt,
     changes: degraded
-      ? [{ field: 'health', before: input.previousHealth ?? 'unknown', after: update.health }]
+      ? [{ field: 'health', before: previousHealth ?? 'unknown', after: update.health }]
       : [],
     summary: degraded
       ? `Health changed to ${update.health}: ${excerpt(update.summary)}`
       : `Health update published (${update.health}): ${excerpt(update.summary)}`,
     metadata: {
       actorMemberKey: update.authorMemberKey,
-      ...planningTargetMetadata(update.target, input.scope),
+      ...planningTargetMetadata(update.target, update.contextSnapshot.scope),
       updateVersion: update.version,
       health: update.health,
-      ...(input.previousHealth ? { previousHealth: input.previousHealth } : {}),
+      ...(previousHealth ? { previousHealth } : {}),
       deepLink: createPlanningUpdateDeepLink(update.target),
       notificationTitle: excerpt(update.summary),
       notificationCandidates: candidates,

@@ -2319,6 +2319,40 @@ describe('collaboration projection pure helpers', () => {
     )).toEqual({ authoritative: true, allowed: false })
   })
 
+  test('authorizes Planning update activity through Enterprise Planning read grants', () => {
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:planning-reader', name: 'Planning reader',
+        permissions: ['planning.read'], guestAssignable: false, revision: 1,
+        createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'planning-reader', principalKind: 'member',
+        principalId: 'member@example.com', roleId: 'custom:planning-reader', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }],
+    })
+    const scope = { workspaceId: 'workspace-1', teamId: 'core', projectId: 'platform' }
+
+    for (const eventType of ['planning-update.published', 'planning-update.health-degraded', 'planning-update.commented']) {
+      expect(resolveEnterpriseNotificationAuthorization(
+        { ...scope, eventType },
+        'member@example.com',
+        'member',
+        snapshot,
+        'core',
+        [],
+        true,
+      )).toEqual({ authoritative: true, allowed: true })
+    }
+    // Other events still need the Work Item read permission.
+    expect(resolveEnterpriseNotificationAuthorization(
+      { ...scope, eventType: 'comment.created' },
+      'member@example.com',
+      'member',
+      snapshot,
+      'core',
+      [],
+      true,
+    )).toEqual({ authoritative: true, allowed: false })
+  })
+
   test('excludes deactivated Workspace members from notification recipients', () => {
     expect(isActiveWorkspaceNotificationMember('departed@example.com', {
       entryType: 'workspace-member',

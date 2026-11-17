@@ -1846,7 +1846,8 @@ export type EnterpriseNotificationAuthorization = {
  * @returns Whether Enterprise is authoritative and whether the member can perform the action.
  */
 export function resolveEnterpriseNotificationAuthorization(
-  event: Pick<AuditProjectionEvent, 'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'>,
+  event: Pick<AuditProjectionEvent, 'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'> &
+    Partial<Pick<AuditProjectionEvent, 'eventType'>>,
   memberKey: string,
   workspaceRole: WorkspaceNotificationRole,
   snapshot: EnterpriseIdentitySnapshot,
@@ -1895,7 +1896,9 @@ export function resolveEnterpriseNotificationAuthorization(
 
   const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' ||
     event.planningNotificationKind === 'overdue')
-  const permissions: EnterprisePermissionId[] = event.planningNotificationKind
+  const planningContent = event.planningNotificationKind !== undefined ||
+    (event.eventType !== undefined && planningUpdateActivityEventTypes.has(event.eventType))
+  const permissions: EnterprisePermissionId[] = planningContent
     ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
     : [contentPermission]
   const allowed = permissions.some((permission) => evaluateEnterpriseAccess({
@@ -2172,7 +2175,11 @@ async function isEligibleRecipient(
   let enterpriseAuthorization: EnterpriseNotificationAuthorization | undefined
   if (
     enterpriseIdentity &&
-    (event.planningNotificationKind !== undefined || enforceContentAuthorization) &&
+    (
+      event.planningNotificationKind !== undefined ||
+      planningUpdateActivityEventTypes.has(event.eventType) ||
+      enforceContentAuthorization
+    ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
   ) {
     const role = readWorkspaceNotificationRole(member.role)
