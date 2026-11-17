@@ -554,7 +554,15 @@ function IssueDetailContent({
     void requestWorkItemTypePreview(nextWorkItemTypeId)
   }
   const editorFormId = useId()
-  const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
+  // The other forms keep their unsaved input when only the estimate, remaining effort, or progress
+  // changed, such as after the effort editor saved on its own; any change to a field they edit resets them.
+  const [draftBase, setDraftBase] = useState({ issue, revision: issue.revision })
+  const draftRevision = draftBase.issue === issue ||
+    (draftBase.issue.id === issue.id && !haveDraftFieldsChanged(draftBase.issue, issue))
+    ? draftBase.revision
+    : issue.revision
+  if (draftBase.issue !== issue) setDraftBase({ issue, revision: draftRevision })
+  const editorIdentity = [issue.teamId, issue.id, draftRevision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
   const acceptanceCriteriaDraftState = useAcceptanceCriteriaDraft(editorIdentity)
@@ -989,8 +997,11 @@ function IssueDetailContent({
             </output>
             <div className="workbench-panel-muted p-3 font-normal">
               <WorkItemEffortProgressEditor
-                editorIdentity={editorIdentity}
+                // Unlike the other forms, it resets to every new revision, including its own saves.
+                editorIdentity={[issue.teamId, issue.id, issue.revision].join(':')}
                 item={issue}
+                // Remounts per Work Item so a save still pending for another item never carries over.
+                key={`${issue.teamId}:${issue.id}:effort`}
                 locale={locale}
                 {...(configuration?.progressMode ? { progressMode: configuration.progressMode } : {})}
                 canEditEstimate
@@ -1183,4 +1194,29 @@ function IssueDetailContent({
       </div>
     </aside>
   )
+}
+
+/**
+ * Returns whether a field edited by the detail forms (other than the effort editor) changed.
+ *
+ * @param before - Work Item the forms were last reset to.
+ * @param after - Current Work Item.
+ * @returns Whether the forms must reset to the current values.
+ */
+function haveDraftFieldsChanged(before: TeamIssue, after: TeamIssue): boolean {
+  /** Picks the fields the detail forms edit, in a fixed order for comparison. */
+  const draftFields = (item: TeamIssue) => JSON.stringify([
+    item.teamId,
+    item.title,
+    item.description,
+    item.assignedProjectId,
+    item.assigneeUserId,
+    item.priority,
+    item.workflowStatusId,
+    item.workItemTypeId,
+    item.customFieldValues,
+    item.contributorAssignments,
+    item.acceptanceCriteria,
+  ])
+  return draftFields(before) !== draftFields(after)
 }

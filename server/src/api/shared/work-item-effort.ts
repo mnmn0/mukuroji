@@ -112,6 +112,7 @@ export async function listTeamWorkItemEffort(
     const response = await teamIssues.getTeamIssues(directoryId, teamId, {
       limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
       includeArchived: options.includeArchived === true,
+      consistentRead: true,
       limitEvaluatedRows: true,
       ...(startAfterIssueId ? { startAfterIssueId } : {}),
     })

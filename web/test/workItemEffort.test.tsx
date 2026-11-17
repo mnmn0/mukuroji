@@ -10,6 +10,11 @@ import {
 import { WorkItemEffortCell } from '../src/work-items/ui/WorkItemEffortCells'
 import { WorkItemEffortProgressEditor } from '../src/work-items/ui/WorkItemEffortProgressEditor'
 import { teamIssueFixtures } from '../src/issues/fixtures'
+import { createTaskInversePatch } from '../src/tasks/model/taskView'
+import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
+import { createTranslator } from '../src/shared/i18n/i18n'
+import { createDefaultDateRangeTaskSchedule } from '../src/tasks/model/taskSchedule'
+import { taskViewStoryConfigurationsByTeam, taskViewStoryTasks } from '../src/tasks/ui/TaskView.stories.fixtures'
 
 const [baseWorkItem] = teamIssueFixtures
 if (!baseWorkItem) throw new Error('Team Work Item fixtures must not be empty.')
@@ -69,6 +74,42 @@ describe('Work Item effort and progress', () => {
     )
     expect(pendingHtml).toMatch(/<input[^>]*disabled=""[^>]*name="remainingEffortHours"/)
     expect(pendingHtml).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/)
+  })
+
+  test('undoes remaining effort and progress back to their previous values', () => {
+    expect(createTaskInversePatch(estimated, { remainingEffortMinutes: 60, progressPercent: 80 })).toEqual({
+      remainingEffortMinutes: 120,
+      progressPercent: 30,
+    })
+    // Values that were not recorded are cleared again.
+    const unrecorded = { ...estimated, remainingEffortMinutes: undefined, progressPercent: undefined }
+    expect(createTaskInversePatch(unrecorded, { remainingEffortMinutes: 60, progressPercent: 0 })).toEqual({
+      remainingEffortMinutes: null,
+      progressPercent: null,
+    })
+    expect(createTaskInversePatch(estimated, { title: 'Renamed' })).toEqual({ title: estimated.title })
+  })
+
+  test('names the Gantt bar with its progress, including 0%', () => {
+    const base = taskViewStoryTasks[0]
+    if (!base) throw new Error('Task view story fixtures must not be empty.')
+    const render = (statusCategory: CanonicalWorkItem['statusCategory']) => renderToStaticMarkup(
+      <TaskGanttView
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        onWindowStartMonthChange={() => undefined}
+        t={createTranslator('en')}
+        tasks={[{
+          ...base,
+          id: 'bar',
+          statusCategory,
+          dueDate: '2026-11-20',
+          schedule: createDefaultDateRangeTaskSchedule('2026-11-10', '2026-11-20'),
+        }]}
+        windowStartMonth="2026-11"
+      />,
+    )
+    expect(render('completed')).toMatch(/aria-label="[^"]*, Progress 100%"[^>]*data-testid="task-gantt-bar-bar"/)
+    expect(render('backlog')).toMatch(/aria-label="[^"]*, Progress 0%"[^>]*data-testid="task-gantt-bar-bar"/)
   })
 
   test('writes an estimate change into the same schedule placement and passes other changes through', () => {

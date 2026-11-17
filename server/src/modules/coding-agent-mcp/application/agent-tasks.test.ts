@@ -745,6 +745,37 @@ describe('agent task lifecycle', () => {
     expect(sent).toEqual([{ expectedRevision: 1, schedule: { ...schedule, plannedEffortMinutes: 480 } }])
   })
 
+  test('resends the first schedule when an estimate retry follows a date change', async () => {
+    const sent: unknown[] = []
+    const schedule = {
+      mode: 'due-date' as const, dueDate: '2026-09-10',
+      calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday' as const], holidays: [] },
+    }
+    let stored = task('one', { schedule })
+    let responses = 0
+    const { service } = fixture([stored], {
+      async get() { return structuredClone(stored) },
+      async update(_id, input) {
+        sent.push(input)
+        responses += 1
+        // The first write commits but its response is lost.
+        if (responses === 1) throw new AgentTaskError('network_error', 'The response was lost.')
+        return task('one', { revision: 3 })
+      },
+    })
+    await expect(service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')).rejects.toThrow()
+    // A person then moves the due date before the agent retries.
+    stored = task('one', { revision: 3, schedule: { ...schedule, dueDate: '2026-09-20', plannedEffortMinutes: 480 } })
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')
+    expect(sent).toEqual([
+      { expectedRevision: 1, schedule: { ...schedule, plannedEffortMinutes: 480 } },
+      { expectedRevision: 1, schedule: { ...schedule, plannedEffortMinutes: 480 } },
+    ])
+    // A new key reads the current schedule.
+    await service.update('one', { expectedRevision: 3, plannedEffortMinutes: 600 }, 'effort-2')
+    expect(sent[2]).toEqual({ expectedRevision: 3, schedule: { ...schedule, dueDate: '2026-09-20', plannedEffortMinutes: 600 } })
+  })
+
   test('replays stale metadata updates and forwards comment scope to the canonical API', async () => {
     const { service } = fixture()
     expect(await service.update('one', { expectedRevision: 1, title: 'New' }, 'edit')).toMatchObject({ revision: 2 })

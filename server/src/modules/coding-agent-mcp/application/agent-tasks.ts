@@ -70,6 +70,8 @@ const claimReadBatchSize = 10
 
 /** Report idempotency keys this process remembers with the endpoint they were sent to. */
 const maximumRememberedReportKeys = 100
+/** Most recent estimate update keys whose sent schedule this process remembers for retries. */
+const maximumRememberedEstimateKeys = 100
 
 /** Endpoint a report was sent to: a run's report endpoint, or the comment endpoint with its fence. */
 type ReportRoute =
@@ -108,6 +110,45 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
    * that run again, and a plain message that meets a newer run falls back to the comment endpoint.
    */
   const reportRoutesByKey = new Map<string, ReportRoute>()
+
+  /**
+   * Schedule each recent estimate update key was sent with, per task. The estimate is written into
+   * the schedule read at the time, so a retry after a lost response must resend that same schedule:
+   * if a person moved the dates in between, a schedule built from the new read would differ, and the
+   * server would reject the retry as a different request under the same key instead of replaying it.
+   * Like report routes, these only cover retries within this process.
+   */
+  const estimateSchedulesByKey = new Map<string, { plannedEffortMinutes: number | null; schedule: AgentTask['schedule'] }>()
+
+  /**
+   * Returns the schedule to send with an estimate update: the one first sent under this key when the
+   * retry asks for the same estimate, otherwise the read schedule with the estimate written in.
+   *
+   * @param id - Task ID.
+   * @param key - Idempotency key of the update.
+   * @param readSchedule - Schedule read for this call.
+   * @param plannedEffortMinutes - Requested estimate, or `null` to clear it.
+   * @returns Schedule to send, remembered for later retries.
+   */
+  function estimateScheduleFor(
+    id: string,
+    key: string,
+    readSchedule: AgentTask['schedule'],
+    plannedEffortMinutes: number | null,
+  ): AgentTask['schedule'] {
+    const rememberedKey = JSON.stringify([id, key])
+    const remembered = estimateSchedulesByKey.get(rememberedKey)
+    const schedule = remembered !== undefined && remembered.plannedEffortMinutes === plannedEffortMinutes
+      ? remembered.schedule
+      : withPlannedEffort(readSchedule, plannedEffortMinutes)
+    estimateSchedulesByKey.delete(rememberedKey)
+    estimateSchedulesByKey.set(rememberedKey, { plannedEffortMinutes, schedule })
+    if (estimateSchedulesByKey.size > maximumRememberedEstimateKeys) {
+      const oldest = estimateSchedulesByKey.keys().next().value
+      if (oldest !== undefined) estimateSchedulesByKey.delete(oldest)
+    }
+    return structuredClone(schedule)
+  }
 
   /**
    * Remembers where a report key was sent, keeping only the most recent keys.
@@ -502,14 +543,16 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       }
       const { acceptanceCriteria: marks, plannedEffortMinutes, ...fields } = input
       // The estimate is written into the schedule read now. The server's revision check rejects it when
-      // the task changed after the caller read it, and a retry after a lost response sends the same
-      // schedule again (only the estimate differed), so the server replays its idempotency receipt.
+      // the task changed after the caller read it. A retry after a lost response resends the schedule
+      // first sent under the key, even if the dates changed since, so the server replays its receipt.
       // The server applies the marks to the stored list inside the request's idempotency boundary, so a
       // retry with the same arguments replays even if a person edited the criteria meanwhile.
       return api.update(id, {
         ...fields,
         ...(marks === undefined ? {} : { acceptanceCriteriaMarks: marks }),
-        ...(plannedEffortMinutes === undefined ? {} : { schedule: withPlannedEffort(task.schedule, plannedEffortMinutes) }),
+        ...(plannedEffortMinutes === undefined
+          ? {}
+          : { schedule: estimateScheduleFor(id, key, task.schedule, plannedEffortMinutes) }),
       }, key, await fenceFor(id))
     },
     /** Creates assigned work within the operator-selected Project boundary. */

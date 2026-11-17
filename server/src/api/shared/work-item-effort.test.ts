@@ -12,7 +12,14 @@ test('reads archived Work Items only when asked, so time reports keep their esti
   }
   const reads: (boolean | undefined)[] = []
   const teamIssues = {
-    async getTeamIssues(_directoryId: string, teamId: string, options?: { includeArchived?: boolean }) {
+    async getTeamIssues(
+      _directoryId: string,
+      teamId: string,
+      options?: { includeArchived?: boolean; consistentRead?: boolean; limitEvaluatedRows?: boolean },
+    ) {
+      // The DynamoDB client rejects an evaluated-row bounded read that is not consistent.
+      expect(options?.limitEvaluatedRows).toBe(true)
+      expect(options?.consistentRead).toBe(true)
       reads.push(options?.includeArchived)
       const issues = [item('open'), ...(options?.includeArchived ? [item('archived')] : [])]
       return { teamId, issues, evaluatedCount: issues.length }
