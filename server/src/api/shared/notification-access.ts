@@ -564,16 +564,7 @@ export async function createNotificationVisibilityFilter(
       if (watcherOnly && !await isWatchingPlanningTarget(currentPlanningScope.planningUpdateTargetKey)) {
         return false
       }
-      if (currentPlanningScope.teamId) {
-        notification.teamId = currentPlanningScope.teamId
-      } else {
-        delete notification.teamId
-      }
-      if (currentPlanningScope.projectId) {
-        notification.projectId = currentPlanningScope.projectId
-      } else {
-        delete notification.projectId
-      }
+      // Keep the captured scope: Inbox actions save the filtered row, and later checks need it.
       // Planning read access is enough; the generic checks below require Work Item read access.
       return true
     } else if (requiresCurrentPlanningUpdateTarget(notification)) {

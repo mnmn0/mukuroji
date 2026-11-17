@@ -1353,9 +1353,13 @@ test('shows Planning update publish and comment notifications only for readable 
 test('requires both the captured and current Initiative scope for Planning update comments', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',
-    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    projectAccesses: [
+      { projectId: 'refero', role: 'viewer' },
+      { projectId: 'handoff', role: 'viewer' },
+    ],
     teamProjects: [
       { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'handoff', name: 'Handoff', tone: 'green' },
       { id: 'private-project', name: 'Private', tone: 'purple' },
     ],
   })
@@ -1381,7 +1385,7 @@ test('requires both the captured and current Initiative scope for Planning updat
     carryOverPolicy: undefined,
   }, { workItems: [] })
   let revision = 2
-  for (const projectId of ['refero', 'private-project']) {
+  for (const projectId of ['refero', 'handoff', 'private-project']) {
     await planning.create(workspaceId, {
       ...createCyclePlanningInput(`${projectId}-initiative`, revision),
       type: 'initiative',
@@ -1425,10 +1429,17 @@ test('requires both the captured and current Initiative scope for Planning updat
     planningTargetId: 'private-project-initiative',
     planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#private-project-initiative',
   })
+  const movedToReadable = createNotificationItem({
+    ...currentReadable,
+    id: 'planning-comment-moved-to-readable',
+    planningTargetId: 'handoff-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#handoff-initiative',
+  })
   const probe = createNotificationVisibilityProbe([
     currentReadable,
     capturedInaccessible,
     movedToInaccessible,
+    movedToReadable,
   ])
   setTestAppDependencies({ notifications: probe.client })
 
@@ -1441,10 +1452,15 @@ test('requires both the captured and current Initiative scope for Planning updat
     [currentReadable.id, true],
     [capturedInaccessible.id, false],
     [movedToInaccessible.id, false],
+    [movedToReadable.id, true],
   ]))
+  // The filter keeps the captured scope, because Inbox actions save the filtered row.
   expect(await response.json()).toMatchObject({
-    notifications: [{ id: currentReadable.id, teamId: 'core-team', projectId: 'refero' }],
-    unreadCount: 1,
+    notifications: [
+      { id: currentReadable.id, teamId: 'core-team', projectId: 'refero' },
+      { id: movedToReadable.id, teamId: 'core-team', projectId: 'refero' },
+    ],
+    unreadCount: 2,
   })
 })
 
