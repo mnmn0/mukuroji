@@ -36,6 +36,7 @@ import {
 } from '../work-items'
 import {
   isProjectQuickAccessItems,
+  normalizeProjectCode,
 } from '../directory'
 import {
   decodeAttributeMap,
@@ -1173,6 +1174,7 @@ function validateProjectDirectoryAuxiliaryRow(
     const code = requireText(row.code)
     requireCanonicalTimestamp(row.createdAt)
     if (
+      normalizeProjectCode(code) !== code ||
       directoryId !== `PROJECT_CODE#${encodeURIComponent(workspaceId)}` ||
       entryKey !== `CODE#${code}`
     ) normalizationFailure()

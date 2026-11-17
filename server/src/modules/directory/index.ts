@@ -31,6 +31,7 @@ export {
   createProjectCharter,
   createProjectCharterPerson,
   isStoredProjectCharter,
+  normalizeProjectCode,
   readProjectCharterUpdate,
   readProjectLifecycleTransition,
   decideProjectLifecycleTransition,
