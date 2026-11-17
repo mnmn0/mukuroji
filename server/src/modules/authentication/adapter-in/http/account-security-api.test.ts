@@ -49,6 +49,9 @@ function overrideCognito(overrides: Partial<CognitoClient>) {
 function overrideWorkspaceAccess(overrides: Partial<WorkspaceAccessClient>) {
   setTestAppDependencies({
     workspaceAccess: {
+      // Spreading the store instance leaves out its class methods, so the credential reset
+      // gets an applying stage unless an earlier override, such as a progress tracker, set one.
+      markMemberCredentialActionApplying: async () => undefined,
       ...getTestAppDependencies().workspace.workspaceAccess,
       ...overrides,
     },
@@ -834,6 +837,28 @@ test('resets the authenticator of a member who lost it', async () => {
   expect(resets).toEqual(['sato@example.com'])
 })
 
+
+test('refuses an authenticator reset when the store cannot mark the change as started', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  trackCredentialActionProgress()
+  const { markMemberCredentialActionApplying: _omitted, ...withoutApplying } =
+    getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({ workspaceAccess: withoutApplying })
+
+  const response = await sendMfaResetWithKey()
+
+  expect(response.status).toBe(503)
+  expect(resets).toEqual([])
+})
 /**
  * Replaces the credential action store with one that keeps progress per idempotency key.
  *

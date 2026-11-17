@@ -48,7 +48,13 @@ export function createMemberCredentialResetPorts(
     : adminDisableSoftwareTokenMfa
   // A password reset must sign the member out before it changes anything.
   const signOutAvailable = action !== 'password-reset-requested' || cognito.globallySignOutWorkspaceUser
-  if (!changeCredential || !recordMemberCredentialAction || !signOutAvailable) {
+  // Without the applying stage, a replay after a failed completion mark could repeat the change.
+  if (
+    !changeCredential ||
+    !recordMemberCredentialAction ||
+    !markMemberCredentialActionApplying ||
+    !signOutAvailable
+  ) {
     return undefined
   }
 
@@ -68,7 +74,7 @@ export function createMemberCredentialResetPorts(
     },
     recordAction: (...args) => recordMemberCredentialAction.apply(workspaceAccess, args),
     async markActionApplying(...args) {
-      await markMemberCredentialActionApplying?.apply(workspaceAccess, args)
+      await markMemberCredentialActionApplying.apply(workspaceAccess, args)
     },
     async completeAction(...args) {
       await completeMemberCredentialAction?.apply(workspaceAccess, args)
