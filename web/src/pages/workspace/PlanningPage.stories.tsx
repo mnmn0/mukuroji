@@ -109,6 +109,44 @@ type Story = StoryObj<typeof meta>
 export const Timeline: Story = {}
 
 /**
+ * 作成フォームの下にアーカイブ済みの計画と復元結果を表示した Roadmap です。
+ */
+export const ArchivedPlans: Story = {
+  args: {
+    activeView: 'roadmap',
+    archive: {
+      entities: [{
+        id: 'cycle-2026-08',
+        type: 'cycle',
+        title: '2026 年 8 月 Cycle',
+        teamId: 'core-team',
+        ownerMemberKey: 'lead@example.com',
+        archivedAt: '2026-09-01T00:00:00.000Z',
+      }],
+      hasMore: false,
+      isLoading: false,
+      isLoadingMore: false,
+      results: [{
+        entityId: 'goal-retention',
+        title: '継続率の改善',
+        summary: {
+          restoredLinkCount: 30,
+          droppedLinkCount: 2,
+          restoredDependencyCount: 1,
+          retainedDependencyCount: 0,
+          droppedDependencyCount: 0,
+          pendingReferenceCount: 12,
+        },
+      }],
+      onLoadMore: () => undefined,
+      onOpen: () => undefined,
+      onRestore: async () => undefined,
+      onRetry: () => undefined,
+    },
+  },
+}
+
+/**
  * Goal から Work Item を辿れる Roadmap です。
  */
 export const Roadmap: Story = {

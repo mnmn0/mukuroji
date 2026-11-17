@@ -144,6 +144,131 @@ describe('PlanningScreen', () => {
     expect(html).toContain('data-testid="planning-roadmap"')
   })
 
+  test('shows live Planning data usage and warns before and at the limit', () => {
+    const normal = renderToStaticMarkup(
+      <PlanningScreen activeView="roadmap" labels={labels} snapshot={planningSnapshotFixture} />,
+    )
+    expect(normal).toContain('data-testid="planning-capacity-usage"')
+    expect(normal).toContain('Planning data usage: 24 / 20,000 rows · 0.0 / 24.0 MB')
+    expect(normal).not.toContain('data-testid="planning-capacity-warning"')
+
+    const warning = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        labels={labels}
+        snapshot={{
+          ...planningSnapshotFixture,
+          capacity: { ...planningSnapshotFixture.capacity, level: 'warning', liveRowCount: 16_500 },
+        }}
+      />,
+    )
+    expect(warning).toContain('data-testid="planning-capacity-warning"')
+    expect(warning).toContain(labels.capacityWarning)
+
+    const full = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        labels={labels}
+        snapshot={{
+          ...planningSnapshotFixture,
+          capacity: { ...planningSnapshotFixture.capacity, level: 'full', liveRowCount: 20_000 },
+        }}
+      />,
+    )
+    expect(full).toContain(labels.capacityFull)
+  })
+
+  test('lists archived plans with restore actions and the latest restore outcome', () => {
+    const archive = {
+      entities: [{
+        id: 'cycle-old',
+        type: 'cycle' as const,
+        title: 'Old cycle',
+        teamId: 'core-team',
+        ownerMemberKey: 'owner@example.com',
+        archivedAt: '2026-11-01T00:00:00.000Z',
+      }],
+      hasMore: true,
+      isLoading: false,
+      isLoadingMore: false,
+      results: [{
+        entityId: 'goal-old',
+        title: 'Old goal',
+        summary: {
+          restoredLinkCount: 30,
+          droppedLinkCount: 1,
+          restoredDependencyCount: 2,
+          retainedDependencyCount: 1,
+          droppedDependencyCount: 1,
+          pendingReferenceCount: 40,
+        },
+      }, {
+        entityId: 'cycle-earlier',
+        title: 'Earlier cycle',
+        summary: {
+          restoredLinkCount: 0,
+          droppedLinkCount: 0,
+          restoredDependencyCount: 0,
+          retainedDependencyCount: 0,
+          droppedDependencyCount: 0,
+          pendingReferenceCount: 3,
+        },
+      }, {
+        entityId: 'project-unknown',
+        title: 'Unconfirmed project',
+      }],
+      onLoadMore: () => undefined,
+      onOpen: () => undefined,
+      onRestore: () => undefined,
+      onRetry: () => undefined,
+    }
+    const markup = renderToStaticMarkup(
+      <PlanningScreen activeView="roadmap" archive={archive} labels={labels} snapshot={planningSnapshotFixture} />,
+    )
+    expect(markup).toContain('data-testid="planning-archived-entities"')
+    expect(markup).toContain('data-testid="planning-archived-entity-cycle-old"')
+    expect(markup).toContain('aria-label="Restore: Old cycle"')
+    expect(markup).toContain(labels.archivedPlans.loadMore)
+    expect(markup).toContain('Restored &quot;Old goal&quot;.')
+    expect(markup).toContain('Brought back 30 Work Item links and 2 dependencies.')
+    expect(markup).toContain('2 no longer fit the current plan')
+    expect(markup).toContain('1 dependencies on plans that are still archived')
+    expect(markup).toContain('40 have not been brought back yet')
+    expect(markup).toContain('aria-label="Restore the rest: Old goal"')
+    // An earlier restore with references left keeps its own continuation.
+    expect(markup).toContain('aria-label="Restore the rest: Earlier cycle"')
+    // A restore whose outcome is unknown says so and can run again.
+    expect(markup).toContain('Could not confirm whether &quot;Unconfirmed project&quot; was restored.')
+    expect(markup).toContain('aria-label="Restore the rest: Unconfirmed project"')
+
+    const restoring = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        archive={{ ...archive, restoringEntityId: 'cycle-old', results: [] }}
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+    expect(restoring).toContain(labels.archivedPlans.restoring)
+    expect(restoring).not.toContain('data-testid="planning-restore-result"')
+
+    const empty = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        archive={{ ...archive, entities: [], hasMore: false, results: [] }}
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+    expect(empty).toContain(labels.archivedPlans.empty)
+    expect(empty).not.toContain(labels.archivedPlans.loadMore)
+
+    const withoutAccess = renderToStaticMarkup(
+      <PlanningScreen activeView="roadmap" labels={labels} snapshot={planningSnapshotFixture} />,
+    )
+    expect(withoutAccess).not.toContain('data-testid="planning-archived-entities"')
+  })
+
   test('does not fabricate Project update details from an unrelated Planning entity', () => {
     const html = renderToStaticMarkup(
       <PlanningScreen

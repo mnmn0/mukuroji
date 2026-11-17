@@ -70,6 +70,50 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     moveToRoot: t('issues.project.unassigned'),
     move: t('planning.action.move'),
     readOnly: t('planning.readOnly'),
+    capacityUsage: (capacity) => {
+      const megabytes = (bytes: number) =>
+        (bytes / 1_000_000).toLocaleString(locale, { maximumFractionDigits: 1, minimumFractionDigits: 1 })
+      return `${t('planning.capacity.usage')}: ` +
+        `${capacity.liveRowCount.toLocaleString(locale)} / ${capacity.liveRowCapacity.toLocaleString(locale)} ${t('planning.capacity.rows')} · ` +
+        `${megabytes(capacity.liveByteCount)} / ${megabytes(capacity.liveByteCapacity)} MB`
+    },
+    capacityWarning: t('planning.capacity.warning'),
+    capacityFull: t('planning.capacity.full'),
+    archivedPlans: {
+      title: t('planning.archived.title'),
+      description: t('planning.archived.description'),
+      empty: t('planning.archived.empty'),
+      loading: t('planning.archived.loading'),
+      error: t('planning.archived.error'),
+      loadMore: t('planning.archived.loadMore'),
+      archivedAt: (archivedAt) => t('planning.archived.archivedAt').replace(
+        '{date}',
+        formatPlanningUpdateDate(archivedAt, undefined, locale),
+      ),
+      restore: t('planning.action.restore'),
+      restoring: t('planning.action.restoring'),
+      continueRestore: t('planning.action.continueRestore'),
+      restoreResult: ({ summary, title }) => {
+        if (!summary) return [t('planning.restore.unknown').replace('{title}', title)]
+        const count = (value: number) => value.toLocaleString(locale)
+        const dropped = summary.droppedLinkCount + summary.droppedDependencyCount
+        return [
+          t('planning.restore.done').replace('{title}', title),
+          ...(summary.restoredLinkCount + summary.restoredDependencyCount > 0
+            ? [t('planning.restore.restored')
+                .replace('{links}', count(summary.restoredLinkCount))
+                .replace('{dependencies}', count(summary.restoredDependencyCount))]
+            : []),
+          ...(dropped > 0 ? [t('planning.restore.dropped').replace('{count}', count(dropped))] : []),
+          ...(summary.retainedDependencyCount > 0
+            ? [t('planning.restore.retained').replace('{count}', count(summary.retainedDependencyCount))]
+            : []),
+          ...(summary.pendingReferenceCount > 0
+            ? [t('planning.restore.pending').replace('{count}', count(summary.pendingReferenceCount))]
+            : []),
+        ]
+      },
+    },
     portfolioTitle: t('planning.view.portfolio'),
     portfolioDescription: t('planning.description'),
     entity: t('planning.field.title'),
