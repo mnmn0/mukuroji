@@ -4,6 +4,7 @@ export {
   PLANNING_STORAGE_SCHEMA_VERSION,
   createPlanningWorkItemDependencySummary,
   createPlanningUpdateProjectTargetRecordKey,
+  createPlanningUpdateTargetRecordKey,
   PlanningError,
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningAuthorizationState,

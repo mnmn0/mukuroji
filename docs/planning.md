@@ -221,7 +221,7 @@ Update の publish とコメントは、Planning の書き込みと同じ transa
 - health が at-risk / off-track に悪化した publish（`planning-update.health-degraded`）: 上に加えて update 担当（cadence の owner）。悪化は前回の update（初回の Initiative は entity）の health と比べて判定します
 - コメント（`planning-update.commented`）: update の作成者と、`mentionMemberKeys`（最大 20 件、Web では本文の `@member@example.com`）で mention された member
 
-どれも投稿した本人は除き、通知から `/planning/portfolio` の target へ移れます。Recipient の閲覧権限は projection と Inbox 表示時に再確認します。Milestone の完了・予定変更の通知と、entity 変更全般の audit はまだありません。
+どれも投稿した本人は除き、通知から `/planning/portfolio` の target へ移れます。Event は update が記録した Team / Project scope と `UPDATE_TARGET` の record key を持ちます。Projection、Slack 配信、Inbox 表示のたびに target を強整合で読み直し、target が消えたか archive されていれば通知しません。Recipient は記録時の scope と、Initiative が別 Project へ移った後の現在の scope の両方を閲覧できる必要があります。Watcher だけが理由の通知は、現在も target を watch している場合に限ります。Milestone の完了・予定変更の通知と、entity 変更全般の audit はまだありません。
 
 主な HTTP endpoint は次の通りです。
 

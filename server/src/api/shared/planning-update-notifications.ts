@@ -12,6 +12,7 @@ import {
 } from '../../modules/audit/audit'
 import { createPlanningUpdatePublicTargetKey } from '../../modules/collaboration'
 import {
+  createPlanningUpdateTargetRecordKey,
   PlanningError,
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
@@ -259,14 +260,19 @@ export function withPlanningAuditOutbox<TResult extends PlanningMutationTransact
 /**
  * Creates target and scope metadata read by the notification projection.
  *
+ * `teamId` / `projectId` keep the scope captured by the update. The target record key lets the
+ * projection, Slack delivery, and the Inbox read the target's current scope, so a recipient must
+ * be able to read both before the update or comment text reaches them.
+ *
  * @param target - Project or Initiative update target.
- * @param scope - Team / Project authorization scope.
+ * @param scope - Team / Project scope captured by the update.
  * @returns Audit metadata fields.
  */
 function planningTargetMetadata(target: PlanningUpdateTarget, scope: PlanningNotificationScope) {
   return {
     planningTargetType: target.type,
     planningTargetId: target.type === 'project' ? target.projectId : target.entityId,
+    planningTargetRecordKey: createPlanningUpdateTargetRecordKey(target),
     ...(scope.teamId ? { teamId: scope.teamId } : {}),
     ...(scope.projectId ? { projectId: scope.projectId } : {}),
   }

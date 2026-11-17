@@ -7734,7 +7734,7 @@ function createPlanningUpdateTargetRecordSuffix(target: PlanningUpdateTarget) {
  * @param target - Canonical target.
  * @returns Size-checked DynamoDB sort key.
  */
-function createPlanningUpdateTargetRecordKey(target: PlanningUpdateTarget) {
+export function createPlanningUpdateTargetRecordKey(target: PlanningUpdateTarget): string {
   return readRecordKey(
     `${UPDATE_TARGET_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}`,
     'Planning update target record key',

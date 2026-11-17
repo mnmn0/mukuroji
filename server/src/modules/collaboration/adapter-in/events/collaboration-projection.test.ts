@@ -153,6 +153,7 @@ describe('collaboration projection pure helpers', () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
       'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
     ]
     const previous = keys.map((key) => process.env[key])
     keys.forEach((key) => { process.env[key] = key })
@@ -161,11 +162,27 @@ describe('collaboration projection pure helpers', () => {
     const directory = [
       { entryType: 'team', teamId: 'core' },
       { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project', teamId: 'core', projectId: 'secret' },
       ...['owner', 'creator', 'watcher', 'actor', 'lead', 'former'].map((name) => ({
         entryType: 'project-member', projectId: 'platform', memberKey: `${name}@example.com`,
         role: name === 'lead' ? 'manager' : 'member',
       })),
+      { entryType: 'project-member', projectId: 'secret', memberKey: 'creator@example.com', role: 'member' },
     ]
+    const planningRows: Record<string, Record<string, unknown>> = {
+      'UPDATE_TARGET#PROJECT#core#platform': {
+        workspaceId: 'workspace-1', recordKey: 'UPDATE_TARGET#PROJECT#core#platform', entryType: 'planning-update-target',
+        target: { type: 'project', teamId: 'core', projectId: 'platform' }, latestVersion: 1, updatedAt: '2026-07-12T12:00:00.000Z',
+      },
+      'UPDATE_TARGET#INITIATIVE#launch': {
+        workspaceId: 'workspace-1', recordKey: 'UPDATE_TARGET#INITIATIVE#launch', entryType: 'planning-update-target',
+        target: { type: 'initiative', entityId: 'launch' }, latestVersion: 1, updatedAt: '2026-07-12T12:00:00.000Z',
+      },
+      'ENTITY#launch': {
+        workspaceId: 'workspace-1', recordKey: 'ENTITY#launch', entryType: 'planning-entity', type: 'initiative',
+        id: 'launch', teamId: 'core', projectId: 'secret',
+      },
+    }
     const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send')
       .mockImplementation(async () => ({ Groups: [], $metadata: {} }))
     const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
@@ -181,6 +198,11 @@ describe('collaboration projection pure helpers', () => {
         if (table === 'WORKSPACE_ACCESS_TABLE_NAME') {
           const recordKey = String(command.input.Key?.recordKey)
           return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        if (table === 'PLANNING_TABLE_NAME') {
+          expect(command.input.ConsistentRead).toBe(true)
+          const row = planningRows[String(command.input.Key?.recordKey)]
+          return row ? { Item: row, $metadata: {} } : { $metadata: {} }
         }
         return { $metadata: {} }
       }
@@ -232,15 +254,32 @@ describe('collaboration projection pure helpers', () => {
         record('published', 'planning-update.health-degraded', {
           actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
           planningTargetType: 'project', planningTargetId: 'platform',
+          planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
           notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'escalation' }],
         }),
         record('commented', 'planning-update.commented', {
           actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
           planningTargetType: 'project', planningTargetId: 'platform',
+          planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
           notificationCandidates: [
             { memberKey: 'owner@example.com', reason: 'update-author' },
             { memberKey: 'creator@example.com', reason: 'mention' },
           ],
+        }),
+        record('moved-initiative-comment', 'planning-update.commented', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
+          planningTargetType: 'initiative', planningTargetId: 'launch',
+          planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#launch',
+          notificationCandidates: [
+            { memberKey: 'owner@example.com', reason: 'update-author' },
+            { memberKey: 'creator@example.com', reason: 'mention' },
+          ],
+        }),
+        record('missing-target-comment', 'planning-update.commented', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
+          planningTargetType: 'initiative', planningTargetId: 'removed',
+          planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#removed',
+          notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'update-author' }],
         }),
         record('escalation', 'work-item.overdue-escalation', {
           actorMemberKey: 'system', teamId: 'core', issueId: 'example', projectId: 'platform', dueDate: '2026-07-05',
@@ -268,6 +307,11 @@ describe('collaboration projection pure helpers', () => {
           ['creator@example.com', ['mention']],
           ['owner@example.com', ['update-author']],
         ])
+      // The Initiative moved from platform to secret: only a member of both scopes is notified.
+      expect(notifications.filter((item) => item.eventId === 'moved-initiative-comment')
+        .map((item) => [item.recipientMemberKey, item.teamId, item.projectId]))
+        .toEqual([['creator@example.com', 'core', 'platform']])
+      expect(notifications.some((item) => item.eventId === 'missing-target-comment')).toBe(false)
       expect(notifications.filter((item) => item.eventId === 'completed').map((item) => [item.recipientMemberKey, item.reasons]).sort())
         .toEqual([
           ['creator@example.com', ['creator']],
@@ -808,6 +852,82 @@ describe('collaboration projection pure helpers', () => {
       snapshot.customRoles[0]!.permissions = ['planning.write']
       expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
       expect(groupReads).toBe(12)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('requires the captured and current Initiative scope before delivering Planning comment text', async () => {
+    const keys = [
+      'WORKSPACE_ACCESS_TABLE_NAME', 'PLANNING_TABLE_NAME', 'COLLABORATION_TABLE_NAME',
+      'PROJECT_DIRECTORY_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    let initiativeProjectId = 'platform'
+    let secretMember = false
+    let subscribed = false
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send')
+      .mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof QueryCommand && command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+        return { Items: [
+          { entryType: 'team', teamId: 'core' },
+          { entryType: 'project', teamId: 'core', projectId: 'platform' },
+          { entryType: 'project', teamId: 'core', projectId: 'secret' },
+          { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+          ...(secretMember
+            ? [{ entryType: 'project-member', teamId: 'core', projectId: 'secret', memberKey, role: 'viewer' }]
+            : []),
+        ], $metadata: {} }
+      }
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      const key = command.input.Key
+      if (command.input.TableName === 'PLANNING_TABLE_NAME') {
+        expect(command.input.ConsistentRead).toBe(true)
+        if (key?.recordKey === 'UPDATE_TARGET#INITIATIVE#launch') return { Item: {
+          workspaceId: 'workspace-1', recordKey: key.recordKey, entryType: 'planning-update-target',
+          target: { type: 'initiative', entityId: 'launch' }, latestVersion: 1, updatedAt: '2026-07-12T12:00:00.000Z',
+        }, $metadata: {} }
+        if (key?.recordKey === 'ENTITY#launch') return { Item: {
+          workspaceId: 'workspace-1', recordKey: 'ENTITY#launch', entryType: 'planning-entity',
+          type: 'initiative', id: 'launch', teamId: 'core', projectId: initiativeProjectId,
+        }, $metadata: {} }
+        return { $metadata: {} }
+      }
+      if (key?.recordKey === `WATCHER#${memberKey}`) return { Item: { ...key, entryType: 'watcher', memberKey,
+        state: subscribed ? 'subscribed' : 'unsubscribed' }, $metadata: {} }
+      return { Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    try {
+      const event = createProjectionEvent({
+        eventType: 'planning-update.commented', entityId: 'initiative/launch', teamId: 'core', projectId: 'platform',
+        planningTargetType: 'initiative', planningTargetId: 'launch',
+        planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#launch',
+        notificationCandidates: [{ memberKey, reason: 'update-author' }],
+      })
+      const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+      const authorize = (candidate = event) => authorizeNotificationDelivery(
+        candidate, memberKey, identity, createNotificationDeliveryAuthorizationCache(),
+      )
+      expect(await authorize()).toBe(true)
+      // Moved to a Project the recipient cannot read.
+      initiativeProjectId = 'secret'
+      expect(await authorize()).toBe(false)
+      secretMember = true
+      expect(await authorize()).toBe(true)
+      // The captured scope still has to be readable after the move.
+      initiativeProjectId = 'platform'
+      secretMember = false
+      expect(await authorize({ ...event, projectId: 'secret' })).toBe(false)
+      // A watcher-only delivery requires a current subscription.
+      const watcherOnly = { ...event, notificationCandidates: [{ memberKey, reason: 'watcher' }] }
+      expect(await authorize(watcherOnly)).toBe(false)
+      subscribed = true
+      expect(await authorize(watcherOnly)).toBe(true)
+      expect(await authorize({ ...event, planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#other' })).toBe(false)
     } finally {
       send.mockRestore()
       groups.mockRestore()

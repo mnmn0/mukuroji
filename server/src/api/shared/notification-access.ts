@@ -11,7 +11,7 @@ import { NotificationError, type NotificationItem } from '../../modules/notifica
 import { requiresCurrentWorkItemAssignee } from '../../modules/notifications'
 import { TriageError } from '../../modules/triage'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
-import { type PlanningAuthorizationState } from '../../modules/planning'
+import { createPlanningUpdateTargetRecordKey, type PlanningAuthorizationState } from '../../modules/planning'
 import {
   DocumentError,
   type DocumentAccessContext,
@@ -142,6 +142,64 @@ function resolveCurrentPlanningNotificationScope(
   return {
     currentRecipientMatches,
     notificationKind: kind,
+    planningUpdateTargetKey,
+    ...(initiative.teamId ? { teamId: initiative.teamId } : {}),
+    ...(initiative.projectId ? { projectId: initiative.projectId } : {}),
+  }
+}
+
+/** Planning update publish and comment events shown in the Inbox. */
+const planningUpdateActivityEventTypes = new Set([
+  'planning-update.published',
+  'planning-update.health-degraded',
+  'planning-update.commented',
+])
+
+/**
+ * Resolves the current target scope of a Planning update publish or comment notification.
+ *
+ * @param notification - Persisted notification whose target metadata is untrusted.
+ * @param state - Current strongly read Planning authorization state.
+ * @returns Current target key and Team / Project scope, or undefined when the target is gone.
+ */
+function resolveCurrentPlanningActivityScope(
+  notification: NotificationItem,
+  state: PlanningAuthorizationState,
+) {
+  if (
+    !planningUpdateActivityEventTypes.has(notification.eventType) ||
+    notification.planningNotificationKind ||
+    notification.planningNextDueAt ||
+    !notification.planningTargetType ||
+    !notification.planningTargetId ||
+    !notification.planningTargetRecordKey
+  ) {
+    return undefined
+  }
+  const updateTarget = state.updateTargets.find((candidate) =>
+    candidate.target.type === notification.planningTargetType &&
+    (candidate.target.type === 'project'
+      ? candidate.target.projectId
+      : candidate.target.entityId) === notification.planningTargetId &&
+    createPlanningUpdateTargetRecordKey(candidate.target) === notification.planningTargetRecordKey
+  )
+  if (!updateTarget || updateTarget.archivedAt) return undefined
+  const currentTarget = updateTarget.target
+  const planningUpdateTargetKey = createPlanningUpdatePublicTargetKey(currentTarget)
+  if (currentTarget.type === 'project') {
+    return {
+      planningUpdateTargetKey,
+      teamId: currentTarget.teamId,
+      projectId: currentTarget.projectId,
+    }
+  }
+  const initiative = state.entities.find((entity) =>
+    entity.id === currentTarget.entityId && entity.type === 'initiative'
+  )
+  if (!initiative || initiative.archivedAt || (initiative.projectId && !initiative.teamId)) {
+    return undefined
+  }
+  return {
     planningUpdateTargetKey,
     ...(initiative.teamId ? { teamId: initiative.teamId } : {}),
     ...(initiative.projectId ? { projectId: initiative.projectId } : {}),
@@ -456,8 +514,67 @@ export async function createNotificationVisibilityFilter(
   const watcherVisibilities = new Map<string, Promise<boolean>>()
   let planningAuthorizationState: Promise<PlanningAuthorizationState> | undefined
 
+  /** Reports whether the principal can read Planning content in one Team / Project scope. */
+  const isPlanningScopeReadable = (scope: { teamId?: string; projectId?: string }) =>
+    scope.projectId
+      ? scope.teamId !== undefined &&
+        planningReadableProjectScopeKeys.has(`${scope.teamId}\0${scope.projectId}`)
+      : scope.teamId
+        ? planningReadableTeamIds.has(scope.teamId)
+        : isEnterpriseContentPrincipal
+          ? enterprisePlanningWorkspaceReadable
+          : principal.workspaceRole !== 'guest'
+  /** Reports whether the principal currently watches one Planning update target. */
+  const isWatchingPlanningTarget = (planningUpdateTargetKey: string) => {
+    const entityKey = createPlanningUpdateCollaborationEntityKey(
+      principal.directoryId,
+      planningUpdateTargetKey,
+    )
+    let visibility = watcherVisibilities.get(entityKey)
+    if (!visibility) {
+      visibility = workItemDependencies.collaboration.getWatcherState({
+        entityKey,
+        memberKey: principal.userKey,
+      }).then((watch) => watch.subscribed)
+      watcherVisibilities.set(entityKey, visibility)
+    }
+    return visibility
+  }
+
   return async (notification: NotificationItem) => {
-    if (requiresCurrentPlanningUpdateTarget(notification)) {
+    if (planningUpdateActivityEventTypes.has(notification.eventType)) {
+      planningAuthorizationState ??=
+        workItemDependencies.planning.getAuthorizationState(principal.directoryId)
+      const currentPlanningScope = resolveCurrentPlanningActivityScope(
+        notification,
+        await planningAuthorizationState,
+      )
+      // The recipient must read both the scope captured by the update and the current target.
+      if (
+        !currentPlanningScope ||
+        !isPlanningScopeReadable(currentPlanningScope) ||
+        !isPlanningScopeReadable({
+          ...(notification.teamId ? { teamId: notification.teamId } : {}),
+          ...(notification.projectId ? { projectId: notification.projectId } : {}),
+        })
+      ) {
+        return false
+      }
+      const watcherOnly = notification.reasons.every((reason) => reason === 'watcher')
+      if (watcherOnly && !await isWatchingPlanningTarget(currentPlanningScope.planningUpdateTargetKey)) {
+        return false
+      }
+      if (currentPlanningScope.teamId) {
+        notification.teamId = currentPlanningScope.teamId
+      } else {
+        delete notification.teamId
+      }
+      if (currentPlanningScope.projectId) {
+        notification.projectId = currentPlanningScope.projectId
+      } else {
+        delete notification.projectId
+      }
+    } else if (requiresCurrentPlanningUpdateTarget(notification)) {
       planningAuthorizationState ??=
         workItemDependencies.planning.getAuthorizationState(principal.directoryId)
       const currentPlanningScope = resolveCurrentPlanningNotificationScope(

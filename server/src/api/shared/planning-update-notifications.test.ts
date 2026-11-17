@@ -65,6 +65,7 @@ describe('Planning update notifications', () => {
       metadata: {
         planningTargetType: 'project',
         planningTargetId: 'platform',
+        planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
         teamId: 'core',
         projectId: 'platform',
         deepLink: '/planning/portfolio?targetType=project&teamId=core&projectId=platform',
@@ -94,6 +95,7 @@ describe('Planning update notifications', () => {
       metadata: {
         planningTargetType: 'initiative',
         planningTargetId: 'launch',
+        planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#launch',
         deepLink: '/planning/portfolio?targetType=initiative&entityId=launch',
         notificationCandidates: [],
       },

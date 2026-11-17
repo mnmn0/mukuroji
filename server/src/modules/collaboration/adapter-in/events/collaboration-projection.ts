@@ -395,6 +395,14 @@ const planningUpdatePublishEventTypes = new Set([
   'planning-update.published',
   'planning-update.health-degraded',
 ])
+/**
+ * Planning update publish and comment events. Their recipients must be able to read both the
+ * scope captured by the update and the target's current scope.
+ */
+const planningUpdateActivityEventTypes = new Set([
+  ...planningUpdatePublishEventTypes,
+  'planning-update.commented',
+])
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
   ['work-item.due', 'due'],
@@ -671,7 +679,8 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  const planningScopedEvent = planningScope.checked
+  const planningActivity = planningUpdateActivityEventTypes.has(event.eventType)
+  const planningScopedEvent = planningScope.checked && !planningActivity
     ? {
       ...workItemAuthorizationEvent,
       teamId: planningScope.teamId,
@@ -683,6 +692,13 @@ async function processRecord(
     planningScope,
   )
   if (!authorizationEvent) {
+    await markProjectionProcessed(event.eventId)
+    return
+  }
+  const currentPlanningActivityEvent = planningActivity
+    ? createCurrentPlanningUpdateActivityScopeEvent(authorizationEvent, planningScope)
+    : undefined
+  if (planningActivity && !currentPlanningActivityEvent) {
     await markProjectionProcessed(event.eventId)
     return
   }
@@ -709,7 +725,12 @@ async function processRecord(
     ],
   })
   const directoryItems = memberDirectory ?? (
-    candidates.length > 0 && (authorizationEvent.projectId || authorizationEvent.teamId)
+    candidates.length > 0 && (
+      authorizationEvent.projectId ||
+      authorizationEvent.teamId ||
+      currentPlanningActivityEvent?.projectId ||
+      currentPlanningActivityEvent?.teamId
+    )
       ? await readProjectDirectory(authorizationEvent.workspaceId)
       : []
   )
@@ -724,6 +745,18 @@ async function processRecord(
           currentSystemAdminCache,
           dependencies.enterpriseIdentity,
           enterpriseSnapshotCache,
+        ) &&
+        (
+          !currentPlanningActivityEvent ||
+          hasSamePlanningScope(authorizationEvent, currentPlanningActivityEvent) ||
+          await isEligibleRecipient(
+            currentPlanningActivityEvent,
+            candidate.memberKey,
+            directoryItems,
+            currentSystemAdminCache,
+            dependencies.enterpriseIdentity,
+            enterpriseSnapshotCache,
+          )
         )
           ? candidate
           : undefined,
@@ -1591,6 +1624,50 @@ export function notifiesPlanningUpdateProjectMembers(
 }
 
 /**
+ * Creates the authorization event for the current scope of a Planning update publish or comment.
+ *
+ * The event keeps the captured scope in `teamId` / `projectId`; the returned copy carries the
+ * target's current scope instead. A recipient must pass both checks.
+ *
+ * @param event - Publish or comment event carrying the captured scope.
+ * @param scope - Strongly read current target scope.
+ * @returns The current-scope event, or undefined when the target is gone, archived, or different.
+ */
+export function createCurrentPlanningUpdateActivityScopeEvent(
+  event: AuditProjectionEvent,
+  scope: CurrentPlanningUpdateNotificationScope,
+): AuditProjectionEvent | undefined {
+  if (
+    !planningUpdateActivityEventTypes.has(event.eventType) ||
+    !scope.checked ||
+    !scope.exists ||
+    scope.archived ||
+    !event.planningTargetType ||
+    event.planningTargetType !== scope.targetType ||
+    !event.planningTargetId ||
+    event.planningTargetId !== scope.targetId ||
+    !event.planningTargetRecordKey ||
+    event.planningTargetRecordKey !== scope.targetRecordKey
+  ) {
+    return undefined
+  }
+  const { teamId: _capturedTeamId, projectId: _capturedProjectId, ...rest } = event
+  return {
+    ...rest,
+    ...(scope.teamId ? { teamId: scope.teamId } : {}),
+    ...(scope.projectId ? { projectId: scope.projectId } : {}),
+  }
+}
+
+/** Reports whether two events carry the same Team / Project authorization scope. */
+function hasSamePlanningScope(
+  left: Pick<AuditProjectionEvent, 'projectId' | 'teamId'>,
+  right: Pick<AuditProjectionEvent, 'projectId' | 'teamId'>,
+) {
+  return left.teamId === right.teamId && left.projectId === right.projectId
+}
+
+/**
  * Lists the current members of the published update's Project as notification candidates.
  *
  * @param event - Publish event carrying the Project scope.
@@ -2080,7 +2157,8 @@ async function isEligibleRecipient(
     const boundary = resolveNotificationRecipientBoundary(current, memberKey, readString(member.email) ?? memberKey, role)
     permissionCeiling = boundary.permissionCeiling
     const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' || event.planningNotificationKind === 'overdue')
-    const permissions: EnterprisePermissionId[] = event.planningNotificationKind
+    const permissions: EnterprisePermissionId[] =
+      event.planningNotificationKind || planningUpdateActivityEventTypes.has(event.eventType)
       ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
       : [contentPermission]
     if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
@@ -2288,7 +2366,12 @@ export async function authorizeNotificationDelivery(
   if (!scoped) return false
   const planningScope = await readCurrentPlanningUpdateScope(scoped)
   if (!planningScope.exists) return false
-  const current = planningScope.checked
+  const planningActivity = planningUpdateActivityEventTypes.has(scoped.eventType)
+  const currentPlanningActivityEvent = planningActivity
+    ? createCurrentPlanningUpdateActivityScopeEvent(scoped, planningScope)
+    : undefined
+  if (planningActivity && !currentPlanningActivityEvent) return false
+  const current = planningScope.checked && !planningActivity
     ? { ...scoped, teamId: planningScope.teamId, projectId: planningScope.projectId }
     : scoped
   let currentWatcher: string | undefined
@@ -2307,8 +2390,20 @@ export async function authorizeNotificationDelivery(
   }
   const refreshed = refreshPlanningScheduledNotificationEvent(current, planningScope, currentWatcher)
   if (!refreshed) return false
+  if (
+    planningActivity &&
+    !currentWatcher &&
+    !event.notificationCandidates.some((candidate) =>
+      candidate.reason !== 'watcher' && normalizeMemberKey(candidate.memberKey) === memberKey
+    )
+  ) return false
   let directory: ProjectDirectoryItem[] = []
-  if (refreshed.projectId || refreshed.teamId) {
+  if (
+    refreshed.projectId ||
+    refreshed.teamId ||
+    currentPlanningActivityEvent?.projectId ||
+    currentPlanningActivityEvent?.teamId
+  ) {
     let snapshot = cache.directories.get(event.workspaceId)
     if (!snapshot) {
       snapshot = readProjectDirectory(event.workspaceId)
@@ -2317,6 +2412,15 @@ export async function authorizeNotificationDelivery(
     directory = await snapshot
   }
   if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
+  if (
+    currentPlanningActivityEvent &&
+    !hasSamePlanningScope(refreshed, currentPlanningActivityEvent) &&
+    !await isEligibleRecipient(
+      currentPlanningActivityEvent, memberKey, directory,
+      new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,
+      true, readApproval,
+    )
+  ) return false
   return isEligibleRecipient(
     refreshed, memberKey, directory,
     new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,
@@ -2449,7 +2553,7 @@ async function readCurrentWorkItemScope(
 }
 
 /**
- * Strongly reads the canonical Planning update target and Initiative scope for scheduled events.
+ * Strongly reads the canonical Planning update target and Initiative scope for scheduled, publish, and comment events.
  *
  * @param event - Parsed audit event that may represent a Planning scheduled notification.
  * @returns Current Planning target scope, or an unchecked pass-through for other events.
@@ -2458,7 +2562,7 @@ async function readCurrentPlanningUpdateScope(
   event: AuditProjectionEvent,
 ): Promise<CurrentPlanningUpdateNotificationScope> {
   const kind = planningNotificationKindFromEventType(event.eventType)
-  if (!kind) {
+  if (!kind && !planningUpdateActivityEventTypes.has(event.eventType)) {
     return { checked: false, exists: true, archived: false }
   }
   if (!event.planningTargetRecordKey) {
