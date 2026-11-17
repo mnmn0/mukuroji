@@ -78,9 +78,9 @@ Live graph に残っている archive 済み entity（update target を持つ In
 - 容量（20,000 row / 24 MB）や Planning snapshot の応答上限を超える分は戻さず退避先に残します。容量を空けてから同じ復元を再実行すると、active な entity に残っている参照の続きを戻します
 - Response は `{ planning, restore }` です。`restore` は `restoredLinkCount`、`droppedLinkCount`、`restoredDependencyCount`、`retainedDependencyCount`、`droppedDependencyCount`、`pendingReferenceCount` を返します。`pendingReferenceCount` は復元の最後に退避先を読み直した件数です
 
-Team / Project の archive は、live graph に残る link と active な entity だけを確認します。退避済みの参照は確認しないため、archive 済み Cycle の link だけが残っていた Team / Project も archive できます。その Team / Project の entity を復元するには、先に Team / Project を戻す必要があります。
+Web の Planning 画面では、計画の作成フォームの下にある「アーカイブ済みの計画」を開くと一覧を読み込みます。Live graph に残っている archive 済み entity を先に、退避済み entity をその後に（「さらに読み込む」で次の page）並べ、どちらも manage できる scope のものだけを表示します。「復元」は上の restore API を呼び、戻した件数・戻せなかった件数・退避先に残った件数を表示します。退避先に残った参照があるときは「続きを戻す」で同じ entity の復元を再実行します。復元した entity は一覧から消えるため、参照が残っている結果は別の entity を復元しても残し、続きがなくなるまで表示します。復元の request が 404 以外で失敗したときは snapshot を読み直し、その entity が active に戻っていれば、最初の revision が commit 済みで参照が退避先に残っている可能性があるため、「確認できませんでした」という結果に「続きを戻す」を付けて残します（commit 後の最後の読み取りで `PlanningRevisionConflict`（409）になる場合や、途中で権限の変更を検出した `PlanningAuthorizationChanged`（409）もこれに当たります）。entity が archive されたままなら復元されていないので結果を残しません。snapshot も読み直せなかったときは、5xx・応答の形式違い・通信失敗・`PlanningAuthorizationChanged`・`PlanningRevisionConflict` を commit 済みの可能性ありとして扱います（commit 前に拒否された conflict でも、「続きを戻す」はもう一度復元するだけです）。続きが残っている結果は Workspace と member ごとにブラウザの localStorage にも entity ごとの key で保存し（同じ member の別タブが別の entity を同時に更新しても互いに消しません）、再読み込みや別の画面から戻ったときにも表示します。別の端末やブラウザから続きを戻すには restore API を直接呼びます。復元しようとした entity が live にも archive にもなくなっていた（404）ときは、その結果を消します。親が archive 済みのときと owner が active な member でないときは、その理由を表示します。
 
-画面からの退避済み entity の一覧と復元は後続の変更で追加します。それまでは上の API を使います。
+Team / Project の archive は、live graph に残る link と active な entity だけを確認します。退避済みの参照は確認しないため、archive 済み Cycle の link だけが残っていた Team / Project も archive できます。その Team / Project の entity を復元するには、先に Team / Project を戻す必要があります。
 
 ## 階層と roll-up
 
@@ -99,7 +99,7 @@ Response は再計算済み snapshot と `movedWorkItemIds` / `retainedWorkItemI
 
 Rollover は canonical Work Item revision を Planning META と同じ DynamoDB transaction で条件検証します。Transaction の100 item上限に合わせ、一度に検証できる source link は49件までです。削除済み・閲覧不能の Work Item が link された場合は rollover を fail-closed にし、Workspace owner / admin が既存の DELETE API で stale link を清掃してから再実行します。Work Item の Project が変わった link は snapshot / roll-up から除外し、新しい Project scope へ明示的に再 link するまで rollover を拒否します。
 
-Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。archive 時も対象 Work Item の revision を Planning META と同じ transaction で条件検証します。
+Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。`PLANNING_TABLE_NAME` を設定した環境では、archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。`PLANNING_TABLE_NAME` を設定しない local 環境では Work Item の書き込みが META を進めないため、archive の transaction で link 先の Work Item ごとに revision を条件検証します（transaction の上限から、link が約 97 件を超える Cycle は archive できません）。
 
 ## Project / Initiative health update
 
