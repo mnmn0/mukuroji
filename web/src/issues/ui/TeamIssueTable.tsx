@@ -205,6 +205,14 @@ export function IssueTable({
                     onClick={() => onOpenIssue?.(issue)}
                     type="button"
                   >
+                    {issue.key ? (
+                      <span
+                        className="mr-2 font-mono text-xs font-semibold text-[var(--workbench-muted)]"
+                        data-testid={`issue-row-key-${issue.id}`}
+                      >
+                        {issue.key}
+                      </span>
+                    ) : null}
                     {resolveIssueTitle(issue, t)}
                   </button>
                   {onIssueActionMenuOpen ? (
