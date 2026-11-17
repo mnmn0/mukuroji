@@ -5744,6 +5744,30 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => previewRevisions).toEqual([1, 2])
   })
 
+  test('Issue #335: Project 詳細でも工数だけの保存で未保存の入力と選択を保持する', async ({ page }) => {
+    const patches: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
+        patches.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const titleInput = detailPane.locator('input[name="title"]')
+    const projectSelect = detailPane.locator('select[name="assignedProjectId"]')
+    await titleInput.fill('工数保存後も残る Project 詳細のタイトル')
+    await projectSelect.selectOption('')
+
+    const effort = detailPane.getByTestId('work-item-effort-progress')
+    await effort.getByLabel('残工数（時間）').fill('3')
+    await effort.getByRole('button', { name: '工数と進捗を保存' }).click()
+    await expect.poll(() => patches).toEqual([{ expectedRevision: 1, remainingEffortMinutes: 180 }])
+    await expect(effort).toContainText('3 時間')
+
+    await expect(titleInput).toHaveValue('工数保存後も残る Project 詳細のタイトル')
+    await expect(projectSelect).toHaveValue('')
+  })
+
   test('Issue #239: Team Issue の保存中は保存ボタンを無効にする', async ({ page }) => {
     let releaseUpdate: (() => void) | undefined
     const updateGate = new Promise<void>((resolve) => {

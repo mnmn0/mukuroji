@@ -44,7 +44,12 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
-import { resolveRecordedRemainingEffortMinutes, toWorkItemEffortPatch } from '../../work-items/model/workItemEffort'
+import {
+  resolveRecordedRemainingEffortMinutes,
+  resolveWorkItemDraftRevision,
+  toWorkItemEffortPatch,
+  type WorkItemDraftBase,
+} from '../../work-items/model/workItemEffort'
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -377,16 +382,34 @@ export function TaskDetailPane({
     ? task
     : matchingDetailIssue
   const currentWorkItemTypeId = selectedIssue?.workItemTypeId ?? task?.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  // The forms keep their unsaved input when only remaining effort or progress changed, such as after
+  // the effort editor saved on its own; any change to a field they edit, the schedule included, resets them.
+  const draftItem = selectedIssue ?? task
+  const [draftBase, setDraftBase] = useState<WorkItemDraftBase<CanonicalWorkItem> | undefined>(undefined)
+  const draftRevision = draftItem === undefined
+    ? undefined
+    : draftBase === undefined
+      ? draftItem.revision
+      : resolveWorkItemDraftRevision(draftBase, draftItem, pickTaskDraftFields)
+  if (
+    draftItem !== undefined &&
+    draftRevision !== undefined &&
+    (draftBase?.item.id !== draftItem.id || draftBase.item.revision !== draftItem.revision)
+  ) {
+    setDraftBase({ item: draftItem, revision: draftRevision })
+  }
+  const draftSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${draftRevision ?? 'loading'}`
+  // A Type change preview is read at the stored revision, so it is read again after any save.
   const workItemTypeSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
   const [selectedWorkItemType, setSelectedWorkItemType] = useState({
-    identity: workItemTypeSelectionIdentity,
+    identity: draftSelectionIdentity,
     value: currentWorkItemTypeId,
   })
-  const selectedWorkItemTypeId = selectedWorkItemType.identity === workItemTypeSelectionIdentity
+  const selectedWorkItemTypeId = selectedWorkItemType.identity === draftSelectionIdentity
     ? selectedWorkItemType.value
     : currentWorkItemTypeId
   const resolvedAssignedProjectId = selectedIssue?.assignedProjectId ?? task?.assignedProjectId ?? ''
-  const projectSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
+  const projectSelectionIdentity = draftSelectionIdentity
   const [selectedProject, setSelectedProject] = useState({
     identity: projectSelectionIdentity,
     value: resolvedAssignedProjectId,
@@ -412,7 +435,7 @@ export function TaskDetailPane({
         targetWorkItemTypeId: selectedWorkItemTypeId,
       }
   const resolvedSchedule = selectedIssue?.schedule ?? task?.schedule
-  const scheduleSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
+  const scheduleSelectionIdentity = draftSelectionIdentity
   const [scheduleSelection, setScheduleSelection] = useState<{
     /** Detail revision represented by the selected schedule mode. */
     identity: string
@@ -541,7 +564,7 @@ export function TaskDetailPane({
   const reverseTriageSources = triageSourcesPages
     ?.flatMap((page) => page.entries)
     .filter((entry) => entry.id !== sourceTriageEntryId) ?? []
-  const editorIdentity = `${task.teamId}:${task.id}:${issue?.revision ?? task.revision}`
+  const editorIdentity = `${task.teamId}:${task.id}:${draftRevision ?? task.revision}`
   const activeAiFormSeed = aiFormSeed.identity === editorIdentity ? aiFormSeed : undefined
   const activeAiDraft = activeAiFormSeed?.draft
   const seededTitle = activeAiDraft?.title?.value ?? title
@@ -703,7 +726,7 @@ export function TaskDetailPane({
       handleCommentDraftDirtyChange(false)
     }
     setSelectedWorkItemType({
-      identity: workItemTypeSelectionIdentity,
+      identity: draftSelectionIdentity,
       value: nextWorkItemTypeId,
     })
     setFieldErrors((current) => ({ ...current, typeChange: undefined }))
@@ -1276,7 +1299,7 @@ export function TaskDetailPane({
             </div>
             <div className="workbench-panel-muted p-3">
               <WorkItemEffortProgressEditor
-                editorIdentity={editorIdentity}
+                editorIdentity={`${task.teamId}:${task.id}:${effortItem.revision}`}
                 item={effortItem}
                 locale={locale}
                 {...(resolvedConfiguration?.progressMode ? { progressMode: resolvedConfiguration.progressMode } : {})}
@@ -1831,4 +1854,27 @@ function resolveTriageContextAvailabilityMessageKey(
 /** Resolves a Team Issue title for relation candidate display. */
 function resolveTeamIssueTitle(issue: TeamIssue) {
   return resolveWorkItemTitle(issue)
+}
+
+/**
+ * Picks the fields edited by the detail forms other than the effort editor, in a fixed order.
+ *
+ * @param item - Work Item to read.
+ * @returns The fields, compared to decide whether the forms' unsaved input must reset.
+ */
+function pickTaskDraftFields(item: CanonicalWorkItem): unknown {
+  return [
+    item.teamId,
+    item.title,
+    item.description,
+    item.assignedProjectId,
+    item.assigneeUserId,
+    item.priority,
+    item.workflowStatusId,
+    item.workItemTypeId,
+    item.customFieldValues,
+    item.contributorAssignments,
+    item.acceptanceCriteria,
+    item.schedule,
+  ]
 }

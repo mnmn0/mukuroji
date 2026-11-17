@@ -1154,6 +1154,10 @@ describe('Analytics metric engine', () => {
     expect(weighted.forecast).toMatchObject({
       weighting: 'effort', remainingWorkItems: 3, remainingEffortHours: 6, unestimatedRemainingWorkItems: 1,
     })
+    // Exports name the unit of effort-weighted rows so they cannot be mistaken for item counts.
+    expect(createAnalyticsCsv(weighted)).toContain('throughput,Throughput (hours),6')
+    expect(createAnalyticsCsv(weighted)).toContain('velocity,Velocity (hours/week),6')
+    expect(createAnalyticsCsv(counted)).toContain('throughput,Throughput,3')
     // Six hours completed over seven days, so six remaining hours take at least the next completing days.
     expect(weighted.forecast.dailyThroughput).toBe(0.857)
     expect(weighted.forecast.p95).not.toBeNull()

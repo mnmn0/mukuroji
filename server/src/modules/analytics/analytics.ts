@@ -1016,7 +1016,11 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
     [...messages.csvHeaders],
   ]
   for (const widget of normalized.widgets) {
-    const metricLabel = messages.metricLabels[widget.metric]
+    // Effort-weighted throughput and velocity count hours, not the metric's usual unit, so their label
+    // names the unit to keep them apart from count-weighted rows of the same metric.
+    const metricLabel = widget.definition.unit === ANALYTICS_METRIC_DEFINITIONS[widget.metric].unit
+      ? messages.metricLabels[widget.metric]
+      : `${messages.metricLabels[widget.metric]} (${messages.unitLabels[widget.definition.unit]})`
     rows.push([
       widget.widgetId,
       widget.metric,

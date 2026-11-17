@@ -120,7 +120,8 @@ export function resolveWorkItemDraftRevision<T extends { id: string; revision: n
   item: T,
   draftFields: (item: T) => unknown,
 ): number {
-  if (base.item === item) return base.revision
+  // The same revision of the same Work Item has the same fields, even when read as another object.
+  if (base.item === item || (base.item.id === item.id && base.item.revision === item.revision)) return base.revision
   const isSameDraft = base.item.id === item.id &&
     JSON.stringify(draftFields(base.item)) === JSON.stringify(draftFields(item))
   return isSameDraft ? base.revision : item.revision
