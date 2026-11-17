@@ -1518,7 +1518,7 @@ export class DynamoDbWorkspaceSearchClient {
     const replacement = createWorkspaceSearchDocument(input)
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
     if (options?.preserveCreator && replacement.creatorUserId === undefined) {
-      return await this.upsertPreservingCreator(replacement, sourceRevision)
+      return await this.upsertPreservingCreator(replacement, sourceRevision, options?.unrevisioned === true)
     }
     const document = replacement
     const fenced = sourceRevision !== undefined || options?.unrevisioned === true
@@ -1626,11 +1626,13 @@ export class DynamoDbWorkspaceSearchClient {
    *
    * @param replacement - Replacement document that lacks a creator.
    * @param sourceRevision - Source revision of the replacement, when the source is revisioned.
+   * @param unrevisioned - Whether an unrevisioned replacement must leave a revisioned row alone.
    * @returns The document that was written, or the replacement when a newer one is kept.
    */
   private async upsertPreservingCreator(
     replacement: WorkspaceSearchDocument,
     sourceRevision: number | undefined,
+    unrevisioned: boolean,
   ) {
     for (let attempt = 1; ; attempt += 1) {
       const response = await this.documentClient.send(new GetCommand({
@@ -1640,13 +1642,11 @@ export class DynamoDbWorkspaceSearchClient {
       }))
       const stored = response.Item
       const storedRevision = stored?.sourceRevision
-      if (
-        sourceRevision !== undefined &&
-        typeof storedRevision === 'number' &&
-        storedRevision > sourceRevision
-      ) {
-        return replacement
-      }
+      // The digest condition below keeps this decision valid until the write lands.
+      const keepsStored = sourceRevision !== undefined
+        ? typeof storedRevision === 'number' && storedRevision > sourceRevision
+        : unrevisioned && storedRevision !== undefined
+      if (keepsStored) return replacement
       const document = withCreatorFrom(replacement, stored)
       try {
         await this.documentClient.send(new TransactWriteCommand({

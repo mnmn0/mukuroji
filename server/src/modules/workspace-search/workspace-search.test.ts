@@ -6,7 +6,7 @@ import {
   DynamoDBClient,
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
   createSearchWorkItemStatusKey,
@@ -336,6 +336,30 @@ test('adds the creator when the creation projection lands after a charter projec
   expect(response.results).toEqual([
     expect.objectContaining({ title: 'Refero', body: 'OPS', creatorUserId: 'creator@example.com' }),
   ])
+})
+
+test('lets an unrevisioned creator-preserving projection replace only an unrevisioned row', async () => {
+  const project = (title: string, sourceRevision?: number) => createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title,
+    ...(sourceRevision === undefined ? {} : { sourceRevision }),
+  })
+  const write = async (stored: ReturnType<typeof project> | undefined) => {
+    const memory = createMemoryDocumentClient(stored ? [stored] : [])
+    const client = new DynamoDbWorkspaceSearchClient('search-table', memory, {} as DynamoDBClient, false)
+    await client.upsertDocument(project('Refero (old)'), { preserveCreator: true, unrevisioned: true })
+    const response = await memory.send(new GetCommand({
+      TableName: 'search-table',
+      Key: { workspaceId: 'workspace-1', recordKey: project('Refero').recordKey },
+    }))
+    return response.Item
+  }
+
+  expect(await write(project('Refero', 2))).toMatchObject({ title: 'Refero', sourceRevision: 2 })
+  expect(await write(project('Refero'))).toMatchObject({ title: 'Refero (old)' })
+  expect(await write(undefined)).toMatchObject({ title: 'Refero (old)' })
 })
 
 test('keeps the stored creation time when the stored Project row has no creator', async () => {
