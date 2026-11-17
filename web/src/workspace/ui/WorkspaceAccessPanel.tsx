@@ -9,7 +9,6 @@ import {
   type RefObject,
 } from 'react'
 import { useSWRConfig } from 'swr'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -34,6 +33,11 @@ import {
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
 import { useWorkspaceMemberCredentialReset } from '../mutations/useWorkspaceMemberCredentialReset'
+import {
+  createWorkspaceAccessMutationSession,
+  getCredentialResetRunner,
+} from '../mutations/workspaceAccessMutationSession'
+import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -268,10 +272,10 @@ export function WorkspaceAccessPanelContainer({
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { mutate: mutateCache } = useSWRConfig()
-  const mutationSession = useMemo(() => ({
-    accessToken,
-    requestRunner: createMutationRequestRunner(),
-  }), [accessToken])
+  const mutationSession = useMemo(
+    () => createWorkspaceAccessMutationSession(accessToken),
+    [accessToken],
+  )
   const mutationRequestRunner = mutationSession.requestRunner
   const {
     data: access,
@@ -288,9 +292,16 @@ export function WorkspaceAccessPanelContainer({
     access?.capabilities.canManageMembers === true,
   )
 
+  const administratorKey = access?.currentMember.memberKey
+  const credentialResetRunner = useMemo(
+    () => administratorKey === undefined
+      ? createMutationRequestRunner()
+      : getCredentialResetRunner(administratorKey),
+    [administratorKey],
+  )
   const resetMemberCredential = useWorkspaceMemberCredentialReset({
     accessToken: mutationSession.accessToken,
-    requestRunner: mutationRequestRunner,
+    requestRunner: credentialResetRunner,
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
@@ -1131,6 +1142,18 @@ function findRowFocusFallback(control: HTMLElement | null) {
 }
 
 /**
+ * Reads the control a dialog returns focus to when it closes.
+ *
+ * The confirmed action can change it after the dialog opened, so it is read on close.
+ *
+ * @param returnFocusRef - Ref of the control.
+ * @returns The control, or null.
+ */
+function readReturnFocusTarget(returnFocusRef: RefObject<HTMLElement | null>) {
+  return returnFocusRef.current
+}
+
+/**
  * Returns focus to the control that opened a dialog, or to its row when the control is gone.
  *
  * @param returnFocusElement - Control that opened the dialog.
@@ -1180,7 +1203,10 @@ function WorkspaceAccessConfirmationDialog({
     dialogRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
 
     return () => {
-      window.requestAnimationFrame(() => restoreDialogFocus(returnFocusElement, fallbackContainer))
+      // The confirmed action may point the ref at another control of the row, such as after an
+      // MFA reset whose button the next reload removes, so the ref is read again on close.
+      const focusTarget = readReturnFocusTarget(returnFocusRef) ?? returnFocusElement
+      window.requestAnimationFrame(() => restoreDialogFocus(focusTarget, fallbackContainer))
     }
   }, [returnFocusRef])
 
