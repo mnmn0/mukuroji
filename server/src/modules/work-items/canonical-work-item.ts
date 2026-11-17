@@ -82,6 +82,11 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
   dueDateUpdatedAt?: string
+  /**
+   * Time the item last returned to open work from completed, canceled, or archived. Overdue
+   * escalations restart from it, so Project managers hear about a reopened item again.
+   */
+  reopenedAt?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終 state 更新日時の ISO 8601 timestamp です。 */
@@ -165,6 +170,11 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     ) &&
     isOptionalCanonicalMutationTimestamp(
       value.dueDateUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
+    isOptionalCanonicalMutationTimestamp(
+      value.reopenedAt,
       value.createdAt,
       value.updatedAt,
     ) &&

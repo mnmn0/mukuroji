@@ -1502,7 +1502,8 @@ export function createNotificationProjectionItem(
  * Re-evaluates a dated stage against today's date in the Work Item's calendar at delivery time.
  *
  * A due-soon reminder stays valid only while the item is still before its due date and no
- * further out than when it was scanned. An escalation stays valid only while the item is at
+ * further out than when it was scanned. A due reminder stays valid only on the due date, and an
+ * overdue reminder only after it. An escalation stays valid only while the item is at
  * least as overdue as when it was scanned. Without a local date or the scanned day count the
  * stage is kept, so events from older schedule versions still deliver.
  *
@@ -1525,6 +1526,10 @@ function isScheduledStageStillCurrent(
     if (currentDaysUntilDue <= 0) return false
     return event.daysUntilDue === undefined || currentDaysUntilDue <= event.daysUntilDue
   }
+  // A due-day reminder held past its date, or an overdue one whose calendar moved back to the
+  // due date, no longer matches the item's stage.
+  if (reason === 'due') return currentDaysUntilDue === 0
+  if (reason === 'overdue') return currentDaysUntilDue < 0
   if (reason === 'escalation' && event.daysUntilDue !== undefined) {
     return currentDaysUntilDue <= event.daysUntilDue
   }
@@ -2712,7 +2717,7 @@ export function parseAuditProjectionEvent(
     summary: readString(value.summary),
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
     workItemUpdatedAt: readTimestamp(metadata.workItemUpdatedAt),
-    daysUntilDue: readSafeInteger(metadata.daysUntilDue),
+    daysUntilDue: readOptionalDaysUntilDue(metadata.daysUntilDue),
     planningTargetType: readPlanningTargetType(metadata.planningTargetType),
     planningTargetId: readString(metadata.planningTargetId),
     planningTargetRecordKey: readString(metadata.planningTargetRecordKey),
@@ -2847,8 +2852,23 @@ function readPositiveInteger(value: unknown) {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : undefined
 }
 
-function readSafeInteger(value: unknown) {
-  return Number.isSafeInteger(value) ? Number(value) : undefined
+/**
+ * Reads the day count a schedule scan recorded on a dated Work Item event.
+ *
+ * Events from older schedule versions carry no count and keep their fallback. A present value
+ * that is not a safe integer is a malformed event, so it fails the record instead of being read
+ * as missing.
+ *
+ * @param value - Raw `metadata.daysUntilDue` value.
+ * @returns The day count, or undefined when the field is absent.
+ * @throws Error when the field is present but not a safe integer.
+ */
+function readOptionalDaysUntilDue(value: unknown) {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value)) {
+    throw new Error('Scheduled Work Item notification daysUntilDue is invalid.')
+  }
+  return Number(value)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -41,6 +41,11 @@ describe('Slack DynamoDB delivery queue', () => {
     const f = fixture({ ...row, dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z', daysUntilDue: -7 })
     expect((await f.store.listDue(shard, now, 2)).deliveries[0])
       .toMatchObject({ dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z', daysUntilDue: -7 })
+    expect((await fixture({ ...row, dueDate: '2026-07-15' }).store.listDue(shard, now, 2)).deliveries[0]?.daysUntilDue).toBeUndefined()
+    for (const daysUntilDue of ['3', 1.5, null]) {
+      expect(await fixture({ ...row, dueDate: '2026-07-15', daysUntilDue }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
   })
   test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
     const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]

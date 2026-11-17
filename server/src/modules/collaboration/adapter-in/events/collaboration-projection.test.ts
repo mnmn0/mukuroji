@@ -395,6 +395,21 @@ describe('collaboration projection pure helpers', () => {
       .toEqual([{ memberKey: 'owner@example.com', reason: 'overdue' }])
     expect(refreshScheduledNotificationEvent(reminder, { ...scope, assigneeMemberKey: 'new@example.com' }))
       .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(reminder, { ...scope, localDate: '2026-07-16' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'overdue' }])
+    // A calendar change moved today back to the due date: the item is not overdue any more.
+    expect(refreshScheduledNotificationEvent(reminder, { ...scope, localDate: '2026-07-15' }))
+      .toBeUndefined()
+    const due = createProjectionEvent({
+      eventType: 'work-item.due',
+      dueDate: '2026-07-15',
+      notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'due' }],
+    })
+    expect(refreshScheduledNotificationEvent(due, { ...scope, localDate: '2026-07-15' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due' }])
+    // Held past the due date (for example by quiet hours) or delivered before it: wrong stage.
+    expect(refreshScheduledNotificationEvent(due, { ...scope, localDate: '2026-07-16' })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(due, { ...scope, localDate: '2026-07-14' })).toBeUndefined()
     expect(refreshScheduledNotificationEvent(stale, scope)?.notificationCandidates)
       .toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
     expect(refreshScheduledNotificationEvent(stale, { ...scope, updatedAt: '2026-07-01T18:00:00+09:00' })
@@ -2111,8 +2126,14 @@ describe('collaboration projection pure helpers', () => {
     })?.daysUntilDue).toBe(-7)
     expect(parseAuditProjectionEvent({
       ...event,
-      metadata: { daysUntilDue: '3' },
+      metadata: { dueDate: '2026-07-12' },
     })?.daysUntilDue).toBeUndefined()
+    for (const daysUntilDue of ['3', 1.5, null]) {
+      expect(() => parseAuditProjectionEvent({
+        ...event,
+        metadata: { dueDate: '2026-07-12', daysUntilDue },
+      })).toThrow('daysUntilDue is invalid')
+    }
   })
 
   test('tolerates legacy events without collaboration metadata', () => {

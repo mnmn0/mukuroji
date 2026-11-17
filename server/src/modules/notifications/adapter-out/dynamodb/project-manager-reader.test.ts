@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createDynamoDbProjectManagerReader } from './project-manager-reader'
 
+/** Document client type accepted by createDynamoDbProjectManagerReader in tests. */
 type ProjectManagerReaderClient = Parameters<typeof createDynamoDbProjectManagerReader>[0]['documentClient']
 
 /** Creates a DocumentClient fake that returns the given Query pages in order. */
