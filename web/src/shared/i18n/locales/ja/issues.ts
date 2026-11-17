@@ -35,6 +35,7 @@ export const issuesMessages = {
   'issues.keyPage.notFound': '{key} の Work Item は見つからないか、閲覧する権限がありません。',
   'issues.keyPage.error': '{key} を開けませんでした。時間をおいてもう一度試してください。',
   'issues.keyPage.openSearch': '検索で探す',
+  'issues.keyPage.retry': 'もう一度試す',
   'issues.detail.empty': 'Issue を選択すると詳細を確認できます。',
   'issues.detail.save': '変更を保存',
   'issues.detail.readOnlyPermission': 'この Issue を編集する権限がありません。Workspace の owner または admin に依頼してください。',

@@ -41,9 +41,13 @@ export function readWorkItemKeyInput(value: string | undefined): string | undefi
 
 /** The Markdown syntax tree shape this module reads and writes. */
 type MarkdownNode = {
+  /** mdast node kind, such as `text`, `link`, or `inlineCode`. */
   type: string
+  /** Literal text of a `text` or code node. */
   value?: string
+  /** Destination of a `link` node. */
   url?: string
+  /** Child nodes of a parent node, such as a paragraph or a link. */
   children?: MarkdownNode[]
 }
 

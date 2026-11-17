@@ -35,6 +35,7 @@ export const issuesMessages = {
   'issues.keyPage.notFound': 'No Work Item has the key {key}, or you cannot view it.',
   'issues.keyPage.error': 'Could not open {key}. Try again in a moment.',
   'issues.keyPage.openSearch': 'Search instead',
+  'issues.keyPage.retry': 'Try again',
   'issues.detail.empty': 'Select an issue to review details.',
   'issues.detail.save': 'Save changes',
   'issues.detail.readOnlyPermission': 'You do not have permission to edit this issue. Ask a Workspace owner or admin for access.',
