@@ -37,6 +37,7 @@ test('loads project directory from the authenticated user scoped partition', asy
             id: 'refero',
             name: 'Refero',
             tone: 'blue',
+            lifecycleState: 'active',
           },
         ],
       },

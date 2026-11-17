@@ -130,6 +130,9 @@ function createDefaultWorkItemService(
     async getEffort(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision }
     },
+    async getKey(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, createdAt: workItem.createdAt, key: 'TEAM-1' }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -448,6 +451,34 @@ describe('public API router', () => {
     })
   })
 
+  test('returns the Work Item key from its own read-scoped endpoint', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async getKey(_credential, teamId, workItemId) {
+          reads.push(`${teamId}/${workItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, createdAt: '2026-07-18T00:00:00.000Z', key: 'TEAM-7' }
+        },
+      }),
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/key?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/key?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', createdAt: '2026-07-18T00:00:00.000Z', key: 'TEAM-7',
+    })
+    expect(denied.status).toBe(403)
+    expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
   test('exposes the authorized Work Item Type creation schema', async () => {
     let requestedTeamId: string | undefined
     let requestedProjectId: string | undefined
@@ -708,6 +739,7 @@ describe('public API router', () => {
     expect(paths['/api/v1/agent-context']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/acceptance-criteria']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/effort']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/key']).toHaveProperty('get')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('remainingEffortMinutes')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('progressPercent')

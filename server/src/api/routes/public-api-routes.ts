@@ -169,6 +169,7 @@ import {
   createWorkItemIdempotencyTransaction,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
@@ -720,6 +721,11 @@ async function createCanonicalPublicWorkItem(
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(input, permission.team)
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    principal.directoryId,
+    permission.team,
+    readAssignedProjectId(body.assignedProjectId),
+  )
   requireAssignedProjectPermission(
     principal,
     permission,
@@ -751,6 +757,7 @@ async function createCanonicalPublicWorkItem(
           }
         : {}),
       authorizationSnapshot,
+      ...newWorkItemProjectFence,
     },
     principal.userKey,
     createPublicMutationAuditContext(principal, context, {
@@ -1245,6 +1252,31 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         ...(issue.schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: issue.schedule.plannedEffortMinutes }),
         ...(issue.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: issue.remainingEffortMinutes }),
         ...(issue.progressPercent === undefined ? {} : { progressPercent: issue.progressPercent }),
+      }
+    },
+
+    /**
+     * Reads the key of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The Team ID, Work Item ID, creation time, and key, which is absent on Work Items created
+     * before keys.
+     */
+    async getKey(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        createdAt: issue.createdAt,
+        ...(issue.key === undefined ? {} : { key: issue.key }),
       }
     },
 

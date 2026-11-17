@@ -50,6 +50,11 @@ import {
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
 import {
+  createProjectCharterDraftStore,
+  createProjectCharterPersonCandidates,
+} from '../../projects/model/projectCharterView'
+import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
+import {
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -119,6 +124,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import {
   createWorkItemRelation,
+  replaceWorkItemParent,
   deleteWorkItemRelation,
 } from '../../work-items/api'
 import {
@@ -420,6 +426,18 @@ export function TaskPage() {
         member.id === currentUserProjectKey && member.role === 'manager',
       )
     )
+  const isWorkspaceAdministrator = workspaceAccess?.currentMember.status === 'active' && (
+    workspaceAccess.currentMember.role === 'owner' ||
+    workspaceAccess.currentMember.role === 'admin'
+  )
+  const canEditProjectCharter = canMutateContent &&
+    (canManageProjectMembers || isWorkspaceAdministrator)
+  const projectCharterCandidates = useMemo(
+    () => createProjectCharterPersonCandidates(workspaceAccess?.members ?? emptyWorkspaceMembers),
+    [workspaceAccess?.members],
+  )
+  // Unsaved charter edits survive switching away from the settings tab and back.
+  const [projectCharterDraftStore] = useState(createProjectCharterDraftStore)
   const {
     data: projectUsersFirstPage,
     error: projectUsersError,
@@ -1621,19 +1639,35 @@ export function TaskPage() {
     requireProjectTaskWriteScope(currentIssue)
 
     const graphRevision = readSelectedRelationGraphRevision(selectedIssueDetail, issueId, t)
+    const replacesParent = input.type === 'parent' &&
+      (selectedIssueDetail?.relations ?? []).some((relation) => relation.type === 'parent')
 
     try {
-      await mutationRequestRunner.run(
-        `issue:relation:create:${teamId}:${issueId}`,
-        JSON.stringify([graphRevision, input]),
-        (context) => createWorkItemRelation(
-          teamId,
-          issueId,
-          accessToken,
-          { ...input, expectedGraphRevision: graphRevision },
-          context,
-        ),
-      )
+      if (replacesParent) {
+        await mutationRequestRunner.run(
+          `issue:relation:parent:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input.targetWorkItemId]),
+          (context) => replaceWorkItemParent(
+            teamId,
+            issueId,
+            accessToken,
+            { parentWorkItemId: input.targetWorkItemId, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        )
+      } else {
+        await mutationRequestRunner.run(
+          `issue:relation:create:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input]),
+          (context) => createWorkItemRelation(
+            teamId,
+            issueId,
+            accessToken,
+            { ...input, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        )
+      }
       await mutateSelectedIssueDetail()
     } catch (error) {
       redirectEnterpriseSessionError(error)
@@ -1868,6 +1902,27 @@ export function TaskPage() {
       assigneeOptions={activeProjectMembers}
       canAccessTriage={canAccessTriage}
       canManageProjectMembers={canManageProjectMembers}
+      projectCharterPanel={(
+        <ProjectCharterSection
+          accessToken={accessToken}
+          canDecideProposal={canMutateContent && isWorkspaceAdministrator}
+          canEdit={canEditProjectCharter}
+          canMutate={canMutateContent}
+          draftStore={projectCharterDraftStore}
+          enabled={Boolean(user && !currentUserError)}
+          members={projectCharterCandidates}
+          projectId={projectId}
+          t={t}
+          teamId={interactionTeamId}
+          onSessionError={(error, requestAccessToken) => {
+            // A late failure of a request sent with a token that was replaced since, such as one
+            // from before signing in again, must not clear the current session.
+            if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+              redirectEnterpriseSessionError(error)
+            }
+          }}
+        />
+      )}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
       collaborationRoute={

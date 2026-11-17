@@ -7,6 +7,7 @@ import {
   deleteWorkItemRelation,
   getWorkItemConfiguration,
   putWorkItemConfiguration,
+  replaceWorkItemParent,
 } from '../src/work-items/api'
 import {
   inheritedWorkItemConfigurationFixture,
@@ -113,6 +114,36 @@ describe('Work Item configuration API', () => {
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual(relationInput)
     expect(JSON.parse(String(requests[1]?.init.body))).toEqual({ expectedGraphRevision: 4 })
     expect(requests[1]?.init.headers).toMatchObject({
+      'Idempotency-Key': 'idempotency-21',
+      'X-Correlation-Id': 'correlation-21',
+    })
+  })
+
+  test('replaces a parent with one encoded PUT request', async () => {
+    const parentResponse = {
+      previousParentWorkItemId: 'phase/1',
+      parentWorkItemId: 'phase/2',
+      graphRevision: 5,
+    }
+    const requests = installFetchRecorder(parentResponse)
+
+    expect(await replaceWorkItemParent(
+      'core team',
+      'issue/1',
+      'access-token',
+      { parentWorkItemId: 'phase/2', expectedGraphRevision: 4 },
+      mutationContext,
+    )).toEqual(parentResponse)
+
+    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+      ['PUT', '/api/teams/core%20team/issues/issue%2F1/parent'],
+    ])
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      parentWorkItemId: 'phase/2',
+      expectedGraphRevision: 4,
+    })
+    expect(requests[0]?.init.headers).toMatchObject({
+      Authorization: 'Bearer access-token',
       'Idempotency-Key': 'idempotency-21',
       'X-Correlation-Id': 'correlation-21',
     })

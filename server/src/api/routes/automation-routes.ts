@@ -147,7 +147,10 @@ import {
   projectWorkspaceSearchDocumentBestEffort,
 } from '../shared/search-access'
 import { isRecord, stableDigestStringify } from '../shared/value-guards'
-import { normalizeTeamIssueInput } from '../shared/work-item-access'
+import {
+  normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
+} from '../shared/work-item-access'
 import {
   prepareConfiguredCreateWorkItem,
   validateWorkItemConfigurationReferences,
@@ -473,6 +476,8 @@ async function executeAutomationTemplateApplication(
           )
         },
         'automation template Project creation',
+        // A charter saved before this projection lands carries a revision; keep it.
+        { unrevisioned: true },
       )
       return await requireCompletedTemplateApplication(application)
     }
@@ -1615,10 +1620,17 @@ async function executeAutomationWorkItemCreate(
     teamId,
     dependencies,
   )
+  const normalizedBody = normalizeTeamIssueInput(body, team)
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    context.execution.workspaceId,
+    team,
+    readAssignedProjectId(normalizedBody.assignedProjectId),
+    dependencies.projectDirectory,
+  )
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
     teamId,
-    normalizeTeamIssueInput(body, team),
+    normalizedBody,
     await dependencies.workItemConfigurations.getTeamConfiguration(
       context.execution.workspaceId,
       teamId,
@@ -1633,7 +1645,7 @@ async function executeAutomationWorkItemCreate(
   const response = await dependencies.teamIssues.createTeamIssue(
     context.execution.workspaceId,
     teamId,
-    configuredBody,
+    { ...configuredBody, ...newWorkItemProjectFence },
     `automation:${context.execution.ruleId}`,
     createAutomationMutationContext(context, values),
   )

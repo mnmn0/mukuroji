@@ -6,6 +6,7 @@ import {
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
   type UpdateAutomationInboundWebhookEndpointInput,
+  WORK_ITEM_TITLE_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import {
   validateWorkflowDefinition,
@@ -50,7 +51,11 @@ export function validateCreateAutomationTemplateInput(
         'workItemTypeId',
         'workflowStatusId',
       ], 'Work Item template payload')
-      const title = requireBoundedText(payload.title, 'Work Item template title', 500)
+      const title = requireBoundedText(payload.title, 'Work Item template title', WORK_ITEM_TITLE_MAX_LENGTH * 2)
+      // Work Item titles are bounded in code points, so a valid template always creates a Work Item.
+      if ([...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
+        throw invalidInput(`Work Item template title must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`)
+      }
       const assignedProjectId = payload.assignedProjectId
       if (
         assignedProjectId !== undefined &&

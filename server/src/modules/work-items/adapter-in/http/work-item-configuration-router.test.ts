@@ -79,6 +79,7 @@ function createDependencies(
     listRelationGraph: unsupportedOperation,
     createRelation: unsupportedOperation,
     deleteRelation: unsupportedOperation,
+    replaceParent: unsupportedOperation,
   } satisfies WorkItemConfigurationClient
   const dependencies: WorkItemConfigurationRouterDependencies<typeof principal> = {
     getWorkItemConfigurations: () => requestClient,

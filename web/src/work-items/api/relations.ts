@@ -1,4 +1,9 @@
-import type { WorkItemRelationMutationInput, WorkItemRelationMutationResponse } from '@mukuroji/contracts'
+import type {
+  WorkItemParentMutationInput,
+  WorkItemParentMutationResponse,
+  WorkItemRelationMutationInput,
+  WorkItemRelationMutationResponse,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkItemConfigurationApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -65,6 +70,37 @@ export function deleteWorkItemRelation(
         ...createMutationHeaders(mutationContext),
       },
       method: 'DELETE',
+    },
+  )
+}
+
+/**
+ * Work Item の親を 1 回の原子的な置換で設定・付け替え・解除します。
+ *
+ * @param teamId - relation を所有する Team ID です。
+ * @param workItemId - 親を変える子 Work Item ID です。
+ * @param accessToken - Authorization header に使う access token です。
+ * @param input - 新しい親 Work Item ID（null は解除）と graph revision です。
+ * @param mutationContext - retry 間で共有する mutation request context です。
+ * @returns 変更前後の親 Work Item ID と更新後 graph revision です。
+ */
+export function replaceWorkItemParent(
+  teamId: string,
+  workItemId: string,
+  accessToken: string,
+  input: WorkItemParentMutationInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<WorkItemParentMutationResponse>(
+    `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(workItemId)}/parent`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'PUT',
     },
   )
 }

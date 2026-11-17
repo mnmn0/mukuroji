@@ -396,7 +396,7 @@ const acknowledgedFindings = [
   },
   {
     id: 'AwsSolutions-COG2',
-    reason: 'The internal tool sign-in has no MFA enrollment screen yet, so the stack-owned pool offers TOTP as optional. Administrators can require it per user, and enterprise SSO keeps the identity provider MFA.',
+    reason: 'The stack-owned pool offers TOTP as optional so that a Workspace can choose. When the Workspace security policy requires MFA, the API makes a member without TOTP register an authenticator at sign-in before any Workspace access, and enterprise SSO keeps the identity provider MFA.',
     scopePaths: userPoolPaths,
   },
   {

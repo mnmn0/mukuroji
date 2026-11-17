@@ -29,6 +29,7 @@ import {
   type EnterprisePermissionId,
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
+  type WorkItemKeyLookupResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -144,6 +145,7 @@ import {
   assertWorkItemChildTypeAllowed,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
+  WORK_ITEM_PROJECTED_RELATION_TYPES,
   previewWorkItemTypeChange,
 } from '../../modules/work-items/work-item-configuration'
 import { PlanningError } from '../../modules/planning'
@@ -258,6 +260,7 @@ import {
   filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
 import {
@@ -873,6 +876,60 @@ async function authorizeRelationMutation(
   requireAssignedProjectPermission(principal, context, source.issue.assignedProjectId, 'member')
   requireAssignedProjectPermission(principal, context, target.issue.assignedProjectId, 'member')
   return { source: source.issue, target: target.issue }
+}
+
+/**
+ * Authorizes every endpoint of a parent replacement and returns their consistent snapshots.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param teamId - Team that owns every endpoint.
+ * @param workItemIds - Child followed by the current and requested parents.
+ * @returns Endpoint rows keyed by Work Item ID.
+ */
+async function authorizeParentReplacementEndpoints(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemIds: readonly string[],
+) {
+  const context = await requireTeamPermission(principal, teamId, 'member')
+  const details = await Promise.all([...new Set(workItemIds)].map((workItemId) =>
+    workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, workItemId, {
+      consistentIssueRead: true,
+      includeEvents: false,
+    })
+  ))
+  for (const detail of details) {
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+  }
+  return new Map(details.map((detail) => [detail.issue.id, detail.issue]))
+}
+
+/**
+ * Creates the store fence for one authorized relation endpoint.
+ *
+ * @param endpoints - Authorized endpoint rows keyed by Work Item ID.
+ * @param workItemId - Endpoint to fence.
+ * @returns The endpoint snapshot passed to the relation store.
+ */
+function readParentReplacementEndpoint(
+  endpoints: ReadonlyMap<string, TeamIssueResponseItem>,
+  workItemId: string,
+) {
+  const endpoint = endpoints.get(workItemId)
+  if (!endpoint) {
+    throw new WorkItemConfigurationError(
+      404,
+      'WorkItemRelationEndpointNotFound',
+      'A relation endpoint no longer exists.',
+    )
+  }
+  return {
+    workItemId,
+    expectedRevision: endpoint.revision,
+    ...(endpoint.assignedProjectId === undefined
+      ? {}
+      : { assignedProjectId: endpoint.assignedProjectId }),
+  }
 }
 
 /** Relation target のみを入力順を保った bounded concurrency で取得します。 */
@@ -2306,7 +2363,12 @@ async function refreshWorkItemSearchDocumentBestEffort(
         consistentIssueRead: true,
         includeEvents: false,
       }),
-      workItemDependencies.workItemConfigurations.listRelations(workspaceId, teamId, issueId),
+      workItemDependencies.workItemConfigurations.listRelations(
+        workspaceId,
+        teamId,
+        issueId,
+        { types: WORK_ITEM_PROJECTED_RELATION_TYPES },
+      ),
     ])
     await workItemDependencies.workspaceSearch.upsertDocument(createWorkItemSearchDocument(
       workspaceId,
@@ -3456,6 +3518,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           )
         },
         'project creation',
+        // A charter saved before this projection lands carries a revision; keep it.
+        { unrevisioned: true },
       )
       return c.json(response, 201)
     } catch (error) {
@@ -3700,6 +3764,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
+        teamContext.team,
+        readAssignedProjectId(normalized.assignedProjectId),
+      )
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         conversion.target.teamId,
@@ -3727,15 +3796,18 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversion.target.projectId,
       )
-      const guardedConfigured = authorizationConditionChecks.length === 0
-        ? configured
-        : {
-            ...configured,
-            authorizationConditionChecks: mergeTriageConditionChecks(
-              configured.authorizationConditionChecks ?? [],
-              authorizationConditionChecks,
-            ),
-          };
+      const guardedConfigured = {
+        ...(authorizationConditionChecks.length === 0
+          ? configured
+          : {
+              ...configured,
+              authorizationConditionChecks: mergeTriageConditionChecks(
+                configured.authorizationConditionChecks ?? [],
+                authorizationConditionChecks,
+              ),
+            }),
+        ...newWorkItemProjectFence,
+      };
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
         readTeamIssueAssigneeUserId(guardedConfigured),
@@ -3949,6 +4021,103 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
   })
 
   /**
+   * Work Item の親を 1 回の原子的な置換で設定・付け替え・解除します。
+   *
+   * Body は `{ parentWorkItemId: string | null, expectedGraphRevision: number }` です。
+   */
+  routeApp.put('/api/teams/:teamId/issues/:issueId/parent', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    if (!teamId || !issueId) {
+      return c.json({ message: 'Team ID and Work Item ID are required.' }, 400)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+      const parentWorkItemId = body.parentWorkItemId === null
+        ? null
+        : readRequiredString(body.parentWorkItemId, 'Parent Work Item ID is required.')
+      const expectedGraphRevision = readNonNegativeRevision(
+        body.expectedGraphRevision,
+        'Relation graph revision',
+      )
+      const currentParents = await workItemDependencies.workItemConfigurations.listRelations(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { types: ['parent'] },
+      )
+      if (currentParents.relations.length > 1) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemRelationInconsistent',
+          'The Work Item has more than one parent. Remove the extra parent relations first.',
+        )
+      }
+      const currentParentWorkItemId = currentParents.relations[0]?.targetWorkItemId
+      const endpoints = await authorizeParentReplacementEndpoints(principal, teamId, [
+        issueId,
+        ...(currentParentWorkItemId ? [currentParentWorkItemId] : []),
+        ...(parentWorkItemId ? [parentWorkItemId] : []),
+      ])
+      const child = readParentReplacementEndpoint(endpoints, issueId)
+      const nextParent = parentWorkItemId
+        ? readParentReplacementEndpoint(endpoints, parentWorkItemId)
+        : undefined
+      const resolvedConfiguration = nextParent
+        ? await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+            principal.directoryId,
+            teamId,
+          )
+        : undefined
+      if (resolvedConfiguration && nextParent) {
+        assertWorkItemChildTypeAllowed(
+          resolvedConfiguration.configuration,
+          endpoints.get(nextParent.workItemId)?.workItemTypeId,
+          endpoints.get(issueId)?.workItemTypeId,
+        )
+      }
+      const response = await workItemDependencies.workItemConfigurations.replaceParent(
+        principal.directoryId,
+        teamId,
+        {
+          child,
+          ...(currentParentWorkItemId
+            ? { currentParent: readParentReplacementEndpoint(endpoints, currentParentWorkItemId) }
+            : {}),
+          ...(nextParent ? { nextParent } : {}),
+          expectedGraphRevision,
+        },
+        resolvedConfiguration
+          ? createWorkItemConfigurationGuardConditionChecks(
+              getWorkItemConfigurationTableName(),
+              principal.directoryId,
+              teamId,
+              resolvedConfiguration,
+            )
+          : undefined,
+      )
+      if (response.previousParentWorkItemId !== response.parentWorkItemId) {
+        await refreshWorkItemSearchDocumentBestEffort(
+          principal.directoryId,
+          teamId,
+          issueId,
+          'Work Item parent replacement',
+        )
+      }
+      return c.json(response)
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
    * 現在ユーザーが参照できる canonical Work Item を Workspace 横断で返します。
    *
    * `limit` または `cursor` を付けると `{ workItems, nextCursor? }` の page を返します。
@@ -3997,6 +4166,61 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         maxItems: WORK_ITEMS_RESPONSE_LIMIT,
       })
       return c.json(await hydrateWorkItemsResponse({ workItems }, principal.directoryId))
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Resolves a Work Item key such as `ABC-123` to the Work Item it names.
+   *
+   * Answers 404 alike for text that is not a key, an unused key, a deleted Work Item, and a
+   * Work Item the caller cannot read, so a key reveals nothing to someone without access.
+   */
+  routeApp.get('/api/work-items/keys/:key', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    const notFound = () => c.json({
+      code: 'WorkItemKeyNotFound',
+      message: 'No readable Work Item has this key.',
+    }, 404)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const location = await workItemDependencies.teamIssues.getWorkItemKeyLocation(
+        principal.directoryId,
+        c.req.param('key'),
+      )
+      if (!location) return notFound()
+      try {
+        const context = await requireTeamPermission(principal, location.teamId, 'viewer')
+        const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          location.teamId,
+          location.workItemId,
+          { consistentIssueRead: true, includeEvents: false },
+        )
+        requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+        // A deleted Work Item keeps its key row, and a fixed ID can be created again with a new key,
+        // so the row only counts when the Work Item at that ID still carries this key.
+        if (detail.issue.key !== location.key) return notFound()
+      } catch (error) {
+        if (
+          isTeamIssueNotFoundError(error) ||
+          error instanceof ProjectDataError && (error.status === 403 || error.status === 404)
+        ) {
+          return notFound()
+        }
+        throw error
+      }
+      return c.json({
+        key: location.key,
+        teamId: location.teamId,
+        workItemId: location.workItemId,
+      } satisfies WorkItemKeyLookupResponse)
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }
@@ -4321,6 +4545,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         requestBody,
         context.team,
       )
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
+        context.team,
+        readAssignedProjectId(body.assignedProjectId),
+      )
       requireAssignedProjectPermission(
         principal,
         context,
@@ -4353,6 +4582,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             assigneeUserId,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            ...newWorkItemProjectFence,
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),

@@ -169,19 +169,35 @@ Reciprocal type は次のとおりである。
 
 一つの logical relation は source projection と target reciprocal projection の2 rowで表す。この Relation Graph row を relation の正本とする。Relation ID / duplicate 判定は inverse request でも同じ logical edge に正規化する。Self relation、同じ logical edge の重複、scope 外 target を 400/409 として拒否する。
 
-各 canonical Work Item row は検索・backfill 用の派生 projection として `relationIds` を必須で持つ。値はその Work Item を source とする Relation Graph row から作る `type:targetWorkItemId` 形式で、辞書順、重複なし、最大100件とする。Relation がない場合も空配列を保存する。Reader と backfill はこの形式を strict に検証し、不正または欠落した row を補完しない。
+Relation row の sort key は source Work Item ID から始まるため、`REL#<source>#` の prefix Query で 1 つの Work Item の近傍（親、子、依存、関連）だけを読める。`REL#<source>#<type>#` まで絞ると、親だけ・子だけを読める。Relation の一覧・作成・削除・付け替えはこの近傍読み取りだけを使い、Team の graph 全体を読まない。Team の graph 全体を読むのは Focus と Team 設定の互換性検証だけである。
+
+各 canonical Work Item row は検索・backfill 用の派生 projection として `relationIds` を必須で持つ。値はその Work Item を source とする Relation Graph row から作る `type:targetWorkItemId` 形式で、辞書順、重複なし、最大100件とする。`child` row は projection に含めない。子は子側の `parent:<id>` で引けるため、親が持てる子の数を projection の上限で縛らない。Relation がない場合も空配列を保存する。Reader と backfill はこの形式を strict に検証し、不正または欠落した row を補完しない。
+
+### 親子関係と上限
+
+`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。付け替えは宣言的な操作で、子の親がすでに指定された親（`null` なら親なし）であれば graph revision に関係なく書き込まずに成功を返す。これで応答が失われた後の再送も成功として扱える。Transaction が取り消され、再読み取りで graph・現在の親・endpoint のどれも変わっていない場合は、競合ではなく再試行可能な `503 WorkItemRelationUnavailable` を返す。
+
+残る上限は次のとおりで、`@mukuroji/contracts` の定数と一致させる。
+
+| 上限 | 値 | 定数 |
+| --- | --- | --- |
+| 1 つの Work Item の `relationIds`（`child` を除く） | 100 | `WORK_ITEM_RELATION_ID_LIMIT` |
+| 1 つの親が持てる子 | 上限なし | |
+| 1 つの Team の relation link（reciprocal 2 row で 1 link） | 10,000 | `WORK_ITEM_TEAM_RELATION_LINK_LIMIT` |
+
+Team の link 数は `RELATION_GRAPH` row の `edgeCount`（directed row 数）で数え、mutation ごとに同じ transaction で更新する。上限を超える作成・付け替えは `413 WorkItemRelationGraphLimitExceeded` で拒否する。`edgeCount` を持たない旧い graph row は、次の mutation で relation row を COUNT Query で数え直してから保存する。この上限は Focus など Team の graph を一括で読む処理の読み取り量を抑えるためのもので、relation mutation の読み取り量には影響しない。
 
 ### Reciprocal transaction と graph CAS
 
-Team scope の `RELATION_GRAPH` row は `schemaVersion=1` と単調増加 `revision` を持つ。Row が無い graph は revision `0` と解釈する。Relation list response は `graphRevision` を返し、作成/削除 input は `expectedGraphRevision` を必須にする。
+Team scope の `RELATION_GRAPH` row は `schemaVersion=1`、単調増加 `revision`、Team の directed relation row 数 `edgeCount` を持つ。Row が無い graph は revision `0` と解釈する。Relation list response は `graphRevision` を返し、作成/削除 input は `expectedGraphRevision` を必須にする。
 
-Mutation 前に graph revision を読み、その後すべての relation page を consistent read して validation graph を作る。DynamoDB Query は複数 page を一つの snapshot として固定しないため、transaction で最初に読んだ graph revision を condition にし、途中で一件でも relation mutation があれば全 transaction を失敗させる。
+Mutation 前に graph revision を読み、その後 endpoint の近傍と循環検証に必要な row を consistent read する。DynamoDB Query は複数 page を一つの snapshot として固定しないため、transaction で最初に読んだ graph revision を condition にし、途中で一件でも relation mutation があれば全 transaction を失敗させる。
 
 作成 transaction は少なくとも次を含む。
 
 1. Source Work Item の存在、認可時 revision、Project assignment を条件に、作成後の `relationIds` を保存する `Update`。
-2. Target Work Item の存在、同じ Team scope、認可時 revision、Project assignment を条件に、reciprocal relation を含む作成後の `relationIds` を保存する `Update`。
-3. Graph metadata revision の condition 付き increment。Revision 0 は `attribute_not_exists` を条件に row を作る。
+2. Target Work Item の存在、同じ Team scope、認可時 revision、Project assignment を条件に、reciprocal relation を含む作成後の `relationIds` を保存する `Update`。Reciprocal が `child` の場合は projection が変わらないため、同じ条件の `ConditionCheck` にする。
+3. Graph metadata revision の condition 付き increment と `edgeCount` の更新。Revision 0 は `attribute_not_exists` を条件に row を作る。
 4. Source relation projection の `attribute_not_exists` 付き Put。
 5. Reciprocal relation projection の `attribute_not_exists` 付き Put。
 
@@ -195,11 +211,13 @@ Relation mutation commit 後の Workspace search 更新は、source / target の
 
 Cycle は logical direction に対して検証し、物理 reciprocal row を独立 edge として数えない。
 
-- `parent` / `child`: child から ancestor へ到達できる relation を追加しない。
-- `blocks` / `blockedBy`: target から source へ到達できる blocking relation を追加しない。
+- `parent` / `child`: child から ancestor へ到達できる relation を追加しない。新しい親から `REL#<id>#parent#` を順に辿り、子に戻るかを確かめる。親は 1 つなので辿るのは祖先の 1 本の鎖だけである。
+- `blocks` / `blockedBy`: target から source へ到達できる blocking relation を追加しない。Target から `REL#<id>#blocks#` を幅優先で辿り、各段の近傍読み取りは 16 件ずつ並列にする。
 - `related` / `duplicate`: symmetric relation のため DAG cycle 判定対象にしない。Self / duplicate は引き続き拒否する。
 
-Direct cycle と transitive cycle の両方を拒否する。Graph scan には page size、最大 node/edge 数、最大 traversal depth を設定し、上限超過時は検証を省略せず request を失敗させる。全 relation writer と repair tool は graph metadata revision を更新し、CAS を迂回しない。
+Direct cycle と transitive cycle の両方を拒否する。1 回の検証で訪れる Work Item は Team の directed row 上限（20,000）までとし、超えた場合は検証を省略せず `413 WorkItemRelationTraversalLimitExceeded` で request を失敗させる。全 relation writer と repair tool は graph metadata revision を更新し、CAS を迂回しない。
+
+既存の graph row からの移行（複数の親を持つ Work Item の整理、親の `relationIds` に残る `child:` の削除）は #365 の migration 契約で扱う。本番データがまだ無いため、この変更では移行処理を持たない。
 
 ## Backup / recovery
 

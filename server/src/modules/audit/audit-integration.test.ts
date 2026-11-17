@@ -8,6 +8,7 @@ import {
   createMutationAuditContext,
   createWorkspaceInvitationAuditEntityId,
 } from './audit'
+import { withWorkItemKeyCounter } from '../../api/test-support/work-item-key-allocation'
 import {
   createApp,
 } from '../../app/createApp'
@@ -102,7 +103,7 @@ test('team issue mutations keep state, specialized activity, and generic audit a
   const client = new DynamoDbTeamIssuesClient(
     'IssuesTable',
     'IssueEventsTable',
-    recording.client,
+    withWorkItemKeyCounter(recording.client),
     undefined,
     false,
     'AuditTable',
@@ -136,14 +137,15 @@ test('team issue mutations keep state, specialized activity, and generic audit a
   const transaction = recording.commands.find((command) => command.name === 'TransactWriteCommand')
   const items = readTransactItems(transaction)
 
-  expect(items).toHaveLength(3)
+  expect(items).toHaveLength(4)
   expect(items[0]).toMatchObject({
     Put: {
       TableName: 'IssuesTable',
       Item: {
         directoryId: workspaceId,
         teamId: 'core-team',
-        issueId: 'ship-audit-trail',
+        issueId: 'ct-1',
+        key: 'CT-1',
         schemaVersion: 2,
         revision: 1,
         relationIds: [],
@@ -158,7 +160,7 @@ test('team issue mutations keep state, specialized activity, and generic audit a
     Put: {
       TableName: 'IssueEventsTable',
       Item: {
-        issueId: 'ship-audit-trail',
+        issueId: 'ct-1',
         eventType: 'created',
       },
     },
@@ -169,13 +171,19 @@ test('team issue mutations keep state, specialized activity, and generic audit a
       Item: {
         eventType: 'work-item.created',
         entityType: 'work-item',
-        entityId: 'team/core-team/issue/ship-audit-trail',
+        entityId: 'team/core-team/issue/ct-1',
         action: 'created',
         metadata: {
           adapter: 'canonical-work-item',
           afterRevision: 1,
         },
       },
+    },
+  })
+  expect(items[3]).toMatchObject({
+    Put: {
+      TableName: 'IssuesTable',
+      Item: { entryType: 'work-item-key', key: 'CT-1', workItemId: 'ct-1' },
     },
   })
 })

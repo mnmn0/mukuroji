@@ -6,7 +6,7 @@ import type {
 
 /** Canonical task fields needed by a coding agent, excluding internal storage fields. */
 export type AgentTask = Pick<CanonicalWorkItem,
-  'id' | 'teamId' | 'revision' | 'title' | 'description' | 'assigneeUserId' |
+  'id' | 'key' | 'teamId' | 'revision' | 'title' | 'description' | 'assigneeUserId' |
   'assignedProjectId' | 'workflowStatusId' | 'statusCategory' | 'workItemTypeId' |
   'priority' | 'dueDate' | 'schedule' |
   'createdAt' | 'updatedAt' | 'relationIds' | 'customFieldValues'>
@@ -246,6 +246,21 @@ export interface AgentWorkItemApi {
    * @returns The values with the revision they were read at, or undefined when the server predates the endpoint.
    */
   effort(id: string): Promise<AgentTaskEffort | undefined>
+  /**
+   * Reads the short immutable key of a task, such as `ABC-123`.
+   * @param id - Task ID.
+   * @returns The key and the creation time of the Work Item it belongs to (the key is absent when
+   * the task predates keys), or `undefined` when the server predates the endpoint.
+   */
+  taskKey(id: string): Promise<AgentTaskKey | undefined>
+}
+
+/** Key of a task together with the creation time that identifies which Work Item it belongs to. */
+export type AgentTaskKey = {
+  /** Canonical key such as `ABC-123`, absent on tasks created before keys existed. */
+  key?: string
+  /** Creation time of the Work Item the key was read from. */
+  createdAt: string
 }
 
 /** Estimate, recorded remaining effort, and recorded progress of a task, as get_task shows them. */

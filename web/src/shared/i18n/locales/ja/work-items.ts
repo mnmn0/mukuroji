@@ -456,6 +456,8 @@ export const workItemsMessages = {
   'workItems.relations.noCandidates': '関連付けられる Work Item がありません',
   'workItems.relations.add': '関係を追加',
   'workItems.relations.adding': '追加中',
+  'workItems.relations.replaceParent': '親を付け替え',
+  'workItems.relations.replaceParentHint': '親は 1 つだけです。追加すると今の親から付け替えます。',
   'workItems.relations.readOnly': 'この Work Item の関係は参照専用です。',
   'workItems.relations.graphNotLoaded': '最新の関係グラフを読み込めていません。もう一度お試しください。',
   'workItems.dependencies.title': 'スケジュール依存関係',

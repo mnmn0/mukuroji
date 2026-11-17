@@ -5,6 +5,7 @@ import {
   createProjectDirectoryAssigneeOptions,
   createProjectDirectoryRows,
   filterProjectDirectoryRows,
+  parseProjectDirectoryLifecycleFilter,
   parseProjectDirectoryStatusFilter,
   paginateProjectDirectoryRows,
   parseProjectDirectoryPage,
@@ -44,17 +45,19 @@ export function ProjectsPage() {
   const routeTeam = workspace.teams.find((team) => team.id === routeTeamId)
   const selectedTeamId = routeTeamId ?? searchParams.get('teamId') ?? undefined
   const status = parseProjectDirectoryStatusFilter(searchParams.get('status'))
+  const lifecycle = parseProjectDirectoryLifecycleFilter(searchParams.get('lifecycle'))
   const assigneeId = searchParams.get('assignee') ?? undefined
   const query = searchParams.get('q') ?? ''
   const quickAccessValue = searchParams.get('quickAccess')
   const quickAccessOnly = quickAccessValue === 'true' || quickAccessValue === '1'
   const filters = useMemo(() => ({
     assigneeId,
+    lifecycle,
     query,
     quickAccessOnly,
     status,
     teamId: selectedTeamId,
-  }), [assigneeId, query, quickAccessOnly, selectedTeamId, status])
+  }), [assigneeId, lifecycle, query, quickAccessOnly, selectedTeamId, status])
   const rows = useMemo(
     () => workItems.data
       ? createProjectDirectoryRows(
@@ -234,6 +237,7 @@ export function ProjectsPage() {
               onSearchChange={(query) => replaceFilter('q', query)}
               onStatusChange={(nextStatus) =>
                 replaceFilter('status', nextStatus === 'all' ? undefined : nextStatus)}
+              onLifecycleChange={(nextLifecycle) => replaceFilter('lifecycle', nextLifecycle)}
               onTeamChange={(teamId) => replaceFilter('teamId', teamId)}
               onToggleQuickAccess={(project) => workspace.onToggleProjectQuickAccess(
                 { projectId: project.projectId, teamId: project.teamId },

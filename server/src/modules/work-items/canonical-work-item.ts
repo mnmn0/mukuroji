@@ -1,7 +1,9 @@
 import {
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
+  isCanonicalWorkItemKey,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_RELATION_ID_LIMIT,
   WORK_ITEM_SCHEMA_VERSION,
   type CustomFieldValue,
   type WorkflowStatusCategory,
@@ -17,7 +19,6 @@ import {
   isCanonicalWorkItemSchedule,
 } from './domain/work-item-schedule'
 
-const WORK_ITEM_RELATION_ID_LIMIT = 100
 const WORK_ITEM_RELATION_ID_MAX_LENGTH = 512
 const WORK_ITEM_RELATION_TARGET_ID_MAX_LENGTH = 256
 
@@ -41,6 +42,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   assignedProjectId?: string
   /** Team 内で Work Item を識別する sort key です。 */
   issueId: string
+  /** Immutable Workspace-unique key such as `ABC-123`; absent on Work Items created before keys. */
+  key?: string
   /** Import の冪等作成 payload を識別する SHA-256 digest です。 */
   importRequestDigest?: string
   /** Team/project 一覧で利用する表示順です。 */
@@ -132,6 +135,7 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     isNonEmptyString(value.teamId) &&
     value.directoryTeamId === `${value.directoryId}#team#${value.teamId}` &&
     isNonEmptyString(value.issueId) &&
+    (value.key === undefined || isCanonicalWorkItemKey(value.key)) &&
     (value.importRequestDigest === undefined ||
       isSha256Digest(value.importRequestDigest)) &&
     typeof value.sortOrder === 'number' &&

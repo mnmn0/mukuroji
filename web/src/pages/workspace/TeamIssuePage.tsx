@@ -69,7 +69,11 @@ import {
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
-import { createWorkItemRelation, deleteWorkItemRelation } from '../../work-items/api'
+import {
+  createWorkItemRelation,
+  deleteWorkItemRelation,
+  replaceWorkItemParent,
+} from '../../work-items/api'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import {
@@ -636,19 +640,35 @@ export function TeamIssuePage() {
     }
 
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
+    const replacesParent = input.type === 'parent' &&
+      (issueDetail?.relations ?? []).some((relation) => relation.type === 'parent')
 
     try {
-      await guardEnterpriseSession(mutationRequestRunner.run(
-        `issue:relation:create:${teamId}:${issueId}`,
-        JSON.stringify([graphRevision, input]),
-        (context) => createWorkItemRelation(
-          teamId,
-          issueId,
-          accessToken,
-          { ...input, expectedGraphRevision: graphRevision },
-          context,
-        ),
-      ))
+      if (replacesParent) {
+        await guardEnterpriseSession(mutationRequestRunner.run(
+          `issue:relation:parent:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input.targetWorkItemId]),
+          (context) => replaceWorkItemParent(
+            teamId,
+            issueId,
+            accessToken,
+            { parentWorkItemId: input.targetWorkItemId, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        ))
+      } else {
+        await guardEnterpriseSession(mutationRequestRunner.run(
+          `issue:relation:create:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input]),
+          (context) => createWorkItemRelation(
+            teamId,
+            issueId,
+            accessToken,
+            { ...input, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        ))
+      }
       await mutateIssueDetail()
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
