@@ -68,6 +68,7 @@ import { createPlanningUpdateTargetKey } from '../../planning/model/targetKey'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import { usePlanningArchivedEntities } from '../../planning/queries/usePlanningArchivedEntities'
 import {
+  recordPlanningRestoreResult,
   selectRestorablePlanningEntities,
   type PlanningRestoreResultView,
 } from '../../planning/model/archive'
@@ -130,7 +131,7 @@ export function PlanningPage() {
   const [isUpdateCollaborationPending, setIsUpdateCollaborationPending] = useState(false)
   const [isArchiveListOpen, setIsArchiveListOpen] = useState(false)
   const [restoringEntityId, setRestoringEntityId] = useState<string>()
-  const [restoreResult, setRestoreResult] = useState<PlanningRestoreResultView>()
+  const [restoreResults, setRestoreResults] = useState<readonly PlanningRestoreResultView[]>([])
   const t = useMemo(() => createTranslator(locale), [locale])
   const labels = useMemo(() => createPlanningLabels(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
@@ -366,8 +367,8 @@ export function PlanningPage() {
   const restoreEntity = async (entity: Pick<ArchivedPlanningEntitySummary, 'id' | 'title'>) => {
     if (!snapshot || !accessToken || restoringEntityId !== undefined) return
     const outcome: { summary?: PlanningRestoreSummary } = {}
-    // The previous result stays until a restore succeeds: after a failed "restore the rest" it is
-    // the only way back to the references still in the archive.
+    // Results stay until a restore succeeds: after a failed "restore the rest", or after restoring
+    // another entity, an earlier result is the only way back to references still in the archive.
     setRestoringEntityId(entity.id)
     try {
       await runMutation(
@@ -385,8 +386,12 @@ export function PlanningPage() {
     } finally {
       setRestoringEntityId(undefined)
     }
-    if (outcome.summary) {
-      setRestoreResult({ entityId: entity.id, title: entity.title, summary: outcome.summary })
+    const { summary } = outcome
+    if (summary) {
+      setRestoreResults((results) => recordPlanningRestoreResult(
+        results,
+        { entityId: entity.id, title: entity.title, summary },
+      ))
     }
     await archivedEntities.mutate()
   }
@@ -832,7 +837,7 @@ export function PlanningPage() {
                 onRestore: restoreEntity,
                 onRetry: () => void archivedEntities.mutate(),
                 restoringEntityId,
-                result: restoreResult,
+                results: restoreResults,
               }
             : undefined}
           onDuplicateEntity={canManagePlanning && snapshot && accessToken

@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import type { ArchivedPlanningEntitySummary, PlanningEntity } from '@mukuroji/contracts'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
-import { selectRestorablePlanningEntities } from '../src/planning/model/archive'
+import {
+  recordPlanningRestoreResult,
+  selectRestorablePlanningEntities,
+  type PlanningRestoreResultView,
+} from '../src/planning/model/archive'
 
 /** Returns a fixture entity archived at the given time. */
 function archiveFixtureEntity(index: number, archivedAt: string): PlanningEntity {
@@ -42,5 +46,29 @@ describe('archived Planning entities', () => {
     // A snapshot entity the caller cannot manage is not offered; the server already filters the list.
     expect(selectRestorablePlanningEntities(entities, listed, (entity) => entity.id !== newer.id)
       .map((entity) => entity.id)).toEqual([older.id, 'goal-compacted'])
+  })
+
+  test('keeps earlier restore outcomes only while their references remain archived', () => {
+    const outcome = (entityId: string, pendingReferenceCount: number): PlanningRestoreResultView => ({
+      entityId,
+      title: entityId,
+      summary: {
+        restoredLinkCount: 1,
+        droppedLinkCount: 0,
+        restoredDependencyCount: 0,
+        retainedDependencyCount: 0,
+        droppedDependencyCount: 0,
+        pendingReferenceCount,
+      },
+    })
+    const afterA = recordPlanningRestoreResult([], outcome('goal-a', 5))
+    const afterB = recordPlanningRestoreResult(afterA, outcome('goal-b', 0))
+    expect(afterB.map((result) => result.entityId)).toEqual(['goal-b', 'goal-a'])
+    // B's finished outcome leaves when a newer restore replaces it; A still has pending references.
+    const afterC = recordPlanningRestoreResult(afterB, outcome('goal-c', 0))
+    expect(afterC.map((result) => result.entityId)).toEqual(['goal-c', 'goal-a'])
+    // Continuing A replaces its own outcome, and A leaves once nothing is pending.
+    const afterARest = recordPlanningRestoreResult(afterC, outcome('goal-a', 0))
+    expect(afterARest.map((result) => result.entityId)).toEqual(['goal-a'])
   })
 })

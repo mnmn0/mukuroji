@@ -48,8 +48,8 @@ export type PlanningArchiveController = {
   errorMessage?: string
   /** Entity whose restore request is running. */
   restoringEntityId?: string
-  /** Outcome of the latest restore. */
-  result?: PlanningRestoreResultView
+  /** Restore outcomes, newest first; earlier ones stay while references remain in the archive. */
+  results: readonly PlanningRestoreResultView[]
   /** Starts loading the list when the panel opens. */
   onOpen: () => void
   /** Loads the next page. */
@@ -63,22 +63,24 @@ export type PlanningArchiveController = {
 /**
  * Lists the archived plans the caller can restore, closed until the caller opens it.
  *
- * @param props - Archive controller, localized text, and the entity type and retry labels.
+ * @param props - Archive controller, initial open state, localized text, and the entity type and retry labels.
  * @returns The disclosure panel.
  */
 export function PlanningArchivePanel({
   archive,
+  defaultOpen = false,
   entityTypes,
   labels,
   retry,
 }: {
   archive: PlanningArchiveController
+  /** Whether the disclosure starts open, for stories. */
+  defaultOpen?: boolean
   entityTypes: Record<PlanningEntityType, string>
   labels: PlanningArchiveLabels
   retry: string
 }) {
-  const { result } = archive
-  const [isOpen, setIsOpen] = useState(false)
+  const [isOpen, setIsOpen] = useState(defaultOpen)
   const isRestoring = archive.restoringEntityId !== undefined
   return (
     <details
@@ -97,10 +99,12 @@ export function PlanningArchivePanel({
       <p className="mt-3 max-w-[820px] text-sm font-medium text-[var(--workbench-muted)]">
         {labels.description}
       </p>
-      {result ? (
+      {archive.results.map((result) => (
         <div
           className="mt-3 grid gap-2 rounded-lg border border-[var(--workbench-border)] px-4 py-3"
+          data-entity-id={result.entityId}
           data-testid="planning-restore-result"
+          key={result.entityId}
           role="status"
         >
           {labels.restoreResult(result).map((sentence) => (
@@ -111,6 +115,7 @@ export function PlanningArchivePanel({
           {hasPendingPlanningRestore(result.summary) ? (
             <div>
               <button
+                aria-label={`${labels.continueRestore}: ${result.title}`}
                 className="workbench-button-secondary min-h-9 px-3"
                 data-testid="planning-restore-continue"
                 disabled={isRestoring}
@@ -122,7 +127,7 @@ export function PlanningArchivePanel({
             </div>
           ) : null}
         </div>
-      ) : null}
+      ))}
       {archive.errorMessage ? (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
           <p className="text-sm font-semibold text-fg-red-800">{archive.errorMessage}</p>

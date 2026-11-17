@@ -191,7 +191,7 @@ describe('PlanningScreen', () => {
       hasMore: true,
       isLoading: false,
       isLoadingMore: false,
-      result: {
+      results: [{
         entityId: 'goal-old',
         title: 'Old goal',
         summary: {
@@ -202,7 +202,18 @@ describe('PlanningScreen', () => {
           droppedDependencyCount: 1,
           pendingReferenceCount: 40,
         },
-      },
+      }, {
+        entityId: 'cycle-earlier',
+        title: 'Earlier cycle',
+        summary: {
+          restoredLinkCount: 0,
+          droppedLinkCount: 0,
+          restoredDependencyCount: 0,
+          retainedDependencyCount: 0,
+          droppedDependencyCount: 0,
+          pendingReferenceCount: 3,
+        },
+      }],
       onLoadMore: () => undefined,
       onOpen: () => undefined,
       onRestore: () => undefined,
@@ -220,12 +231,14 @@ describe('PlanningScreen', () => {
     expect(markup).toContain('2 no longer fit the current plan')
     expect(markup).toContain('1 dependencies on plans that are still archived')
     expect(markup).toContain('40 have not been brought back yet')
-    expect(markup).toContain('data-testid="planning-restore-continue"')
+    expect(markup).toContain('aria-label="Restore the rest: Old goal"')
+    // An earlier restore with references left keeps its own continuation.
+    expect(markup).toContain('aria-label="Restore the rest: Earlier cycle"')
 
     const restoring = renderToStaticMarkup(
       <PlanningScreen
         activeView="roadmap"
-        archive={{ ...archive, restoringEntityId: 'cycle-old', result: undefined }}
+        archive={{ ...archive, restoringEntityId: 'cycle-old', results: [] }}
         labels={labels}
         snapshot={planningSnapshotFixture}
       />,
@@ -236,7 +249,7 @@ describe('PlanningScreen', () => {
     const empty = renderToStaticMarkup(
       <PlanningScreen
         activeView="roadmap"
-        archive={{ ...archive, entities: [], hasMore: false, result: undefined }}
+        archive={{ ...archive, entities: [], hasMore: false, results: [] }}
         labels={labels}
         snapshot={planningSnapshotFixture}
       />,

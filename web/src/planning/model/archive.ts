@@ -4,7 +4,7 @@ import type {
   PlanningRestoreSummary,
 } from '@mukuroji/contracts'
 
-/** Outcome of the latest restore shown next to the archived plans. */
+/** Outcome of one restore shown next to the archived plans. */
 export type PlanningRestoreResultView = {
   /** Restored entity ID; also the target of "restore the rest". */
   entityId: string
@@ -56,4 +56,26 @@ export function selectRestorablePlanningEntities(
  */
 export function hasPendingPlanningRestore(summary: PlanningRestoreSummary) {
   return summary.pendingReferenceCount > 0
+}
+
+/**
+ * Records a successful restore among the outcomes shown next to the archived plans.
+ *
+ * A restored entity is no longer listed as archived, so an earlier outcome with references still
+ * in the archive is the only way back to them and stays until its own restore finishes them.
+ *
+ * @param results - Outcomes shown so far, newest first.
+ * @param next - Outcome of the restore that just succeeded.
+ * @returns The new outcome first, then earlier outcomes of other entities that still have pending references.
+ */
+export function recordPlanningRestoreResult(
+  results: readonly PlanningRestoreResultView[],
+  next: PlanningRestoreResultView,
+): PlanningRestoreResultView[] {
+  return [
+    next,
+    ...results.filter((result) =>
+      result.entityId !== next.entityId && hasPendingPlanningRestore(result.summary)
+    ),
+  ]
 }
