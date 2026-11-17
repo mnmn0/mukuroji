@@ -28,6 +28,8 @@ export type SlackDelivery = {
   workItemUpdatedAt?: string
   /** Whole days until the due date when the schedule emitted the stage (negative once overdue). */
   daysUntilDue?: number
+  /** Work Item reopen time an escalation was scanned under, when the item had reopened. */
+  workItemReopenedAt?: string
   /** Original approval target, retained independently from its parent Work Item. */
   targetId?: string
   /** Original file subject, when the source is file-backed. */

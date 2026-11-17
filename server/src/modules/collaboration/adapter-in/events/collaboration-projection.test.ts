@@ -435,6 +435,19 @@ describe('collaboration projection pure helpers', () => {
       ?.notificationCandidates).toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
     expect(refreshScheduledNotificationEvent(scannedEscalation, { ...scope, localDate: '2026-07-21' }))
       .toBeUndefined()
+    // Reopened since the scan: the next scan keys a fresh escalation, so the old one is dropped.
+    expect(refreshScheduledNotificationEvent(escalation, { ...scope, reopenedAt: '2026-07-18T09:00:00.000Z' }))
+      .toBeUndefined()
+    const reopenedEscalation = { ...escalation, workItemReopenedAt: '2026-07-18T09:00:00.000Z' }
+    expect(refreshScheduledNotificationEvent(reopenedEscalation, {
+      ...scope,
+      reopenedAt: '2026-07-18T18:00:00+09:00',
+    })?.notificationCandidates).toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
+    expect(refreshScheduledNotificationEvent(reopenedEscalation, {
+      ...scope,
+      reopenedAt: '2026-07-19T09:00:00.000Z',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(reopenedEscalation, scope)).toBeUndefined()
     // Moved to another Project: a fresh escalation is keyed for it, so the old one is dropped.
     expect(refreshScheduledNotificationEvent(
       { ...escalation, projectId: 'other' },
@@ -2133,6 +2146,14 @@ describe('collaboration projection pure helpers', () => {
         ...event,
         metadata: { dueDate: '2026-07-12', daysUntilDue },
       })).toThrow('daysUntilDue is invalid')
+    }
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { workItemReopenedAt: '2026-07-10T18:00:00+09:00' },
+    })?.workItemReopenedAt).toBe('2026-07-10T09:00:00.000Z')
+    for (const workItemReopenedAt of ['yesterday', 1, null]) {
+      expect(() => parseAuditProjectionEvent({ ...event, metadata: { workItemReopenedAt } }))
+        .toThrow('workItemReopenedAt is invalid')
     }
   })
 

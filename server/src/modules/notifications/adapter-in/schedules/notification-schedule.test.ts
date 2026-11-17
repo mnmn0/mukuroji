@@ -635,7 +635,7 @@ describe('notification schedule handler', () => {
       return new Map(recording.commands
         .filter(({ name }) => name === 'PutCommand')
         .map(({ input }) => readPutItem(input))
-        .map((event) => [event.eventType, event.eventId]))
+        .map((event) => [event.eventType, event]))
     }
 
     const beforeClose = await run(createWorkItem({ dueDate: '2026-07-05' }))
@@ -643,11 +643,16 @@ describe('notification schedule handler', () => {
     const reopenedAgain = await run(createWorkItem({ dueDate: '2026-07-05', reopenedAt: '2026-07-11T09:00:00.000Z' }))
 
     const escalationIds = [beforeClose, reopened, reopenedAgain]
-      .map((events) => events.get('work-item.overdue-escalation'))
+      .map((events) => events.get('work-item.overdue-escalation')?.eventId)
     expect(escalationIds.every(Boolean)).toBe(true)
     expect(new Set(escalationIds).size).toBe(3)
+    // Delivery compares the captured reopen time with the current row.
+    expect(beforeClose.get('work-item.overdue-escalation')?.metadata).not.toHaveProperty('workItemReopenedAt')
+    expect(reopened.get('work-item.overdue-escalation')?.metadata)
+      .toMatchObject({ workItemReopenedAt: '2026-07-10T09:00:00.000Z' })
     for (const eventType of ['work-item.overdue', 'work-item.overdue-reminder']) {
-      expect(reopened.get(eventType)).toBe(beforeClose.get(eventType))
+      expect(reopened.get(eventType)?.eventId).toBe(beforeClose.get(eventType)?.eventId)
+      expect(reopened.get(eventType)?.metadata).not.toHaveProperty('workItemReopenedAt')
     }
   })
 

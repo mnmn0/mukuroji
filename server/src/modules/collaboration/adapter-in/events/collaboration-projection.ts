@@ -132,6 +132,8 @@ export type AuditProjectionEvent = {
   workItemUpdatedAt?: string
   /** Whole days until the due date when the schedule emitted the stage (negative once overdue). */
   daysUntilDue?: number
+  /** Work Item `reopenedAt` an escalation was scanned under; absent before any reopening. */
+  workItemReopenedAt?: string
   /** Scheduled Planning event の Project / Initiative target type です。 */
   planningTargetType?: 'project' | 'initiative'
   /** Scheduled Planning event の canonical target ID です。 */
@@ -307,6 +309,8 @@ export type CurrentWorkItemNotificationScope = {
   archived?: boolean
   /** Current Work Item revision, used to pin scheduled notification writes to this read. */
   revision?: number
+  /** When the Work Item last reopened, if it ever did. */
+  reopenedAt?: string
 }
 
 /** Projection 時に強整合 read した Planning update target scope です。 */
@@ -1494,6 +1498,7 @@ export function createNotificationProjectionItem(
     dueDate: event.dueDate,
     workItemUpdatedAt: event.workItemUpdatedAt,
     daysUntilDue: event.daysUntilDue,
+    workItemReopenedAt: event.workItemReopenedAt,
     expiresAt,
   }
 }
@@ -1591,6 +1596,8 @@ export function refreshScheduledNotificationEvent(
   if (reason === 'escalation') {
     // A Project move gets its own escalation key on the next scan, so the old one is dropped.
     if (!scope.projectId || scope.projectId !== scheduledProjectId) return undefined
+    // Reopening also gets its own key, so an escalation scanned before it is dropped.
+    if (event.workItemReopenedAt !== readTimestamp(scope.reopenedAt)) return undefined
     const recipients = event.notificationCandidates.filter((candidate) =>
       candidate.reason === 'escalation' &&
       normalizeMemberKey(candidate.memberKey) !== scope.assigneeMemberKey
@@ -2561,6 +2568,7 @@ async function readCurrentWorkItemScope(
     localDate: workItemScheduleInstantToLocalDate(new Date(), item.schedule.calendarPolicy),
     archived: item.archivedAt !== undefined,
     revision: item.revision,
+    ...(item.reopenedAt === undefined ? {} : { reopenedAt: item.reopenedAt }),
   }
 }
 
@@ -2718,6 +2726,7 @@ export function parseAuditProjectionEvent(
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
     workItemUpdatedAt: readTimestamp(metadata.workItemUpdatedAt),
     daysUntilDue: readOptionalDaysUntilDue(metadata.daysUntilDue),
+    workItemReopenedAt: readOptionalReopenedAt(metadata.workItemReopenedAt),
     planningTargetType: readPlanningTargetType(metadata.planningTargetType),
     planningTargetId: readString(metadata.planningTargetId),
     planningTargetRecordKey: readString(metadata.planningTargetRecordKey),
@@ -2846,6 +2855,20 @@ function readTimestamp(value: unknown): string | undefined {
   if (!text) return undefined
   const timestamp = Date.parse(text)
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined
+}
+
+/**
+ * Reads the Work Item reopen time an escalation was scanned under.
+ *
+ * @param value - Raw `metadata.workItemReopenedAt` value.
+ * @returns The canonical timestamp, or undefined when the field is absent.
+ * @throws Error when the field is present but not a timestamp.
+ */
+function readOptionalReopenedAt(value: unknown) {
+  if (value === undefined) return undefined
+  const timestamp = readTimestamp(value)
+  if (!timestamp) throw new Error('Scheduled Work Item notification workItemReopenedAt is invalid.')
+  return timestamp
 }
 
 function readPositiveInteger(value: unknown) {

@@ -42,6 +42,12 @@ describe('Slack DynamoDB delivery queue', () => {
     expect((await f.store.listDue(shard, now, 2)).deliveries[0])
       .toMatchObject({ dueDate: '2026-07-15', workItemUpdatedAt: '2026-07-01T09:00:00.000Z', daysUntilDue: -7 })
     expect((await fixture({ ...row, dueDate: '2026-07-15' }).store.listDue(shard, now, 2)).deliveries[0]?.daysUntilDue).toBeUndefined()
+    expect((await fixture({ ...row, workItemReopenedAt: '2026-07-10T09:00:00.000Z' }).store.listDue(shard, now, 2))
+      .deliveries[0]?.workItemReopenedAt).toBe('2026-07-10T09:00:00.000Z')
+    for (const workItemReopenedAt of ['yesterday', 1]) {
+      expect(await fixture({ ...row, workItemReopenedAt }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
     for (const daysUntilDue of ['3', 1.5, null]) {
       expect(await fixture({ ...row, dueDate: '2026-07-15', daysUntilDue }).store.listDue(shard, now, 2))
         .toEqual({ deliveries: [], invalidCount: 1 })
