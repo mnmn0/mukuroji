@@ -70,5 +70,6 @@ export const issuesMessages = {
   'issues.error.create': 'Failed to create the issue',
   'issues.error.update': 'Failed to update the issue',
   'issues.error.conflict': 'Another member updated this first. Review the latest details and save again.',
+  'issues.error.openChildren': 'This Team does not allow completing a Work Item while a child is neither completed nor canceled. Complete or cancel the children first.',
   'issues.error.comment': 'Failed to add the comment',
 } as const

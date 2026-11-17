@@ -659,6 +659,9 @@ export function TeamIssuePage() {
         await Promise.all([mutateIssues(), mutateIssueDetail()])
         throw new Error(t('issues.error.conflict'), { cause: error })
       }
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
+        throw new Error(t('issues.error.openChildren'), { cause: error })
+      }
 
       throw error
     }

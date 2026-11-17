@@ -70,5 +70,6 @@ export const issuesMessages = {
   'issues.error.create': 'Issue を作成できませんでした',
   'issues.error.update': 'Issue を更新できませんでした',
   'issues.error.conflict': '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。',
+  'issues.error.openChildren': '完了かキャンセルになっていない子 Work Item があるため、このチームでは完了にできません。先に子を完了かキャンセルにしてください。',
   'issues.error.comment': 'コメントを追加できませんでした',
 } as const

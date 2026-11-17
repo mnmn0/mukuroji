@@ -236,14 +236,14 @@ export function IssueTable({
                       <button
                         aria-expanded={!outlineRow.collapsed}
                         aria-label={`${t(outlineRow.collapsed ? 'issues.outline.expand' : 'issues.outline.collapse')}: ${issueTitle}`}
-                        className="-my-1.5 grid h-8 w-6 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tone-2563eb/10"
+                        className="-my-1.5 grid h-8 w-6 flex-none place-items-center rounded max-[640px]:h-11 max-[640px]:w-11 text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tone-2563eb/10"
                         data-testid={`issue-outline-toggle-${issue.id}`}
                         onClick={() => outline?.onToggleCollapsed(issue.id)}
                         type="button"
                       >
                         <ChevronIcon className={`h-4 w-4 fill-none stroke-current stroke-2 transition-transform ${outlineRow.collapsed ? '-rotate-90' : ''}`} />
                       </button>
-                    ) : <span aria-hidden="true" className="w-6 flex-none" />
+                    ) : <span aria-hidden="true" className="w-6 flex-none max-[640px]:w-11" />
                   ) : null}
                   <button
                     aria-keyshortcuts={outlineRow && onMove ? WORK_ITEM_HIERARCHY_MOVE_KEY_SHORTCUTS : undefined}
