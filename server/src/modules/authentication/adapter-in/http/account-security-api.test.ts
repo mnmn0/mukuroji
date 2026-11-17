@@ -691,6 +691,35 @@ test('lists the MFA state of active members for administrators', async () => {
   })
 })
 
+test.each([
+  ['workspace:member', 403],
+  ['workspace:admin', 200],
+] as const)('lets only administrators list sign-in security under a %s role assignment', async (roleId, status) => {
+  configureFakeProjectClients(true)
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => ({
+    ...await readSnapshot(currentWorkspaceId),
+    // An assigned role replaces the legacy owner role, and members.read alone is not enough.
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'demo-workspace-role',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId,
+      scope: { workspaceId, kind: 'workspace' },
+      source: 'direct',
+    }],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+
+  const response = await app.request('/api/workspace/members/sign-in-security', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(status)
+})
+
 test('records the administrator password reset and signs the member out around the Cognito reset', async () => {
   configureFakeProjectClients(true)
   const events: string[] = []
