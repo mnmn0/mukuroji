@@ -92,7 +92,8 @@ export function hasPendingPlanningRestore(result: PlanningRestoreResultView) {
  *
  * The first revision may have restored the entity before the failure, which removes it from the
  * archived list; an outcome with an unknown summary keeps a way to restore it again. An existing
- * outcome of the same entity is kept as it is.
+ * outcome of the same entity that still offers a continuation is kept as it is; a finished one is
+ * replaced, because it offers none.
  *
  * @param results - Outcomes shown so far, newest first.
  * @param entity - Entity whose restore failed.
@@ -102,8 +103,12 @@ export function recordUncertainPlanningRestore(
   results: readonly PlanningRestoreResultView[],
   entity: Pick<PlanningRestoreResultView, 'entityId' | 'title'>,
 ): PlanningRestoreResultView[] {
-  if (results.some((result) => result.entityId === entity.entityId)) return [...results]
-  return [{ entityId: entity.entityId, title: entity.title }, ...results]
+  const existing = results.find((result) => result.entityId === entity.entityId)
+  if (existing && hasPendingPlanningRestore(existing)) return [...results]
+  return [
+    { entityId: entity.entityId, title: entity.title },
+    ...results.filter((result) => result.entityId !== entity.entityId),
+  ]
 }
 
 /**
@@ -133,9 +138,6 @@ export type PlanningRestoreResultStorage = Pick<Storage, 'getItem' | 'setItem' |
 
 /** Storage key prefix of the unfinished restores kept per Workspace member. */
 const pendingRestoreStoragePrefix = 'mukuroji.planning.pendingRestores:'
-
-/** Most unfinished restores kept in storage; older ones fall back to the API. */
-const pendingRestoreStorageLimit = 50
 
 /** Count fields of a stored restore summary. */
 const restoreSummaryCountKeys = [
@@ -224,7 +226,7 @@ export function writeStoredPlanningRestoreResults(
   results: readonly PlanningRestoreResultView[],
 ) {
   const key = `${pendingRestoreStoragePrefix}${scope}`
-  const pending = results.filter(hasPendingPlanningRestore).slice(0, pendingRestoreStorageLimit)
+  const pending = results.filter(hasPendingPlanningRestore)
   try {
     if (pending.length === 0) storage?.removeItem(key)
     else storage?.setItem(key, JSON.stringify(pending))

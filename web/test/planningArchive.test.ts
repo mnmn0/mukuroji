@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { ArchivedPlanningEntitySummary, PlanningEntity } from '@mukuroji/contracts'
+import { PlanningApiError } from '../src/planning/api/errors'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
+import { isUncertainPlanningRestoreFailure } from '../src/planning/mutations/usePlanningArchive'
 import {
   dropPlanningRestoreResult,
   hasPendingPlanningRestore,
@@ -96,6 +98,15 @@ describe('archived Planning entities', () => {
     // A failed continuation keeps the counts the earlier restore reported.
     expect(recordUncertainPlanningRestore(uncertain, { entityId: 'goal-a', title: 'Goal A' }))
       .toEqual(uncertain)
+    // A finished outcome offers no continuation, so an unknown restore of that entity replaces it.
+    const finished: PlanningRestoreResultView = {
+      ...pending,
+      entityId: 'goal-c',
+      title: 'Goal C',
+      summary: { ...pending.summary!, pendingReferenceCount: 0 },
+    }
+    expect(recordUncertainPlanningRestore([pending, finished], { entityId: 'goal-c', title: 'Goal C' }))
+      .toEqual([{ entityId: 'goal-c', title: 'Goal C' }, pending])
     // A later successful restore of the same entity replaces the unknown outcome.
     const restored = recordPlanningRestoreResult(uncertain, {
       ...pending,
@@ -132,6 +143,11 @@ describe('archived Planning entities', () => {
 
     writeStoredPlanningRestoreResults(storage, 'member-1', [finished, unknown, pending])
     expect(readStoredPlanningRestoreResults(storage, 'member-1')).toEqual([unknown, pending])
+    // Every unfinished restore is kept, however many there are.
+    const many = Array.from({ length: 60 }, (_, index) => ({ ...unknown, entityId: `goal-${index}` }))
+    writeStoredPlanningRestoreResults(storage, 'member-3', many)
+    expect(readStoredPlanningRestoreResults(storage, 'member-3')).toHaveLength(60)
+    writeStoredPlanningRestoreResults(storage, 'member-3', [])
     expect(readStoredPlanningRestoreResults(storage, 'member-2')).toEqual([])
     // Nothing left to continue clears the saved entry.
     writeStoredPlanningRestoreResults(storage, 'member-1', [finished])
@@ -157,5 +173,20 @@ describe('archived Planning entities', () => {
     expect(() => writeStoredPlanningRestoreResults(failing, 'member-1', [pending])).not.toThrow()
 
     expect(dropPlanningRestoreResult([unknown, pending], 'goal-b')).toEqual([pending])
+  })
+
+  test('treats only failures that may follow a committed restore as uncertain', () => {
+    expect(isUncertainPlanningRestoreFailure(new PlanningApiError(503, 'Unavailable.'))).toBe(true)
+    expect(isUncertainPlanningRestoreFailure(new TypeError('Failed to fetch'))).toBe(true)
+    // The server reports a changed grant after the entity may already be active again.
+    expect(isUncertainPlanningRestoreFailure(
+      new PlanningApiError(409, 'Changed.', 'PlanningAuthorizationChanged'),
+    )).toBe(true)
+    expect(isUncertainPlanningRestoreFailure(
+      new PlanningApiError(409, 'Conflict.', 'PlanningRevisionConflict'),
+    )).toBe(false)
+    expect(isUncertainPlanningRestoreFailure(
+      new PlanningApiError(409, 'Inactive.', 'PlanningOwnerInactive'),
+    )).toBe(false)
   })
 })
