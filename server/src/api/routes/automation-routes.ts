@@ -14,6 +14,7 @@ import {
   type UpdateAutomationTemplateInput,
   type UpdateRecurringWorkInput,
   type WorkItemConfiguration,
+  type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -36,6 +37,8 @@ import {
   createTeamIssueDeepLink,
   readAssignedProjectId,
   readTeamIssueAssigneeUserId,
+  applyWorkItemStatusTransitionToActualDates,
+  workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
   type UpdateTeamIssueRequestBody,
   type UpdateTeamIssueResponse,
@@ -128,6 +131,10 @@ import {
 } from '../shared/file-approval-access'
 import { createAgentRunReleaseOnRemovalItems } from '../shared/agent-run-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
+import {
+  readWorkItemActualDateCorrection,
+  requireWorkItemActualDateCorrectionPermission,
+} from '../shared/work-item-actual-dates'
 import { createPlanningFencedWorkItemAuthorizationSnapshot } from '../shared/planning-access'
 import {
   createApiMutationContext,
@@ -943,7 +950,10 @@ function createApiBulkOperationAdapter(
     const resultingRevision = item.resultingRevision + 1
     if (
       loaded.detail.issue.revision !== resultingRevision ||
-      !isAutomationPatchApplied(loaded.detail.issue, item.undoPayload)
+      !isAutomationPatchApplied(
+        loaded.detail.issue,
+        withoutBulkUndoActualDates(item.undoPayload),
+      )
     ) return undefined
     const metadata = {
       bulkOperationId: operation.id,
@@ -1054,10 +1064,12 @@ function createApiBulkOperationAdapter(
         if (recovered) return recovered
         throw error
       }
-      const body = {
+      const undoInput: Record<string, unknown> = {
         ...item.undoPayload,
         expectedRevision: item.resultingRevision,
-      } as UpdateTeamIssueRequestBody
+      }
+      const actualDateRequest = readWorkItemActualDateCorrection(undoInput)
+      const body = actualDateRequest.body as UpdateTeamIssueRequestBody
       const normalizedBody = operation.action.type === 'archive'
         ? body
         : normalizeTeamIssueInput(body, loaded.context.team)
@@ -1095,11 +1107,21 @@ function createApiBulkOperationAdapter(
         readAssignedProjectId(configuredBody.assignedProjectId) !==
           loaded.detail.issue.assignedProjectId
       const restoresArchive = typeof configuredBody.archivedAt === 'string'
-      let mutationBody = configuredBody
+      const actualDateCorrection = actualDateRequest.correction
+        ? await resolveBulkUndoActualDateCorrection(
+            principal,
+            loaded,
+            configuredBody,
+            actualDateRequest.correction,
+          )
+        : undefined
+      let mutationBody: UpdateTeamIssueRequestBody = actualDateCorrection
+        ? { ...configuredBody, actualDateCorrection }
+        : configuredBody
       if (changesSchedule || restoresArchive || changesAssignedProject) {
         try {
           mutationBody = {
-            ...configuredBody,
+            ...mutationBody,
             authorizationSnapshot:
               changesSchedule || restoresArchive
                 ? await createDependencyFencedWorkItemAuthorizationSnapshot(
@@ -1157,6 +1179,82 @@ function createApiBulkOperationAdapter(
       return { resultingRevision: response.issue.revision }
     },
   }
+}
+
+const workflowStatusCategories: readonly WorkflowStatusCategory[] = [
+  'backlog',
+  'unstarted',
+  'started',
+  'completed',
+  'canceled',
+]
+
+/**
+ * Decides how a Bulk status undo restores the actual dates captured before the Bulk edit.
+ *
+ * The reverse status change already restores the dates in most cases, and then no correction is sent.
+ * Otherwise a manager restores the captured dates as a correction. Anyone else may still undo when
+ * only the actual start date differs, but not when the undo would replace a recorded completion date.
+ *
+ * @param principal - Principal undoing the Bulk operation.
+ * @param loaded - Current Work Item and Team context, read for the undo.
+ * @param configuredBody - Undo body after the Work Item configuration resolved the target status.
+ * @param captured - Actual dates captured before the Bulk edit; null means no date.
+ * @returns The correction to send with the undo, or undefined when none is needed.
+ * @throws AutomationError when a non-manager undo would lose a recorded completion date.
+ */
+async function resolveBulkUndoActualDateCorrection(
+  principal: Parameters<typeof requireWorkItemActualDateCorrectionPermission>[0],
+  loaded: {
+    context: Parameters<typeof requireWorkItemActualDateCorrectionPermission>[2]
+    detail: { issue: TeamIssueResponseItem }
+    item: { teamId: string }
+  },
+  configuredBody: UpdateTeamIssueRequestBody,
+  captured: { actualStartDate?: string | null, actualEndDate?: string | null },
+): Promise<{ actualStartDate: string | null, actualEndDate: string | null } | undefined> {
+  const current = loaded.detail.issue
+  const before = {
+    actualStartDate: captured.actualStartDate ?? null,
+    actualEndDate: captured.actualEndDate ?? null,
+  }
+  const nextStatusCategory = workflowStatusCategories.find((category) =>
+    category === configuredBody.statusCategory
+  ) ?? current.statusCategory
+  const reversed = applyWorkItemStatusTransitionToActualDates(
+    {
+      ...(current.actualStartDate ? { actualStartDate: current.actualStartDate } : {}),
+      ...(current.actualEndDate ? { actualEndDate: current.actualEndDate } : {}),
+    },
+    current.statusCategory,
+    nextStatusCategory,
+    workItemScheduleInstantToLocalDate(
+      new Date().toISOString(),
+      current.schedule.calendarPolicy,
+    ),
+  )
+  const reversedEnd = reversed.actualEndDate ?? null
+  if (
+    (reversed.actualStartDate ?? null) === before.actualStartDate &&
+    reversedEnd === before.actualEndDate
+  ) return undefined
+  try {
+    await requireWorkItemActualDateCorrectionPermission(
+      principal,
+      loaded.item.teamId,
+      loaded.context,
+      current.assignedProjectId,
+    )
+    return before
+  } catch (error) {
+    if (!(error instanceof ProjectDataError) || error.status !== 403) throw error
+  }
+  if (reversedEnd === before.actualEndDate) return undefined
+  throw new AutomationError(
+    'conflict',
+    'BulkUndoUnavailable',
+    'Undoing this status change would replace the recorded actual end date. Ask a Project or Team manager to undo it.',
+  )
 }
 
 function isExpectedBulkMutationAuditProof(
@@ -1251,7 +1349,25 @@ function createBulkUndoPayload(
       snapshot[field] = issueValues[field] ?? null
     }
   }
+  if ('workflowStatusId' in action.patch) {
+    // A status change can record or clear actual dates, so Undo keeps the dates it must restore.
+    snapshot.actualStartDate = issue.actualStartDate ?? null
+    snapshot.actualEndDate = issue.actualEndDate ?? null
+  }
   return snapshot
+}
+
+/**
+ * Removes the actual date snapshot from a Bulk undo payload.
+ *
+ * @param payload - Stored Bulk undo payload.
+ * @returns The payload fields that the undo writes as ordinary Work Item fields.
+ */
+function withoutBulkUndoActualDates(
+  payload: Record<string, AutomationValue>,
+): Record<string, AutomationValue> {
+  const { actualStartDate: _start, actualEndDate: _end, ...fields } = payload
+  return fields
 }
 
 function isBulkActionApplied(

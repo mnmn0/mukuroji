@@ -99,3 +99,22 @@ export const PlanAndActual: Story = {
     await expect(canvas.queryByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[2].id}`)).not.toBeInTheDocument()
   },
 }
+
+/** Without a selected period, the timeline widens to show actual work after the planned horizon. */
+export const ActualAfterPlannedHorizon: Story = {
+  args: {
+    tasks: [
+      {
+        ...taskViewStoryTasks[0],
+        actualStartDate: '2026-08-10',
+        actualEndDate: '2026-08-12',
+        statusCategory: 'completed',
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[0].id}`))
+      .toHaveAccessibleName(t('tasks.gantt.actualBar').replace('{start}', '2026-08-10').replace('{end}', '2026-08-12'))
+  },
+}
