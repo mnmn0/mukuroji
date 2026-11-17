@@ -420,7 +420,15 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     /** Returns canonical details, dependency readiness, and the task's active run. */
     async get(id: string) {
-      const task = inScope(await api.get(id))
+      // Keys are never reused, so the same key before and after the task read means the task read
+      // saw that Work Item, even when another one was created under the same ID at the same instant.
+      const before = await api.taskKey(id)
+      const scoped = inScope(await api.get(id))
+      const found = await api.taskKey(id)
+      if (found?.key !== before?.key || found?.createdAt !== before?.createdAt || (found && found.createdAt !== scoped.createdAt)) {
+        throw new AgentTaskError('conflict', 'The task was replaced while it was read. Read it again.', true)
+      }
+      const task = found?.key === undefined ? scoped : { ...scoped, key: found.key }
       // The claim is read directly, so a run started moments ago or before a restart is found.
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)

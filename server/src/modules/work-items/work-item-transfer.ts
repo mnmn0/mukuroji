@@ -1,9 +1,10 @@
-import type {
-  CanonicalWorkItem,
-  CreateWorkItemInput,
-  CustomFieldValue,
-  WorkItemPriority,
-  WorkItemSchedule,
+import {
+  WORK_ITEM_TITLE_MAX_LENGTH,
+  type CanonicalWorkItem,
+  type CreateWorkItemInput,
+  type CustomFieldValue,
+  type WorkItemPriority,
+  type WorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
   normalizeWorkItemSchedule,
@@ -327,6 +328,15 @@ function mapImportRow(
   }
   const read = (targetField: string) => values.get(targetField)
   const title = readRequiredImportString(read('title'), row, 'title', errors)
+  // The dry run must reject what creation rejects, so an import never stops after writing some rows.
+  if (title && [...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
+    errors.push({
+      row,
+      field: 'title',
+      code: 'WorkItemTitleTooLong',
+      message: `title must be at most ${WORK_ITEM_TITLE_MAX_LENGTH} characters.`,
+    })
+  }
   const assigneeUserId = readRequiredImportString(
     read('assigneeUserId'),
     row,

@@ -11,6 +11,8 @@ const {
   resetTestApp,
   withTestEnvironment,
 } = createApiTestHarness()
+import { projectPublicWorkItem } from '../../../../api/routes/public-api-routes'
+import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
 import { DynamoDbTeamIssuesClient } from '../../../work-items'
 import type {
   DynamoDBClient,
@@ -26,6 +28,7 @@ import {
 } from 'bun:test'
 import {
   WORK_ITEM_SCHEMA_VERSION,
+  type CanonicalWorkItem,
   type DueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 
@@ -226,7 +229,7 @@ test('accepts the deterministic public API Work Item ID namespace', async () => 
   const client = new DynamoDbTeamIssuesClient(
     'issues-table',
     'events-table',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     {} as DynamoDBClient,
     false,
   )
@@ -460,4 +463,30 @@ test('serves the same authenticated API contract from Function URL root and /api
       ])
     },
   )
+})
+
+test('keeps the Work Item key off the closed public Work Item response', () => {
+  const workItem: CanonicalWorkItem = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    id: 'ct-7',
+    teamId: 'core-team',
+    title: 'Keyed Work Item',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-31',
+    schedule: createDueDateSchedule(),
+    priority: 'medium',
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:00:00.000Z',
+    source: 'dynamodb',
+  }
+
+  // Clients read the key from GET /api/v1/work-items/{workItemId}/key instead.
+  expect(projectPublicWorkItem({ ...workItem, key: 'CT-7' })).not.toHaveProperty('key')
 })
