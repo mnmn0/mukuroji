@@ -992,6 +992,26 @@ test('requires preview confirmation before directly patching a dependency-owned 
   expect(calls.scheduleCascades).toEqual([])
 })
 
+test('changes only the estimate of a dependency-owned schedule without preview confirmation', async () => {
+  const { calls } = await configureDueDateScheduleDependency()
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      schedule: { ...createDefaultDueDateWorkItemSchedule('2026-06-18'), plannedEffortMinutes: 240 },
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).issue.schedule).toMatchObject({ dueDate: '2026-06-18', plannedEffortMinutes: 240 })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(calls.scheduleCascades).toEqual([])
+})
+
 test('rejects a direct schedule patch when a dependency is created after its precheck', async () => {
   const planning = new InMemoryPlanningClient()
   const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')

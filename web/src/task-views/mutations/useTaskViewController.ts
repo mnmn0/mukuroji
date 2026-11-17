@@ -51,6 +51,8 @@ export type TaskViewControllerCapabilities = {
   columns: readonly string[]
   /** Field identifiers available for grouping, sorting, and filters. */
   fields: readonly string[]
+  /** Field identifiers available for sorting; `fields` applies when omitted. */
+  sortFields?: readonly string[]
   /** Layout modes implemented by the consuming surface. */
   layoutModes: readonly TaskViewLayoutMode[]
   /** Columns that must remain visible after migration. */
@@ -706,6 +708,7 @@ function createSanitizeOptions(
     expectedSurface: input.surface,
     fallback,
     fields: input.capabilities.fields,
+    ...(input.capabilities.sortFields === undefined ? {} : { sortFields: input.capabilities.sortFields }),
     layoutModes: input.capabilities.layoutModes,
     requiredColumns: input.capabilities.requiredColumns,
     workflowStatuses: input.capabilities.workflowStatuses,

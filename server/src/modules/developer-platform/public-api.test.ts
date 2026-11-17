@@ -127,6 +127,12 @@ function createDefaultWorkItemService(
     async getAcceptanceCriteria(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, items: [] }
     },
+    async getEffort(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision }
+    },
+    async getKey(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, createdAt: workItem.createdAt, key: 'TEAM-1' }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -445,6 +451,34 @@ describe('public API router', () => {
     })
   })
 
+  test('returns the Work Item key from its own read-scoped endpoint', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async getKey(_credential, teamId, workItemId) {
+          reads.push(`${teamId}/${workItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, createdAt: '2026-07-18T00:00:00.000Z', key: 'TEAM-7' }
+        },
+      }),
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/key?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/key?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', createdAt: '2026-07-18T00:00:00.000Z', key: 'TEAM-7',
+    })
+    expect(denied.status).toBe(403)
+    expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
   test('exposes the authorized Work Item Type creation schema', async () => {
     let requestedTeamId: string | undefined
     let requestedProjectId: string | undefined
@@ -704,7 +738,11 @@ describe('public API router', () => {
     expect(paths['/api/v1/agent-settings']).toHaveProperty('get')
     expect(paths['/api/v1/agent-context']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/acceptance-criteria']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/effort']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/key']).toHaveProperty('get')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('remainingEffortMinutes')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('progressPercent')
     expect(components.schemas.UpdatePublicWorkItemRequest.properties).toHaveProperty('agentInstanceId')
     expect(components.schemas.CreatePublicWorkItemCommentRequest.properties).toHaveProperty('agentRunId')
     expect(
@@ -931,6 +969,69 @@ describe('public API router', () => {
       expect((await request(valid)).status).toBe(201)
     }
     expect(receivedDueDates).toEqual(['1000-01-01', '2024-02-29', '2026-04-30'])
+  })
+
+  test('passes remaining effort and manual progress updates, including clears, and rejects invalid amounts', async () => {
+    const inputs: unknown[] = []
+    const workItems = createDefaultWorkItemService({
+      async update(_credential, _teamId, _workItemId, input) {
+        inputs.push(input)
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const request = (key: string, body: Record<string, unknown>) => router.request('http://localhost/v1/work-items/work-item-1?teamId=team-1', {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({ expectedRevision: 1, ...body }),
+    })
+
+    expect((await request('effort-set', { remainingEffortMinutes: 90, progressPercent: 40 })).status).toBe(200)
+    expect((await request('effort-clear', { remainingEffortMinutes: null, progressPercent: null })).status).toBe(200)
+    for (const [key, body] of [
+      ['effort-negative', { remainingEffortMinutes: -1 }],
+      ['effort-fraction', { remainingEffortMinutes: 1.5 }],
+      ['progress-over', { progressPercent: 101 }],
+      ['progress-text', { progressPercent: '50' }],
+    ] as const) {
+      const response = await request(key, body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'validation_failed' })
+    }
+    expect(inputs).toEqual([
+      { expectedRevision: 1, remainingEffortMinutes: 90, progressPercent: 40 },
+      { expectedRevision: 1, remainingEffortMinutes: null, progressPercent: null },
+    ])
+  })
+
+  test('reads the effort of a Work Item from its own endpoint with the read scope', async () => {
+    const reads: string[] = []
+    const workItems = createDefaultWorkItemService({
+      async getEffort(_credential, teamId, workItemId) {
+        reads.push(`${teamId}/${workItemId}`)
+        return { schemaVersion: 1, teamId, workItemId, revision: 3, plannedEffortMinutes: 480, remainingEffortMinutes: 120, progressPercent: 75 }
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/effort?teamId=team-1', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', revision: 3,
+      plannedEffortMinutes: 480, remainingEffortMinutes: 120, progressPercent: 75,
+    })
+    expect(reads).toEqual(['team-1/work-item-1'])
+    const missingTeam = await router.request('http://localhost/v1/work-items/work-item-1/effort', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+    expect(missingTeam.status).toBe(400)
   })
 
   test('rejects oversized calendar collections before invoking the Work Item service', async () => {

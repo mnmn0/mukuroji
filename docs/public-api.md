@@ -42,6 +42,10 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 Credential の scope は作成後に変更しない。権限を変える場合は、新しい credential を最小 scope で作成し、利用側を移行してから旧 credential を revoke する。
 
+## Work Item key
+
+`GET /api/v1/work-items/{workItemId}/key?teamId={teamId}` は Work Item の `ABC-123` 形式の `key` を `{ schemaVersion, teamId, workItemId, createdAt, key }` で返します。`createdAt` は Work Item の作成時刻で、削除後に同じ ID で作り直された Work Item とを区別するのに使えます。key は Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item では `key` を省きます。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。既存の `WorkItem` は closed schema なので `key` を含めません。操作の path には従来どおり `id` を使います。Work Item の `title` は 1〜256 文字（Unicode code point）で、超えると `400 validation_failed` を返します。
+
 ## Work Item Type catalog
 
 `GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。
@@ -94,6 +98,13 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   一覧が変わっていても replay になります。`acceptanceCriteria` と同時には送れません。
   Agent context の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
   custom field の値）がない Work Item の Run start は `not_ready` です。
+- 見積の正本は `WorkItem` の `schedule.plannedEffortMinutes` です。残工数と手入力の進捗率は
+  `GET /api/v1/work-items/{workItemId}/effort?teamId={teamId}` で読みます。応答は
+  `{ schemaVersion, teamId, workItemId, revision, plannedEffortMinutes?, remainingEffortMinutes?, progressPercent? }` で、
+  記録されていない値は省きます。`WorkItem` の response schema は閉じた object のため、残工数と進捗率は含めません
+  （export の行にも含めません）。PATCH は `remainingEffortMinutes`（分）/ `progressPercent`（0〜100）を受け付け、`null` で
+  消します。見積は `schedule` の置換で変え、見積だけの変更は dependency の確認を必要としません。不正な値は
+  `400 validation_failed` です。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress) を参照してください。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。

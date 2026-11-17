@@ -11,7 +11,10 @@ import {
   WorkspaceSearchError,
   type WorkspaceSearchDocument,
 } from '../../modules/workspace-search/workspace-search'
-import { createWorkItemRelationIds } from '../../modules/work-items/work-item-configuration'
+import {
+  createWorkItemRelationIds,
+  WORK_ITEM_PROJECTED_RELATION_TYPES,
+} from '../../modules/work-items/work-item-configuration'
 import { createDocumentSearchAccessReadContext } from '../../modules/documents'
 import { workItemDependencies } from '../shared/app-dependencies'
 import {
@@ -140,6 +143,7 @@ async function resolveCurrentWorkspaceSearchScope(
         workspaceId,
         parsed.teamId,
         parsed.issueId,
+        { types: WORK_ITEM_PROJECTED_RELATION_TYPES },
       )
       return {
         ...scope,

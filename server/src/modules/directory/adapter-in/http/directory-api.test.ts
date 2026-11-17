@@ -224,6 +224,7 @@ test('creates a project under an authenticated team directory', async () => {
     project: {
       id: 'new-project',
       name: '新規プロジェクト',
+      lifecycleState: 'active',
       tone: 'green',
     },
   })
@@ -845,6 +846,7 @@ test('rejects Project archive dependency fan-out above the atomic guard limit', 
 })
 
 test('rejects archiving scopes referenced only by a stored Planning Work Item link', async () => {
+  // A link to an active Goal without Team or Project scope is the only reference to the scopes.
   const planningClient = new InMemoryPlanningClient()
   const workItemState = {
     workItems: [{
@@ -858,25 +860,31 @@ test('rejects archiving scopes referenced only by a stored Planning Work Item li
       schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     }],
   }
-  await planningClient.create(
-    'user#demo@example.com',
-    createCyclePlanningInput('cycle-link-scope', 0),
-    workItemState,
-  )
+  const hierarchy = [
+    ['portfolio-link-scope', 'portfolio', undefined],
+    ['roadmap-link-scope', 'roadmap', 'portfolio-link-scope'],
+    ['initiative-link-scope', 'initiative', 'roadmap-link-scope'],
+    ['goal-link-scope', 'goal', 'initiative-link-scope'],
+  ] as const
+  for (const [index, [id, type, parentId]] of hierarchy.entries()) {
+    await planningClient.create('user#demo@example.com', {
+      ...createCyclePlanningInput(id, index),
+      type,
+      ...(parentId === undefined ? {} : { parentId }),
+      teamId: undefined,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, workItemState)
+  }
   await planningClient.putWorkItemLink('user#demo@example.com', {
     teamId: 'core-team',
     workItemId: 'linked-work-item',
     projectId: 'refero',
-    cycleId: 'cycle-link-scope',
-    goalIds: [],
-    expectedRevision: 1,
+    goalIds: ['goal-link-scope'],
+    expectedRevision: hierarchy.length,
   }, workItemState)
-  await planningClient.archive(
-    'user#demo@example.com',
-    'cycle-link-scope',
-    { expectedRevision: 2 },
-    workItemState,
-  )
   const calls = configureFakeProjectClients(true)
   setTestAppDependencies({ planning: planningClient })
 

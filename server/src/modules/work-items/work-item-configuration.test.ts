@@ -1030,6 +1030,59 @@ test('writes a configuration audit event in the same transaction as the revision
   })
 })
 
+test('audits the progress mode before and after a change of only that setting', async () => {
+  const previousConfiguration = createConfiguration({ revision: 2 })
+  const sent: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      sent.push(command.input)
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: toStoredConfiguration(previousConfiguration) }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'audit-table',
+  )
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'configuration-progress-mode-audit-1',
+    request: { method: 'PUT', path: '/api/work-item-configuration', body: { revision: 2 } },
+    source: { kind: 'api', method: 'PUT', route: '/api/work-item-configuration' },
+    occurredAt: '2026-07-16T00:00:00.000Z',
+  })
+
+  await client.saveWorkspaceConfiguration(
+    'workspace-1',
+    { ...previousConfiguration, progressMode: 'manual' },
+    async () => undefined,
+    [],
+    auditContext,
+  )
+
+  const transaction = sent[2]
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Expected a configuration transaction.')
+  }
+  expect(transaction.TransactItems).toContainEqual(expect.objectContaining({
+    Put: expect.objectContaining({
+      TableName: 'audit-table',
+      Item: expect.objectContaining({
+        changes: expect.arrayContaining([
+          expect.objectContaining({ field: 'progressMode', before: 'status-category', after: 'manual' }),
+        ]),
+      }),
+    }),
+  }))
+})
+
 test('audits Work Item Type policy changes even when policy counts stay the same', async () => {
   const previousConfiguration = createConfiguration({
     customFields: [field('summary', 'text'), field('severity', 'text')],
@@ -1386,34 +1439,12 @@ test('reads zero and the stored canonical relation graph revision consistently',
   ])
 })
 
-test('reads the complete stable relation graph before Work Item source filtering', async () => {
-  const relations = [
-    relationItem('source-a', 'target-a', 'blocks'),
-    relationItem('source-b', 'target-b', 'related'),
-  ]
-  const documentClient = {
-    async send(command: { constructor: { name: string } }) {
-      if (command.constructor.name === 'GetCommand') {
-        return {
-          Item: {
-            entryType: 'relation-graph',
-            schemaVersion: 1,
-            revision: 9,
-          },
-        }
-      }
-      if (command.constructor.name === 'QueryCommand') {
-        return { Items: relations }
-      }
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbWorkItemConfigurationClient(
-    'configuration-table',
-    'work-items-table',
-    documentClient,
-    {} as DynamoDBClient,
-  )
+test('reads the complete stable relation graph for bulk projections', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('source-a', 'target-a', 'blocks')
+  store.seedRelation('source-b', 'target-b', 'related')
+  store.seedGraph(9, 4)
+  const client = store.createClient()
 
   expect(await client.listRelationGraph('workspace-1', 'core-team')).toEqual({
     graphRevision: 9,
@@ -1430,47 +1461,69 @@ test('reads the complete stable relation graph before Work Item source filtering
         type: 'related',
         createdAt: '2026-07-12T00:00:00.000Z',
       },
+      {
+        sourceWorkItemId: 'target-a',
+        targetWorkItemId: 'source-a',
+        type: 'blockedBy',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
+      {
+        sourceWorkItemId: 'target-b',
+        targetWorkItemId: 'source-b',
+        type: 'related',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
     ],
-  })
-  expect(await client.listRelations('workspace-1', 'core-team', 'source-a')).toEqual({
-    graphRevision: 9,
-    relations: [{
-      sourceWorkItemId: 'source-a',
-      targetWorkItemId: 'target-a',
-      type: 'blocks',
-      createdAt: '2026-07-12T00:00:00.000Z',
-    }],
   })
 })
 
+test('reads one Work Item relation neighbourhood through its source key prefix', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('source-a', 'target-a', 'blocks')
+  store.seedRelation('source-b', 'target-b', 'related')
+  store.seedRelation('source-a', 'parent-a', 'parent')
+  store.seedGraph(3, 6)
+  const client = store.createClient()
+
+  expect(await client.listRelations('workspace-1', 'core-team', 'source-a')).toEqual({
+    graphRevision: 3,
+    relations: [
+      {
+        sourceWorkItemId: 'source-a',
+        targetWorkItemId: 'target-a',
+        type: 'blocks',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
+      {
+        sourceWorkItemId: 'source-a',
+        targetWorkItemId: 'parent-a',
+        type: 'parent',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
+    ],
+  })
+  expect(store.queryPrefixes).toEqual(['REL#source-a#'])
+
+  store.queryPrefixes.length = 0
+  expect((await client.listRelations('workspace-1', 'core-team', 'source-a', {
+    types: ['parent'],
+  })).relations.map((relation) => relation.targetWorkItemId)).toEqual(['parent-a'])
+  expect(store.queryPrefixes).toEqual(['REL#source-a#parent#'])
+})
+
 test('creates reciprocal relation edges with endpoint and graph guards in one transaction', async () => {
-  const sent: Array<{ name: string; input: Record<string, unknown> }> = []
-  const documentClient = {
-    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
-      sent.push({ name: command.constructor.name, input: command.input })
-      if (command.constructor.name === 'QueryCommand') {
-        return { Items: [] }
-      }
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbWorkItemConfigurationClient(
-    'configuration-table',
-    'work-items-table',
-    documentClient,
-    {} as DynamoDBClient,
-  )
+  const store = createInMemoryRelationStore()
+  const client = store.createClient()
 
   const response = await client.createRelation('workspace-1', 'core-team', {
-    sourceWorkItemId: 'parent',
-    targetWorkItemId: 'child',
+    sourceWorkItemId: 'child',
+    targetWorkItemId: 'parent',
     type: 'parent',
     expectedGraphRevision: 0,
     sourceExpectedRevision: 1,
     targetExpectedRevision: 1,
   })
-  const transaction = sent.find((entry) => entry.name === 'TransactWriteCommand')?.input
-  const transactItems = transaction?.TransactItems as Array<Record<string, unknown>>
+  const transactItems = store.transactions[0]?.TransactItems as Array<Record<string, unknown>>
 
   expect(response).toMatchObject({
     graphRevision: 1,
@@ -1478,41 +1531,39 @@ test('creates reciprocal relation edges with endpoint and graph guards in one tr
     reciprocalRelation: { type: 'child' },
   })
   expect(transactItems).toHaveLength(5)
-  expect(transactItems.filter((item) => 'Update' in item)).toHaveLength(2)
-  expect(transactItems.filter((item) => 'Put' in item)).toHaveLength(3)
-  expect(transactItems.filter((item) => 'Update' in item)).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          ConditionExpression: expect.stringContaining('#revision = :revision'),
-          UpdateExpression: 'SET #relationIds = :relationIds',
-          ExpressionAttributeValues: expect.objectContaining({
-            ':relationIds': ['parent:child'],
-            ':revision': 1,
-          }),
-        }),
-      }),
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          UpdateExpression: 'SET #relationIds = :relationIds',
-          ExpressionAttributeValues: expect.objectContaining({
-            ':relationIds': ['child:parent'],
-            ':revision': 1,
-          }),
-        }),
-      }),
-    ]),
-  )
-  expect(JSON.stringify(transactItems.filter((item) => 'Update' in item))).not.toContain('updatedAt')
-  expect(transactItems).toContainEqual(expect.objectContaining({
-    Put: expect.objectContaining({
-      Item: expect.objectContaining({
-        entryType: 'relation-graph',
-        recordKey: 'RELATION_GRAPH',
-        schemaVersion: 1,
-      }),
+  expect(transactItems[0]).toEqual({
+    Update: expect.objectContaining({
+      TableName: 'work-items-table',
+      Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'child' },
+      ConditionExpression: expect.stringContaining('#revision = :revision'),
+      UpdateExpression: 'SET #relationIds = :relationIds',
+      ExpressionAttributeValues: { ':relationIds': ['parent:parent'], ':revision': 1 },
     }),
-  }))
+  })
+  expect(transactItems[1]).toEqual({
+    ConditionCheck: {
+      TableName: 'work-items-table',
+      Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'parent' },
+      ConditionExpression:
+        'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :revision AND ' +
+        'attribute_not_exists(#assignedProjectId)',
+      ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId', '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': 1 },
+    },
+  })
+  expect(JSON.stringify(transactItems)).not.toContain('updatedAt')
+  expect(transactItems[2]).toEqual({
+    Put: expect.objectContaining({
+      Item: {
+        scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+        recordKey: 'RELATION_GRAPH',
+        entryType: 'relation-graph',
+        schemaVersion: 1,
+        revision: 1,
+        edgeCount: 2,
+      },
+    }),
+  })
 })
 
 test('fences relation creation against a concurrent configuration change', async () => {
@@ -1556,8 +1607,8 @@ test('fences relation creation against a concurrent configuration change', async
   )
 
   await expect(client.createRelation('workspace-1', 'core-team', {
-    sourceWorkItemId: 'parent',
-    targetWorkItemId: 'child',
+    sourceWorkItemId: 'child',
+    targetWorkItemId: 'parent',
     type: 'parent',
     expectedGraphRevision: 0,
     sourceExpectedRevision: 1,
@@ -1567,50 +1618,18 @@ test('fences relation creation against a concurrent configuration change', async
     status: 409,
   })
   const transactionItems = transactions[0]?.TransactItems
-  expect(transactionItems).toEqual(expect.arrayContaining([
-    configurationConditionCheck,
-  ]))
   expect(Array.isArray(transactionItems) ? transactionItems.at(-1) : undefined)
     .toEqual(configurationConditionCheck)
 })
 
-test('derives complete sorted relation projections for create and delete transactions', async () => {
-  const sentTransactions: Array<Record<string, unknown>> = []
-  let relations = [
-    relationItem('source', 'existing-z', 'related'),
-    relationItem('existing-z', 'source', 'related'),
-    relationItem('source', 'target', 'blocks'),
-    relationItem('target', 'source', 'blockedBy'),
-    relationItem('target', 'existing-a', 'parent'),
-    relationItem('existing-a', 'target', 'child'),
-  ]
-  let graphRevision = 1
-  const documentClient = {
-    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
-      if (command.constructor.name === 'GetCommand') {
-        return {
-          Item: {
-            entryType: 'relation-graph',
-            schemaVersion: 1,
-            revision: graphRevision,
-          },
-        }
-      }
-      if (command.constructor.name === 'QueryCommand') {
-        return { Items: relations }
-      }
-      if (command.constructor.name === 'TransactWriteCommand') {
-        sentTransactions.push(command.input)
-      }
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbWorkItemConfigurationClient(
-    'configuration-table',
-    'work-items-table',
-    documentClient,
-    {} as DynamoDBClient,
-  )
+test('derives sorted relation projections without child rows for create and delete', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('source', 'existing-z', 'related')
+  store.seedRelation('source', 'target', 'blocks')
+  store.seedRelation('target', 'existing-a', 'parent')
+  store.seedRelation('source', 'grandchild', 'child')
+  store.seedGraph(1, 8)
+  const client = store.createClient()
 
   await client.createRelation('workspace-1', 'core-team', {
     sourceWorkItemId: 'source',
@@ -1620,12 +1639,6 @@ test('derives complete sorted relation projections for create and delete transac
     sourceExpectedRevision: 7,
     targetExpectedRevision: 2,
   })
-  relations = [
-    ...relations,
-    relationItem('source', 'new-target', 'parent'),
-    relationItem('new-target', 'source', 'child'),
-  ]
-  graphRevision = 2
   await client.deleteRelation('workspace-1', 'core-team', {
     sourceWorkItemId: 'source',
     targetWorkItemId: 'target',
@@ -1635,33 +1648,18 @@ test('derives complete sorted relation projections for create and delete transac
     targetExpectedRevision: 2,
   })
 
-  const createTransaction = sentTransactions[0]
-  const deleteTransaction = sentTransactions[1]
-  if (!createTransaction || !deleteTransaction) {
-    throw new Error('Expected create and delete relation transactions.')
-  }
-  const createUpdates = (createTransaction.TransactItems as Array<{
-    Update?: { ExpressionAttributeValues?: Record<string, unknown> }
-  }>).flatMap((item) => item.Update ? [item.Update] : [])
-  const deleteUpdates = (deleteTransaction.TransactItems as Array<{
-    Update?: { ExpressionAttributeValues?: Record<string, unknown> }
-  }>).flatMap((item) => item.Update ? [item.Update] : [])
-  expect(createUpdates.map((update) => update.ExpressionAttributeValues?.[':relationIds']))
-    .toEqual([
-      ['blocks:target', 'parent:new-target', 'related:existing-z'],
-      ['child:source'],
-    ])
-  expect(deleteUpdates.map((update) => update.ExpressionAttributeValues?.[':relationIds']))
-    .toEqual([
-      ['parent:new-target', 'related:existing-z'],
-      ['parent:existing-a'],
-    ])
+  expect(store.transactions.map(readEndpointProjections)).toEqual([
+    [['blocks:target', 'parent:new-target', 'related:existing-z'], undefined],
+    [['parent:new-target', 'related:existing-z'], ['parent:existing-a']],
+  ])
+  expect(store.graph()).toMatchObject({ revision: 3, edgeCount: 8 })
 })
 
 test('validates canonical derived relation IDs as bounded unique sorted keys', () => {
   expect(createWorkItemRelationIds([
     { sourceWorkItemId: 'source', targetWorkItemId: 'z', type: 'related' },
     { sourceWorkItemId: 'source', targetWorkItemId: 'a', type: 'blocks' },
+    { sourceWorkItemId: 'source', targetWorkItemId: 'c', type: 'child' },
   ], 'source')).toEqual(['blocks:a', 'related:z'])
   expect(isCanonicalWorkItemRelationIds(['blocks:a', 'related:z'])).toBe(true)
   expect(isCanonicalWorkItemRelationIds(['related:z', 'blocks:a'])).toBe(false)
@@ -1673,81 +1671,290 @@ test('validates canonical derived relation IDs as bounded unique sorted keys', (
   ))).toBe(false)
 })
 
-test('rejects relation creation before reciprocal rows exceed the graph limit', async () => {
-  const relations = Array.from({ length: 2_000 }, (_, index) => ({
-    entryType: 'relation',
-    sourceWorkItemId: `source-${index}`,
-    targetWorkItemId: `target-${index}`,
-    type: 'related',
-    createdAt: '2026-07-14T00:00:00.000Z',
+test('does not count children against the parent relation projection limit', () => {
+  const children = Array.from({ length: 1_000 }, (_, index) => ({
+    sourceWorkItemId: 'phase',
+    targetWorkItemId: `task-${index}`,
+    type: 'child' as const,
   }))
-  const documentClient = {
-    async send(command: { constructor: { name: string } }) {
-      return command.constructor.name === 'QueryCommand' ? { Items: relations } : {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbWorkItemConfigurationClient(
-    'configuration-table',
-    'work-items-table',
-    documentClient,
-    {} as DynamoDBClient,
-  )
+
+  expect(createWorkItemRelationIds([
+    ...children,
+    { sourceWorkItemId: 'phase', targetWorkItemId: 'root', type: 'parent' },
+  ], 'phase')).toEqual(['parent:root'])
+})
+
+test('rejects relation creation before the Team link limit using the stored edge count', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedGraph(4, 20_000)
+  const client = store.createClient()
 
   await expect(client.createRelation('workspace-1', 'core-team', {
     sourceWorkItemId: 'source',
     targetWorkItemId: 'target',
     type: 'related',
-    expectedGraphRevision: 0,
+    expectedGraphRevision: 4,
     sourceExpectedRevision: 1,
     targetExpectedRevision: 1,
   })).rejects.toMatchObject({
     code: 'WorkItemRelationGraphLimitExceeded',
     status: 413,
   })
+  expect(store.transactions).toHaveLength(0)
+})
+
+test('counts legacy relation rows once when the graph row has no edge count', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('a', 'b', 'related')
+  store.seedGraph(2)
+  const client = store.createClient()
+
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'c',
+    targetWorkItemId: 'd',
+    type: 'blocks',
+    expectedGraphRevision: 2,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 1,
+  })
+
+  expect(store.countQueries).toBe(1)
+  expect(store.graph()).toMatchObject({ revision: 3, edgeCount: 4 })
 })
 
 test('rejects self, duplicate, and transitive cyclic relations before writing', async () => {
-  const relations = [
-    relationItem('b', 'c', 'blocks'),
-    relationItem('c', 'a', 'blocks'),
-  ]
-  let transactionCount = 0
-  const documentClient = {
-    async send(command: { constructor: { name: string } }) {
-      if (command.constructor.name === 'QueryCommand') {
-        return { Items: relations }
-      }
-      if (command.constructor.name === 'TransactWriteCommand') {
-        transactionCount += 1
-      }
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbWorkItemConfigurationClient(
-    'configuration-table',
-    'work-items-table',
-    documentClient,
-    {} as DynamoDBClient,
-  )
+  const store = createInMemoryRelationStore()
+  store.seedRelation('b', 'c', 'blocks')
+  store.seedRelation('c', 'a', 'blocks')
+  store.seedRelation('x', 'y', 'parent')
+  store.seedRelation('y', 'z', 'parent')
+  store.seedGraph(4, 8)
+  const client = store.createClient()
+  const create = (sourceWorkItemId: string, targetWorkItemId: string, type: 'blocks' | 'parent' | 'related') =>
+    client.createRelation('workspace-1', 'core-team', {
+      sourceWorkItemId,
+      targetWorkItemId,
+      type,
+      expectedGraphRevision: 4,
+      sourceExpectedRevision: 1,
+      targetExpectedRevision: 1,
+    })
+
+  await expect(create('a', 'a', 'related')).rejects.toMatchObject({ code: 'WorkItemRelationSelf' })
+  await expect(create('b', 'c', 'blocks')).rejects.toMatchObject({ code: 'WorkItemRelationDuplicate' })
+  await expect(create('c', 'b', 'blocks')).rejects.toMatchObject({ code: 'WorkItemRelationCycle' })
+  await expect(create('a', 'b', 'blocks')).rejects.toMatchObject({ code: 'WorkItemRelationCycle' })
+  await expect(create('z', 'x', 'parent')).rejects.toMatchObject({ code: 'WorkItemRelationCycle' })
+  expect(store.transactions).toHaveLength(0)
+})
+
+test('rejects a second parent and keeps blocks and related relations unchanged', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(1, 2)
+  const client = store.createClient()
 
   await expect(client.createRelation('workspace-1', 'core-team', {
-    sourceWorkItemId: 'a',
-    targetWorkItemId: 'a',
-    type: 'related',
-    expectedGraphRevision: 0,
+    sourceWorkItemId: 'task',
+    targetWorkItemId: 'phase-b',
+    type: 'parent',
+    expectedGraphRevision: 1,
     sourceExpectedRevision: 1,
     targetExpectedRevision: 1,
-  })).rejects.toMatchObject({ code: 'WorkItemRelationSelf' })
-  await expect(client.createRelation('workspace-1', 'core-team', {
-    sourceWorkItemId: 'a',
-    targetWorkItemId: 'b',
+  })).rejects.toMatchObject({ code: 'WorkItemParentAlreadyExists', status: 409 })
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'task',
+    targetWorkItemId: 'phase-b',
     type: 'blocks',
-    expectedGraphRevision: 0,
+    expectedGraphRevision: 1,
     sourceExpectedRevision: 1,
     targetExpectedRevision: 1,
-  })).rejects.toMatchObject({ code: 'WorkItemRelationCycle' })
-  expect(transactionCount).toBe(0)
+  })
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'task',
+    targetWorkItemId: 'phase-b',
+    type: 'related',
+    expectedGraphRevision: 2,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 1,
+  })
+
+  expect((await client.listRelations('workspace-1', 'core-team', 'task')).relations
+    .map((relation) => `${relation.type}:${relation.targetWorkItemId}`))
+    .toEqual(['blocks:phase-b', 'parent:phase-a', 'related:phase-b'])
 })
+
+test('replaces, removes, and sets a parent atomically', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedRelation('task', 'other', 'related')
+  store.seedGraph(5, 4)
+  const client = store.createClient()
+
+  expect(await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2, assignedProjectId: 'project-1' },
+    expectedGraphRevision: 5,
+  })).toEqual({ previousParentWorkItemId: 'phase-a', parentWorkItemId: 'phase-b', graphRevision: 6 })
+  const replacement = store.transactions[0]?.TransactItems as Array<Record<string, unknown>>
+  expect(replacement.map((item) => Object.keys(item)[0])).toEqual([
+    'Update',
+    'ConditionCheck',
+    'ConditionCheck',
+    'Put',
+    'Delete',
+    'Delete',
+    'Put',
+    'Put',
+  ])
+  expect(readEndpointProjections(store.transactions[0] ?? {})).toEqual([
+    ['parent:phase-b', 'related:other'],
+    undefined,
+    undefined,
+  ])
+  expect((await client.listRelations('workspace-1', 'core-team', 'phase-a')).relations).toEqual([])
+  expect((await client.listRelations('workspace-1', 'core-team', 'phase-b')).relations
+    .map((relation) => `${relation.type}:${relation.targetWorkItemId}`)).toEqual(['child:task'])
+
+  expect(await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-b', expectedRevision: 2, assignedProjectId: 'project-1' },
+    expectedGraphRevision: 6,
+  })).toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: null, graphRevision: 7 })
+  expect(store.graph()).toMatchObject({ revision: 7, edgeCount: 2 })
+
+  expect(await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    expectedGraphRevision: 7,
+  })).toEqual({ previousParentWorkItemId: null, parentWorkItemId: 'phase-a', graphRevision: 8 })
+  expect(store.graph()).toMatchObject({ revision: 8, edgeCount: 4 })
+
+  expect(await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    expectedGraphRevision: 8,
+  })).toEqual({ previousParentWorkItemId: 'phase-a', parentWorkItemId: 'phase-a', graphRevision: 8 })
+  expect(store.transactions).toHaveLength(3)
+})
+
+test('returns success without writing when a lost-response retry finds the requested parent', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+  const input = {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+  }
+
+  expect(await client.replaceParent('workspace-1', 'core-team', input)).toMatchObject({
+    parentWorkItemId: 'phase-b',
+    graphRevision: 6,
+  })
+  expect(await client.replaceParent('workspace-1', 'core-team', input)).toMatchObject({
+    parentWorkItemId: 'phase-b',
+    graphRevision: 6,
+  })
+  expect(store.transactions).toHaveLength(1)
+})
+
+test('keeps unexplained parent replacement cancellations retryable', async () => {
+  const store = createInMemoryRelationStore({ cancelTransactions: true })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 1 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 1 },
+    expectedGraphRevision: 5,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 2 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 1 },
+    expectedGraphRevision: 5,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+})
+
+test('rejects a stale or cyclic parent replacement before writing', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase', 'parent')
+  store.seedRelation('phase', 'root', 'parent')
+  store.seedGraph(2, 4)
+  const client = store.createClient()
+
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 1 },
+    nextParent: { workItemId: 'root', expectedRevision: 1 },
+    expectedGraphRevision: 2,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'root', expectedRevision: 1 },
+    nextParent: { workItemId: 'task', expectedRevision: 1 },
+    expectedGraphRevision: 2,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationCycle', status: 409 })
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 1 },
+    currentParent: { workItemId: 'phase', expectedRevision: 1 },
+    nextParent: { workItemId: 'task', expectedRevision: 1 },
+    expectedGraphRevision: 2,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationSelf', status: 400 })
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 1 },
+    currentParent: { workItemId: 'phase', expectedRevision: 1 },
+    nextParent: { workItemId: 'root', expectedRevision: 1 },
+    expectedGraphRevision: 1,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+  expect(store.transactions).toHaveLength(0)
+})
+
+test('builds, reads, and re-parents a 5,000 link WBS by reading only endpoint neighbourhoods', async () => {
+  const store = createInMemoryRelationStore()
+  const client = store.createClient()
+  let graphRevision = 0
+  const link = async (child: string, parent: string) => {
+    const response = await client.createRelation('workspace-1', 'core-team', {
+      sourceWorkItemId: child,
+      targetWorkItemId: parent,
+      type: 'parent',
+      expectedGraphRevision: graphRevision,
+      sourceExpectedRevision: 1,
+      targetExpectedRevision: 1,
+    })
+    graphRevision = response.graphRevision
+  }
+  for (let phase = 0; phase < 20; phase += 1) {
+    await link(`phase-${phase}`, 'root')
+    for (let task = 0; task < 249; task += 1) {
+      await link(`task-${phase}-${task}`, `phase-${phase}`)
+    }
+  }
+
+  expect(store.graph()).toMatchObject({ revision: 5_000, edgeCount: 10_000 })
+  expect(store.maxRowsReadPerOperation).toBeLessThanOrEqual(3)
+  expect((await client.listRelations('workspace-1', 'core-team', 'root')).relations).toHaveLength(20)
+  expect((await client.listRelations('workspace-1', 'core-team', 'phase-3')).relations).toHaveLength(250)
+
+  store.resetReadCounters()
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task-3-10', expectedRevision: 1 },
+    currentParent: { workItemId: 'phase-3', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-4', expectedRevision: 1 },
+    expectedGraphRevision: graphRevision,
+  })
+  expect(store.rowsRead).toBeLessThanOrEqual(5)
+  expect((await client.listRelations('workspace-1', 'core-team', 'phase-4', {
+    types: ['child'],
+  })).relations).toHaveLength(250)
+  expect((await client.listRelationGraph('workspace-1', 'core-team')).relations).toHaveLength(10_000)
+}, 60_000)
 
 test('fails closed when the relation graph changes during a consistent snapshot', async () => {
   let guardRead = 0
@@ -1831,6 +2038,177 @@ test('classifies a canceled relation transaction when an endpoint disappeared', 
     status: 404,
   })
 })
+
+/** Relation rows and graph metadata held by the in-memory configuration table fake. */
+type InMemoryRelationStore = {
+  /** Committed TransactWrite inputs. */
+  transactions: Array<Record<string, unknown>>
+  /** Key prefixes of every attribute Query in call order. */
+  queryPrefixes: string[]
+  /** Number of COUNT queries issued. */
+  countQueries: number
+  /** Relation rows returned since the last reset. */
+  rowsRead: number
+  /** Largest number of relation rows read between two transactions. */
+  maxRowsReadPerOperation: number
+  /** Adds a reciprocal relation pair without a transaction. */
+  seedRelation(sourceWorkItemId: string, targetWorkItemId: string, type: string): void
+  /** Stores graph metadata; omitting the edge count simulates a legacy row. */
+  seedGraph(revision: number, edgeCount?: number): void
+  /** Returns the stored graph metadata row. */
+  graph(): Record<string, unknown> | undefined
+  /** Resets the row read counters. */
+  resetReadCounters(): void
+  /** Creates a configuration client backed by this fake. */
+  createClient(): DynamoDbWorkItemConfigurationClient
+}
+
+/**
+ * Creates an in-memory configuration table that understands relation key prefixes.
+ *
+ * @param options - Set `cancelTransactions` to make every TransactWrite fail as canceled.
+ *
+ * @returns The fake store and its counters.
+ */
+function createInMemoryRelationStore(
+  options: { cancelTransactions?: boolean } = {},
+): InMemoryRelationStore {
+  const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
+  const rows = new Map<string, Record<string, unknown>>()
+  const rowsBySource = new Map<string, Map<string, Record<string, unknown>>>()
+  const sourceOf = (recordKey: string) => recordKey.split('#')[1] ?? ''
+  const setRow = (recordKey: string, item: Record<string, unknown>) => {
+    rows.set(recordKey, item)
+    if (!recordKey.startsWith('REL#')) return
+    const sourceRows = rowsBySource.get(sourceOf(recordKey)) ?? new Map<string, Record<string, unknown>>()
+    sourceRows.set(recordKey, item)
+    rowsBySource.set(sourceOf(recordKey), sourceRows)
+  }
+  const deleteRow = (recordKey: string) => {
+    rows.delete(recordKey)
+    rowsBySource.get(sourceOf(recordKey))?.delete(recordKey)
+  }
+  let rowsSinceTransaction = 0
+  const store: InMemoryRelationStore = {
+    transactions: [],
+    queryPrefixes: [],
+    countQueries: 0,
+    rowsRead: 0,
+    maxRowsReadPerOperation: 0,
+    seedRelation(sourceWorkItemId, targetWorkItemId, type) {
+      const reciprocal: Record<string, string> = {
+        parent: 'child',
+        child: 'parent',
+        blocks: 'blockedBy',
+        blockedBy: 'blocks',
+        related: 'related',
+        duplicate: 'duplicate',
+      }
+      for (const item of [
+        relationItem(sourceWorkItemId, targetWorkItemId, type),
+        relationItem(targetWorkItemId, sourceWorkItemId, reciprocal[type] ?? type),
+      ]) {
+        setRow(item.recordKey, item)
+      }
+    },
+    seedGraph(revision, edgeCount) {
+      setRow('RELATION_GRAPH', {
+        scopeKey,
+        recordKey: 'RELATION_GRAPH',
+        entryType: 'relation-graph',
+        schemaVersion: 1,
+        revision,
+        ...(edgeCount === undefined ? {} : { edgeCount }),
+      })
+    },
+    graph() {
+      return rows.get('RELATION_GRAPH')
+    },
+    resetReadCounters() {
+      store.rowsRead = 0
+      store.maxRowsReadPerOperation = 0
+      rowsSinceTransaction = 0
+    },
+    createClient() {
+      const documentClient = {
+        async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+          const input = command.input
+          if (command.constructor.name === 'GetCommand') {
+            const key = input.Key as Record<string, string>
+            if (input.TableName !== 'configuration-table') {
+              return { Item: { revision: 1 } }
+            }
+            return key.recordKey ? { Item: rows.get(key.recordKey) } : {}
+          }
+          if (command.constructor.name === 'QueryCommand') {
+            const values = input.ExpressionAttributeValues as Record<string, string>
+            const prefix = values[':prefix'] ?? ''
+            const candidates = prefix === 'REL#'
+              ? rows
+              : rowsBySource.get(sourceOf(prefix)) ?? new Map<string, Record<string, unknown>>()
+            const items = [...candidates.entries()]
+              .filter(([recordKey]) => recordKey.startsWith(prefix))
+              .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+              .map(([, item]) => item)
+            if (input.Select === 'COUNT') {
+              store.countQueries += 1
+              return { Count: items.length }
+            }
+            store.queryPrefixes.push(prefix)
+            store.rowsRead += items.length
+            rowsSinceTransaction += items.length
+            return { Items: items }
+          }
+          if (command.constructor.name === 'TransactWriteCommand' && options.cancelTransactions) {
+            throw { name: 'TransactionCanceledException' }
+          }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            store.maxRowsReadPerOperation = Math.max(store.maxRowsReadPerOperation, rowsSinceTransaction)
+            rowsSinceTransaction = 0
+            store.transactions.push(input)
+            for (const item of input.TransactItems as Array<Record<string, Record<string, unknown>>>) {
+              if (item.Put?.TableName === 'configuration-table') {
+                const putItem = item.Put.Item as Record<string, unknown>
+                setRow(String(putItem.recordKey), putItem)
+              }
+              if (item.Delete?.TableName === 'configuration-table') {
+                const key = item.Delete.Key as Record<string, string>
+                deleteRow(String(key.recordKey))
+              }
+            }
+            return {}
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      return new DynamoDbWorkItemConfigurationClient(
+        'configuration-table',
+        'work-items-table',
+        documentClient,
+        {} as DynamoDBClient,
+      )
+    },
+  }
+  return store
+}
+
+/**
+ * Reads the `relationIds` written to each endpoint, or undefined for condition-only endpoints.
+ *
+ * @param transaction - TransactWrite input.
+ * @returns One entry per Work Item endpoint in transaction order.
+ */
+function readEndpointProjections(transaction: Record<string, unknown>) {
+  return (transaction.TransactItems as Array<Record<string, Record<string, unknown>>>)
+    .filter((item) =>
+      item.Update?.TableName === 'work-items-table' ||
+      item.ConditionCheck?.TableName === 'work-items-table'
+    )
+    .map((item) => {
+      const values = item.Update?.ExpressionAttributeValues as Record<string, unknown> | undefined
+      return values?.[':relationIds']
+    })
+}
 
 function createConfiguration(
   overrides: Partial<WorkItemConfiguration> = {},

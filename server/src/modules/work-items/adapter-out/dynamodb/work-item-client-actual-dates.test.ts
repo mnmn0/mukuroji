@@ -5,6 +5,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
+import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
 import { createMutationAuditContext } from '../../../audit/audit'
 import { ProjectDataError } from '../../../directory'
 import { DynamoDbTeamIssuesClient } from './work-item-client'
@@ -55,7 +56,10 @@ function createClient(stored: Record<string, unknown>) {
   }))
   Object.assign(documentClient, {
     async send(command: unknown) {
-      if (command instanceof GetCommand) return { Item: stored }
+      // Only the stored Work Item exists, so a new Work Item's ID is free.
+      if (command instanceof GetCommand) {
+        return { Item: command.input.Key?.issueId === stored.issueId ? stored : undefined }
+      }
       if (command instanceof TransactWriteCommand) transactions.push(command.input)
       return { Items: [] }
     },
@@ -63,7 +67,7 @@ function createClient(stored: Record<string, unknown>) {
   const client = new DynamoDbTeamIssuesClient(
     'IssuesTable',
     'IssueEventsTable',
-    documentClient,
+    withWorkItemKeyCounter(documentClient),
     new DynamoDBClient({ region: 'us-east-1' }),
     false,
     'AuditTable',

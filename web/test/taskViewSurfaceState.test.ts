@@ -22,6 +22,24 @@ import {
 import { taskViewStoryTasks } from '../src/tasks/ui/TaskView.stories.fixtures'
 
 describe('task-view surface adapters', () => {
+  test('sorts progress with the Team progress mode, matching the rendered percentages', () => {
+    const base = taskViewStoryTasks[0]
+    if (!base) throw new Error('Expected a story task.')
+    const started = { ...base, statusCategory: 'started', schedule: { ...base.schedule, plannedEffortMinutes: 600 } }
+    // Remaining effort shows 90% and 20%, while the stale manual values say 10% and 80%.
+    const nearlyDone = { ...started, id: 'nearly-done', remainingEffortMinutes: 60, progressPercent: 10 }
+    const justStarted = { ...started, id: 'just-started', remainingEffortMinutes: 480, progressPercent: 80 }
+    const definition = createBuiltInTaskViewDefinition('team', { kind: 'team', teamId: base.teamId }, 'table')
+    const byProgress = { ...definition, filters: {}, layout: { ...definition.layout, sort: [{ direction: 'desc' as const, field: 'progress' }] } }
+
+    expect(applyTaskViewDefinitionToTasks([justStarted, nearlyDone], byProgress, {
+      resolveProgressMode: () => 'remaining-effort',
+    }).map((task) => task.id)).toEqual(['nearly-done', 'just-started'])
+    expect(applyTaskViewDefinitionToTasks([nearlyDone, justStarted], byProgress, {
+      resolveProgressMode: () => 'manual',
+    }).map((task) => task.id)).toEqual(['just-started', 'nearly-done'])
+  })
+
   test('creates a complete and deterministic built-in definition per surface', () => {
     expect(createBuiltInTaskViewDefinition(
       'team',

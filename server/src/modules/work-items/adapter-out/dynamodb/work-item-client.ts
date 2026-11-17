@@ -48,6 +48,12 @@ import {
   type WorkItemActualDates,
 } from '../../domain/actual-dates'
 import {
+  allocateWorkItemKey,
+  createWorkItemKeyReservationPut,
+  readWorkItemKeyLocation,
+  type WorkItemKeyLocation,
+} from './work-item-key-registry'
+import {
   deriveWorkItemScheduleDueDate,
   normalizeWorkItemSchedule,
   workItemScheduleInstantToLocalDate,
@@ -76,9 +82,14 @@ import type {
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  isWorkItemEffortMinutes,
+  isWorkItemProgressPercent,
+  parseWorkItemKey,
   readSearchWorkItemTypeKey,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  WORK_ITEM_TITLE_MAX_LENGTH,
+  type ParsedWorkItemKey,
 } from '@mukuroji/contracts'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 import type {
@@ -102,6 +113,9 @@ import type {
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
+
+/** Keys tried for a new Work Item before giving up on IDs taken by older title-based IDs. */
+const CREATED_WORK_ITEM_ID_ATTEMPT_LIMIT = 5
 
 /**
  * Creates the Planning META update shared by canonical Work Item mutations.
@@ -506,6 +520,8 @@ type TeamIssueItem = {
    * チーム内の Issue ID です。
    */
   issueId: string
+  /** Immutable Workspace-unique key such as `ABC-123`; absent on Work Items created before keys. */
+  key?: string
   /**
    * 冪等作成時に payload 一致を検証する digest です。
    */
@@ -530,6 +546,10 @@ type TeamIssueItem = {
   contributorAssignments?: WorkItemContributorAssignment[]
   /** Acceptance criteria; absent when none. */
   acceptanceCriteria?: WorkItemAcceptanceCriterion[]
+  /** Recorded remaining effort in minutes; absent until recorded. */
+  remainingEffortMinutes?: number
+  /** Manually recorded progress percentage; absent until recorded. */
+  progressPercent?: number
   /**
    * Issue 作成者の Workspace member key です。
    */
@@ -912,6 +932,11 @@ export type CreateTeamIssueRequestBody = {
   authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Application layer が認可時に読み込んだ source-of-truth generations です。 */
   authorizationSnapshot?: WorkItemAuthorizationSnapshot
+  /**
+   * Proves at commit time that the assigned Project still accepts new Work Items, so a Project
+   * closed after the directory read cannot receive one.
+   */
+  newWorkItemProjectConditionCheck?: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
   /** Import worker または public API の冪等作成で固定する Work Item ID です。 */
   idempotentIssueId?: string
   /** 既存 row と同一 request か検証する SHA-256 digest です。 */
@@ -1042,6 +1067,10 @@ export type PublicUpdateTeamIssueRequestBody = {
   acceptanceCriteria?: unknown
   /** Complete replacement schedule shared by every task view. */
   schedule?: unknown
+  /** Recorded remaining effort in minutes; null clears it. */
+  remainingEffortMinutes?: unknown
+  /** Manually recorded progress percentage; null clears it. */
+  progressPercent?: unknown
   /**
    * 優先度です。
    */
@@ -1203,6 +1232,17 @@ export type TeamIssuesClient = {
     teamId: string,
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
+  /**
+   * Resolves a Work Item key to the Team and Work Item that hold it, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @param key - Untrusted key text.
+   * @returns The location, or `undefined` when the text is not a key or no Work Item holds it.
+   */
+  getWorkItemKeyLocation(
+    directoryId: string,
+    key: string,
+  ): Promise<WorkItemKeyLocation | undefined>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -1987,7 +2027,7 @@ export class DynamoDbTeamIssuesClient {
     await this.ensureLocalTables()
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
 
-    const title = readRequiredString(input.title, 'Issue title is required.')
+    const title = readWorkItemTitle(input.title)
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
     const contributorAssignments = input.contributorAssignments === undefined
@@ -2057,38 +2097,44 @@ export class DynamoDbTeamIssuesClient {
       ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
       : new Date().toISOString()
     const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const newWorkItemProjectConditionCheck = assignedProjectId
+      ? input.newWorkItemProjectConditionCheck
+      : undefined
+    // The Project fence also proves the Project is unarchived, so it replaces a caller's
+    // active-reference check on the same row; DynamoDB rejects two checks on one item.
+    const newWorkItemProjectRowKey = newWorkItemProjectConditionCheck
+      ? readConditionCheckRowKey({ kind: 'workspace-member', transactWriteItem: newWorkItemProjectConditionCheck })
+      : undefined
     const authorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    ).filter((entry) =>
+      newWorkItemProjectRowKey === undefined || readConditionCheckRowKey(entry) !== newWorkItemProjectRowKey
     )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
 
     try {
-      const currentIssues = await this.getTeamIssues(
-        directoryId,
-        teamId,
-        { includeArchived: true },
-      )
-      const existingSourceIssue = sourceRequestId
-        ? currentIssues.issues.find((issue) => issue.sourceRequestId === sourceRequestId)
+      const sourceRequestIssueId = sourceRequestId
+        ? createResourceId(`request-${sourceRequestId}`)
         : undefined
-
-      if (existingSourceIssue) {
-        return { issue: existingSourceIssue } satisfies CreateTeamIssueResponse
+      if (sourceRequestId && sourceRequestIssueId) {
+        const existingSourceIssue = await this.findTeamIssueItem(
+          directoryId,
+          teamId,
+          sourceRequestIssueId,
+        )
+        if (existingSourceIssue?.sourceRequestId === sourceRequestId) {
+          return { issue: toTeamIssueResponseItem(existingSourceIssue) } satisfies CreateTeamIssueResponse
+        }
       }
 
-      const issueId = idempotentIssueId ?? idempotencyResourceId ?? (
-        sourceRequestId
-          ? createUniqueResourceId(
-              `request-${sourceRequestId}`,
-              currentIssues.issues.map((issue) => issue.id),
-            )
-          : createUniqueResourceId(
-              title,
-              currentIssues.issues.map((issue) => issue.id),
-            )
+      const { issueId, key } = await this.allocateCreatedWorkItemIdentity(
+        directoryId,
+        teamId,
+        idempotentIssueId ?? idempotencyResourceId ?? sourceRequestIssueId,
+        now,
       )
       const item: TeamIssueItem = {
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -2097,8 +2143,9 @@ export class DynamoDbTeamIssuesClient {
         directoryTeamId,
         teamId,
         issueId,
+        ...(key ? { key: key.key } : {}),
         ...(idempotentRequestDigest ? { importRequestDigest: idempotentRequestDigest } : {}),
-        sortOrder: (currentIssues.issues.length + 1) * 10,
+        sortOrder: await this.readNextTeamIssueSortOrder(directoryId, teamId),
         title,
         assigneeUserId,
         creatorMemberKey: actorUserId,
@@ -2159,6 +2206,7 @@ export class DynamoDbTeamIssuesClient {
         occurredAt: now,
         summary: 'Work Item was created and assigned.',
         changes: createAuditFieldChanges(undefined, item, [
+          'key',
           'title',
           'description',
           'assignedProjectId',
@@ -2213,7 +2261,12 @@ export class DynamoDbTeamIssuesClient {
               Put: {
                 TableName: this.issueTableName,
                 Item: item,
-                ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+                // A retry that found its Work Item allocated no key, so it must never insert: if
+                // the Work Item was deleted since, inserting would leave a keyless replacement.
+                // The always-false condition sends it down the replay path below instead.
+                ConditionExpression: key
+                  ? 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)'
+                  : 'attribute_exists(issueId) AND attribute_not_exists(issueId)',
               },
             },
             {
@@ -2226,9 +2279,19 @@ export class DynamoDbTeamIssuesClient {
             ...(auditPut ? [auditPut] : []),
             ...configurationConditionChecks,
             ...authorizationConditionChecks,
+            ...(newWorkItemProjectConditionCheck ? [newWorkItemProjectConditionCheck] : []),
             ...requestConversionItems,
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
             ...(triageAcceptance?.transactItems ?? []),
+            // Last, so the indexes callers use to classify cancellations stay unchanged.
+            ...(key
+              ? [createWorkItemKeyReservationPut(
+                  this.issueTableName,
+                  directoryId,
+                  { key: key.key, teamId, workItemId: issueId },
+                  now,
+                )]
+              : []),
           ],
         }),
       )
@@ -2248,6 +2311,20 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      if (
+        newWorkItemProjectConditionCheck &&
+        !isTransactionConditionalFailureAt(error, 0) &&
+        isTransactionConditionalFailureAt(
+          error,
+          authorizationConditionStartIndex + authorizationConditionEntries.length,
+        )
+      ) {
+        throw new ProjectDataError(
+          409,
+          'ProjectClosedForNewWorkItems',
+          'The assigned Project no longer accepts new Work Items.',
+        )
+      }
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
@@ -2280,16 +2357,13 @@ export class DynamoDbTeamIssuesClient {
           }
         }
         if (sourceRequestId) {
-          const currentIssues = await this.getTeamIssues(
+          const existingSourceIssue = await this.findTeamIssueItem(
             directoryId,
             teamId,
-            { includeArchived: true },
+            createResourceId(`request-${sourceRequestId}`),
           )
-          const existingSourceIssue = currentIssues.issues.find(
-            (issue) => issue.sourceRequestId === sourceRequestId,
-          )
-          if (existingSourceIssue) {
-            return { issue: existingSourceIssue } satisfies CreateTeamIssueResponse
+          if (existingSourceIssue?.sourceRequestId === sourceRequestId) {
+            return { issue: toTeamIssueResponseItem(existingSourceIssue) } satisfies CreateTeamIssueResponse
           }
         }
         if (idempotencyResourceId) {
@@ -2687,7 +2761,7 @@ export class DynamoDbTeamIssuesClient {
 
     if ('title' in input) {
       expressionAttributeNames['#title'] = 'title'
-      expressionAttributeValues[':title'] = readRequiredString(input.title, 'Issue title is required.')
+      expressionAttributeValues[':title'] = readWorkItemTitle(input.title)
       setExpressions.push('#title = :title')
     }
 
@@ -2744,6 +2818,28 @@ export class DynamoDbTeamIssuesClient {
       } else {
         expressionAttributeValues[':acceptanceCriteria'] = readNormalizedAcceptanceCriteria(input.acceptanceCriteria)
         setExpressions.push('#acceptanceCriteria = :acceptanceCriteria')
+      }
+    }
+
+    if ('remainingEffortMinutes' in input) {
+      const remainingEffortMinutes = readOptionalEffortMinutes(input.remainingEffortMinutes)
+      expressionAttributeNames['#remainingEffortMinutes'] = 'remainingEffortMinutes'
+      if (remainingEffortMinutes === undefined) {
+        removeExpressions.push('#remainingEffortMinutes')
+      } else {
+        expressionAttributeValues[':remainingEffortMinutes'] = remainingEffortMinutes
+        setExpressions.push('#remainingEffortMinutes = :remainingEffortMinutes')
+      }
+    }
+
+    if ('progressPercent' in input) {
+      const progressPercent = readOptionalProgressPercent(input.progressPercent)
+      expressionAttributeNames['#progressPercent'] = 'progressPercent'
+      if (progressPercent === undefined) {
+        removeExpressions.push('#progressPercent')
+      } else {
+        expressionAttributeValues[':progressPercent'] = progressPercent
+        setExpressions.push('#progressPercent = :progressPercent')
       }
     }
 
@@ -2955,6 +3051,8 @@ export class DynamoDbTeamIssuesClient {
           'customFieldValues',
           'dueDate',
           'schedule',
+          'remainingEffortMinutes',
+          'progressPercent',
           'priority',
           'actualStartDate',
           'actualEndDate',
@@ -3273,6 +3371,134 @@ export class DynamoDbTeamIssuesClient {
       throw toProjectDataError(error)
     }
   }
+
+  /**
+   * Resolves a Work Item key to the Team and Work Item that hold it.
+   *
+   * The caller must still authorize the returned Team and the Work Item's Project before it
+   * reveals anything about the Work Item.
+   *
+   * @param directoryId - Workspace ID.
+   * @param key - Untrusted key text; lowercase is accepted.
+   * @returns The key location, or `undefined` when the text is not a key or no Work Item holds it.
+   */
+  async getWorkItemKeyLocation(
+    directoryId: string,
+    key: string,
+  ): Promise<WorkItemKeyLocation | undefined> {
+    await this.ensureLocalTables()
+    const parsed = parseWorkItemKey(key)
+    if (!parsed) return undefined
+    try {
+      return await readWorkItemKeyLocation(
+        this.documentClient,
+        this.issueTableName,
+        directoryId,
+        parsed.key,
+      )
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads one Work Item row with a strongly consistent read.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param issueId - Work Item ID.
+   * @returns The canonical row, or `undefined` when it does not exist.
+   */
+  private async findTeamIssueItem(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+  ): Promise<TeamIssueItem | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.issueTableName,
+      Key: { directoryTeamId: createDirectoryTeamId(directoryId, teamId), issueId },
+      ConsistentRead: true,
+    }))
+    return response.Item === undefined ? undefined : toTeamIssueItem(response.Item)
+  }
+
+  /**
+   * Allocates the key of a new Work Item and picks its ID.
+   *
+   * A caller-chosen ID (idempotent import, API, Triage, or Request conversion) is kept. When a
+   * Work Item already has that ID, the create is a retry: no key is allocated, so retries do not
+   * use up numbers, and the create transaction is sent with a condition that never inserts, so it
+   * replays as before even when the Work Item is deleted between this read and the transaction. Otherwise the ID is the lowercase key, and a number whose ID an older title-based
+   * Work Item already uses is skipped.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param fixedIssueId - Caller-chosen Work Item ID, if any.
+   * @param now - ISO 8601 instant of the create.
+   * @returns The Work Item ID and its key; no key for the retry of an existing Work Item.
+   */
+  private async allocateCreatedWorkItemIdentity(
+    directoryId: string,
+    teamId: string,
+    fixedIssueId: string | undefined,
+    now: string,
+  ): Promise<{ issueId: string; key?: ParsedWorkItemKey }> {
+    if (
+      fixedIssueId !== undefined &&
+      await this.findTeamIssueItem(directoryId, teamId, fixedIssueId)
+    ) {
+      return { issueId: fixedIssueId }
+    }
+    for (let attempt = 0; attempt < CREATED_WORK_ITEM_ID_ATTEMPT_LIMIT; attempt += 1) {
+      const key = await allocateWorkItemKey(
+        this.documentClient,
+        this.issueTableName,
+        directoryId,
+        teamId,
+        now,
+      )
+      if (fixedIssueId !== undefined) return { issueId: fixedIssueId, key }
+      const issueId = key.key.toLowerCase()
+      if (!await this.findTeamIssueItem(directoryId, teamId, issueId)) return { issueId, key }
+    }
+    throw new ProjectDataError(
+      503,
+      'WorkItemKeyAllocationUnavailable',
+      'A Work Item key could not be allocated. Retry the request.',
+    )
+  }
+
+  /**
+   * Picks the sort order that places a new Work Item after every existing one in its Team.
+   *
+   * Reads only the highest entry of the sort-order index instead of the whole Team. The index is
+   * eventually consistent, so two creates in quick succession can share a sort order; list reads
+   * already break such ties by Work Item ID.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns Ten more than the current highest sort order, or 10 for an empty Team.
+   */
+  private async readNextTeamIssueSortOrder(directoryId: string, teamId: string): Promise<number> {
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.issueTableName,
+      IndexName: 'TeamIssueSortOrderIndex',
+      KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+      ExpressionAttributeValues: {
+        ':directoryTeamId': createDirectoryTeamId(directoryId, teamId),
+      },
+      ScanIndexForward: false,
+      Limit: 1,
+    }))
+    const highest: unknown = response.Items?.[0]?.sortOrder
+    if (highest === undefined) return 10
+    if (typeof highest !== 'number' || !Number.isFinite(highest)) {
+      throw new ProjectDataError(503, 'InvalidTeamIssue', 'Team issue item is missing or invalid.')
+    }
+    return (Math.floor(highest / 10) + 1) * 10
+  }
+
   private async getRequiredTeamIssueItem(
     directoryId: string,
     teamId: string,
@@ -4062,6 +4288,7 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     schemaVersion: item.schemaVersion,
     revision: item.revision,
     id: item.issueId,
+    ...(item.key === undefined ? {} : { key: item.key }),
     teamId: item.teamId,
     title: item.title,
     assigneeUserId: item.assigneeUserId,
@@ -4104,6 +4331,14 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
 
   if (item.acceptanceCriteria && item.acceptanceCriteria.length > 0) {
     issue.acceptanceCriteria = item.acceptanceCriteria
+  }
+
+  if (item.remainingEffortMinutes !== undefined) {
+    issue.remainingEffortMinutes = item.remainingEffortMinutes
+  }
+
+  if (item.progressPercent !== undefined) {
+    issue.progressPercent = item.progressPercent
   }
 
   if (item.archivedAt) {
@@ -4835,6 +5070,34 @@ function readNormalizedContributorAssignments(value: unknown): WorkItemContribut
 }
 
 /**
+ * Reads an optional effort amount for a Work Item update.
+ *
+ * @param value - Candidate minutes, or null to clear the stored value.
+ * @returns The minutes, or `undefined` when the value is cleared.
+ */
+function readOptionalEffortMinutes(value: unknown): number | undefined {
+  if (value === null) return undefined
+  if (!isWorkItemEffortMinutes(value)) {
+    throw new ProjectDataError(400, 'InvalidWorkItemEffort', 'Remaining effort minutes must be a nonnegative integer.')
+  }
+  return value
+}
+
+/**
+ * Reads an optional manually recorded progress percentage for a Work Item update.
+ *
+ * @param value - Candidate percentage, or null to clear the stored value.
+ * @returns The percentage, or `undefined` when the value is cleared.
+ */
+function readOptionalProgressPercent(value: unknown): number | undefined {
+  if (value === null) return undefined
+  if (!isWorkItemProgressPercent(value)) {
+    throw new ProjectDataError(400, 'InvalidWorkItemProgress', 'Progress percent must be an integer from 0 to 100.')
+  }
+  return value
+}
+
+/**
  * Reads a non-empty acceptance criteria list that the API handler has already normalized.
  *
  * The adapter re-checks the stored shape so an unvalidated caller cannot persist a malformed list.
@@ -4863,21 +5126,23 @@ export function readRequiredCommentBody(value: unknown) {
   return value.trim()
 }
 
-function createUniqueResourceId(value: string, existingIds: Iterable<string>) {
-  const baseId = createResourceId(value)
-  const usedIds = new Set(existingIds)
-
-  if (!usedIds.has(baseId)) {
-    return baseId
+/**
+ * Reads and bounds a Work Item title.
+ *
+ * @param value - Untrusted title.
+ * @returns The trimmed title.
+ * @throws ProjectDataError when the title is empty or longer than the limit.
+ */
+function readWorkItemTitle(value: unknown): string {
+  const title = readRequiredString(value, 'Issue title is required.')
+  if ([...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
+    throw new ProjectDataError(
+      400,
+      'WorkItemTitleTooLong',
+      `Work Item title must be at most ${WORK_ITEM_TITLE_MAX_LENGTH} characters.`,
+    )
   }
-
-  let suffix = 2
-
-  while (usedIds.has(`${baseId}-${suffix}`)) {
-    suffix += 1
-  }
-
-  return `${baseId}-${suffix}`
+  return title
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

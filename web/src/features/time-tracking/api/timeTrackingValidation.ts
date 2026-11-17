@@ -4,7 +4,6 @@ import type {
   TimeEntryHistory,
   TimeEntrySource,
   TimeEntryStatus,
-  TimeEstimate,
   TimeSheet,
   TimeSummaryGroup,
 } from '@mukuroji/contracts'
@@ -135,26 +134,6 @@ export function readRunningTimer(value: unknown): RunningTimer | undefined {
     revision,
     updatedAt,
   }
-}
-
-/**
- * Validates a Work Item estimate from the API.
- *
- * @param value - Unknown JSON value.
- * @returns The estimate, or undefined when the shape is invalid.
- */
-export function readTimeEstimate(value: unknown): TimeEstimate | undefined {
-  if (!isRecord(value)) return undefined
-  const { schemaVersion, workspaceId, teamId, workItemId, estimateMinutes, revision, updatedBy, updatedAt } = value
-  if (
-    schemaVersion !== 1 ||
-    typeof workspaceId !== 'string' || typeof teamId !== 'string' || typeof workItemId !== 'string' ||
-    !isNonnegativeSafeInteger(estimateMinutes) || !isNonnegativeSafeInteger(revision) ||
-    typeof updatedBy !== 'string' || typeof updatedAt !== 'string'
-  ) {
-    return undefined
-  }
-  return { schemaVersion, workspaceId, teamId, workItemId, estimateMinutes, revision, updatedBy, updatedAt }
 }
 
 /**

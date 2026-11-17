@@ -1,4 +1,4 @@
-import { type EnterprisePermissionId } from '@mukuroji/contracts'
+import { type EnterprisePermissionId, type ProjectCharter } from '@mukuroji/contracts'
 import {
   projectRoleWeights,
   type ProjectDirectoryProjectResponse,
@@ -15,7 +15,10 @@ import {
   evaluateEnterpriseAccess,
   type EnterpriseAuthorizationResource,
 } from '../../modules/enterprise-identity'
-import { createWorkItemRelationIds } from '../../modules/work-items/work-item-configuration'
+import {
+  createWorkItemRelationIds,
+  WORK_ITEM_PROJECTED_RELATION_TYPES,
+} from '../../modules/work-items/work-item-configuration'
 import { DocumentError, type DocumentProjectRole } from '../../modules/documents'
 import {
   ambientAutomationActionExecutorDependencies,
@@ -264,6 +267,8 @@ export function createCommentSearchDocument(
  * @param project - Project directory entry.
  * @param creatorUserId - User who created the Project.
  * @param subtitle - Search result subtitle.
+ * @param charter - Optional Project charter indexed as searchable body text.
+ * @param sourceRevision - Charter revision the document reflects, when written after a charter change.
  * @returns The Project search document.
  */
 export function createProjectSearchDocument(
@@ -272,6 +277,8 @@ export function createProjectSearchDocument(
   project: ProjectDirectoryProjectResponse,
   creatorUserId?: string,
   subtitle?: string,
+  charter?: ProjectCharter,
+  sourceRevision?: number,
 ) {
   return createProjectWorkspaceSearchDocument({
     workspaceId,
@@ -279,7 +286,9 @@ export function createProjectSearchDocument(
     projectId: project.id,
     title: project.name,
     ...(subtitle ? { subtitle } : {}),
+    ...(charter ? { charter } : {}),
     ...(creatorUserId ? { creatorUserId } : {}),
+    ...(sourceRevision === undefined ? {} : { sourceRevision }),
   })
 }
 
@@ -308,6 +317,7 @@ export async function projectWorkItemSearchDocumentBestEffort(
         workspaceId,
         issue.teamId,
         issue.id,
+        { types: WORK_ITEM_PROJECTED_RELATION_TYPES },
       )).relations,
       issue.id,
     )

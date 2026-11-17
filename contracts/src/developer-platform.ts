@@ -1551,10 +1551,13 @@ export type DeletePublicWorkItemRequest = {
  * Public API が返す Work Item です。
  *
  * Contributors are managed only through the Workspace API, so public responses never
- * contain `contributorAssignments`. Acceptance criteria are read from their own endpoint because
- * the public Work Item schema is closed.
+ * contain `contributorAssignments`. Acceptance criteria, remaining effort, and progress are read
+ * from their own endpoints because the public Work Item schema is closed.
  */
-export type PublicWorkItem = Omit<CanonicalWorkItem, 'contributorAssignments' | 'acceptanceCriteria'>
+export type PublicWorkItem = Omit<
+  CanonicalWorkItem,
+  'contributorAssignments' | 'acceptanceCriteria' | 'remainingEffortMinutes' | 'progressPercent'
+>
 
 /**
  * Public Work Item list endpoint の cursor page です。

@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
+import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
@@ -75,6 +76,10 @@ export function SettingsPage() {
           )}
           configurationSections={workspace.accessToken ? (
             <>
+              <AccountSecurityPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+              />
               {aiAssistanceUiEnabled ? (
                 <AiAssistanceSettingsPanelContainer
                   accessToken={workspace.accessToken}

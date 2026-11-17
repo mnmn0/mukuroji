@@ -48,6 +48,7 @@ import {
   getVerifiedEnterpriseAuthenticationMethods,
   hasUnqualifiedEnterpriseProjectScope,
   isEnterpriseSsoConfigured,
+  isEnterpriseExternalMember,
   normalizeEnterpriseEmailDomain,
   qualifyEnterpriseProjectScopes,
   readCognitoAuthenticationMethods,
@@ -285,6 +286,11 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'POST',
     pathPattern: '/api/planning/entities/:entityId/archive',
+    permission: 'planning.manage',
+  },
+  {
+    method: 'POST',
+    pathPattern: '/api/planning/entities/:entityId/restore',
     permission: 'planning.manage',
   },
   {
@@ -532,6 +538,21 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.manage',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
+    permission: 'projects.manage',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/lifecycle',
+    permission: 'projects.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',
     permission: 'projects.write',
@@ -592,6 +613,13 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/push-subscriptions',
+    permission: 'workspace.read',
+  },
+  // Removing one's own authenticator is self-service; the route still checks the MFA policy
+  // and a recent sign-in.
+  {
+    method: 'DELETE',
+    pathPattern: '/api/auth/mfa/totp',
     permission: 'workspace.read',
   },
   {
@@ -721,14 +749,7 @@ export async function authenticateWorkspacePrincipal(
       'Workspace access was deprovisioned by the enterprise directory.',
     )
   }
-  const memberDomain = normalizeEnterpriseEmailDomain(workspaceMember.email)
-  const verifiedDomains = snapshot.domains.filter((domain) =>
-    domain.status === 'verified'
-  )
-  const managedDomain = verifiedDomains.length === 0 || verifiedDomains.some((domain) =>
-    domain.domain === memberDomain
-  )
-  const external = workspaceMember.role === 'guest' || !managedDomain
+  const external = isEnterpriseExternalMember(snapshot, workspaceMember)
   requireEnterpriseExternalAccessAllowed(
     snapshot,
     workspaceMember.email,
@@ -1561,6 +1582,15 @@ async function resolveEnterpriseAuthorizationResource(
       const authorizationState = await workItemDependencies.planning.getAuthorizationState(workspaceId)
       const entity = authorizationState.entities.find((candidate) =>
         candidate.id === decodePathSegment(entityId)
+      ) ?? (
+        // A restore targets an entity that left the live graph; its archived scope is the resource.
+        // A failed lookup falls back to the Workspace resource, which only narrows access.
+        /\/planning\/entities\/[^/]+\/restore$/u.test(path)
+          ? await workItemDependencies.planning.getArchivedEntity(
+              workspaceId,
+              decodePathSegment(entityId),
+            ).catch(() => undefined)
+          : undefined
       )
       if (entity?.projectId) {
         return {
@@ -1624,9 +1654,17 @@ async function resolveEnterpriseAuthorizationResource(
         .filter((team) => team.projects.some((project) => project.id === decodedProjectId))
         .map((team) => team.id),
     )
-    const parentTeamId = ownerTeamIds.size === 1
-      ? ownerTeamIds.values().next().value
-      : undefined
+    // A Team-qualified path names the owner directly, which also tells apart two Teams that use
+    // the same Project ID. The route reads the Project under that Team, so the qualifier stays
+    // authoritative even when the directory lists the Project only under another Team (for
+    // example, when the qualified Team's Project is archived); a grant on the other Team's
+    // Project then never covers it.
+    const qualifiedTeamId = path?.match(/\/teams\/([^/]+)\/projects\/[^/]+/u)?.[1]
+    const parentTeamId = qualifiedTeamId
+      ? decodePathSegment(qualifiedTeamId)
+      : ownerTeamIds.size === 1
+        ? ownerTeamIds.values().next().value
+        : undefined
     return {
       workspaceId,
       kind: 'project' as const,

@@ -13,38 +13,6 @@ export const publicMessages = {
   'public.backToLogin': 'Back to login',
   'public.copy.copied': 'Copied',
   'public.copy.error': 'Automatic copy failed. Select and copy the displayed text instead.',
-  'public.forgot.eyebrow': 'Account recovery',
-  'public.forgot.title': 'Find a safe path back in',
-  'public.forgot.intro':
-    'Password-reset email delivery is not connected in mukuroji yet. This page prepares the minimum information for your organization admin or official support channel without revealing whether an account exists.',
-  'public.forgot.step.admin.title': 'Confirm the official contact',
-  'public.forgot.step.admin.description':
-    'Use the workspace admin or support channel listed in your internal portal, onboarding guide, or agreement.',
-  'public.forgot.step.context.title': 'Share only useful context',
-  'public.forgot.step.context.description':
-    'Your login email, workspace name, and last successful access time help the team investigate quickly.',
-  'public.forgot.step.safe.title': 'Keep secrets out of the message',
-  'public.forgot.step.safe.description':
-    'Never share a password, verification code, access token, or a full-screen capture containing private data.',
-  'public.forgot.localOnly': 'Handled in this browser',
-  'public.forgot.form.title': 'Prepare a recovery request',
-  'public.forgot.form.description':
-    'Your entry is not sent to a server. It is used only to prepare a note for your admin.',
-  'public.forgot.email': 'Login email address',
-  'public.forgot.emailPlaceholder': 'name@example.com',
-  'public.forgot.emailHelp': 'This page does not check whether an account is registered.',
-  'public.forgot.emailError': 'Enter a valid email address.',
-  'public.forgot.reviewAction': 'Review recovery steps',
-  'public.forgot.noSend.title': 'No reset email will be sent',
-  'public.forgot.noSend.description':
-    'We will not pretend a request was submitted. Continue to the guidance below and use an official contact path.',
-  'public.forgot.guidance.title': 'Message for your administrator',
-  'public.forgot.guidance.description':
-    'Copy the note below and send it through the channel designated by your organization.',
-  'public.forgot.requestTemplate':
-    'I need help recovering my mukuroji account.\nLogin email: {email}\nWorkspace name: \nLast successful access: \nMessage shown: \n\nI have not included a password, verification code, or access token.',
-  'public.forgot.copyAction': 'Copy recovery note',
-  'public.forgot.supportAction': 'View support guidance',
   'public.legal.updatedLabel': 'Draft updated',
   'public.legal.draftTitle': 'Draft pending legal and security review',
   'public.legal.draftDescription':

@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 import {
+  isWorkItemProgressPercent,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -8,6 +9,8 @@ import {
   type AgentContext,
   type PublicAgentSettings,
   type PublicWorkItemAcceptanceCriteria,
+  type PublicWorkItemEffort,
+  type PublicWorkItemKey,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -255,6 +258,30 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<PublicWorkItemAcceptanceCriteria>
+  /**
+   * Reads the estimate, remaining effort, and recorded progress of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The values with the Work Item revision they were read at.
+   */
+  getEffort(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemEffort>
+  /**
+   * Reads the short immutable key of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The key, which is absent on Work Items created before keys existed.
+   */
+  getKey(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemKey>
   /**
    * Returns active Work Item Types and creation field schemas after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -958,6 +985,24 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items/:workItemId/acceptance-criteria', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.getAcceptanceCriteria(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/effort', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getEffort(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/key', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getKey(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
@@ -3297,6 +3342,8 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'typeChangeResolution',
     'acceptanceCriteria',
     'acceptanceCriteriaMarks',
+    'remainingEffortMinutes',
+    'progressPercent',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
@@ -3327,6 +3374,14 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   if ('priority' in body) result.priority = readPriority(body.priority)
   if ('acceptanceCriteria' in body) result.acceptanceCriteria = readPublicAcceptanceCriteria(body.acceptanceCriteria)
   if ('acceptanceCriteriaMarks' in body) result.acceptanceCriteriaMarks = readPublicAcceptanceCriteriaMarks(body.acceptanceCriteriaMarks)
+  if ('remainingEffortMinutes' in body) {
+    result.remainingEffortMinutes = body.remainingEffortMinutes === null
+      ? null
+      : readRequiredNonNegativeInteger(body.remainingEffortMinutes, 'remainingEffortMinutes')
+  }
+  if ('progressPercent' in body) {
+    result.progressPercent = body.progressPercent === null ? null : readProgressPercent(body.progressPercent)
+  }
   if (Object.keys(result).length === 1) {
     throw new PublicApiServiceError(
       400,
@@ -4040,6 +4095,34 @@ function readPublicWorkItemScheduleWeekday(value: unknown): WorkItemScheduleWeek
 }
 
 /** Reads an optional non-negative integer from a public request. */
+/**
+ * Reads a required non-negative safe integer.
+ *
+ * @param value - Untrusted value.
+ * @param label - Field name used in the validation message.
+ * @returns The integer.
+ */
+function readRequiredNonNegativeInteger(value: unknown, label: string): number {
+  const result = readOptionalNonNegativeInteger(value, label)
+  if (result === undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} must be a non-negative integer.`)
+  }
+  return result
+}
+
+/**
+ * Reads a manually recorded progress percentage.
+ *
+ * @param value - Untrusted value.
+ * @returns An integer from 0 to 100.
+ */
+function readProgressPercent(value: unknown): number {
+  if (!isWorkItemProgressPercent(value)) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'progressPercent must be an integer from 0 to 100.')
+  }
+  return value
+}
+
 function readOptionalNonNegativeInteger(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {

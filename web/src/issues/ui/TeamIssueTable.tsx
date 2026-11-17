@@ -34,6 +34,8 @@ import {
 } from '../model/teamIssueDisplay'
 import { IssueCustomFieldSummary, IssuePriorityBadge, IssueStatusBadge } from './TeamIssueBadges'
 import { type TeamIssueActionMenuOpenHandler } from './teamIssueScreenShared'
+import { WORK_ITEM_EFFORT_COLUMN_FIELDS } from '../../work-items/model/workItemEffort'
+import { WorkItemEffortCell } from '../../work-items/ui/WorkItemEffortCells'
 
 /**
  * Renders the Team Work Items as a grouped, keyboard-navigable table.
@@ -203,6 +205,14 @@ export function IssueTable({
                     onClick={() => onOpenIssue?.(issue)}
                     type="button"
                   >
+                    {issue.key ? (
+                      <span
+                        className="mr-2 font-mono text-xs font-semibold text-[var(--workbench-muted)]"
+                        data-testid={`issue-row-key-${issue.id}`}
+                      >
+                        {issue.key}
+                      </span>
+                    ) : null}
                     {resolveIssueTitle(issue, t)}
                   </button>
                   {onIssueActionMenuOpen ? (
@@ -285,6 +295,13 @@ export function IssueTable({
             case 'team': return (
               <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
                 {issue.teamId}
+              </td>
+            )
+            case 'estimate':
+            case 'remainingEffort':
+            case 'progress': return (
+              <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
+                <WorkItemEffortCell configuration={configuration} field={field} hoursLabel={t('workItems.effort.hours')} item={issue} />
               </td>
             )
             default: {
@@ -428,6 +445,7 @@ function isSupportedTeamIssueColumn(field: string): boolean {
     'priority',
     'workItemType',
     'team',
+    ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
   ].includes(field) || field.startsWith('custom:')
 }
 
@@ -447,6 +465,9 @@ function resolveIssueTableColumnLabel(
     case 'priority': return t('tasks.column.priority')
     case 'workItemType': return t('tasks.column.workItemType')
     case 'team': return t('workspace.column.team')
+    case 'estimate': return t('tasks.column.estimate')
+    case 'remainingEffort': return t('tasks.column.remainingEffort')
+    case 'progress': return t('tasks.column.progress')
     default: {
       const customFieldId = field.slice('custom:'.length)
       return configuration?.customFields.find((item) => item.id === customFieldId)?.name ??

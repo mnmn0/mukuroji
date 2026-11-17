@@ -97,6 +97,8 @@ export type TaskViewToolbarProps = {
   errorMessage?: string
   /** Grouping choices supported by the current surface. */
   groupOptions: readonly TaskViewFieldOption[]
+  /** Sorting choices supported by the current surface; the grouping choices apply when omitted. */
+  sortOptions?: readonly TaskViewFieldOption[]
   /** Column identifiers that the current layout requires to remain visible. */
   requiredColumnIds?: readonly string[]
   /** Whether the current surface can render the child Work Item toggle. */
@@ -162,6 +164,7 @@ export function TaskViewToolbar({
   columnOptions,
   errorMessage,
   groupOptions,
+  sortOptions = groupOptions,
   requiredColumnIds = ['title'],
   supportsSubtasks = false,
   supportsLayoutPresentation = true,
@@ -444,6 +447,7 @@ export function TaskViewToolbar({
           columnOptions={columnOptions}
           groupOptions={groupOptions}
           onChange={onSettingsChange}
+          sortOptions={sortOptions}
           requiredColumnIds={requiredColumnIds}
           settings={settings}
           supportsColumnLayoutMetadata={supportsColumnLayoutMetadata}
@@ -654,6 +658,8 @@ export type TaskViewSettingsPanelProps = {
   columnOptions: readonly TaskViewFieldOption[]
   /** Grouping choices supported by the current surface. */
   groupOptions: readonly TaskViewFieldOption[]
+  /** Sorting choices supported by the current surface; the grouping choices apply when omitted. */
+  sortOptions?: readonly TaskViewFieldOption[]
   /** Applies a complete next presentation state. */
   onChange: (settings: TaskViewPresentationSettings) => void
   /** Columns that cannot be hidden in the current layout. */
@@ -685,6 +691,7 @@ export function TaskViewSettingsPanel({
   supportsEmptyGroups,
   supportsKeyboardSelection,
   supportsLayoutPresentation,
+  sortOptions = groupOptions,
   supportsSubtasks,
   t,
 }: TaskViewSettingsPanelProps) {
@@ -694,7 +701,7 @@ export function TaskViewSettingsPanel({
   const addSortButtonRef = useRef<HTMLButtonElement>(null)
   const pendingSortFocusRef = useRef<number | 'add' | `field:${number}` | undefined>(undefined)
   const [sortFocusRequestId, setSortFocusRequestId] = useState(0)
-  const nextSortOption = groupOptions.find(
+  const nextSortOption = sortOptions.find(
     (option) => !sortRules.some((sort) => sort.field === option.id),
   )
   useEffect(() => {
@@ -820,7 +827,7 @@ export function TaskViewSettingsPanel({
         <legend className="text-xs font-semibold text-[var(--workbench-muted)]">{t('taskViews.sort')}</legend>
         <div className="grid gap-2">
           {sortRules.map((sort, index) => {
-            const availableOptions = groupOptions.filter((option) =>
+            const availableOptions = sortOptions.filter((option) =>
               option.id === sort.field || !sortRules.some((rule) => rule.field === option.id)
             )
             const position = String(index + 1)

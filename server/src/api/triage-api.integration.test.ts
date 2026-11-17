@@ -5,6 +5,7 @@ import {
   TRIAGE_CONFIGURATION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  WORK_ITEM_TITLE_MAX_LENGTH,
   createDefaultUnscheduledWorkItemSchedule,
   type EnterpriseCustomRoleId,
   type RequestSubmission,
@@ -1320,6 +1321,50 @@ describe('Team Triage API composition', () => {
       schedule: { mode: 'due-date', dueDate: '2026-08-12' },
       priority: 'high',
     })
+  })
+
+  test('accept-create shortens a Triage title that is longer than a Work Item title', async () => {
+    const longTitle = `${'界'.repeat(300)}🙂`
+    const longEntry = createEntry({
+      sourcePreview: { ...createEntry().sourcePreview, title: longTitle },
+    })
+    let createdTitle: string | undefined
+    configureFakeProjectClients(true, {
+      role: 'member',
+      workspaceRole: 'member',
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+    })
+    setTestAppDependencies({
+      triage: createTriageClient(longEntry),
+      teamIssues: createTeamIssuesFake({
+        async createTeamIssue(
+          _workspaceId,
+          _teamId,
+          input,
+          _actorUserId,
+          _auditContext,
+          _requestConversion,
+          triageAcceptance,
+        ) {
+          createdTitle = typeof input.title === 'string' ? input.title : undefined
+          if (!triageAcceptance || typeof input.idempotentIssueId !== 'string') {
+            throw new Error('Triage acceptance omitted its atomic contribution.')
+          }
+          return {
+            issue: createAcceptedWorkItem(input.idempotentIssueId, triageAcceptance.entryId),
+          }
+        },
+      }),
+    })
+
+    const response = await app.request('/api/teams/core-team/triage-entries/triage-api-1/actions', {
+      method: 'POST',
+      headers: createHeaders('accept-long-title'),
+      body: JSON.stringify({ action: 'accept', mode: 'create', expectedRevision: 1 }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(createdTitle).toBe(`${'界'.repeat(WORK_ITEM_TITLE_MAX_LENGTH - 1)}…`)
   })
 
   test('accept-create does not copy an expired Form submission body', async () => {

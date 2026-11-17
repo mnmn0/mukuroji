@@ -852,7 +852,7 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
       id: 'core-team',
       name: 'コアチーム',
       expanded: true,
-      projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      projects: [{ id: 'refero', name: 'Refero', tone: 'blue', lifecycleState: 'active' }],
     }],
   })
   expect(quickAccessResponse.status).toBe(200)
@@ -1009,6 +1009,127 @@ test('denies an ambiguous Project URL even when a qualified assignment matches o
 
     const response = await app.request('/api/projects/shared-launch/issues', {
       headers: { Authorization: authorization },
+    })
+
+    expect(response.status).toBe(403)
+  })
+})
+
+test.each([
+  ['project:member', false],
+  ['project:manager', true],
+] as const)(
+  'authorizes a Team-qualified charter route for a %s grant and reports canEdit=%p',
+  async (roleId, canEdit) => {
+    await withTestEnvironment({
+      COGNITO_CLIENT_ID: 'mukuroji-main-client',
+      COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+      COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+      COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+      ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    }, async () => {
+      configureFakeProjectClients(true, {
+        workspaceRole: 'member',
+        projectAccesses: [],
+        teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+        additionalTeams: [{
+          id: 'design-team',
+          name: 'Design Team',
+          projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+        }],
+      })
+      const workspaceId = 'user#demo@example.com'
+      const identity = new InMemoryEnterpriseIdentityClient()
+      const readSnapshot = identity.getSnapshot.bind(identity)
+      identity.getSnapshot = async (currentWorkspaceId) => {
+        const snapshot = await readSnapshot(currentWorkspaceId)
+        return {
+          ...snapshot,
+          roleAssignments: [{
+            workspaceId,
+            assignmentId: 'shared-project-grant',
+            principalKind: 'member',
+            principalId: 'demo@example.com',
+            roleId,
+            scope: {
+              workspaceId,
+              kind: 'project',
+              targetId: 'shared-launch',
+              parentTeamId: 'core-team',
+            },
+            source: 'direct',
+          }],
+        }
+      }
+      setTestAppDependencies({ enterpriseIdentity: identity })
+      const authorization = `Bearer ${createAccessToken([], {
+        client_id: 'mukuroji-main-client',
+        token_use: 'access',
+      })}`
+      const read = (teamId: string) => app.request(`/api/teams/${teamId}/projects/shared-launch/charter`, {
+        headers: { Authorization: authorization },
+      })
+
+      const granted = await read('core-team')
+      const otherTeam = await read('design-team')
+
+      expect(granted.status).toBe(200)
+      expect(await granted.json()).toMatchObject({ viewer: { canEdit, canDecideProposal: false } })
+      expect(otherTeam.status).toBe(403)
+    })
+  },
+)
+
+test('keeps the Team qualifier when the directory lists the Project only under another Team', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
+    // design-team's own shared-launch is archived, so the active directory lists the Project
+    // only under core-team.
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+      additionalTeams: [{ id: 'design-team', name: 'Design Team', projects: [] }],
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readSnapshot = identity.getSnapshot.bind(identity)
+    identity.getSnapshot = async (currentWorkspaceId) => {
+      const snapshot = await readSnapshot(currentWorkspaceId)
+      return {
+        ...snapshot,
+        roleAssignments: [{
+          workspaceId,
+          assignmentId: 'core-project-grant',
+          principalKind: 'member',
+          principalId: 'demo@example.com',
+          roleId: 'project:manager',
+          scope: {
+            workspaceId,
+            kind: 'project',
+            targetId: 'shared-launch',
+            parentTeamId: 'core-team',
+          },
+          source: 'direct',
+        }],
+      }
+    }
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    const response = await app.request('/api/teams/design-team/projects/shared-launch/charter', {
+      headers: {
+        Authorization: `Bearer ${createAccessToken([], {
+          client_id: 'mukuroji-main-client',
+          token_use: 'access',
+        })}`,
+      },
     })
 
     expect(response.status).toBe(403)

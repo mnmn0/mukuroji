@@ -25,8 +25,9 @@ Canonical row は次の field を持つ。
 | `directoryTeamId` | yes | Primary partition key。 |
 | `teamId` | yes | Work Item を所有する Team。 |
 | `issueId` | yes | Physical sort key と公開 `id`。 |
+| `key` | no | `ABC-123` 形式の短い参照。Workspace 内で一意で、作成後は変わらない。key を持つ前に作られた row は持たない（詳細は「Work Item key」）。 |
 | `assignedProjectId` / `directoryProjectId` | no | 遂行先 project と project GSI key。未割当 Work Item では持たない。 |
-| `title` | yes | Literal title。canonical row は `titleKey` を持たない。 |
+| `title` | yes | Literal title。canonical row は `titleKey` を持たない。作成・更新では前後の空白を除いて 1〜256 文字（Unicode code point）で、超えると `400 WorkItemTitleTooLong`。Triage（上限 500 文字）や Request の回答から作るときは、255 文字に `…` を付けて収める。Automation の Work Item template の title も 256 文字まで。Import の dry-run は超える row を `WorkItemTitleTooLong` で拒否する。 |
 | `description` | no | 詳細説明。 |
 | `assigneeUserId` | yes | 最終責任者（accountable owner）である Workspace member の安定 ID。Work Item ごとに 1 人だけ。 |
 | `contributorAssignments` | no | 作業を分担する Contributor の配列。空の場合は属性を持たない。詳細は「責任者と Contributor」を参照。 |
@@ -40,13 +41,30 @@ Canonical row は次の field を持つ。
 | `relationIds` | yes | Relation Graph から導出した `type:targetWorkItemId` の辞書順・重複なし配列。最大100件で、relation がなくても `[]` を保存する。 |
 | `priority` | yes | `low`、`medium`、`high`。 |
 | `priorityUpdatedAt` | no | `priority` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
-| `schedule` | yes | 日付の意味、予定工数、timezone、稼働曜日、祝日を固定する canonical schedule。 |
+| `schedule` | yes | 日付の意味、予定工数、timezone、稼働曜日、祝日を固定する canonical schedule。`schedule.plannedEffortMinutes` が見積の正本。 |
+| `remainingEffortMinutes` | no | 記録された残工数（分、0 以上の整数）。未記録なら属性を持たない。 |
+| `progressPercent` | no | 手入力の進捗率（0〜100 の整数）。未記録なら属性を持たない。 |
 | `dueDate` | yes | `schedule` から導出する projection。`unscheduled` では空文字、それ以外は `YYYY-MM-DD`。 |
 | `dueDateUpdatedAt` | no | 導出済み `dueDate` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
 | `sortOrder` | yes | Team/project list の安定表示順。 |
 | `createdAt` / `updatedAt` | yes | UTC ISO 8601 timestamp。 |
 
 Canonical row と API response は旧固定 `status`、`titleKey`、`assignee`、`assigneeKey` を持たない。API response は上記に `id` と `source=dynamodb` を加える。
+
+## Work Item key
+
+週報、chat、commit message、branch 名、PR で Work Item を短く参照するため、新しい Work Item には作成時に `ABC-123` 形式の `key` を付ける（#375）。
+
+- 形式は「Team の prefix（英大文字で始まる英大文字・数字 2〜10 文字）」「`-`」「1 から始まる連番」。比較と検索では大文字・小文字を区別しない。
+- prefix は Team ごとに 1 つで、その Team で最初に Work Item を作るときに Team ID から決める。複数語の ID は頭文字（`platform-team` → `PT`）、それ以外は先頭 4 文字（`backend` → `BACK`、`team-1a2b…` → `TEAM`）。同じ Workspace の別 Team が使っていれば `PT2` … `PT10` を順に試し、それも埋まっていれば Team ID のハッシュから作る 4 桁の 16 進数を付けた prefix（`PT3F0A` など）を試す。この順は Team ID だけで決まる。Project を移しても key は変わらない。Project code（#340）から prefix を選べるようにするのは後続の作業。
+- 連番は Team ごとの原子的な counter から取るので、同時に作成しても重複しない。作成が途中で失敗した番号は再利用しないため、欠番があり得る。
+- 呼び出し元が ID を決めない作成では、Work Item ID も key の小文字（`pt-12`）にする。古い title 由来の ID と重なる番号は飛ばす。冪等作成（import・Public API・Triage の `api-`/`import-`/`triage-` ID、`idempotencyResourceId`）と Request 変換（`request-<submissionId>`）は従来どおりの ID に key を付ける。
+- key と prefix と counter は Work Items table の Workspace ごとの registry partition（`<workspaceId>#work-item-key-registry`）に保存する。row は `entryType` が `work-item-key-prefix`（prefix → Team）、`work-item-key-counter`（Team の prefix と最後の番号）、`work-item-key`（key → Team と Work Item ID）のいずれかで、`sortOrder`・`updatedAt`・`directoryProjectId` を持たないので Work Item の GSI には入らない。table 全体を Scan する処理のうち、期限通知・横断整合性検査・Workspace search backfill は形の正しい registry row だけを読み飛ばし、Work Items の整合性 manifest（restore 照合）は registry row も digest に含める。どれも壊れた row では従来どおり失敗する。
+- `work-item-key` row は Work Item の作成 transaction の最後に条件付き Put で書く。Work Item が作られなかった key は記録されない。
+- `GET /api/work-items/keys/{key}` は key を `{ key, teamId, workItemId }` に解決する。存在しない key、key でない文字列、削除済みの Work Item、閲覧できない Team / Project の Work Item は、どれも同じ `404 WorkItemKeyNotFound` を返す。削除しても key の row は残り、固定 ID の作成では同じ ID が新しい key で作られ得るため、その ID の Work Item が今もその key を持つときだけ解決する。
+- key は内部 API の Work Item、Public API の `GET /api/v1/work-items/{workItemId}/key`、coding-agent MCP の `get_task` に出る。Public API の `WorkItem` は closed schema で、既存操作の応答に property を足すと後方互換を壊すため、key は別 endpoint で返す。作成時の audit event の変更内容にも含める。
+- title の上限 256 文字は Public API v1 の request（`title` の `maxLength`）を狭める変更で、互換チェックは失敗する。利用者がまだいないため、判断のうえで入れた（2026-11-16）。
+- key を持たない既存 Work Item への付与は #365 の migration 契約で行う。
 
 Strict reader は必須 workflow field がない row、未知の schema version、型が不正な status/custom field、不正または欠落した `relationIds`、不正な `schedule`、`dueDate` と schedule の不一致を canonical Work Item として返さない。field-specific timestamp がある場合は canonical UTC で `createdAt` 以上 `updatedAt` 以下であることも検証する。現在の configuration との整合は configuration 更新時の usage 検証と mutation 時の再検証で保証し、read 時に configuration は取得しない。
 
@@ -70,6 +88,29 @@ Interactive な schedule 操作は、保存前に server preview を取得する
 Work Item Relation Graph の `blocks` / `blockedBy` は意味上の blocker であり、単独では schedule を変更しない。自動 reschedule が必要な関係は PlanningTable の qualified Work Item schedule dependency として別に作成する。
 
 日付は `1000-01-01` から `9999-12-31` までの実在する `YYYY-MM-DD` に正規化する。`date-range.durationDays` は開始・終了を含む範囲で `calendarPolicy.workingWeekdays` に属し、`calendarPolicy.holidays` に含まれない日の数と完全に一致させる。`calendarPolicy.timeZone` は IANA timezone、稼働曜日は1件以上7件以下、祝日は重複のない local calendar date として最大512件まで保存する。通知と Web の due/overdue 判定は、現在時刻をこの time zone の local calendar date へ変換して同じ期限境界を使用する。`plannedEffortMinutes` は任意の非負の整数（分）であり、calendar duration とは別に扱う。
+
+### Estimate, remaining effort, and progress
+
+見積（工数）の正本は `schedule.plannedEffortMinutes` の1か所だけです。工数管理、キャパシティ、Analytics、Table / Gantt / 詳細、MCP、Public API はすべてこの値を読み書きします。以前の工数管理の `TimeEstimate`（`PUT/GET /api/teams/:teamId/work-items/:workItemId/time-estimate`）は廃止しました。
+
+| Field | 意味 | 書き込み |
+| --- | --- | --- |
+| `schedule.plannedEffortMinutes` | 見積（分）。 | schedule の置換。見積だけを変える置換は日付を動かさないため、dependency preview / confirm を必要としない。 |
+| `remainingEffortMinutes` | 記録された残工数（分）。 | Work Item update。`null` で消す。 |
+| `progressPercent` | 手入力の進捗率（0〜100）。 | Work Item update。`null` で消す。 |
+
+不正な値は `400 InvalidWorkItemEffort` / `400 InvalidWorkItemProgress`（Public API は `validation_failed`）で拒否し、どちらの変更も他の field と同じ revision 付き transaction と audit event に入ります（audit の field 名は `remainingEffortMinutes` / `progressPercent`）。
+
+導出規則は `@mukuroji/contracts` の `deriveWorkItemRemainingEffortMinutes` / `deriveWorkItemProgressPercent` で共通化しています。
+
+- 残工数: `completed` / `canceled` は 0。それ以外は記録された残工数、なければ見積。どちらもなければ不明。
+- 進捗率は Team の Work Item configuration の `progressMode` で選ぶ（省略時 `status-category`）。変更は configuration の保存として監査される。
+  - `status-category`: `backlog` / `unstarted` は 0%、`started` は 50%。
+  - `remaining-effort`: `(見積 - 残工数) / 見積`。見積が 0 以下、または残工数が未記録なら `status-category` に戻る。
+  - `manual`: 記録された `progressPercent`。未記録なら `status-category` に戻る。
+  - どのモードでも `completed` は 100%、`canceled` は対象外。
+
+**移行方針**: 本番データはまだないため、旧 `TimeEstimate` row は移行せずに破棄します（読み手がなくなるだけで、既存 row があっても無視される）。`remainingEffortMinutes` / `progressPercent` を持たない既存 Work Item row は「未記録」として読み、strict reader は fail-closed にしません。
 
 Relation の正本は `WorkItemConfigurationTable` の Relation Graph row であり、Work Item row の `relationIds` は検索と backfill のための派生 projection である。Relation の作成・削除 transaction は、graph metadata と reciprocal row に加えて source / target 両方の `relationIds` を同時に更新する。この projection 更新では Work Item の `revision` と `updatedAt` を進めない。
 
@@ -239,7 +280,7 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 - Web の Team 画面と、Project のテーブル・ボードは一覧全体を cursor で読み切る。1 一覧 10,000 件を超えると読み込めない。Project の期限カレンダーとガントは表示期間と期限なしの Work Item だけを読む（期限なしが 10,000 件を超えると読み込めない）。
 - 期間で絞る読み取りも、DynamoDB では並び順 GSI を評価予算つきで読み、期間外の row を評価後に除く。範囲用の GSI は未追加。
 - Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
-- Work Item 作成は ID と `sortOrder` を決めるために Team partition 全件を読む。
+- Work Item 作成は Team partition 全件を読まない。ID は key から決め、`sortOrder` は並び順 GSI の最大値を 1 件だけ読んで 10 足す。GSI は結果整合なので、ほぼ同時の作成で同じ `sortOrder` になることがある（一覧は ID で順序を決める）。
 
 ## 運用
 

@@ -4,7 +4,7 @@ import { isTimeTrackingQueryKey } from '../queries/timeTrackingQueryKeys'
 
 /**
  * Returns a function that revalidates every time tracking query, so the timer, entry lists,
- * totals, and estimates agree after a mutation or a conflict.
+ * and totals agree after a mutation or a conflict.
  *
  * @returns Revalidation callback that never rejects.
  */

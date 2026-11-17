@@ -3,6 +3,8 @@ import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemScheduleVariance,
+  deriveWorkItemProgressPercent,
+  deriveWorkItemRemainingEffortMinutes,
   type SearchCustomFieldFilter,
   type SearchCustomFieldValue,
   type TaskViewDefinition,
@@ -11,6 +13,7 @@ import {
   type TaskViewSurface,
   type TaskViewUrlOverride,
   type TaskViewWorkflowStatusFilter,
+  type WorkItemProgressMode,
 } from '@mukuroji/contracts'
 import {
   matchesTaskDueDateFilter,
@@ -61,6 +64,11 @@ export type TaskViewEvaluationContext = {
   keywordMatcher?: TaskViewKeywordMatcher
   /** Reference time used by relative due-date filters. */
   now?: Date
+  /**
+   * Progress mode of the Team configuration that renders a Work Item, so sorting by progress
+   * follows the shown percentages; the default mode applies when it is omitted or returns undefined.
+   */
+  resolveProgressMode?: (task: CanonicalWorkItem) => WorkItemProgressMode | undefined
 }
 
 /** Reproducible Team Issue collection state controlled by a task-view definition. */
@@ -638,17 +646,19 @@ export function filterTasksByTaskViewDefinition(
  *
  * @param tasks - Filtered Work Items to order.
  * @param definition - Effective definition owning the ordered sort rules.
+ * @param context - Optional progress-mode resolver used by progress sorting.
  * @returns A stable sorted copy of the input Work Items.
  */
 export function sortTasksByTaskViewDefinition(
   tasks: readonly CanonicalWorkItem[],
   definition: TaskViewDefinition,
+  context: Pick<TaskViewEvaluationContext, 'resolveProgressMode'> = {},
 ): CanonicalWorkItem[] {
   const indexedTasks = tasks.map((task, index) => ({ index, task }))
   indexedTasks.sort((left, right) => {
     for (const sort of definition.layout.sort) {
-      const leftValue = resolveTaskViewFieldValue(left.task, sort.field)
-      const rightValue = resolveTaskViewFieldValue(right.task, sort.field)
+      const leftValue = resolveTaskViewFieldValue(left.task, sort.field, context)
+      const rightValue = resolveTaskViewFieldValue(right.task, sort.field, context)
       if (actualDateSortFields.has(sort.field)) {
         // Work Items without actual dates stay last in both directions so the result leads with
         // what actually happened.
@@ -669,7 +679,7 @@ export function sortTasksByTaskViewDefinition(
  *
  * @param tasks - Permission-filtered Work Items in the current scope.
  * @param definition - Effective task-view definition.
- * @param context - Optional relative-date reference and surface keyword matcher.
+ * @param context - Optional relative-date reference, surface keyword matcher, and progress-mode resolver.
  * @returns Reproducible Work Item results ready for rendering.
  */
 export function applyTaskViewDefinitionToTasks(
@@ -680,6 +690,7 @@ export function applyTaskViewDefinitionToTasks(
   return sortTasksByTaskViewDefinition(
     filterTasksByTaskViewDefinition(tasks, definition, context),
     definition,
+    context,
   )
 }
 
@@ -742,6 +753,7 @@ function matchesTaskDateRange(
 function resolveTaskViewFieldValue(
   task: CanonicalWorkItem,
   field: string,
+  context: Pick<TaskViewEvaluationContext, 'resolveProgressMode'>,
 ): string | number | boolean | readonly string[] | null | undefined {
   if (field.startsWith('custom:')) return task.customFieldValues[field.slice('custom:'.length)]
   switch (field) {
@@ -759,6 +771,10 @@ function resolveTaskViewFieldValue(
     case 'actualEndDate': return task.actualEndDate
     case 'startDelayDays': return deriveWorkItemScheduleVariance(task).startDelayDays
     case 'completionDelayDays': return deriveWorkItemScheduleVariance(task).completionDelayDays
+    case 'estimate': return task.schedule.plannedEffortMinutes
+    case 'remainingEffort': return deriveWorkItemRemainingEffortMinutes(task)
+    // The same derivation as the rendered progress column, under the Team's progress mode.
+    case 'progress': return deriveWorkItemProgressPercent(task, context.resolveProgressMode?.(task))
     default: return undefined
   }
 }

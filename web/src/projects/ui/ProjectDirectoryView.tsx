@@ -7,10 +7,13 @@ import type {
 import type { ProjectDirectoryTeam } from '../api/directory'
 import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 import {
+  PROJECT_DIRECTORY_LIFECYCLE_FILTERS,
   PROJECT_DIRECTORY_UNASSIGNED_ID,
   isProjectDirectoryStatusFilter,
+  parseProjectDirectoryLifecycleFilter,
   type ProjectDirectoryAssignee,
   type ProjectDirectoryFilters,
+  type ProjectDirectoryLifecycleFilter,
   type ProjectDirectoryRow,
   type ProjectDirectoryStatus,
   type ProjectDirectoryStatusFilter,
@@ -19,6 +22,7 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import { formatPlanningUpdateDate } from '../../planning/model/date'
+import { projectLifecycleClassNames, projectLifecycleMessageKey } from '../model/projectCharterView'
 
 /** Props for the searchable, filterable Project directory view. */
 export type ProjectDirectoryViewProps = {
@@ -54,6 +58,8 @@ export type ProjectDirectoryViewProps = {
   onTeamChange: (teamId?: string) => void
   /** Updates the selected status in the route URL. */
   onStatusChange: (status: ProjectDirectoryStatusFilter) => void
+  /** Updates the selected lifecycle state in the route URL. */
+  onLifecycleChange?: (lifecycle?: ProjectDirectoryLifecycleFilter) => void
   /** Updates the selected assignee in the route URL. */
   onAssigneeChange: (assigneeId?: string) => void
   /** Updates whether the route shows only starred Projects. */
@@ -164,6 +170,7 @@ export function ProjectDirectoryView({
   onQuickAccessOnlyChange,
   onSearchChange,
   onStatusChange,
+  onLifecycleChange,
   onTeamChange,
   onToggleQuickAccess,
   planningUpdateTargets = [],
@@ -176,6 +183,7 @@ export function ProjectDirectoryView({
     filters.query ||
     (!isTeamFilterLocked && filters.teamId) ||
     filters.status !== 'all' ||
+    filters.lifecycle ||
     filters.assigneeId ||
     filters.quickAccessOnly,
   )
@@ -239,10 +247,10 @@ export function ProjectDirectoryView({
             label={t('workspace.filters.title')}
             summary={t('workspace.filters.active').replace('{count}', String([
               !isTeamFilterLocked && Boolean(filters.teamId), filters.status !== 'all',
-              Boolean(filters.assigneeId), filters.quickAccessOnly,
+              Boolean(filters.lifecycle), Boolean(filters.assigneeId), filters.quickAccessOnly,
             ].filter(Boolean).length))}
           >
-            <div className="grid grid-cols-3 gap-3 max-[760px]:grid-cols-1">
+            <div className="grid grid-cols-4 gap-3 max-[1100px]:grid-cols-2 max-[760px]:grid-cols-1">
               <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
                 {t('projects.directory.teamFilter')}
                 <select
@@ -277,6 +285,24 @@ export function ProjectDirectoryView({
                         ? t('projects.directory.filterAll')
                         : t(statusMessageKeys[status])}
                     </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('projects.directory.lifecycleFilter')}
+                <select
+                  className="workbench-input h-11 w-full px-3"
+                  data-testid="project-directory-lifecycle-filter"
+                  value={filters.lifecycle ?? ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value
+                    onLifecycleChange?.(parseProjectDirectoryLifecycleFilter(value))
+                  }}
+                >
+                  <option value="">{t('projects.directory.filterAll')}</option>
+                  {PROJECT_DIRECTORY_LIFECYCLE_FILTERS.map((state) => (
+                    <option key={state} value={state}>{t(projectLifecycleMessageKey(state))}</option>
                   ))}
                 </select>
               </label>
@@ -347,12 +373,13 @@ export function ProjectDirectoryView({
       >
         <div
           aria-hidden="true"
-          className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 text-xs font-semibold text-[var(--workbench-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[1100px]:[&>*:nth-child(5)]:hidden max-[1100px]:[&>*:nth-child(7)]:hidden max-[760px]:hidden"
+          className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(150px,1fr)_minmax(130px,0.9fr)_140px_120px_48px] max-[1280px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 text-xs font-semibold text-[var(--workbench-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[1280px]:[&>*:nth-child(5)]:hidden max-[1100px]:[&>*:nth-child(6)]:hidden max-[1100px]:[&>*:nth-child(8)]:hidden max-[760px]:hidden"
         >
           <span />
           <span>{t('projects.directory.column.project')}</span>
           <span>{t('projects.directory.column.team')}</span>
           <span>{t('projects.directory.column.status')}</span>
+          <span>{t('projects.directory.column.charter')}</span>
           <span>{t('projects.directory.column.assignee')}</span>
           <span>{t('projects.directory.column.progress')}</span>
           <span>{t('projects.directory.column.workItems')}</span>
@@ -476,12 +503,15 @@ function ProjectDirectoryListRow({
       : 'projects.directory.quickAccess.add'),
     { name: project.projectName },
   )
+  const periodLabel = project.plannedStartDate || project.plannedEndDate
+    ? `${project.plannedStartDate ?? ''} – ${project.plannedEndDate ?? ''}`
+    : t('projects.directory.charter.noPeriod')
   const updateState = planningUpdate?.updateState ?? 'not-configured'
   const updateHealth = planningUpdate?.latestUpdate?.health ?? 'unknown'
 
   return (
     <div
-      className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-[var(--workbench-surface-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[760px]:grid-cols-[44px_minmax(0,1fr)_44px] max-[760px]:items-start"
+      className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(150px,1fr)_minmax(130px,0.9fr)_140px_120px_48px] max-[1280px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-[var(--workbench-surface-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[760px]:grid-cols-[44px_minmax(0,1fr)_44px] max-[760px]:items-start"
       role="listitem"
     >
       <button
@@ -527,7 +557,21 @@ function ProjectDirectoryListRow({
         <p className="mt-1 hidden truncate text-xs font-medium text-[var(--workbench-muted)] max-[760px]:block">
           {project.teamName} · {statusLabel}
         </p>
+        <p className="mt-0.5 hidden truncate text-xs font-medium text-[var(--workbench-muted)] max-[1280px]:block">
+          {project.owner?.displayName ?? t('projects.directory.charter.noOwner')} · {periodLabel}
+        </p>
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+          <span
+            className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${projectLifecycleClassNames[project.lifecycleState]}`}
+            data-testid={`project-lifecycle-${project.teamId}-${project.projectId}`}
+          >
+            {t(projectLifecycleMessageKey(project.lifecycleState))}
+          </span>
+          {project.code ? (
+            <span className="rounded-full border border-[var(--workbench-border)] px-2 py-0.5 font-mono text-[11px] font-semibold text-[var(--workbench-muted)]">
+              {project.code}
+            </span>
+          ) : null}
           <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${planningUpdateHealthClassNames[updateHealth]}`}>
             {t(`planning.health.${updateHealth}`)}
           </span>
@@ -590,6 +634,24 @@ function ProjectDirectoryListRow({
       <span className={`w-fit rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClassNames[project.status]} max-[760px]:hidden`}>
         {statusLabel}
       </span>
+
+      <div
+        className="grid min-w-0 gap-0.5 max-[1280px]:hidden"
+        data-testid={`project-charter-summary-${project.teamId}-${project.projectId}`}
+      >
+        <span className="truncate text-sm font-medium text-[var(--workbench-text)]">
+          {project.owner?.displayName ?? t('projects.directory.charter.noOwner')}
+        </span>
+        <span className="text-xs font-medium tabular-nums text-[var(--workbench-muted)]">
+          {project.plannedStartDate || project.plannedEndDate ? (
+            <>
+              <span className="whitespace-nowrap">{project.plannedStartDate ?? ''}</span>
+              {' – '}
+              <span className="whitespace-nowrap">{project.plannedEndDate ?? ''}</span>
+            </>
+          ) : periodLabel}
+        </span>
+      </div>
 
       <ProjectAssigneeSummary project={project} t={t} />
 

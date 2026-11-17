@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_SCHEMA_VERSION,
+  WORK_ITEM_TITLE_MAX_LENGTH,
   createDefaultDueDateWorkItemSchedule,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
@@ -118,6 +119,23 @@ describe('Work Item import dry-run', () => {
     expect(preview.invalidRows).toBe(1)
     expect(preview.errors.map((error) => error.code)).toContain('InvalidSchedule')
     expect(preview.errors).toHaveLength(1)
+  })
+
+  test('Work Item title の上限を超える row を dry-run で拒否する', () => {
+    const rows = [WORK_ITEM_TITLE_MAX_LENGTH, WORK_ITEM_TITLE_MAX_LENGTH + 1].map((length) => ({
+      name: '🙂'.repeat(length),
+      owner: 'owner@example.com',
+      schedule: dueDateSchedule,
+    }))
+    const preview = previewWorkItemImport('json', JSON.stringify(rows), [
+      { sourceField: 'name', targetField: 'title' },
+      { sourceField: 'owner', targetField: 'assigneeUserId' },
+      { sourceField: 'schedule', targetField: 'schedule' },
+    ])
+
+    expect(preview.validRows).toBe(1)
+    expect(preview.invalidRows).toBe(1)
+    expect(preview.errors).toEqual([expect.objectContaining({ row: 2, field: 'title', code: 'WorkItemTitleTooLong' })])
   })
 
   test('必須 mapping の欠落を stable error にする', () => {

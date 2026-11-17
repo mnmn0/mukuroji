@@ -3,7 +3,6 @@ import { expect, fn, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import {
   timeTrackingFixtureEntries,
-  timeTrackingFixtureEstimate,
   timeTrackingFixtureNow,
   timeTrackingFixtureRejectionReasons,
   timeTrackingFixtureTimer,
@@ -20,11 +19,10 @@ const meta = {
     t: createTranslator('ja'),
     formatters: createTimeTrackingFormatters('ja'),
     now: timeTrackingFixtureNow,
-    canEditEstimate: true,
     workItemId: 'onboarding',
     teamId: 'core-team',
     timer: null,
-    estimate: timeTrackingFixtureEstimate,
+    plannedEffortMinutes: 480,
     actualMinutes: 540,
     entries: timeTrackingFixtureEntries.filter((entry) => entry.workItemId === 'onboarding').reverse(),
     rejectionReasons: timeTrackingFixtureRejectionReasons,
@@ -33,7 +31,6 @@ const meta = {
     onStartTimer: fn(async () => undefined),
     onStopTimer: fn(async () => undefined),
     onDiscardTimer: fn(async () => undefined),
-    onSaveEstimate: fn(async () => undefined),
     onCreateEntry: fn(async () => undefined),
     onUpdateEntry: fn(async () => undefined),
     onSubmitEntry: fn(async () => undefined),
@@ -53,6 +50,16 @@ export const OverEstimate: Story = {
   },
 }
 
+/** Recorded remaining effort shown instead of the estimate minus actual time. */
+export const RecordedRemaining: Story = {
+  args: { remainingEffortMinutes: 120 },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('残り')).toBeVisible()
+    await expect(canvas.getByText('2:00')).toBeVisible()
+  },
+}
+
 /** A timer running on this Work Item. */
 export const TimerRunning: Story = {
   args: { timer: timeTrackingFixtureTimer },
@@ -60,7 +67,7 @@ export const TimerRunning: Story = {
 
 /** No estimate and no entries yet. */
 export const Empty: Story = {
-  args: { estimate: null, actualMinutes: 0, entries: [] },
+  args: { plannedEffortMinutes: undefined, actualMinutes: 0, entries: [] },
 }
 
 /** Phone width with a running timer. */

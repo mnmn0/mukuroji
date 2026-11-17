@@ -10,6 +10,7 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
@@ -120,6 +121,36 @@ export type WorkspaceMember = {
   updatedAt: string
   /** 利用停止日時の ISO 8601 timestamp です。 */
   deactivatedAt?: string
+}
+
+/**
+ * Sign-in credential action an administrator takes on a member.
+ *
+ * - `password-reset-requested`: invalidated the password and sent a reset code
+ * - `mfa-reset`: removed the registered authenticator app (TOTP)
+ */
+export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-reset'
+
+/**
+ * How far an administrator credential action under one idempotency key got.
+ *
+ * - `none`: nothing was recorded
+ * - `recorded`: the audit event was written, but the Cognito change was not confirmed
+ * - `completed`: the Cognito change finished
+ */
+export type WorkspaceMemberCredentialProgress = 'none' | 'recorded' | 'completed'
+
+/** Result of recording a credential action for a member. */
+export type WorkspaceMemberCredentialRecord = {
+  /** Member the action targets. */
+  member: WorkspaceMember
+  /** Whether a retry with the same idempotency key found the action already recorded. */
+  alreadyRecorded: boolean
+  /**
+   * Whether an earlier attempt with the same idempotency key already finished the action, so
+   * the caller must not change the account again.
+   */
+  completed: boolean
 }
 
 /** Workspace access API が返す invitation です。 */
@@ -337,6 +368,62 @@ export interface WorkspaceAccessClient {
   ): Promise<WorkspaceAccessTransactWriteItem | undefined>
   /** 指定 member を取得します。 */
   getMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
+  /**
+   * Checks that an administrator may change an active member's sign-in credentials and records
+   * the action in the audit log.
+   *
+   * Call it before changing Cognito, and stop when it cannot record. The call also claims the
+   * action for a short lease, so that only one attempt changes Cognito at a time. A retry with
+   * the same idempotency key checks authority again, finds the existing record and returns
+   * `alreadyRecorded`, with `completed` when an earlier attempt finished the action.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param actorMemberKey - Member key of the administrator.
+   * @param targetMemberKey - Member key of the target member.
+   * @param action - Action to record.
+   * @param auditContext - Audit context of the request.
+   * @returns The checked target member, and whether the action was already recorded or completed.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
+   *   holds the lease.
+   */
+  recordMemberCredentialAction?(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMemberCredentialRecord>
+  /**
+   * Reads how far an administrator credential action under the same idempotency key got.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns `none` when nothing was recorded, `recorded` when the action was recorded but not
+   *   confirmed done, and `completed` when it finished.
+   * @throws WorkspaceAccessError 409 when the key was used for a different operation.
+   */
+  readMemberCredentialActionProgress?(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMemberCredentialProgress>
+  /**
+   * Marks a recorded administrator credential action as finished in Cognito.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   */
+  completeMemberCredentialAction?(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<void>
   /** 指定 member が active な場合だけ返します。 */
   getActiveMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /** 管理画面用の member / invitation snapshot を取得します。 */
@@ -1623,6 +1710,356 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
   }
 
+  /**
+   * Checks that an administrator may change an active member's sign-in credentials and records
+   * the action in the audit log, together with a progress record that claims it for a lease.
+   *
+   * Owners may act on every member, admins on members and guests. Nobody may act on themselves;
+   * they change their own password and MFA in their account settings. The authority check runs
+   * on every attempt, including a retry that resumes a recorded action.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param actorMemberKey - Member key of the administrator.
+   * @param targetMemberKey - Member key of the target member.
+   * @param action - Action to record.
+   * @param auditContext - Audit context of the request.
+   * @returns The checked target member, and whether the action was already recorded or completed.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
+   *   holds the lease.
+   */
+  async recordMemberCredentialAction(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
+    const target = await this.getMember(normalizedWorkspaceId, targetMemberKey)
+
+    if (!target || target.status !== 'active') {
+      throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
+    }
+
+    if (actor.memberKey === target.memberKey) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceSelfCredentialReset',
+        'Change your own password and MFA from your account settings.',
+      )
+    }
+
+    assertCanManageMemberCredentials(actor, target)
+
+    const auditPut = this.createMemberCredentialAuditPut(
+      normalizedWorkspaceId,
+      target.memberKey,
+      action,
+      auditContext,
+    )
+
+    const auditItem = auditPut?.Put?.Item
+    if (!auditPut || !auditItem) {
+      return { member: target, alreadyRecorded: false, completed: false }
+    }
+
+    const now = this.clock()
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          this.actorCondition(normalizedWorkspaceId, actor),
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: normalizedWorkspaceId,
+                recordKey: createMemberRecordKey(target.memberKey),
+              },
+              ConditionExpression: '#status = :active AND version = :version',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':active': 'active',
+                ':version': target.version,
+              },
+            },
+          },
+          auditPut,
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                workspaceId: normalizedWorkspaceId,
+                recordKey: createCredentialActionRecordKey(auditItem.eventId),
+                entryType: 'workspace-member-credential-action',
+                memberKey: target.memberKey,
+                actorKey: auditItem.actorKey,
+                action,
+                status: 'recorded',
+                recordedAt: now.toISOString(),
+                leaseUntil: now.getTime() + credentialActionLeaseMs,
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+      return { member: target, alreadyRecorded: false, completed: false }
+    } catch (error) {
+      const replayed = !isTransactionConditionalFailureAt(error, 0) &&
+        !isTransactionConditionalFailureAt(error, 1) &&
+        (isTransactionConditionalFailureAt(error, 2) || isTransactionConditionalFailureAt(error, 3))
+      if (replayed) {
+        const recorded = await this.readCredentialActionRecord(
+          normalizedWorkspaceId,
+          target.memberKey,
+          action,
+          auditContext,
+        )
+        if (recorded) {
+          if (recorded.status === 'completed') {
+            return { member: target, alreadyRecorded: true, completed: true }
+          }
+          await this.renewCredentialActionLease(normalizedWorkspaceId, recorded, now)
+          return { member: target, alreadyRecorded: true, completed: false }
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceIdempotencyConflict',
+          'This idempotency key was already used for a different operation.',
+          { cause: error },
+        )
+      }
+      if (isConditionalTransactionCancellation(error)) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceVersionConflict',
+          'Workspace member changed. Reload and try again.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Reads how far a credential action under the same idempotency key got.
+   *
+   * The progress record is written in the same transaction as the audit event and marked
+   * completed after the Cognito change. A record for another actor, member, or action means
+   * the key was reused, which is a conflict.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   * @returns The progress of the action.
+   */
+  async readMemberCredentialActionProgress(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMemberCredentialProgress> {
+    const recorded = await this.readCredentialActionRecord(
+      normalizeRequired(workspaceId, 'Workspace ID'),
+      normalizeMemberKey(targetMemberKey),
+      action,
+      auditContext,
+    )
+    if (!recorded) {
+      return 'none'
+    }
+    return recorded.status === 'completed' ? 'completed' : 'recorded'
+  }
+
+  /**
+   * Reads the progress record of a credential action under the request's idempotency key.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param targetMemberKey - Normalized member key of the target.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   * @returns The record, or undefined when nothing was recorded or auditing is off.
+   * @throws WorkspaceAccessError 409 when the key was used for a different operation.
+   */
+  private async readCredentialActionRecord(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const expected = this.createMemberCredentialAuditPut(
+      workspaceId,
+      targetMemberKey,
+      action,
+      auditContext,
+    )?.Put?.Item
+    if (!expected) {
+      return undefined
+    }
+
+    const recordKey = createCredentialActionRecordKey(expected.eventId)
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey },
+        ConsistentRead: true,
+      }))
+      const recorded = response.Item
+      if (!recorded) {
+        return undefined
+      }
+      if (
+        recorded.memberKey !== targetMemberKey ||
+        recorded.action !== action ||
+        recorded.actorKey !== expected.actorKey
+      ) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceIdempotencyConflict',
+          'This idempotency key was already used for a different operation.',
+        )
+      }
+      return {
+        recordKey,
+        status: recorded.status === 'completed' ? 'completed' as const : 'recorded' as const,
+        leaseUntil: typeof recorded.leaseUntil === 'number' ? recorded.leaseUntil : undefined,
+        recordedAt: typeof recorded.recordedAt === 'string' ? Date.parse(recorded.recordedAt) : Number.NaN,
+      }
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) throw error
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Takes over a recorded credential action whose earlier attempt stopped, once its lease ran out.
+   *
+   * The conditional update succeeds for one caller only, so two retries cannot both change
+   * Cognito. An action recorded longer ago than the resume window is not repeated: the member
+   * may have set up a new password or app since, so the administrator sends a new request.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param recorded - Progress record that the caller read.
+   * @param recorded.recordKey - Key of the progress record.
+   * @param recorded.leaseUntil - Lease end the caller observed, if any.
+   * @param recorded.recordedAt - When the action was recorded, in milliseconds.
+   * @param now - Current time.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
+   *   holds the lease or took it over first, and 409 `WorkspaceCredentialActionExpired` when the
+   *   resume window has passed.
+   */
+  private async renewCredentialActionLease(
+    workspaceId: string,
+    recorded: { recordKey: string; leaseUntil: number | undefined; recordedAt: number },
+    now: Date,
+  ) {
+    const inProgress = () => new WorkspaceAccessError(
+      409,
+      'WorkspaceCredentialActionInProgress',
+      'Another request is still resetting this member\'s sign-in. Try again shortly.',
+    )
+    if (recorded.leaseUntil !== undefined && recorded.leaseUntil > now.getTime()) {
+      throw inProgress()
+    }
+    if (!(recorded.recordedAt + credentialActionResumeWindowMs > now.getTime())) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceCredentialActionExpired',
+        'The earlier request stopped before it finished. Check the member\'s sign-in and send a new request.',
+      )
+    }
+
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: recorded.recordKey },
+        UpdateExpression: 'SET leaseUntil = :leaseUntil',
+        ConditionExpression: recorded.leaseUntil === undefined
+          ? '#status = :recorded AND attribute_not_exists(leaseUntil)'
+          : '#status = :recorded AND leaseUntil = :observedLeaseUntil',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':recorded': 'recorded',
+          ':leaseUntil': now.getTime() + credentialActionLeaseMs,
+          ...(recorded.leaseUntil === undefined ? {} : { ':observedLeaseUntil': recorded.leaseUntil }),
+        },
+      }))
+    } catch (error) {
+      if (isAwsError(error, 'ConditionalCheckFailedException')) {
+        throw inProgress()
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Marks a credential action as finished in Cognito, so that a retry with the same
+   * idempotency key does not change the account again.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   */
+  async completeMemberCredentialAction(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const expected = this.createMemberCredentialAuditPut(
+      normalizedWorkspaceId,
+      normalizeMemberKey(targetMemberKey),
+      action,
+      auditContext,
+    )?.Put?.Item
+    if (!expected) {
+      return
+    }
+
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createCredentialActionRecordKey(expected.eventId),
+        },
+        UpdateExpression: 'SET #status = :completed, completedAt = :completedAt',
+        ConditionExpression: 'attribute_exists(recordKey)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':completed': 'completed',
+          ':completedAt': this.clock().toISOString(),
+        },
+      }))
+    } catch (error) {
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /** Builds the audit Put of a credential action, or undefined when auditing is off. */
+  private createMemberCredentialAuditPut(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext: MutationAuditContext | undefined,
+  ) {
+    return this.createWorkspaceAuditPut(auditContext, {
+      directoryId: workspaceId,
+      eventType: `member.${action}`,
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(workspaceId, targetMemberKey),
+      action,
+      occurredAt: this.clock().toISOString(),
+      metadata: { kind: 'workspace-member-credential' },
+      sequence: 0,
+    })
+  }
+
   /** actor の権限を検証し、target member を version 付きで更新します。 */
   async updateMember(
     workspaceId: string,
@@ -2882,6 +3319,23 @@ function createInvitationRecordKey(invitationId: string) {
   return `INVITATION#${normalizeEmail(invitationId)}`
 }
 
+/**
+ * How long one attempt holds an administrator credential action before a retry may take it
+ * over. It is longer than the API Lambda's run time, so a live attempt keeps its claim.
+ */
+const credentialActionLeaseMs = 60_000
+
+/**
+ * How long after recording a stopped credential action a retry may still resume it. Later, the
+ * member may have set up a new password or app, which a repeated reset would undo.
+ */
+const credentialActionResumeWindowMs = 10 * 60_000
+
+/** Key of the record that tracks one administrator credential action, named by its audit event. */
+function createCredentialActionRecordKey(auditEventId: unknown) {
+  return `CREDENTIAL_ACTION#${String(auditEventId)}`
+}
+
 function requireWorkspaceRole(value: unknown): WorkspaceRole {
   if (value === 'owner' || value === 'admin' || value === 'member' || value === 'guest') {
     return value
@@ -2904,6 +3358,28 @@ function capabilitiesForRole(role: WorkspaceRole): WorkspaceAccessCapabilities {
     canManageMembers: role === 'owner' || role === 'admin',
     canManageAdmins: role === 'owner',
   }
+}
+
+/**
+ * Requires the actor to be allowed to reset the target member's sign-in credentials.
+ *
+ * @param actor - Active administrator performing the action.
+ * @param target - Active member whose credentials change.
+ */
+function assertCanManageMemberCredentials(actor: WorkspaceMember, target: WorkspaceMember) {
+  if (actor.role === 'owner') {
+    return
+  }
+
+  if (actor.role === 'admin' && (target.role === 'member' || target.role === 'guest')) {
+    return
+  }
+
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspaceRoleDenied',
+    'The Workspace role cannot manage this member.',
+  )
 }
 
 function assertCanManageRole(actor: WorkspaceMember, managedRole: WorkspaceRole) {

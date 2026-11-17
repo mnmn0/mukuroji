@@ -15,8 +15,12 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORK_ITEM_PROGRESS_MODE,
+  isWorkItemProgressMode,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
+  WORK_ITEM_RELATION_ID_LIMIT,
+  WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
   DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type CustomFieldDefinition,
@@ -31,6 +35,7 @@ import {
   type WorkItemConfigurationScopeType,
   type WorkItemJobRoleDefinition,
   type WorkItemRelation,
+  type WorkItemParentMutationResponse,
   type WorkItemRelationMutationResponse,
   type WorkItemRelationsResponse,
   type WorkItemRelationType,
@@ -60,8 +65,12 @@ const CONFIGURATION_WRITE_LOCK_RECORD_KEY = 'CONFIG_WRITE_LOCK'
 const CONFIGURATION_WRITE_LOCK_LEASE_SECONDS = 15 * 60
 const RELATION_GRAPH_RECORD_KEY = 'RELATION_GRAPH'
 const RELATION_RECORD_PREFIX = 'REL#'
-const RELATION_SCAN_LIMIT = 2_000
-const WORK_ITEM_RELATION_ID_LIMIT = 100
+/** Directed relation rows a Team may store; each logical link is a reciprocal pair. */
+const TEAM_RELATION_EDGE_LIMIT = WORK_ITEM_TEAM_RELATION_LINK_LIMIT * 2
+/** Work Items a single cycle validation may visit before failing closed. */
+const RELATION_TRAVERSAL_NODE_LIMIT = TEAM_RELATION_EDGE_LIMIT
+/** Concurrent neighbourhood reads issued by one cycle validation level. */
+const RELATION_TRAVERSAL_READ_CONCURRENCY = 16
 const DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
 /** Maximum UTF-8 JSON size allowed for a persisted Work Item configuration item. */
 export const MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES = 350 * 1_024
@@ -260,6 +269,81 @@ export type MutateWorkItemRelationInput = {
   targetAssignedProjectId?: string
 }
 
+/** Relation types projected into a Work Item's `relationIds`; `child` is excluded. */
+export const WORK_ITEM_PROJECTED_RELATION_TYPES: readonly WorkItemRelationType[] = [
+  'blockedBy',
+  'blocks',
+  'duplicate',
+  'parent',
+  'related',
+]
+
+/** Options for reading one Work Item's relation neighbourhood. */
+export type ListWorkItemRelationsOptions = {
+  /** Relation types to read; omitted reads every type. */
+  types?: readonly WorkItemRelationType[]
+}
+
+/** Authorization-time snapshot of one relation endpoint used as a transaction fence. */
+export type WorkItemRelationEndpointSnapshot = {
+  /** Endpoint Work Item ID. */
+  workItemId: string
+  /** Work Item revision read during authorization. */
+  expectedRevision: number
+  /** Project assignment read during authorization. */
+  assignedProjectId?: string
+}
+
+/** Input for setting, replacing, or removing a Work Item's single parent. */
+export type ReplaceWorkItemParentInput = {
+  /** Child Work Item whose parent changes. */
+  child: WorkItemRelationEndpointSnapshot
+  /** Parent observed by the caller; omitted when the child had no parent. */
+  currentParent?: WorkItemRelationEndpointSnapshot
+  /** Requested parent; omitted removes the parent. */
+  nextParent?: WorkItemRelationEndpointSnapshot
+  /** Team relation graph revision observed by the caller. */
+  expectedGraphRevision: number
+}
+
+/** Graph metadata read before a relation mutation. */
+type RelationGraphState = {
+  /** Current graph revision; zero before the metadata row exists. */
+  revision: number
+  /** Directed relation rows currently stored for the Team. */
+  edgeCount: number
+}
+
+/** Pending relation rows applied to an endpoint projection. */
+type RelationProjectionChange = {
+  /** Rows added with the endpoint as their source. */
+  add?: readonly WorkItemRelation[]
+  /** Rows removed with the endpoint as their source. */
+  remove?: readonly WorkItemRelation[]
+}
+
+/** Endpoint guard written with a relation transaction. */
+type RelationTransactionEndpoint = WorkItemRelationEndpointSnapshot & {
+  /** Next projection; omitted only checks the endpoint snapshot. */
+  relationIds?: readonly string[]
+}
+
+/** Items committed by one relation transaction. */
+type RelationTransactionInput = {
+  /** Graph revision observed before the mutation. */
+  expectedRevision: number
+  /** Directed relation rows stored after the mutation. */
+  nextEdgeCount: number
+  /** Endpoint projections and guards. */
+  endpoints: readonly RelationTransactionEndpoint[]
+  /** Relation row puts and deletes. */
+  edgeMutations: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /** Configuration guards appended after every other item. */
+  configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /** Classifies a canceled transaction after re-reading its fences. */
+  classifyCancellation: () => Promise<Error>
+}
+
 /** API handler が利用する Work Item configuration client contract です。 */
 export type WorkItemConfigurationClient = {
   /** Workspace default または built-in default を返します。 */
@@ -302,11 +386,20 @@ export type WorkItemConfigurationClient = {
     completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
     auditContext?: MutationAuditContext,
   ): Promise<ResolvedWorkItemConfiguration>
-  /** Work Item から見た relation と graph revision を返します。 */
+  /**
+   * Reads the relations stored with one Work Item as their source and the graph revision.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @param workItemId - Source Work Item whose neighbourhood is read.
+   * @param options - Optional relation type filter.
+   * @returns The source Work Item's relations and the stable graph revision.
+   */
   listRelations(
     workspaceId: string,
     teamId: string,
     workItemId: string,
+    options?: ListWorkItemRelationsOptions,
   ): Promise<WorkItemRelationsResponse>
   /**
    * Reads every relation and the stable graph revision for one Team.
@@ -337,6 +430,21 @@ export type WorkItemConfigurationClient = {
     teamId: string,
     input: MutateWorkItemRelationInput,
   ): Promise<WorkItemRelationMutationResponse>
+  /**
+   * Sets, replaces, or removes a Work Item's single parent as one atomic transaction.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns every endpoint.
+   * @param input - Child, observed current parent, and requested next parent snapshots.
+   * @param configurationConditionChecks - Configuration guards committed with the new parent link.
+   * @returns The previous and next parent IDs with the resulting graph revision.
+   */
+  replaceParent(
+    workspaceId: string,
+    teamId: string,
+    input: ReplaceWorkItemParentInput,
+    configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+  ): Promise<WorkItemParentMutationResponse>
 }
 
 /** 既存4 statusを保持するbuilt-in configurationです。 */
@@ -457,6 +565,10 @@ export function validateWorkItemConfiguration(
   const jobRoles = value.jobRoles === undefined
     ? undefined
     : readJobRoleDefinitions(value.jobRoles)
+  if (value.progressMode !== undefined && !isWorkItemProgressMode(value.progressMode)) {
+    throw invalidConfiguration('Progress mode must be status-category, remaining-effort, or manual.')
+  }
+  const progressMode = value.progressMode
 
   return {
     scopeType,
@@ -468,6 +580,7 @@ export function validateWorkItemConfiguration(
     customFields,
     ...(workItemTypes === undefined ? {} : { workItemTypes }),
     ...(jobRoles === undefined ? {} : { jobRoles }),
+    ...(progressMode === undefined ? {} : { progressMode }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
@@ -1115,6 +1228,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   /**
    * Reads every relation and the stable graph revision for one Team.
    *
+   * Only bulk projections such as Focus and Team configuration validation use this read.
+   * Relation mutations read the neighbourhood of their endpoints instead.
+   *
    * @param workspaceId - Workspace that owns the relation graph.
    * @param teamId - Team whose complete relation graph is read.
    * @returns All directed relations and their stable graph revision.
@@ -1124,23 +1240,61 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     teamId: string,
   ): Promise<WorkItemRelationsResponse> {
     await this.ensureTable()
-    const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
+    const before = await this.getRelationGraphRevision(workspaceId, teamId)
+    const relations = await this.queryRelationRows(
+      workspaceId,
+      teamId,
+      RELATION_RECORD_PREFIX,
+      TEAM_RELATION_EDGE_LIMIT,
+    )
+    const after = await this.getRelationGraphRevision(workspaceId, teamId)
+    assertStableGraphRevision(before, after)
     return {
-      graphRevision: snapshot.revision,
-      relations: snapshot.relations,
+      graphRevision: after,
+      relations,
     } satisfies WorkItemRelationsResponse
   }
 
-  /** Work Item から見た relation と graph revision を返します。 */
-  async listRelations(workspaceId: string, teamId: string, workItemId: string) {
-    const snapshot = await this.listRelationGraph(workspaceId, teamId)
+  /**
+   * Reads the relations stored with one Work Item as their source, without reading the Team graph.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @param workItemId - Source Work Item whose neighbourhood is read.
+   * @param options - Optional relation type filter.
+   * @returns The source Work Item's relations and the stable graph revision.
+   */
+  async listRelations(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    options: ListWorkItemRelationsOptions = {},
+  ) {
+    await this.ensureTable()
+    const before = await this.getRelationGraphRevision(workspaceId, teamId)
+    const relations = await this.readWorkItemRelations(
+      workspaceId,
+      teamId,
+      workItemId,
+      options.types,
+    )
+    const after = await this.getRelationGraphRevision(workspaceId, teamId)
+    assertStableGraphRevision(before, after)
     return {
-      graphRevision: snapshot.graphRevision,
-      relations: snapshot.relations.filter((relation) => relation.sourceWorkItemId === workItemId),
+      graphRevision: after,
+      relations,
     } satisfies WorkItemRelationsResponse
   }
 
-  /** Reciprocal relation を単一 transaction で作成します。 */
+  /**
+   * Creates one reciprocal relation in a single transaction.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns both endpoints.
+   * @param input - Normalizable relation mutation input.
+   * @param configurationConditionChecks - Configuration guards committed with the relation.
+   * @returns The created relation pair and the next graph revision.
+   */
   async createRelation(
     workspaceId: string,
     teamId: string,
@@ -1149,28 +1303,11 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   ) {
     await this.ensureTable()
     const normalized = normalizeRelationInput(input)
-    const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
-    assertExpectedGraphRevision(snapshot.revision, normalized.expectedGraphRevision)
     if (normalized.sourceWorkItemId === normalized.targetWorkItemId) {
       throw new WorkItemConfigurationError(400, 'WorkItemRelationSelf', 'A Work Item cannot relate to itself.')
     }
-    const reciprocalType = reciprocalRelationType(normalized.type)
-    const duplicate = snapshot.relations.some((relation) =>
-      relation.sourceWorkItemId === normalized.sourceWorkItemId &&
-      relation.targetWorkItemId === normalized.targetWorkItemId &&
-      relation.type === normalized.type,
-    )
-    if (duplicate) {
-      throw new WorkItemConfigurationError(409, 'WorkItemRelationDuplicate', 'The relation already exists.')
-    }
-    if (snapshot.relations.length + 2 > RELATION_SCAN_LIMIT) {
-      throw new WorkItemConfigurationError(
-        413,
-        'WorkItemRelationGraphLimitExceeded',
-        `A Team relation graph cannot exceed ${RELATION_SCAN_LIMIT} directed edges.`,
-      )
-    }
-    assertRelationDoesNotCreateCycle(snapshot.relations, normalized)
+    const graph = await this.readRelationGraphState(workspaceId, teamId)
+    assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
     const createdAt = new Date().toISOString()
     const relation: WorkItemRelation = {
       sourceWorkItemId: normalized.sourceWorkItemId,
@@ -1181,78 +1318,282 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     const reciprocalRelation: WorkItemRelation = {
       sourceWorkItemId: normalized.targetWorkItemId,
       targetWorkItemId: normalized.sourceWorkItemId,
-      type: reciprocalType,
+      type: reciprocalRelationType(normalized.type),
       createdAt,
     }
-    const nextRevision = snapshot.revision + 1
-    const nextRelations = [...snapshot.relations, relation, reciprocalRelation]
-
-    await this.sendRelationTransaction(
+    if (await this.readRelationRow(workspaceId, teamId, relation)) {
+      throw new WorkItemConfigurationError(409, 'WorkItemRelationDuplicate', 'The relation already exists.')
+    }
+    if (normalized.type === 'parent') {
+      const parents = await this.readWorkItemRelations(
+        workspaceId,
+        teamId,
+        normalized.sourceWorkItemId,
+        ['parent'],
+      )
+      if (parents.length > 0) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemParentAlreadyExists',
+          'A Work Item can have only one parent. Replace the parent instead of adding another one.',
+        )
+      }
+    }
+    const nextEdgeCount = graph.edgeCount + 2
+    assertTeamRelationEdgeCapacity(nextEdgeCount)
+    await this.assertRelationDoesNotCreateCycle(
       workspaceId,
       teamId,
-      snapshot.revision,
-      [
+      normalized.type,
+      normalized.sourceWorkItemId,
+      normalized.targetWorkItemId,
+    )
+    const [sourceRelationIds, targetRelationIds] = await Promise.all([
+      this.readChangedRelationIds(workspaceId, teamId, relation, { add: [relation] }),
+      this.readChangedRelationIds(workspaceId, teamId, reciprocalRelation, { add: [reciprocalRelation] }),
+    ])
+
+    await this.sendRelationTransaction(workspaceId, teamId, {
+      expectedRevision: graph.revision,
+      nextEdgeCount,
+      endpoints: [
+        {
+          workItemId: normalized.sourceWorkItemId,
+          expectedRevision: normalized.sourceExpectedRevision,
+          assignedProjectId: normalized.sourceAssignedProjectId,
+          relationIds: sourceRelationIds,
+        },
+        {
+          workItemId: normalized.targetWorkItemId,
+          expectedRevision: normalized.targetExpectedRevision,
+          assignedProjectId: normalized.targetAssignedProjectId,
+          relationIds: targetRelationIds,
+        },
+      ],
+      edgeMutations: [
         createRelationPut(this.tableName, workspaceId, teamId, relation),
         createRelationPut(this.tableName, workspaceId, teamId, reciprocalRelation),
       ],
-      normalized,
-      relation,
-      reciprocalRelation,
-      createWorkItemRelationIds(nextRelations, normalized.sourceWorkItemId),
-      createWorkItemRelationIds(nextRelations, normalized.targetWorkItemId),
-      'create',
       configurationConditionChecks,
-    )
-    return { relation, reciprocalRelation, graphRevision: nextRevision }
+      classifyCancellation: () => this.classifyRelationTransactionCancellation(
+        workspaceId,
+        teamId,
+        normalized,
+        relation,
+        reciprocalRelation,
+        'create',
+      ),
+    })
+    return { relation, reciprocalRelation, graphRevision: graph.revision + 1 }
   }
 
-  /** Reciprocal relation を単一 transaction で削除します。 */
+  /**
+   * Deletes one reciprocal relation in a single transaction.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns both endpoints.
+   * @param input - Normalizable relation mutation input; reciprocal types are accepted.
+   * @returns The deleted relation pair and the next graph revision.
+   */
   async deleteRelation(workspaceId: string, teamId: string, input: MutateWorkItemRelationInput) {
     await this.ensureTable()
     const normalized = normalizeRelationInput(input, true)
-    const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
-    assertExpectedGraphRevision(snapshot.revision, normalized.expectedGraphRevision)
-    const reciprocalType = reciprocalRelationType(normalized.type)
-    const relation = snapshot.relations.find((candidate) =>
-      candidate.sourceWorkItemId === normalized.sourceWorkItemId &&
-      candidate.targetWorkItemId === normalized.targetWorkItemId &&
-      candidate.type === normalized.type,
-    )
+    const graph = await this.readRelationGraphState(workspaceId, teamId)
+    assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
+    const [relation, reciprocalRelation] = await Promise.all([
+      this.readRelationRow(workspaceId, teamId, {
+        sourceWorkItemId: normalized.sourceWorkItemId,
+        targetWorkItemId: normalized.targetWorkItemId,
+        type: normalized.type,
+      }),
+      this.readRelationRow(workspaceId, teamId, {
+        sourceWorkItemId: normalized.targetWorkItemId,
+        targetWorkItemId: normalized.sourceWorkItemId,
+        type: reciprocalRelationType(normalized.type),
+      }),
+    ])
     if (!relation) {
       throw new WorkItemConfigurationError(404, 'WorkItemRelationNotFound', 'The relation was not found.')
     }
-    const reciprocalRelation = snapshot.relations.find((candidate) =>
-      candidate.sourceWorkItemId === normalized.targetWorkItemId &&
-      candidate.targetWorkItemId === normalized.sourceWorkItemId &&
-      candidate.type === reciprocalType,
-    )
     if (!reciprocalRelation) {
       throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'The reciprocal relation is missing.')
     }
-    const nextRevision = snapshot.revision + 1
-    const removedRecordKeys = new Set([
-      createRelationRecordKey(relation),
-      createRelationRecordKey(reciprocalRelation),
+    if (graph.edgeCount < 2) {
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemRelationInconsistent',
+        'Stored relation graph metadata is inconsistent.',
+      )
+    }
+    const [sourceRelationIds, targetRelationIds] = await Promise.all([
+      this.readChangedRelationIds(workspaceId, teamId, relation, { remove: [relation] }),
+      this.readChangedRelationIds(workspaceId, teamId, reciprocalRelation, { remove: [reciprocalRelation] }),
     ])
-    const nextRelations = snapshot.relations.filter((candidate) =>
-      !removedRecordKeys.has(createRelationRecordKey(candidate))
-    )
-    await this.sendRelationTransaction(
-      workspaceId,
-      teamId,
-      snapshot.revision,
-      [
+    await this.sendRelationTransaction(workspaceId, teamId, {
+      expectedRevision: graph.revision,
+      nextEdgeCount: graph.edgeCount - 2,
+      endpoints: [
+        {
+          workItemId: normalized.sourceWorkItemId,
+          expectedRevision: normalized.sourceExpectedRevision,
+          assignedProjectId: normalized.sourceAssignedProjectId,
+          relationIds: sourceRelationIds,
+        },
+        {
+          workItemId: normalized.targetWorkItemId,
+          expectedRevision: normalized.targetExpectedRevision,
+          assignedProjectId: normalized.targetAssignedProjectId,
+          relationIds: targetRelationIds,
+        },
+      ],
+      edgeMutations: [
         createRelationDelete(this.tableName, workspaceId, teamId, relation),
         createRelationDelete(this.tableName, workspaceId, teamId, reciprocalRelation),
       ],
-      normalized,
-      relation,
-      reciprocalRelation,
-      createWorkItemRelationIds(nextRelations, normalized.sourceWorkItemId),
-      createWorkItemRelationIds(nextRelations, normalized.targetWorkItemId),
-      'delete',
+      configurationConditionChecks: [],
+      classifyCancellation: () => this.classifyRelationTransactionCancellation(
+        workspaceId,
+        teamId,
+        normalized,
+        relation,
+        reciprocalRelation,
+        'delete',
+      ),
+    })
+    return { relation, reciprocalRelation, graphRevision: graph.revision + 1 }
+  }
+
+  /**
+   * Sets, replaces, or removes a Work Item's single parent as one atomic transaction.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns every endpoint.
+   * @param input - Child, observed current parent, and requested next parent snapshots.
+   * @param configurationConditionChecks - Configuration guards committed with the new parent link.
+   * @returns The previous and next parent IDs with the resulting graph revision.
+   */
+  async replaceParent(
+    workspaceId: string,
+    teamId: string,
+    input: ReplaceWorkItemParentInput,
+    configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+  ): Promise<WorkItemParentMutationResponse> {
+    await this.ensureTable()
+    const normalized = normalizeReplaceParentInput(input)
+    const child = normalized.child
+    if (normalized.nextParent?.workItemId === child.workItemId) {
+      throw new WorkItemConfigurationError(400, 'WorkItemRelationSelf', 'A Work Item cannot relate to itself.')
+    }
+    const graph = await this.readRelationGraphState(workspaceId, teamId)
+    const storedParents = await this.readWorkItemRelations(
+      workspaceId,
+      teamId,
+      child.workItemId,
+      ['parent'],
     )
-    return { relation, reciprocalRelation, graphRevision: nextRevision }
+    const previousParentWorkItemId = normalized.currentParent?.workItemId ?? null
+    const parentWorkItemId = normalized.nextParent?.workItemId ?? null
+    // Setting a parent is declarative: when the child already has exactly the requested parent,
+    // including on a retry after a lost response, report success without writing.
+    if (
+      storedParents.length === (parentWorkItemId ? 1 : 0) &&
+      (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
+    ) {
+      return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
+    }
+    assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
+    if (
+      storedParents.length !== (normalized.currentParent ? 1 : 0) ||
+      (storedParents[0]?.targetWorkItemId ?? null) !== previousParentWorkItemId
+    ) {
+      throw new WorkItemConfigurationError(
+        409,
+        'WorkItemRelationGraphConflict',
+        'The Work Item parent changed. Reload and try again.',
+      )
+    }
+    const removed: WorkItemRelation[] = []
+    const storedParent = storedParents[0]
+    if (storedParent) {
+      const storedChild = await this.readRelationRow(workspaceId, teamId, {
+        sourceWorkItemId: storedParent.targetWorkItemId,
+        targetWorkItemId: child.workItemId,
+        type: 'child',
+      })
+      if (!storedChild) {
+        throw new WorkItemConfigurationError(
+          503,
+          'WorkItemRelationInconsistent',
+          'The reciprocal relation is missing.',
+        )
+      }
+      removed.push(storedParent, storedChild)
+    }
+    const createdAt = new Date().toISOString()
+    const added: WorkItemRelation[] = normalized.nextParent
+      ? [
+          {
+            sourceWorkItemId: child.workItemId,
+            targetWorkItemId: normalized.nextParent.workItemId,
+            type: 'parent',
+            createdAt,
+          },
+          {
+            sourceWorkItemId: normalized.nextParent.workItemId,
+            targetWorkItemId: child.workItemId,
+            type: 'child',
+            createdAt,
+          },
+        ]
+      : []
+    const nextEdgeCount = graph.edgeCount + added.length - removed.length
+    if (nextEdgeCount < 0) {
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemRelationInconsistent',
+        'Stored relation graph metadata is inconsistent.',
+      )
+    }
+    if (nextEdgeCount > graph.edgeCount) {
+      assertTeamRelationEdgeCapacity(nextEdgeCount)
+    }
+    if (normalized.nextParent) {
+      await this.assertRelationDoesNotCreateCycle(
+        workspaceId,
+        teamId,
+        'parent',
+        child.workItemId,
+        normalized.nextParent.workItemId,
+      )
+    }
+    const childAdded = added.filter((relation) => relation.sourceWorkItemId === child.workItemId)
+    const childRemoved = removed.filter((relation) => relation.sourceWorkItemId === child.workItemId)
+    const childRelationIds = await this.readRelationIdsAfter(
+      workspaceId,
+      teamId,
+      child.workItemId,
+      { add: childAdded, remove: childRemoved },
+    )
+    await this.sendRelationTransaction(workspaceId, teamId, {
+      expectedRevision: graph.revision,
+      nextEdgeCount,
+      endpoints: [
+        { ...child, relationIds: childRelationIds },
+        ...(normalized.currentParent ? [normalized.currentParent] : []),
+        ...(normalized.nextParent ? [normalized.nextParent] : []),
+      ],
+      edgeMutations: [
+        ...removed.map((relation) => createRelationDelete(this.tableName, workspaceId, teamId, relation)),
+        ...added.map((relation) => createRelationPut(this.tableName, workspaceId, teamId, relation)),
+      ],
+      configurationConditionChecks: normalized.nextParent ? configurationConditionChecks : [],
+      classifyCancellation: () => this.classifyParentReplacementCancellation(
+        workspaceId,
+        teamId,
+        normalized,
+      ),
+    })
+    return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision + 1 }
   }
 
   private async ensureTable() {
@@ -1489,9 +1830,47 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     }
   }
 
-  private async readStableRelationGraph(workspaceId: string, teamId: string) {
-    const before = await this.getRelationGraphRevision(workspaceId, teamId)
-    const relations: WorkItemRelation[] = []
+  /**
+   * Reads the graph revision and stored directed edge count for one Team.
+   *
+   * Graph rows written before the edge count existed are counted once with a COUNT query; the
+   * next mutation stores the count.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose graph metadata is read.
+   * @returns The current revision and directed edge count.
+   */
+  private async readRelationGraphState(
+    workspaceId: string,
+    teamId: string,
+  ): Promise<RelationGraphState> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+        recordKey: RELATION_GRAPH_RECORD_KEY,
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) {
+      return { revision: 0, edgeCount: 0 }
+    }
+    const revision = readRelationGraphRevisionItem(response.Item)
+    const edgeCount = response.Item.edgeCount === undefined
+      ? await this.countRelationRows(workspaceId, teamId)
+      : readStoredEdgeCount(response.Item.edgeCount)
+    return { revision, edgeCount }
+  }
+
+  /**
+   * Counts the directed relation rows of a Team graph without reading their attributes.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation rows are counted.
+   * @returns The number of stored directed relation rows.
+   */
+  private async countRelationRows(workspaceId: string, teamId: string) {
+    let count = 0
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const response = await this.documentClient.send(new QueryCommand({
@@ -1503,28 +1882,228 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         },
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
+        Select: 'COUNT',
+      }))
+      count += response.Count ?? 0
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return count
+  }
+
+  /**
+   * Reads every relation row under one record key prefix with strongly consistent pages.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation rows are read.
+   * @param prefix - Relation record key prefix.
+   * @param limit - Optional maximum number of rows before failing closed.
+   * @returns Relation rows in record key order.
+   */
+  private async queryRelationRows(
+    workspaceId: string,
+    teamId: string,
+    prefix: string,
+    limit?: number,
+  ) {
+    const relations: WorkItemRelation[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':scopeKey': createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+          ':prefix': prefix,
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
       }))
       for (const item of response.Items ?? []) {
         relations.push(readRelationItem(item))
-        if (relations.length > RELATION_SCAN_LIMIT) {
-          throw new WorkItemConfigurationError(
-            413,
-            'WorkItemRelationGraphLimitExceeded',
-            `A Team relation graph cannot exceed ${RELATION_SCAN_LIMIT} directed edges.`,
-          )
+        if (limit !== undefined && relations.length > limit) {
+          throw teamRelationLimitExceeded()
         }
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
-    const after = await this.getRelationGraphRevision(workspaceId, teamId)
-    if (before !== after) {
-      throw new WorkItemConfigurationError(
-        409,
-        'WorkItemRelationGraphConflict',
-        'Work Item relations changed. Reload and try again.',
-      )
+    return relations
+  }
+
+  /**
+   * Reads the relations whose source is one Work Item through its record key prefix.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation rows are read.
+   * @param workItemId - Source Work Item ID.
+   * @param types - Optional relation types; omitted reads every type.
+   * @returns Relation rows of the Work Item in record key order.
+   */
+  private async readWorkItemRelations(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    types?: readonly WorkItemRelationType[],
+  ) {
+    const sourcePrefix = createRelationSourcePrefix(workItemId)
+    const pages = types === undefined
+      ? [await this.queryRelationRows(workspaceId, teamId, sourcePrefix)]
+      : await Promise.all([...new Set(types)].sort().map((type) =>
+          this.queryRelationRows(workspaceId, teamId, `${sourcePrefix}${encodeURIComponent(type)}#`)
+        ))
+    const relations = pages.flat()
+    if (relations.some((relation) => relation.sourceWorkItemId !== workItemId)) {
+      throw storedRelationInvalid()
     }
-    return { relations, revision: after }
+    return relations
+  }
+
+  /**
+   * Reads one directed relation row by its exact key.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation row is read.
+   * @param relation - Source, target, and type identifying the row.
+   * @returns The stored relation, or undefined when the row does not exist.
+   */
+  private async readRelationRow(
+    workspaceId: string,
+    teamId: string,
+    relation: WorkItemRelation,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+        recordKey: createRelationRecordKey(relation),
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) {
+      return undefined
+    }
+    const stored = readRelationItem(response.Item)
+    if (
+      stored.sourceWorkItemId !== relation.sourceWorkItemId ||
+      stored.targetWorkItemId !== relation.targetWorkItemId ||
+      stored.type !== relation.type
+    ) {
+      throw storedRelationInvalid()
+    }
+    return stored
+  }
+
+  /**
+   * Computes the next `relationIds` of a relation's source when that relation is projected.
+   *
+   * `child` rows are not projected, so a parent's row is only condition-checked.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation rows are read.
+   * @param relation - Directed relation being added or removed.
+   * @param change - Rows added to or removed from the source.
+   * @returns The next projection, or undefined when the source projection does not change.
+   */
+  private async readChangedRelationIds(
+    workspaceId: string,
+    teamId: string,
+    relation: WorkItemRelation,
+    change: RelationProjectionChange,
+  ) {
+    if (!isProjectedRelationType(relation.type)) {
+      return undefined
+    }
+    return this.readRelationIdsAfter(workspaceId, teamId, relation.sourceWorkItemId, change)
+  }
+
+  /**
+   * Reads one Work Item's projected relations and applies a pending change.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation rows are read.
+   * @param workItemId - Work Item whose projection is computed.
+   * @param change - Rows added to or removed from the Work Item.
+   * @returns The sorted `relationIds` after the change.
+   */
+  private async readRelationIdsAfter(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    change: RelationProjectionChange,
+  ) {
+    const current = await this.readWorkItemRelations(
+      workspaceId,
+      teamId,
+      workItemId,
+      WORK_ITEM_PROJECTED_RELATION_TYPES,
+    )
+    const removedKeys = new Set((change.remove ?? []).map(createRelationRecordKey))
+    return createWorkItemRelationIds([
+      ...current.filter((relation) => !removedKeys.has(createRelationRecordKey(relation))),
+      ...(change.add ?? []),
+    ], workItemId)
+  }
+
+  /**
+   * Rejects parent and blocks relations that would close a cycle.
+   *
+   * The traversal follows the same relation type from the new target, reading only the
+   * neighbourhood of each visited Work Item. A parent chain is linear because every Work Item has
+   * at most one parent.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation rows are read.
+   * @param type - Relation type being added.
+   * @param sourceWorkItemId - Source of the new relation.
+   * @param targetWorkItemId - Target of the new relation.
+   */
+  private async assertRelationDoesNotCreateCycle(
+    workspaceId: string,
+    teamId: string,
+    type: WorkItemRelationType,
+    sourceWorkItemId: string,
+    targetWorkItemId: string,
+  ) {
+    if (type !== 'parent' && type !== 'blocks') {
+      return
+    }
+    const visited = new Set<string>()
+    let frontier = [targetWorkItemId]
+    while (frontier.length > 0) {
+      if (frontier.includes(sourceWorkItemId)) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemRelationCycle',
+          `The ${type} relation would create a cycle.`,
+        )
+      }
+      for (const workItemId of frontier) {
+        visited.add(workItemId)
+      }
+      if (visited.size > RELATION_TRAVERSAL_NODE_LIMIT) {
+        throw new WorkItemConfigurationError(
+          413,
+          'WorkItemRelationTraversalLimitExceeded',
+          `Cycle validation cannot visit more than ${RELATION_TRAVERSAL_NODE_LIMIT} Work Items.`,
+        )
+      }
+      const next = new Set<string>()
+      for (
+        let offset = 0;
+        offset < frontier.length;
+        offset += RELATION_TRAVERSAL_READ_CONCURRENCY
+      ) {
+        const batch = frontier.slice(offset, offset + RELATION_TRAVERSAL_READ_CONCURRENCY)
+        const pages = await Promise.all(batch.map((workItemId) =>
+          this.readWorkItemRelations(workspaceId, teamId, workItemId, [type])
+        ))
+        for (const relation of pages.flat()) {
+          if (!visited.has(relation.targetWorkItemId)) {
+            next.add(relation.targetWorkItemId)
+          }
+        }
+      }
+      frontier = [...next]
+    }
   }
 
   /**
@@ -1546,96 +2125,65 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     if (!response.Item) {
       return 0
     }
-    if (
-      response.Item.entryType !== 'relation-graph' ||
-      response.Item.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
-    ) {
-      throw new WorkItemConfigurationError(
-        503,
-        'InvalidWorkItemRelationGraph',
-        'Stored relation graph metadata is invalid.',
-      )
-    }
-    return readPositiveInteger(response.Item.revision, 'Relation graph revision')
+    return readRelationGraphRevisionItem(response.Item)
   }
 
+  /**
+   * Commits relation row changes, endpoint guards, and the graph metadata in one transaction.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns every endpoint.
+   * @param input - Graph CAS, endpoint, row, and configuration items to commit.
+   */
   private async sendRelationTransaction(
     workspaceId: string,
     teamId: string,
-    expectedRevision: number,
-    edgeMutations: NonNullable<TransactWriteCommandInput['TransactItems']>,
-    input: MutateWorkItemRelationInput,
-    relation: WorkItemRelation,
-    reciprocalRelation: WorkItemRelation,
-    sourceRelationIds: readonly string[],
-    targetRelationIds: readonly string[],
-    operation: 'create' | 'delete',
-    configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    input: RelationTransactionInput,
   ) {
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId)
     const workItemPartitionKey = `${workspaceId}#team#${teamId}`
-    const configurationConditionStartIndex = 2 + 1 + edgeMutations.length
-    const graphMutation = expectedRevision === 0
+    const configurationConditionStartIndex =
+      input.endpoints.length + 1 + input.edgeMutations.length
+    const graphItem = {
+      scopeKey,
+      recordKey: RELATION_GRAPH_RECORD_KEY,
+      entryType: 'relation-graph',
+      schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+      revision: input.expectedRevision + 1,
+      edgeCount: input.nextEdgeCount,
+    }
+    const graphMutation = input.expectedRevision === 0
       ? {
           Put: {
             TableName: this.tableName,
-            Item: {
-              scopeKey,
-              recordKey: RELATION_GRAPH_RECORD_KEY,
-              entryType: 'relation-graph',
-              schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-              revision: 1,
-            },
+            Item: graphItem,
             ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
           },
         }
       : {
           Put: {
             TableName: this.tableName,
-            Item: {
-              scopeKey,
-              recordKey: RELATION_GRAPH_RECORD_KEY,
-              entryType: 'relation-graph',
-              schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-              revision: expectedRevision + 1,
-            },
+            Item: graphItem,
             ConditionExpression: '#revision = :expectedRevision',
             ExpressionAttributeNames: { '#revision': 'revision' },
-            ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+            ExpressionAttributeValues: { ':expectedRevision': input.expectedRevision },
           },
         }
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
-          {
-            Update: {
-              TableName: this.workItemsTableName,
-              Key: { directoryTeamId: workItemPartitionKey, issueId: input.sourceWorkItemId },
-              ...createRelationEndpointProjectionUpdate(
-                input.sourceExpectedRevision,
-                input.sourceAssignedProjectId,
-                sourceRelationIds,
-              ),
-            },
-          },
-          {
-            Update: {
-              TableName: this.workItemsTableName,
-              Key: { directoryTeamId: workItemPartitionKey, issueId: input.targetWorkItemId },
-              ...createRelationEndpointProjectionUpdate(
-                input.targetExpectedRevision,
-                input.targetAssignedProjectId,
-                targetRelationIds,
-              ),
-            },
-          },
+          ...input.endpoints.map((endpoint) => createRelationEndpointTransactionItem(
+            this.workItemsTableName,
+            workItemPartitionKey,
+            endpoint,
+          )),
           graphMutation,
-          ...edgeMutations,
-          ...configurationConditionChecks,
+          ...input.edgeMutations,
+          ...input.configurationConditionChecks,
         ],
       }))
     } catch (error) {
-      if (configurationConditionChecks.some((_, index) =>
+      if (input.configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
         throw new WorkItemConfigurationError(
@@ -1645,17 +2193,74 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         )
       }
       if (isNamedError(error, 'TransactionCanceledException')) {
-        throw await this.classifyRelationTransactionCancellation(
-          workspaceId,
-          teamId,
-          input,
-          relation,
-          reciprocalRelation,
-          operation,
-        )
+        throw await input.classifyCancellation()
       }
       throw toPersistenceError(error)
     }
+  }
+
+  /**
+   * Classifies a canceled parent replacement after re-reading its fences.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns every endpoint.
+   * @param input - Normalized parent replacement input.
+   * @returns The error to return to the caller.
+   */
+  private async classifyParentReplacementCancellation(
+    workspaceId: string,
+    teamId: string,
+    input: ReplaceWorkItemParentInput,
+  ) {
+    try {
+      const workItemPartitionKey = `${workspaceId}#team#${teamId}`
+      const endpoints = [
+        input.child,
+        ...(input.currentParent ? [input.currentParent] : []),
+        ...(input.nextParent ? [input.nextParent] : []),
+      ]
+      const [graphRevision, storedParents, ...items] = await Promise.all([
+        this.getRelationGraphRevision(workspaceId, teamId),
+        this.readWorkItemRelations(workspaceId, teamId, input.child.workItemId, ['parent']),
+        ...endpoints.map((endpoint) => this.documentClient.send(new GetCommand({
+          TableName: this.workItemsTableName,
+          Key: { directoryTeamId: workItemPartitionKey, issueId: endpoint.workItemId },
+          ConsistentRead: true,
+        }))),
+      ])
+      if (items.some((item) => !item.Item)) {
+        return new WorkItemConfigurationError(
+          404,
+          'WorkItemRelationEndpointNotFound',
+          'A relation endpoint no longer exists.',
+        )
+      }
+      const endpointsChanged = endpoints.some((endpoint, index) => {
+        const item = items[index]?.Item
+        return !item ||
+          !relationEndpointMatchesSnapshot(item, endpoint.expectedRevision, endpoint.assignedProjectId)
+      })
+      const parentChanged = storedParents.length !== (input.currentParent ? 1 : 0) ||
+        (storedParents[0]?.targetWorkItemId ?? null) !== (input.currentParent?.workItemId ?? null)
+      if (
+        endpointsChanged ||
+        parentChanged ||
+        graphRevision !== input.expectedGraphRevision
+      ) {
+        return new WorkItemConfigurationError(
+          409,
+          'WorkItemRelationGraphConflict',
+          'Work Item relations or endpoints changed. Reload and try again.',
+        )
+      }
+    } catch (error) {
+      return toPersistenceError(error)
+    }
+    return new WorkItemConfigurationError(
+      503,
+      'WorkItemRelationUnavailable',
+      'The relation transaction was canceled for an unclassified reason.',
+    )
   }
 
   private async classifyRelationTransactionCancellation(
@@ -1816,6 +2421,8 @@ function createScopedDefaultConfiguration(
 function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfiguration) {
   return {
     revision: configuration.revision,
+    // The calculation policy changes every displayed progress percentage, so its value is audited.
+    progressMode: configuration.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE,
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),
@@ -2581,38 +3188,72 @@ function normalizeRelationInput(
   }
 }
 
-function createRelationEndpointProjectionUpdate(
-  revision: number,
-  assignedProjectId: string | undefined,
-  relationIds: readonly string[],
-) {
-  return {
-    UpdateExpression: 'SET #relationIds = :relationIds',
+/**
+ * Creates the Work Item row item that fences a relation endpoint and optionally stores its projection.
+ *
+ * @param workItemsTableName - Canonical Work Items table name.
+ * @param workItemPartitionKey - Team partition key of the endpoint.
+ * @param endpoint - Endpoint snapshot and optional next projection.
+ * @returns An Update when the projection changes, otherwise a ConditionCheck.
+ */
+function createRelationEndpointTransactionItem(
+  workItemsTableName: string,
+  workItemPartitionKey: string,
+  endpoint: RelationTransactionEndpoint,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const guard = {
+    TableName: workItemsTableName,
+    Key: { directoryTeamId: workItemPartitionKey, issueId: endpoint.workItemId },
     ConditionExpression:
       'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :revision AND ' +
-      (assignedProjectId === undefined
+      (endpoint.assignedProjectId === undefined
         ? 'attribute_not_exists(#assignedProjectId)'
         : '#assignedProjectId = :assignedProjectId'),
     ExpressionAttributeNames: {
       '#assignedProjectId': 'assignedProjectId',
-      '#relationIds': 'relationIds',
       '#revision': 'revision',
     },
     ExpressionAttributeValues: {
-      ':relationIds': [...relationIds],
-      ':revision': revision,
-      ...(assignedProjectId === undefined ? {} : { ':assignedProjectId': assignedProjectId }),
+      ':revision': endpoint.expectedRevision,
+      ...(endpoint.assignedProjectId === undefined
+        ? {}
+        : { ':assignedProjectId': endpoint.assignedProjectId }),
+    },
+  }
+  if (endpoint.relationIds === undefined) {
+    return { ConditionCheck: guard }
+  }
+  return {
+    Update: {
+      ...guard,
+      UpdateExpression: 'SET #relationIds = :relationIds',
+      ExpressionAttributeNames: { ...guard.ExpressionAttributeNames, '#relationIds': 'relationIds' },
+      ExpressionAttributeValues: {
+        ...guard.ExpressionAttributeValues,
+        ':relationIds': [...endpoint.relationIds],
+      },
     },
   }
 }
 
-/** Relation graph から Work Item row/search 用の決定的な relation ID 一覧を作成します。 */
+/**
+ * Relation graph から Work Item row/search 用の決定的な relation ID 一覧を作成します。
+ *
+ * `child` relation は親の projection に含めません。子は子側の `parent:<id>` で引けるため、
+ * 親が持てる子の数を projection の上限で縛らないためです。
+ *
+ * @param relations - Relations that may include rows of other sources.
+ * @param sourceWorkItemId - Work Item whose projection is created.
+ * @returns Sorted unique `type:targetWorkItemId` entries.
+ */
 export function createWorkItemRelationIds(
   relations: readonly WorkItemRelation[],
   sourceWorkItemId: string,
 ) {
   const relationIds = relations
-    .filter((relation) => relation.sourceWorkItemId === sourceWorkItemId)
+    .filter((relation) =>
+      relation.sourceWorkItemId === sourceWorkItemId && isProjectedRelationType(relation.type)
+    )
     .map((relation) => `${relation.type}:${relation.targetWorkItemId}`)
   if (new Set(relationIds).size !== relationIds.length) {
     throw storedRelationInvalid()
@@ -2650,38 +3291,122 @@ function reciprocalRelationType(type: WorkItemRelationType): WorkItemRelationTyp
   return reciprocal[type]
 }
 
-function assertRelationDoesNotCreateCycle(
-  relations: readonly WorkItemRelation[],
-  input: MutateWorkItemRelationInput,
-) {
-  if (input.type !== 'parent' && input.type !== 'blocks') {
-    return
+/**
+ * Checks whether a relation type is stored in the source Work Item's `relationIds`.
+ *
+ * @param type - Relation type.
+ * @returns False only for `child`.
+ */
+function isProjectedRelationType(type: WorkItemRelationType) {
+  return type !== 'child'
+}
+
+/**
+ * Rejects a mutation that would store more directed rows than the Team limit.
+ *
+ * @param nextEdgeCount - Directed rows after the mutation.
+ */
+function assertTeamRelationEdgeCapacity(nextEdgeCount: number) {
+  if (nextEdgeCount > TEAM_RELATION_EDGE_LIMIT) {
+    throw teamRelationLimitExceeded()
   }
-  const adjacency = new Map<string, Set<string>>()
-  for (const relation of relations) {
-    if (relation.type !== input.type) {
-      continue
-    }
-    const targets = adjacency.get(relation.sourceWorkItemId) ?? new Set<string>()
-    targets.add(relation.targetWorkItemId)
-    adjacency.set(relation.sourceWorkItemId, targets)
+}
+
+/**
+ * Creates the error returned when a Team relation graph would exceed its link limit.
+ *
+ * @returns A 413 configuration error.
+ */
+function teamRelationLimitExceeded() {
+  return new WorkItemConfigurationError(
+    413,
+    'WorkItemRelationGraphLimitExceeded',
+    `A Team cannot store more than ${WORK_ITEM_TEAM_RELATION_LINK_LIMIT} relation links.`,
+  )
+}
+
+/**
+ * Fails when the graph revision moved while a multi-page read was in progress.
+ *
+ * @param before - Revision read before the pages.
+ * @param after - Revision read after the pages.
+ */
+function assertStableGraphRevision(before: number, after: number) {
+  if (before !== after) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemRelationGraphConflict',
+      'Work Item relations changed. Reload and try again.',
+    )
   }
-  const pending = [input.targetWorkItemId]
-  const visited = new Set<string>()
-  while (pending.length > 0) {
-    const current = pending.pop()!
-    if (current === input.sourceWorkItemId) {
-      throw new WorkItemConfigurationError(
-        409,
-        'WorkItemRelationCycle',
-        `The ${input.type} relation would create a cycle.`,
-      )
-    }
-    if (visited.has(current)) {
-      continue
-    }
-    visited.add(current)
-    pending.push(...(adjacency.get(current) ?? []))
+}
+
+/**
+ * Validates the stored relation graph metadata row and reads its revision.
+ *
+ * @param item - Stored graph metadata row.
+ * @returns The positive graph revision.
+ */
+function readRelationGraphRevisionItem(item: Record<string, unknown>) {
+  if (
+    item.entryType !== 'relation-graph' ||
+    item.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
+  ) {
+    throw new WorkItemConfigurationError(
+      503,
+      'InvalidWorkItemRelationGraph',
+      'Stored relation graph metadata is invalid.',
+    )
+  }
+  return readPositiveInteger(item.revision, 'Relation graph revision')
+}
+
+/**
+ * Reads the stored directed edge count of a relation graph metadata row.
+ *
+ * @param value - Stored `edgeCount` attribute.
+ * @returns The non-negative edge count.
+ */
+function readStoredEdgeCount(value: unknown) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new WorkItemConfigurationError(
+      503,
+      'InvalidWorkItemRelationGraph',
+      'Stored relation graph metadata is invalid.',
+    )
+  }
+  return value
+}
+
+/**
+ * Creates the record key prefix shared by every relation whose source is one Work Item.
+ *
+ * @param workItemId - Source Work Item ID.
+ * @returns The `REL#<source>#` prefix.
+ */
+function createRelationSourcePrefix(workItemId: string) {
+  return `${RELATION_RECORD_PREFIX}${encodeURIComponent(workItemId)}#`
+}
+
+/**
+ * Validates a parent replacement input from an authorized caller.
+ *
+ * @param input - Parent replacement input.
+ * @returns The input with validated identifiers and revisions.
+ */
+function normalizeReplaceParentInput(input: ReplaceWorkItemParentInput): ReplaceWorkItemParentInput {
+  const readEndpoint = (endpoint: WorkItemRelationEndpointSnapshot, label: string) => ({
+    workItemId: readIdentifier(endpoint.workItemId, `${label} Work Item ID`),
+    expectedRevision: readPositiveInteger(endpoint.expectedRevision, `${label} Work Item revision`),
+    ...(endpoint.assignedProjectId === undefined
+      ? {}
+      : { assignedProjectId: readIdentifier(endpoint.assignedProjectId, `${label} Project ID`) }),
+  })
+  return {
+    child: readEndpoint(input.child, 'Child'),
+    ...(input.currentParent ? { currentParent: readEndpoint(input.currentParent, 'Current parent') } : {}),
+    ...(input.nextParent ? { nextParent: readEndpoint(input.nextParent, 'Parent') } : {}),
+    expectedGraphRevision: readNonNegativeInteger(input.expectedGraphRevision, 'Relation graph revision'),
   }
 }
 

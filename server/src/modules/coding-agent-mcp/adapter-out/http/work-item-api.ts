@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import {
+  isCanonicalWorkItemKey,
   AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
@@ -11,15 +12,41 @@ import { AgentTaskError } from '../../application/work-item-api'
 const identifier = z.string().min(1).max(256).refine((value) => value !== '.' && value !== '..')
 const category = z.enum(['backlog', 'unstarted', 'started', 'completed', 'canceled'])
 const customValue = z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()).max(100)])
+const effortMinutes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+const scheduleBase = {
+  calendarPolicy: z.object({
+    timeZone: z.string().min(1),
+    workingWeekdays: z.array(z.enum(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'])),
+    holidays: z.array(z.iso.date()),
+  }),
+  plannedEffortMinutes: effortMinutes.optional(),
+}
+const scheduleSchema = z.discriminatedUnion('mode', [
+  z.object({ ...scheduleBase, mode: z.literal('unscheduled') }),
+  z.object({ ...scheduleBase, mode: z.literal('due-date'), dueDate: z.iso.date() }),
+  z.object({
+    ...scheduleBase, mode: z.literal('date-range'), startDate: z.iso.date(), endDate: z.iso.date(),
+    durationDays: z.number().int().positive(),
+  }),
+  z.object({
+    ...scheduleBase, mode: z.literal('milestone'), startDate: z.iso.date(), endDate: z.iso.date(), durationDays: z.literal(0),
+  }),
+])
 const taskSchema: z.ZodType<AgentTask> = z.object({
   id: identifier, teamId: identifier, revision: z.number().int().positive(),
   title: z.string(), description: z.string().optional(), assigneeUserId: identifier,
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
   workItemTypeId: identifier.optional(), statusCategory: category,
   priority: z.enum(['high', 'medium', 'low']), dueDate: z.union([z.literal(''), z.iso.date()]),
+  schedule: scheduleSchema,
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   relationIds: z.array(z.string().regex(/^(parent|child|blocks|blockedBy|related|duplicate):.+$/)).max(100),
   customFieldValues: z.record(z.string(), customValue),
+})
+const effortSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
+  plannedEffortMinutes: effortMinutes.optional(), remainingEffortMinutes: effortMinutes.optional(),
+  progressPercent: z.number().int().min(0).max(100).optional(),
 })
 const acceptanceCriteriaSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
@@ -28,6 +55,10 @@ const acceptanceCriteriaSchema = z.object({
     text: z.string().min(1).max(WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH),
     satisfied: z.boolean(),
   })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
+})
+const keySchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, createdAt: z.iso.datetime(),
+  key: z.string().refine(isCanonicalWorkItemKey).optional(),
 })
 const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
@@ -350,6 +381,39 @@ export function createAgentWorkItemApi(
         throw new AgentTaskError('invalid_response', 'The API returned acceptance criteria of another task.')
       }
       return criteria.items
+    },
+    /** Reads a task's estimate, remaining effort, and progress; a server older than the endpoint has none. */
+    async effort(id) {
+      let effort: z.infer<typeof effortSchema>
+      try {
+        effort = await request(`work-items/${encodeURIComponent(id)}/effort`, effortSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (effort.teamId !== config.teamId || effort.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the effort of another task.')
+      }
+      return {
+        revision: effort.revision,
+        ...(effort.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: effort.plannedEffortMinutes }),
+        ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
+        ...(effort.progressPercent === undefined ? {} : { progressPercent: effort.progressPercent }),
+      }
+    },
+    /** Reads a task's key and its Work Item's creation time; a server older than the endpoint has neither. */
+    async taskKey(id) {
+      let found: z.infer<typeof keySchema>
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/key`, keySchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the key of another task.')
+      }
+      return { createdAt: found.createdAt, ...(found.key === undefined ? {} : { key: found.key }) }
     },
   }
 

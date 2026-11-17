@@ -435,6 +435,7 @@ function createAnalyticsReportQuery(
     ...(report.forecastBaseline === undefined
       ? {}
       : { forecastBaseline: structuredClone(report.forecastBaseline) }),
+    ...(report.forecastWeighting === undefined ? {} : { forecastWeighting: report.forecastWeighting }),
   }
 }
 

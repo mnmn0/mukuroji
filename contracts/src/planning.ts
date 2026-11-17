@@ -890,3 +890,58 @@ export type PlanningMutationResponse = {
   /** Cycle rollover で元 Cycle に残した Work Item ID 一覧です。 */
   retainedWorkItemIds: string[]
 }
+
+/** Live graph から退避した archive 済み Planning entity の一覧用 summary です。 */
+export type ArchivedPlanningEntitySummary = {
+  /** Workspace 内で entity を識別する ID です。 */
+  id: string
+  /** Entity の種別です。 */
+  type: PlanningEntityType
+  /** 表示名です。 */
+  title: string
+  /** Archive 時点の親 entity ID です。復元にはこの親が live で active である必要があります。 */
+  parentId?: string
+  /** Archive 時点の Team scope です。 */
+  teamId?: string
+  /** Archive 時点の Project scope です。 */
+  projectId?: string
+  /** Entity owner の member key です。復元には owner が active な member である必要があります。 */
+  ownerMemberKey: string
+  /** Archive した日時の ISO 8601 timestamp です。 */
+  archivedAt: string
+}
+
+/** 退避済み Planning entity 一覧の cursor page です。 */
+export type ArchivedPlanningEntityPage = {
+  /** 呼び出し元が復元できる退避済み entity です。 */
+  entities: ArchivedPlanningEntitySummary[]
+  /** 次の page を読む opaque cursor です。最後の page では省略します。 */
+  nextCursor?: string
+}
+
+/** 退避済み entity を復元した結果です。 */
+export type PlanningRestoreSummary = {
+  /** Live graph に戻した Work Item link の参照数です。 */
+  restoredLinkCount: number
+  /** Work Item が別の Cycle や Milestone に移っていたなど、戻すと整合しないため破棄した link の参照数です。 */
+  droppedLinkCount: number
+  /** Live graph に戻した dependency 数です。 */
+  restoredDependencyCount: number
+  /** 相手の entity がまだ退避中のため、相手と一緒に退避したままにした dependency 数です。 */
+  retainedDependencyCount: number
+  /** 相手の entity が存在しない、または循環になるため破棄した dependency 数です。 */
+  droppedDependencyCount: number
+  /**
+   * 退避先に残っている参照数です。容量不足でこの request では戻しきれなかったものと、呼び出し元から
+   * 見えない（または削除・archive 済みの）Work Item の link を含みます。同じ復元を再実行すると続きを戻します。
+   */
+  pendingReferenceCount: number
+}
+
+/** Planning entity 復元 API の response です。 */
+export type RestorePlanningEntityResponse = {
+  /** 復元後に再計算した snapshot です。 */
+  planning: PlanningSnapshot
+  /** 戻した参照と戻せなかった参照の件数です。 */
+  restore: PlanningRestoreSummary
+}

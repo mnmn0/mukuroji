@@ -1,0 +1,79 @@
+import {
+  DEFAULT_WORK_ITEM_PROGRESS_MODE,
+  deriveWorkItemProgressPercent,
+  deriveWorkItemRemainingEffortMinutes,
+  type WorkItemConfiguration,
+  type WorkItemEffortFields,
+  type WorkItemPatch,
+  type WorkItemSchedule,
+} from '@mukuroji/contracts'
+
+/** Effort and progress values a person changed; null clears a value, and absent values are unchanged. */
+export type WorkItemEffortProgressChange = {
+  /** Canonical estimate in minutes, written into the schedule, or null to clear it. */
+  plannedEffortMinutes?: number | null
+  /** Recorded remaining minutes, or null to clear it. */
+  remainingEffortMinutes?: number | null
+  /** Manually recorded progress, or null to clear it. */
+  progressPercent?: number | null
+}
+
+/**
+ * Converts an effort and progress change into a Work Item update.
+ *
+ * The estimate is the schedule's `plannedEffortMinutes`, so changing it replaces the schedule with
+ * the same placement; the server then needs no dependency confirmation.
+ *
+ * @param change - Changed values.
+ * @param schedule - Current canonical schedule of the Work Item.
+ * @returns Update fields for the Work Item.
+ */
+export function toWorkItemEffortPatch(
+  change: WorkItemEffortProgressChange,
+  schedule: WorkItemSchedule,
+): Pick<WorkItemPatch, 'schedule' | 'remainingEffortMinutes' | 'progressPercent'> {
+  const { plannedEffortMinutes, ...fields } = change
+  if (plannedEffortMinutes === undefined) return fields
+  const placement = { ...schedule }
+  delete placement.plannedEffortMinutes
+  return {
+    ...fields,
+    schedule: plannedEffortMinutes === null ? placement : { ...placement, plannedEffortMinutes },
+  }
+}
+
+/** Task view column fields that show a Work Item's estimate, remaining effort, and progress. */
+export const WORK_ITEM_EFFORT_COLUMN_FIELDS = ['estimate', 'remainingEffort', 'progress'] as const
+
+/** One of {@link WORK_ITEM_EFFORT_COLUMN_FIELDS}. */
+export type WorkItemEffortColumnField = (typeof WORK_ITEM_EFFORT_COLUMN_FIELDS)[number]
+
+/**
+ * Returns whether a task view column field is an effort column.
+ *
+ * @param field - Column field.
+ * @returns Whether it names an effort column.
+ */
+export function isWorkItemEffortColumnField(field: string): field is WorkItemEffortColumnField {
+  return WORK_ITEM_EFFORT_COLUMN_FIELDS.some((candidate) => candidate === field)
+}
+
+/**
+ * Resolves the sortable value of an effort column: minutes for effort, percent for progress.
+ *
+ * @param item - Work Item effort fields.
+ * @param field - Effort column.
+ * @param configuration - Work Item configuration that selects the progress mode.
+ * @returns The value, or undefined when it is unknown.
+ */
+export function resolveWorkItemEffortColumnValue(
+  item: WorkItemEffortFields,
+  field: WorkItemEffortColumnField,
+  configuration?: Pick<WorkItemConfiguration, 'progressMode'>,
+): number | undefined {
+  switch (field) {
+    case 'estimate': return item.schedule.plannedEffortMinutes
+    case 'remainingEffort': return deriveWorkItemRemainingEffortMinutes(item)
+    case 'progress': return deriveWorkItemProgressPercent(item, configuration?.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE)
+  }
+}

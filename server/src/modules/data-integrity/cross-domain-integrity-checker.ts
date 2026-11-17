@@ -1935,11 +1935,14 @@ function indexItem(
     if (indexes.relations.has(key)) failures.add('DUPLICATE_RECORD')
     indexes.relations.add(key)
     indexes.relationItems.push(item)
-    appendGrouped(
-      indexes.relationProjectionsBySource,
-      workItemKey(item.workspaceId, item.teamId, item.sourceWorkItemId),
-      `${item.relationType}:${item.targetWorkItemId}`,
-    )
+    // A parent's relationIds omit its children; each child projects `parent:<id>` instead.
+    if (item.relationType !== 'child') {
+      appendGrouped(
+        indexes.relationProjectionsBySource,
+        workItemKey(item.workspaceId, item.teamId, item.sourceWorkItemId),
+        `${item.relationType}:${item.targetWorkItemId}`,
+      )
+    }
     return
   }
   if (item.kind === 'audit-reference') {

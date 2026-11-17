@@ -50,6 +50,11 @@ import {
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
 import {
+  createProjectCharterDraftStore,
+  createProjectCharterPersonCandidates,
+} from '../../projects/model/projectCharterView'
+import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
+import {
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -120,6 +125,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import {
   createWorkItemRelation,
+  replaceWorkItemParent,
   deleteWorkItemRelation,
 } from '../../work-items/api'
 import {
@@ -135,6 +141,7 @@ import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workI
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { taskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui'
+import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -424,6 +431,18 @@ export function TaskPage() {
         member.id === currentUserProjectKey && member.role === 'manager',
       )
     )
+  const isWorkspaceAdministrator = workspaceAccess?.currentMember.status === 'active' && (
+    workspaceAccess.currentMember.role === 'owner' ||
+    workspaceAccess.currentMember.role === 'admin'
+  )
+  const canEditProjectCharter = canMutateContent &&
+    (canManageProjectMembers || isWorkspaceAdministrator)
+  const projectCharterCandidates = useMemo(
+    () => createProjectCharterPersonCandidates(workspaceAccess?.members ?? emptyWorkspaceMembers),
+    [workspaceAccess?.members],
+  )
+  // Unsaved charter edits survive switching away from the settings tab and back.
+  const [projectCharterDraftStore] = useState(createProjectCharterDraftStore)
   const {
     data: projectUsersFirstPage,
     error: projectUsersError,
@@ -590,10 +609,15 @@ export function TaskPage() {
   const taskViewColumns = useMemo(
     () => [
       ...standardTaskViewFields,
+      ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
       ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
       ...taskViewCustomFields.map((field) => `custom:${field.id}`),
     ],
     [taskViewCustomFields],
+  )
+  const taskViewSortFields = useMemo(
+    () => [...taskViewFields, ...WORK_ITEM_EFFORT_COLUMN_FIELDS],
+    [taskViewFields],
   )
   const builtInTaskViewDefinition = useMemo(
     () => createBuiltInTaskViewDefinition(
@@ -615,6 +639,8 @@ export function TaskPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
+      // Effort values sort but do not group, because they have no shared buckets.
+      sortFields: taskViewSortFields,
       layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
@@ -641,6 +667,9 @@ export function TaskPage() {
       { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
       { id: 'team', label: t('workspace.column.team') },
+      { id: 'estimate', label: t('tasks.column.estimate') },
+      { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
+      { id: 'progress', label: t('tasks.column.progress') },
       ...(taskViewCustomFields.length > 0
         ? [{ id: 'customFields', label: t('workItems.fields.title') }]
         : []),
@@ -651,9 +680,13 @@ export function TaskPage() {
     ],
     [t, taskViewCustomFields],
   )
-  const taskViewGroupOptions = useMemo(
+  const taskViewSortOptions = useMemo(
     () => taskViewFieldOptions.filter((option) => option.id !== 'customFields'),
     [taskViewFieldOptions],
+  )
+  const taskViewGroupOptions = useMemo(
+    () => taskViewSortOptions.filter((option) => !isWorkItemEffortColumnField(option.id)),
+    [taskViewSortOptions],
   )
   const taskViewTeams = useMemo(
     () => {
@@ -1628,19 +1661,35 @@ export function TaskPage() {
     requireProjectTaskWriteScope(currentIssue)
 
     const graphRevision = readSelectedRelationGraphRevision(selectedIssueDetail, issueId, t)
+    const replacesParent = input.type === 'parent' &&
+      (selectedIssueDetail?.relations ?? []).some((relation) => relation.type === 'parent')
 
     try {
-      await mutationRequestRunner.run(
-        `issue:relation:create:${teamId}:${issueId}`,
-        JSON.stringify([graphRevision, input]),
-        (context) => createWorkItemRelation(
-          teamId,
-          issueId,
-          accessToken,
-          { ...input, expectedGraphRevision: graphRevision },
-          context,
-        ),
-      )
+      if (replacesParent) {
+        await mutationRequestRunner.run(
+          `issue:relation:parent:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input.targetWorkItemId]),
+          (context) => replaceWorkItemParent(
+            teamId,
+            issueId,
+            accessToken,
+            { parentWorkItemId: input.targetWorkItemId, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        )
+      } else {
+        await mutationRequestRunner.run(
+          `issue:relation:create:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input]),
+          (context) => createWorkItemRelation(
+            teamId,
+            issueId,
+            accessToken,
+            { ...input, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        )
+      }
       await mutateSelectedIssueDetail()
     } catch (error) {
       redirectEnterpriseSessionError(error)
@@ -1791,6 +1840,7 @@ export function TaskPage() {
       columnOptions={taskViewFieldOptions}
       errorMessage={taskViewController.errorMessage}
       groupOptions={taskViewGroupOptions}
+      sortOptions={taskViewSortOptions}
       isDirty={taskViewController.isDirty}
       isSaving={taskViewController.isSaving}
       migrationWarnings={taskViewController.migrationWarnings.map(
@@ -1875,6 +1925,27 @@ export function TaskPage() {
       assigneeOptions={activeProjectMembers}
       canAccessTriage={canAccessTriage}
       canManageProjectMembers={canManageProjectMembers}
+      projectCharterPanel={(
+        <ProjectCharterSection
+          accessToken={accessToken}
+          canDecideProposal={canMutateContent && isWorkspaceAdministrator}
+          canEdit={canEditProjectCharter}
+          canMutate={canMutateContent}
+          draftStore={projectCharterDraftStore}
+          enabled={Boolean(user && !currentUserError)}
+          members={projectCharterCandidates}
+          projectId={projectId}
+          t={t}
+          teamId={interactionTeamId}
+          onSessionError={(error, requestAccessToken) => {
+            // A late failure of a request sent with a token that was replaced since, such as one
+            // from before signing in again, must not clear the current session.
+            if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+              redirectEnterpriseSessionError(error)
+            }
+          }}
+        />
+      )}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
       collaborationRoute={

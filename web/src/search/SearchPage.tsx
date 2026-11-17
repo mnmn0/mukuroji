@@ -20,7 +20,9 @@ import {
   type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
+import { readWorkItemKeyInput } from '../issues/model/workItemKeys'
+import { createWorkItemKeyPath } from '../shared/routing/paths'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
@@ -818,6 +820,7 @@ function SearchToolbar({
   t,
 }: SearchToolbarProps) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
+  const keywordWorkItemKey = readWorkItemKeyInput(getSearchKeyword(routeState.filters))
   const statuses = getSearchStatuses(routeState.filters)
   const selectedWorkItemTypeIds = getSearchFilterValues(routeState.filters, 'workItemTypeIds')
   const columns = getSearchColumns(routeState.layout)
@@ -902,6 +905,16 @@ function SearchToolbar({
             value={getSearchKeyword(routeState.filters)}
           />
         </label>
+        {keywordWorkItemKey ? (
+          // A keyword that is exactly a key opens that Work Item directly.
+          <Link
+            className="workbench-button-primary min-h-10 px-4"
+            data-testid="workspace-search-key-jump"
+            to={createWorkItemKeyPath(keywordWorkItemKey)}
+          >
+            {t('search.keyJump').replace('{key}', keywordWorkItemKey)}
+          </Link>
+        ) : null}
         {onUpdateSelectedView && selectedSavedView ? (
           <button className="workbench-button-primary min-h-10 px-4" onClick={onUpdateSelectedView} type="button">
             {t('search.saved.update')}

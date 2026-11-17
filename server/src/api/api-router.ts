@@ -4,6 +4,7 @@ import { appDependencyRuntime } from './shared/app-dependencies'
 import { registerEnterpriseIdentityRoutes } from './routes/enterprise-identity-routes'
 import { registerDocumentsRoutes } from './routes/documents-routes'
 import { registerAuthenticationRoutes } from './routes/authentication-routes'
+import { registerAccountSecurityRoutes } from './routes/account-security-routes'
 import { registerWorkspaceRoutes } from './routes/workspace-routes'
 import { registerAnalyticsRoutes } from './routes/analytics-routes'
 import { registerAuditRoutes } from './routes/audit-routes'
@@ -14,6 +15,7 @@ import { registerCapacityPlanningRoutes } from './routes/capacity-planning-route
 import { registerNotificationsRoutes } from './routes/notifications-routes'
 import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
+import { registerProjectCharterRoutes } from './routes/project-charter-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
 import { registerCollectionsRoutes } from './routes/collections-routes'
@@ -156,6 +158,7 @@ export function bindApiDependencies(
 registerEnterpriseIdentityRoutes(routeApp)
 registerDocumentsRoutes(routeApp)
 registerAuthenticationRoutes(routeApp)
+registerAccountSecurityRoutes(routeApp)
 registerWorkspaceRoutes(routeApp)
 registerAnalyticsRoutes(routeApp)
 registerAuditRoutes(routeApp)
@@ -166,6 +169,7 @@ registerCapacityPlanningRoutes(routeApp)
 registerNotificationsRoutes(routeApp)
 registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
+registerProjectCharterRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
 registerCollectionsRoutes(routeApp)

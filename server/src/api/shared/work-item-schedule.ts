@@ -84,6 +84,7 @@ export function rejectInternalWorkItemCreateFields(input: unknown): void {
     'idempotencyResourceId',
     'idempotentIssueId',
     'idempotentRequestDigest',
+    'newWorkItemProjectConditionCheck',
     'statusCategory',
     'workflowSchemaVersion',
   ])

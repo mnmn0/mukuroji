@@ -14,7 +14,6 @@ import type {
   TimeEntryHistory,
   TimeEntrySource,
   TimeEntryStatus,
-  TimeEstimate,
   TimeSheet,
   TimeSummaryGroup,
   TimeTrackingGroupBy,
@@ -80,7 +79,6 @@ type CompletedTimeTrackingMutation = { completed: true }
 const ENTRY_PREFIX = 'TIME_ENTRY#'
 const HISTORY_PREFIX = 'TIME_HISTORY#'
 const TIMER_PREFIX = 'TIME_TIMER#'
-const ESTIMATE_PREFIX = 'TIME_ESTIMATE#'
 const BUDGET_PREFIX = 'TIME_BUDGET#'
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
@@ -245,22 +243,21 @@ export type CancelTimerInput = {
   idempotencyKey?: string
 }
 
-/** An estimate update request. */
-export type SaveTimeEstimateInput = {
-  /** Workspace identifier. */
-  workspaceId: string
-  /** Team identifier. */
-  teamId: string
-  /** Canonical Work Item identifier. */
-  workItemId: string
-  /** Planned effort in minutes. */
-  estimateMinutes: number
-  /** Expected estimate revision, or zero for a new estimate. */
-  expectedRevision: number
-  /** Actor changing the estimate. */
-  updatedBy: string
-  /** Optional client key used to make audit writes idempotent across retries. */
-  idempotencyKey?: string
+/**
+ * Read port for Work Item estimates.
+ *
+ * The estimate's single source is the canonical Work Item (`schedule.plannedEffortMinutes`); time
+ * tracking only reads it for reports.
+ */
+export type TimeTrackingEstimateSource = {
+  /**
+   * Lists the planned effort of a Team's Work Items that have one.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @returns Planned minutes keyed by Work Item ID.
+   */
+  listPlannedEffort(workspaceId: string, teamId: string): Promise<ReadonlyMap<string, number>>
 }
 
 /** A budget update request. */
@@ -413,12 +410,6 @@ export interface TimeTrackingRepository {
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
   ): Promise<void>
-  /** Reads a Work Item estimate. */
-  getEstimate(workspaceId: string, teamId: string, workItemId: string): Promise<TimeEstimate | undefined>
-  /** Lists estimates in a Team. */
-  listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]>
-  /** Saves a Work Item estimate with optimistic concurrency and optional audit. */
-  saveEstimate(estimate: TimeEstimate, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team or Project budget. */
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
@@ -453,6 +444,8 @@ export class TimeTrackingService {
   private readonly audit?: TimeTrackingAuditOptions
   /** Durable receipt store used for mutation replay. */
   private readonly idempotency?: TimeTrackingIdempotencyPort
+  /** Read port for canonical Work Item estimates. */
+  private readonly estimates?: TimeTrackingEstimateSource
 
   /** Creates a time tracking service. */
   constructor(
@@ -462,6 +455,7 @@ export class TimeTrackingService {
       createId?: () => string
       audit?: TimeTrackingAuditOptions
       idempotency?: TimeTrackingIdempotencyPort
+      estimates?: TimeTrackingEstimateSource
     } = {},
   ) {
     this.repository = repository
@@ -469,6 +463,7 @@ export class TimeTrackingService {
     this.createId = options.createId ?? (() => crypto.randomUUID())
     this.audit = options.audit
     this.idempotency = options.idempotency
+    this.estimates = options.estimates
   }
 
   /** Creates a manual time entry in draft state. */
@@ -911,90 +906,6 @@ export class TimeTrackingService {
     return await this.repository.listHistory(workspaceId, teamId, entryId)
   }
 
-  /** Saves a Work Item estimate. */
-  async saveEstimate(input: SaveTimeEstimateInput): Promise<TimeEstimate> {
-    return await this.withIdempotency(
-      input.workspaceId,
-      input.updatedBy,
-      input.idempotencyKey,
-      'time-estimate.save',
-      input,
-      (completion) => this.saveEstimateInternal(input, completion),
-      readStoredEstimate,
-    )
-  }
-
-  /** Saves an estimate without the public idempotency wrapper. */
-  private async saveEstimateInternal(
-    input: SaveTimeEstimateInput,
-    completion?: TimeTrackingIdempotencyCompletion,
-  ): Promise<TimeEstimate> {
-    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
-    const teamId = readIdentifier(input.teamId, 'Team ID')
-    const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
-    const estimateMinutes = requireInteger(input.estimateMinutes, 'Estimate minutes', 0, MAX_ENTRY_DURATION_MINUTES * 365)
-    const expectedRevision = requireInteger(input.expectedRevision, 'Estimate revision', 0, Number.MAX_SAFE_INTEGER)
-    const current = await this.repository.getEstimate(workspaceId, teamId, workItemId)
-    if (current && current.revision !== expectedRevision) {
-      throw new TimeTrackingError(409, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
-    }
-    if (!current && expectedRevision !== 0) {
-      throw new TimeTrackingError(409, 'TimeEstimateRevisionConflict', 'The estimate does not exist at the requested revision.')
-    }
-    const estimate: TimeEstimate = {
-      schemaVersion: 1,
-      workspaceId,
-      teamId,
-      workItemId,
-      estimateMinutes,
-      revision: expectedRevision + 1,
-      updatedBy: readIdentifier(input.updatedBy, 'User ID'),
-      updatedAt: readNow(this.now).toISOString(),
-    }
-    const auditPut = this.createAuditEventPut({
-      workspaceId,
-      teamId,
-      actorUserId: estimate.updatedBy,
-      eventType: 'time-estimate.updated',
-      entityType: 'work-item',
-      entityId: workItemId,
-      action: 'updated',
-      idempotencyKey: input.idempotencyKey ?? this.createId(),
-      requestBody: { action: 'estimate.updated', workItemId, estimateMinutes },
-      before: current ? toAuditEstimateSnapshot(current) : undefined,
-      after: toAuditEstimateSnapshot(estimate),
-      includeFields: ['teamId', 'workItemId', 'estimateMinutes', 'revision', 'updatedBy'],
-      metadata: { teamId, workItemId },
-      path: `/api/teams/${teamId}/work-items/${workItemId}/time-estimate`,
-      occurredAt: estimate.updatedAt,
-    })
-    const idempotencyPut = completion ? await completion(estimate) : undefined
-    await this.repository.saveEstimate(
-      estimate,
-      expectedRevision,
-      auditPut,
-      idempotencyPut,
-    )
-    return estimate
-  }
-
-  /** Reads a Work Item estimate for an authorized report or detail view. */
-  async getEstimate(workspaceId: string, teamId: string, workItemId: string): Promise<TimeEstimate | undefined> {
-    return await this.repository.getEstimate(
-      readIdentifier(workspaceId, 'Workspace ID'),
-      readIdentifier(teamId, 'Team ID'),
-      readIdentifier(workItemId, 'Work Item ID'),
-    )
-  }
-
-  /** Lists all Work Item estimates for a Team for capacity-planning reconciliation. */
-  async listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]> {
-    return await this.repository.listEstimates(
-      readIdentifier(workspaceId, 'Workspace ID'),
-      readIdentifier(teamId, 'Team ID'),
-    )
-  }
-
   /** Saves a Team or Project budget. */
   async saveBudget(input: SaveTimeBudgetInput): Promise<TimeBudget> {
     return await this.withIdempotency(
@@ -1100,8 +1011,7 @@ export class TimeTrackingService {
       to: period.to,
       ...(input.projectIds ? { projectIds: input.projectIds } : {}),
     })
-    const estimates = await this.repository.listEstimates(input.workspaceId, input.teamId)
-    const estimateByWorkItem = new Map(estimates.map((estimate) => [estimate.workItemId, estimate.estimateMinutes]))
+    const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
     const budget = input.budgetScope === 'project' && input.budgetScopeId
       ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
@@ -1139,8 +1049,7 @@ export class TimeTrackingService {
       to: period.to,
       ...(input.projectIds ? { projectIds: input.projectIds } : {}),
     })
-    const estimates = await this.repository.listEstimates(input.workspaceId, input.teamId)
-    const estimateByWorkItem = new Map(estimates.map((estimate) => [estimate.workItemId, estimate.estimateMinutes]))
+    const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const days = aggregateCalendarEntries(entries, 'day', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
     const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
     return {
@@ -1151,6 +1060,17 @@ export class TimeTrackingService {
       weeks,
       costsRedacted: !input.includeCosts,
     }
+  }
+
+  /**
+   * Reads the canonical Work Item estimates of a Team for a report.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @returns Planned minutes keyed by Work Item ID; empty without an estimate source.
+   */
+  private async listPlannedEffort(workspaceId: string, teamId: string): Promise<ReadonlyMap<string, number>> {
+    return this.estimates ? await this.estimates.listPlannedEffort(workspaceId, teamId) : new Map()
   }
 
   /** Creates a CSV export using the same ACL-filtered report data as JSON. */
@@ -1315,8 +1235,6 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   private readonly histories = new Map<string, TimeEntryHistory[]>()
   /** Active timers keyed by Workspace and member. */
   private readonly timers = new Map<string, RunningTimer>()
-  /** Stored estimates keyed by Workspace, Team, and Work Item. */
-  private readonly estimates = new Map<string, TimeEstimate>()
   /** Stored budgets keyed by Workspace, scope type, and scope ID. */
   private readonly budgets = new Map<string, TimeBudget>()
 
@@ -1423,37 +1341,6 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     this.timers.delete(key)
     await this.saveEntry(entry)
     await this.saveHistory(entry.workspaceId, entry.teamId, history)
-  }
-
-  /** Reads an estimate. */
-  async getEstimate(workspaceId: string, teamId: string, workItemId: string) {
-    const estimate = this.estimates.get(estimateKey(workspaceId, teamId, workItemId))
-    return estimate ? clone(estimate) : undefined
-  }
-
-  /** Lists estimates. */
-  async listEstimates(workspaceId: string, teamId: string) {
-    return [...this.estimates.values()]
-      .filter((estimate) => estimate.workspaceId === workspaceId && estimate.teamId === teamId)
-      .map(clone)
-  }
-
-  /** Saves an estimate. */
-  async saveEstimate(
-    estimate: TimeEstimate,
-    expectedRevision: number,
-    _auditPut?: AuditTransactWriteItem,
-    _idempotencyPut?: AuditTransactWriteItem,
-  ) {
-    const key = estimateKey(estimate.workspaceId, estimate.teamId, estimate.workItemId)
-    const current = this.estimates.get(key)
-    if ((current?.revision ?? 0) !== expectedRevision) {
-      throw new TimeTrackingError(409, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
-    }
-    this.estimates.set(
-      key,
-      clone(estimate),
-    )
   }
 
   /** Reads a budget. */
@@ -1765,81 +1652,6 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       }))
     } catch (error) {
       throw mapConditionalWriteError(error, 'RunningTimerConflict', 'The running timer changed before it was stopped.')
-    }
-  }
-
-  /** Reads an estimate. */
-  async getEstimate(workspaceId: string, teamId: string, workItemId: string) {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: { workspaceId, recordKey: `${ESTIMATE_PREFIX}${teamId}#${workItemId}` },
-      ConsistentRead: true,
-    }))
-    return response.Item ? readStoredEstimate(response.Item) : undefined
-  }
-
-  /** Lists Team estimates. */
-  async listEstimates(workspaceId: string, teamId: string) {
-    const estimates: TimeEstimate[] = []
-    let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey']
-    do {
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': workspaceId,
-          ':prefix': `${ESTIMATE_PREFIX}${teamId}#`,
-        },
-        ConsistentRead: true,
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      }))
-      estimates.push(...(response.Items ?? []).map(readStoredEstimate))
-      exclusiveStartKey = response.LastEvaluatedKey
-    } while (exclusiveStartKey)
-    return estimates
-  }
-
-  /** Saves an estimate using a single-owner key. */
-  async saveEstimate(
-    estimate: TimeEstimate,
-    expectedRevision: number,
-    auditPut?: AuditTransactWriteItem,
-    idempotencyPut?: AuditTransactWriteItem,
-  ) {
-    const item = {
-      ...estimate,
-      recordKey: `${ESTIMATE_PREFIX}${estimate.teamId}#${estimate.workItemId}`,
-    }
-    const condition = expectedRevision === 0
-      ? {
-          ConditionExpression: 'attribute_not_exists(recordKey)',
-        }
-      : {
-          ConditionExpression: 'revision = :expectedRevision',
-          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-        }
-    if (!auditPut && !idempotencyPut) {
-      try {
-        await this.documentClient.send(new PutCommand({
-          TableName: this.tableName,
-          Item: item,
-          ...condition,
-        }))
-      } catch (error) {
-        throw mapConditionalWriteError(error, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
-      }
-      return
-    }
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          { Put: { TableName: this.tableName, Item: item, ...condition } },
-          ...(auditPut ? [auditPut] : []),
-          ...(idempotencyPut ? [idempotencyPut] : []),
-        ],
-      }))
-    } catch (error) {
-      throw mapConditionalWriteError(error, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
     }
   }
 
@@ -2208,17 +2020,6 @@ function toAuditTimerSnapshot(timer: RunningTimer): Record<string, unknown> {
   }
 }
 
-/** Removes non-audit fields before an estimate snapshot enters audit. */
-function toAuditEstimateSnapshot(estimate: TimeEstimate): Record<string, unknown> {
-  return {
-    teamId: estimate.teamId,
-    workItemId: estimate.workItemId,
-    estimateMinutes: estimate.estimateMinutes,
-    revision: estimate.revision,
-    updatedBy: estimate.updatedBy,
-  }
-}
-
 /** Creates a budget snapshot with the amount available for field-level redaction. */
 function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
   return {
@@ -2563,22 +2364,6 @@ function readStoredHistory(value: unknown): TimeEntryHistory {
   }
 }
 
-/** Reads a stored estimate. */
-function readStoredEstimate(value: unknown): TimeEstimate {
-  const record = readRecord(value)
-  readSchemaVersion(record, 'Stored estimate')
-  return {
-    schemaVersion: 1,
-    workspaceId: readString(record.workspaceId, 'Stored estimate Workspace ID'),
-    teamId: readString(record.teamId, 'Stored estimate Team ID'),
-    workItemId: readString(record.workItemId, 'Stored estimate Work Item ID'),
-    estimateMinutes: readNumber(record.estimateMinutes, 'Stored estimate'),
-    revision: readNumber(record.revision, 'Stored estimate revision'),
-    updatedBy: readString(record.updatedBy, 'Stored estimate actor'),
-    updatedAt: readString(record.updatedAt, 'Stored estimate timestamp'),
-  }
-}
-
 /** Reads a stored budget. */
 function readStoredBudget(value: unknown): TimeBudget {
   const record = readRecord(value)
@@ -2723,11 +2508,6 @@ function historyKey(workspaceId: string, teamId: string, entryId: string): strin
 /** Builds an active timer key. */
 function timerKey(workspaceId: string, userId: string): string {
   return `${workspaceId}\0${userId}`
-}
-
-/** Builds an estimate key. */
-function estimateKey(workspaceId: string, teamId: string, workItemId: string): string {
-  return `${workspaceId}\0${teamId}\0${workItemId}`
 }
 
 /** Builds a budget key. */

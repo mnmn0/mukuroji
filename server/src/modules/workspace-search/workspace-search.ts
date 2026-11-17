@@ -60,6 +60,7 @@ import {
   type WorkspaceSearchHighlight,
   type WorkspaceSearchResponse,
   type WorkspaceSearchResult,
+  type ProjectCharter,
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
@@ -474,6 +475,16 @@ export class WorkspaceSearchError extends Error {
 export type WorkspaceSearchProjectionWriteOptions = {
   /** Only replace or remove a document whose stored source revision is not newer. */
   sourceRevision?: number
+  /**
+   * Keeps the creator and creation time of the stored document when the replacement has none,
+   * for projections whose source row does not record who created the entity.
+   */
+  preserveCreator?: boolean
+  /**
+   * The source has no revision yet, so the write never replaces a document projected from a
+   * revisioned source. Ignored when `sourceRevision` is given.
+   */
+  unrevisioned?: boolean
 }
 
 /** Marks persisted projection content that disagrees with its server-owned digest. */
@@ -1108,27 +1119,54 @@ export function createProjectWorkspaceSearchDocument(input: {
   title: string
   /** Project の補助表示名です。 */
   subtitle?: string
+  /** Project charter whose code, purpose, description, and tags become searchable. */
+  charter?: ProjectCharter
   /** Project row を作成した user ID です。 */
   creatorUserId?: string
   /** Project row の作成日時です。 */
   createdAt?: string
   /** Project row の最終更新日時です。 */
   updatedAt?: string
+  /** Charter revision the document reflects, so an older projection cannot replace it. */
+  sourceRevision?: number
 }) {
   const query = new URLSearchParams({ teamId: input.teamId })
+  const body = createProjectCharterSearchBody(input.charter)
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
     entityType: 'project',
     entityId: `team/${input.teamId}/project/${input.projectId}`,
     title: input.title,
     ...(input.subtitle ? { subtitle: input.subtitle } : {}),
+    ...(body ? { body } : {}),
     url: `/projects/${encodeURIComponent(input.projectId)}/issues?${query.toString()}`,
     teamId: input.teamId,
     projectId: input.projectId,
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.sourceRevision === undefined ? {} : { sourceRevision: input.sourceRevision }),
   })
+}
+
+/**
+ * Builds the searchable body of a Project from its charter.
+ *
+ * People are left out so that searching a name does not reveal who owns which Project beyond
+ * what the directory already shows.
+ *
+ * @param charter - Optional Project charter.
+ * @returns Searchable text, or undefined when the charter has no searchable field.
+ */
+function createProjectCharterSearchBody(charter: ProjectCharter | undefined): string | undefined {
+  if (!charter) return undefined
+  const text = [
+    charter.code,
+    charter.purpose,
+    charter.description,
+    charter.tags.join(' '),
+  ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n')
+  return text.length === 0 ? undefined : text.slice(0, WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH)
 }
 
 /**
@@ -1488,17 +1526,21 @@ export class DynamoDbWorkspaceSearchClient {
     options?: WorkspaceSearchProjectionWriteOptions,
   ) {
     await this.ensureLocalTable()
-    const document = createWorkspaceSearchDocument(input)
+    const replacement = createWorkspaceSearchDocument(input)
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    if (options?.preserveCreator && replacement.creatorUserId === undefined) {
+      return await this.upsertPreservingCreator(replacement, sourceRevision, options?.unrevisioned === true)
+    }
+    const document = replacement
+    const fenced = sourceRevision !== undefined || options?.unrevisioned === true
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [{
           Put: {
             TableName: this.tableName,
             Item: document,
-            ...(sourceRevision === undefined
-              ? {}
-              : {
+            ...(sourceRevision !== undefined
+              ? {
                   ConditionExpression:
                     'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
                     '#sourceRevision <= :sourceRevision',
@@ -1507,16 +1549,141 @@ export class DynamoDbWorkspaceSearchClient {
                     '#sourceRevision': 'sourceRevision',
                   },
                   ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
-                }),
+                }
+              : options?.unrevisioned === true
+                ? {
+                    ConditionExpression: 'attribute_not_exists(#sourceRevision)',
+                    ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+                  }
+                : {}),
           },
         }],
       }))
     } catch (error) {
-      if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
+      if (!fenced || !isTransactionConditionalCheckFailed(error)) {
         throw error
+      }
+      if (sourceRevision === undefined && document.creatorUserId !== undefined) {
+        await this.fillStoredCreator(document.workspaceId, document.recordKey, document.creatorUserId, document.createdAt)
       }
     }
     return document
+  }
+
+  /**
+   * Adds a creator to a stored revisioned document that was projected before the creation.
+   *
+   * A revisioned projection may land before the unrevisioned creation projection that knows the
+   * creator. The creation then must not replace the newer content, so only the creator and creation
+   * time are added, guarded by the stored digest so a concurrent revision is never overwritten.
+   * A conflict re-reads the row; when conflicts persist the failure is raised, so the creator is
+   * never dropped silently.
+   *
+   * @param workspaceId - Workspace of the document.
+   * @param recordKey - Record key of the document.
+   * @param creatorUserId - Creator known to the creation projection.
+   * @param createdAt - Creation time known to the creation projection.
+   */
+  private async fillStoredCreator(
+    workspaceId: string,
+    recordKey: string,
+    creatorUserId: string,
+    createdAt: string | undefined,
+  ) {
+    for (let attempt = 1; ; attempt += 1) {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey },
+        ConsistentRead: true,
+      }))
+      if (!response.Item || response.Item.creatorUserId !== undefined) return
+      const stored = readWorkspaceSearchDocument(response.Item)
+      const storedCreatedAt = stored.createdAt ?? createdAt
+      const completed = createWorkspaceSearchDocument({
+        ...stored,
+        creatorUserId,
+        ...(storedCreatedAt ? { createdAt: storedCreatedAt } : {}),
+      })
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: this.tableName,
+              Item: completed,
+              ConditionExpression: '#projectionDigest = :projectionDigest AND attribute_not_exists(#creatorUserId)',
+              ExpressionAttributeNames: {
+                '#projectionDigest': 'projectionDigest',
+                '#creatorUserId': 'creatorUserId',
+              },
+              ExpressionAttributeValues: { ':projectionDigest': stored.projectionDigest },
+            },
+          }],
+        }))
+        return
+      } catch (error) {
+        if (!isTransactionConditionalCheckFailed(error)) throw error
+        if (attempt >= SEARCH_PROJECTION_CAS_ATTEMPTS) throw createSearchProjectionContendedError(error)
+      }
+    }
+  }
+
+  /**
+   * Replaces a document that lacks a creator while keeping the stored creator and creation time.
+   *
+   * The write is conditioned on the stored row being exactly the one read, or still absent, so a
+   * creator added between the read and the write (by a late creation projection) is never
+   * dropped. A conflict re-reads the row and tries again; a stored document from a newer source
+   * revision is left in place.
+   *
+   * @param replacement - Replacement document that lacks a creator.
+   * @param sourceRevision - Source revision of the replacement, when the source is revisioned.
+   * @param unrevisioned - Whether an unrevisioned replacement must leave a revisioned row alone.
+   * @returns The document that was written, or the replacement when a newer one is kept.
+   */
+  private async upsertPreservingCreator(
+    replacement: WorkspaceSearchDocument,
+    sourceRevision: number | undefined,
+    unrevisioned: boolean,
+  ) {
+    for (let attempt = 1; ; attempt += 1) {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: replacement.workspaceId, recordKey: replacement.recordKey },
+        ConsistentRead: true,
+      }))
+      const stored = response.Item
+      const storedRevision = stored?.sourceRevision
+      // The digest condition below keeps this decision valid until the write lands.
+      const keepsStored = sourceRevision !== undefined
+        ? typeof storedRevision === 'number' && storedRevision > sourceRevision
+        : unrevisioned && storedRevision !== undefined
+      if (keepsStored) return replacement
+      const document = withCreatorFrom(replacement, stored)
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: this.tableName,
+              Item: document,
+              ...(stored
+                ? {
+                    ConditionExpression: '#projectionDigest = :projectionDigest',
+                    ExpressionAttributeNames: { '#projectionDigest': 'projectionDigest' },
+                    ExpressionAttributeValues: { ':projectionDigest': stored.projectionDigest },
+                  }
+                : {
+                    ConditionExpression: 'attribute_not_exists(#recordKey)',
+                    ExpressionAttributeNames: { '#recordKey': 'recordKey' },
+                  }),
+            },
+          }],
+        }))
+        return document
+      } catch (error) {
+        if (!isTransactionConditionalCheckFailed(error)) throw error
+        if (attempt >= SEARCH_PROJECTION_CAS_ATTEMPTS) throw createSearchProjectionContendedError(error)
+      }
+    }
   }
 
   /** Search document を entity key で削除します。 */
@@ -6604,6 +6771,47 @@ function invalidTaskView(message: string): never {
 /** Creates a stable error for malformed persisted task view state. */
 function invalidStoredTaskView() {
   return new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.')
+}
+
+/**
+ * Copies the creator and creation time of a stored document onto a replacement without them.
+ *
+ * @param document - Replacement document that lacks a creator.
+ * @param stored - Stored row, if any.
+ * @returns The replacement, with the stored creator and creation time it lacks.
+ */
+function withCreatorFrom(
+  document: WorkspaceSearchDocument,
+  stored: Record<string, unknown> | undefined,
+) {
+  const creatorUserId = document.creatorUserId ??
+    (typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined)
+  const createdAt = document.createdAt ??
+    (typeof stored?.createdAt === 'string' ? stored.createdAt : undefined)
+  if (creatorUserId === document.creatorUserId && createdAt === document.createdAt) return document
+  return createWorkspaceSearchDocument({
+    ...document,
+    ...(creatorUserId ? { creatorUserId } : {}),
+    ...(createdAt ? { createdAt } : {}),
+  })
+}
+
+/** Reads before a contended conditional projection write gives up and reports the failure. */
+const SEARCH_PROJECTION_CAS_ATTEMPTS = 5
+
+/**
+ * Creates the error raised when a conditional projection write keeps conflicting.
+ *
+ * @param cause - Last conditional failure.
+ * @returns A retryable search error.
+ */
+function createSearchProjectionContendedError(cause: unknown) {
+  return new WorkspaceSearchError(
+    503,
+    'SearchProjectionContended',
+    'Search projection kept conflicting with concurrent writes.',
+    { cause },
+  )
 }
 
 /** Validates the optional source revision used by an asynchronous projection guard. */

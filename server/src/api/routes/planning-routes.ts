@@ -31,7 +31,7 @@ import {
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
-import { type Locale, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
+import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
 import { type TeamIssueResponseItem } from '../../modules/work-items'
 import {
   WorkspaceAccessError,
@@ -116,6 +116,7 @@ import {
   createApiMutationContext,
   getEffectiveProjectScopeAccessList,
   type ProjectPrincipal,
+  requireAssignedProjectPermission,
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
@@ -331,6 +332,65 @@ function readPlanningUpdateReactionToken(value: unknown): string {
     )
   }
   return emoji
+}
+
+/**
+ * Returns whether an authorization failure only means the caller cannot manage one scope.
+ *
+ * @param error - Error thrown by a Planning scope permission check.
+ * @returns Whether the archive list should skip the entity instead of failing.
+ */
+function isPlanningScopeDenial(error: unknown) {
+  return (
+    error instanceof PlanningError ||
+    error instanceof WorkspaceAccessError ||
+    error instanceof ProjectDataError
+  ) && (error.status === 403 || error.status === 404 || error.status === 409)
+}
+
+/**
+ * Checks whether the caller may manage Planning at one entity's scope.
+ *
+ * The route was authorized at one resource (the Workspace for the archive list, the restored
+ * entity for a restore), so an Enterprise caller is evaluated again at this entity's own
+ * Team / Project resource.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param entity - Entity whose scope is checked.
+ * @returns Whether the caller holds `planning.manage` at the entity's scope.
+ */
+async function canManagePlanningEntityScope(
+  principal: WorkspacePrincipal,
+  entity: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+) {
+  try {
+    const evaluation = principal.enterpriseAuthorizationEvaluation
+    if (principal.enterprisePermissions === undefined || evaluation === undefined) {
+      await requirePlanningScopePermission(principal, entity, 'manager')
+      return true
+    }
+    requireWorkspaceBusinessWrite(principal)
+    return evaluateEnterpriseAccess({
+      permission: 'planning.manage',
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource: entity.projectId
+        ? {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: entity.projectId,
+            ...(entity.teamId === undefined ? {} : { parentTeamId: entity.teamId }),
+          }
+        : entity.teamId
+          ? { workspaceId: principal.directoryId, kind: 'team', targetId: entity.teamId }
+          : { workspaceId: principal.directoryId, kind: 'workspace' },
+    }).allowed
+  } catch (error) {
+    if (!isPlanningScopeDenial(error)) throw error
+    return false
+  }
 }
 
 function readPlanningRouteId(value: string | undefined, label: string) {
@@ -3760,6 +3820,113 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
       const response = await workItemDependencies.planning.archive(principal.directoryId, entityId, input, workItemState)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** Live graph から退避した archive 済み entity を active に戻します。 */
+  routeApp.post('/api/planning/entities/:entityId/restore', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+      const input = await readPlanningJson<PlanningRevisionInput>(c.req)
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      const archived = await workItemDependencies.planning.getArchivedEntity(
+        principal.directoryId,
+        entityId,
+      )
+      if (archived) {
+        await requirePlanningScopePermission(principal, archived, 'manager')
+      }
+      const target = archived ?? await requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        entityId,
+        'manager',
+      )
+      if (target.archivedAt !== undefined) {
+        // Restoring re-attaches the entity under its parent, whether it was compacted or kept live.
+        const { parentId } = target
+        if (parentId !== undefined && snapshot.entities.some((entity) => entity.id === parentId)) {
+          await requirePlanningEntityPermission(principal, snapshot.entities, parentId, 'member')
+        }
+        // The owner may have been deactivated while the entity was archived.
+        await requirePlanningActiveOwner(principal, target.ownerMemberKey)
+      }
+      const response = await workItemDependencies.planning.restore(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        {
+          // Every restore revision fails once the caller's membership or Enterprise controls change.
+          // A service account has no Workspace member row, so only its Enterprise control is fenced.
+          authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
+          // Rechecked each step for the restored entity, and for dependency counterparts: restoring
+          // an edge needs the same permission on both endpoints as creating one.
+          canManageEntity: (entity) => canManagePlanningEntityScope(principal, entity),
+          // Restoring a link writes the Work Item's link row, like PUT work-item-links.
+          canRestoreLinkTo: async (workItem) => {
+            try {
+              const context = await requireTeamPermission(principal, workItem.teamId, 'member')
+              requireAssignedProjectPermission(principal, context, workItem.projectId, 'member')
+              return true
+            } catch (error) {
+              if (!isPlanningScopeDenial(error)) throw error
+              return false
+            }
+          },
+        },
+      )
+      return c.json({
+        planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+        restore: response.restore,
+      })
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** 呼び出し元が復元できる退避済み entity を ID 順の cursor page で返します。 */
+  routeApp.get('/api/planning/archived-entities', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const limitValue = c.req.query('limit')
+      const limit = limitValue === undefined ? undefined : Number(limitValue)
+      if (limit !== undefined && (!/^[1-9][0-9]*$/.test(limitValue ?? '') || !Number.isSafeInteger(limit))) {
+        throw new PlanningError(400, 'InvalidPlanningInput', 'Archived Planning page limit is invalid.')
+      }
+      const cursor = c.req.query('cursor')
+      const page = await workItemDependencies.planning.listArchivedEntities(principal.directoryId, {
+        ...(limit === undefined ? {} : { limit }),
+        ...(cursor === undefined ? {} : { cursor }),
+      })
+      const entities = []
+      for (const entity of page.entities) {
+        if (await canManagePlanningEntityScope(principal, entity)) entities.push(entity)
+      }
+      return c.json({
+        entities,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+      })
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }

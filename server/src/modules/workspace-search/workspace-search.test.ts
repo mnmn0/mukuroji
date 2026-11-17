@@ -6,7 +6,7 @@ import {
   DynamoDBClient,
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
   createSearchWorkItemStatusKey,
@@ -22,6 +22,7 @@ import {
   createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchSourceDocument,
   createDocumentWorkspaceSearchDocument,
+  createProjectWorkspaceSearchDocument,
   createTaskViewRecordKey,
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
@@ -219,6 +220,256 @@ test('derives document keys from entity identity instead of trusting producer in
     title: 'Document',
     url: '/documents/document-1',
   })).toThrow('record key does not match')
+})
+
+test('keeps the stored creator when a Project projection is rebuilt without one', async () => {
+  const created = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    creatorUserId: 'creator@example.com',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([created]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const replaced = await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  }), { sourceRevision: 1, preserveCreator: true })
+  const withoutOption = await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    sourceRevision: 2,
+  }), { sourceRevision: 2 })
+
+  expect(createWorkspaceSearchDocument(replaced)).toEqual(replaced)
+  expect(replaced).toMatchObject({ creatorUserId: 'creator@example.com', body: 'OPS' })
+  expect(withoutOption.creatorUserId).toBeUndefined()
+})
+
+test('does not let an unrevisioned Project projection replace a revisioned one', async () => {
+  const revisioned = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const creation = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    creatorUserId: 'creator@example.com',
+  })
+
+  await client.upsertDocument(creation, { unrevisioned: true })
+  await client.upsertDocument(revisioned, { sourceRevision: 1, preserveCreator: true })
+  await client.upsertDocument(creation, { unrevisioned: true })
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: true,
+      projectIds: new Set(['refero']),
+      teamIds: new Set(['core']),
+    },
+  })
+  expect(response.results).toEqual([
+    expect.objectContaining({ body: 'OPS', creatorUserId: 'creator@example.com' }),
+  ])
+})
+
+test('adds the creator when the creation projection lands after a charter projection', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  }), { sourceRevision: 1, preserveCreator: true })
+  await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero (old name)',
+    creatorUserId: 'creator@example.com',
+    createdAt: '2026-11-16T00:00:00.000Z',
+  }), { unrevisioned: true })
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: true,
+      projectIds: new Set(['refero']),
+      teamIds: new Set(['core']),
+    },
+    filters: { creatorUserIds: ['creator@example.com'] },
+  })
+  expect(response.results).toEqual([
+    expect.objectContaining({ title: 'Refero', body: 'OPS', creatorUserId: 'creator@example.com' }),
+  ])
+})
+
+test('lets an unrevisioned creator-preserving projection replace only an unrevisioned row', async () => {
+  const project = (title: string, sourceRevision?: number) => createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title,
+    ...(sourceRevision === undefined ? {} : { sourceRevision }),
+  })
+  const write = async (stored: ReturnType<typeof project> | undefined) => {
+    const memory = createMemoryDocumentClient(stored ? [stored] : [])
+    const client = new DynamoDbWorkspaceSearchClient('search-table', memory, {} as DynamoDBClient, false)
+    await client.upsertDocument(project('Refero (old)'), { preserveCreator: true, unrevisioned: true })
+    const response = await memory.send(new GetCommand({
+      TableName: 'search-table',
+      Key: { workspaceId: 'workspace-1', recordKey: project('Refero').recordKey },
+    }))
+    return response.Item
+  }
+
+  expect(await write(project('Refero', 2))).toMatchObject({ title: 'Refero', sourceRevision: 2 })
+  expect(await write(project('Refero'))).toMatchObject({ title: 'Refero (old)' })
+  expect(await write(undefined)).toMatchObject({ title: 'Refero (old)' })
+})
+
+test('keeps the stored creation time when the stored Project row has no creator', async () => {
+  const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    createdAt: '2026-11-01T00:00:00.000Z',
+  })])
+  const client = new DynamoDbWorkspaceSearchClient('search-table', memory, {} as DynamoDBClient, false)
+
+  const written = await client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  }), { sourceRevision: 1, preserveCreator: true })
+
+  expect(written.creatorUserId).toBeUndefined()
+  expect(written.createdAt).toBe('2026-11-01T00:00:00.000Z')
+  expect(createWorkspaceSearchDocument(written)).toEqual(written)
+})
+
+test('keeps a creator added while a charter projection was between its read and write', async () => {
+  const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  })])
+  const creationWriter = new DynamoDbWorkspaceSearchClient('search-table', memory, {} as DynamoDBClient, false)
+  let interleaved = false
+  const racingClient = {
+    send: async (command: { constructor: { name: string } }) => {
+      const result = await memory.send(command as never)
+      // The creation projection lands right after the charter projection read the row.
+      if (!interleaved && command.constructor.name === 'GetCommand') {
+        interleaved = true
+        await creationWriter.upsertDocument(createProjectWorkspaceSearchDocument({
+          workspaceId: 'workspace-1',
+          teamId: 'core',
+          projectId: 'refero',
+          title: 'Refero',
+          creatorUserId: 'creator@example.com',
+        }), { unrevisioned: true })
+      }
+      return result
+    },
+  } as unknown as DynamoDBDocumentClient
+  const charterWriter = new DynamoDbWorkspaceSearchClient('search-table', racingClient, {} as DynamoDBClient, false)
+
+  const written = await charterWriter.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS-2', tags: [], repositoryUrls: [] },
+    sourceRevision: 2,
+  }), { sourceRevision: 2, preserveCreator: true })
+
+  expect(interleaved).toBe(true)
+  expect(written).toMatchObject({ body: 'OPS-2', creatorUserId: 'creator@example.com', sourceRevision: 2 })
+  const response = await creationWriter.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: true,
+      projectIds: new Set(['refero']),
+      teamIds: new Set(['core']),
+    },
+    filters: { creatorUserIds: ['creator@example.com'] },
+  })
+  expect(response.results).toEqual([expect.objectContaining({ body: 'OPS-2' })])
+})
+
+test('reports a creation projection that keeps conflicting instead of dropping the creator', async () => {
+  const memory = createMemoryDocumentClient([createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS', tags: [], repositoryUrls: [] },
+    sourceRevision: 1,
+  })])
+  let conflictingWrites = 0
+  const contendedClient = {
+    send: async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name !== 'TransactWriteCommand') return await memory.send(command as never)
+      conflictingWrites += 1
+      const error = new Error('transaction condition failed')
+      error.name = 'TransactionCanceledException'
+      throw Object.assign(error, { CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] })
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkspaceSearchClient('search-table', contendedClient, {} as DynamoDBClient, false)
+
+  await expect(client.upsertDocument(createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    projectId: 'refero',
+    title: 'Refero',
+    creatorUserId: 'creator@example.com',
+  }), { unrevisioned: true })).rejects.toMatchObject({ code: 'SearchProjectionContended' })
+  // The creation write itself, then every bounded attempt to add the creator.
+  expect(conflictingWrites).toBe(6)
 })
 
 test('does not let an older source projection replace or remove a newer document', async () => {
@@ -4026,3 +4277,17 @@ function splitMemoryAssignments(expression: string) {
   if (tail) assignments.push(tail)
   return assignments
 }
+
+test('carries the charter revision on a Project search document so older projections lose', () => {
+  const document = createProjectWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core-team',
+    projectId: 'refero',
+    title: 'Refero',
+    charter: { code: 'OPS-1', tags: [], repositoryUrls: [] },
+    sourceRevision: 3,
+  })
+
+  expect(document.sourceRevision).toBe(3)
+  expect(document.body).toContain('OPS-1')
+})

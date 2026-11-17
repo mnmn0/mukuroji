@@ -124,6 +124,8 @@ export function WorkItemRelationsEditor({
     ? targetWorkItemId
     : availableCandidates[0]?.id ?? ''
   const canMutate = !readOnly && Boolean(onAddRelation)
+  const replacesParent = relationType === 'parent' &&
+    relations.some((relation) => relation.type === 'parent')
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -291,8 +293,15 @@ export function WorkItemRelationsEditor({
           >
             {savingKey?.startsWith('add:')
               ? t('workItems.relations.adding')
-              : t('workItems.relations.add')}
+              : replacesParent
+                ? t('workItems.relations.replaceParent')
+                : t('workItems.relations.add')}
           </button>
+          {replacesParent ? (
+            <p className="col-span-full text-sm font-medium text-[var(--workbench-muted)]">
+              {t('workItems.relations.replaceParentHint')}
+            </p>
+          ) : null}
         </form>
       ) : (
         <p className="text-sm font-medium text-[var(--workbench-muted)]">

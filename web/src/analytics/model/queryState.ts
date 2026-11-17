@@ -1,5 +1,6 @@
 import type {
   AnalyticsDateRange,
+  AnalyticsWeighting,
   AnalyticsFilter,
   AnalyticsQueryInput,
   AnalyticsWidget,
@@ -22,6 +23,10 @@ export type AnalyticsRouteState = {
    * Forecast risk と比較する target date range です。
    */
   forecastBaseline?: AnalyticsDateRange
+  /**
+   * Forecast の単位です。`effort` は正本見積（予定工数）の合計で予測し、省略時は件数で予測します。
+   */
+  forecastWeighting?: AnalyticsWeighting
   /**
    * Metric の日付境界と表示に使う IANA timezone です。
    */
@@ -87,6 +92,7 @@ export function parseAnalyticsRouteState(
     builder: searchParams.get('edit') === '1',
     filter,
     forecastBaseline,
+    ...(searchParams.get('forecast') === 'effort' ? { forecastWeighting: 'effort' as const } : {}),
     reportId: readValue(searchParams, 'report'),
     snapshotId: readValue(searchParams, 'snapshot'),
     timezone: readValue(searchParams, 'timezone') ?? 'UTC',
@@ -112,6 +118,7 @@ export function createAnalyticsQueryInput(
     ...(state.forecastBaseline
       ? { forecastBaseline: state.forecastBaseline }
       : {}),
+    ...(state.forecastWeighting === 'effort' ? { forecastWeighting: 'effort' as const } : {}),
     timeZone: state.timezone,
     widgets,
   }
@@ -136,6 +143,7 @@ export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
   } else {
     searchParams.set('baseline', 'none')
   }
+  if (state.forecastWeighting === 'effort') searchParams.set('forecast', 'effort')
   setValue(searchParams, 'from', readString(period.from))
   setValue(searchParams, 'to', readString(period.to))
   appendFilterValues(searchParams, 'team', filter.teamIds)

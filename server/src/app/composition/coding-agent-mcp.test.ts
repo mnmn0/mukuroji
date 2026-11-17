@@ -25,6 +25,7 @@ const handlerPath = resolve(import.meta.dir, '../../handlers/coding-agent-mcp.ts
 function startFakeApi() {
   let task = { id: 'task', teamId: 'team', revision: 1, title: 'Implement feature', assigneeUserId: 'agent',
     workflowStatusId: 'todo', statusCategory: 'unstarted', priority: 'medium', dueDate: '',
+    schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
     createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
   const notes: { id: string; actorUserId: string; body: string; createdAt: string }[] = []
   const commentBodies: Record<string, unknown>[] = []

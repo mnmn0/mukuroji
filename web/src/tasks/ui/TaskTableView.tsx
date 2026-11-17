@@ -80,6 +80,8 @@ import {
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
+import { WORK_ITEM_EFFORT_COLUMN_FIELDS } from '../../work-items/model/workItemEffort'
+import { WorkItemEffortCell } from '../../work-items/ui/WorkItemEffortCells'
 import {
   formatShowMoreLabel,
   TASK_TABLE_RENDER_STEP,
@@ -1056,6 +1058,13 @@ function TaskTableRow({
               {task.teamId}
             </td>
           )
+          case 'estimate':
+          case 'remainingEffort':
+          case 'progress': return (
+            <td {...columnCellProps} className={`${cellPadding} text-fg-505967`} key={field}>
+              <WorkItemEffortCell configuration={configuration} field={field} hoursLabel={t('workItems.effort.hours')} item={task} />
+            </td>
+          )
           case 'customFields': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
               {canEditTask ? (
@@ -1163,6 +1172,7 @@ function isSupportedProjectTaskColumn(field: string): boolean {
     'project',
     'team',
     'customFields',
+    ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
   ].includes(field) || field.startsWith('custom:')
 }
 
@@ -1187,6 +1197,9 @@ function resolveTaskTableColumnLabel(
     case 'project': return t('workspace.column.project')
     case 'team': return t('workspace.column.team')
     case 'customFields': return t('workItems.fields.title')
+    case 'estimate': return t('tasks.column.estimate')
+    case 'remainingEffort': return t('tasks.column.remainingEffort')
+    case 'progress': return t('tasks.column.progress')
     default: {
       const customFieldId = field.slice('custom:'.length)
       for (const candidate of [

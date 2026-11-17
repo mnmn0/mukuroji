@@ -1,5 +1,9 @@
 import {
+  isWorkItemEffortMinutes,
+  isWorkItemProgressPercent,
+  isCanonicalWorkItemKey,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_RELATION_ID_LIMIT,
   WORK_ITEM_SCHEMA_VERSION,
   type CustomFieldValue,
   type WorkflowStatusCategory,
@@ -16,7 +20,6 @@ import {
   isCanonicalWorkItemSchedule,
 } from './domain/work-item-schedule'
 
-const WORK_ITEM_RELATION_ID_LIMIT = 100
 const WORK_ITEM_RELATION_ID_MAX_LENGTH = 512
 const WORK_ITEM_RELATION_TARGET_ID_MAX_LENGTH = 256
 
@@ -40,6 +43,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   assignedProjectId?: string
   /** Team 内で Work Item を識別する sort key です。 */
   issueId: string
+  /** Immutable Workspace-unique key such as `ABC-123`; absent on Work Items created before keys. */
+  key?: string
   /** Import の冪等作成 payload を識別する SHA-256 digest です。 */
   importRequestDigest?: string
   /** Team/project 一覧で利用する表示順です。 */
@@ -54,6 +59,10 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   contributorAssignments?: WorkItemContributorAssignment[]
   /** Acceptance criteria; absent when none. */
   acceptanceCriteria?: WorkItemAcceptanceCriterion[]
+  /** Recorded remaining effort in minutes; absent until recorded. */
+  remainingEffortMinutes?: number
+  /** Manually recorded progress percentage; absent until recorded. */
+  progressPercent?: number
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
@@ -131,6 +140,7 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     isNonEmptyString(value.teamId) &&
     value.directoryTeamId === `${value.directoryId}#team#${value.teamId}` &&
     isNonEmptyString(value.issueId) &&
+    (value.key === undefined || isCanonicalWorkItemKey(value.key)) &&
     (value.importRequestDigest === undefined ||
       isSha256Digest(value.importRequestDigest)) &&
     typeof value.sortOrder === 'number' &&
@@ -144,6 +154,9 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
         isStoredContributorAssignmentList(value.contributorAssignments))) &&
     // Rows saved before acceptance criteria existed lack the attribute; an empty list is also stored absent.
     (value.acceptanceCriteria === undefined || isStoredAcceptanceCriterionList(value.acceptanceCriteria)) &&
+    // Rows saved before remaining effort and progress existed lack both attributes.
+    (value.remainingEffortMinutes === undefined || isWorkItemEffortMinutes(value.remainingEffortMinutes)) &&
+    (value.progressPercent === undefined || isWorkItemProgressPercent(value.progressPercent)) &&
     isNonEmptyString(value.creatorMemberKey) &&
     (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
     (value.sourceTriageEntryId === undefined ||

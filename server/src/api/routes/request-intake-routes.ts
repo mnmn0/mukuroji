@@ -1,6 +1,7 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   createDefaultUnscheduledWorkItemSchedule,
+  fitWorkItemTitle,
   type CreateManualTriageEntryInput,
   type TriageBulkActionInput,
   type TriageBulkActionResult,
@@ -76,6 +77,7 @@ import {
   getTeamIssuesTableName,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
   filterRequestConversionCustomFieldValues,
@@ -1040,7 +1042,8 @@ async function acceptTriageEntryAsNewWorkItem(
           priority: 'medium',
         }
       : {
-          title: entry.sourcePreview.title,
+          // Triage accepts titles up to 500 code points; a Work Item title is shorter.
+          title: fitWorkItemTitle(entry.sourcePreview.title),
           ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
           schedule: createDefaultUnscheduledWorkItemSchedule(),
           priority: 'medium',
@@ -1053,6 +1056,11 @@ async function acceptTriageEntryAsNewWorkItem(
     idempotentIssueId: issueId,
     idempotentRequestDigest: request.idempotency.fingerprint,
   }, teamContext.team)
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    request.workspaceId,
+    teamContext.team,
+    assignedProjectId,
+  )
   const customFieldValues = mergeTriageCustomFieldValues(
     'customFieldValues' in normalized ? normalized.customFieldValues : undefined,
     request.action.customFieldValues,
@@ -1087,6 +1095,7 @@ async function acceptTriageEntryAsNewWorkItem(
       ...acceptanceReferenceConditionChecks,
       ...(request.authorizationConditionChecks ?? []),
     ],
+    ...newWorkItemProjectFence,
   }
   const now = new Date().toISOString()
   const canonicalWorkItem = {

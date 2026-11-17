@@ -493,7 +493,7 @@ test('detects disallowed parent-child Work Item Types from effective Team config
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       projectId: null,
-      relationIds: ['child:child-item'],
+      relationIds: [],
     },
     {
       kind: 'relation',

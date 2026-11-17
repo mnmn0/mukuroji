@@ -18,6 +18,7 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
       candidate.pathname === '/security/recovery' ||
       [
         '/dashboard',
+        '/browse',
         '/home',
         '/focus',
         '/my-tasks',

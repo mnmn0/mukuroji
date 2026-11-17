@@ -1,3 +1,4 @@
+import type { EnterpriseMfaRequirementImpact } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { EnterpriseSecurityApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
@@ -75,6 +76,8 @@ export type EnterpriseSessionPolicyImpact = {
   warnings: string[]
   /** Caller IP 除外を確認した場合だけ PUT へ渡す短時間 token です。 */
   confirmationToken?: string
+  /** Members without an authenticator app, returned only when the change turns MFA on. */
+  mfaImpact?: EnterpriseMfaRequirementImpact
 }
 
 const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')
@@ -168,7 +171,24 @@ function parseEnterpriseSessionPolicyImpact(
     throw createMalformedResponseError()
   }
 
+  if (impact.mfaImpact !== undefined && !isMfaRequirementImpact(impact.mfaImpact)) {
+    throw createMalformedResponseError()
+  }
+
   return impact as EnterpriseSessionPolicyImpact
+}
+
+/**
+ * Checks the member counts returned when a policy change turns MFA on.
+ *
+ * @param value - Value from the response.
+ * @returns Whether every count is a non-negative integer.
+ */
+function isMfaRequirementImpact(value: unknown): value is EnterpriseMfaRequirementImpact {
+  return isRecord(value) &&
+    [value.activeMemberCount, value.unenrolledMemberCount, value.unknownMemberCount].every(
+      (count) => typeof count === 'number' && Number.isInteger(count) && count >= 0,
+    )
 }
 
 function readResponseProperty<T>(

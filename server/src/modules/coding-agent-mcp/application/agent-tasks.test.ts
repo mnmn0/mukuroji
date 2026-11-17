@@ -12,6 +12,7 @@ function task(id = 'one', patch: Partial<AgentTask> = {}): AgentTask {
     id, teamId: 'team', revision: 1, title: id, description: 'Original instructions',
     assigneeUserId: 'agent-member', workflowStatusId: 'todo', statusCategory: 'unstarted',
     priority: 'medium', dueDate: '', createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+    schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
     relationIds: [], customFieldValues: {}, ...patch,
   }
 }
@@ -221,6 +222,8 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
     async acceptanceCriteria() { return [] },
+    async effort() { return undefined },
+    async taskKey() { return undefined },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -301,12 +304,47 @@ describe('agent task lifecycle', () => {
     expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
     // The custom field is checked first, so only the bare task needed a criteria read.
     expect(criteriaReads).toEqual(['bare'])
-    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria })
+    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria, effort: null })
     expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
     // Only the marks are sent; the server applies them to the stored list, so a retry has the same body.
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
     expect(sent.at(-1)).toEqual({ expectedRevision: 1, acceptanceCriteriaMarks: [{ id: criteria[1]?.id, satisfied: true }] })
     expect(criteriaReads).toEqual(['bare', 'canonical'])
+  })
+
+  test('shows the task key in get_task so agents can use it in branch names and PR titles', async () => {
+    const keyReads: string[] = []
+    const createdAt = '2026-09-01T00:00:00.000Z'
+    const { service } = fixture([task('keyed'), task('legacy'), task('old-server')], {
+      async taskKey(id) {
+        keyReads.push(id)
+        if (id === 'keyed') return { key: 'TEAM-7', createdAt }
+        return id === 'legacy' ? { createdAt } : undefined
+      },
+    })
+    expect(await service.get('keyed')).toMatchObject({ task: { id: 'keyed', key: 'TEAM-7' } })
+    expect((await service.get('legacy')).task).not.toHaveProperty('key')
+    expect((await service.get('old-server')).task).not.toHaveProperty('key')
+    // The key is read before and after the task, so the pair belongs to one Work Item.
+    expect(keyReads).toEqual(['keyed', 'keyed', 'legacy', 'legacy', 'old-server', 'old-server'])
+  })
+
+  test('refuses to pair a task with the key of a Work Item created again under the same ID', async () => {
+    const { service } = fixture([task('replaced')], {
+      // The task was deleted and created again between the task read and the key read.
+      async taskKey() { return { key: 'TEAM-9', createdAt: '2026-09-02T00:00:00.000Z' } },
+    })
+    await expect(service.get('replaced')).rejects.toMatchObject({ code: 'conflict', retryable: true })
+  })
+
+  test('refuses a task whose key changed during the read even when the creation time is the same', async () => {
+    const createdAt = task('same-instant').createdAt
+    const keys = ['TEAM-9', 'TEAM-10']
+    const { service } = fixture([task('same-instant')], {
+      // Another Work Item was created under the same ID in the same millisecond while the task was read.
+      async taskKey() { return { key: keys.shift() ?? 'TEAM-10', createdAt } },
+    })
+    await expect(service.get('same-instant')).rejects.toMatchObject({ code: 'conflict', retryable: true })
   })
 
   test('resumes only work this instance claimed and counts all statuses', async () => {
@@ -651,6 +689,60 @@ describe('agent task lifecycle', () => {
     await expect(service.transition('one', 2, 'coding', 'start', 'future')).rejects.toMatchObject({ code: 'conflict' })
     await expect(service.update('one', { expectedRevision: 2, title: 'Overwrite' }, 'future')).rejects.toMatchObject({ code: 'conflict' })
     expect(writes).toBe(0)
+  })
+
+  test('shows the estimate, remaining effort, and progress read from their own endpoint', async () => {
+    const effortReads: string[] = []
+    const { service } = fixture([task('one')], {
+      async effort(id) {
+        effortReads.push(id)
+        return { revision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 }
+      },
+    })
+    expect(await service.get('one')).toMatchObject({
+      task: { id: 'one' },
+      effort: { revision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 },
+    })
+    expect(effortReads).toEqual(['one'])
+  })
+
+  test('writes the estimate into the read schedule and passes remaining effort and progress through', async () => {
+    const sent: unknown[] = []
+    const stored = task('one', {
+      schedule: {
+        mode: 'due-date', dueDate: '2026-09-10', plannedEffortMinutes: 120,
+        calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: [] },
+      },
+    })
+    const { service } = fixture([stored], {
+      async update(_id, input) { sent.push(input); return task('one', { revision: 2 }) },
+    })
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 }, 'effort')
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: null }, 'clear')
+    expect(sent).toEqual([
+      {
+        expectedRevision: 1, remainingEffortMinutes: 300, progressPercent: 40,
+        schedule: { ...stored.schedule, plannedEffortMinutes: 480 },
+      },
+      {
+        expectedRevision: 1,
+        schedule: { mode: 'due-date', dueDate: '2026-09-10', calendarPolicy: stored.schedule.calendarPolicy },
+      },
+    ])
+  })
+
+  test('lets an estimate retry reach the server receipt after the first write advanced the revision', async () => {
+    const sent: unknown[] = []
+    const schedule = {
+      mode: 'due-date' as const, dueDate: '2026-09-10',
+      calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday' as const], holidays: [] },
+    }
+    // The first write succeeded, so the stored task already carries the estimate at revision 2.
+    const { service } = fixture([task('one', { revision: 2, schedule: { ...schedule, plannedEffortMinutes: 480 } })], {
+      async update(_id, input) { sent.push(input); return task('one', { revision: 2 }) },
+    })
+    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')
+    expect(sent).toEqual([{ expectedRevision: 1, schedule: { ...schedule, plannedEffortMinutes: 480 } }])
   })
 
   test('replays stale metadata updates and forwards comment scope to the canonical API', async () => {

@@ -85,6 +85,7 @@ const meta = {
     totalCount: defaultRows.length,
     onAssigneeChange: () => undefined,
     onClearFilters: () => undefined,
+    onLifecycleChange: () => undefined,
     onOpenProject: () => undefined,
     onOpenPlanningUpdate: () => undefined,
     onPageChange: () => undefined,
@@ -114,9 +115,27 @@ export const MobileFilters: Story = {
     const disclosure = canvas.getByRole('button', { name: /絞り込み・並べ替え/ })
     await expect(canvas.queryByRole('combobox')).not.toBeInTheDocument()
     await userEvent.click(disclosure)
-    await expect(canvas.getAllByRole('combobox')).toHaveLength(3)
+    await expect(canvas.getAllByRole('combobox')).toHaveLength(4)
     await userEvent.click(disclosure)
     await expect(disclosure).toHaveFocus()
+  },
+}
+
+/** Charter summaries show the lifecycle badge, code, owner, and planned period per Project. */
+export const WithCharters: Story = {
+  args: {
+    rows: defaultRows.map((row, index) => index === 0
+      ? {
+          ...row,
+          lifecycleState: 'active' as const,
+          code: 'OPS-1',
+          owner: { userId: 'demo@example.com', displayName: 'Demo User' },
+          plannedStartDate: '2026-04-01',
+          plannedEndDate: '2027-03-31',
+        }
+      : index === 1
+        ? { ...row, lifecycleState: 'on-hold' as const, code: 'MKT-7' }
+        : row),
   },
 }
 

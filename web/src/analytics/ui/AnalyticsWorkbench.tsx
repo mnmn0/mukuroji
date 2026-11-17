@@ -11,6 +11,7 @@ import type {
   AnalyticsSchedule,
   AnalyticsSnapshot,
   AnalyticsSnapshotRecord,
+  AnalyticsWeighting,
   AnalyticsWidget,
   AnalyticsWidgetResult,
   CreateAnalyticsReportInput,
@@ -65,6 +66,10 @@ export type AnalyticsWorkbenchProps = {
    * Forecast risk と比較する target date range です。
    */
   forecastBaseline?: AnalyticsDateRange
+  /**
+   * Forecast の単位です。`effort` は正本見積の合計で予測し、省略時は件数で予測します。
+   */
+  forecastWeighting?: AnalyticsWeighting
   /**
    * Calendar bucket と日付表示に使う IANA timezone です。
    */
@@ -147,6 +152,10 @@ export type AnalyticsWorkbenchProps = {
    * Forecast baseline date range が変更されたときの callback です。
    */
   onForecastBaselineChange?: (baseline?: AnalyticsDateRange) => void
+  /**
+   * Forecast の単位が変更されたときの callback です。
+   */
+  onForecastWeightingChange?: (weighting?: AnalyticsWeighting) => void
   /**
    * Timezone が変更されたときの callback です。
    */
@@ -318,6 +327,7 @@ export function AnalyticsWorkbench({
   selectedReportId,
   filter,
   forecastBaseline,
+  forecastWeighting,
   timeZone,
   widgets,
   snapshot,
@@ -339,6 +349,7 @@ export function AnalyticsWorkbench({
   onSelectReport,
   onFilterChange,
   onForecastBaselineChange,
+  onForecastWeightingChange,
   onTimeZoneChange,
   onBuilderChange,
   onWidgetsChange,
@@ -409,6 +420,7 @@ export function AnalyticsWorkbench({
         description: draftDescription.trim() || undefined,
         filter,
         forecastBaseline,
+        ...(forecastWeighting === 'effort' ? { forecastWeighting } : {}),
         id: draftId,
         name: draftName.trim(),
         schedule: selectedReport?.schedule,
@@ -589,12 +601,14 @@ export function AnalyticsWorkbench({
       <AnalyticsFilterToolbar
         filter={filter}
         forecastBaseline={forecastBaseline}
+        {...(forecastWeighting ? { forecastWeighting } : {})}
         t={t}
         teams={teams}
         timeZone={timeZone}
         workItemTypes={workItemTypes}
         onFilterChange={onFilterChange}
         onForecastBaselineChange={onForecastBaselineChange}
+        {...(onForecastWeightingChange ? { onForecastWeightingChange } : {})}
         onTimeZoneChange={onTimeZoneChange}
       />
 
@@ -819,8 +833,10 @@ function SnapshotMetadata({
 function AnalyticsFilterToolbar({
   filter,
   forecastBaseline,
+  forecastWeighting,
   onFilterChange,
   onForecastBaselineChange,
+  onForecastWeightingChange,
   onTimeZoneChange,
   t,
   teams,
@@ -829,8 +845,10 @@ function AnalyticsFilterToolbar({
 }: {
   filter: AnalyticsFilter
   forecastBaseline?: AnalyticsDateRange
+  forecastWeighting?: AnalyticsWeighting
   onFilterChange?: (filter: AnalyticsFilter) => void
   onForecastBaselineChange?: (baseline?: AnalyticsDateRange) => void
+  onForecastWeightingChange?: (weighting?: AnalyticsWeighting) => void
   onTimeZoneChange?: (timeZone: string) => void
   t: ReturnType<typeof createTranslator>
   teams: ProjectDirectoryTeam[]
@@ -1040,6 +1058,18 @@ function AnalyticsFilterToolbar({
                   })
                 }}
               />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('analytics.filter.forecastWeighting')}
+              <select
+                className="workbench-input min-h-10 px-3"
+                data-testid="analytics-forecast-weighting"
+                value={forecastWeighting ?? 'count'}
+                onChange={(event) => onForecastWeightingChange?.(event.target.value === 'effort' ? 'effort' : undefined)}
+              >
+                <option value="count">{t('analytics.weighting.count')}</option>
+                <option value="effort">{t('analytics.weighting.effort')}</option>
+              </select>
             </label>
             <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
               {t('analytics.filter.timeZone')}
@@ -1611,7 +1641,15 @@ function AnalyticsWidgetEditor({
       </label>
       <label className="mt-2 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
         {t('analytics.builder.metric')}
-        <select className="workbench-input min-h-9 px-2" value={widget.metric} onChange={(event) => onChange({ ...widget, metric: event.target.value as AnalyticsMetricKey })}>
+        <select
+          className="workbench-input min-h-9 px-2"
+          value={widget.metric}
+          onChange={(event) => {
+            const metric = event.target.value as AnalyticsMetricKey
+            // Only throughput and velocity accept effort weighting, so other metrics drop it.
+            onChange(isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric })
+          }}
+        >
           {metricKeys.map((metric) => <option key={metric} value={metric}>{t(metricLabelKeys[metric])}</option>)}
         </select>
       </label>
@@ -1681,6 +1719,21 @@ function AnalyticsWidgetEditor({
               }
             }}
           />
+        </label>
+      ) : null}
+      {isEffortWeightableMetric(widget.metric) ? (
+        <label className="mt-2 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.builder.weighting')}
+          <select
+            className="workbench-input min-h-9 px-2"
+            value={widget.weighting ?? 'count'}
+            onChange={(event) => onChange(event.target.value === 'effort'
+              ? { ...widget, weighting: 'effort' }
+              : withoutWidgetWeighting(widget))}
+          >
+            <option value="count">{t('analytics.weighting.count')}</option>
+            <option value="effort">{t('analytics.weighting.effort')}</option>
+          </select>
         </label>
       ) : null}
       {widget.metric === 'sla' ? (
@@ -2115,10 +2168,17 @@ function AnalyticsForecastCard({
           <ForecastValue label={t('analytics.forecast.p50')} value={formatForecastDate(forecast.p50, locale, snapshot.timeZone, t)} />
           <ForecastValue label={t('analytics.forecast.p85')} value={formatForecastDate(forecast.p85, locale, snapshot.timeZone, t)} />
           <ForecastValue label={t('analytics.forecast.p95')} value={formatForecastDate(forecast.p95, locale, snapshot.timeZone, t)} />
-          <ForecastValue label={t('analytics.forecast.remaining')} value={String(forecast.remainingWorkItems)} />
+          {forecast.weighting === 'effort' ? (
+            <ForecastValue
+              label={t('analytics.forecast.remainingEffort')}
+              value={t('analytics.value.hours').replace('{value}', String(forecast.remainingEffortHours ?? 0))}
+            />
+          ) : (
+            <ForecastValue label={t('analytics.forecast.remaining')} value={String(forecast.remainingWorkItems)} />
+          )}
         </dl>
         <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
-          {t('analytics.forecast.sample')
+          {t(forecast.weighting === 'effort' ? 'analytics.forecast.sampleEffort' : 'analytics.forecast.sample')
             .replace('{count}', String(forecast.sampleSize))
             .replace('{rate}', forecast.dailyThroughput.toFixed(2))}
         </p>
@@ -2441,6 +2501,8 @@ function createEvidenceInput(
     metric: result.metric,
     slaTargetHours: widget?.slaTargetHours,
     timeZone: snapshot.timeZone,
+    // The drill-down explains the displayed value, so it uses the widget's weighting.
+    ...(widget?.weighting === 'effort' ? { weighting: 'effort' as const } : {}),
   } satisfies AnalyticsEvidenceInput
 }
 
@@ -2503,8 +2565,31 @@ function formatMetricValue(
 
   if (unit === 'hours') return t('analytics.value.hours').replace('{value}', formatted)
   if (unit === 'items-per-week') return t('analytics.value.perWeek').replace('{value}', formatted)
+  if (unit === 'hours-per-week') return t('analytics.value.hoursPerWeek').replace('{value}', formatted)
   if (unit === 'percent') return `${formatted}%`
   return formatted
+}
+
+/**
+ * Copies a widget without its effort weighting, so it measures item counts.
+ *
+ * @param widget - Widget to copy.
+ * @returns The copy without `weighting`.
+ */
+function withoutWidgetWeighting(widget: AnalyticsWidget): AnalyticsWidget {
+  const copy = { ...widget }
+  delete copy.weighting
+  return copy
+}
+
+/**
+ * Returns whether a metric can be weighted by the canonical estimate.
+ *
+ * @param metric - Widget metric.
+ * @returns Whether it is throughput or velocity.
+ */
+function isEffortWeightableMetric(metric: AnalyticsMetricKey): boolean {
+  return metric === 'throughput' || metric === 'velocity'
 }
 
 function formatForecastDate(

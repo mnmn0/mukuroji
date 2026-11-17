@@ -1,3 +1,4 @@
+import type { MfaSetupChallenge } from '@mukuroji/contracts'
 import type { AuthSession } from '../session'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { ApiError } from './errors'
@@ -53,6 +54,7 @@ export type MfaRequiredChallenge = {
 export type AuthenticationChallenge =
   | NewPasswordRequiredChallenge
   | MfaRequiredChallenge
+  | MfaSetupChallenge
 
 /**
  * 通常 token または続行可能な Cognito challenge を返すログイン結果です。
@@ -149,7 +151,7 @@ export async function completeNewPasswordChallenge({
   newPassword,
   remember,
   session,
-}: CompleteNewPasswordChallengeParams, mutationContext: MutationRequestContext): Promise<AuthSession | MfaRequiredChallenge> {
+}: CompleteNewPasswordChallengeParams, mutationContext: MutationRequestContext): Promise<AuthSession | MfaRequiredChallenge | MfaSetupChallenge> {
   const response = await apiFetch<unknown>('/auth/challenge/new-password', {
     body: JSON.stringify({ email, newPassword, session }),
     headers: {
@@ -159,7 +161,7 @@ export async function completeNewPasswordChallenge({
     method: 'POST',
   })
 
-  if (isMfaRequiredChallenge(response)) {
+  if (isMfaRequiredChallenge(response) || isMfaSetupChallenge(response)) {
     return response
   }
 
@@ -233,8 +235,30 @@ function isAuthenticationChallenge(
   response: unknown,
 ): response is AuthenticationChallenge {
   return isNewPasswordRequiredChallenge(response) ||
-    isMfaRequiredChallenge(response)
+    isMfaRequiredChallenge(response) ||
+    isMfaSetupChallenge(response)
 }
+/**
+ * Checks whether a sign-in result is the authenticator setup challenge.
+ *
+ * @param value - Parsed sign-in response.
+ * @returns Whether it is a valid MFA_SETUP challenge with exactly one way to continue.
+ */
+export function isMfaSetupChallenge(value: unknown): value is MfaSetupChallenge {
+  if (
+    !isRecord(value) ||
+    value.challenge !== 'MFA_SETUP' ||
+    typeof value.email !== 'string' ||
+    !value.email
+  ) {
+    return false
+  }
+  const hasSession = typeof value.session === 'string' && value.session.length > 0
+  const hasSetupToken = typeof value.setupAccessToken === 'string' &&
+    value.setupAccessToken.length > 0
+  return hasSession !== hasSetupToken
+}
+
 
 function isNewPasswordRequiredChallenge(
   response: unknown,
@@ -271,7 +295,14 @@ function isMfaRequiredChallenge(
     )
 }
 
-function parseAuthSession(
+/**
+ * Validates a sign-in response body and turns it into a session to store.
+ *
+ * @param response - Parsed response body.
+ * @param remember - Whether to keep the session across browser restarts.
+ * @returns The session.
+ */
+export function parseAuthSession(
   response: unknown,
   remember: boolean,
 ): AuthSession {
