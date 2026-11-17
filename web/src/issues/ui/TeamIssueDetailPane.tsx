@@ -834,10 +834,14 @@ function IssueDetailContent({
     </>
   )
 
-  /** Renders one configured Team Issue detail section in its persisted order. */
   // Keys written in the saved description, as links, because the description is edited as plain text.
   const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '').map((match) => match.key))]
     .filter((key) => key !== issue.key)
+  /**
+   * Lists the Work Item keys written in the saved description, each opening its key URL in a new tab.
+   *
+   * @returns The list of key links, or nothing when the description names no other Work Item.
+   */
   const renderMentionedWorkItemKeys = (): ReactNode => mentionedWorkItemKeys.length > 0 ? (
     <nav
       aria-label={t('issues.key.mentioned')}
@@ -859,6 +863,7 @@ function IssueDetailContent({
     </nav>
   ) : null
 
+  /** Renders one configured Team Issue detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
       case 'overview':

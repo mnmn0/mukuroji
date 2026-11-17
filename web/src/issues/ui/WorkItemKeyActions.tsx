@@ -22,6 +22,12 @@ type CopyFeedback = 'key' | 'link' | 'failed'
  */
 export function WorkItemKeyActions({ workItemKey, t, writeText = writeToClipboard }: WorkItemKeyActionsProps) {
   const [feedback, setFeedback] = useState<CopyFeedback>()
+  /**
+   * Copies text and shows whether it worked.
+   *
+   * @param text - Text to put on the clipboard.
+   * @param done - Feedback to show when the copy succeeds.
+   */
   const copy = (text: string, done: CopyFeedback) => {
     writeText(text).then(() => setFeedback(done), () => setFeedback('failed'))
   }
