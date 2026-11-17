@@ -1810,6 +1810,28 @@ test('returns success without writing when a lost-response retry finds the reque
   expect(store.transactions).toHaveLength(1)
 })
 
+test('rejects a no-op parent replacement when the graph changes while the parent is read', async () => {
+  let graphChanged = false
+  const store = createInMemoryRelationStore({
+    afterQuery: () => {
+      if (graphChanged) return
+      graphChanged = true
+      store.seedGraph(6, 2)
+    },
+  })
+  store.seedRelation('task', 'phase-b', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+  })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+  expect(store.transactions).toHaveLength(0)
+})
+
 test('keeps unexplained parent replacement cancellations retryable', async () => {
   const store = createInMemoryRelationStore({ cancelTransactions: true })
   store.seedRelation('task', 'phase-a', 'parent')
@@ -2018,7 +2040,7 @@ type InMemoryRelationStore = {
  * @returns The fake store and its counters.
  */
 function createInMemoryRelationStore(
-  options: { cancelTransactions?: boolean } = {},
+  options: { cancelTransactions?: boolean; afterQuery?: (prefix: string) => void } = {},
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
   const rows = new Map<string, Record<string, unknown>>()
@@ -2104,6 +2126,7 @@ function createInMemoryRelationStore(
             store.queryPrefixes.push(prefix)
             store.rowsRead += items.length
             rowsSinceTransaction += items.length
+            options.afterQuery?.(prefix)
             return { Items: items }
           }
           if (command.constructor.name === 'TransactWriteCommand' && options.cancelTransactions) {
