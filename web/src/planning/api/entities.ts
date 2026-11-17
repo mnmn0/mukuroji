@@ -301,10 +301,17 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 }
 
+/**
+ * Returns whether a value is a plain JSON object.
+ *
+ * @param value - Parsed response value.
+ * @returns True for a non-null, non-array object.
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Planning entity types an archived entity summary may carry. */
 const planningEntityTypes = new Set<string>([
   'cycle',
   'milestone',
@@ -316,10 +323,22 @@ const planningEntityTypes = new Set<string>([
   'portfolio',
 ])
 
+/**
+ * Returns whether an optional response field is absent or a string.
+ *
+ * @param value - Parsed response field.
+ * @returns True when the field is undefined or a string.
+ */
 function isOptionalString(value: unknown) {
   return value === undefined || typeof value === 'string'
 }
 
+/**
+ * Returns whether a parsed value is an archived entity summary from the archive list API.
+ *
+ * @param value - One element of the response `entities` array.
+ * @returns True when every required field has its contract type.
+ */
 function isArchivedPlanningEntitySummary(value: unknown): value is ArchivedPlanningEntitySummary {
   return isRecord(value) &&
     typeof value.id === 'string' &&
@@ -333,6 +352,12 @@ function isArchivedPlanningEntitySummary(value: unknown): value is ArchivedPlann
     isOptionalString(value.projectId)
 }
 
+/**
+ * Returns whether a parsed value is the restore summary of the restore API.
+ *
+ * @param value - The response `restore` field.
+ * @returns True when every count is a non-negative safe integer.
+ */
 function isPlanningRestoreSummary(value: unknown): value is PlanningRestoreSummary {
   if (!isRecord(value)) return false
   const counts = [

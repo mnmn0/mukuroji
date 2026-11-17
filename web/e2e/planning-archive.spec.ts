@@ -139,6 +139,11 @@ async function mockPlanningArchivePage(page: Page) {
       body: request.postDataJSON(),
       pathname: new URL(request.url()).pathname,
     })
+    if (restoreRequests.length === 2) {
+      // The first "restore the rest" fails; the result and its button must stay.
+      await route.fulfill({ json: { code: 'PlanningUnavailable', message: 'Unavailable.' }, status: 503 })
+      return
+    }
     goalArchived = false
     planning = {
       ...planning,
@@ -153,7 +158,7 @@ async function mockPlanningArchivePage(page: Page) {
   return restoreRequests
 }
 
-test('Issue #369: lists archived plans, restores one, and restores the references left behind', async ({
+test('Issue #369: lists archived plans, restores one, and retries the references left behind', async ({
   page,
 }) => {
   const restoreRequests = await mockPlanningArchivePage(page)
@@ -175,11 +180,16 @@ test('Issue #369: lists archived plans, restores one, and restores the reference
   await expect(panel.getByTestId('planning-archived-entity-goal-archived')).toHaveCount(0)
 
   await panel.getByTestId('planning-restore-continue').click()
+  await expect(page.getByText('計画の変更を保存できませんでした。もう一度お試しください。')).toBeVisible()
+  await expect(result).toContainText('5 件はまだ戻っていません。')
+
+  await panel.getByTestId('planning-restore-continue').click()
   await expect(result).toContainText('Work Item の関連付け 5 件と依存関係 0 件を戻しました。')
   await expect(panel.getByTestId('planning-restore-continue')).toHaveCount(0)
 
   expect(restoreRequests).toEqual([
     { body: { expectedRevision: 30 }, pathname: '/api/planning/entities/goal-archived/restore' },
+    { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
     { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
   ])
 })

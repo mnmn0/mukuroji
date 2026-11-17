@@ -366,8 +366,9 @@ export function PlanningPage() {
   const restoreEntity = async (entity: Pick<ArchivedPlanningEntitySummary, 'id' | 'title'>) => {
     if (!snapshot || !accessToken || restoringEntityId !== undefined) return
     const outcome: { summary?: PlanningRestoreSummary } = {}
+    // The previous result stays until a restore succeeds: after a failed "restore the rest" it is
+    // the only way back to the references still in the archive.
     setRestoringEntityId(entity.id)
-    setRestoreResult(undefined)
     try {
       await runMutation(
         `planning:entity:${entity.id}:restore`,
