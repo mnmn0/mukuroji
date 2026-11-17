@@ -313,11 +313,16 @@ function queryPlanningPage(
  *
  * @param rows - Rows of `workspace-1`, live graph and archive alike.
  * @param pageSize - Maximum rows one Query page returns.
+ * @param sharesRevisionWithWorkItems - Whether canonical Work Item writes advance the table's META.
  * @returns The client, its mutable rows, every Query input, every transaction it wrote, and a
  * control whose `rejectAuthorizationAtWrite` cancels that write (1-based) on its
  * `workspace-access` condition checks, as DynamoDB does when the caller's membership changed.
  */
-function createFakePlanningTable(rows: Record<string, unknown>[], pageSize = 1_000_000) {
+function createFakePlanningTable(
+  rows: Record<string, unknown>[],
+  pageSize = 1_000_000,
+  sharesRevisionWithWorkItems = false,
+) {
   const control = { rejectAuthorizationAtWrite: 0 }
   let meta: Record<string, unknown> = {
     workspaceId: 'FENCE#workspace-1',
@@ -393,6 +398,8 @@ function createFakePlanningTable(rows: Record<string, unknown>[], pageSize = 1_0
     {} as DynamoDBClient,
     false,
     () => NOW,
+    undefined,
+    sharesRevisionWithWorkItems,
   )
   return { client, rows, writes, queries, control }
 }
@@ -3672,7 +3679,99 @@ describe('planning persistence', () => {
     expect(transactionCalls).toBe(1)
   })
 
-  test('fences a Cycle archive on the META revision instead of each linked Work Item', async () => {
+  test('condition-checks completed Work Item revisions when archiving a Cycle without a shared META', async () => {
+    let transaction: Record<string, unknown> | undefined
+    const storedCycle = createStoredCycle('cycle-1')
+    const storedLink = {
+      workspaceId: 'workspace-1',
+      recordKey: 'LINK#team-1#work-1',
+      entryType: 'planning-work-item-link',
+      teamId: 'team-1',
+      workItemId: 'work-1',
+      projectId: 'project-1',
+      cycleId: 'cycle-1',
+      goalIds: [],
+      createdAt: NOW.toISOString(),
+    }
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
+          return {
+            Item: {
+              workspaceId: 'FENCE#workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: 1,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(command.input, [storedCycle, storedLink]),
+          }
+        }
+        transaction = command.input
+        throw {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+          ],
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+      'WorkItemsTable',
+    )
+
+    await expect(client.archive(
+      'workspace-1',
+      'cycle-1',
+      { expectedRevision: 1 },
+      { workItems: [{ ...createWorkItem('work-1', 'completed'), revision: 7 }] },
+    )).rejects.toMatchObject({ status: 409, code: 'PlanningWorkItemChanged' })
+
+    expect(transaction?.TransactItems).toEqual([
+      expect.objectContaining({ Put: expect.any(Object) }),
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkItemsTable',
+          Key: {
+            directoryTeamId: 'workspace-1#team#team-1',
+            issueId: 'work-1',
+          },
+          ExpressionAttributeValues: { ':expectedRevision': 7 },
+        }),
+      },
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            recordKey: 'ENTITY#cycle-1',
+            archivedAt: NOW.toISOString(),
+          }),
+        }),
+      }),
+    ])
+  })
+
+  test('fences a Cycle archive on META alone where Work Item writes advance it', async () => {
     let transaction: Record<string, unknown> | undefined
     const storedCycle = createStoredCycle('cycle-1')
     const storedLink = {
@@ -3732,6 +3831,7 @@ describe('planning persistence', () => {
       false,
       () => NOW,
       'WorkItemsTable',
+      true,
     )
 
     await expect(client.archive(
@@ -4241,7 +4341,7 @@ describe('planning persistence', () => {
         createWorkItem(`item-${index}`, index === 0 ? statusCategory : 'completed')
       ),
     })
-    const { client, writes } = createFakePlanningTable(rows)
+    const { client, writes } = createFakePlanningTable(rows, undefined, true)
 
     await expect(client.archive('workspace-1', 'cycle-1', { expectedRevision: 1 }, workItems('started')))
       .rejects.toMatchObject({ status: 409, code: 'PlanningCycleHasIncompleteWorkItems' })

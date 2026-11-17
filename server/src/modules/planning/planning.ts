@@ -754,6 +754,16 @@ abstract class BasePlanningClient implements PlanningClient {
     this.now = now
   }
 
+  /**
+   * Whether every canonical Work Item write advances this Planning META revision in its own
+   * transaction, so the caller's expectedRevision CAS also detects a changed Work Item.
+   *
+   * @returns False unless the storage shares its META with the canonical Work Item writers.
+   */
+  protected workItemWritesAdvanceRevision() {
+    return false
+  }
+
   /** Workspace state を storage から読み込みます。 */
   protected abstract readState(workspaceId: string): Promise<PlanningWorkspaceState>
 
@@ -1388,11 +1398,12 @@ abstract class BasePlanningClient implements PlanningClient {
           'Move or archive active child entities before archiving their parent.',
         )
       }
+      const workItemConditions: PlanningWorkItemCondition[] = []
+      // Where every canonical Work Item write advances META, the caller's expectedRevision CAS
+      // already fails if a linked Work Item changed after the caller's snapshot, so a Cycle with any
+      // number of links fits one transaction. Elsewhere each linked Work Item is guarded itself.
+      const guardEachWorkItem = !this.workItemWritesAdvanceRevision()
       if (current.type === 'cycle') {
-        // No per-Work Item condition: every canonical Work Item write advances META in its own
-        // transaction, so the caller's expectedRevision CAS already fails if a linked Work Item
-        // changed after the caller's snapshot. That keeps a Cycle with any number of links within
-        // one transaction.
         const summaries = createWorkItemMap(workItemState)
         for (const link of state.workItemLinks) {
           if (link.cycleId !== current.id) continue
@@ -1405,6 +1416,13 @@ abstract class BasePlanningClient implements PlanningClient {
               'PlanningCycleHasIncompleteWorkItems',
               'Rollover or unlink incomplete Work Items before archiving this Cycle.',
             )
+          }
+          if (guardEachWorkItem) {
+            workItemConditions.push({
+              teamId: link.teamId,
+              workItemId: link.workItemId,
+              revision: readRevision(summary.revision),
+            })
           }
         }
       }
@@ -1422,7 +1440,7 @@ abstract class BasePlanningClient implements PlanningClient {
           })
         }
       }
-      return { state: next }
+      return { state: next, workItemConditions }
     })
   }
 
@@ -2801,6 +2819,8 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   private readonly graphCache = new Map<string, PlanningWorkspaceState>()
   /** Local table の自動作成を有効にするかどうかです。 */
   private readonly bootstrapLocalTable: boolean
+  /** Whether canonical Work Item writes advance this table's META revision. */
+  private readonly sharesRevisionWithWorkItems: boolean
 
   constructor(
     tableName = loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -2810,6 +2830,8 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     now: () => Date = () => new Date(),
     workItemsTableName = loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ??
       'mukuroji-team-issues-local',
+    // The canonical Work Item client advances Planning META only when PLANNING_TABLE_NAME is set.
+    sharesRevisionWithWorkItems = Boolean(loadServerConfig().environment.PLANNING_TABLE_NAME?.trim()),
   ) {
     super(now)
     this.tableName = tableName
@@ -2817,6 +2839,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     this.documentClient = documentClient
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
+    this.sharesRevisionWithWorkItems = sharesRevisionWithWorkItems
+  }
+
+  protected override workItemWritesAdvanceRevision() {
+    return this.sharesRevisionWithWorkItems
   }
 
   /**

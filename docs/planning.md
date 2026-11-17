@@ -99,7 +99,7 @@ Response は再計算済み snapshot と `movedWorkItemIds` / `retainedWorkItemI
 
 Rollover は canonical Work Item revision を Planning META と同じ DynamoDB transaction で条件検証します。Transaction の100 item上限に合わせ、一度に検証できる source link は49件までです。削除済み・閲覧不能の Work Item が link された場合は rollover を fail-closed にし、Workspace owner / admin が既存の DELETE API で stale link を清掃してから再実行します。Work Item の Project が変わった link は snapshot / roll-up から除外し、新しい Project scope へ明示的に再 link するまで rollover を拒否します。
 
-Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。
+Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。`PLANNING_TABLE_NAME` を設定した環境では、archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。`PLANNING_TABLE_NAME` を設定しない local 環境では Work Item の書き込みが META を進めないため、archive の transaction で link 先の Work Item ごとに revision を条件検証します（transaction の上限から、link が約 97 件を超える Cycle は archive できません）。
 
 ## Project / Initiative health update
 
