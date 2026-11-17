@@ -25,8 +25,17 @@ export {
   type WorkspaceInvitationResponse,
   type WorkspaceInvitationStatus,
   type WorkspaceMember,
+  type WorkspaceMemberCredentialAction,
+  type WorkspaceMemberCredentialProgress,
+  type WorkspaceMemberCredentialRecord,
   type WorkspaceMemberProvisioningSource,
   type WorkspaceMemberResponse,
   type WorkspaceMemberStatus,
   type WorkspaceAccessTransactWriteItem,
 } from './workspace-access'
+export {
+  resetMemberCredential,
+  type MemberCredentialResetInput,
+  type MemberCredentialResetPorts,
+  type MemberSignInAccount,
+} from './application/member-credential-reset'

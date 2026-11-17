@@ -41,6 +41,7 @@ export type AuthenticationSessionContinuation = {
  * @param requestAuditContext - Audit context of the login request.
  * @param verifiedAuthenticationMethods - Authentication methods verified for the session.
  * @param continuation - Previous access token when the token set came from a refresh.
+ * @param loadedUser - Cognito user already read with the same access token, if any.
  * @returns The HTTP response carrying the session tokens.
  */
 export async function createAuthenticationResponse(
@@ -50,6 +51,7 @@ export async function createAuthenticationResponse(
   requestAuditContext?: MutationAuditContext,
   verifiedAuthenticationMethods: readonly string[] = [],
   continuation?: AuthenticationSessionContinuation,
+  loadedUser?: GetUserResponse,
 ) {
   if (!tokens.AccessToken) {
     throw new CognitoServiceError(
@@ -72,7 +74,7 @@ export async function createAuthenticationResponse(
     }
   }
 
-  const user = await authenticationDependencies.cognito.getUser(tokens.AccessToken)
+  const user = loadedUser ?? await authenticationDependencies.cognito.getUser(tokens.AccessToken)
   const userKey = readUserAttribute(user, 'email') ?? user.Username
 
   if (userKey?.trim()) {

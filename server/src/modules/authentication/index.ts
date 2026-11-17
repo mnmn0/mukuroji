@@ -21,4 +21,28 @@ export {
   type GetUserResponse,
   type InitiateAuthResponse,
   type ListCognitoUsersInput,
+  type SoftwareTokenAssociation,
+  type SoftwareTokenTarget,
 } from './adapter-out/cognito/cognito-client'
+export {
+  confirmSoftwareTokenEnrollment,
+  SoftwareTokenEnrollmentError,
+  startSoftwareTokenEnrollment,
+  type SoftwareTokenEnrollee,
+  type SoftwareTokenEnrollmentErrorCode,
+  type SoftwareTokenEnrollmentPorts,
+} from './application/software-token-enrollment'
+export {
+  AccountCredentialChangeError,
+  changeAccountPassword,
+  confirmAccountPasswordReset,
+  removeSoftwareToken,
+  requestAccountPasswordReset,
+  type AccountCredentialChangeErrorCode,
+  type AccountCredentialChangeErrorStatus,
+  type PasswordChangePorts,
+  type PasswordChanger,
+  type PasswordResetPorts,
+  type SoftwareTokenRemovalPorts,
+  type SoftwareTokenRemover,
+} from './application/account-credential-changes'

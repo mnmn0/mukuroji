@@ -29,6 +29,7 @@ import {
   type EnterprisePermissionId,
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
+  type WorkItemKeyLookupResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -259,6 +260,7 @@ import {
   filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
 import {
@@ -3515,6 +3517,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           )
         },
         'project creation',
+        // A charter saved before this projection lands carries a revision; keep it.
+        { unrevisioned: true },
       )
       return c.json(response, 201)
     } catch (error) {
@@ -3759,6 +3763,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
+        teamContext.team,
+        readAssignedProjectId(normalized.assignedProjectId),
+      )
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         conversion.target.teamId,
@@ -3786,15 +3795,18 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversion.target.projectId,
       )
-      const guardedConfigured = authorizationConditionChecks.length === 0
-        ? configured
-        : {
-            ...configured,
-            authorizationConditionChecks: mergeTriageConditionChecks(
-              configured.authorizationConditionChecks ?? [],
-              authorizationConditionChecks,
-            ),
-          };
+      const guardedConfigured = {
+        ...(authorizationConditionChecks.length === 0
+          ? configured
+          : {
+              ...configured,
+              authorizationConditionChecks: mergeTriageConditionChecks(
+                configured.authorizationConditionChecks ?? [],
+                authorizationConditionChecks,
+              ),
+            }),
+        ...newWorkItemProjectFence,
+      };
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
         readTeamIssueAssigneeUserId(guardedConfigured),
@@ -4158,6 +4170,61 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
     }
   })
 
+  /**
+   * Resolves a Work Item key such as `ABC-123` to the Work Item it names.
+   *
+   * Answers 404 alike for text that is not a key, an unused key, a deleted Work Item, and a
+   * Work Item the caller cannot read, so a key reveals nothing to someone without access.
+   */
+  routeApp.get('/api/work-items/keys/:key', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    const notFound = () => c.json({
+      code: 'WorkItemKeyNotFound',
+      message: 'No readable Work Item has this key.',
+    }, 404)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const location = await workItemDependencies.teamIssues.getWorkItemKeyLocation(
+        principal.directoryId,
+        c.req.param('key'),
+      )
+      if (!location) return notFound()
+      try {
+        const context = await requireTeamPermission(principal, location.teamId, 'viewer')
+        const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          location.teamId,
+          location.workItemId,
+          { consistentIssueRead: true, includeEvents: false },
+        )
+        requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+        // A deleted Work Item keeps its key row, and a fixed ID can be created again with a new key,
+        // so the row only counts when the Work Item at that ID still carries this key.
+        if (detail.issue.key !== location.key) return notFound()
+      } catch (error) {
+        if (
+          isTeamIssueNotFoundError(error) ||
+          error instanceof ProjectDataError && (error.status === 403 || error.status === 404)
+        ) {
+          return notFound()
+        }
+        throw error
+      }
+      return c.json({
+        key: location.key,
+        teamId: location.teamId,
+        workItemId: location.workItemId,
+      } satisfies WorkItemKeyLookupResponse)
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
   /** 現在ユーザーが参照できる Work Item の件数を Team と Project ごとに集計して返します。 */
   routeApp.get('/api/work-items/summary', async (c) => {
     const accessToken = readBearerAccessToken(c)
@@ -4477,6 +4544,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         requestBody,
         context.team,
       )
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
+        context.team,
+        readAssignedProjectId(body.assignedProjectId),
+      )
       requireAssignedProjectPermission(
         principal,
         context,
@@ -4509,6 +4581,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             assigneeUserId,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            ...newWorkItemProjectFence,
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),

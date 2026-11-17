@@ -155,13 +155,27 @@ export function createEnterpriseSecurityConfirmationCopy(
   }
 
   if (confirmation.kind === 'session-policy') {
+    const mfaDescription = describeMfaRequirementImpact(confirmation.impact, t)
+
+    if (!confirmation.impact.requiresConfirmation) {
+      return {
+        confirmLabel: t('security.dialog.mfaRequiredConfirm'),
+        description: mfaDescription,
+        destructive: true,
+        title: t('security.dialog.mfaRequiredTitle'),
+      }
+    }
+
     return {
       confirmLabel: t('security.dialog.sessionPolicyConfirm'),
-      description: t('security.dialog.sessionPolicyDescription').replace(
-        '{ip}',
-        confirmation.impact.callerIp ||
-          t('security.dialog.sessionPolicyUnknownIp'),
-      ),
+      description: [
+        t('security.dialog.sessionPolicyDescription').replace(
+          '{ip}',
+          confirmation.impact.callerIp ||
+            t('security.dialog.sessionPolicyUnknownIp'),
+        ),
+        mfaDescription,
+      ].filter(Boolean).join(' '),
       destructive: true,
       title: t('security.dialog.sessionPolicyTitle'),
     }
@@ -282,4 +296,34 @@ export function createEnterpriseSecurityConfirmationCopy(
     destructive: true,
     title: t('security.dialog.roleTitle'),
   }
+}
+
+/**
+ * Describes how many active members must register an authenticator app once MFA is required.
+ *
+ * @param impact - Preview returned by the API.
+ * @param t - Translator.
+ * @returns The description, or an empty string when the change does not turn MFA on.
+ */
+function describeMfaRequirementImpact(
+  impact: EnterpriseSessionPolicyImpact,
+  t: (key: MessageKey) => string,
+) {
+  const mfaImpact = impact.mfaImpact
+  if (!mfaImpact) {
+    return ''
+  }
+
+  return [
+    t('security.sessions.mfaImpact.count').replace(
+      '{count}',
+      String(mfaImpact.unenrolledMemberCount),
+    ),
+    mfaImpact.unknownMemberCount > 0
+      ? t('security.sessions.mfaImpact.unknown').replace(
+          '{count}',
+          String(mfaImpact.unknownMemberCount),
+        )
+      : '',
+  ].filter(Boolean).join(' ')
 }

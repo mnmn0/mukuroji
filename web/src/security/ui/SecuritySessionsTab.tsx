@@ -89,7 +89,7 @@ export function SecuritySessionsTab({
 
     try {
       const impact = await onPreview(input)
-      if (impact.requiresConfirmation) {
+      if (impact.requiresConfirmation || leavesMembersWithoutMfa(impact)) {
         onRequestConfirmation(input, impact)
         return
       }
@@ -321,4 +321,16 @@ export function SecuritySessionsTab({
       ) : null}
     </form>
   )
+}
+
+/**
+ * Tells whether saving would require MFA from members who have not registered an authenticator
+ * app, or whose enrollment the API could not read.
+ *
+ * @param impact - Preview returned by the API.
+ * @returns Whether the admin should confirm first.
+ */
+function leavesMembersWithoutMfa(impact: EnterpriseSessionPolicyImpact) {
+  return impact.mfaImpact !== undefined &&
+    (impact.mfaImpact.unenrolledMemberCount > 0 || impact.mfaImpact.unknownMemberCount > 0)
 }

@@ -1,3 +1,4 @@
+export * from './account-security'
 export * from './analytics'
 /** Re-exports AI assistance contracts for server and Web consumers. */
 export * from './ai-assistance'
@@ -16,6 +17,7 @@ export * from './files'
 export * from './focus'
 export * from './openapi'
 export * from './planning'
+export * from './project-charter'
 export * from './project-navigation'
 export * from './push-subscriptions'
 export * from './request-intake'

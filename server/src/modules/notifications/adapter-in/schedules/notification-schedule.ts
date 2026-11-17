@@ -25,6 +25,7 @@ import {
 import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
 import {
   isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
   workItemScheduleInstantToLocalDate,
 } from '../../../work-items'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
@@ -327,6 +328,8 @@ export async function runNotificationSchedule(
     result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
     for (const item of response.Items ?? []) {
+      // The Work Item key registry shares the table; its rows are not Work Items.
+      if (isWorkItemKeyRegistryRecord(item)) continue
       const completionPreparation = readCustomerCompletionPreparation(item)
       if (completionPreparation) {
         const prepare = options.prepareCustomerCompletionNotifications

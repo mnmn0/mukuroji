@@ -18,6 +18,7 @@ import {
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
+  fitWorkItemTitle,
   type CreateRequestFormInput,
   type MarkDuplicateRequestSubmissionAction,
   type PublicRequestForm,
@@ -753,7 +754,7 @@ export function createRequestWorkItemInput(
   return {
     target,
     input: {
-      title: title.slice(0, 500),
+      title: fitWorkItemTitle(title),
       ...(description ? { description } : {}),
       ...(workItemTypeId ? { workItemTypeId } : {}),
       ...(target.projectId ? { assignedProjectId: target.projectId } : {}),

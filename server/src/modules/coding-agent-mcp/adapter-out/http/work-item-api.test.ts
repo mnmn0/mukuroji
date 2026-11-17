@@ -241,3 +241,25 @@ test('maps Agent Run problem reasons to stable codes without forwarding remote d
   const scoped = createAgentWorkItemApi(config, async () => Response.json({ ...validRun, teamId: 'other' }))
   await expect(scoped.getRun(validRun.runId)).rejects.toMatchObject({ code: 'invalid_response' })
 })
+
+test('reads a task key and its creation time from the endpoint and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    const respond = (body: Record<string, unknown>) =>
+      Response.json({ schemaVersion: 1, teamId: 'team', createdAt: '2026-09-01T00:00:00.000Z', ...body })
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/key': return respond({ workItemId: 'task', key: 'TEAM-42' })
+      case '/api/v1/work-items/keyless/key': return respond({ workItemId: 'keyless' })
+      case '/api/v1/work-items/other/key': return respond({ workItemId: 'task', key: 'TEAM-42' })
+      case '/api/v1/work-items/lowercase/key': return respond({ workItemId: 'lowercase', key: 'team-42' })
+      default: return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.taskKey('task')).toEqual({ key: 'TEAM-42', createdAt: '2026-09-01T00:00:00.000Z' })
+  expect(paths[0]).toBe('/api/v1/work-items/task/key?teamId=team')
+  expect(await api.taskKey('keyless')).toEqual({ createdAt: '2026-09-01T00:00:00.000Z' })
+  expect(await api.taskKey('legacy-server')).toBeUndefined()
+  await expect(api.taskKey('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.taskKey('lowercase')).rejects.toMatchObject({ code: 'invalid_response' })
+})

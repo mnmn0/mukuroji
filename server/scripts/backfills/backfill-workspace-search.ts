@@ -19,8 +19,12 @@ import {
   type SearchCustomFieldValue,
   type SearchEntityType,
 } from '@mukuroji/contracts'
-import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
+import {
+  isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
+} from '../../src/modules/work-items'
 import { validateDocumentPayload } from '../../src/modules/documents'
+import { isStoredProjectCharter } from '../../src/modules/directory'
 import {
   createCommentWorkspaceSearchDocument,
   createCommentWorkspaceSearchEntityId,
@@ -102,6 +106,12 @@ export type SearchProjectionOperation =
        * 保存する versioned search document です。
        */
       document: WorkspaceSearchDocument
+      /**
+       * Source revision the row was scanned at, for sources that fence their live projections.
+       * The write then never replaces a document projected from a newer revision; `0` means the
+       * row has no revision yet, so any document that carries one is newer.
+       */
+      sourceRevision?: number
     }
   | {
       /**
@@ -481,7 +491,11 @@ export async function runBackfill(
           continue
         }
 
-        await applyProjectionOperation(client, workspaceSearchTableName, operation)
+        if (!await applyProjectionOperation(client, workspaceSearchTableName, operation)) {
+          // A live projection of a newer revision won; the scanned row is already stale.
+          counters[definition.name].projected -= 1
+          counters[definition.name].skipped += 1
+        }
       }
 
       lastEvaluatedKey = response.LastEvaluatedKey
@@ -519,23 +533,37 @@ function printDryRunOperation(source: SourceName, operation: SearchProjectionOpe
   )
 }
 
+/**
+ * Writes one projection operation to the search table.
+ *
+ * @param client - DynamoDB document client.
+ * @param tableName - Workspace search table name.
+ * @param operation - Operation to apply.
+ * @returns Whether the operation was written; `false` when a newer projection was kept.
+ */
 async function applyProjectionOperation(
   client: DynamoDBDocumentClient,
   tableName: string,
   operation: SearchProjectionOperation,
 ) {
   if (operation.action === 'put') {
-    await client.send(
-      new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: tableName,
-            Item: operation.document,
-          },
-        }],
-      }),
-    )
-    return
+    try {
+      await client.send(
+        new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: tableName,
+              Item: operation.document,
+              ...createSourceRevisionCondition(operation.sourceRevision),
+            },
+          }],
+        }),
+      )
+    } catch (error) {
+      if (operation.sourceRevision !== undefined && isConditionalCheckFailure(error)) return false
+      throw error
+    }
+    return true
   }
 
   await client.send(
@@ -551,6 +579,43 @@ async function applyProjectionOperation(
       }],
     }),
   )
+  return true
+}
+
+/**
+ * Builds the write condition that keeps a document projected from a newer source revision.
+ *
+ * @param sourceRevision - Revision the source row was scanned at, if the source is fenced.
+ * @returns The condition parts of the Put, or nothing for an unfenced source.
+ */
+function createSourceRevisionCondition(sourceRevision: number | undefined) {
+  if (sourceRevision === undefined) return {}
+  if (sourceRevision === 0) {
+    return {
+      ConditionExpression: 'attribute_not_exists(#sourceRevision)',
+      ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+    }
+  }
+  return {
+    ConditionExpression: 'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+    ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+    ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+  }
+}
+
+/**
+ * Checks whether a write failed only because its condition did not hold.
+ *
+ * @param error - Write failure.
+ * @returns Whether the failure is a conditional check failure.
+ */
+function isConditionalCheckFailure(error: unknown) {
+  if (!(error instanceof Error)) return false
+  if (error.name === 'ConditionalCheckFailedException') return true
+  if (error.name !== 'TransactionCanceledException') return false
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  return Array.isArray(reasons) &&
+    reasons.some((reason: unknown) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
 }
 
 /**
@@ -635,6 +700,24 @@ function mapProjectDirectoryItemRow(
     return undefined
   }
 
+  // A Project row without a charter is valid; a charter that is present but invalid is corrupt
+  // data, and indexing the row without it would silently hide the problem.
+  if (item.charter !== undefined && !isStoredProjectCharter(item.charter)) {
+    throw new TypeError(
+      `Workspace search backfill encountered an invalid charter on Project "${teamId}/${projectId}".`,
+    )
+  }
+
+  // Charter edits project synchronously behind the charter revision, so the backfill is fenced by
+  // the same revision and cannot replace a newer charter with the one it scanned earlier.
+  const charterRevision = readPositiveInteger(item.charterRevision)
+  // Only a Project that never had a charter edit may lack the revision; a stored value that is not
+  // a positive safe integer is corrupt and must not be projected as revision 0.
+  if (item.charterRevision !== undefined && charterRevision === undefined) {
+    throw new TypeError(
+      `Workspace search backfill encountered an invalid charter revision on Project "${teamId}/${projectId}".`,
+    )
+  }
   return {
     action: 'put',
     document: createProjectWorkspaceSearchDocument({
@@ -643,9 +726,12 @@ function mapProjectDirectoryItemRow(
       subtitle,
       teamId,
       projectId,
+      ...(item.charter === undefined ? {} : { charter: item.charter }),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
+      ...(charterRevision === undefined ? {} : { sourceRevision: charterRevision }),
     }),
+    sourceRevision: charterRevision ?? 0,
   }
 }
 
@@ -653,6 +739,8 @@ function mapProjectDirectoryItemRow(
  * Canonical Work Item row を Team scope を保持した search document 操作へ変換します。
  */
 export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOperation | undefined {
+  // The Work Item key registry shares the table; its rows are not searchable Work Items.
+  if (isWorkItemKeyRegistryRecord(item)) return undefined
   if (!isCanonicalWorkItemRecord(item)) {
     throw new TypeError(
       'Workspace search backfill encountered a non-canonical Work Item row.',

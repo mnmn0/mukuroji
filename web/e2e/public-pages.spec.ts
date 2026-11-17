@@ -10,7 +10,7 @@ test('公開ページは390px幅でも実本文と復帰導線を表示する', 
   await page.setViewportSize({ width: 390, height: 844 })
 
   const routes = [
-    { path: '/forgot-password', heading: '安全な復旧経路を確認する' },
+    { path: '/forgot-password', heading: 'パスワードを再設定する' },
     { path: '/privacy', heading: 'プライバシーポリシー（ドラフト）' },
     { path: '/terms', heading: '利用規約（ドラフト）' },
     { path: '/support', heading: '困っていることから探す' },
@@ -59,19 +59,36 @@ test('サポートはURL履歴、検索件数、言語切替を同期する', as
   await expect(page.getByRole('button', { name: 'Copy support note' })).toBeVisible()
 })
 
-test('パスワード復旧は未送信を明示し、安全な依頼メモだけを作る', async ({ page }) => {
+test('パスワード再設定は確認コードを送り、新しいパスワードを設定する', async ({ page }) => {
+  await page.route('**/api/auth/password-reset/request', async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ email: 'demo@example.com' })
+    await route.fulfill({ status: 202, json: { accepted: true } })
+  })
+  await page.route('**/api/auth/password-reset/confirm', async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      email: 'demo@example.com',
+      code: '123456',
+      newPassword: 'NewPassword123!',
+    })
+    await route.fulfill({ status: 204, body: '' })
+  })
   await page.goto('/forgot-password')
 
   const emailInput = page.getByRole('textbox', { name: 'ログイン用メールアドレス' })
 
   await emailInput.fill('invalid-address')
-  await page.getByRole('button', { name: '復旧手順を確認' }).click()
+  await page.getByRole('button', { name: '確認コードを送る' }).click()
   await expect(page.getByRole('alert')).toContainText('有効なメールアドレス')
 
-  await emailInput.fill('demo@example.com')
-  await page.getByRole('button', { name: '復旧手順を確認' }).click()
+  await emailInput.fill('Demo@Example.com')
+  await page.getByRole('button', { name: '確認コードを送る' }).click()
 
-  await expect(page.getByRole('heading', { name: '管理者へ渡す連絡メモ' })).toBeVisible()
-  await expect(page.getByText('再設定メールは送信されません')).toBeVisible()
-  await expect(page.getByText(/ログイン用メールアドレス: demo@example.com/)).toBeVisible()
+  await expect(page.getByRole('heading', { name: '新しいパスワードを設定' })).toBeVisible()
+  await page.getByLabel('確認コード').fill('123456')
+  await page.getByLabel('新しいパスワード', { exact: true }).fill('NewPassword123!')
+  await page.getByLabel('新しいパスワード（確認）').fill('NewPassword123!')
+  await page.getByRole('button', { name: 'パスワードを再設定' }).click()
+
+  await expect(page.getByRole('heading', { name: 'パスワードを再設定しました' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'ログインへ進む' })).toBeVisible()
 })

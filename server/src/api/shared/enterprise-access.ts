@@ -263,6 +263,26 @@ export function normalizeEnterpriseEmailDomain(email: string) {
 }
 
 /**
+ * Classifies a member as external: a guest, or an address outside every verified domain.
+ *
+ * With no verified domain, every address counts as managed.
+ *
+ * @param snapshot - Enterprise identity snapshot.
+ * @param member - Member email and Workspace role.
+ * @returns Whether the external-access policy applies to the member.
+ */
+export function isEnterpriseExternalMember(
+  snapshot: Pick<EnterpriseIdentitySnapshot, 'domains'>,
+  member: { email: string; role: string },
+) {
+  const memberDomain = normalizeEnterpriseEmailDomain(member.email)
+  const verifiedDomains = snapshot.domains.filter((domain) => domain.status === 'verified')
+  const managedDomain = verifiedDomains.length === 0 ||
+    verifiedDomains.some((domain) => domain.domain === memberDomain)
+  return member.role === 'guest' || !managedDomain
+}
+
+/**
  * Enforces the enterprise external-access policy for a member email and role.
  *
  * @param snapshot - Enterprise identity snapshot.

@@ -16,7 +16,13 @@ import {
   startEnterpriseSso,
   type AuthenticationChallenge,
   type MfaRequiredChallenge,
+  type MfaSetupChallenge,
 } from '../../auth/api'
+import {
+  useLoginAuthenticatorSetup,
+  type LoginAuthenticatorSetupResult,
+} from '../../features/account-security/mutations/useLoginAuthenticatorSetup'
+import { AuthenticatorSetup } from '../../features/account-security/ui/AuthenticatorSetup'
 import {
   isSafeEnterpriseSsoAuthorizationUrl,
   savePendingEnterpriseSsoLogin,
@@ -128,6 +134,7 @@ export function LoginPage({
   const [errorKey, setErrorKey] = useState<MessageKey | null>(
     initialChallengeFailed ? 'login.challenge.error' : null,
   )
+  const [noticeKey, setNoticeKey] = useState<MessageKey | null>(null)
   const t = useMemo(() => createTranslator(locale), [locale])
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
 
@@ -209,6 +216,7 @@ export function LoginPage({
 
     setIsSubmitting(true)
     setErrorKey(null)
+    setNoticeKey(null)
 
     try {
       const normalizedEmail = email.trim().toLowerCase()
@@ -252,6 +260,14 @@ export function LoginPage({
       navigate(returnPath, { replace: true })
     } catch (error) {
       if (await resumeRequiredEnterpriseSso(error, email)) {
+        return
+      }
+      if (error instanceof ApiError && error.code === 'PasswordResetRequired') {
+        const parameters = new URLSearchParams({
+          email: email.trim().toLowerCase(),
+          reason: 'admin-reset',
+        })
+        navigate(`/forgot-password?${parameters.toString()}`)
         return
       }
       setErrorKey(resolveLoginErrorKey(error))
@@ -402,6 +418,27 @@ export function LoginPage({
   const mfaChallenge = challenge && isMfaChallenge(challenge)
     ? challenge
     : undefined
+  const mfaSetupChallenge = challenge?.challenge === 'MFA_SETUP' ? challenge : undefined
+
+  /**
+   * Continues the sign-in after the authenticator app is registered.
+   *
+   * @param setupChallenge - Challenge the registration answered.
+   * @param result - Whether the session was issued or the user signs in again with a code.
+   */
+  const finishAuthenticatorSetup = (
+    setupChallenge: MfaSetupChallenge,
+    result: LoginAuthenticatorSetupResult,
+  ) => {
+    if (result === 'signed-in') {
+      navigate(returnPath, { replace: true })
+      return
+    }
+    returnToPasswordLogin()
+    setEmail(setupChallenge.email)
+    setLoginStep('password')
+    setNoticeKey('mfaSetup.loginDone')
+  }
 
   return (
     <main className="workbench-shell grid min-h-svh min-w-0 grid-cols-[minmax(460px,1.02fr)_minmax(520px,0.98fr)] max-[1080px]:grid-cols-1">
@@ -437,18 +474,22 @@ export function LoginPage({
               className="workbench-title m-0 text-login-title"
               id="login-title"
             >
-              {mfaChallenge
-                ? t('login.mfa.title')
-                : challenge
-                  ? t('login.challenge.title')
-                  : t('login.title')}
+              {mfaSetupChallenge
+                ? t('mfaSetup.title')
+                : mfaChallenge
+                  ? t('login.mfa.title')
+                  : challenge
+                    ? t('login.challenge.title')
+                    : t('login.title')}
             </h1>
             <p className="mt-3 text-base font-medium text-[var(--workbench-muted)]">
-              {mfaChallenge
-                ? t('login.mfa.subtitle')
-                : challenge
-                  ? t('login.challenge.subtitle')
-                  : t(
+              {mfaSetupChallenge
+                ? t('mfaSetup.subtitle')
+                : mfaChallenge
+                  ? t('login.mfa.subtitle')
+                  : challenge
+                    ? t('login.challenge.subtitle')
+                    : t(
                     loginStep === 'email'
                       ? 'login.emailFirstSubtitle'
                       : 'login.passwordSubtitle',
@@ -456,6 +497,21 @@ export function LoginPage({
             </p>
           </div>
 
+          {mfaSetupChallenge ? (
+            <div className="mt-9 grid min-w-0 gap-5" data-testid="login-mfa-setup">
+              <p className="m-0 rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]">
+                {t('mfaSetup.policyNotice')}
+              </p>
+              <LoginAuthenticatorSetup
+                challenge={mfaSetupChallenge}
+                key={mfaSetupChallenge.setupAccessToken ?? mfaSetupChallenge.session}
+                remember={remember}
+                t={t}
+                onCancel={returnToPasswordLogin}
+                onFinished={(result) => finishAuthenticatorSetup(mfaSetupChallenge, result)}
+              />
+            </div>
+          ) : (
           <form
             className="mt-9 grid min-w-0 gap-[22px] max-[720px]:gap-[19px]"
             onSubmit={
@@ -715,6 +771,15 @@ export function LoginPage({
                   <span>{t('login.remember')}</span>
                 </label>
 
+                {noticeKey ? (
+                  <p
+                    className="m-0 rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]"
+                    role="status"
+                  >
+                    {t(noticeKey)}
+                  </p>
+                ) : null}
+
                 {errorKey ? (
                   <p
                     className="m-0 rounded-lg border border-tone-ffd2d2 bg-tone-fff5f5 px-4 py-3 text-sm font-bold leading-6 text-fg-b42318"
@@ -753,6 +818,7 @@ export function LoginPage({
               </>
             )}
           </form>
+          )}
         </div>
 
         <footer className="self-end text-center text-sm text-[var(--muted)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:text-app-meta">
@@ -974,10 +1040,43 @@ function resolveMfaErrorKey(error: unknown): MessageKey {
   return 'login.mfa.errorUnknown'
 }
 
+/**
+ * Registers an authenticator app during sign-in, before the session is issued.
+ *
+ * @param props - Challenge, remember choice, translator, and what happens next.
+ * @returns The registration steps.
+ */
+function LoginAuthenticatorSetup({
+  challenge,
+  remember,
+  t,
+  onCancel,
+  onFinished,
+}: {
+  challenge: MfaSetupChallenge
+  remember: boolean
+  t: (key: MessageKey) => string
+  onCancel: () => void
+  onFinished: (result: LoginAuthenticatorSetupResult) => void
+}) {
+  const setup = useLoginAuthenticatorSetup(challenge, remember)
+
+  return (
+    <AuthenticatorSetup
+      cancelLabel={t('login.mfa.restart')}
+      t={t}
+      onCancel={onCancel}
+      onStart={setup.start}
+      onVerify={async (code, started) => onFinished(await setup.verify(code, started.session))}
+    />
+  )
+}
+
 function isMfaChallenge(
   challenge: AuthenticationChallenge,
 ): challenge is MfaRequiredChallenge {
-  return challenge.challenge !== 'NEW_PASSWORD_REQUIRED'
+  return challenge.challenge !== 'NEW_PASSWORD_REQUIRED' &&
+    challenge.challenge !== 'MFA_SETUP'
 }
 
 function isEnterpriseSsoRequired(error: unknown) {
