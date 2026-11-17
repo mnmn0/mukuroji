@@ -172,7 +172,11 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
-import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
+import {
+  changesWorkItemSchedulePlacement,
+  readWorkItemEffortChange,
+  withWorkItemPlannedEffort,
+} from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -876,6 +880,9 @@ export async function updateCanonicalPublicWorkItem(
   principal: WorkspacePrincipal
 }> {
   rejectInternalWorkItemUpdateFields(input)
+  // An estimate sent on its own is written into the stored schedule, so the request body does not
+  // depend on the dates the client read and a retry under the same key stays the same request.
+  const { plannedEffortMinutes, ...scheduleInput } = input
   const authorization = await resolveStableWorkItemAuthorization(
     credential.workspaceId,
     async () => await resolveDeveloperCredentialPrincipal(credential, {
@@ -886,13 +893,16 @@ export async function updateCanonicalPublicWorkItem(
     async (principal) => {
       requireWorkspaceBusinessWrite(principal)
       const permission = await requireTeamPermission(principal, teamId, 'member')
-      const body = normalizeTeamIssueInput(input, permission.team)
+      const normalized = normalizeTeamIssueInput(scheduleInput, permission.team)
       const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
         principal.directoryId,
         teamId,
         workItemId,
         { consistentIssueRead: true, includeEvents: false },
       )
+      const body = plannedEffortMinutes === undefined
+        ? normalized
+        : { ...normalized, schedule: withWorkItemPlannedEffort(detail.issue.schedule, plannedEffortMinutes) }
       requireAssignedProjectPermission(
         principal,
         permission,
@@ -953,8 +963,12 @@ export async function updateCanonicalPublicWorkItem(
     ...('acceptanceCriteria' in writableBody ? { acceptanceCriteria: writableBody.acceptanceCriteria } : {}),
     ...('acceptanceCriteriaMarks' in input ? { acceptanceCriteriaMarks: input.acceptanceCriteriaMarks } : {}),
   }
-  if (Object.keys(criteriaChange).length > 0 && detail.issue.revision !== expectedRevision) {
-    // Criterion IDs refer to the observed list, so a stale request is a revision conflict.
+  if (
+    (Object.keys(criteriaChange).length > 0 || plannedEffortMinutes !== undefined) &&
+    detail.issue.revision !== expectedRevision
+  ) {
+    // Criterion IDs and an estimate written into the stored schedule both refer to the observed Work
+    // Item, so a stale request is a revision conflict.
     throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
   }
   const acceptanceCriteria = readAcceptanceCriteriaChange(

@@ -33,6 +33,7 @@ import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRun
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
 import {
+  resolveRecordedRemainingEffortMinutes,
   resolveWorkItemDraftRevision,
   toWorkItemEffortPatch,
   type WorkItemEffortProgressChange,
@@ -1092,7 +1093,7 @@ function IssueDetailContent({
             {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
             {...(issue.schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: issue.schedule.plannedEffortMinutes })}
             readOnly={isIssueReadOnly}
-            {...(issue.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: issue.remainingEffortMinutes })}
+            remainingEffortMinutes={resolveRecordedRemainingEffortMinutes(issue)}
             teamId={issue.teamId}
             timesheetHref={createTeamTimeTrackingPath(issue.teamId)}
             workItemId={issue.id}

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { createApiTestHarness } from '../test-support/api-test-harness'
-import { listTeamWorkItemEffort } from './work-item-effort'
+import { listTeamWorkItemEffort, withWorkItemPlannedEffort } from './work-item-effort'
 
 const { createBulkRecoveryIssue } = createApiTestHarness()
 
@@ -32,4 +32,11 @@ test('reads archived Work Items only when asked, so time reports keep their esti
     { workItemId: 'archived', plannedEffortMinutes: 120, remainingEffortMinutes: 0 },
   ])
   expect(reads).toEqual([false, true])
+})
+
+test('writes an estimate into a stored schedule and keeps its placement', () => {
+  const calendarPolicy = { timeZone: 'UTC', workingWeekdays: ['monday' as const], holidays: [] }
+  const stored = { mode: 'due-date' as const, dueDate: '2026-09-10', calendarPolicy, plannedEffortMinutes: 120 }
+  expect(withWorkItemPlannedEffort(stored, 480)).toEqual({ ...stored, plannedEffortMinutes: 480 })
+  expect(withWorkItemPlannedEffort(stored, null)).toEqual({ mode: 'due-date', dueDate: '2026-09-10', calendarPolicy })
 })

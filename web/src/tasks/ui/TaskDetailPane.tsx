@@ -44,7 +44,7 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
-import { toWorkItemEffortPatch } from '../../work-items/model/workItemEffort'
+import { resolveRecordedRemainingEffortMinutes, toWorkItemEffortPatch } from '../../work-items/model/workItemEffort'
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -1358,7 +1358,7 @@ export function TaskDetailPane({
             {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
             {...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes })}
             readOnly={isReadOnly}
-            {...(effortItem.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effortItem.remainingEffortMinutes })}
+            remainingEffortMinutes={resolveRecordedRemainingEffortMinutes(effortItem)}
             teamId={task.teamId}
             timesheetHref={createTeamTimeTrackingPath(task.teamId)}
             workItemId={task.id}

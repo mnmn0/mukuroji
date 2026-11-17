@@ -170,7 +170,7 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール |
-| `update_task` | タイトル・説明・優先度・custom field・見積（`plannedEffortMinutes`）・残工数（`remainingEffortMinutes`）・手入力の進捗率（`progressPercent`）をrevision付きで更新（`null` で消す）。見積は読み込んだ schedule に書き込むため、変更時は `expectedRevision` が読み込んだ revision と一致している必要がある。受け入れ条件はIDごとに満たした・満たしていないを付けられる（条件の追加・削除・文言変更は人だけ） |
+| `update_task` | タイトル・説明・優先度・custom field・見積（`plannedEffortMinutes`）・残工数（`remainingEffortMinutes`）・手入力の進捗率（`progressPercent`）をrevision付きで更新（`null` で消す）。見積は Public API の `plannedEffortMinutes` として送り、server が保存済みの schedule に書き込むため、変更時は `expectedRevision` が最新の revision と一致している必要がある。応答を失った再試行は、途中で期限が動いても同じ request として replay される。受け入れ条件はIDごとに満たした・満たしていないを付けられる（条件の追加・削除・文言変更は人だけ） |
 | `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
 | `move_task` | 作業中から同じstartedカテゴリーの「レビュー中」「ブロック中」などへ移動 |
 | `report_progress` | 進捗・問題・テスト結果・PRリンクを、エージェント名付きコメントとして保存。自インスタンスのAgent Runがあれば、`kind`・`verifications`・`artifacts`・`changedFileCount` をRunの構造化reportとして同じtransactionで保存 |

@@ -3342,6 +3342,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'typeChangeResolution',
     'acceptanceCriteria',
     'acceptanceCriteriaMarks',
+    'plannedEffortMinutes',
     'remainingEffortMinutes',
     'progressPercent',
   ], 'Work Item patch')
@@ -3374,6 +3375,16 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   if ('priority' in body) result.priority = readPriority(body.priority)
   if ('acceptanceCriteria' in body) result.acceptanceCriteria = readPublicAcceptanceCriteria(body.acceptanceCriteria)
   if ('acceptanceCriteriaMarks' in body) result.acceptanceCriteriaMarks = readPublicAcceptanceCriteriaMarks(body.acceptanceCriteriaMarks)
+  if ('plannedEffortMinutes' in body) {
+    if ('schedule' in body) {
+      throw new PublicApiServiceError(
+        400, 'validation_failed', 'Send plannedEffortMinutes or schedule.plannedEffortMinutes, not both.',
+      )
+    }
+    result.plannedEffortMinutes = body.plannedEffortMinutes === null
+      ? null
+      : readRequiredNonNegativeInteger(body.plannedEffortMinutes, 'plannedEffortMinutes')
+  }
   if ('remainingEffortMinutes' in body) {
     result.remainingEffortMinutes = body.remainingEffortMinutes === null
       ? null

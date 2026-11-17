@@ -4,6 +4,7 @@ import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { isCanonicalWorkItem } from '../src/work-items/api/contractValidation'
 import {
   isWorkItemEffortColumnField,
+  resolveRecordedRemainingEffortMinutes,
   resolveWorkItemDraftRevision,
   resolveWorkItemEffortColumnValue,
   toWorkItemEffortPatch,
@@ -30,6 +31,14 @@ const estimated: CanonicalWorkItem = {
 }
 
 describe('Work Item effort and progress', () => {
+  test('reads recorded remaining effort as zero for finished Work Items in the time panel', () => {
+    expect(resolveRecordedRemainingEffortMinutes(estimated)).toBe(120)
+    expect(resolveRecordedRemainingEffortMinutes({ ...estimated, statusCategory: 'completed' })).toBe(0)
+    expect(resolveRecordedRemainingEffortMinutes({ ...estimated, statusCategory: 'canceled' })).toBe(0)
+    // Without a recorded value an open Work Item stays unknown, so the panel falls back to the estimate.
+    expect(resolveRecordedRemainingEffortMinutes({ statusCategory: 'started' })).toBeUndefined()
+  })
+
   test('keeps unsaved Project and Work Item Type choices after an effort-only save', () => {
     /** Picks the fields the other detail forms edit. */
     const draftFields = (item: CanonicalWorkItem) => [item.title, item.assignedProjectId, item.workItemTypeId]

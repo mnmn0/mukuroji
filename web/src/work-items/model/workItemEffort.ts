@@ -78,6 +78,23 @@ export function resolveWorkItemEffortColumnValue(
   }
 }
 
+/**
+ * Returns the remaining effort a person recorded, read as zero once the Work Item is completed or
+ * canceled, as everywhere else that shows remaining effort.
+ *
+ * Unlike {@link deriveWorkItemRemainingEffortMinutes}, an open Work Item without a recorded value
+ * stays undefined, so a view may fall back to the estimate minus actual time.
+ *
+ * @param item - Work Item status category and recorded remaining effort.
+ * @returns The recorded minutes, 0 for a finished Work Item, or undefined when not recorded.
+ */
+export function resolveRecordedRemainingEffortMinutes(
+  item: Pick<WorkItemEffortFields, 'statusCategory' | 'remainingEffortMinutes'>,
+): number | undefined {
+  if (item.statusCategory === 'completed' || item.statusCategory === 'canceled') return 0
+  return item.remainingEffortMinutes
+}
+
 /** The Work Item a detail form's drafts started from, and the revision those drafts are keyed by. */
 export type WorkItemDraftBase<T> = {
   /** Work Item the forms last rendered. */
