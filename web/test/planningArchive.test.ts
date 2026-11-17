@@ -225,9 +225,10 @@ describe('archived Planning entities', () => {
     expect(isUncertainPlanningRestoreFailure(
       new PlanningApiError(409, 'Changed.', 'PlanningAuthorizationChanged'),
     )).toBe(true)
+    // The final read after the commit can raise a revision conflict.
     expect(isUncertainPlanningRestoreFailure(
       new PlanningApiError(409, 'Conflict.', 'PlanningRevisionConflict'),
-    )).toBe(false)
+    )).toBe(true)
     expect(isUncertainPlanningRestoreFailure(
       new PlanningApiError(409, 'Inactive.', 'PlanningOwnerInactive'),
     )).toBe(false)
@@ -249,8 +250,13 @@ describe('archived Planning entities', () => {
     expect(planningRestoreMayHaveCommitted(conflict, fixtureEntity.id, stillArchived)).toBe(false)
     expect(planningRestoreMayHaveCommitted(new PlanningApiError(503, 'Down.'), 'goal-compacted', active))
       .toBe(false)
-    // Without a reloaded snapshot the error decides.
-    expect(planningRestoreMayHaveCommitted(conflict, fixtureEntity.id, undefined)).toBe(false)
+    // Without a reloaded snapshot the error decides, so a conflict keeps a way to continue.
+    expect(planningRestoreMayHaveCommitted(conflict, fixtureEntity.id, undefined)).toBe(true)
+    expect(planningRestoreMayHaveCommitted(
+      new PlanningApiError(409, 'Inactive.', 'PlanningOwnerInactive'),
+      fixtureEntity.id,
+      undefined,
+    )).toBe(false)
     expect(planningRestoreMayHaveCommitted(new PlanningApiError(503, 'Down.'), fixtureEntity.id, undefined))
       .toBe(true)
   })

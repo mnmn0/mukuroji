@@ -82,16 +82,21 @@ function getPlanningRestoreStorage(): PlanningRestoreResultStorage | undefined {
 /**
  * Returns whether a failed restore request may still have committed on the server.
  *
- * A Planning API error below 500 is a definite rejection, except `PlanningAuthorizationChanged`:
- * the server reports it when a grant changes after the entity is already active again. A server
- * error, an unreadable response or a network failure can also follow a committed restore.
+ * A Planning API error below 500 is a definite rejection, except two 409s that can follow the
+ * commit: `PlanningAuthorizationChanged`, reported when a grant changes after the entity is
+ * already active again, and `PlanningRevisionConflict`, which the final read after the commit can
+ * raise. A server error, an unreadable response or a network failure can also follow a committed
+ * restore. Used only when no reloaded snapshot can settle it, so a conflict that rejected a stale
+ * restore keeps a harmless retry.
  *
  * @param error - Rejection of the restore request.
  * @returns True when the restore may have committed.
  */
 export function isUncertainPlanningRestoreFailure(error: unknown) {
   if (!(error instanceof PlanningApiError)) return true
-  return error.status >= 500 || error.code === 'PlanningAuthorizationChanged'
+  return error.status >= 500 ||
+    error.code === 'PlanningAuthorizationChanged' ||
+    error.code === 'PlanningRevisionConflict'
 }
 
 /**
