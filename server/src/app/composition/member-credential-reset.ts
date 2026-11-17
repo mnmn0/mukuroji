@@ -40,6 +40,7 @@ export function createMemberCredentialResetPorts(
   const {
     recordMemberCredentialAction,
     readMemberCredentialActionProgress,
+    markMemberCredentialActionApplying,
     completeMemberCredentialAction,
   } = workspaceAccess
   const changeCredential = action === 'password-reset-requested'
@@ -66,6 +67,9 @@ export function createMemberCredentialResetPorts(
       return await readMemberCredentialActionProgress?.apply(workspaceAccess, args) ?? 'none'
     },
     recordAction: (...args) => recordMemberCredentialAction.apply(workspaceAccess, args),
+    async markActionApplying(...args) {
+      await markMemberCredentialActionApplying?.apply(workspaceAccess, args)
+    },
     async completeAction(...args) {
       await completeMemberCredentialAction?.apply(workspaceAccess, args)
     },

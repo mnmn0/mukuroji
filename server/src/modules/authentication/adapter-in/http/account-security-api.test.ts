@@ -16,6 +16,7 @@ const {
   getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
 
 afterEach(() => {
@@ -593,6 +594,72 @@ test('changes the password after checking the current one', async () => {
   expect((await wrong.json()).code).toBe('CurrentPasswordIncorrect')
   expect(changed.status).toBe(204)
   expect(changes).toHaveLength(2)
+})
+
+test('refuses a password change once the email domain enforces SSO', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const changes: string[] = []
+    overrideCognito({
+      async changePassword(accessToken) {
+        changes.push(accessToken)
+      },
+    })
+    const timestamp = new Date().toISOString()
+    const identity = new InMemoryEnterpriseIdentityClient()
+    // The password sign-in predates the domain's SSO enforcement, so its token is not an SSO one.
+    identity.discoverSso = async (email) => email.endsWith('@example.com')
+      ? {
+          provider: {
+            workspaceId,
+            providerId: 'idp-enforced',
+            kind: 'oidc',
+            displayName: 'Enterprise SSO',
+            cognitoProviderName: 'EnterpriseOidc',
+            status: 'active',
+            revision: 1,
+            issuer: 'https://idp.example.com',
+            clientId: 'enterprise-client',
+            authorizationEndpoint: 'https://idp.example.com/authorize',
+            tokenEndpoint: 'https://idp.example.com/token',
+            jwksUri: 'https://idp.example.com/jwks',
+            scopes: ['openid', 'email'],
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            lastTestedAt: timestamp,
+          },
+          domain: {
+            workspaceId,
+            domainId: 'example-com',
+            domain: 'example.com',
+            status: 'verified',
+            revision: 1,
+            verificationRecordName: '_mukuroji-challenge.example.com',
+            verifiedAt: timestamp,
+            enforceSso: true,
+            identityProviderId: 'idp-enforced',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        }
+      : undefined
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    const response = await sendJson('/api/auth/password/change', {
+      currentPassword: 'Current123!',
+      newPassword: 'NewPassword123!',
+    }, 'test-token')
+
+    expect(response.status).toBe(409)
+    expect((await response.json()).code).toBe('PasswordManagedBySso')
+    expect(changes).toEqual([])
+  })
 })
 
 test('lists the MFA state of active members for administrators', async () => {

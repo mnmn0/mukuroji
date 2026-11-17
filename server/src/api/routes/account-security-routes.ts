@@ -239,6 +239,17 @@ async function ssoRequiredResponse(c: Context, email: string) {
 }
 
 /**
+ * Tells whether the domain of an email address now enforces enterprise SSO.
+ *
+ * @param email - Email address of the signed-in user, if Cognito returned one.
+ * @returns True when an identity provider must handle the sign-in of that address.
+ */
+async function isSsoEnforcedEmail(email: string | undefined) {
+  if (!email || !isEnterpriseSsoConfigured()) return false
+  return Boolean(await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email))
+}
+
+/**
  * Maps a failed account security request to an HTTP response.
  *
  * @param c - Hono request context.
@@ -413,8 +424,8 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
    * Changes the signed-in user's password after checking the current one.
    *
    * @remarks
-   * A wrong current password answers 400 `CurrentPasswordIncorrect`. An SSO session answers
-   * 409 `PasswordManagedBySso`. Success answers 204.
+   * A wrong current password answers 400 `CurrentPasswordIncorrect`. An SSO session, or a user
+   * whose email domain now enforces SSO, answers 409 `PasswordManagedBySso`. Success answers 204.
    */
   routeApp.post('/api/auth/password/change', async (c) => {
     c.header('Cache-Control', 'no-store')
@@ -431,9 +442,12 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const caller = await readCognitoCaller(c)
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
+      // A password sign-in from before the domain started enforcing SSO still cannot change it.
+      const ssoManaged = isSsoSessionAccessToken(caller.accessToken) ||
+        await isSsoEnforcedEmail(readUserAttribute(caller.user, 'email')?.trim().toLowerCase())
       await changeAccountPassword(
         createPasswordChangePorts(authenticationDependencies.cognito),
-        { accessToken: caller.accessToken, ssoSession: isSsoSessionAccessToken(caller.accessToken) },
+        { accessToken: caller.accessToken, ssoSession: ssoManaged },
         currentPassword,
         newPassword,
       )

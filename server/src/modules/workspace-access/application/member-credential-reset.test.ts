@@ -39,6 +39,9 @@ function createPorts(
       calls.push(`record:${actor}:${memberKey}:${action}`)
       return { completed: false }
     },
+    async markActionApplying(_workspaceId, memberKey, action) {
+      calls.push(`applying:${memberKey}:${action}`)
+    },
     async completeAction(_workspaceId, memberKey, action) {
       calls.push(`complete:${memberKey}:${action}`)
     },
@@ -73,6 +76,7 @@ test('records a password reset and signs the member out before and after resetti
   expect(calls).toEqual([
     'record:demo@example.com:sato@example.com:password-reset-requested',
     'sign-out:sato@example.com',
+    'applying:sato@example.com:password-reset-requested',
     'reset:sato@example.com',
     'sign-out:sato@example.com',
     'complete:sato@example.com:password-reset-requested',
@@ -134,6 +138,7 @@ test('records an authenticator reset before removing the app', async () => {
 
   expect(calls).toEqual([
     'record:demo@example.com:sato@example.com:mfa-reset',
+    'applying:sato@example.com:mfa-reset',
     'disable:sato@example.com',
     'complete:sato@example.com:mfa-reset',
   ])
@@ -160,6 +165,7 @@ test('resumes a recorded reset whose earlier attempt stopped before finishing', 
 
   expect(calls).toEqual([
     'record:demo@example.com:sato@example.com:mfa-reset',
+    'applying:sato@example.com:mfa-reset',
     'disable:sato@example.com',
     'complete:sato@example.com:mfa-reset',
   ])
@@ -231,22 +237,22 @@ test('marks a finished reset completed after a transient failure', async () => {
   expect(calls.filter((call) => call.startsWith('failure:'))).toEqual([])
 })
 
-test('repeats an unmarked reset when its key is replayed inside the resume window', async () => {
-  // Accepted behaviour: when the completion mark failed, the store still reports the action as
-  // recorded, and a replay that the store lets resume changes the account again, even if the
-  // member set up a new app in between. The store bounds this to its resume window.
-  const { ports, calls } = createPorts(
-    { readActionProgress: async () => 'recorded' },
-    { invitationPending: false, mfaEnrolled: true },
-  )
+test('changes nothing when marking the change as started fails', async () => {
+  const { ports, calls } = createPorts({
+    async markActionApplying() {
+      throw Object.assign(new Error('Another request took the action over.'), {
+        status: 409,
+        code: 'WorkspaceCredentialActionInProgress',
+      })
+    },
+  })
 
-  await resetMemberCredential(ports, { ...input, action: 'mfa-reset' })
+  await expect(resetMemberCredential(ports, { ...input, action: 'mfa-reset' }))
+    .rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionInProgress' })
 
-  expect(calls).toEqual([
-    'record:demo@example.com:sato@example.com:mfa-reset',
-    'disable:sato@example.com',
-    'complete:sato@example.com:mfa-reset',
-  ])
+  // Once the change is marked as started, the store refuses to resume it, so a removal followed
+  // by a failed completion mark never removes an app the member registered afterwards.
+  expect(calls).toEqual(['record:demo@example.com:sato@example.com:mfa-reset'])
 })
 
 test('leaves single sign-on members and missing members untouched', async () => {

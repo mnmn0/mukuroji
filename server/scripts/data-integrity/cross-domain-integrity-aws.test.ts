@@ -1329,6 +1329,31 @@ describe('cross-domain integrity AWS composition bridge', () => {
     }
   })
 
+  test('accepts administrator credential action progress rows in Workspace Access', async () => {
+    const rows = createHealthyNativeRows()
+    const progress = {
+      workspaceId: WORKSPACE_ID,
+      recordKey: 'CREDENTIAL_ACTION#event-1',
+      entryType: 'workspace-member-credential-action',
+      memberKey: MEMBER_KEY,
+      actorKey: 'actor-pseudonym',
+      action: 'mfa-reset',
+      status: 'completed',
+      recordedAt: '2026-08-01T00:01:00.000Z',
+    }
+    rows['workspace-access'] = [...rows['workspace-access'], progress]
+
+    await expect(runBridge(new FixtureAwsReader(createPagesFromNativeRows(rows))))
+      .resolves.toMatchObject({ status: 'pass' })
+
+    rows['workspace-access'] = [
+      ...rows['workspace-access'].filter((row) => row !== progress),
+      { ...progress, status: 'unknown' },
+    ]
+    await expect(runBridge(new FixtureAwsReader(createPagesFromNativeRows(rows))))
+      .rejects.toMatchObject({ code: 'NORMALIZATION_FAILED' })
+  })
+
   test('rejects a Planning row misplaced in Workspace Access', async () => {
     const rows = createHealthyNativeRows()
     rows['workspace-access'] = [
