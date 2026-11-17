@@ -50,6 +50,11 @@ import {
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
 import {
+  createProjectCharterDraftStore,
+  createProjectCharterPersonCandidates,
+} from '../../projects/model/projectCharterView'
+import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
+import {
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -419,6 +424,18 @@ export function TaskPage() {
         member.id === currentUserProjectKey && member.role === 'manager',
       )
     )
+  const isWorkspaceAdministrator = workspaceAccess?.currentMember.status === 'active' && (
+    workspaceAccess.currentMember.role === 'owner' ||
+    workspaceAccess.currentMember.role === 'admin'
+  )
+  const canEditProjectCharter = canMutateContent &&
+    (canManageProjectMembers || isWorkspaceAdministrator)
+  const projectCharterCandidates = useMemo(
+    () => createProjectCharterPersonCandidates(workspaceAccess?.members ?? emptyWorkspaceMembers),
+    [workspaceAccess?.members],
+  )
+  // Unsaved charter edits survive switching away from the settings tab and back.
+  const [projectCharterDraftStore] = useState(createProjectCharterDraftStore)
   const {
     data: projectUsersFirstPage,
     error: projectUsersError,
@@ -1852,6 +1869,27 @@ export function TaskPage() {
       assigneeOptions={activeProjectMembers}
       canAccessTriage={canAccessTriage}
       canManageProjectMembers={canManageProjectMembers}
+      projectCharterPanel={(
+        <ProjectCharterSection
+          accessToken={accessToken}
+          canDecideProposal={canMutateContent && isWorkspaceAdministrator}
+          canEdit={canEditProjectCharter}
+          canMutate={canMutateContent}
+          draftStore={projectCharterDraftStore}
+          enabled={Boolean(user && !currentUserError)}
+          members={projectCharterCandidates}
+          projectId={projectId}
+          t={t}
+          teamId={interactionTeamId}
+          onSessionError={(error, requestAccessToken) => {
+            // A late failure of a request sent with a token that was replaced since, such as one
+            // from before signing in again, must not clear the current session.
+            if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+              redirectEnterpriseSessionError(error)
+            }
+          }}
+        />
+      )}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
       collaborationRoute={

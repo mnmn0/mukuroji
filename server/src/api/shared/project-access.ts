@@ -283,6 +283,52 @@ export function createDocumentEnterpriseScopeBoundary(
   }
 }
 
+/**
+ * Evaluates an Enterprise permission at the Workspace resource, independently of the route.
+ *
+ * Route-level authorization may have been evaluated at a narrower resource such as a Team or
+ * Project. Decisions that require Workspace-wide authority use this check instead.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param permission - Enterprise permission to evaluate.
+ * @returns Whether the principal holds the permission Workspace-wide.
+ */
+export function hasEnterprisePermissionAtWorkspace(
+  principal: WorkspacePrincipal,
+  permission: EnterprisePermissionId,
+): boolean {
+  return hasEnterprisePermissionAtResource(principal, permission, {
+    workspaceId: principal.directoryId,
+    kind: 'workspace',
+  })
+}
+
+/**
+ * Evaluates an Enterprise permission at one resource, independently of the current route's
+ * authorization, so a read route can describe what a later write route would allow.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param permission - Enterprise permission to evaluate.
+ * @param resource - Workspace, Team, or Project resource to evaluate at.
+ * @returns Whether the principal holds the permission at that resource.
+ */
+export function hasEnterprisePermissionAtResource(
+  principal: WorkspacePrincipal,
+  permission: EnterprisePermissionId,
+  resource: EnterpriseAuthorizationResource,
+): boolean {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) return hasEnterpriseWorkspacePermission(principal, permission)
+  return evaluateEnterpriseAccess({
+    permission,
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource,
+  }).allowed
+}
+
 /** Checks one Customer capability against the same Enterprise resource as the route. */
 export function hasEnterpriseCustomerPermission(
   principal: WorkspacePrincipal,
@@ -732,6 +778,25 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (error.code === 'ProjectQuickAccessConflict') {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
+  if (
+    error.code === 'InvalidProjectCharter' ||
+    error.code === 'InvalidProjectLifecycleTransition'
+  ) {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (
+    error.code === 'ProjectCharterRevisionConflict' ||
+    error.code === 'ProjectCodeAlreadyUsed' ||
+    error.code === 'ProjectLifecycleTransitionNotAllowed' ||
+    error.code === 'ProjectArchived' ||
+    error.code === 'ProjectClosedForNewWorkItems' ||
+    error.code === 'ProjectCharterPersonInactive' ||
+    error.code === 'ProjectCharterAuthorizationChanged'
+  ) {
     return c.json({ code: error.code, message: error.message }, 409)
   }
 

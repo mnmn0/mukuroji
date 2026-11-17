@@ -28,6 +28,19 @@ export type UseProjectDirectoryOptions = {
 const defaultDedupingInterval = 10_000
 
 /**
+ * Tells whether an SWR key belongs to the Project directory query in any locale.
+ *
+ * Mutations that change directory content revalidate every matching key with it, so the key
+ * shape stays owned by this query.
+ *
+ * @param key - SWR cache key.
+ * @returns Whether the key is a Project directory key.
+ */
+export function isProjectDirectoryKey(key: unknown): boolean {
+  return Array.isArray(key) && key[0] === 'project-directory'
+}
+
+/**
  * 認証状態に応じて Team / Project directory を取得します。
  *
  * SWR key、条件付き取得、retry方針をこのquery境界で所有します。

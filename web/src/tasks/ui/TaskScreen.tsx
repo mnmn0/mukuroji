@@ -419,6 +419,8 @@ export type TaskScreenProps = {
   isSystemAdmin?: boolean
   /** Whether the current user may manage Project member roles. */
   canManageProjectMembers?: boolean
+  /** Project charter section rendered on the permissions tab. */
+  projectCharterPanel?: ReactNode
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
   canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
@@ -598,6 +600,7 @@ export function TaskScreen({
   assigneeOptions = emptyProjectMembers,
   canAccessTriage = false,
   canManageProjectMembers = false,
+  projectCharterPanel,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
   collaboration,
@@ -3596,6 +3599,7 @@ export function TaskScreen({
                 bulkTaskActionRequest={bulkTaskActionRequest}
                 bulkWorkspaceId={workspaceId}
                 canManageProjectMembers={canManageProjectMembers}
+                projectCharterPanel={projectCharterPanel}
                 canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
                 canMutateTask={canMutateTask}
                 configuration={configuration}

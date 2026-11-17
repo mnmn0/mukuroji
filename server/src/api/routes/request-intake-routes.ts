@@ -77,6 +77,7 @@ import {
   getTeamIssuesTableName,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
   filterRequestConversionCustomFieldValues,
@@ -1055,6 +1056,11 @@ async function acceptTriageEntryAsNewWorkItem(
     idempotentIssueId: issueId,
     idempotentRequestDigest: request.idempotency.fingerprint,
   }, teamContext.team)
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    request.workspaceId,
+    teamContext.team,
+    assignedProjectId,
+  )
   const customFieldValues = mergeTriageCustomFieldValues(
     'customFieldValues' in normalized ? normalized.customFieldValues : undefined,
     request.action.customFieldValues,
@@ -1089,6 +1095,7 @@ async function acceptTriageEntryAsNewWorkItem(
       ...acceptanceReferenceConditionChecks,
       ...(request.authorizationConditionChecks ?? []),
     ],
+    ...newWorkItemProjectFence,
   }
   const now = new Date().toISOString()
   const canonicalWorkItem = {

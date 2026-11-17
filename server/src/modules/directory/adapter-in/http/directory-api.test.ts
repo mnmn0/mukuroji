@@ -224,6 +224,7 @@ test('creates a project under an authenticated team directory', async () => {
     project: {
       id: 'new-project',
       name: '新規プロジェクト',
+      lifecycleState: 'active',
       tone: 'green',
     },
   })

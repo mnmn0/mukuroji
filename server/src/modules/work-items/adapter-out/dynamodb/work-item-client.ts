@@ -913,6 +913,11 @@ export type CreateTeamIssueRequestBody = {
   authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Application layer が認可時に読み込んだ source-of-truth generations です。 */
   authorizationSnapshot?: WorkItemAuthorizationSnapshot
+  /**
+   * Proves at commit time that the assigned Project still accepts new Work Items, so a Project
+   * closed after the directory read cannot receive one.
+   */
+  newWorkItemProjectConditionCheck?: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
   /** Import worker または public API の冪等作成で固定する Work Item ID です。 */
   idempotentIssueId?: string
   /** 既存 row と同一 request か検証する SHA-256 digest です。 */
@@ -2063,9 +2068,19 @@ export class DynamoDbTeamIssuesClient {
       ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
       : new Date().toISOString()
     const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const newWorkItemProjectConditionCheck = assignedProjectId
+      ? input.newWorkItemProjectConditionCheck
+      : undefined
+    // The Project fence also proves the Project is unarchived, so it replaces a caller's
+    // active-reference check on the same row; DynamoDB rejects two checks on one item.
+    const newWorkItemProjectRowKey = newWorkItemProjectConditionCheck
+      ? readConditionCheckRowKey({ kind: 'workspace-member', transactWriteItem: newWorkItemProjectConditionCheck })
+      : undefined
     const authorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    ).filter((entry) =>
+      newWorkItemProjectRowKey === undefined || readConditionCheckRowKey(entry) !== newWorkItemProjectRowKey
     )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
@@ -2227,6 +2242,7 @@ export class DynamoDbTeamIssuesClient {
             ...(auditPut ? [auditPut] : []),
             ...configurationConditionChecks,
             ...authorizationConditionChecks,
+            ...(newWorkItemProjectConditionCheck ? [newWorkItemProjectConditionCheck] : []),
             ...requestConversionItems,
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
             ...(triageAcceptance?.transactItems ?? []),
@@ -2258,6 +2274,20 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      if (
+        newWorkItemProjectConditionCheck &&
+        !isTransactionConditionalFailureAt(error, 0) &&
+        isTransactionConditionalFailureAt(
+          error,
+          authorizationConditionStartIndex + authorizationConditionEntries.length,
+        )
+      ) {
+        throw new ProjectDataError(
+          409,
+          'ProjectClosedForNewWorkItems',
+          'The assigned Project no longer accepts new Work Items.',
+        )
+      }
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
