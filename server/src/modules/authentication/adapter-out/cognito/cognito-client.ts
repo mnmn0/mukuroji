@@ -780,7 +780,8 @@ export class AwsCognitoClient implements CognitoClient {
    * Cognito's NEW_PASSWORD_REQUIRED challenge follows a sign-in with the temporary password it
    * mailed to that address, so the user has proven control of it. Password reset needs a verified
    * email, so without this an invited user could never reset a forgotten password. A failure is
-   * logged rather than failing the sign-in the user already completed.
+   * logged rather than failing the sign-in the user already completed, and the next password
+   * reset request repairs it ({@link repairInvitedEmailVerification}).
    *
    * @param email - Email address and username of the user.
    */
@@ -885,14 +886,60 @@ export class AwsCognitoClient implements CognitoClient {
    */
   async requestPasswordReset(email: string): Promise<void> {
     const { clientId } = this.readRequiredConfiguration()
+    const sendCode = () => this.client.send(new ForgotPasswordCommand({
+      ClientId: clientId,
+      Username: normalizeCognitoUserId(email),
+    }))
 
     try {
-      await this.client.send(new ForgotPasswordCommand({
-        ClientId: clientId,
-        Username: normalizeCognitoUserId(email),
-      }))
+      await sendCode()
     } catch (error) {
-      throw toCognitoSdkError(error)
+      const failure = toCognitoSdkError(error)
+      // Cognito refuses an unverified email. An invited user whose verification was not saved
+      // after the first sign-in gets it repaired here, then the code is sent once more.
+      if (failure.code !== 'InvalidParameterException' || !await this.repairInvitedEmailVerification(email)) {
+        throw failure
+      }
+      try {
+        await sendCode()
+      } catch (retryError) {
+        throw toCognitoSdkError(retryError)
+      }
+    }
+  }
+
+  /**
+   * Marks the email of an invited user verified when saving it after the first sign-in failed.
+   *
+   * Self sign-up is off, so every password user was invited with a temporary password sent to
+   * the address. A confirmed user replaced that password and so proved control of the address,
+   * which is what {@link markInvitedEmailVerified} records.
+   *
+   * @param email - Email address and username of the user.
+   * @returns Whether the email was unverified and is now marked verified.
+   */
+  private async repairInvitedEmailVerification(email: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const username = normalizeCognitoUserId(email)
+
+    try {
+      const user = await this.client.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: username,
+      }))
+      const verified = user.UserAttributes?.find((attribute) => attribute.Name === 'email_verified')?.Value
+      if (user.UserStatus !== 'CONFIRMED' || verified === 'true') {
+        return false
+      }
+      await this.client.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: username,
+        UserAttributes: [{ Name: 'email_verified', Value: 'true' }],
+      }))
+      return true
+    } catch (error) {
+      console.error('Failed to repair the invited user email verification:', toCognitoSdkError(error).code)
+      return false
     }
   }
 

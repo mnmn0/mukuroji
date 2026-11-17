@@ -1,15 +1,6 @@
 import type { MfaSetupChallenge } from '@mukuroji/contracts'
-import {
-  FlociCognitoClient,
-  type AuthTokenSet,
-  type GetUserResponse,
-  type InitiateAuthResponse,
-} from '../../modules/authentication'
-import {
-  authenticationDependencies,
-  requireAppDependencies,
-  workspaceDependencies,
-} from './app-dependencies'
+import type { GetUserResponse, InitiateAuthResponse } from '../../modules/authentication'
+import { workspaceDependencies } from './app-dependencies'
 import { toProjectPrincipal } from './authentication-session'
 import { isEnterpriseExternalMember, type CognitoAccessTokenClaims } from './enterprise-access'
 import { getEnv } from './runtime-config'
@@ -123,37 +114,4 @@ export function readCognitoMfaSetupChallenge(
 ): MfaSetupChallenge | undefined {
   if (response.ChallengeName !== 'MFA_SETUP' || !response.Session) return undefined
   return { challenge: 'MFA_SETUP', email, session: response.Session }
-}
-
-/**
- * Decides whether a password-only sign-in must register an authenticator app first.
- *
- * The user pool keeps MFA optional, so Cognito completes a sign-in without MFA when the user
- * has none. If the Workspace policy requires MFA, that session would be rejected by every
- * Workspace API. Instead of the tokens, the sign-in returns an MFA_SETUP challenge carrying the
- * access token, which the authenticator endpoints accept. The refresh token is not returned, so
- * the session cannot be kept; the user signs in again with the new code.
- *
- * @param tokens - Tokens of a completed password sign-in.
- * @param email - Normalized email address of the user.
- * @returns The challenge when the user must register first; otherwise the Cognito user it read,
- *   so that the sign-in response does not read it again.
- */
-export async function resolvePolicyMfaSetupChallenge(
-  tokens: AuthTokenSet,
-  email: string,
-): Promise<{ challenge: MfaSetupChallenge } | { user?: GetUserResponse }> {
-  const accessToken = tokens.AccessToken
-  if (!accessToken) return {}
-  if (
-    requireAppDependencies().authentication.cognito instanceof FlociCognitoClient &&
-    accessToken.split('.').length !== 3
-  ) {
-    return {}
-  }
-  const user = await authenticationDependencies.cognito.getUser(accessToken)
-  if (hasEnabledMfa(user) || !(await readMfaRequirement(user, accessToken)).mfaRequired) {
-    return { user }
-  }
-  return { challenge: { challenge: 'MFA_SETUP', email, setupAccessToken: accessToken } }
 }

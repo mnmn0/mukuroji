@@ -36,6 +36,7 @@ import {
 } from '../work-items'
 import {
   isProjectQuickAccessItems,
+  normalizeProjectCode,
 } from '../directory'
 import {
   decodeAttributeMap,
@@ -1174,6 +1175,7 @@ function validateProjectDirectoryAuxiliaryRow(
     const code = requireText(row.code)
     requireCanonicalTimestamp(row.createdAt)
     if (
+      normalizeProjectCode(code) !== code ||
       directoryId !== `PROJECT_CODE#${encodeURIComponent(workspaceId)}` ||
       entryKey !== `CODE#${code}`
     ) normalizationFailure()
@@ -1256,7 +1258,25 @@ function normalizeWorkspaceAccessRow(row: Record<string, unknown>): CrossDomainI
     if (updatedAt < createdAt) return normalizationFailure()
     return []
   }
+  if (row.entryType === 'workspace-member-credential-action') {
+    if (
+      !recordKey.startsWith('CREDENTIAL_ACTION#') || !isText(row.memberKey) || !isText(row.actorKey) ||
+      !isWorkspaceMemberCredentialAction(row.action) || !isWorkspaceMemberCredentialActionStatus(row.status)
+    ) return normalizationFailure()
+    requireCanonicalTimestamp(row.recordedAt)
+    return []
+  }
   return normalizationFailure()
+}
+
+/** Tells whether a value names an administrator credential action. */
+function isWorkspaceMemberCredentialAction(value: unknown) {
+  return value === 'password-reset-requested' || value === 'mfa-reset'
+}
+
+/** Tells whether a value is a stage of an administrator credential action. */
+function isWorkspaceMemberCredentialActionStatus(value: unknown) {
+  return value === 'recorded' || value === 'applying' || value === 'completed'
 }
 
 /**

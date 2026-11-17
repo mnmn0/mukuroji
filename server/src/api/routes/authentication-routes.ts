@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto'
 import type { Hono } from 'hono'
 import { getConnInfo } from 'hono/aws-lambda'
 import type { Context } from 'hono'
+import type { MfaSetupChallenge } from '@mukuroji/contracts'
 import {
   CognitoServiceError,
+  decidePolicyMfaSetup,
   readCognitoMfaChallengeName,
+  type AuthTokenSet,
   type InitiateAuthResponse,
 } from '../../modules/authentication'
+import { createPolicyMfaSetupPorts } from '../../app/composition/policy-mfa-setup'
 import { ProjectDataError } from '../../modules/directory'
 import { type MutationAuditContext } from '../../modules/audit/audit'
 import {
@@ -17,10 +21,7 @@ import {
   EnterpriseIdentityError,
   EnterpriseSessionActivityError,
 } from '../../modules/enterprise-identity'
-import {
-  readCognitoMfaSetupChallenge,
-  resolvePolicyMfaSetupChallenge,
-} from '../shared/account-security'
+import { readCognitoMfaSetupChallenge } from '../shared/account-security'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createAuthenticationResponse } from '../shared/authentication-session'
@@ -175,6 +176,37 @@ const retryableCognitoRefreshErrors = new Set([
   'LimitExceededException',
   'InternalErrorException',
 ])
+
+/**
+ * Decides whether a completed password sign-in must register an authenticator app first.
+ *
+ * @param tokens - Tokens of the completed password sign-in.
+ * @returns The decision of the policy-driven MFA setup use case.
+ */
+async function decidePolicyMfaSetupForSignIn(tokens: AuthTokenSet) {
+  return await decidePolicyMfaSetup(
+    createPolicyMfaSetupPorts(authenticationDependencies.cognito),
+    tokens.AccessToken,
+  )
+}
+
+/**
+ * Converts a required policy MFA setup into the sign-in's MFA_SETUP challenge response.
+ *
+ * The response carries the access token, which the authenticator endpoints accept, instead of
+ * the tokens. The refresh token is not returned, so the session cannot be kept; the user signs
+ * in again with the new code.
+ *
+ * @param decision - Decision that requires setup.
+ * @param email - Normalized email address of the user.
+ * @returns The challenge response.
+ */
+function toPolicyMfaSetupChallenge(
+  decision: { setupAccessToken: string },
+  email: string,
+): MfaSetupChallenge {
+  return { challenge: 'MFA_SETUP', email, setupAccessToken: decision.setupAccessToken }
+}
 
 function toSupportedMfaChallenge(response: InitiateAuthResponse, email: string) {
   const challenge = readCognitoMfaChallengeName(response.ChallengeName)
@@ -383,8 +415,8 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         )
       }
 
-      const policyMfaSetup = await resolvePolicyMfaSetupChallenge(tokens, email)
-      if ('challenge' in policyMfaSetup) return c.json(policyMfaSetup.challenge)
+      const policyMfaSetup = await decidePolicyMfaSetupForSignIn(tokens)
+      if (policyMfaSetup.setupRequired) return c.json(toPolicyMfaSetupChallenge(policyMfaSetup, email))
 
       return c.json(await createAuthenticationResponse(
         tokens,
@@ -471,8 +503,8 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
           )
         }
 
-        const policyMfaSetup = await resolvePolicyMfaSetupChallenge(tokens, email)
-        if ('challenge' in policyMfaSetup) return c.json(policyMfaSetup.challenge)
+        const policyMfaSetup = await decidePolicyMfaSetupForSignIn(tokens)
+        if (policyMfaSetup.setupRequired) return c.json(toPolicyMfaSetupChallenge(policyMfaSetup, email))
 
         return c.json(await createAuthenticationResponse(
           tokens,
