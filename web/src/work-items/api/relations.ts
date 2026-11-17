@@ -75,14 +75,16 @@ export function deleteWorkItemRelation(
 }
 
 /**
- * Work Item の親を 1 回の原子的な置換で設定・付け替え・解除します。
+ * Sets, replaces, or removes a Work Item's parent in one atomic replacement.
  *
- * @param teamId - relation を所有する Team ID です。
- * @param workItemId - 親を変える子 Work Item ID です。
- * @param accessToken - Authorization header に使う access token です。
- * @param input - 新しい親 Work Item ID（null は解除）と graph revision です。
- * @param mutationContext - retry 間で共有する mutation request context です。
- * @returns 変更前後の親 Work Item ID と更新後 graph revision です。
+ * @param teamId - Team that owns the relation.
+ * @param workItemId - Child Work Item whose parent changes.
+ * @param accessToken - Access token sent in the Authorization header.
+ * @param input - Next parent Work Item ID (null removes the parent) and the observed graph revision.
+ * @param mutationContext - Mutation request context shared across retries.
+ * @returns The previous and next parent Work Item IDs and the resulting graph revision.
+ * @throws WorkItemConfigurationApiError with code `InvalidWorkItemParentResponse` when a successful
+ * response does not match `WorkItemParentMutationResponse`.
  */
 export async function replaceWorkItemParent(
   teamId: string,
@@ -115,6 +117,12 @@ export async function replaceWorkItemParent(
   return data
 }
 
+/**
+ * Checks that a successful parent response matches `WorkItemParentMutationResponse`.
+ *
+ * @param value - Parsed response body.
+ * @returns True when both parent IDs are a string or null and `graphRevision` is a non-negative integer.
+ */
 function isWorkItemParentMutationResponse(value: unknown): value is WorkItemParentMutationResponse {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -128,6 +136,12 @@ function isWorkItemParentMutationResponse(value: unknown): value is WorkItemPare
     (response.graphRevision as number) >= 0
 }
 
+/**
+ * Checks for a nullable string value.
+ *
+ * @param value - Value to check.
+ * @returns True when the value is null or a string.
+ */
 function isNullableString(value: unknown) {
   return value === null || typeof value === 'string'
 }
