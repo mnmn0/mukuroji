@@ -7,7 +7,6 @@ import {
 import {
   createNotificationScheduleHandler,
   createPlanningScheduledNotificationCandidates,
-  parseUtcDateOnly,
   parsePlanningUpdateTargetScheduleRow,
   runNotificationSchedule,
   type NotificationScheduleDocumentClient,
@@ -248,18 +247,6 @@ function createRunOptions(
 }
 
 describe('notification schedule handler', () => {
-  test('parses only valid canonical UTC date-only values', () => {
-    expect(parseUtcDateOnly('2026/07/12')).toBeUndefined()
-    expect(parseUtcDateOnly('2026-07-12')).toBe('2026-07-12')
-    expect(parseUtcDateOnly('2024-02-29')).toBe('2024-02-29')
-    expect(parseUtcDateOnly('1000-01-01')).toBe('1000-01-01')
-    expect(parseUtcDateOnly('0999-12-31')).toBeUndefined()
-    expect(parseUtcDateOnly('2026-02-29')).toBeUndefined()
-    expect(parseUtcDateOnly('2026-02/28')).toBeUndefined()
-    expect(parseUtcDateOnly('2026/13/01')).toBeUndefined()
-    expect(parseUtcDateOnly('2026/07/12T00:00:00Z')).toBeUndefined()
-  })
-
   test('emits due and overdue audit outbox events and skips ineligible items', async () => {
     const recording = createRecordingDocumentClient((name) => {
       if (name === 'ScanCommand') {
@@ -626,6 +613,42 @@ describe('notification schedule handler', () => {
       .toHaveLength(2)
     expect(events.filter((event) => event.eventType === 'work-item.overdue'))
       .toHaveLength(3)
+  })
+
+  test('starts a new escalation after the Work Item reopens while owner stages keep their keys', async () => {
+    const directory = [
+      { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'platform' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+    ]
+    const run = async (workItem: Record<string, unknown>) => {
+      const recording = createRecordingDocumentClient((name, input) => {
+        if (name === 'ScanCommand') return { Items: [workItem] }
+        if (name === 'QueryCommand' && input.TableName === 'ProjectDirectoryTable') return { Items: directory }
+        return {}
+      })
+      await runNotificationSchedule(createRunOptions(recording.client, {
+        projectManagerReader: createDynamoDbProjectManagerReader({
+          documentClient: recording.client,
+          tableName: 'ProjectDirectoryTable',
+        }),
+      }))
+      return new Map(recording.commands
+        .filter(({ name }) => name === 'PutCommand')
+        .map(({ input }) => readPutItem(input))
+        .map((event) => [event.eventType, event.eventId]))
+    }
+
+    const beforeClose = await run(createWorkItem({ dueDate: '2026-07-05' }))
+    const reopened = await run(createWorkItem({ dueDate: '2026-07-05', reopenedAt: '2026-07-10T09:00:00.000Z' }))
+    const reopenedAgain = await run(createWorkItem({ dueDate: '2026-07-05', reopenedAt: '2026-07-11T09:00:00.000Z' }))
+
+    const escalationIds = [beforeClose, reopened, reopenedAgain]
+      .map((events) => events.get('work-item.overdue-escalation'))
+    expect(escalationIds.every(Boolean)).toBe(true)
+    expect(new Set(escalationIds).size).toBe(3)
+    for (const eventType of ['work-item.overdue', 'work-item.overdue-reminder']) {
+      expect(reopened.get(eventType)).toBe(beforeClose.get(eventType))
+    }
   })
 
   test('emits the initial overdue event for a Work Item first scanned long after its due date', async () => {

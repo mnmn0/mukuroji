@@ -2315,6 +2315,8 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
   })
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
+  // Only leaving a closed state marks a reopen.
+  expect(JSON.stringify(transactItems)).not.toContain('reopenedAt')
   expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
     Update: {
       ExpressionAttributeValues: {
@@ -2407,6 +2409,13 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
 
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
+  const firstItem = Array.isArray(transactItems) ? transactItems[0] : undefined
+  const reopenUpdate = isUnknownRecord(firstItem) && isUnknownRecord(firstItem.Update)
+    ? structuredClone(firstItem.Update) as {
+        UpdateExpression?: string
+        ExpressionAttributeValues?: Record<string, unknown>
+      }
+    : undefined
   expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
     Update: {
       ExpressionAttributeNames: expect.objectContaining({
@@ -2418,6 +2427,10 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
       ),
     },
   })
+  // Reopening restarts overdue escalation, which is keyed by this time.
+  expect(reopenUpdate?.UpdateExpression).toContain('#reopenedAt = :reopenedAt')
+  expect(reopenUpdate?.ExpressionAttributeValues?.[':reopenedAt'])
+    .toBe(reopenUpdate?.ExpressionAttributeValues?.[':updatedAt'])
   expect(Array.isArray(transactItems)
     ? transactItems.find((item) => {
         if (!isUnknownRecord(item) || !isUnknownRecord(item.Put)) return false

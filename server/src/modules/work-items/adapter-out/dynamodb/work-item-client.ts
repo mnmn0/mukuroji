@@ -571,6 +571,8 @@ type TeamIssueItem = {
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
   dueDateUpdatedAt?: string
+  /** Time the item last returned to open work from completed, canceled, or archived. */
+  reopenedAt?: string
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -2859,6 +2861,18 @@ export class DynamoDbTeamIssuesClient {
           '#customerCompletionPreparationAt = :customerCompletionPreparationAt',
           '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
         )
+      }
+      const nextArchivedAt = 'archivedAt' in input
+        ? expressionAttributeValues[':archivedAt']
+        : beforeIssue.archivedAt
+      if (
+        isClosedWorkItemState(beforeIssue.statusCategory, beforeIssue.archivedAt) &&
+        !isClosedWorkItemState(nextStatusCategory, nextArchivedAt)
+      ) {
+        // Overdue escalations are keyed by this time, so a reopened item escalates again.
+        expressionAttributeNames['#reopenedAt'] = 'reopenedAt'
+        expressionAttributeValues[':reopenedAt'] = updatedAt
+        setExpressions.push('#reopenedAt = :reopenedAt')
       }
       if (leavesCompletion) {
         expressionAttributeNames['#customerCompletionPreparationAt'] =
@@ -5160,4 +5174,15 @@ function getDynamoDbEndpoint() {
 
 function getEnv(name: string) {
   return loadServerConfig().environment[name]
+}
+
+/**
+ * Reports whether a Work Item is out of open work, so dated notifications no longer apply.
+ *
+ * @param statusCategory - Workflow status category.
+ * @param archivedAt - Archive timestamp, when archived.
+ * @returns Whether the item is completed, canceled, or archived.
+ */
+function isClosedWorkItemState(statusCategory: WorkflowStatusCategory, archivedAt: unknown) {
+  return statusCategory === 'completed' || statusCategory === 'canceled' || archivedAt !== undefined
 }
