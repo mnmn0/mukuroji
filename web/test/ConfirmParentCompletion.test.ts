@@ -42,6 +42,11 @@ test('asks before completing a parent with open children under the default warn 
   expect((await check({}, 2, true)).result).toBe(true)
 })
 
+test('asks when a canceled parent with open children moves to completed', async () => {
+  expect(await check({ workItem: { ...workItem, statusCategory: 'canceled' } }))
+    .toEqual({ result: false, counted: ['phase-1'], asked: [2] })
+})
+
 test('does not ask when nothing is open, the change does not complete, or the Team rejects', async () => {
   expect(await check({}, 0)).toEqual({ result: true, counted: ['phase-1'], asked: [] })
   expect(await check({ nextStatusCategory: 'started' })).toEqual({ result: true, counted: [], asked: [] })

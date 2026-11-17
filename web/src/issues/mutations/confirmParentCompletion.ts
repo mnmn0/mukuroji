@@ -1,6 +1,5 @@
 import {
   DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
-  isWorkItemHierarchyClosedCategory,
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -53,7 +52,9 @@ export async function confirmParentCompletion({
   confirm,
   countOpenChildren = getWorkItemOpenChildCount,
 }: ConfirmParentCompletionInput): Promise<boolean> {
-  if (nextStatusCategory !== 'completed' || isWorkItemHierarchyClosedCategory(workItem.statusCategory)) {
+  // Like the server's check, only a Work Item already completed is exempt; a canceled one moving
+  // to completed still asks.
+  if (nextStatusCategory !== 'completed' || workItem.statusCategory === 'completed') {
     return true
   }
   const policy = configuration?.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY
