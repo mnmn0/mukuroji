@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import type { ArchivedPlanningEntitySummary, PlanningEntity } from '@mukuroji/contracts'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import {
+  hasPendingPlanningRestore,
   recordPlanningRestoreResult,
+  recordUncertainPlanningRestore,
   selectRestorablePlanningEntities,
   type PlanningRestoreResultView,
 } from '../src/planning/model/archive'
@@ -70,5 +72,35 @@ describe('archived Planning entities', () => {
     // Continuing A replaces its own outcome, and A leaves once nothing is pending.
     const afterARest = recordPlanningRestoreResult(afterC, outcome('goal-a', 0))
     expect(afterARest.map((result) => result.entityId)).toEqual(['goal-a'])
+  })
+
+  test('keeps a retry target for a restore whose outcome is unknown', () => {
+    const pending: PlanningRestoreResultView = {
+      entityId: 'goal-a',
+      title: 'Goal A',
+      summary: {
+        restoredLinkCount: 1,
+        droppedLinkCount: 0,
+        restoredDependencyCount: 0,
+        retainedDependencyCount: 0,
+        droppedDependencyCount: 0,
+        pendingReferenceCount: 3,
+      },
+    }
+    const uncertain = recordUncertainPlanningRestore([pending], { entityId: 'goal-b', title: 'Goal B' })
+    expect(uncertain).toEqual([{ entityId: 'goal-b', title: 'Goal B' }, pending])
+    expect(uncertain.every(hasPendingPlanningRestore)).toBe(true)
+    // A failed continuation keeps the counts the earlier restore reported.
+    expect(recordUncertainPlanningRestore(uncertain, { entityId: 'goal-a', title: 'Goal A' }))
+      .toEqual(uncertain)
+    // A later successful restore of the same entity replaces the unknown outcome.
+    const restored = recordPlanningRestoreResult(uncertain, {
+      ...pending,
+      entityId: 'goal-b',
+      title: 'Goal B',
+      summary: { ...pending.summary!, pendingReferenceCount: 0 },
+    })
+    expect(restored.map((result) => result.entityId)).toEqual(['goal-b', 'goal-a'])
+    expect(hasPendingPlanningRestore(restored[0]!)).toBe(false)
   })
 })

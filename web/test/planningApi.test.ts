@@ -214,6 +214,22 @@ describe('Planning API', () => {
       expectedRevision: 1,
     }, mutationContext)).rejects.toMatchObject({ status: 502 })
 
+    // A valid summary next to a snapshot that is not a Planning snapshot is rejected too.
+    installFetchRecorder({
+      planning: { ...planningSnapshotFixture, entities: 'none' },
+      restore: {
+        restoredLinkCount: 0,
+        droppedLinkCount: 0,
+        restoredDependencyCount: 0,
+        retainedDependencyCount: 0,
+        droppedDependencyCount: 0,
+        pendingReferenceCount: 0,
+      },
+    })
+    await expect(restorePlanningEntity('token', 'goal', {
+      expectedRevision: 1,
+    }, mutationContext)).rejects.toMatchObject({ status: 502, code: 'InvalidPlanningRestoreResponse' })
+
     installFetchRecorder({
       entities: [{ id: 'goal', type: 'unknown', title: 'Goal', ownerMemberKey: 'owner', archivedAt: 'now' }],
     })

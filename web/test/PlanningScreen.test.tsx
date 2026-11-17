@@ -213,6 +213,9 @@ describe('PlanningScreen', () => {
           droppedDependencyCount: 0,
           pendingReferenceCount: 3,
         },
+      }, {
+        entityId: 'project-unknown',
+        title: 'Unconfirmed project',
       }],
       onLoadMore: () => undefined,
       onOpen: () => undefined,
@@ -234,6 +237,9 @@ describe('PlanningScreen', () => {
     expect(markup).toContain('aria-label="Restore the rest: Old goal"')
     // An earlier restore with references left keeps its own continuation.
     expect(markup).toContain('aria-label="Restore the rest: Earlier cycle"')
+    // A restore whose outcome is unknown says so and can run again.
+    expect(markup).toContain('Could not confirm whether &quot;Unconfirmed project&quot; was restored.')
+    expect(markup).toContain('aria-label="Restore the rest: Unconfirmed project"')
 
     const restoring = renderToStaticMarkup(
       <PlanningScreen

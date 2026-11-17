@@ -40,27 +40,37 @@ const archivedCycle = {
 } satisfies ArchivedPlanningEntitySummary
 
 /**
+ * How the stubbed restore API fails once.
+ *
+ * - `continuation-fails`: the first "restore the rest" fails before changing anything.
+ * - `initial-outcome-unknown`: the first restore commits, then the response is lost as a 503.
+ */
+type RestoreFailureScenario = 'continuation-fails' | 'initial-outcome-unknown'
+
+/**
  * Installs authenticated Workspace and Planning API stubs with two pages of archived plans.
  *
  * @param page - Playwright page whose same-origin API calls are intercepted.
+ * @param scenario - Which restore request fails, and whether it commits first.
  * @returns The restore request bodies, in order.
  */
-async function mockPlanningArchivePage(page: Page) {
+async function mockPlanningArchivePage(page: Page, scenario: RestoreFailureScenario) {
   let planning: PlanningSnapshot = {
     ...structuredClone(planningSnapshotFixture),
     revision: 30,
   }
   let goalArchived = true
   const restoreRequests: unknown[] = []
+  const failingRequest = scenario === 'continuation-fails' ? 2 : 1
   const restoreSummaries: PlanningRestoreSummary[] = [
-    {
+    ...(scenario === 'continuation-fails' ? [{
       restoredLinkCount: 30,
       droppedLinkCount: 1,
       restoredDependencyCount: 2,
       retainedDependencyCount: 0,
       droppedDependencyCount: 0,
       pendingReferenceCount: 5,
-    },
+    }] : []),
     {
       restoredLinkCount: 5,
       droppedLinkCount: 0,
@@ -139,7 +149,8 @@ async function mockPlanningArchivePage(page: Page) {
       body: request.postDataJSON(),
       pathname: new URL(request.url()).pathname,
     })
-    if (restoreRequests.length === 2) {
+    const fails = restoreRequests.length === failingRequest
+    if (fails && scenario === 'continuation-fails') {
       // The first "restore the rest" fails; the result and its button must stay.
       await route.fulfill({ json: { code: 'PlanningUnavailable', message: 'Unavailable.' }, status: 503 })
       return
@@ -152,6 +163,11 @@ async function mockPlanningArchivePage(page: Page) {
         ? planning.entities
         : [...planning.entities, { ...structuredClone(fixtureGoal), id: archivedGoal.id, title: archivedGoal.title }],
     }
+    if (fails) {
+      // The restore committed, but the client only sees a server error.
+      await route.fulfill({ json: { code: 'PlanningUnavailable', message: 'Unavailable.' }, status: 503 })
+      return
+    }
     const restore = restoreSummaries.shift()
     await route.fulfill({ json: { planning, restore } })
   })
@@ -161,7 +177,7 @@ async function mockPlanningArchivePage(page: Page) {
 test('Issue #369: lists archived plans, restores one, and retries the references left behind', async ({
   page,
 }) => {
-  const restoreRequests = await mockPlanningArchivePage(page)
+  const restoreRequests = await mockPlanningArchivePage(page, 'continuation-fails')
   await page.goto('/planning/roadmap', { waitUntil: 'domcontentloaded' })
 
   const panel = page.getByTestId('planning-archived-entities')
@@ -190,6 +206,31 @@ test('Issue #369: lists archived plans, restores one, and retries the references
   expect(restoreRequests).toEqual([
     { body: { expectedRevision: 30 }, pathname: '/api/planning/entities/goal-archived/restore' },
     { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
+    { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
+  ])
+})
+
+test('Issue #369: keeps a way to finish a restore whose response was lost', async ({ page }) => {
+  const restoreRequests = await mockPlanningArchivePage(page, 'initial-outcome-unknown')
+  await page.goto('/planning/roadmap', { waitUntil: 'domcontentloaded' })
+
+  const panel = page.getByTestId('planning-archived-entities')
+  await panel.getByText('アーカイブ済みの計画', { exact: true }).click()
+  await panel.getByRole('button', { name: '復元: 過去の目標' }).click()
+
+  // The goal left the archive although the request failed; only the result can reach it now.
+  await expect(page.getByText('計画の変更を保存できませんでした。もう一度お試しください。')).toBeVisible()
+  const result = panel.getByTestId('planning-restore-result')
+  await expect(result).toContainText('「過去の目標」の復元が完了したか確認できませんでした。')
+  await expect(panel.getByTestId('planning-archived-entity-goal-archived')).toHaveCount(0)
+
+  await panel.getByTestId('planning-restore-continue').click()
+  await expect(result).toContainText('Work Item の関連付け 5 件と依存関係 0 件を戻しました。')
+  await expect(panel.getByTestId('planning-restore-continue')).toHaveCount(0)
+
+  // The snapshot reloaded after the lost response, so the retry carries the committed revision.
+  expect(restoreRequests).toEqual([
+    { body: { expectedRevision: 30 }, pathname: '/api/planning/entities/goal-archived/restore' },
     { body: { expectedRevision: 31 }, pathname: '/api/planning/entities/goal-archived/restore' },
   ])
 })

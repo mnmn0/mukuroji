@@ -11,6 +11,7 @@ import type {
   UpdatePlanningEntityInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
@@ -113,17 +114,12 @@ export async function restorePlanningEntity(
     input,
     mutationContext,
   )
-  if (
-    !isRecord(response) ||
-    !isRecord(response.planning) ||
-    !isPlanningRestoreSummary(response.restore)
-  ) {
-    throw new PlanningApiError(502, defaultPlanningApiErrorMessage)
+  const planning = isRecord(response) ? readPlanningSnapshot(response.planning) : undefined
+  if (!isRecord(response) || !planning || !isPlanningRestoreSummary(response.restore)) {
+    // The restore may have committed, so a malformed success is reported as a server failure.
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage, 'InvalidPlanningRestoreResponse')
   }
-  return {
-    planning: response.planning as PlanningSnapshot,
-    restore: response.restore,
-  }
+  return { planning, restore: response.restore }
 }
 
 /**

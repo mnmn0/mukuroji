@@ -94,6 +94,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       restoring: t('planning.action.restoring'),
       continueRestore: t('planning.action.continueRestore'),
       restoreResult: ({ summary, title }) => {
+        if (!summary) return [t('planning.restore.unknown').replace('{title}', title)]
         const count = (value: number) => value.toLocaleString(locale)
         const dropped = summary.droppedLinkCount + summary.droppedDependencyCount
         return [

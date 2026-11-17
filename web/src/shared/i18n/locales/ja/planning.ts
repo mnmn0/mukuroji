@@ -197,6 +197,7 @@ export const planningMessages = {
   'planning.restore.dropped': 'Work Item が別の Cycle や Milestone に移っていたなど、今の計画と合わない {count} 件は戻していません。',
   'planning.restore.retained': '相手の計画がまだアーカイブ中の依存関係 {count} 件は、相手を復元したときに戻ります。',
   'planning.restore.pending': '{count} 件はまだ戻っていません。容量が足りない分や、あなたが見られない Work Item の関連付けです。「続きを戻す」で、戻せる分を戻します。',
+  'planning.restore.unknown': '「{title}」の復元が完了したか確認できませんでした。「続きを戻す」でもう一度実行すると、戻せる分を戻します。',
   'planning.restore.parentUnavailable': '上位の計画がアーカイブ済みのため復元できません。先に上位の計画を復元してください。',
   'planning.restore.ownerInactive': '担当者が Workspace のメンバーではなくなったため復元できません。',
 } as const

@@ -1,22 +1,26 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { PlanningRestoreSummary } from '@mukuroji/contracts'
 import type { PlanningRestoreResultView } from '../model/archive'
 import { PlanningArchivePanel, type PlanningArchiveController } from './PlanningArchivePanel'
 import { createPlanningLabels } from './labels'
 
 const labels = createPlanningLabels('ja')
 
+/** Reference counts of a restore that left references in the archive. */
+const pendingSummary: PlanningRestoreSummary = {
+  restoredLinkCount: 30,
+  droppedLinkCount: 2,
+  restoredDependencyCount: 1,
+  retainedDependencyCount: 1,
+  droppedDependencyCount: 0,
+  pendingReferenceCount: 12,
+}
+
 /** A restore that left references in the archive. */
 const pendingResult: PlanningRestoreResultView = {
   entityId: 'goal-retention',
   title: '継続率の改善',
-  summary: {
-    restoredLinkCount: 30,
-    droppedLinkCount: 2,
-    restoredDependencyCount: 1,
-    retainedDependencyCount: 1,
-    droppedDependencyCount: 0,
-    pendingReferenceCount: 12,
-  },
+  summary: pendingSummary,
 }
 
 /** Archived plans of both kinds with a further page to load. */
@@ -96,8 +100,18 @@ export const SeveralResults: Story = {
       results: [{
         entityId: 'milestone-beta-old',
         title: '旧ベータ版',
-        summary: { ...pendingResult.summary, droppedLinkCount: 0, pendingReferenceCount: 0, retainedDependencyCount: 0 },
+        summary: { ...pendingSummary, droppedLinkCount: 0, pendingReferenceCount: 0, retainedDependencyCount: 0 },
       }, pendingResult],
+    },
+  },
+}
+
+/** A restore failed after it may have committed, so the outcome is unknown and can be retried. */
+export const UncertainResult: Story = {
+  args: {
+    archive: {
+      ...loadedArchive,
+      results: [{ entityId: 'project-legacy-portal', title: '旧ポータル刷新' }],
     },
   },
 }

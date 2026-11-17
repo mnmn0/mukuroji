@@ -1,12 +1,12 @@
-import type {
-  ArchivedPlanningEntitySummary,
-  PlanningEntityType,
-} from '@mukuroji/contracts'
+import type { PlanningEntityType } from '@mukuroji/contracts'
 import { useState } from 'react'
 import {
   hasPendingPlanningRestore,
+  type PlanningArchiveController,
   type PlanningRestoreResultView,
 } from '../model/archive'
+
+export type { PlanningArchiveController } from '../model/archive'
 
 /** Localized text of the archived plans panel. */
 export type PlanningArchiveLabels = {
@@ -32,32 +32,6 @@ export type PlanningArchiveLabels = {
   continueRestore: string
   /** Sentences describing a restore outcome. */
   restoreResult: (result: PlanningRestoreResultView) => string[]
-}
-
-/** Data and callbacks the archived plans panel needs from the page. */
-export type PlanningArchiveController = {
-  /** Restorable archived entities in display order. */
-  entities: readonly ArchivedPlanningEntitySummary[]
-  /** Whether the archive list has another page. */
-  hasMore: boolean
-  /** Whether the first page is loading. */
-  isLoading: boolean
-  /** Whether a further page is loading. */
-  isLoadingMore: boolean
-  /** List load error message. */
-  errorMessage?: string
-  /** Entity whose restore request is running. */
-  restoringEntityId?: string
-  /** Restore outcomes, newest first; earlier ones stay while references remain in the archive. */
-  results: readonly PlanningRestoreResultView[]
-  /** Starts loading the list when the panel opens. */
-  onOpen: () => void
-  /** Loads the next page. */
-  onLoadMore: () => void | Promise<unknown>
-  /** Reloads the list after an error. */
-  onRetry: () => void
-  /** Restores an entity, or continues a restore that left references behind. */
-  onRestore: (entity: Pick<ArchivedPlanningEntitySummary, 'id' | 'title'>) => void | Promise<void>
 }
 
 /**
@@ -112,7 +86,7 @@ export function PlanningArchivePanel({
               {sentence}
             </p>
           ))}
-          {hasPendingPlanningRestore(result.summary) ? (
+          {hasPendingPlanningRestore(result) ? (
             <div>
               <button
                 aria-label={`${labels.continueRestore}: ${result.title}`}

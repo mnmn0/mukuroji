@@ -197,6 +197,7 @@ export const planningMessages = {
   'planning.restore.dropped': '{count} no longer fit the current plan, for example because the Work Item moved to another Cycle or Milestone, and were not brought back.',
   'planning.restore.retained': '{count} dependencies on plans that are still archived come back when those plans are restored.',
   'planning.restore.pending': '{count} have not been brought back yet, because there was not enough room or they link Work Items you cannot see. Use "Restore the rest" to bring back what you can.',
+  'planning.restore.unknown': 'Could not confirm whether "{title}" was restored. Use "Restore the rest" to run it again and bring back what you can.',
   'planning.restore.parentUnavailable': 'This plan cannot be restored while its parent plan is archived. Restore the parent first.',
   'planning.restore.ownerInactive': 'This plan cannot be restored because its owner is no longer a member of the Workspace.',
 } as const
