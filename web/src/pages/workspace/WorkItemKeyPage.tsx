@@ -1,8 +1,9 @@
 import { useMemo } from 'react'
-import { Link, Navigate, useParams } from 'react-router'
+import { Navigate, useParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
 import { readWorkItemKeyInput } from '../../issues/model/workItemKeys'
 import { useWorkItemKeyLocation } from '../../issues/queries/useWorkItemKeyLocation'
+import { WorkItemKeyStatus, type WorkItemKeyLookupStatus } from '../../issues/ui/WorkItemKeyStatus'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -25,56 +26,26 @@ export function WorkItemKeyPage() {
     return <Navigate replace to={createTeamIssuesPath(lookup.data.teamId, lookup.data.workItemId)} />
   }
 
-  const notFound = lookup.error instanceof TeamIssuesApiError && lookup.error.status === 404
-  const failed = Boolean(lookup.error) && !notFound
-  const loading = Boolean(key) && !lookup.error
-  const shownKey = key ?? rawKey
-  const message = !key
-    ? t('issues.keyPage.invalid')
-    : notFound
-      ? t('issues.keyPage.notFound')
-      : failed
-        ? t('issues.keyPage.error')
-        : t('issues.keyPage.loading')
+  const status: WorkItemKeyLookupStatus = !key
+    ? 'invalid'
+    : !lookup.error
+      ? 'loading'
+      : lookup.error instanceof TeamIssuesApiError && lookup.error.status === 404
+        ? 'not-found'
+        : 'failed'
 
   return (
     <WorkspaceRouteContent
       isLoading={false}
-      sessionErrors={failed ? [lookup.error] : []}
+      sessionErrors={status === 'failed' ? [lookup.error] : []}
     >
-      <section
-        className="mx-auto grid w-full max-w-xl gap-3 px-5 py-10"
-        data-testid="work-item-key-page"
-      >
-        <p className="workbench-eyebrow">{t('issues.keyPage.title')}</p>
-        <p
-          aria-live="polite"
-          className="text-base font-semibold text-[var(--workbench-text)]"
-          role={loading ? 'status' : 'alert'}
-        >
-          {message.replace('{key}', shownKey)}
-        </p>
-        {loading ? null : (
-          <div className="flex flex-wrap gap-2">
-            {failed ? (
-              <button
-                className="workbench-button-primary min-h-9 px-3"
-                disabled={lookup.isValidating}
-                onClick={() => void lookup.mutate()}
-                type="button"
-              >
-                {t('issues.keyPage.retry')}
-              </button>
-            ) : null}
-            <Link
-              className="workbench-button-secondary min-h-9 w-fit px-3"
-              to={`/search?${new URLSearchParams({ q: shownKey, type: 'work-item' }).toString()}`}
-            >
-              {t('issues.keyPage.openSearch')}
-            </Link>
-          </div>
-        )}
-      </section>
+      <WorkItemKeyStatus
+        onRetry={() => void lookup.mutate()}
+        retrying={lookup.isValidating}
+        status={status}
+        t={t}
+        workItemKey={key ?? rawKey}
+      />
     </WorkspaceRouteContent>
   )
 }
