@@ -411,6 +411,23 @@ export interface WorkspaceAccessClient {
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMemberCredentialProgress>
   /**
+   * Marks that the attempt holding an administrator credential action is about to change
+   * Cognito, so a later retry does not repeat a change that may already have happened.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` when the action is no
+   *   longer only recorded.
+   */
+  markMemberCredentialActionApplying?(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ): Promise<void>
+  /**
    * Marks a recorded administrator credential action as finished in Cognito.
    *
    * @param workspaceId - Workspace of the action.
@@ -1725,7 +1742,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param auditContext - Audit context of the request.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
-   *   holds the lease.
+   *   holds the lease, and 503 `AccountSecurityUnavailable` when no audit table is configured,
+   *   because the progress record that keeps retries safe lives beside the audit event.
    */
   async recordMemberCredentialAction(
     workspaceId: string,
@@ -1761,7 +1779,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 
     const auditItem = auditPut?.Put?.Item
     if (!auditPut || !auditItem) {
-      return { member: target, alreadyRecorded: false, completed: false }
+      // Without the audit log there is no progress record, so a retry could repeat a change the
+      // member has since undone. Refuse rather than change Cognito without that protection.
+      throw new WorkspaceAccessError(
+        503,
+        'AccountSecurityUnavailable',
+        'Administrator credential resets need the audit log, which is not configured.',
+      )
     }
 
     const now = this.clock()
@@ -1770,21 +1794,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           this.actorCondition(normalizedWorkspaceId, actor),
-          {
-            ConditionCheck: {
-              TableName: this.tableName,
-              Key: {
-                workspaceId: normalizedWorkspaceId,
-                recordKey: createMemberRecordKey(target.memberKey),
-              },
-              ConditionExpression: '#status = :active AND version = :version',
-              ExpressionAttributeNames: { '#status': 'status' },
-              ExpressionAttributeValues: {
-                ':active': 'active',
-                ':version': target.version,
-              },
-            },
-          },
+          this.credentialTargetCondition(normalizedWorkspaceId, target),
           auditPut,
           {
             Put: {
@@ -1799,6 +1809,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
                 status: 'recorded',
                 recordedAt: now.toISOString(),
                 leaseUntil: now.getTime() + credentialActionLeaseMs,
+                // The record answers retries for as long as the audit event keeps the key taken.
+                ...(typeof auditItem.expiresAt === 'number' ? { expiresAt: auditItem.expiresAt } : {}),
               },
               ConditionExpression: 'attribute_not_exists(recordKey)',
             },
@@ -1821,7 +1833,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           if (recorded.status === 'completed') {
             return { member: target, alreadyRecorded: true, completed: true }
           }
-          await this.renewCredentialActionLease(normalizedWorkspaceId, recorded, now)
+          await this.renewCredentialActionLease(
+            normalizedWorkspaceId,
+            actor,
+            target,
+            { ...recorded, status: recorded.status },
+            now,
+          )
           return { member: target, alreadyRecorded: true, completed: false }
         }
         throw new WorkspaceAccessError(
@@ -1840,6 +1858,32 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         )
       }
       throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Builds the transaction check that the target of a credential action is still the active
+   * member version the authority check read.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param target - Target member as read.
+   * @returns The DynamoDB transaction item.
+   */
+  private credentialTargetCondition(workspaceId: string, target: WorkspaceMember) {
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey: createMemberRecordKey(target.memberKey),
+        },
+        ConditionExpression: '#status = :active AND version = :version',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':version': target.version,
+        },
+      },
     }
   }
 
@@ -1924,7 +1968,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       }
       return {
         recordKey,
-        status: recorded.status === 'completed' ? 'completed' as const : 'recorded' as const,
+        status: toCredentialActionStatus(recorded.status),
         leaseUntil: typeof recorded.leaseUntil === 'number' ? recorded.leaseUntil : undefined,
         recordedAt: typeof recorded.recordedAt === 'string' ? Date.parse(recorded.recordedAt) : Number.NaN,
       }
@@ -1938,22 +1982,36 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * Takes over a recorded credential action whose earlier attempt stopped, once its lease ran out.
    *
    * The conditional update succeeds for one caller only, so two retries cannot both change
-   * Cognito. An action recorded longer ago than the resume window is not repeated: the member
-   * may have set up a new password or app since, so the administrator sends a new request.
+   * Cognito. It runs in one transaction with the checks that the actor and the target are still
+   * the versions the authority check read, so a role change in between stops the takeover. An
+   * action recorded longer ago than the resume window, or one whose earlier attempt had started
+   * changing Cognito, is not repeated: the member may have set up a new password or app since,
+   * so the administrator checks the member and sends a new request.
    *
    * @param workspaceId - Normalized Workspace ID.
+   * @param actor - Administrator as read by the authority check.
+   * @param target - Target member as read by the authority check.
    * @param recorded - Progress record that the caller read.
    * @param recorded.recordKey - Key of the progress record.
+   * @param recorded.status - Stage the earlier attempt reached.
    * @param recorded.leaseUntil - Lease end the caller observed, if any.
    * @param recorded.recordedAt - When the action was recorded, in milliseconds.
    * @param now - Current time.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
-   *   holds the lease or took it over first, and 409 `WorkspaceCredentialActionExpired` when the
-   *   resume window has passed.
+   *   holds the lease or took it over first, 409 `WorkspaceCredentialActionExpired` when the
+   *   resume window has passed or the earlier attempt had started changing Cognito, and 409 `WorkspaceVersionConflict` when the actor or the target
+   *   changed.
    */
   private async renewCredentialActionLease(
     workspaceId: string,
-    recorded: { recordKey: string; leaseUntil: number | undefined; recordedAt: number },
+    actor: WorkspaceMember,
+    target: WorkspaceMember,
+    recorded: {
+      recordKey: string
+      status: 'recorded' | 'applying'
+      leaseUntil: number | undefined
+      recordedAt: number
+    },
     now: Date,
   ) {
     const inProgress = () => new WorkspaceAccessError(
@@ -1964,7 +2022,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     if (recorded.leaseUntil !== undefined && recorded.leaseUntil > now.getTime()) {
       throw inProgress()
     }
-    if (!(recorded.recordedAt + credentialActionResumeWindowMs > now.getTime())) {
+    // An attempt that stopped while changing Cognito may have changed the account already, and a
+    // repeat could undo a password or app the member set up since, so it is never repeated.
+    if (
+      recorded.status === 'applying' ||
+      !(recorded.recordedAt + credentialActionResumeWindowMs > now.getTime())
+    ) {
       throw new WorkspaceAccessError(
         409,
         'WorkspaceCredentialActionExpired',
@@ -1973,23 +2036,96 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          this.actorCondition(workspaceId, actor),
+          this.credentialTargetCondition(workspaceId, target),
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { workspaceId, recordKey: recorded.recordKey },
+              UpdateExpression: 'SET leaseUntil = :leaseUntil',
+              ConditionExpression: recorded.leaseUntil === undefined
+                ? '#status = :recorded AND attribute_not_exists(leaseUntil)'
+                : '#status = :recorded AND leaseUntil = :observedLeaseUntil',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':recorded': 'recorded',
+                ':leaseUntil': now.getTime() + credentialActionLeaseMs,
+                ...(recorded.leaseUntil === undefined ? {} : { ':observedLeaseUntil': recorded.leaseUntil }),
+              },
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 2)) {
+        throw inProgress()
+      }
+      if (isConditionalTransactionCancellation(error)) {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceVersionConflict',
+          'Workspace member changed. Reload and try again.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Marks that the attempt holding a credential action is about to change Cognito. From then on
+   * a retry with the same idempotency key does not repeat the action, because the change may
+   * already have happened and the member may have set up a new password or app since.
+   *
+   * @param workspaceId - Workspace of the action.
+   * @param targetMemberKey - Member the action targets.
+   * @param action - Credential action.
+   * @param auditContext - Audit context of the request.
+   * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` when the action is no
+   *   longer only recorded.
+   */
+  async markMemberCredentialActionApplying(
+    workspaceId: string,
+    targetMemberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const expected = this.createMemberCredentialAuditPut(
+      normalizedWorkspaceId,
+      normalizeMemberKey(targetMemberKey),
+      action,
+      auditContext,
+    )?.Put?.Item
+    if (!expected) {
+      return
+    }
+
+    try {
       await this.documentClient.send(new UpdateCommand({
         TableName: this.tableName,
-        Key: { workspaceId, recordKey: recorded.recordKey },
-        UpdateExpression: 'SET leaseUntil = :leaseUntil',
-        ConditionExpression: recorded.leaseUntil === undefined
-          ? '#status = :recorded AND attribute_not_exists(leaseUntil)'
-          : '#status = :recorded AND leaseUntil = :observedLeaseUntil',
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createCredentialActionRecordKey(expected.eventId),
+        },
+        UpdateExpression: 'SET #status = :applying',
+        ConditionExpression: '#status = :recorded',
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
+          ':applying': 'applying',
           ':recorded': 'recorded',
-          ':leaseUntil': now.getTime() + credentialActionLeaseMs,
-          ...(recorded.leaseUntil === undefined ? {} : { ':observedLeaseUntil': recorded.leaseUntil }),
         },
       }))
     } catch (error) {
       if (isAwsError(error, 'ConditionalCheckFailedException')) {
-        throw inProgress()
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceCredentialActionInProgress',
+          'Another request is still resetting this member\'s sign-in. Try again shortly.',
+          { cause: error },
+        )
       }
       throw toWorkspaceAccessError(error)
     }
@@ -3330,6 +3466,19 @@ const credentialActionLeaseMs = 60_000
  * member may have set up a new password or app, which a repeated reset would undo.
  */
 const credentialActionResumeWindowMs = 10 * 60_000
+
+/**
+ * Reads the stage of a stored credential action record.
+ *
+ * @param value - Stored status.
+ * @returns `completed` once Cognito changed, `applying` once an attempt started changing it, and
+ *   `recorded` otherwise.
+ */
+function toCredentialActionStatus(value: unknown): 'recorded' | 'applying' | 'completed' {
+  if (value === 'completed') return 'completed'
+  if (value === 'applying') return 'applying'
+  return 'recorded'
+}
 
 /** Key of the record that tracks one administrator credential action, named by its audit event. */
 function createCredentialActionRecordKey(auditEventId: unknown) {

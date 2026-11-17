@@ -11661,6 +11661,37 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('workspace-member-demo-example-com').getByRole('button', { name: 'パスワード再設定を送る' })).toHaveCount(0)
   })
 
+  test('Issue #427: メンバーの MFA をリセットするとボタンが消えても同じ行にフォーカスを戻す', async ({ page }) => {
+    let mfaEnrolled = true
+
+    await page.route('**/api/workspace/members/sign-in-security', async (route) => {
+      await route.fulfill({
+        json: {
+          members: [
+            { memberKey: 'demo@example.com', mfa: 'enrolled', passwordReset: 'available' },
+            { memberKey: 'sato@example.com', mfa: mfaEnrolled ? 'enrolled' : 'not-enrolled', passwordReset: 'available' },
+          ],
+        },
+      })
+    })
+    await page.route('**/api/workspace/members/sato%40example.com/mfa-reset', async (route) => {
+      expect(route.request().method()).toBe('POST')
+      mfaEnrolled = false
+      await route.fulfill({ json: { reset: true } })
+    })
+
+    await page.goto('/settings')
+
+    const member = page.getByTestId('workspace-member-sato-example-com')
+    await member.getByRole('button', { name: 'MFAをリセット' }).click()
+    const dialog = page.getByRole('dialog', { name: 'MFA をリセットしますか？' })
+    await dialog.getByRole('button', { name: 'MFAをリセット' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(member.getByRole('button', { name: 'MFAをリセット' })).toHaveCount(0)
+    // The reset button is gone, so focus stays in the same row instead of falling to the page.
+    await expect(member.locator(':focus')).toHaveCount(1)
+  })
+
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)

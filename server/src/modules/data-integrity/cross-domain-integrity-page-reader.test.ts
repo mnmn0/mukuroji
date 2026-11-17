@@ -530,6 +530,9 @@ describe('cross-domain normalized page reader boundary', () => {
       projectCodeRawItem({ entryKey: { S: 'CODE#OPS-2' } }),
       projectCodeRawItem({ projectId: { S: '' } }),
       projectCodeRawItem({ createdAt: { S: 'yesterday' } }),
+      // A reservation the writer never produces: not upper-case, or not a valid code at all.
+      projectCodeRawItem({ code: { S: 'ops-1' }, entryKey: { S: 'CODE#ops-1' } }),
+      projectCodeRawItem({ code: { S: 'OPS 1' }, entryKey: { S: 'CODE#OPS 1' } }),
     ]
 
     for (const row of malformedRows) {

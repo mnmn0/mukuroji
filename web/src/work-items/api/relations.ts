@@ -84,14 +84,14 @@ export function deleteWorkItemRelation(
  * @param mutationContext - retry 間で共有する mutation request context です。
  * @returns 変更前後の親 Work Item ID と更新後 graph revision です。
  */
-export function replaceWorkItemParent(
+export async function replaceWorkItemParent(
   teamId: string,
   workItemId: string,
   accessToken: string,
   input: WorkItemParentMutationInput,
   mutationContext: MutationRequestContext,
-) {
-  return requestJson<WorkItemParentMutationResponse>(
+): Promise<WorkItemParentMutationResponse> {
+  const data = await requestJson<unknown>(
     `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(workItemId)}/parent`,
     accessToken,
     {
@@ -103,6 +103,33 @@ export function replaceWorkItemParent(
       method: 'PUT',
     },
   )
+
+  if (!isWorkItemParentMutationResponse(data)) {
+    throw new WorkItemConfigurationApiError(
+      502,
+      'Work Item API returned an invalid parent response.',
+      'InvalidWorkItemParentResponse',
+    )
+  }
+
+  return data
+}
+
+function isWorkItemParentMutationResponse(value: unknown): value is WorkItemParentMutationResponse {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const response = value as Record<string, unknown>
+
+  return isNullableString(response.previousParentWorkItemId) &&
+    isNullableString(response.parentWorkItemId) &&
+    Number.isInteger(response.graphRevision) &&
+    (response.graphRevision as number) >= 0
+}
+
+function isNullableString(value: unknown) {
+  return value === null || typeof value === 'string'
 }
 
 function createRelationsPath(teamId: string, workItemId: string) {

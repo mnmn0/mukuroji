@@ -515,6 +515,11 @@ export function WorkspaceAccessPanel({
     if (action.kind === 'member-credential') {
       try {
         await onResetMemberCredential?.(action.member.memberKey, action.action)
+        if (action.action === 'mfa-reset') {
+          // The reload removes the reset button, so focus returns to another control of the row.
+          actionReturnFocusRef.current = findRowFocusFallback(actionReturnFocusRef.current) ??
+            actionReturnFocusRef.current
+        }
         setAction(undefined)
         setNoticeMessage(
           t(action.action === 'password-reset'
@@ -1110,6 +1115,47 @@ function AccessStatusBadge({
   )
 }
 
+/** Controls that can take focus inside a member row. */
+const rowFocusableSelector = 'button:not([disabled]), a[href], select:not([disabled]), input:not([disabled])'
+
+/**
+ * Finds another control in the member row of a control, for when an action removes that control.
+ *
+ * @param control - Control that opened the dialog.
+ * @returns The first other focusable control of the row, or undefined.
+ */
+function findRowFocusFallback(control: HTMLElement | null) {
+  const row = control?.closest<HTMLElement>('tr')
+  return Array.from(row?.querySelectorAll<HTMLElement>(rowFocusableSelector) ?? [])
+    .find((candidate) => candidate !== control)
+}
+
+/**
+ * Returns focus to the control that opened a dialog, or to its row when the control is gone.
+ *
+ * @param returnFocusElement - Control that opened the dialog.
+ * @param fallbackContainer - Row of that control, read when the dialog opened.
+ */
+function restoreDialogFocus(
+  returnFocusElement: HTMLElement | null | undefined,
+  fallbackContainer: HTMLElement | null | undefined,
+) {
+  if (returnFocusElement?.isConnected) {
+    returnFocusElement.focus()
+    return
+  }
+  if (!fallbackContainer?.isConnected) {
+    return
+  }
+  const fallback = fallbackContainer.querySelector<HTMLElement>(rowFocusableSelector)
+  if (fallback) {
+    fallback.focus()
+    return
+  }
+  fallbackContainer.tabIndex = -1
+  fallbackContainer.focus()
+}
+
 function WorkspaceAccessConfirmationDialog({
   confirmLabel,
   description,
@@ -1129,10 +1175,12 @@ function WorkspaceAccessConfirmationDialog({
 
   useEffect(() => {
     const returnFocusElement = returnFocusRef.current
+    // An action can remove its own button, such as resetting MFA, so the row is the fallback.
+    const fallbackContainer = returnFocusElement?.closest<HTMLElement>('tr')
     dialogRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
 
     return () => {
-      window.requestAnimationFrame(() => returnFocusElement?.isConnected && returnFocusElement.focus())
+      window.requestAnimationFrame(() => restoreDialogFocus(returnFocusElement, fallbackContainer))
     }
   }, [returnFocusRef])
 
