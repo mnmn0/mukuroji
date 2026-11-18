@@ -28,25 +28,25 @@ export async function refreshMovedCacheEntry(
 
 /**
  * Reads a moved Team's hierarchy and writes it to the cache, so the outline shows the new
- * placement even when it closed while the move saved. When the read fails, the entry is
- * revalidated or cleared like {@link refreshMovedCacheEntry}, so the pre-move hierarchy is
- * never shown as current.
+ * placement even when it closed while the move saved.
+ *
+ * When the read fails, the cached pre-move hierarchy is cleared whether or not the outline is
+ * open, and an open outline reads it again. The outline then shows its loading or error state
+ * instead of the old placement, and no further move is planned from it.
  *
  * @param mutate - Global SWR mutator.
  * @param key - Key of the moved Team's hierarchy.
  * @param load - Reads the hierarchy.
- * @param readShownKeys - Returns the serialized keys the page reads now.
- * @returns Resolves once the entry holds the new hierarchy, or is revalidated or cleared.
+ * @returns Resolves once the entry holds the new hierarchy or is cleared.
  */
 export async function refreshMovedHierarchyCache<Data>(
   mutate: ScopedMutator,
   key: Arguments,
   load: () => Promise<Data>,
-  readShownKeys: () => ReadonlySet<string>,
 ): Promise<void> {
   try {
     await mutate(key, load(), { revalidate: false })
   } catch {
-    await refreshMovedCacheEntry(mutate, key, readShownKeys)
+    await mutate(key, undefined, { revalidate: true })
   }
 }

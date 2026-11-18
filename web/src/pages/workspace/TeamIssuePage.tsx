@@ -482,23 +482,21 @@ export function TeamIssuePage() {
     error: hierarchyError,
     mutate: mutateHierarchy,
     isValidating: isHierarchyValidating,
-    key: hierarchyKey,
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
-  // The cache keys this page reads now. A hierarchy move that finishes after the person
-  // switched Team or Work Item, or closed the outline, checks it to tell whether a key it
-  // refreshes still has a reader that revalidates it.
+  // The list and detail cache keys this page reads now. A hierarchy move that finishes after
+  // the person switched Team or Work Item checks it to tell whether a key it refreshes still
+  // has a reader that revalidates it.
   const shownCacheKeysRef = useRef<ReadonlySet<string>>(new Set())
   const shownIssuesCacheKey = issuesKey ? unstable_serialize(issuesKey) : ''
   const shownDetailCacheKey = detailKey ? unstable_serialize(detailKey) : ''
-  const shownHierarchyCacheKey = hierarchyKey ? unstable_serialize(hierarchyKey) : ''
   useEffect(() => {
     shownCacheKeysRef.current = new Set(
-      [shownIssuesCacheKey, shownDetailCacheKey, shownHierarchyCacheKey].filter(Boolean),
+      [shownIssuesCacheKey, shownDetailCacheKey].filter(Boolean),
     )
     return () => {
       shownCacheKeysRef.current = new Set()
     }
-  }, [shownDetailCacheKey, shownHierarchyCacheKey, shownIssuesCacheKey])
+  }, [shownDetailCacheKey, shownIssuesCacheKey])
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
     currentUserError,
     [
@@ -776,7 +774,6 @@ export function TeamIssuePage() {
       mutateSWR,
       movedHierarchyKey,
       () => getTeamWorkItemHierarchy(movedTeamId, accessToken),
-      readShownCacheKeys,
     )
     try {
       await guardEnterpriseSession(mutationRequestRunner.run(

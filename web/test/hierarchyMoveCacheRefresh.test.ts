@@ -15,38 +15,24 @@ describe('hierarchy move cache refresh', () => {
     const key = ['team-work-item-hierarchy', 'token', 'team-written'] as const
     await mutate(key, 'before move', { revalidate: false })
 
-    await refreshMovedHierarchyCache(mutate, key, async () => 'after move', () => new Set())
+    await refreshMovedHierarchyCache(mutate, key, async () => 'after move')
 
     expect(await readCached(key)).toBe('after move')
   })
 
-  test('clears the pre-move hierarchy when the read fails and the outline is closed', async () => {
-    const key = ['team-work-item-hierarchy', 'token', 'team-closed'] as const
+  test('clears the pre-move hierarchy when the read fails, even for an open outline', async () => {
+    const key = ['team-work-item-hierarchy', 'token', 'team-failed'] as const
     await mutate(key, 'before move', { revalidate: false })
 
     await refreshMovedHierarchyCache(
       mutate,
       key,
       async () => { throw new Error('Hierarchy read failed.') },
-      () => new Set(),
     )
 
-    // Reopening the outline reads the hierarchy again instead of showing the old placement.
+    // The outline shows its loading or error state, and reopening it reads the hierarchy again,
+    // instead of showing the old placement.
     expect(await readCached(key)).toBeUndefined()
-  })
-
-  test('keeps the hierarchy for its open outline to revalidate when the read fails', async () => {
-    const key = ['team-work-item-hierarchy', 'token', 'team-open'] as const
-    await mutate(key, 'before move', { revalidate: false })
-
-    await refreshMovedHierarchyCache(
-      mutate,
-      key,
-      async () => { throw new Error('Hierarchy read failed.') },
-      () => new Set([unstable_serialize(key)]),
-    )
-
-    expect(await readCached(key)).toBe('before move')
   })
 
   test('clears a list or detail entry the page no longer reads', async () => {

@@ -23,7 +23,7 @@ export function createTeamWorkItemHierarchyKey(accessToken: string, teamId: stri
  * @param accessToken - Access token for the Work Item API.
  * @param teamId - Team whose hierarchy is read.
  * @param enabled - Whether the query runs.
- * @returns SWR state of the hierarchy, with the key it reads (`null` while disabled).
+ * @returns SWR state of the hierarchy.
  */
 export function useTeamWorkItemHierarchy(
   accessToken: string | undefined,
@@ -33,10 +33,9 @@ export function useTeamWorkItemHierarchy(
   const key = accessToken && teamId && enabled
     ? createTeamWorkItemHierarchyKey(accessToken, teamId)
     : null
-  const query = useSWR(
+  return useSWR(
     key,
     ([, token, currentTeamId]) => getTeamWorkItemHierarchy(currentTeamId, token),
     hierarchyQueryConfig,
   )
-  return { ...query, key }
 }
