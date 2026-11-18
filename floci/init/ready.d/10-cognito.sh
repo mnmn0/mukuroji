@@ -176,6 +176,7 @@ if ! aws_local cognito-idp describe-user-pool --user-pool-id "$POOL_ID" >/dev/nu
     --pool-name "$POOL_NAME" \
     --user-pool-tags "floci:override-id=$POOL_ID" \
     --username-attributes email \
+    --admin-create-user-config AllowAdminCreateUserOnly=true \
     --schema \
       Name=directory_id,AttributeDataType=String,Mutable=true,Required=false \
       Name=workspace_id,AttributeDataType=String,Mutable=true,Required=false \
@@ -223,6 +224,7 @@ if [ "$CLIENT_ID" = "None" ] || [ -z "$CLIENT_ID" ]; then
     --client-name "$CLIENT_NAME" \
     --no-generate-secret \
     --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH \
+    --write-attributes name \
     --query UserPoolClient.ClientId \
     --output text)"
 fi

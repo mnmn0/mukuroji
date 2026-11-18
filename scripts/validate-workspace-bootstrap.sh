@@ -140,12 +140,8 @@ validate_password_client_write_contract() {
   # own access token must not be able to rewrite them. Cognito's default WriteAttributes includes
   # email, so the client must set the list explicitly.
   if [[ -z "$write_attributes" || "$write_attributes" == "None" ]]; then
-    if [[ -n "${AWS_ENDPOINT_URL:-}" ]]; then
-      echo "Cognito emulator omitted WriteAttributes; the real user pool client must set them explicitly." >&2
-    else
-      echo "Bootstrap validation failed: Cognito password app client must set WriteAttributes explicitly; the Cognito default lets users write email." >&2
-      exit 1
-    fi
+    echo "Bootstrap validation failed: Cognito password app client must set WriteAttributes explicitly; the Cognito default lets users write email." >&2
+    exit 1
   fi
 
   for protected_attribute in email email_verified custom:directory_id custom:workspace_id; do
@@ -156,12 +152,8 @@ validate_password_client_write_contract() {
   done
 
   if [[ "$admin_create_only" != "True" ]]; then
-    if [[ -n "${AWS_ENDPOINT_URL:-}" && ( -z "$admin_create_only" || "$admin_create_only" == "None" ) ]]; then
-      echo "Cognito emulator omitted AdminCreateUserConfig; the real user pool must allow only administrators to create users." >&2
-    else
-      echo "Bootstrap validation failed: Cognito user pool must set AdminCreateUserConfig.AllowAdminCreateUserOnly to true." >&2
-      exit 1
-    fi
+    echo "Bootstrap validation failed: Cognito user pool must set AdminCreateUserConfig.AllowAdminCreateUserOnly to true." >&2
+    exit 1
   fi
 }
 
