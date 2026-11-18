@@ -169,12 +169,23 @@ function parseDelivery(row: Record<string, unknown> | undefined, recipientKey: s
   const notification = toNotificationItem(row, recipientKey, now, true)
   if (!notification) throw invalidRow()
   if ([row.fileId, row.targetId].some((value) => value !== undefined && (typeof value !== 'string' || !value.trim()))) throw invalidRow()
+  // Rows from older projections carry no day count; a present one must be a safe integer.
+  if (row.daysUntilDue !== undefined && !Number.isSafeInteger(row.daysUntilDue)) throw invalidRow()
+  if (
+    row.workItemReopenedAt !== undefined &&
+    (typeof row.workItemReopenedAt !== 'string' || !Number.isFinite(Date.parse(row.workItemReopenedAt)))
+  ) throw invalidRow()
   return {
     workspaceId: row.workspaceId, memberKey: row.recipientMemberKey, recipientKey, notificationKey,
     attempts: row.slackAttempts, version: row.version, nextAttemptAt: row.slackNextAttemptAt,
     scheduledAt: typeof row.deliveryAfter === 'string' ? row.deliveryAfter : row.slackNextAttemptAt,
     notification, expiresAt: row.expiresAt,
     ...(typeof row.dueDate === 'string' ? { dueDate: row.dueDate } : {}),
+    ...(typeof row.workItemUpdatedAt === 'string'
+      ? { workItemUpdatedAt: row.workItemUpdatedAt }
+      : {}),
+    ...(typeof row.daysUntilDue === 'number' ? { daysUntilDue: row.daysUntilDue } : {}),
+    ...(typeof row.workItemReopenedAt === 'string' ? { workItemReopenedAt: row.workItemReopenedAt } : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
     ...(typeof row.targetId === 'string' ? { targetId: row.targetId } : {}),
   }
