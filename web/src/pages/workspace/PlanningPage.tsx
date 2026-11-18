@@ -54,6 +54,7 @@ import {
 import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
+  extractPlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
   type PlanningUpdateTargetDetailView,
   type PlanningUpdateTargetSummaryView,
@@ -418,11 +419,13 @@ export function PlanningPage() {
   ) => {
     const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
     if (!accessToken || !selectedUpdateTarget || !update) return
+    const mentionMemberKeys = extractPlanningUpdateCommentMentions(bodyMarkdown)
     const input = {
       body: bodyMarkdown,
       id: createPlanningClientId('planning-update-comment'),
       target: selectedUpdateTarget,
       updateVersion: update.version,
+      ...(mentionMemberKeys.length > 0 ? { mentionMemberKeys } : {}),
     }
     setMutationErrorMessage(undefined)
     setIsUpdateCollaborationPending(true)
