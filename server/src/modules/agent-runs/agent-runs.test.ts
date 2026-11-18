@@ -18,6 +18,7 @@ import {
   readAgentRunMutationFence,
   readFinishAgentRunRequest,
   readHeartbeatAgentRunRequest,
+  readResumeAgentRunRequest,
   readStartAgentRunRequest,
   readUpdateAgentSettingsRequest,
   splitAgentRunMutationFence,
@@ -145,14 +146,14 @@ describe('Agent Run domain', () => {
     expect(() => readHeartbeatAgentRunRequest({})).toThrow(AgentRunError)
     expect(() => readHeartbeatAgentRunRequest(undefined)).toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false }))
-      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
+      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
     // Ready statuses and briefs are optional; empty briefs are dropped.
     expect(readUpdateAgentSettingsRequest({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
       readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.', cdk: '  ' },
     })).toEqual({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
+      readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
       fileFailedRunsToTriage: false, fileStalledRunsToTriage: false,
     })
     const base = { expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
@@ -342,6 +343,30 @@ describe('DynamoDB Agent Run store', () => {
     expect(() => store.createTakeOverItems(finishAgentRun(createRun(), 'released', 'member-2', later), successor)).toThrow(TypeError)
   })
 
+  test('keeps the run a resume links to and fails closed on a malformed link', async () => {
+    const resumed = { ...createRun(), resumedFromRunId: 'run_00000000-0000-4000-8000-0000000000aa' }
+    const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(resumed)[0]?.Put?.Item
+    expect(item).toMatchObject({ resumedFromRunId: resumed.resumedFromRunId })
+    const { client } = createClient([
+      { Item: item },
+      { Item: { ...item, resumedFromRunId: 'not-a-run' } },
+      { Item: { ...item, resumedFromRunId: resumed.runId } },
+    ])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    expect(await reader.getRun('workspace-1', 'core', resumed.runId)).toEqual(resumed)
+    await expect(reader.getRun('workspace-1', 'core', resumed.runId)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    await expect(reader.getRun('workspace-1', 'core', resumed.runId)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    expect(readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1' }))
+      .toEqual({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceIdHash: hashAgentInstanceId('laptop-1') })
+    expect(() => readResumeAgentRunRequest({ runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1' })).toThrow(AgentRunError)
+    expect(() => readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', workflowStatusId: 'doing' }))
+      .toThrow(AgentRunError)
+    expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, resumableStatusIds: ['doing'] }))
+      .toMatchObject({ resumableStatusIds: ['doing'] })
+    expect(() => readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, resumableStatusIds: ['doing', 'doing'] }))
+      .toThrow(AgentRunError)
+  })
+
   test('reads runs strictly and fails closed on rows from another Team', async () => {
     const run = createRun()
     const item = store().createStartItems(run)[0]?.Put?.Item
@@ -480,9 +505,9 @@ describe('DynamoDB Agent Run store', () => {
     }
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
-      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, updatedAt: now.toISOString(), updatedBy: 'member-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, updatedAt: now.toISOString(), updatedBy: 'member-1' })
     // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
-    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
+    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { resumableStatusIds: [''] }, { resumableStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
       await expect(new DynamoDbAgentRunStore(client.client, 'AgentRuns').getSettings('workspace-1', 'core'))
         .rejects.toMatchObject({ category: 'temporarily_unavailable' })
@@ -502,7 +527,7 @@ describe('DynamoDB Agent Run store', () => {
       })
     }
     const first = createClient([{}])
-    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false }
+    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], resumableStatusIds: ['doing'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false }
     const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', [])
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
     const command = first.commands[0]

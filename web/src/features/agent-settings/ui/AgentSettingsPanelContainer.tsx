@@ -8,6 +8,7 @@ import {
   listAgentAcceptanceCriteriaFieldOptions,
   listAgentProjectBriefTargets,
   listAgentReadyStatusOptions,
+  listAgentResumableStatusOptions,
   type AgentSettingsDraft,
   type AgentSettingsProject,
 } from '../model/agentSettingsForm'
@@ -121,6 +122,7 @@ export function AgentSettingsPanelContainer({
       projectBriefTargets={settings ? listAgentProjectBriefTargets(team?.projects ?? [], settings.projectBriefs) : []}
       readOnly={readOnly}
       readyStatusOptions={listAgentReadyStatusOptions(configuration, draft?.readyStatusIds ?? [])}
+      resumableStatusOptions={listAgentResumableStatusOptions(configuration, draft?.resumableStatusIds ?? [])}
       selectedTeamId={teamId}
       settings={settings}
       t={t}

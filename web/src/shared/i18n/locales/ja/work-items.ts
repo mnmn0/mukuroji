@@ -711,6 +711,8 @@ export const workItemsMessages = {
   'workItems.agentRuns.releaseConfirm': 'この実行を解放しますか。エージェントは以後このタスクを更新できなくなります。',
   'workItems.agentRuns.releaseError': '実行を解放できませんでした。権限と最新の状態を確認してください。',
   'workItems.agentRuns.stalledHint': '期限内に操作がありません。エージェントの状況を確認し、必要なら解放してください。',
+  'workItems.agentRuns.resumed': '再開',
+  'workItems.agentRuns.resumedHint': '前の Run の後に、同じ担当者のエージェントが再開した Run です。',
   'workItems.agentRuns.state.running': '処理中',
   'workItems.agentRuns.state.stalled': '停滞',
   'workItems.agentRuns.state.completed': '完了',

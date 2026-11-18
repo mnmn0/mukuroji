@@ -50,7 +50,14 @@ export type AgentTaskScope = {
 export type OtherAgentRun = Pick<AgentRunRecord, 'runId' | 'workItemId' | 'runtime' | 'agentName' | 'startedAt' | 'leaseExpiresAt' | 'stalled'>
 
 /** Why a candidate task was not selected. */
-export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready'
+export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready' | 'not_resumable'
+
+/**
+ * Outcomes of a task's newest run that make a started task a resume candidate: the agent paused it,
+ * or completed its run and a person sent the task back to work. A failed or released run waits for a
+ * person instead.
+ */
+const resumableOutcomes: ReadonlySet<string> = new Set(['paused', 'completed'])
 
 /** Maximum number of skipped candidates reported by task selection. */
 const maximumSkippedReports = 5
@@ -370,6 +377,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           if (holder && (await claimedRun(id, true))?.runId !== holder.runId) {
             throw new AgentTaskError('agent_run_conflict', 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.')
           }
+          if (!holder) {
+            throw new AgentTaskError('invalid_transition', 'The task is already started and no agent holds it. To continue it, call resume_task with its revision instead of start_task.')
+          }
         }
         throw new AgentTaskError('invalid_transition', 'The task is not in a state that permits this operation. Reload its current status.')
       }
@@ -398,6 +408,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           leaseMinutes: agentSettings.leaseMinutes,
           allowTakeoverAfterLeaseExpiry: agentSettings.allowTakeoverAfterLeaseExpiry,
           readyStatusIds: agentSettings.readyStatusIds,
+          resumableStatusIds: agentSettings.resumableStatusIds,
           requireAcceptanceCriteria: agentSettings.requireAcceptanceCriteria,
           ...(agentSettings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: agentSettings.acceptanceCriteriaFieldId }),
         },
@@ -440,7 +451,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const [acceptanceCriteria, effort] = await Promise.all([api.acceptanceCriteria(id), api.effort(id)])
       return { task, acceptanceCriteria, effort: effort ?? null, blockers: await blockers(task), activeRun }
     },
-    /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
+    /**
+     * Reports this instance's active run first, then offers a paused or sent-back started task for
+     * resume, then selects ready work; candidates are ordered by priority, deadline, creation time, and ID.
+     */
     async next(input: AgentTaskFilters) {
       const [queued, settings] = await Promise.all([queue(input), api.agentSettings()])
       const tasks = queued.sort(compareTasks)
@@ -453,6 +467,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         .map((run) => tasks.find((task) => task.id === run.workItemId && task.statusCategory === 'started'))
         .find((task) => task !== undefined)
       if (resumed) return { action: 'in_progress', task: resumed, blockedCount: 0, skipped: [], ...runSummary }
+      const resumableStatusIds = new Set(settings.resumableStatusIds)
       const skipped: { taskId: string; reason: SkippedTaskReason }[] = []
       /**
        * Records a skipped task while the report stays within its size limit.
@@ -465,6 +480,18 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       }
       let blockedCount = 0
       let dependencyReads = 0
+      // Paused or sent-back work comes before new work, so started tasks are offered for resume first.
+      for (const task of tasks) {
+        if (task.statusCategory !== 'started' || claimed.has(task.id)) continue
+        dependencyReads += 1
+        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
+        // A started task without a run, or whose newest run failed or was released, waits for a person.
+        const latest = await api.latestRun(task.id)
+        if (latest === undefined || latest.state !== 'finished' || !resumableOutcomes.has(latest.outcome ?? '')) continue
+        // The server rejects a resume from any other status, so such tasks are never offered.
+        if (resumableStatusIds.size > 0 && !resumableStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_resumable'); continue }
+        return { action: 'resume', task, resumedFromRun: latest, blockedCount, skipped, ...runSummary }
+      }
       for (const task of tasks) {
         if (task.statusCategory !== 'unstarted' && task.statusCategory !== 'backlog') continue
         if (claimed.has(task.id)) { skip(task.id, 'active_run'); continue }
@@ -603,6 +630,35 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     async takeOver(id: string, runId: string, key: string) {
       await owned(id)
       return api.takeOverRun(id, runId, { runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId }, key)
+    },
+    /**
+     * Resumes a started task that no run claims by starting a new run for this instance, linked to the
+     * task's newest earlier run. The server enforces the assignee, the resumable statuses, and the revision.
+     *
+     * @param id - Task ID.
+     * @param expectedRevision - Revision read before deciding to resume.
+     * @param key - Idempotency key of the resume.
+     * @returns This instance's new run and the earlier run it resumes, if any.
+     */
+    async resume(id: string, expectedRevision: number, key: string) {
+      const task = await owned(id)
+      if (expectedRevision > task.revision) {
+        throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before resuming it.')
+      }
+      // A stale revision is forwarded unchanged so the API can replay a successful receipt.
+      if (task.revision === expectedRevision) {
+        if (task.statusCategory !== 'started') {
+          throw new AgentTaskError('invalid_transition', 'Only a started task can be resumed. Use start_task for backlog or todo work.')
+        }
+        const own = await claimedRun(id, true)
+        if (own) {
+          throw new AgentTaskError('already_running', 'This instance already holds an active run on this task. Continue it with that runId instead of resuming.')
+        }
+        if (await claimedRun(id, false)) {
+          throw new AgentTaskError('agent_run_conflict', 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.')
+        }
+      }
+      return api.resumeRun(id, { expectedRevision, runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId }, key)
     },
     /** Reads existing discussion without changing the task description or state. */
     async comments(id: string, cursor?: string, limit?: number) {

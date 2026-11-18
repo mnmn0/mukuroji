@@ -4,6 +4,7 @@ import {
   hasWorkItemAcceptanceCriteria,
   type AgentRun,
   type ReportAgentRunResponse,
+  type ResumeAgentRunResponse,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
@@ -265,6 +266,55 @@ async function createHolderConflict(principal: WorkspacePrincipal, teamId: strin
   const holder = await workItemDependencies.agentRuns.getRun(principal.directoryId, teamId, runId)
   if (!holder || holder.state !== 'active') return createAgentRunIntegrityError()
   return createAgentRunConflictError(describeHoldingRun(holder, now))
+}
+
+/**
+ * Rejects a resume that the Work Item or the Team's settings do not allow: the caller must be the
+ * assignee, the Work Item must be in a started status the Team marks as resumable, and it must still
+ * be at the revision the caller read.
+ *
+ * @param principal - Authorized writer.
+ * @param issue - Work Item as read.
+ * @param issue.assigneeUserId - Member responsible for the Work Item.
+ * @param issue.statusCategory - Category of the Work Item's status.
+ * @param issue.workflowStatusId - The Work Item's status.
+ * @param issue.revision - Revision that was read.
+ * @param expectedRevision - Revision the caller read before deciding to resume.
+ * @param resumableStatusIds - Started statuses the Team allows resuming from; empty means any.
+ */
+function requireResumable(
+  principal: WorkspacePrincipal,
+  issue: {
+    /** Member responsible for the Work Item. */
+    assigneeUserId: string
+    /** Category of the Work Item's status. */
+    statusCategory: string
+    /** The Work Item's status. */
+    workflowStatusId?: string
+    /** Revision that was read. */
+    revision: number
+  },
+  expectedRevision: number,
+  resumableStatusIds: readonly string[],
+): void {
+  if (issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
+  if (issue.statusCategory !== 'started') {
+    throw new AgentRunError(
+      'conflict',
+      'An Agent Run resumes only a started Work Item. Start it from a Ready status instead.',
+      { reason: 'invalid_transition' },
+    )
+  }
+  if (resumableStatusIds.length > 0 && !resumableStatusIds.includes(issue.workflowStatusId ?? '')) {
+    throw new AgentRunError(
+      'conflict',
+      'The Work Item is not in a status the Team marks as resumable by agents.',
+      { reason: 'not_resumable' },
+    )
+  }
+  if (issue.revision !== expectedRevision) {
+    throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
+  }
 }
 
 /** Concurrent reads per run listing page. */
@@ -769,6 +819,101 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       return response
     },
 
+    /** Rechecks permissions before a resume receipt replays. */
+    async authorizeResume(credential, teamId, workItemId) {
+      const principal = await resolveWriter(credential, teamId)
+      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+    },
+
+    /**
+     * Starts a new run of the assignee on a started Work Item that no run claims, linked to the Work
+     * Item's newest earlier run. The Work Item itself does not change.
+     */
+    async resume(credential, teamId, workItemId, input, context, idempotency) {
+      const principal = await resolveWriter(credential, teamId)
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      const store = workItemDependencies.agentRuns
+      const settings = await store.getSettings(principal.directoryId, teamId)
+      requireResumable(principal, detail.issue, input.expectedRevision, settings.resumableStatusIds)
+      const now = new Date()
+      const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
+      if (claim) throw await createHolderConflict(principal, teamId, claim.runId, now)
+      // The run history is read again run by run, so the newest run's state is current.
+      const [previous] = (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs
+      if (previous?.state === 'active') throw createAgentRunConflictError(describeHoldingRun(previous, now))
+      const run = createActiveAgentRun({
+        directoryId: principal.directoryId,
+        teamId,
+        workItemId,
+        assigneeUserId: principal.userKey,
+        start: input,
+        credentialId: credential.credentialId,
+        startRevision: detail.issue.revision,
+        leaseMinutes: settings.leaseMinutes,
+        now,
+        ...(previous === undefined ? {} : { resumedFromRunId: previous.runId }),
+      })
+      const path = `/api/v1/work-items/${encodeURIComponent(workItemId)}/agent-runs/resume`
+      const auditContext = createMutationAuditContext({
+        workspaceId: principal.directoryId,
+        actor: { id: principal.actorId, kind: 'user', displayName: principal.userKey },
+        idempotencyKey: context.idempotencyKey,
+        ...(context.correlationId ? { correlationId: context.correlationId } : {}),
+        // The instance ID is a bearer-like secret of the agent; only its runtime and name are audited.
+        request: {
+          method: 'POST',
+          path,
+          query: { teamId },
+          body: { expectedRevision: input.expectedRevision, runtime: input.runtime, agentName: input.agentName },
+        },
+        source: { kind: 'api', requestId: context.requestId, method: 'POST', route: path },
+      })
+      const response: ResumeAgentRunResponse = {
+        run: toAgentRun(run, now),
+        ...(previous === undefined ? {} : { resumedFromRun: toAgentRun(previous, now) }),
+      }
+      const auditPut = createAgentRunAuditPut(
+        auditContext,
+        run,
+        'resumed',
+        previous === undefined
+          ? 'Agent Run resumed a started Work Item that had no earlier run.'
+          : `Agent Run resumed after run ${previous.runId} finished as ${previous.outcome ?? 'unknown'}.`,
+      )
+      const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
+        ?.prepare({ status: 201, body: response })
+      const startItems = store.createStartItems(run)
+      try {
+        await store.commit([
+          ...startItems,
+          // The resume was authorized against this status, assignment, and these settings.
+          createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
+          store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          ...(auditPut ? [auditPut] : []),
+          ...(receipt ? [receipt.transactWriteItem] : []),
+        ], 2)
+      } catch (error) {
+        if (!(error instanceof AgentRunError)) throw error
+        if (error.reason === 'agent_run_not_active') {
+          // The claim put failed: another start, resume, or take over claimed the Work Item first.
+          const latest = await store.getClaim(principal.directoryId, teamId, workItemId)
+          if (latest) throw await createHolderConflict(principal, teamId, latest.runId, new Date())
+          throw new AgentRunError('conflict', 'The Agent Run claim changed during the request. Reload the task and retry.')
+        }
+        if (error.category !== 'temporarily_unavailable') throw error
+        // The Work Item or settings guard failed: report what changed instead of a retryable failure.
+        const latest = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        const latestSettings = await store.getSettings(principal.directoryId, teamId)
+        // A change of assignee, status, or revision is reported as such.
+        requireResumable(principal, latest.detail.issue, detail.issue.revision, latestSettings.resumableStatusIds)
+        if (latestSettings.revision !== settings.revision) {
+          throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the resume.')
+        }
+        throw error
+      }
+      return response
+    },
+
     /** Reads the run-governing Agent settings for a Team the caller can see. */
     async getSettings(credential, teamId) {
       const principal = await resolveReader(credential, teamId)
@@ -797,6 +942,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         teamId: settings.teamId,
         revision: settings.revision,
         readyStatusIds: settings.readyStatusIds,
+        resumableStatusIds: settings.resumableStatusIds,
         requireAcceptanceCriteria: settings.requireAcceptanceCriteria,
         ...(settings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: settings.acceptanceCriteriaFieldId }),
         ...(settings.brief === undefined ? {} : { brief: settings.brief }),

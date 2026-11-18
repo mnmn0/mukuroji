@@ -19,6 +19,7 @@ import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
   createSavedAgentSettings,
+  isAgentRunId,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
@@ -583,7 +584,23 @@ function parseRun(
     reportCount: storedInteger(item, 'reportCount'),
     ...readLastReport(item),
     ...(item.stallTriagedAt === undefined ? {} : { stallTriagedAt: storedTimestamp(item, 'stallTriagedAt') }),
+    ...readResumedFromRunId(item, runId),
   }
+}
+
+/**
+ * Reads the earlier run a resumed run links to.
+ *
+ * @param item - Stored run row.
+ * @param runId - ID of the run the row stores.
+ * @returns The linked run ID, or nothing when the run was not started by a resume.
+ */
+function readResumedFromRunId(item: Record<string, unknown>, runId: string): Pick<StoredAgentRun, 'resumedFromRunId'> {
+  if (item.resumedFromRunId === undefined) return {}
+  const resumedFromRunId = storedString(item, 'resumedFromRunId')
+  // A run resumes an earlier run of the same Work Item, never itself.
+  if (!isAgentRunId(resumedFromRunId) || resumedFromRunId === runId) throw createAgentRunIntegrityError()
+  return { resumedFromRunId }
 }
 
 /**
@@ -782,6 +799,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry &&
     saved.readyStatusIds.length === update.readyStatusIds.length &&
     saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
+    saved.resumableStatusIds.length === update.resumableStatusIds.length &&
+    saved.resumableStatusIds.every((id, index) => id === update.resumableStatusIds[index]) &&
     saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
     saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
@@ -852,10 +871,13 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
   // Rows saved before Ready statuses and briefs existed lack them; any other value, null included, is corrupt.
   const readyStatusIds = item.readyStatusIds === undefined ? [] : item.readyStatusIds
+  const resumableStatusIds = item.resumableStatusIds === undefined ? [] : item.resumableStatusIds
   const projectBriefs = item.projectBriefs === undefined ? {} : item.projectBriefs
   if (
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
+    !Array.isArray(resumableStatusIds) ||
+    !resumableStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     (item.brief !== undefined && (typeof item.brief !== 'string' || item.brief === '')) ||
     (item.requireAcceptanceCriteria !== undefined && typeof item.requireAcceptanceCriteria !== 'boolean') ||
     (item.fileFailedRunsToTriage !== undefined && typeof item.fileFailedRunsToTriage !== 'boolean') ||
@@ -878,6 +900,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
+    resumableStatusIds,
     requireAcceptanceCriteria: item.requireAcceptanceCriteria === true,
     ...(typeof item.acceptanceCriteriaFieldId === 'string' ? { acceptanceCriteriaFieldId: item.acceptanceCriteriaFieldId } : {}),
     ...(typeof item.brief === 'string' ? { brief: item.brief } : {}),

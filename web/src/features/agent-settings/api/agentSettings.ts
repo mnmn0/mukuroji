@@ -76,6 +76,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     leaseMinutes,
     readyStatusIds,
     requireAcceptanceCriteria,
+    resumableStatusIds,
     revision,
     teamId,
     updatedAt,
@@ -89,6 +90,8 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     typeof allowTakeoverAfterLeaseExpiry !== 'boolean' ||
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every(isNonEmptyString) ||
+    // Servers older than resuming omit the list, which then reads as any started status.
+    (resumableStatusIds !== undefined && (!Array.isArray(resumableStatusIds) || !resumableStatusIds.every(isNonEmptyString))) ||
     typeof requireAcceptanceCriteria !== 'boolean' ||
     // Servers older than Triage filing omit the flags, which then read as off.
     (fileFailedRunsToTriage !== undefined && typeof fileFailedRunsToTriage !== 'boolean') ||
@@ -108,6 +111,7 @@ export function readAgentSettings(value: unknown): AgentSettings | undefined {
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...readyStatusIds],
+    resumableStatusIds: Array.isArray(resumableStatusIds) ? resumableStatusIds.filter(isNonEmptyString) : [],
     requireAcceptanceCriteria,
     ...(acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId }),
     ...(brief === undefined ? {} : { brief }),

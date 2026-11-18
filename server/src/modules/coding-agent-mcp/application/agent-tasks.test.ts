@@ -190,6 +190,40 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return { run: publicRun(run), supersededRun: publicRun(superseded) }
     },
     /**
+     * Resumes a started task that no run claims, linked to its newest run, as the server does.
+     *
+     * @param id - Task ID.
+     * @param input - Revision and identity of the caller.
+     * @returns The new run and the run it resumes.
+     */
+    async resumeRun(id, input) {
+      const current = records.get(id)
+      if (!current || current.revision !== input.expectedRevision) throw new AgentTaskError('conflict', 'Changed')
+      if (current.statusCategory !== 'started') throw new AgentTaskError('invalid_transition', 'Not started')
+      if ([...runs.values()].some((run) => run.workItemId === id && run.state === 'active')) throw new AgentTaskError('agent_run_conflict', 'Held')
+      const previous = [...runs.values()].filter((run) => run.workItemId === id).at(-1)
+      runSequence += 1
+      const run = {
+        schemaVersion: 1 as const, runId: `run_00000000-0000-4000-8000-${String(runSequence).padStart(12, '0')}`,
+        teamId: 'team', workItemId: id, assigneeUserId: 'agent-member', runtime: input.runtime, agentName: input.agentName,
+        state: 'active' as const, startRevision: current.revision, leaseMinutes: 30, startedAt: '2026-09-01T02:00:00.000Z',
+        lastHeartbeatAt: '2026-09-01T02:00:00.000Z', leaseExpiresAt: '2026-09-01T02:30:00.000Z', stalled: false, reportCount: 0,
+        instanceId: input.instanceId,
+      }
+      runs.set(run.runId, run)
+      return { run: publicRun(run), ...(previous === undefined ? {} : { resumedFromRun: publicRun(previous) }) }
+    },
+    /**
+     * Returns the newest run of a task.
+     *
+     * @param id - Task ID.
+     * @returns The newest run, or undefined.
+     */
+    async latestRun(id) {
+      const run = [...runs.values()].filter((candidate) => candidate.workItemId === id).at(-1)
+      return run === undefined ? undefined : publicRun(run)
+    },
+    /**
      * Returns the active run of a task when it matches the requested owner.
      *
      * @param id - Task ID.
@@ -219,7 +253,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       return api.getRun(runId)
     },
     async agentSettings() {
-      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
+      return { schemaVersion: 1, teamId: 'team', revision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {} }
     },
     async acceptanceCriteria() { return [] },
     async effort() { return undefined },
@@ -235,6 +269,59 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
 }
 
 describe('agent task lifecycle', () => {
+  test('offers a paused started task for resume before new work and resumes it with a linked run', async () => {
+    const rows = [task('paused', { priority: 'low' }), task('fresh', { priority: 'high' })]
+    const { service, records } = fixture(rows)
+    const started = await service.transition('paused', 1, 'coding', 'start', '00000000-0000-4000-8000-000000000101')
+    if (!('run' in started)) throw new Error('start_task must return a run.')
+    await service.finishRun(started.run.runId, 'paused', '00000000-0000-4000-8000-000000000102')
+    // A started task without a holder is resumed, not started again.
+    await expect(service.transition('paused', 2, 'coding', 'start', '00000000-0000-4000-8000-000000000103'))
+      .rejects.toMatchObject({ code: 'invalid_transition', message: expect.stringContaining('resume_task') })
+    expect(await service.next({})).toMatchObject({
+      action: 'resume', task: { id: 'paused' }, resumedFromRun: { runId: started.run.runId, outcome: 'paused' },
+    })
+    const resumed = await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104')
+    expect(resumed.resumedFromRun?.runId).toBe(started.run.runId)
+    expect(resumed.run).toMatchObject({ state: 'active', workItemId: 'paused' })
+    expect(records.get('paused')?.workflowStatusId).toBe('coding')
+    // The new run is this instance's run, so the task is in progress and a structured report reaches it.
+    expect(await service.next({})).toMatchObject({ action: 'in_progress', task: { id: 'paused' } })
+    expect(await service.report('paused', { message: 'Fixed review comments', kind: 'verification', verifications: [{ command: 'bun test', status: 'passed' }] }, '00000000-0000-4000-8000-000000000105'))
+      .toMatchObject({ report: { runId: resumed.run.runId } })
+    await expect(service.resume('paused', 2, '00000000-0000-4000-8000-000000000106')).rejects.toMatchObject({ code: 'already_running' })
+  })
+
+  test('does not offer started tasks whose newest run failed or that are outside the resumable statuses', async () => {
+    const rows = [task('failed', { priority: 'high' }), task('review', { priority: 'high' }), task('fresh', { priority: 'low' })]
+    const { service } = fixture(rows, {
+      async agentSettings() {
+        return {
+          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+          readyStatusIds: [], resumableStatusIds: ['coding'], requireAcceptanceCriteria: false, projectBriefs: {},
+        }
+      },
+    })
+    const failed = await service.transition('failed', 1, 'coding', 'start', '00000000-0000-4000-8000-000000000201')
+    const review = await service.transition('review', 1, 'review', 'start', '00000000-0000-4000-8000-000000000202')
+    if (!('run' in failed) || !('run' in review)) throw new Error('start_task must return a run.')
+    await service.finishRun(failed.run.runId, 'failed', '00000000-0000-4000-8000-000000000203')
+    await service.finishRun(review.run.runId, 'paused', '00000000-0000-4000-8000-000000000204')
+    expect(await service.next({})).toMatchObject({
+      action: 'start', task: { id: 'fresh' }, skipped: [{ taskId: 'review', reason: 'not_resumable' }],
+    })
+    expect((await service.configuration()).agentSettings.resumableStatusIds).toEqual(['coding'])
+  })
+
+  test('refuses to resume a task another instance holds or that is not started', async () => {
+    const { api, service } = fixture([task('held'), task('todo')])
+    const other = createAgentTasks(api, { ...baseScope, instanceId: 'instance-b' })
+    await other.transition('held', 1, 'coding', 'start', '00000000-0000-4000-8000-000000000301')
+    await expect(service.resume('held', 2, '00000000-0000-4000-8000-000000000302')).rejects.toMatchObject({ code: 'agent_run_conflict' })
+    await expect(service.resume('todo', 1, '00000000-0000-4000-8000-000000000303')).rejects.toMatchObject({ code: 'invalid_transition' })
+    await expect(service.resume('todo', 5, '00000000-0000-4000-8000-000000000304')).rejects.toMatchObject({ code: 'conflict' })
+  })
+
   test('selects ready work across empty pages by priority, then due date, while skipping blockers', async () => {
     const rows = [task('low', { priority: 'low' }), task('later', { priority: 'high', dueDate: '2026-10-03' }),
       task('next', { priority: 'high', dueDate: '2026-10-01' }), task('blocked', { priority: 'high', dueDate: '2026-09-01', relationIds: ['blockedBy:missing'] })]
@@ -252,7 +339,7 @@ describe('agent task lifecycle', () => {
   test('offers only tasks in a ready status and returns the Team and Project briefs', async () => {
     const settings = {
       schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
+      readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Add a story.' },
     }
     const rows = [task('todo-first', { priority: 'high' }), task('ready-later', { workflowStatusId: 'ready', priority: 'low' })]
     const { api, service } = fixture(rows, { async agentSettings() { return settings } })
@@ -277,7 +364,7 @@ describe('agent task lifecycle', () => {
   test('skips tasks without acceptance criteria when the Team requires them and marks criteria by ID', async () => {
     const settings = {
       schemaVersion: 1 as const, teamId: 'team', revision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', projectBriefs: {},
+      readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', projectBriefs: {},
     }
     const criteria = [
       { id: 'a'.repeat(32), text: 'Tests pass', satisfied: false },

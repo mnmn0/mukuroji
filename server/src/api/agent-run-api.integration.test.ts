@@ -960,6 +960,129 @@ describe('public Agent Run service', () => {
     await expect(takeOverDuring(undefined, 'unrelated')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
+  test('resumes a started Work Item after a paused run with a linked run, audit, and history', async () => {
+    const previous = process.env.AUDIT_EVENTS_TABLE_NAME
+    process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEvents'
+    try {
+      const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+      const held = createHeldRun('task-1', 'laptop-1')
+      store.seed(held)
+      store.applyTransactItems(store.createCloseItems(finishAgentRun(held, 'paused', 'agent', new Date()), held.instanceIdHash, true))
+      const receipts: unknown[] = []
+      setTestAppDependencies({
+        transactions: {
+          /**
+           * Records the receipt request and returns a receipt write for the transaction.
+           *
+           * @param input - Receipt to write.
+           * @returns The receipt write.
+           */
+          async prepareIdempotencyCompletionTransactWrite(input) {
+            receipts.push(input.response)
+            return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+          },
+        },
+      })
+      const committed: unknown[][] = []
+      const commit = store.commit.bind(store)
+      store.commit = async (items, fenceItemCount) => {
+        committed.push([...items])
+        return commit(items, fenceItemCount)
+      }
+      const service = createCanonicalPublicAgentRunService()
+      /**
+       * Resumes the Work Item as an instance.
+       *
+       * @param instanceId - Raw instance ID resuming the Work Item.
+       * @param key - Idempotency key.
+       * @param expectedRevision - Revision the agent read.
+       * @returns The resume response.
+       */
+      const resume = (instanceId: string, key: string, expectedRevision = 1) => runWithTestAppDependencies(() => service.resume(
+        credential, 'core-team', 'task-1',
+        { expectedRevision, runtime: 'claude-code', agentName: 'Claude', instanceIdHash: hashAgentInstanceId(instanceId) },
+        { requestId: 'resume', idempotencyKey: key },
+        { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+      ))
+      await expect(resume('laptop-2', 'stale', 2)).rejects.toMatchObject({ status: 409 })
+      const resumed = await resume('laptop-2', 'resume-1')
+      expect(resumed.resumedFromRun).toMatchObject({ runId: held.runId, state: 'finished', outcome: 'paused' })
+      expect(resumed.run).toMatchObject({ workItemId: 'task-1', state: 'active', runtime: 'claude-code', startRevision: 1 })
+      // The closed Public API schema does not carry the link; the stored run and the Web view do.
+      expect(resumed.run).not.toHaveProperty('resumedFromRunId')
+      expect(store.state.runs.get(`${workspaceId}|core-team|${resumed.run.runId}`)).toMatchObject({ resumedFromRunId: held.runId })
+      expect(receipts).toEqual([{ status: 201, body: resumed }])
+      expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({
+        runId: resumed.run.runId, instanceIdHash: hashAgentInstanceId('laptop-2'),
+      })
+      const audit = (committed[0] ?? []).flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('Put' in item)) return []
+        const put = item.Put
+        if (typeof put !== 'object' || put === null || !('TableName' in put) || put.TableName !== 'AuditEvents') return []
+        return 'Item' in put ? [put.Item] : []
+      })
+      expect(audit).toMatchObject([{ eventType: 'agent-run.resumed', metadata: { runId: resumed.run.runId, resumedFromRunId: held.runId } }])
+      // A second resume meets the new run's claim.
+      await expect(resume('laptop-3', 'resume-2')).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+      const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', {
+        headers: { Authorization: 'Bearer test-token' },
+      })
+      expect(await history.json()).toMatchObject({ items: [
+        { runId: resumed.run.runId, state: 'active', resumedFromRunId: held.runId },
+        { runId: held.runId, state: 'finished', outcome: 'paused' },
+      ] })
+    } finally {
+      if (previous === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
+      else process.env.AUDIT_EVENTS_TABLE_NAME = previous
+    }
+  })
+
+  test('resumes only a started Work Item of the caller in a resumable status', async () => {
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Resumes the Work Item as a new instance.
+     *
+     * @param key - Idempotency key.
+     * @returns The resume response.
+     */
+    const resume = (key: string) => runWithTestAppDependencies(() => service.resume(
+      credential, 'core-team', 'task-1',
+      { expectedRevision: 1, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'resume', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    configureUnstartedAssignedWorkItem({ statusCategory: 'unstarted' })
+    await expect(resume('unstarted')).rejects.toMatchObject({ reason: 'invalid_transition' })
+    configureUnstartedAssignedWorkItem({ statusCategory: 'started', assigneeUserId: 'sato@example.com' })
+    await expect(resume('other-assignee')).rejects.toMatchObject({ reason: 'agent_run_forbidden' })
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, resumableStatusIds: ['review'],
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    await expect(resume('not-resumable')).rejects.toMatchObject({ reason: 'not_resumable' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 2, resumableStatusIds: ['in-progress'],
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    // A started Work Item without any earlier run can be resumed explicitly, with no link.
+    const resumed = await resume('no-history')
+    expect(resumed.resumedFromRun).toBeUndefined()
+    expect(store.state.runs.get(`${workspaceId}|core-team|${resumed.run.runId}`)).not.toHaveProperty('resumedFromRunId')
+  })
+
   test('does not take over a run on a Work Item that is no longer started', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'unstarted' })
     store.state.settings.set(`${workspaceId}|core-team`, {
@@ -1553,7 +1676,7 @@ describe('Web Agent Run routes', () => {
     expect(await read.json()).toMatchObject({ brief: 'Team brief', projectBriefs: { refero: 'Visible brief' } })
     const service = createCanonicalPublicAgentRunService()
     expect((await runWithTestAppDependencies(() => service.getContext(credential, 'core-team')))).toEqual({
-      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], requireAcceptanceCriteria: false,
+      schemaVersion: 1, teamId: 'core-team', revision: 1, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false,
       brief: 'Team brief', projectBriefs: { refero: 'Visible brief' },
     })
     // The closed run-settings schema keeps its original fields.

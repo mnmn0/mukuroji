@@ -12,6 +12,7 @@ import {
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
   AGENT_SETTINGS_MAX_READY_STATUSES,
+  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   AGENT_SETTINGS_SCHEMA_VERSION,
   type AgentRun,
   type AgentRunFinishOutcome,
@@ -74,6 +75,8 @@ export type StoredAgentRun = {
   lastReportAt?: string
   /** Time the run was filed to Triage as stalled; a stalled run is filed once. */
   stallTriagedAt?: string
+  /** Earlier run of the same Work Item that this run resumed, when a resume started it. */
+  resumedFromRunId?: string
 }
 
 /** Persisted claim that fences one Work Item to its single active run. */
@@ -110,6 +113,12 @@ export type ValidatedAgentRunStart = Omit<StartAgentRunRequest, 'instanceId'> & 
 
 /** Validated take over request, with the instance ID already hashed. */
 export type ValidatedAgentRunTakeOver = Omit<ValidatedAgentRunStart, 'expectedRevision' | 'workflowStatusId'>
+
+/** Validated resume request, with the instance ID already hashed. */
+export type ValidatedAgentRunResume = ValidatedAgentRunTakeOver & {
+  /** Work Item revision the agent read before deciding to resume. */
+  expectedRevision: number
+}
 
 /** Validated mutation fence, with the instance ID already hashed. */
 export type ValidatedAgentRunFence = {
@@ -294,6 +303,21 @@ export function readTakeOverAgentRunRequest(value: unknown): ValidatedAgentRunTa
 }
 
 /**
+ * Validates a resume request body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Revision, runtime, agent name, and the hash of the resuming instance.
+ */
+export function readResumeAgentRunRequest(value: unknown): ValidatedAgentRunResume {
+  if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent Run resume body is required.')
+  assertKnownFields(value, ['expectedRevision', 'runtime', 'agentName', 'instanceId'], 'Agent Run resume')
+  return {
+    expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', false),
+    ...readAgentIdentity(value),
+  }
+}
+
+/**
  * Validates the runtime, display name, and instance of an agent.
  *
  * @param value - Untrusted JSON object.
@@ -458,6 +482,8 @@ export function createActiveAgentRun(input: {
   now: Date
   /** Run ID; generated when omitted. */
   runId?: string
+  /** Earlier run of the Work Item that the new run resumes. */
+  resumedFromRunId?: string
 }): StoredAgentRun {
   const startedAt = input.now.toISOString()
   return {
@@ -478,6 +504,7 @@ export function createActiveAgentRun(input: {
     lastHeartbeatAt: startedAt,
     leaseExpiresAt: calculateLeaseExpiry(input.now, input.leaseMinutes),
     reportCount: 0,
+    ...(input.resumedFromRunId === undefined ? {} : { resumedFromRunId: input.resumedFromRunId }),
   }
 }
 
@@ -555,6 +582,7 @@ export function createDefaultAgentSettings(teamId: string): AgentSettings {
     leaseMinutes: AGENT_RUN_DEFAULT_LEASE_MINUTES,
     allowTakeoverAfterLeaseExpiry: false,
     readyStatusIds: [],
+    resumableStatusIds: [],
     requireAcceptanceCriteria: false,
     projectBriefs: {},
     fileFailedRunsToTriage: false,
@@ -585,23 +613,25 @@ function readSettingsIdentifier(value: unknown, pointer: string): string {
 }
 
 /**
- * Reads the workflow status IDs agents may start from.
+ * Reads a list of workflow status IDs from the settings, such as the statuses agents may start from.
  *
  * @param value - Untrusted value; undefined means none.
+ * @param field - Settings field the list belongs to.
+ * @param maximum - Largest number of status IDs the field holds.
  * @returns Distinct status IDs in the order given.
  */
-function readReadyStatusIds(value: unknown): string[] {
+function readStatusIds(value: unknown, field: 'readyStatusIds' | 'resumableStatusIds', maximum: number): string[] {
   if (value === undefined) return []
-  if (!Array.isArray(value) || value.length > AGENT_SETTINGS_MAX_READY_STATUSES) {
+  if (!Array.isArray(value) || value.length > maximum) {
     throw new AgentRunError(
       'validation_failed',
-      `readyStatusIds must be a list of at most ${AGENT_SETTINGS_MAX_READY_STATUSES} status IDs.`,
-      { pointer: '/readyStatusIds' },
+      `${field} must be a list of at most ${maximum} status IDs.`,
+      { pointer: `/${field}` },
     )
   }
-  const ids = value.map((id, index) => readSettingsIdentifier(id, `/readyStatusIds/${index}`))
+  const ids = value.map((id, index) => readSettingsIdentifier(id, `/${field}/${index}`))
   if (new Set(ids).size !== ids.length) {
-    throw new AgentRunError('validation_failed', 'readyStatusIds must not repeat a status ID.', { pointer: '/readyStatusIds' })
+    throw new AgentRunError('validation_failed', `${field} must not repeat a status ID.`, { pointer: `/${field}` })
   }
   return ids
 }
@@ -661,7 +691,7 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
   assertKnownFields(
     value,
     [
-      'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds',
+      'expectedRevision', 'leaseMinutes', 'allowTakeoverAfterLeaseExpiry', 'readyStatusIds', 'resumableStatusIds',
       'requireAcceptanceCriteria', 'acceptanceCriteriaFieldId', 'brief', 'projectBriefs',
       'fileFailedRunsToTriage', 'fileStalledRunsToTriage',
     ],
@@ -705,7 +735,8 @@ export function readUpdateAgentSettingsRequest(value: unknown): ValidatedAgentSe
     expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', true),
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: value.allowTakeoverAfterLeaseExpiry,
-    readyStatusIds: readReadyStatusIds(value.readyStatusIds),
+    readyStatusIds: readStatusIds(value.readyStatusIds, 'readyStatusIds', AGENT_SETTINGS_MAX_READY_STATUSES),
+    resumableStatusIds: readStatusIds(value.resumableStatusIds, 'resumableStatusIds', AGENT_SETTINGS_MAX_RESUMABLE_STATUSES),
     requireAcceptanceCriteria: value.requireAcceptanceCriteria === true,
     ...(acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId }),
     ...(brief === undefined ? {} : { brief }),
@@ -751,6 +782,8 @@ export function assertAgentSettingsBriefLimits({ brief, projectBriefs }: {
 export type ValidatedAgentSettingsUpdate = UpdateAgentSettingsRequest & {
   /** Status IDs agents may start from. */
   readyStatusIds: string[]
+  /** Started status IDs agents may resume from. */
+  resumableStatusIds: string[]
   /** Whether only Work Items with acceptance criteria are ready. */
   requireAcceptanceCriteria: boolean
   /** Non-empty briefs per Project ID. */
@@ -788,6 +821,7 @@ export function createSavedAgentSettings(
     leaseMinutes: update.leaseMinutes,
     allowTakeoverAfterLeaseExpiry: update.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...update.readyStatusIds],
+    resumableStatusIds: [...update.resumableStatusIds],
     requireAcceptanceCriteria: update.requireAcceptanceCriteria,
     ...(update.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: update.acceptanceCriteriaFieldId }),
     ...(update.brief === undefined ? {} : { brief: update.brief }),
