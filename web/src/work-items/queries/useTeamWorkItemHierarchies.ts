@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getTeamWorkItemHierarchies } from '../api/hierarchy'
+import { loadTeamWorkItemHierarchies } from './teamWorkItemHierarchies'
 
 // Reading several whole Team trees is heavy, so focusing the window does not re-read them.
 const hierarchiesQueryConfig = {
@@ -37,7 +37,7 @@ export function useTeamWorkItemHierarchies(
     : null
   return useSWR(
     key,
-    ([, token, ...currentTeamIds]) => getTeamWorkItemHierarchies(currentTeamIds, token),
+    ([, token, ...currentTeamIds]) => loadTeamWorkItemHierarchies(currentTeamIds, token),
     hierarchiesQueryConfig,
   )
 }

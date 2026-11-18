@@ -9,27 +9,7 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
-import { readRecord } from '../../shared/api/jsonValidation'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
-import { getTeamWorkItemHierarchies } from '../../work-items/api/hierarchy'
-import {
-  createWorkItemOutlineKey,
-  createWorkItemWbsNumberIndex,
-} from '../../work-items/model/workItemHierarchy'
-
-/**
- * Work Item export response と download metadata です。
- */
-export type DeveloperExportFile = {
-  /**
-   * Browser download に渡す response body です。
-   */
-  blob: Blob
-  /**
-   * UI が export 日と format から生成した file 名です。
-   */
-  fileName: string
-}
 
 const developerApiBaseUrl = resolveApiBaseUrl('workspaceWithoutProjects')
 
@@ -77,13 +57,13 @@ export function createDeveloperImport(
 }
 
 /**
- * Work Item export file を Authorization header 付きで取得します。
+ * Export 対象の Work Item を全 page 読みます。
  *
  * @param accessToken - Authorization header に使う access token です。
  * @param format - CSV または JSON の export format です。
- * @returns Browser download に使う Blob と file 名です。
+ * @returns Export 対象の Work Item です。
  */
-export async function exportDeveloperWorkItems(
+export async function listDeveloperExportWorkItems(
   accessToken: string,
   format: DeveloperExportFormat,
 ) {
@@ -119,31 +99,7 @@ export async function exportDeveloperWorkItems(
     cursor = page.nextCursor
   } while (cursor)
 
-  return createDeveloperExportFile(
-    format,
-    workItems,
-    await readDeveloperExportWbsNumbers(accessToken, workItems),
-  )
-}
-
-/**
- * Reads the WBS number of each exported Work Item from its Team's hierarchy.
- *
- * Each Team is read once. A Team whose hierarchy cannot be read, such as one too large for a
- * single tree, leaves its Work Items without a number instead of failing the export.
- *
- * @param accessToken - Authorization header に使う access token です。
- * @param workItems - Exported Work Items.
- * @returns WBS numbers by `createWorkItemOutlineKey` key.
- */
-async function readDeveloperExportWbsNumbers(
-  accessToken: string,
-  workItems: readonly CanonicalWorkItem[],
-): Promise<ReadonlyMap<string, string>> {
-  const teamIds = [...new Set(workItems.map((workItem) => workItem.teamId))]
-  if (teamIds.length === 0) return new Map()
-  const hierarchies = await getTeamWorkItemHierarchies(teamIds, accessToken)
-  return createWorkItemWbsNumberIndex(hierarchies.nodesByTeam)
+  return workItems
 }
 
 async function requestDeveloperExportPage(
@@ -172,132 +128,6 @@ function waitForDeveloperExportRetry(seconds: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, seconds * 1_000)
   })
-}
-
-function createDeveloperExportFile(
-  format: DeveloperExportFormat,
-  workItems: readonly CanonicalWorkItem[],
-  wbsNumbers: ReadonlyMap<string, string>,
-): DeveloperExportFile {
-  const suffix = new Date().toISOString().slice(0, 10)
-  /** Reads the WBS number of one exported Work Item. */
-  const readWbsNumber = (workItem: CanonicalWorkItem) =>
-    wbsNumbers.get(createWorkItemOutlineKey(workItem.teamId, workItem.id))
-  if (format === 'json') {
-    const body = `${JSON.stringify({
-      apiVersion: '2026-07-01',
-      workItems: workItems.map((workItem) => toExportWorkItem(workItem, readWbsNumber(workItem))),
-    }, null, 2)}\n`
-
-    return {
-      blob: new Blob([body], {
-        type: 'application/json; charset=utf-8',
-      }),
-      fileName: `mukuroji-work-items-${suffix}.json`,
-    }
-  }
-
-  const customFieldIds = [...new Set(
-    workItems.flatMap((workItem) =>
-      Object.keys(workItem.customFieldValues)
-    ),
-  )].sort()
-  const headers = [
-    'id',
-    'teamId',
-    'wbsNumber',
-    'title',
-    'description',
-    'assignedProjectId',
-    'assigneeUserId',
-    'workflowStatusId',
-    'statusCategory',
-    'dueDate',
-    'schedule',
-    'priority',
-    'revision',
-    'createdAt',
-    'updatedAt',
-    ...customFieldIds.map(
-      (fieldId) => `customFieldValues.${fieldId}`,
-    ),
-  ]
-  const lines = [
-    headers.map(escapeDeveloperExportCsvValue).join(','),
-    ...workItems.map((workItem) =>
-      headers.map((header) => {
-        const value = header.startsWith('customFieldValues.')
-          ? workItem.customFieldValues[
-              header.slice('customFieldValues.'.length)
-            ]
-          : header === 'wbsNumber'
-            ? readWbsNumber(workItem)
-            : readRecord(workItem)[header]
-
-        return escapeDeveloperExportCsvValue(
-          serializeDeveloperExportCell(value),
-        )
-      }).join(',')
-    ),
-  ]
-
-  return {
-    blob: new Blob(
-      [`\ufeff${lines.join('\r\n')}\r\n`],
-      { type: 'text/csv; charset=utf-8' },
-    ),
-    fileName: `mukuroji-work-items-${suffix}.csv`,
-  }
-}
-
-function toExportWorkItem(workItem: CanonicalWorkItem, wbsNumber: string | undefined) {
-  return {
-    id: workItem.id,
-    teamId: workItem.teamId,
-    ...(wbsNumber ? { wbsNumber } : {}),
-    title: workItem.title,
-    ...(workItem.description
-      ? { description: workItem.description }
-      : {}),
-    ...(workItem.assignedProjectId
-      ? { assignedProjectId: workItem.assignedProjectId }
-      : {}),
-    assigneeUserId: workItem.assigneeUserId,
-    workflowStatusId: workItem.workflowStatusId,
-    statusCategory: workItem.statusCategory,
-    customFieldValues: structuredClone(workItem.customFieldValues),
-    relationIds: [...workItem.relationIds],
-    dueDate: workItem.dueDate,
-    schedule: structuredClone(workItem.schedule),
-    priority: workItem.priority,
-    revision: workItem.revision,
-    createdAt: workItem.createdAt,
-    updatedAt: workItem.updatedAt,
-  }
-}
-
-function serializeDeveloperExportCell(value: unknown) {
-  if (value === undefined || value === null) {
-    return ''
-  }
-  if (
-    Array.isArray(value) ||
-    (typeof value === 'object' && value !== null)
-  ) {
-    return JSON.stringify(value)
-  }
-
-  return String(value)
-}
-
-function escapeDeveloperExportCsvValue(value: string) {
-  const safeValue = /^[\t\r\n ]*[=+\-@]/u.test(value)
-    ? `'${value}`
-    : value
-
-  return /[",\r\n]/u.test(safeValue)
-    ? `"${safeValue.replaceAll('"', '""')}"`
-    : safeValue
 }
 
 function createJsonMutation(

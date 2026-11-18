@@ -17,7 +17,6 @@ import {
   disconnectDeveloperConnector,
   deleteDeveloperExternalLink,
   dryRunDeveloperImport,
-  exportDeveloperWorkItems,
   getDeveloperPlatformResources,
   getPersonalCredentialAdministration,
   listDeveloperExternalLinks,
@@ -34,6 +33,7 @@ import {
   shouldRetainDeveloperPlatformMutationContext,
   updateDeveloperExternalLink,
 } from '../src/developer-platform/api'
+import { exportDeveloperWorkItems } from '../src/developer-platform/queries/developerExport'
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
