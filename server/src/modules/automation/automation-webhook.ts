@@ -276,14 +276,15 @@ export async function sendAutomationWebhookRequest(
 }
 
 /**
- * DNS 検証済み address だけを返す `net` 用 lookup を作ります。
+ * Creates a `net` lookup that only ever answers with the DNS-validated address.
  *
- * Node.js 20 以降は `autoSelectFamily` が既定で有効で、`net` は lookup を
- * `{ all: true }` 付きで呼び、address の配列を期待します。単一 address 形式だけで
- * 応答すると `ERR_INVALID_IP_ADDRESS` で接続前に失敗するため、両方の形式に応答します。
+ * Since Node.js 20, `autoSelectFamily` is enabled by default, so `net` calls the
+ * lookup with `{ all: true }` and expects an array of addresses. Answering only in
+ * the single-address form fails with `ERR_INVALID_IP_ADDRESS` before connecting,
+ * so this lookup answers in both forms.
  *
- * @param resolvedAddress - SSRF policy で検証済みの接続先です。
- * @returns 検証済み address に接続先を固定する lookup です。
+ * @param resolvedAddress - Destination already validated by the SSRF policy.
+ * @returns A lookup that pins every connection to the validated address.
  */
 export function createPinnedAutomationWebhookLookup(
   resolvedAddress: AutomationWebhookResolvedAddress,

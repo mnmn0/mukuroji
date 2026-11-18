@@ -105,13 +105,13 @@ export class UnsafeWebhookUrlError extends Error {
 }
 
 /**
- * Webhook hostname の名前解決そのものが失敗した場合の内部 error です。
+ * Internal error raised when resolving the webhook hostname itself fails.
  *
- * SERVFAIL や resolver の timeout は一時的なことがあるため、禁止 address への解決
- * (終端) とは分け、配信時は retry の対象にします。
+ * SERVFAIL or a resolver timeout can be transient, so this is kept apart from a
+ * resolution to a forbidden address (terminal) and is retried during delivery.
  */
 class WebhookHostnameResolutionError extends Error {
-  /** Resolver 失敗を表す error を作成します。 */
+  /** Creates an error that represents a resolver failure. */
   constructor() {
     super('Webhook hostname could not be resolved.')
     this.name = 'WebhookHostnameResolutionError'
