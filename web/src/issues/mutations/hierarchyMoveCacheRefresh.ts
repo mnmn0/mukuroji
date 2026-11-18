@@ -32,7 +32,9 @@ export async function refreshMovedCacheEntry(
  *
  * When the read fails, the cached pre-move hierarchy is cleared whether or not the outline is
  * open, and an open outline reads it again. The outline then shows its loading or error state
- * instead of the old placement, and no further move is planned from it.
+ * instead of the old placement, and no further move is planned from it. The failure is written
+ * through the same mutation as a success, so a newer hierarchy that another write stored while
+ * this read ran is kept rather than cleared.
  *
  * @param mutate - Global SWR mutator.
  * @param key - Key of the moved Team's hierarchy.
@@ -44,9 +46,11 @@ export async function refreshMovedHierarchyCache<Data>(
   key: Arguments,
   load: () => Promise<Data>,
 ): Promise<void> {
-  try {
-    await mutate(key, load(), { revalidate: false })
-  } catch {
-    await mutate(key, undefined, { revalidate: true })
-  }
+  let failed = false
+  const read = load().catch(() => {
+    failed = true
+    return undefined
+  })
+  await mutate(key, read, { revalidate: false })
+  if (failed) await mutate(key)
 }

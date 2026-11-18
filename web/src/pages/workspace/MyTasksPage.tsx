@@ -367,7 +367,12 @@ export function MyTasksPage() {
         requestSlot,
         visibleMyTasks,
         workItems.configurationsByTeam,
-        moveTaskStatus,
+        // The direct move reports a refusal in its action result, so the board does not repeat it.
+        moveTaskStatus
+          ? (task, workflowStatusId) => moveTaskStatus(task, workflowStatusId, {
+              reportOpenChildrenRefusal: false,
+            })
+          : undefined,
         {
           conflict: t('workspace.myTasks.conflict'),
           failed: t('workspace.myTasks.moveError'),
@@ -675,7 +680,11 @@ export function MyTasksPage() {
       : undefined
 
     try {
-      const updatedTask = await moveTaskStatus(task, workflowStatusId)
+      // A refusal is reported once: by the action result when one is settled below, otherwise by
+      // the board.
+      const updatedTask = await moveTaskStatus(task, workflowStatusId, {
+        reportOpenChildrenRefusal: !(claimedContext && target),
+      })
       if (claimedContext && target) {
         if (isCancelledTeamIssueUpdate(updatedTask)) {
           // The person declined the parent completion warning; nothing failed.

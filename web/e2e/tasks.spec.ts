@@ -4509,8 +4509,16 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ json: createHierarchy(hierarchyMode === 'after', hierarchyMode === 'after' ? 2 : 1) })
     })
     const parentRequests: unknown[] = []
+    const unexpectedParentRequests: string[] = []
     await page.route(/.*\/api\/teams\/core-team\/issues\/[^/]+\/parent$/, async (route) => {
-      parentRequests.push(route.request().postDataJSON())
+      const request = route.request()
+      // Only the moved Work Item's parent PUT counts; any other request is recorded and fails.
+      if (request.method() !== 'PUT' || !new URL(request.url()).pathname.endsWith(`/issues/${movedId}/parent`)) {
+        unexpectedParentRequests.push(`${request.method()} ${request.url()}`)
+        await route.fulfill({ status: 500, json: { code: 'UnexpectedRequest', message: request.url() } })
+        return
+      }
+      parentRequests.push(request.postDataJSON())
       // Every hierarchy read after the move fails, including the one the move itself makes.
       hierarchyMode = 'failing'
       await route.fulfill({
@@ -4532,6 +4540,7 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => parentRequests).toEqual([
       expect.objectContaining({ parentWorkItemId: parentId, expectedGraphRevision: 1 }),
     ])
+    expect(unexpectedParentRequests).toEqual([])
 
     // The open outline drops the pre-move numbers and reports the failed read.
     await expect(page.getByTestId('team-issue-outline-unavailable')).toBeVisible()
@@ -4554,6 +4563,7 @@ test.describe('authenticated task page', () => {
     hierarchyMode = 'after'
     await page.getByRole('button', { name: '階層を再読み込み' }).click()
     await expect(movedWbs).toHaveText('WBS 番号 1.1')
+    expect(unexpectedParentRequests).toEqual([])
   })
 
   test('Issue #188: Table の期限編集も共通 preview を確認してから保存する', async ({ page }) => {
@@ -14133,6 +14143,53 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
   expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
   expect(getMockRequestCounts(page).workspaceWorkItems).toBe(1)
   expect(getMockRequestCounts(page).projectIssues).toEqual({})
+})
+
+test('Issue #334: マイタスクで子が未完了の親の完了を拒否されたら、理由を 1 回だけ伝える', async ({ page }) => {
+  await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+    teamIssuesByTeam: {
+      'core-team': [
+        createStoredTeamIssue({
+          id: 'onboarding-friction',
+          title: '初回オンボーディングの離脱要因を減らす',
+          workflowStatusId: 'in-progress',
+          priority: 'high',
+        }),
+      ],
+    },
+  })
+  // Registered last, so it answers before the shared mock: the Team rejects the completion.
+  let refusedUpdates = 0
+  await page.route(/.*\/api\/teams\/core-team\/issues\/onboarding-friction$/, async (route) => {
+    if (route.request().method() !== 'PATCH') {
+      await route.fallback()
+      return
+    }
+    refusedUpdates += 1
+    await route.fulfill({
+      status: 409,
+      json: {
+        code: 'WorkItemOpenChildren',
+        message: 'A child Work Item is still open. Complete or cancel the children before completing the parent.',
+      },
+    })
+  })
+  await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await page.goto('/my-tasks')
+
+  await page
+    .getByTestId('my-tasks-card-refero-onboarding-friction-status-select')
+    .selectOption('done')
+
+  const refusal = page.getByText('完了かキャンセルになっていない子 Work Item があるため', { exact: false })
+  await expect(refusal).toHaveCount(1)
+  await expect(refusal).toBeVisible()
+  expect(refusedUpdates).toBe(1)
+  await expect(
+    page.getByTestId('my-tasks-column-core-team-default-in-progress').getByTestId('my-tasks-card-refero-onboarding-friction'),
+  ).toBeVisible()
 })
 
 test('未認証の場合はログイン画面へ戻す', async ({ page }) => {

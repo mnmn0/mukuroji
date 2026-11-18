@@ -258,9 +258,11 @@ test('rejects completing a parent with an open child when the Team rejects it', 
 
   expect(response.status).toBe(409)
   const body: unknown = await response.json()
-  expect(body).toMatchObject({ code: 'WorkItemOpenChildren' })
-  // Unreadable children count too, so the message must not reveal how many are open.
-  expect(body).toMatchObject({ message: expect.not.stringMatching(/\d/) })
+  // Unreadable children count too, so the public message must not reveal how many are open.
+  expect(body).toEqual({
+    code: 'WorkItemOpenChildren',
+    message: 'A child Work Item is still open. Complete or cancel the children before completing the parent.',
+  })
   expect(childReads).toEqual(['onboarding-friction'])
 })
 

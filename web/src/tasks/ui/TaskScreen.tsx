@@ -2254,9 +2254,13 @@ export function TaskScreen({
             // Undo and Redo wait for this save too: completing a parent reads its children
             // first, and an undo meanwhile would leave the completion with a stale revision.
             setPendingTaskUpdateCount((count) => count + 1)
-            const result = await onUpdateIssue(teamId, issueId, input).finally(() => {
+            let result: Awaited<ReturnType<typeof onUpdateIssue>>
+            try {
+              result = await onUpdateIssue(teamId, issueId, input)
+            } finally {
+              // Also runs when the callback throws before returning its promise.
               setPendingTaskUpdateCount((count) => count - 1)
-            })
+            }
             if (isCancelledTeamIssueUpdate(result)) {
               if (claimedContext && target) {
                 taskActionCompletion.settle(

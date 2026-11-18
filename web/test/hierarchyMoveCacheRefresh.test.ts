@@ -35,6 +35,25 @@ describe('hierarchy move cache refresh', () => {
     expect(await readCached(key)).toBeUndefined()
   })
 
+  test('keeps a newer hierarchy stored while the failed read ran', async () => {
+    const key = ['team-work-item-hierarchy', 'token', 'team-raced'] as const
+    await mutate(key, 'before move', { revalidate: false })
+    let failRead: (error: Error) => void = () => undefined
+    const refresh = refreshMovedHierarchyCache(
+      mutate,
+      key,
+      () => new Promise<string>((_resolve, reject) => {
+        failRead = reject
+      }),
+    )
+
+    await mutate(key, 'newer', { revalidate: false })
+    failRead(new Error('Hierarchy read failed.'))
+    await refresh
+
+    expect(await readCached(key)).toBe('newer')
+  })
+
   test('clears a list or detail entry the page no longer reads', async () => {
     const shownKey = ['team-issues', 'token', 'team-shown', true] as const
     const leftKey = ['team-issue-detail', 'token', 'team-shown', 'left-issue'] as const

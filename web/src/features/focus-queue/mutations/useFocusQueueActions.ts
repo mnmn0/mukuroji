@@ -19,8 +19,10 @@ import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
 } from '../../../issues/mutations/confirmParentCompletion'
+import { refreshMovedHierarchyCache } from '../../../issues/mutations/hierarchyMoveCacheRefresh'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../../shared/i18n/i18n'
+import { getTeamWorkItemHierarchy } from '../../../work-items/api/hierarchy'
 import { resolveWorkItemTypeWorkflow } from '../../../work-items/model/workItemDisplay'
 import {
   updateFocusPolicy,
@@ -153,6 +155,28 @@ export function useFocusQueueActions({
   }>()
   const [snoozeFeedback, setSnoozeFeedback] = useState<FocusQueueSnoozeFeedback>()
 
+  /**
+   * Reads every loaded Team hierarchy the action affected again and writes it to the cache. A
+   * hierarchy that cannot be read is cleared, so the outline shows its retry instead of the
+   * totals from before the action.
+   */
+  const refreshAffectedHierarchies = useCallback(async (scope: FocusCacheRevalidationScope) => {
+    const hierarchyKeys: (readonly [string, string, string])[] = []
+    // Only collects the loaded keys; returning false leaves every entry untouched.
+    await mutateSWR((key) => {
+      if (isFocusAffectedHierarchyCacheKey(key, scope)) hierarchyKeys.push(key)
+      return false
+    })
+    await Promise.all(hierarchyKeys.map((key) => {
+      const [, hierarchyAccessToken, teamId] = key
+      return refreshMovedHierarchyCache(
+        mutateSWR,
+        key,
+        () => getTeamWorkItemHierarchy(teamId, hierarchyAccessToken),
+      )
+    }))
+  }, [mutateSWR])
+
   /** Revalidates Focus and every loaded canonical projection affected by one action. */
   const refreshAffectedCaches = useCallback(async (
     scope: FocusCacheRevalidationScope,
@@ -164,13 +188,9 @@ export function useFocusQueueActions({
         undefined,
         { revalidate: true },
       ),
-      mutateSWR(
-        (key) => isFocusAffectedHierarchyCacheKey(key, scope),
-        undefined,
-        { populateCache: false, revalidate: true },
-      ),
+      refreshAffectedHierarchies(scope),
     ])
-  }, [mutateFocusQueue, mutateSWR])
+  }, [mutateFocusQueue, mutateSWR, refreshAffectedHierarchies])
 
   /** Runs one item action once while publishing pending and failure state. */
   const runItemAction = useCallback(async <Result,>(

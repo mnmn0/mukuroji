@@ -198,6 +198,11 @@ const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTe
 const onDeclinedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) =>
   // Status changes stand in for a completion the person declines; other edits are saved.
   input.workflowStatusId === undefined ? createStoryUpdatedTask(task) : CANCELLED_TEAM_ISSUE_UPDATE)
+/**
+ * Saves a direct task edit made while a detail save is still pending.
+ *
+ * @returns The task with its revision advanced, as the server would return it.
+ */
 const onSavedBeforeDetailPatch = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
@@ -208,6 +213,11 @@ const heldDetailPatch: { settle?: (outcome: CancelledTeamIssueUpdate) => void } 
 function declineHeldDetailPatch() {
   heldDetailPatch.settle?.(CANCELLED_TEAM_ISSUE_UPDATE)
 }
+/**
+ * Holds a detail save open until the story ends it.
+ *
+ * @returns A promise that resolves only when {@link declineHeldDetailPatch} is called.
+ */
 const onHeldDetailPatch = fn((teamId: string, issueId: string, input: UpdateTeamIssueInput) => {
   void teamId
   void issueId

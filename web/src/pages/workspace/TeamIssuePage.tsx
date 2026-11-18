@@ -38,7 +38,11 @@ import {
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../../issues/api'
-import { useTeamIssueDetail, useTeamIssues } from '../../issues/queries/useWorkItems'
+import {
+  createTeamIssueDetailKey,
+  useTeamIssueDetail,
+  useTeamIssues,
+} from '../../issues/queries/useWorkItems'
 import { describeScopedWorkItemListError } from '../../issues/model/workItemListError'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
@@ -769,6 +773,8 @@ export function TeamIssuePage() {
     const movedHierarchyKey = createTeamWorkItemHierarchyKey(accessToken, movedTeamId)
     const movedIssuesKey = issuesKey
     const movedDetailKey = detailKey
+    // The moved Work Item's own detail may be read later even if another one is open now.
+    const movedItemDetailKey = createTeamIssueDetailKey(accessToken, movedTeamId, issueId)
     const readShownCacheKeys = () => shownCacheKeysRef.current
     const refreshMovedHierarchy = () => refreshMovedHierarchyCache(
       mutateSWR,
@@ -802,6 +808,9 @@ export function TeamIssuePage() {
       refreshMovedHierarchy(),
       movedIssuesKey ? refreshMovedCacheEntry(mutateSWR, movedIssuesKey, readShownCacheKeys) : undefined,
       movedDetailKey ? refreshMovedCacheEntry(mutateSWR, movedDetailKey, readShownCacheKeys) : undefined,
+      movedDetailKey && unstable_serialize(movedDetailKey) === unstable_serialize(movedItemDetailKey)
+        ? undefined
+        : refreshMovedCacheEntry(mutateSWR, movedItemDetailKey, readShownCacheKeys),
     ])
   }
 

@@ -498,6 +498,13 @@ export function TeamIssueScreen({
     [collapsedOutlineIds, outlineNodes, visibleIssues],
   )
   const hasOutlineError = Boolean(isOutlineRequested && issueOutline?.errorMessage)
+  // Whether the outline is on screen now. A move that finishes after the outline gave way to the
+  // flat table, such as while the hierarchy reloads, leaves focus alone instead of moving it to
+  // the flat row with the same ID.
+  const isOutlineShownRef = useRef(false)
+  useEffect(() => {
+    isOutlineShownRef.current = outlineRows !== undefined
+  }, [outlineRows])
   useEffect(() => {
     // Waits for the error to clear rather than for new rows: a retry that returns the same
     // hierarchy as before the failure keeps the rows, but the retry button still goes away.
@@ -570,6 +577,7 @@ export function TeamIssueScreen({
         // Only the view that started the move is searched, so a row with the same ID in another
         // Team's view never takes focus.
         if (!viewPanel?.isConnected || shownTeamIdRef.current !== teamId) return
+        if (!isOutlineShownRef.current) return
         viewPanel.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
       })
     }, (error: unknown) => {

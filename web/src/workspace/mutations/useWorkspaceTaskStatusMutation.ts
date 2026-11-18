@@ -43,6 +43,16 @@ export type UseWorkspaceTaskStatusMutationOptions = {
   tasks: readonly CanonicalWorkItem[]
 }
 
+/** Options for one My Tasks status move. */
+export type WorkspaceTaskStatusMoveOptions = {
+  /**
+   * Whether `errorMessage` reports a refusal to complete a parent with open children. A caller
+   * that reports the refusal in its own action result passes `false`, so the reason is not
+   * shown and read out twice. Defaults to `true`.
+   */
+  reportOpenChildrenRefusal?: boolean
+}
+
 /**
  * Return value for the My Tasks status mutation controller.
  */
@@ -57,6 +67,7 @@ export type WorkspaceTaskStatusMutationController = {
   moveTaskStatus?: (
     task: CanonicalWorkItem,
     workflowStatusId: string,
+    options?: WorkspaceTaskStatusMoveOptions,
   ) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | undefined>
 }
 
@@ -88,6 +99,7 @@ export function useWorkspaceTaskStatusMutation({
   const moveTaskStatus = useCallback(async (
     task: CanonicalWorkItem,
     workflowStatusId: string,
+    options?: WorkspaceTaskStatusMoveOptions,
   ) => {
     const canonicalTask = tasks.find(
       (candidate) => createWorkspaceTaskKey(candidate) === createWorkspaceTaskKey(task),
@@ -193,7 +205,9 @@ export function useWorkspaceTaskStatusMutation({
         setErrorMessage(t('workspace.myTasks.conflict'))
         await mutateWorkItems()
       } else if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
-        setErrorMessage(t('issues.error.openChildren'))
+        if (options?.reportOpenChildrenRefusal !== false) {
+          setErrorMessage(t('issues.error.openChildren'))
+        }
       } else {
         setErrorMessage(t('workspace.myTasks.moveError'))
       }
