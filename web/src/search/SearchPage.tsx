@@ -21,7 +21,7 @@ import {
 } from '@mukuroji/contracts'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
-import { readWorkItemKeyInput } from '../issues/model/workItemKeys'
+import { readWorkItemKeyInput } from '../work-items/model/workItemKeys'
 import { createWorkItemKeyPath } from '../shared/routing/paths'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
