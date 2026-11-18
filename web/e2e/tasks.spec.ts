@@ -4462,6 +4462,100 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('Issue #334: 階層移動後の再取得に失敗しても移動前の WBS 番号を表示しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    const coreTeamIds = referoTaskFixtures
+      .filter((task) => task.teamId === 'core-team')
+      .map((task) => task.id)
+    const [parentId, movedId] = coreTeamIds
+    if (!parentId || !movedId) throw new Error('Expected two core-team fixtures.')
+    /** Builds the hierarchy before or after `movedId` is indented under `parentId`. */
+    const createHierarchy = (moved: boolean, graphRevision: number) => ({
+      schemaVersion: 1,
+      teamId: 'core-team',
+      graphRevision,
+      nodes: coreTeamIds.flatMap((workItemId, index) => {
+        if (moved && workItemId === movedId) return []
+        const node = {
+          workItemId,
+          parentWorkItemId: null,
+          depth: 0,
+          wbsNumber: String(moved && index > 1 ? index : index + 1),
+          hierarchyRank: (index + 1).toString(36),
+          childWorkItemIds: moved && workItemId === parentId ? [movedId] : [],
+        }
+        if (!moved || workItemId !== parentId) return [node]
+        return [node, {
+          workItemId: movedId,
+          parentWorkItemId: parentId,
+          depth: 1,
+          wbsNumber: '1.1',
+          hierarchyRank: '1',
+          childWorkItemIds: [],
+        }]
+      }),
+    })
+    let hierarchyMode: 'before' | 'failing' | 'after' = 'before'
+    let failedHierarchyReads = 0
+    await page.route(/.*\/api\/teams\/core-team\/work-item-hierarchy$/, async (route) => {
+      if (hierarchyMode === 'failing') {
+        failedHierarchyReads += 1
+        await route.fulfill({
+          status: 503,
+          json: { code: 'ServiceUnavailable', message: 'Hierarchy is unavailable.' },
+        })
+        return
+      }
+      await route.fulfill({ json: createHierarchy(hierarchyMode === 'after', hierarchyMode === 'after' ? 2 : 1) })
+    })
+    const parentRequests: unknown[] = []
+    await page.route(/.*\/api\/teams\/core-team\/issues\/[^/]+\/parent$/, async (route) => {
+      parentRequests.push(route.request().postDataJSON())
+      // Every hierarchy read after the move fails, including the one the move itself makes.
+      hierarchyMode = 'failing'
+      await route.fulfill({
+        json: { previousParentWorkItemId: null, parentWorkItemId: parentId, graphRevision: 2 },
+      })
+    })
+
+    await page.goto('/teams/core-team/issues')
+    await page.getByRole('button', { name: '表示オプション' }).click()
+    const outlineOption = page.getByRole('checkbox', { name: '階層（WBS）で表示する' })
+    // The option applies after the view settings update, so it is clicked and then awaited.
+    await outlineOption.click()
+    await expect(outlineOption).toBeChecked()
+    const movedWbs = page.getByTestId(`issue-row-wbs-${movedId}`)
+    await expect(movedWbs).toHaveText('WBS 番号 2')
+
+    await page.getByTestId(`issue-row-${movedId}`).focus()
+    await page.keyboard.press('Alt+Shift+ArrowRight')
+    await expect.poll(() => parentRequests).toEqual([
+      expect.objectContaining({ parentWorkItemId: parentId, expectedGraphRevision: 1 }),
+    ])
+
+    // The open outline drops the pre-move numbers and reports the failed read.
+    await expect(page.getByTestId('team-issue-outline-unavailable')).toBeVisible()
+    await expect(movedWbs).toHaveCount(0)
+    await expect(page.getByTestId(`issue-row-wbs-${parentId}`)).toHaveCount(0)
+    expect(failedHierarchyReads).toBeGreaterThan(0)
+
+    // Closing and reopening the outline reads again; the old placement still does not come back.
+    const readsBeforeReopen = failedHierarchyReads
+    await outlineOption.click()
+    await expect(outlineOption).not.toBeChecked()
+    await expect(page.getByTestId('team-issue-outline-unavailable')).toHaveCount(0)
+    await outlineOption.click()
+    await expect(outlineOption).toBeChecked()
+    await expect.poll(() => failedHierarchyReads).toBeGreaterThan(readsBeforeReopen)
+    await expect(page.getByTestId('team-issue-outline-unavailable')).toBeVisible()
+    await expect(movedWbs).toHaveCount(0)
+
+    // Once the hierarchy can be read, the moved row shows its new number.
+    hierarchyMode = 'after'
+    await page.getByRole('button', { name: '階層を再読み込み' }).click()
+    await expect(movedWbs).toHaveText('WBS 番号 1.1')
+  })
+
   test('Issue #188: Table の期限編集も共通 preview を確認してから保存する', async ({ page }) => {
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
