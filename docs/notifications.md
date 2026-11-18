@@ -18,6 +18,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - 上記の変更の item watcher: `watcher`（projection が現在の購読から解決する。Project watcher には送らない。title や説明だけの変更では送らない）
 - 定期 due scan: `due` / `due-soon` / `overdue` / `escalation` / `stale`
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
+- Planning update の publish / health 悪化 / コメント: `watcher` / `project-member` / `escalation` / `update-owner` / `update-author` / `mention`（詳細は [Planning](./planning.md)）
 - Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
 
 Approval と automation の各 subsystem は、実装時に同じ契約で `approval` / `automation-failure` candidate と deep link を発行します。notification projector は event type を限定せず、候補を持つ audit event を同じ重複排除・認可ルールで扱います。
