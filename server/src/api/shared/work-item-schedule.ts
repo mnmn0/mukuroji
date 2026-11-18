@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { ProjectDataError } from '../../modules/directory'
 import {
   WorkItemScheduleError,
-  type CreateTeamIssueRequestBody,
+  type PublicCreateTeamIssueRequestBody,
   type PublicUpdateTeamIssueRequestBody,
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
@@ -69,22 +69,12 @@ const publicWorkItemUpdateFields: Readonly<Record<keyof PublicUpdateTeamIssueReq
   typeChangeResolution: true,
 }
 
-/** Fields a client may send to the Work Item create endpoint; the rest are server-owned. */
-type PublicCreateTeamIssueField =
-  | 'title'
-  | 'description'
-  | 'assignedProjectId'
-  | 'assigneeUserId'
-  | 'contributorAssignments'
-  | 'schedule'
-  | 'priority'
-  | 'workflowStatusId'
-  | 'workItemTypeId'
-  | 'customFieldValues'
-  | 'quickCapture'
-
-/** Lookup table for {@link PublicCreateTeamIssueField}; the record type keeps both in step. */
-const publicWorkItemCreateFields: Readonly<Record<PublicCreateTeamIssueField, true>> = {
+/**
+ * Fields a client may send to the Work Item create endpoint.
+ *
+ * Keyed by the public body type so a new public field fails type checking until it is listed here.
+ */
+const publicWorkItemCreateFields: Readonly<Record<keyof PublicCreateTeamIssueRequestBody, true>> = {
   title: true,
   description: true,
   assignedProjectId: true,
@@ -114,7 +104,7 @@ function isPublicWorkItemUpdateField(field: string): field is keyof PublicUpdate
  * @param field - Key read from the untrusted request body.
  * @returns Whether the key may be copied into the create input.
  */
-function isPublicWorkItemCreateField(field: string): field is PublicCreateTeamIssueField {
+function isPublicWorkItemCreateField(field: string): field is keyof PublicCreateTeamIssueRequestBody {
   return Object.hasOwn(publicWorkItemCreateFields, field)
 }
 
@@ -146,10 +136,10 @@ export function readPublicWorkItemUpdateBody(input: unknown): PublicUpdateTeamIs
  * @param input - Untrusted create body.
  * @returns A new body built from the public create fields only.
  */
-export function readPublicWorkItemCreateBody(input: unknown): CreateTeamIssueRequestBody {
+export function readPublicWorkItemCreateBody(input: unknown): PublicCreateTeamIssueRequestBody {
   rejectInternalWorkItemCreateFields(input)
   // A missing schedule stays undefined, which the create path rejects as before.
-  const body: CreateTeamIssueRequestBody = { schedule: input.schedule }
+  const body: PublicCreateTeamIssueRequestBody = { schedule: input.schedule }
   for (const [field, value] of Object.entries(input)) {
     if (isPublicWorkItemCreateField(field)) {
       body[field] = value
