@@ -22,6 +22,7 @@ import {
   createWorkItemWbsNumberIndex,
 } from '../src/work-items/model/workItemHierarchy'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
+import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
 
 const [baseFixture] = teamIssueFixtures
 if (!baseFixture) throw new Error('Expected a Team Issue fixture.')
@@ -290,6 +291,31 @@ describe('Team Issue Gantt', () => {
     expect(html).toContain('data-testid="task-gantt-summary-phase"')
     expect(html).toContain('data-testid="task-gantt-group-')
     expect(html).not.toContain('data-testid="team-issue-table-group"')
+  })
+})
+
+describe('My Tasks Gantt', () => {
+  test('switches to an outlined Gantt chart across Teams', () => {
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={{ 'core-team': { configuration: teamWorkItemConfigurationFixture } }}
+        ganttOutline={{ hierarchies, collapsedKeys: new Set(), onToggleCollapsed: () => undefined }}
+        onViewModeChange={() => undefined}
+        t={t}
+        tasks={[otherTeamItem, task, deliverable, phase]}
+        teams={projectDirectoryFixtures}
+        viewMode="gantt"
+      />,
+    )
+
+    expect(html).toContain('data-testid="my-tasks-view-gantt"')
+    expect(html).not.toContain('data-testid="my-tasks-kanban"')
+    expect(html).toContain('data-testid="task-gantt-summary-phase"')
+    // Teams follow their earliest Work Item; the Team without a hierarchy stays flat.
+    expect(html.indexOf('task-gantt-timeline-other-team-item')).toBeLessThan(html.indexOf('task-gantt-wbs-phase'))
+    expect(html.indexOf('task-gantt-wbs-phase')).toBeLessThan(html.indexOf('task-gantt-wbs-task'))
+    expect(html).not.toContain('task-gantt-wbs-other-team-item')
   })
 })
 
