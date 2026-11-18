@@ -124,6 +124,23 @@ export function createTaskGanttRows(
 }
 
 /**
+ * Lists the Work Items of a Gantt chart in the order its rows show them.
+ *
+ * Keyboard navigation and selection use it, so they skip the rows under a collapsed parent and
+ * follow the groups and the outline like the chart does.
+ *
+ * @param tasks - Work Items the chart is given.
+ * @param options - Outline and grouping, as given to the chart.
+ * @returns The shown Work Items in row order.
+ */
+export function listTaskGanttRowTasks(
+  tasks: readonly CanonicalWorkItem[],
+  options: CreateTaskGanttRowsOptions = {},
+): CanonicalWorkItem[] {
+  return createTaskGanttRows(tasks, options).flatMap((row) => row.kind === 'task' ? [row.task] : [])
+}
+
+/**
  * Applies the outline to one group's Work Items.
  *
  * @param rows - Work Item rows in schedule order.

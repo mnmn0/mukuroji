@@ -1,6 +1,5 @@
 import {
   type CanonicalWorkItem,
-  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -10,16 +9,12 @@ import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 import {
   groupTaskViewItems,
-  type TaskViewGroupValue,
   type TaskViewPresentationSettings,
 } from '../../task-views/model/taskViewPresentation'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
   resolveEditableWorkflowStatuses,
-  resolveWorkItemAssignee,
-  resolveWorkItemTypeLabel,
-  resolveWorkItemWorkflowStatusLabel,
 } from '../../work-items/model/workItemDisplay'
 import {
   createWorkspaceTaskKey,
@@ -34,7 +29,11 @@ import {
   createWorkspaceTaskTestToken,
 } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
-import type { TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
+import {
+  createMyTasksGanttGrouping,
+  resolveMyTaskGroupValue,
+  resolveMyTaskProjectLabel,
+} from '../model/myTaskGrouping'
 
 /** Layouts of the My Tasks view. */
 export type MyTasksViewMode = 'board' | 'gantt'
@@ -130,13 +129,11 @@ export function MyTasksWorkspaceView({
   outlineNotice,
 }: MyTasksWorkspaceViewProps) {
   const ganttGroupBy = presentation?.groupBy
-  const ganttGroupDirection = presentation?.groupDirection ?? 'asc'
-  const ganttGroup = useMemo<TaskGanttGrouping | undefined>(() => ganttGroupBy
-    ? {
-        direction: ganttGroupDirection,
-        resolve: (task) => resolveMyTaskGroupValue(task, ganttGroupBy, configurationsByTeam, teams, t),
-      }
-    : undefined, [configurationsByTeam, ganttGroupBy, ganttGroupDirection, t, teams])
+  const ganttGroupDirection = presentation?.groupDirection
+  const ganttGroup = useMemo(
+    () => createMyTasksGanttGrouping(ganttGroupBy, ganttGroupDirection, configurationsByTeam, teams, t),
+    [configurationsByTeam, ganttGroupBy, ganttGroupDirection, t, teams],
+  )
   const ganttTasks = useMemo(() => [...tasks], [tasks])
   const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string | undefined>()
@@ -582,59 +579,4 @@ export function MyTasksWorkspaceView({
       </div>
     </div>
   )
-}
-
-/** Resolves a Project display name for one Workspace Work Item. */
-function resolveMyTaskProjectLabel(
-  task: CanonicalWorkItem,
-  teams: readonly ProjectDirectoryTeam[],
-): string | undefined {
-  if (!task.assignedProjectId) return undefined
-  return teams.flatMap((team) => team.projects).find(
-    (project) => project.id === task.assignedProjectId,
-  )?.name ?? task.assignedProjectId
-}
-
-/** Resolves a stable key and visible label for one My Tasks grouping field. */
-function resolveMyTaskGroupValue(
-  task: CanonicalWorkItem,
-  field: string,
-  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
-  teams: readonly ProjectDirectoryTeam[],
-  t: (key: MessageKey) => string,
-): TaskViewGroupValue {
-  const configuration = configurationsByTeam[task.teamId]?.configuration
-  let value: string
-  let key: string | undefined
-  switch (field) {
-    case 'title': value = task.title; break
-    case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
-    case 'assignee': value = resolveWorkItemAssignee(task); break
-    case 'dueDate': value = task.dueDate || '—'; break
-    case 'priority': value = t(`tasks.priority.${task.priority}`); break
-    case 'workItemType': {
-      const typeLabel = resolveWorkItemTypeLabel(task, configuration)
-      const hasMultipleTeams = Object.keys(configurationsByTeam).length > 1 || teams.length > 1
-      const teamLabel = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId
-      value = hasMultipleTeams ? `${teamLabel} · ${typeLabel}` : typeLabel
-      key = createSearchWorkItemTypeKey(
-        task.teamId,
-        task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
-      )
-      break
-    }
-    case 'project': value = resolveMyTaskProjectLabel(task, teams) ?? '—'; break
-    case 'team': value = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId; break
-    default: {
-      const customValue = field.startsWith('custom:')
-        ? task.customFieldValues[field.slice('custom:'.length)]
-        : undefined
-      value = Array.isArray(customValue)
-        ? customValue.join(', ')
-        : customValue === undefined || customValue === null || customValue === ''
-          ? '—'
-          : String(customValue)
-    }
-  }
-  return { key: key ?? value, label: value }
 }

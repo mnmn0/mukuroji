@@ -95,6 +95,8 @@ import {
 } from '../../workspace/ui/WorkspaceDataNotices'
 import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
 import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
+import { createMyTasksGanttGrouping } from '../../workspace/model/myTaskGrouping'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
 import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
@@ -289,13 +291,40 @@ export function MyTasksPage() {
       : undefined,
     [collapsedMyTasksOutlineKeys, isMyTasksOutlineShown, myTasksHierarchies, toggleMyTasksOutlineKey],
   )
+  // In the Gantt chart, keyboard moves and selection follow its rows: its groups and outline
+  // order, without the rows under a collapsed parent.
+  const myTasksGanttGroupBy = taskViewController.effectiveDefinition.layout.group?.field
+  const myTasksGanttGroupDirection = taskViewController.effectiveDefinition.layout.group?.direction
+  const navigableMyTasks = useMemo(() => {
+    if (myTasksViewMode !== 'gantt') return visibleMyTasks
+    const group = createMyTasksGanttGrouping(
+      myTasksGanttGroupBy,
+      myTasksGanttGroupDirection,
+      workItems.configurationsByTeam,
+      workspace.teams,
+      t,
+    )
+    return listTaskGanttRowTasks(visibleMyTasks, {
+      ...(myTasksGanttOutline ? { outline: myTasksGanttOutline } : {}),
+      ...(group ? { group } : {}),
+    })
+  }, [
+    myTasksGanttGroupBy,
+    myTasksGanttGroupDirection,
+    myTasksGanttOutline,
+    myTasksViewMode,
+    t,
+    visibleMyTasks,
+    workItems.configurationsByTeam,
+    workspace.teams,
+  ])
   const visibleMyTaskActionTargets = useMemo(
-    () => visibleMyTasks.map((task) => ({
+    () => navigableMyTasks.map((task) => ({
       expectedRevision: task.revision,
       teamId: task.teamId,
       workItemId: task.id,
     })),
-    [visibleMyTasks],
+    [navigableMyTasks],
   )
   const visibleMyTaskKeys = useMemo(
     () => visibleMyTaskActionTargets.map((target) =>
@@ -463,6 +492,8 @@ export function MyTasksPage() {
   }), [executeMyTaskMoveAction, executeMyTaskOpenAction])
   const myTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
     move: (context) => {
+      // The Gantt chart is read-only and has no status control to move a Work Item with.
+      if (myTasksViewMode === 'gantt') return denyTaskAction(myTaskActionDisabledReasons.unavailable)
       const targets = resolveTaskSurfaceActionTargets(context)
       if (targets.length === 0) return allowTaskAction()
       if (targets.length !== 1) {
@@ -483,6 +514,7 @@ export function MyTasksPage() {
   }), [
     myTaskActionDisabledReasons.singleSelectionRequired,
     myTaskActionDisabledReasons.unavailable,
+    myTasksViewMode,
     canMoveMyTaskStatus,
     resolveMyTaskActionTarget,
   ])

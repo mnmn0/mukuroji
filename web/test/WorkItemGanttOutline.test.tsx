@@ -11,7 +11,7 @@ import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { TeamIssueScreen } from '../src/issues/ui/TeamIssueScreen'
 import { SearchResultCollection } from '../src/search/ui/SearchResultCollection'
 import { readSearchWorkItemIdentity } from '../src/search/model/searchWbsNumbers'
-import { createTaskGanttRows } from '../src/tasks/model/taskGanttRows'
+import { createTaskGanttRows, listTaskGanttRowTasks } from '../src/tasks/model/taskGanttRows'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -165,6 +165,19 @@ describe('Gantt rows', () => {
       'group:refero:2',
       'phase:0:true',
     ])
+  })
+
+  test('list the shown Work Items in row order for keyboard navigation', () => {
+    const tasks = listTaskGanttRowTasks([phase, deliverable, task], {
+      outline: { hierarchies, collapsedKeys: new Set([createWorkItemOutlineKey('core-team', 'phase')]) },
+      group: {
+        direction: 'asc',
+        resolve: (item) => ({ key: item.assignedProjectId ?? '', label: item.assignedProjectId ?? '—' }),
+      },
+    })
+
+    // The deliverable is under the collapsed phase, so it is skipped.
+    expect(tasks.map((item) => item.id)).toEqual(['task', 'phase'])
   })
 })
 

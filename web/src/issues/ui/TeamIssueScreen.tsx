@@ -119,7 +119,7 @@ import {
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
-import type { TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
+import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 
@@ -514,19 +514,6 @@ export function TeamIssueScreen({
       issueViewPanelRef.current?.focus()
     }
   }, [hasOutlineError, outlineRows])
-  // Rows hidden under a collapsed parent are left out of keyboard navigation and selection.
-  const navigableIssues = useMemo(
-    () => outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
-    [outlineRows, visibleIssues],
-  )
-  const visibleIssueActionTargets = useMemo(
-    () => navigableIssues.map((issue) => ({
-      expectedRevision: issue.revision,
-      teamId: issue.teamId,
-      workItemId: issue.id,
-    })),
-    [navigableIssues],
-  )
 
   /** Shows or hides the rows nested under one outline row and remembers the choice. */
   const toggleOutlineCollapsed = useCallback((issueId: string) => {
@@ -551,6 +538,25 @@ export function TeamIssueScreen({
         resolve: (issue) => resolveTeamIssueGroupValue(issue, ganttGroupBy, configuration, activeTeam, t),
       }
     : undefined, [activeTeam, configuration, ganttGroupBy, ganttGroupDirection, t])
+  // Keyboard navigation and selection follow the rows shown: the outline order without the rows
+  // under a collapsed parent, and in the Gantt chart its groups and schedule order as well.
+  const navigableIssues = useMemo(
+    () => viewMode === 'gantt'
+      ? listTaskGanttRowTasks(visibleIssues, {
+          ...(ganttOutline ? { outline: ganttOutline } : {}),
+          ...(ganttGroup ? { group: ganttGroup } : {}),
+        })
+      : outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
+    [ganttGroup, ganttOutline, outlineRows, viewMode, visibleIssues],
+  )
+  const visibleIssueActionTargets = useMemo(
+    () => navigableIssues.map((issue) => ({
+      expectedRevision: issue.revision,
+      teamId: issue.teamId,
+      workItemId: issue.id,
+    })),
+    [navigableIssues],
+  )
   const ganttConfigurationsByTeam = useMemo(
     () => resolvedConfiguration ? { [teamId]: resolvedConfiguration } : {},
     [resolvedConfiguration, teamId],
