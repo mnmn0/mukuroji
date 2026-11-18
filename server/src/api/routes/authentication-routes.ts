@@ -353,6 +353,12 @@ const NEW_PASSWORD_CHALLENGE_HIDDEN_INVITATION_ERRORS = new Set([
   'WorkspaceVersionConflict',
 ])
 
+/**
+ * Tells whether a lock failure should be hidden behind the rejected-session response.
+ *
+ * @param error - Error thrown while taking the invitation acceptance lock.
+ * @returns `true` when the error only reveals the invitation's state.
+ */
 function isHiddenNewPasswordChallengeInvitationError(error: unknown) {
   return error instanceof WorkspaceAccessError &&
     NEW_PASSWORD_CHALLENGE_HIDDEN_INVITATION_ERRORS.has(error.code)

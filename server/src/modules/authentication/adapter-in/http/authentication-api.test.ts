@@ -294,7 +294,7 @@ test('returns a stable error when a new password violates the Cognito policy', a
 test('holds the invitation acceptance lock across the Cognito password challenge', async () => {
   const sequence: string[] = []
   const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
-  const lockAuditContexts: unknown[] = []
+  const lockArgumentCounts: number[] = []
   const invitation = {
     id: 'invitee@example.com',
     email: 'invitee@example.com',
@@ -349,23 +349,14 @@ test('holds the invitation acceptance lock across the Cognito password challenge
         sequence.push('get-active-member')
         return undefined
       },
-      async acquireInvitationAcceptanceLock(
-        _workspaceId,
-        _invitationId,
-        auditContext,
-      ) {
+      async acquireInvitationAcceptanceLock(...args: unknown[]) {
         sequence.push('acquire-lock')
-        lockAuditContexts.push(auditContext)
+        lockArgumentCounts.push(args.length)
         return invitation
       },
-      async releaseInvitationAcceptanceLock(
-        _workspaceId,
-        _invitationId,
-        _expectedVersion,
-        auditContext,
-      ) {
+      async releaseInvitationAcceptanceLock(...args: unknown[]) {
         sequence.push('release-lock')
-        lockAuditContexts.push(auditContext)
+        lockArgumentCounts.push(args.length)
         return {
           ...invitation,
           acceptanceLockExpiresAt: undefined,
@@ -427,8 +418,8 @@ test('holds the invitation acceptance lock across the Cognito password challenge
     stages: ['reconcileAuthenticatedMember'],
     workspaceId: 'workspace#production',
   })
-  // The lock runs before Cognito proves the session, so it must not audit in the invitee's name.
-  expect(lockAuditContexts).toEqual([undefined, undefined])
+  // The lock runs before Cognito proves the session, so the route passes no audit context to it.
+  expect(lockArgumentCounts).toEqual([2, 3])
 })
 
 test('lets an active Workspace member complete a new password challenge without an invitation lock', async () => {
@@ -517,12 +508,16 @@ test('lets an active Workspace member complete a new password challenge without 
   ])
 })
 
+/**
+ * Wires a pending invitee whose Cognito challenge fails, recording each dependency call in order.
+ *
+ * @param options - Invitee email, call log, and the errors the lock or Cognito should throw.
+ */
 function configureNewPasswordChallengeInvitee(options: {
   email: string
   sequence: string[]
   acquireError?: Error
   challengeError?: Error
-  lockAuditContexts?: unknown[]
 }) {
   const invitation = {
     id: options.email,
@@ -568,21 +563,26 @@ function configureNewPasswordChallengeInvitee(options: {
         options.sequence.push('get-active-member')
         return undefined
       },
-      async acquireInvitationAcceptanceLock(_workspaceId, _invitationId, auditContext) {
+      async acquireInvitationAcceptanceLock() {
         options.sequence.push('acquire-lock')
-        options.lockAuditContexts?.push(auditContext)
         if (options.acquireError) throw options.acquireError
         return invitation
       },
-      async releaseInvitationAcceptanceLock(_workspaceId, _invitationId, _expectedVersion, auditContext) {
+      async releaseInvitationAcceptanceLock() {
         options.sequence.push('release-lock')
-        options.lockAuditContexts?.push(auditContext)
         return { ...invitation, acceptanceLockExpiresAt: undefined, version: 3 }
       },
     },
   })
 }
 
+/**
+ * Sends a new-password challenge request for the given email.
+ *
+ * @param email - Email address to send.
+ * @param session - Challenge session to send; defaults to a forged value.
+ * @returns The HTTP response.
+ */
 function requestNewPasswordChallenge(email: string, session = 'forged-session') {
   return app.request('/api/auth/challenge/new-password', {
     method: 'POST',
@@ -591,13 +591,11 @@ function requestNewPasswordChallenge(email: string, session = 'forged-session') 
   })
 }
 
-test('releases the invitation lock without audit events when Cognito rejects a forged session', async () => {
+test('releases the invitation lock when Cognito rejects a forged session', async () => {
   const sequence: string[] = []
-  const lockAuditContexts: unknown[] = []
   configureNewPasswordChallengeInvitee({
     email: 'forged-session@example.com',
     sequence,
-    lockAuditContexts,
   })
 
   const response = await requestNewPasswordChallenge('forged-session@example.com')
@@ -611,7 +609,6 @@ test('releases the invitation lock without audit events when Cognito rejects a f
     'complete-challenge',
     'release-lock',
   ])
-  expect(lockAuditContexts).toEqual([undefined, undefined])
 })
 
 test('answers a revoked or busy invitation like a rejected session before calling Cognito', async () => {

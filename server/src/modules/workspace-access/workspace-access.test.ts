@@ -341,13 +341,15 @@ test('maps an overdue pending invitation to expired without mutating it', async 
   })
 })
 
-test('acquires and releases an invitation acceptance lock with version checks', async () => {
+test('acquires and releases an invitation acceptance lock with version checks and no audit event', async () => {
   const inputs: Array<Record<string, unknown>> = []
+  const commandNames: string[] = []
   let invitationItem = createInvitationItem('pending')
   const client = new DynamoDbWorkspaceAccessClient(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       inputs.push(command.input)
+      commandNames.push(command.constructor.name)
 
       if (command.constructor.name === 'GetCommand') {
         return { Item: invitationItem }
@@ -364,6 +366,9 @@ test('acquires and releases an invitation acceptance lock with version checks', 
     undefined,
     false,
     () => now,
+    'PlanningTable',
+    // The audit table is configured as in production; the unauthenticated lock must still not audit.
+    'AuditTable',
   )
 
   const locked = await client.acquireInvitationAcceptanceLock(workspaceId, 'sato@example.com')
@@ -386,6 +391,8 @@ test('acquires and releases an invitation acceptance lock with version checks', 
   expect(released.version).toBe(3)
   const releasedItem = inputs.at(-1)?.Item as Record<string, unknown> | undefined
   expect(releasedItem?.acceptanceLockExpiresAt).toBeUndefined()
+  expect(commandNames).toEqual(['GetCommand', 'PutCommand', 'GetCommand', 'PutCommand'])
+  expect(inputs.some((input) => 'TransactItems' in input)).toBe(false)
 })
 
 test('records delivery failure while preserving ambiguous identity ownership', async () => {
@@ -2475,9 +2482,12 @@ test('preserves mixed invitation cancellation reasons as an infrastructure failu
     'AuditTable',
   )
 
-  await expect(client.acquireInvitationAcceptanceLock(
+  await expect(client.markInvitationIdentityMutationStarted(
     workspaceId,
     'sato@example.com',
+    1,
+    undefined,
+    undefined,
     createAuditContext('mixed-invitation-cancellation'),
   )).rejects.toMatchObject({
     status: 502,
