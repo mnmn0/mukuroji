@@ -3600,3 +3600,207 @@ test('finishes an accepted Triage delivery after the endpoint secret is rotated'
     else process.env.AUDIT_EVENTS_TABLE_NAME = previousAuditTable
   }
 })
+
+/**
+ * Builds a completed Bulk status edit whose single item undoes with the given payload.
+ *
+ * @param undoPayload - Undo snapshot stored for the edited Work Item.
+ * @returns Bulk Operation ready to be undone.
+ */
+function createBulkStatusUndoOperation(
+  undoPayload: BulkOperation['items'][number]['undoPayload'],
+): BulkOperation {
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-status-undo',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: { type: 'edit', patch: { workflowStatusId: 'in-progress' } },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      ...(undoPayload ? { undoPayload } : {}),
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+}
+
+/**
+ * Undoes a stored Bulk Operation through the API.
+ *
+ * @param operation - Bulk Operation the fake store returns.
+ * @returns The HTTP response of the undo request.
+ */
+async function requestBulkUndo(operation: BulkOperation) {
+  const automationFake = createBulkOperationAutomationFake(operation)
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  return app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+}
+
+test('keeps the actual dates in the undo snapshot of a Bulk status edit', async () => {
+  configureFakeProjectClients(true, {
+    detailWorkflowStatusId: 'done',
+    detailActualStartDate: '2026-06-01',
+    detailActualEndDate: '2026-06-05',
+  })
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const request = {
+    action: { type: 'edit', patch: { workflowStatusId: 'in-progress' } },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  }
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  const preview = await previewResponse.json() as { operationToken: string }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  const applied = await applyResponse.json() as { id: string }
+
+  expect(applyResponse.status).toBe(201)
+  const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
+  expect(stored?.items[0]?.undoPayload).toEqual({
+    workflowStatusId: 'done',
+    actualStartDate: '2026-06-01',
+    actualEndDate: '2026-06-05',
+  })
+})
+
+test('restores the earlier completion date when a manager undoes a Bulk reopen', async () => {
+  const corrections: unknown[] = []
+  const transitionInstants: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailWorkflowStatusId: 'in-progress',
+    detailActualStartDate: '2026-06-01',
+    issueUpdateHook: (input) => {
+      corrections.push(input.actualDateCorrection)
+      transitionInstants.push(input.actualDateTransitionAt)
+    },
+  })
+
+  const response = await requestBulkUndo(createBulkStatusUndoOperation({
+    workflowStatusId: 'done',
+    actualStartDate: '2026-06-01',
+    actualEndDate: '2026-06-05',
+  }))
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ items: [{ status: 'undone' }] })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(corrections).toEqual([{ actualStartDate: '2026-06-01', actualEndDate: '2026-06-05' }])
+  // The adapter dates the transition with the same instant the prediction used.
+  expect(transitionInstants).toHaveLength(1)
+  expect(Number.isNaN(Date.parse(String(transitionInstants[0])))).toBe(false)
+})
+
+test('refuses a member Bulk undo that would replace the recorded completion date', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailWorkflowStatusId: 'in-progress',
+    detailActualStartDate: '2026-06-01',
+  })
+
+  const response = await requestBulkUndo(createBulkStatusUndoOperation({
+    workflowStatusId: 'done',
+    actualStartDate: '2026-06-01',
+    actualEndDate: '2026-06-05',
+  }))
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    items: [{ status: 'failed', errorCode: 'BulkUndoUnavailable' }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('lets a member undo a Bulk first start without correcting the actual dates', async () => {
+  const corrections: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailWorkflowStatusId: 'in-progress',
+    detailActualStartDate: '2026-06-01',
+    issueUpdateHook: (input) => {
+      corrections.push(input.actualDateCorrection)
+    },
+  })
+
+  const response = await requestBulkUndo(createBulkStatusUndoOperation({
+    workflowStatusId: 'todo',
+    actualStartDate: null,
+    actualEndDate: null,
+  }))
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ items: [{ status: 'undone' }] })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(corrections).toEqual([undefined])
+})
+
+test('predicts a Bulk undo completion date in the calendar of the restored schedule', async () => {
+  const withTimeZone = (timeZone: string) => {
+    const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+    return { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, timeZone } }
+  }
+  // These zones are 26 hours apart, so their local dates always differ.
+  const restoredSchedule = withTimeZone('Pacific/Kiritimati')
+  const todayInRestoredZone = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Pacific/Kiritimati',
+  }).format(new Date())
+  const corrections: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailWorkflowStatusId: 'in-progress',
+    detailActualStartDate: '2026-06-01',
+    detailSchedule: withTimeZone('Etc/GMT+12'),
+    issueUpdateHook: (input) => {
+      corrections.push(input.actualDateCorrection)
+    },
+  })
+  const operation = createBulkStatusUndoOperation({
+    workflowStatusId: 'done',
+    schedule: restoredSchedule,
+    actualStartDate: '2026-06-01',
+    actualEndDate: todayInRestoredZone,
+  })
+  operation.action = {
+    type: 'edit',
+    patch: { workflowStatusId: 'in-progress', schedule: withTimeZone('Etc/GMT+12') },
+  }
+
+  const response = await requestBulkUndo(operation)
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ items: [{ status: 'undone' }] })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(corrections).toEqual([undefined])
+})

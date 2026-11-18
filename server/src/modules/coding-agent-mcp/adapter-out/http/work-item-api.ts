@@ -57,6 +57,11 @@ const acceptanceCriteriaSchema = z.object({
     satisfied: z.boolean(),
   })).max(WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT),
 })
+const hierarchySchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
+  parentWorkItemId: identifier.nullable(), childWorkItemIds: z.array(identifier),
+  wbsNumber: z.string().regex(/^[1-9][0-9]*(\.[1-9][0-9]*)*$/u).optional(),
+})
 const keySchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, createdAt: z.iso.datetime(),
   key: z.string().refine(isCanonicalWorkItemKey).optional(),
@@ -424,6 +429,24 @@ export function createAgentWorkItemApi(
         ...(effort.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: effort.plannedEffortMinutes }),
         ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
         ...(effort.progressPercent === undefined ? {} : { progressPercent: effort.progressPercent }),
+      }
+    },
+    /** Reads a task's parent, children, and WBS number; a server older than the endpoint has none. */
+    async hierarchy(id) {
+      let found: z.infer<typeof hierarchySchema>
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/hierarchy`, hierarchySchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the hierarchy of another task.')
+      }
+      return {
+        parentWorkItemId: found.parentWorkItemId,
+        childWorkItemIds: found.childWorkItemIds,
+        ...(found.wbsNumber === undefined ? {} : { wbsNumber: found.wbsNumber }),
       }
     },
     /** Reads a task's key and its Work Item's creation time; a server older than the endpoint has neither. */

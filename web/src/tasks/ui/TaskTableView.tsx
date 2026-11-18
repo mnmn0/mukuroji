@@ -1,12 +1,13 @@
-import type {
-  BulkOperation,
-  BulkOperationPreview,
-  BulkOperationRequest,
-  ResolvedWorkItemConfiguration,
-  WorkItemPatch,
-  WorkItemConfiguration,
-  CanonicalWorkItem,
-  WorkItemPriority,
+import {
+  deriveWorkItemScheduleVariance,
+  type BulkOperation,
+  type BulkOperationPreview,
+  type BulkOperationRequest,
+  type ResolvedWorkItemConfiguration,
+  type WorkItemPatch,
+  type WorkItemConfiguration,
+  type CanonicalWorkItem,
+  type WorkItemPriority,
 } from '@mukuroji/contracts'
 import {
   Fragment,
@@ -61,6 +62,11 @@ import {
   taskScheduleModeLabelKeys,
 } from '../model/taskSchedule'
 import { TaskInlineField } from './TaskInlineField'
+import {
+  formatTaskScheduleVariance,
+  resolveTaskScheduleVarianceTone,
+  taskScheduleVarianceToneClasses,
+} from '../model/taskActualDates'
 import { TaskInlineCustomFields } from './TaskInlineCustomFields'
 import { WorkItemAssigneeAvatar } from '../../work-items/ui/WorkItemAssigneeAvatar'
 import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDisplay'
@@ -80,6 +86,10 @@ import {
   formatShowMoreLabel,
   TASK_TABLE_RENDER_STEP,
 } from '../model/taskListRendering'
+import {
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 
 /** Resolves a localized task-table message. */
 type TaskTableTranslator = (key: MessageKey) => string
@@ -169,7 +179,7 @@ export type TaskTableViewProps = {
   /** Opens the create-task form when task creation is available. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates a row through the common Work Item action. */
-  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
   /** Selects a task for the detail pane. */
   onSelectTask: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for one rendered row. */
@@ -215,7 +225,7 @@ type TaskTableRowProps = {
   /** Opens the create panel with the row's Work Item context. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates the row through the common Work Item action. */
-  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
   /** Updates the row's bulk-selection state. */
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   /** Work item rendered by the row. */
@@ -332,18 +342,33 @@ export function TaskTableView({
     )
     const failedCount = invalidCount + (updates.length - writableUpdates.length) +
       results.filter((result) => result.status === 'rejected').length
+    // Rows the person declined to change are neither saved nor failed.
+    const cancelledCount = results.filter((result) =>
+      result.status === 'fulfilled' && isCancelledTeamIssueUpdate(result.value)
+    ).length
 
+    const cancelledMessage = cancelledCount > 0
+      ? t('tasks.action.cancelledCount').replace('{count}', String(cancelledCount))
+      : undefined
     if (failedCount > 0) {
+      // Declined rows are reported next to the failures, so they are not taken for saved ones.
       setTableAction({
         kind: 'error',
-        message: t('tasks.action.partial').replace('{count}', String(failedCount)),
+        message: [t('tasks.action.partial').replace('{count}', String(failedCount)), cancelledMessage]
+          .filter((part) => part !== undefined)
+          .join(' '),
       })
       return
     }
 
+    const savedCount = updates.length - cancelledCount
     setTableAction({
       kind: 'success',
-      message: successMessage.replace('{count}', String(updates.length)),
+      message: savedCount > 0
+        ? [successMessage.replace('{count}', String(savedCount)), cancelledMessage]
+          .filter((part) => part !== undefined)
+          .join(' ')
+        : cancelledMessage ?? successMessage.replace('{count}', '0'),
     })
   }
 
@@ -774,6 +799,7 @@ function TaskTableRow({
   const scheduleRange = formatTaskScheduleRange(schedule)
   const scheduleDisplay = `${t(taskScheduleModeLabelKeys[schedule.mode])}${scheduleRange ? `: ${scheduleRange}` : ''}`
   const overdue = isTaskOverdue(task)
+  const scheduleVariance = deriveWorkItemScheduleVariance(task)
   const cellPadding = resolveTaskTableCellPadding(presentation?.density)
   const titleCellPadding = resolveTaskTableCellPadding(presentation?.density, true)
   const wrapText = presentation?.display.wrapTitles ?? false
@@ -807,7 +833,7 @@ function TaskTableRow({
       ]
   const canEditTask = Boolean(onUpdateTask && (canMutateTask?.(task) ?? true))
   /** Sends one row edit only when its exact Work Item scope is writable. */
-  const updateTask = async (candidate: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem> => {
+  const updateTask = async (candidate: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     if (!canEditTask || !onUpdateTask) return candidate
     return onUpdateTask(candidate, input)
   }
@@ -989,6 +1015,34 @@ function TaskTableRow({
               ) : <span>{scheduleDisplay}</span>}
             </td>
           )
+          case 'actualStartDate':
+          case 'actualEndDate': return (
+            <td
+              {...columnCellProps}
+              className={`whitespace-nowrap ${cellPadding} text-fg-505967`}
+              data-testid={`task-${field}-${task.id}`}
+              key={field}
+            >
+              {task[field] ?? '—'}
+            </td>
+          )
+          case 'startDelayDays':
+          case 'completionDelayDays': {
+            const delay = scheduleVariance[field]
+            const tone = resolveTaskScheduleVarianceTone(delay)
+            return (
+              <td
+                {...columnCellProps}
+                className={`whitespace-nowrap ${cellPadding} ${
+                  tone ? taskScheduleVarianceToneClasses[tone] : 'text-fg-8f99a8'
+                }`}
+                data-testid={`task-${field}-${task.id}`}
+                key={field}
+              >
+                {formatTaskScheduleVariance(delay, t)}
+              </td>
+            )
+          }
           case 'priority': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
               {canEditTask ? (
@@ -1128,6 +1182,10 @@ function isSupportedProjectTaskColumn(field: string): boolean {
     'assignee',
     'status',
     'dueDate',
+    'actualStartDate',
+    'actualEndDate',
+    'startDelayDays',
+    'completionDelayDays',
     'priority',
     'workItemType',
     'project',
@@ -1149,6 +1207,10 @@ function resolveTaskTableColumnLabel(
     case 'assignee': return t('tasks.column.assignee')
     case 'status': return t('tasks.column.status')
     case 'dueDate': return t('tasks.column.dueDate')
+    case 'actualStartDate': return t('tasks.column.actualStartDate')
+    case 'actualEndDate': return t('tasks.column.actualEndDate')
+    case 'startDelayDays': return t('tasks.column.startDelayDays')
+    case 'completionDelayDays': return t('tasks.column.completionDelayDays')
     case 'priority': return t('tasks.column.priority')
     case 'workItemType': return t('tasks.column.workItemType')
     case 'project': return t('workspace.column.project')

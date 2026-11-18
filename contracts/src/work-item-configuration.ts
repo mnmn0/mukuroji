@@ -169,6 +169,10 @@ export type WorkItemConfiguration = {
   jobRoles?: import('./work-item-contributors').WorkItemJobRoleDefinition[]
   /** How Work Item progress percentages are derived; absent means `status-category`. */
   progressMode?: import('./work-item-effort').WorkItemProgressMode
+  /**
+   * What happens when a parent is completed while a child is still open; absent means `warn`.
+   */
+  parentCompletionPolicy?: WorkItemParentCompletionPolicy
   /** 最終更新日時の ISO 8601 timestamp です。 */
   updatedAt?: string
 }
@@ -181,4 +185,33 @@ export type ResolvedWorkItemConfiguration = {
   configuration: WorkItemConfiguration
   /** Team configuration が無い場合に利用した継承元です。 */
   inheritedFrom?: 'workspace' | 'default'
+}
+
+/**
+ * How a Team treats completing a parent Work Item whose children are not all completed or canceled.
+ *
+ * - `warn`: the Web asks for confirmation; the server allows the change.
+ * - `reject`: the server rejects the change with `409 WorkItemOpenChildren`.
+ */
+export type WorkItemParentCompletionPolicy = 'warn' | 'reject'
+
+/** Parent completion policies in the order settings screens present them. */
+export const WORK_ITEM_PARENT_COMPLETION_POLICIES: readonly WorkItemParentCompletionPolicy[] = [
+  'warn',
+  'reject',
+]
+
+/** Parent completion policy used when a Work Item configuration does not choose one. */
+export const DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY: WorkItemParentCompletionPolicy = 'warn'
+
+/**
+ * Returns whether a value is a supported parent completion policy.
+ *
+ * @param value - Candidate value.
+ * @returns Whether it names one of {@link WORK_ITEM_PARENT_COMPLETION_POLICIES}.
+ */
+export function isWorkItemParentCompletionPolicy(
+  value: unknown,
+): value is WorkItemParentCompletionPolicy {
+  return value === 'warn' || value === 'reject'
 }

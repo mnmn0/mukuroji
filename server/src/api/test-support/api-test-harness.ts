@@ -841,6 +841,7 @@ function createTeamIssuesFake(
       throw new Error('Unexpected Team Issues client call.')
     },
     getTeamIssues: unsupported,
+    getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
     getWorkItemKeyLocation: unsupported,
     getProjectIssues: unsupported,
@@ -1495,6 +1496,10 @@ function configureFakeProjectClients(
     detailWorkflowStatusId?: string
     /** Status category the detail fake returns instead of the one derived from the status ID. */
     detailStatusCategory?: 'backlog' | 'unstarted' | 'started' | 'completed' | 'canceled'
+    /** Actual start date of the returned Work Item detail. */
+    detailActualStartDate?: string
+    /** Actual end date of the returned Work Item detail. */
+    detailActualEndDate?: string
     /** Detail fake が read ごとに返す workflow status ID です。 */
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
@@ -1531,6 +1536,10 @@ function configureFakeProjectClients(
       contributorAssignments?: unknown
       /** Acceptance criteria supplied to the adapter, when the update changes them. */
       acceptanceCriteria?: unknown
+      /** Manager correction of the actual dates supplied to the adapter. */
+      actualDateCorrection?: UpdateTeamIssueRequestBody['actualDateCorrection']
+      /** Instant that dates an actual-date transition, when the caller fixed it. */
+      actualDateTransitionAt?: string
       /** Remaining effort supplied to the adapter, when the update changes it. */
       remainingEffortMinutes?: unknown
       /** Manual progress percentage supplied to the adapter, when the update changes it. */
@@ -1541,6 +1550,8 @@ function configureFakeProjectClients(
       configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
       /** Agent Run writes committed with the update. */
       agentRunTransactItems?: UpdateTeamIssueRequestBody['agentRunTransactItems']
+      /** Every key of the adapter update input, so tests can prove unknown keys never arrive. */
+      inputKeys: string[]
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -2918,6 +2929,8 @@ function configureFakeProjectClients(
               (workflowStatusId === 'done' || workflowStatusId === 'approval-complete'
                 ? 'completed'
                 : 'started'),
+            ...(options.detailActualStartDate ? { actualStartDate: options.detailActualStartDate } : {}),
+            ...(options.detailActualEndDate ? { actualEndDate: options.detailActualEndDate } : {}),
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
@@ -2999,11 +3012,14 @@ function configureFakeProjectClients(
           issueId,
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
           ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
+          ...(input.actualDateCorrection ? { actualDateCorrection: input.actualDateCorrection } : {}),
+          ...(input.actualDateTransitionAt ? { actualDateTransitionAt: input.actualDateTransitionAt } : {}),
           ...('remainingEffortMinutes' in input ? { remainingEffortMinutes: input.remainingEffortMinutes } : {}),
           ...('progressPercent' in input ? { progressPercent: input.progressPercent } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
+          inputKeys: Object.keys(input),
         })
         if ('acceptanceCriteria' in input) {
           // An empty list removes the criteria, like the DynamoDB adapter.

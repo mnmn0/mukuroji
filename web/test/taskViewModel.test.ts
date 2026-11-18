@@ -10,6 +10,7 @@ import {
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
+import { resolveTaskActualDateUndo } from '../src/tasks/model/taskActualDates'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import type { WorkspaceMember } from '../src/workspace/api/access'
 import {
@@ -59,8 +60,16 @@ describe('task view constants and input normalization', () => {
   test('exposes the existing tabs, priorities, due-date filters, and sort orders', () => {
     expect(taskTabs).toEqual(['table', 'board', 'gantt', 'calendar', 'file', 'permissions'])
     expect(taskPriorities).toEqual(['high', 'medium', 'low'])
-    expect(taskDueDateFilters).toEqual(['all', 'overdue', 'today', 'upcoming', 'no-date'])
-    expect(taskSortOrders).toEqual(['due-date-asc', 'due-date-desc'])
+    expect(taskDueDateFilters).toEqual([
+      'all',
+      'overdue',
+      'today',
+      'upcoming',
+      'no-date',
+      'completed-late',
+      'started-late',
+    ])
+    expect(taskSortOrders).toEqual(['due-date-asc', 'due-date-desc', 'completion-delay-desc'])
   })
 
   test('narrows supported priorities and defaults invalid values to medium', () => {
@@ -86,10 +95,13 @@ describe('task view constants and input normalization', () => {
       'tasks.filter.dueDateToday',
       'tasks.filter.dueDateUpcoming',
       'tasks.filter.dueDateNoDate',
+      'tasks.filter.completedLate',
+      'tasks.filter.startedLate',
     ])
     expect(taskSortOrders.map(resolveTaskSortOrderLabelKey)).toEqual([
       'tasks.sort.dueDateAsc',
       'tasks.sort.dueDateDesc',
+      'tasks.sort.completionDelayDesc',
     ])
   })
 })
@@ -332,6 +344,140 @@ describe('task due-date model', () => {
       'later',
       'same-date-a',
     ])
+  })
+})
+
+describe('task plan-versus-actual model', () => {
+  test('restores actual dates on undo only when the reverse status change cannot', () => {
+    const completed = createTask({
+      actualEndDate: '2026-07-20',
+      actualStartDate: '2026-07-10',
+      statusCategory: 'completed',
+    })
+    const reopened = createTask({ actualStartDate: '2026-07-10', statusCategory: 'started' })
+    const statusPatch = { workflowStatusId: 'active' }
+
+    // Undoing a reopen would record today as the completion, so a manager restores it explicitly.
+    expect(resolveTaskActualDateUndo(completed, reopened, statusPatch, true, '2026-07-25')).toEqual({
+      reversible: true,
+      patch: { actualStartDate: '2026-07-10', actualEndDate: '2026-07-20' },
+    })
+    expect(resolveTaskActualDateUndo(completed, reopened, statusPatch, false, '2026-07-25'))
+      .toEqual({ reversible: false })
+    // Completing again on the original day already restores the same dates.
+    expect(resolveTaskActualDateUndo(completed, reopened, statusPatch, false, '2026-07-20'))
+      .toEqual({ reversible: true })
+    // Undoing a completion removes the end through the reverse transition alone.
+    expect(resolveTaskActualDateUndo(reopened, completed, statusPatch, false, '2026-07-25'))
+      .toEqual({ reversible: true })
+    // Undoing a first start would keep the recorded start.
+    const unstarted = createTask({ statusCategory: 'unstarted' })
+    const started = createTask({ actualStartDate: '2026-07-25', statusCategory: 'started' })
+    expect(resolveTaskActualDateUndo(unstarted, started, statusPatch, true, '2026-07-25')).toEqual({
+      reversible: true,
+      patch: { actualStartDate: null, actualEndDate: null },
+    })
+    expect(resolveTaskActualDateUndo(unstarted, started, statusPatch, false, '2026-07-25'))
+      .toEqual({ reversible: true })
+    // A correction of one date restores both earlier dates, since the server may move the other.
+    const corrected = createTask({ actualStartDate: '2026-07-09', statusCategory: 'completed' })
+    expect(resolveTaskActualDateUndo(completed, corrected, { actualStartDate: '2026-07-09' }, false, '2026-07-25'))
+      .toEqual({ reversible: true, patch: { actualStartDate: '2026-07-10', actualEndDate: '2026-07-20' } })
+    expect(resolveTaskActualDateUndo(unstarted, started, { actualStartDate: '2026-07-25' }, true, '2026-07-25'))
+      .toEqual({ reversible: true, patch: { actualStartDate: null, actualEndDate: null } })
+  })
+
+  test('restores both actual dates when undoing a reopen that also corrected the start', () => {
+    const completed = createTask({
+      actualEndDate: '2026-07-20',
+      actualStartDate: '2026-07-10',
+      statusCategory: 'completed',
+      workflowStatusId: 'done',
+    })
+    const forward = { workflowStatusId: 'active', actualStartDate: '2026-07-09' }
+    const reopened = createTask({ actualStartDate: '2026-07-09', statusCategory: 'started', workflowStatusId: 'active' })
+
+    // Undo happens on a later day, so the reverse transition alone would record 2026-07-25.
+    const undo = resolveTaskActualDateUndo(completed, reopened, forward, true, '2026-07-25')
+    expect(undo.reversible).toBeTrue()
+    const inversePatch = { ...createTaskInversePatch(completed, forward), ...(undo.reversible ? undo.patch : {}) }
+
+    expect(inversePatch).toEqual({
+      workflowStatusId: 'done',
+      actualStartDate: '2026-07-10',
+      actualEndDate: '2026-07-20',
+    })
+    expect(applyTaskPatchOptimistically(reopened, inversePatch)).toMatchObject({
+      actualStartDate: '2026-07-10',
+      actualEndDate: '2026-07-20',
+    })
+  })
+
+  test('applies an actual date correction optimistically and builds its undo patch', () => {
+    const task = createTask({
+      actualEndDate: '2026-07-26',
+      actualStartDate: '2026-07-20',
+      statusCategory: 'completed',
+    })
+    const patch = { actualStartDate: '2026-07-18', actualEndDate: null }
+
+    expect(applyTaskPatchOptimistically(task, patch)).toMatchObject({
+      actualStartDate: '2026-07-18',
+      actualEndDate: undefined,
+    })
+    expect(createTaskInversePatch(task, patch)).toEqual({
+      actualStartDate: '2026-07-20',
+      actualEndDate: '2026-07-26',
+    })
+    expect(createTaskInversePatch(createTask({}), { actualStartDate: '2026-07-18' })).toEqual({
+      actualStartDate: null,
+    })
+  })
+
+  const lateTask = createTask({
+    actualEndDate: '2026-07-26',
+    actualStartDate: '2026-07-20',
+    id: 'late',
+    statusCategory: 'completed',
+  })
+  const earlyTask = createTask({
+    actualEndDate: '2026-07-21',
+    actualStartDate: '2026-07-20',
+    id: 'early',
+    statusCategory: 'completed',
+  })
+  const openTask = createTask({ id: 'open', statusCategory: 'started', actualStartDate: '2026-07-20' })
+  const rangeTask = createTask({
+    actualStartDate: '2026-07-22',
+    id: 'range',
+    schedule: {
+      calendarPolicy: { holidays: [], timeZone: 'UTC', workingWeekdays: ['monday'] },
+      durationDays: 3,
+      endDate: '2026-07-23',
+      mode: 'date-range',
+      startDate: '2026-07-21',
+    },
+    statusCategory: 'started',
+  })
+
+  test('filters completed-late and started-late Work Items', () => {
+    const tasks = [lateTask, earlyTask, openTask, rangeTask]
+    expect(tasks.filter((task) => matchesTaskDueDateFilter(task, 'completed-late')).map((task) => task.id))
+      .toEqual(['late'])
+    expect(tasks.filter((task) => matchesTaskDueDateFilter(task, 'started-late')).map((task) => task.id))
+      .toEqual(['range'])
+  })
+
+  test('sorts the longest completion delay first and keeps the rest in due-date order', () => {
+    expect(sortTasksByDueDate([earlyTask, openTask, lateTask], 'completion-delay-desc').map((task) => task.id))
+      .toEqual(['late', 'early', 'open'])
+  })
+
+  test('groups by actual dates and delays', () => {
+    const t = (key: MessageKey) => key
+    expect(resolveProjectTaskGroupValue(lateTask, 'actualEndDate', {}, undefined, t).label).toBe('2026-07-26')
+    expect(resolveProjectTaskGroupValue(lateTask, 'completionDelayDays', {}, undefined, t).label).toBe('3')
+    expect(resolveProjectTaskGroupValue(openTask, 'completionDelayDays', {}, undefined, t).label).toBe('—')
   })
 })
 

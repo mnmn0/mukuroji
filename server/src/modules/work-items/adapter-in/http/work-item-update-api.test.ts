@@ -1147,6 +1147,35 @@ test('rejects internal adapter fields at the Work Item update boundary', async (
   expect(calls.issueUpdates).toEqual([])
 })
 
+test('applies public update fields while unknown body keys never reach the adapter', async () => {
+  const adapterInputKeys: string[][] = []
+  const calls = configureFakeProjectClients(true, {
+    issueUpdateHook({ inputKeys }) {
+      adapterInputKeys.push(inputKeys)
+    },
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      expectedRevision: 1,
+      title: 'Whitelisted title',
+      unknownAdapterInput: 'dropped',
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ issue: { title: 'Whitelisted title' } })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(adapterInputKeys).toHaveLength(1)
+  expect(adapterInputKeys[0]).toContain('title')
+  expect(adapterInputKeys[0]).not.toContain('unknownAdapterInput')
+})
+
 test('rejects non-object Work Item update bodies before reading schedule fields', async () => {
   const calls = configureFakeProjectClients(true)
 

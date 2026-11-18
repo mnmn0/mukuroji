@@ -167,10 +167,12 @@ import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
   createWorkItemAuthorizationSnapshot,
   createWorkItemIdempotencyTransaction,
+  filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
+import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import {
   changesWorkItemSchedulePlacement,
@@ -1300,6 +1302,54 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId: issue.id,
         createdAt: issue.createdAt,
         ...(issue.key === undefined ? {} : { key: issue.key }),
+      }
+    },
+
+    /**
+     * Reads the parent, children, and WBS number of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The readable parent and children and the WBS number; an archived Work Item is
+     * outside the tree and has no parent, children, or number.
+     */
+    async getHierarchy(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      /**
+       * Tells whether the credential may read a Work Item in this Team.
+       *
+       * @param issue - Work Item to check.
+       * @returns Whether the Work Item is readable.
+       */
+      const isReadable = (issue: TeamIssueResponseItem) =>
+        filterAccessibleTeamIssues([issue], principal, context).length > 0
+      let hierarchy
+      try {
+        hierarchy = await readTeamWorkItemHierarchy(principal.directoryId, context.team.id, isReadable)
+      } catch (error) {
+        if (!(error instanceof ProjectDataError && error.code === 'WorkItemListLimitExceeded')) throw error
+        // A Team too large for the tree still answers for one Work Item, without a WBS number.
+        return {
+          schemaVersion: 1,
+          teamId: detail.issue.teamId,
+          workItemId: detail.issue.id,
+          ...await readWorkItemHierarchyLinks(principal.directoryId, context.team.id, detail.issue, isReadable),
+        }
+      }
+      const node = hierarchy.nodes.find((candidate) => candidate.workItemId === detail.issue.id)
+      return {
+        schemaVersion: 1,
+        teamId: detail.issue.teamId,
+        workItemId: detail.issue.id,
+        parentWorkItemId: node?.parentWorkItemId ?? null,
+        childWorkItemIds: node?.childWorkItemIds ?? [],
+        ...(node ? { wbsNumber: node.wbsNumber } : {}),
       }
     },
 

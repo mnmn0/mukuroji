@@ -17,6 +17,8 @@ const {
   app,
   configureFakeProjectClients,
   createAccessToken,
+  createFakeWorkItemConfigurationClient,
+  createTeamIssuesFake,
   resetTestApp,
   setTestAppDependencies,
   withTestEnvironment,
@@ -140,6 +142,41 @@ test('uses Team teams.read access for a Work Item route', async () => {
       teamId: 'core-team',
       issues: [{ id: 'onboarding-friction', assignedProjectId: 'refero' }],
     })
+  })
+})
+
+test('requires work-items.read for the Team Work Item hierarchy, like the Team list', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const teamsOnly = await configureEnterpriseTeamAccess(['teams.read'])
+    const deniedList = await app.request('/api/teams/core-team/issues', {
+      headers: { Authorization: teamsOnly },
+    })
+    const deniedHierarchy = await app.request('/api/teams/core-team/work-item-hierarchy', {
+      headers: { Authorization: teamsOnly },
+    })
+
+    expect(deniedList.status).toBe(403)
+    expect(deniedHierarchy.status).toBe(403)
+
+    const workItems = await configureEnterpriseTeamAccess(['teams.read', 'work-items.read'])
+    setTestAppDependencies({
+      teamIssues: createTeamIssuesFake({
+        async getTeamHierarchyEntries() {
+          return []
+        },
+      }),
+      workItemConfigurations: createFakeWorkItemConfigurationClient({
+        async getRelationGraphRevision() {
+          return 1
+        },
+      }),
+    })
+    const hierarchy = await app.request('/api/teams/core-team/work-item-hierarchy', {
+      headers: { Authorization: workItems },
+    })
+
+    expect(hierarchy.status).toBe(200)
+    expect(await hierarchy.json()).toMatchObject({ teamId: 'core-team', nodes: [] })
   })
 })
 

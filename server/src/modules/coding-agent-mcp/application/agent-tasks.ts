@@ -433,7 +433,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const page = await api.list(filters(input), cursor, limit)
       return { ...page, items: page.items.map(inScope) }
     },
-    /** Returns canonical details, acceptance criteria, effort, dependency readiness, and the task's active run. */
+    /** Returns canonical details, acceptance criteria, effort, hierarchy, dependency readiness, and the task's active run. */
     async get(id: string) {
       // Keys are never reused, so the same key before and after the task read means the task read
       // saw that Work Item, even when another one was created under the same ID at the same instant.
@@ -448,8 +448,19 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      const [acceptanceCriteria, effort] = await Promise.all([api.acceptanceCriteria(id), api.effort(id)])
-      return { task, acceptanceCriteria, effort: effort ?? null, blockers: await blockers(task), activeRun }
+      const [acceptanceCriteria, effort, hierarchy] = await Promise.all([
+        api.acceptanceCriteria(id),
+        api.effort(id),
+        api.hierarchy(id),
+      ])
+      return {
+        task,
+        acceptanceCriteria,
+        effort: effort ?? null,
+        hierarchy: hierarchy ?? null,
+        blockers: await blockers(task),
+        activeRun,
+      }
     },
     /**
      * Reports this instance's active run first, then offers a paused or sent-back started task for

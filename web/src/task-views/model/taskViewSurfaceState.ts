@@ -2,6 +2,7 @@ import {
   type CanonicalWorkItem,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  deriveWorkItemScheduleVariance,
   deriveWorkItemProgressPercent,
   deriveWorkItemRemainingEffortMinutes,
   type SearchCustomFieldFilter,
@@ -34,6 +35,13 @@ const defaultTaskViewColumns = [
   'priority',
   'workItemType',
 ]
+/** Plan-versus-actual sort fields whose missing values always sort last. */
+const actualDateSortFields: ReadonlySet<string> = new Set([
+  'actualStartDate',
+  'actualEndDate',
+  'startDelayDays',
+  'completionDelayDays',
+])
 const taskLayoutModes: readonly TaskViewLayoutMode[] = [
   'table',
   'board',
@@ -191,9 +199,7 @@ export function taskViewDefinitionToProjectState(
     priorityFilter: definition.filters.priorities?.[0] ?? 'all',
     searchQuery: definition.filters.keyword ?? '',
     workItemTypeFilter: definition.filters.workItemTypeIds?.[0] ?? 'all',
-    sortOrder: definition.layout.sort.find((sort) => sort.field === 'dueDate')?.direction === 'desc'
-      ? 'due-date-desc'
-      : 'due-date-asc',
+    sortOrder: readProjectSortOrder(definition.layout.sort),
     statusFilter: workflowStatus ? createWorkflowStatusFilterValue(workflowStatus) : 'all',
   }
 }
@@ -287,10 +293,7 @@ export function projectStateToTaskViewDefinition(
     layout.mode = state.activeTab
   }
   if (state.sortOrder !== currentState.sortOrder) {
-    layout.sort = updateDueDateSort(
-      definition.layout.sort,
-      state.sortOrder === 'due-date-desc' ? 'desc' : 'asc',
-    )
+    layout.sort = updateProjectSortOrder(definition.layout.sort, state.sortOrder)
   }
 
   return {
@@ -428,6 +431,9 @@ export function taskViewDefinitionToPresentationSettings(
       showEmptyGroups: definition.layout.displayOptions.showEmptyGroups ?? true,
       showSubtasks: definition.layout.displayOptions.showSubItems ?? true,
       wrapTitles: definition.layout.displayOptions.wrapText ?? false,
+      ...(definition.layout.displayOptions.showOutline === undefined
+        ? {}
+        : { showOutline: definition.layout.displayOptions.showOutline }),
     },
     ...(definition.layout.group ? { groupBy: definition.layout.group.field } : {}),
     ...(definition.layout.group
@@ -481,6 +487,9 @@ export function presentationSettingsToTaskViewDefinition(
         showEmptyGroups: settings.display.showEmptyGroups,
         showSubItems: settings.display.showSubtasks,
         wrapText: settings.display.wrapTitles,
+        ...(settings.display.showOutline === undefined
+          ? {}
+          : { showOutline: settings.display.showOutline }),
       },
       ...(settings.groupBy
         ? { group: { direction: settings.groupDirection ?? 'asc', field: settings.groupBy } }
@@ -654,10 +663,16 @@ export function sortTasksByTaskViewDefinition(
   const indexedTasks = tasks.map((task, index) => ({ index, task }))
   indexedTasks.sort((left, right) => {
     for (const sort of definition.layout.sort) {
-      const comparison = compareTaskViewValues(
-        resolveTaskViewFieldValue(left.task, sort.field, context),
-        resolveTaskViewFieldValue(right.task, sort.field, context),
-      )
+      const leftValue = resolveTaskViewFieldValue(left.task, sort.field, context)
+      const rightValue = resolveTaskViewFieldValue(right.task, sort.field, context)
+      if (actualDateSortFields.has(sort.field)) {
+        // Work Items without actual dates stay last in both directions so the result leads with
+        // what actually happened.
+        const leftMissing = leftValue === undefined
+        const rightMissing = rightValue === undefined
+        if (leftMissing !== rightMissing) return leftMissing ? 1 : -1
+      }
+      const comparison = compareTaskViewValues(leftValue, rightValue)
       if (comparison !== 0) return sort.direction === 'desc' ? -comparison : comparison
     }
     return left.index - right.index
@@ -758,6 +773,10 @@ function resolveTaskViewFieldValue(
     case 'team': return task.teamId
     case 'createdAt': return task.createdAt
     case 'updatedAt': return task.updatedAt
+    case 'actualStartDate': return task.actualStartDate
+    case 'actualEndDate': return task.actualEndDate
+    case 'startDelayDays': return deriveWorkItemScheduleVariance(task).startDelayDays
+    case 'completionDelayDays': return deriveWorkItemScheduleVariance(task).completionDelayDays
     case 'estimate': return task.schedule.plannedEffortMinutes
     case 'remainingEffort': return deriveWorkItemRemainingEffortMinutes(task)
     // The same derivation as the rendered progress column, under the Team's progress mode.
@@ -856,6 +875,48 @@ function updatePrimaryFilterValue<TValue>(
     ...(values ?? []).slice(1).filter((candidate) => !valuesEqual(candidate, value)),
   ]
 }
+
+/**
+ * Reads the Project sort control value represented by the leading sort rules.
+ *
+ * @param sort - Canonical ordered sort rules.
+ * @returns The completion-delay order when it leads, otherwise the due-date direction.
+ */
+function readProjectSortOrder(
+  sort: TaskViewDefinition['layout']['sort'],
+): TaskScreenViewState['sortOrder'] {
+  if (sort[0]?.field === 'completionDelayDays' && sort[0].direction === 'desc') {
+    return 'completion-delay-desc'
+  }
+  return sort.find((rule) => rule.field === 'dueDate')?.direction === 'desc'
+    ? 'due-date-desc'
+    : 'due-date-asc'
+}
+
+/**
+ * Applies the Project sort control without discarding secondary sort rules.
+ *
+ * @param sort - Canonical ordered sort rules before the surface change.
+ * @param sortOrder - New order selected by the Project task control.
+ * @returns Ordered sort rules that represent the selected order.
+ */
+function updateProjectSortOrder(
+  sort: TaskViewDefinition['layout']['sort'],
+  sortOrder: TaskScreenViewState['sortOrder'],
+): TaskViewDefinition['layout']['sort'] {
+  const withoutDelay = sort.filter((rule) => rule.field !== 'completionDelayDays')
+  const next: TaskViewDefinition['layout']['sort'] = sortOrder === 'completion-delay-desc'
+    ? [
+        { direction: 'desc', field: 'completionDelayDays' },
+        ...withoutDelay.map((rule) => ({ ...rule })),
+      ]
+    : updateDueDateSort(withoutDelay, sortOrder === 'due-date-desc' ? 'desc' : 'asc')
+  // A prepended rule pushes the lowest-priority rule past the saved-view limit.
+  return next.slice(0, TASK_VIEW_SORT_RULE_LIMIT)
+}
+
+/** Maximum number of sort rules a saved task view may store, matching the server. */
+const TASK_VIEW_SORT_RULE_LIMIT = 10
 
 /**
  * Updates the represented due-date rule without discarding secondary sort rules.
@@ -990,7 +1051,9 @@ function readProjectDueDateFilter(
     value === 'overdue' ||
     value === 'today' ||
     value === 'upcoming' ||
-    value === 'no-date'
+    value === 'no-date' ||
+    value === 'completed-late' ||
+    value === 'started-late'
   ) return value
   return 'all'
 }

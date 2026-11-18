@@ -5,6 +5,7 @@ import {
   WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
   WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEMA_VERSION,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
   type CanonicalWorkItem,
@@ -514,7 +515,28 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isOptionalString(value.sourceTriageEntryId) &&
     isOptionalString(value.archivedAt) &&
     isOptionalString(value.archivedBy) &&
+    isOptionalCalendarDate(value.actualStartDate) &&
+    isOptionalCalendarDate(value.actualEndDate) &&
     isApprovalSummary(value.approvalSummary, value.createdAt)
+}
+
+/**
+ * Returns whether a value is absent or a real `YYYY-MM-DD` calendar date.
+ *
+ * @param value - Unknown date candidate.
+ * @returns Whether the value is undefined or a date that exists on the calendar, such as not `2026-02-30`.
+ */
+function isOptionalCalendarDate(value: unknown): boolean {
+  if (value === undefined) {
+    return true
+  }
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    return false
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number(value.slice(0, 4)) >= WORK_ITEM_SCHEDULE_MIN_YEAR &&
+    !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
 }
 
 /**

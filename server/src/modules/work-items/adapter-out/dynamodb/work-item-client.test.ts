@@ -547,6 +547,92 @@ test('DynamoDB Team Work Item read can bound evaluated rows including archived r
   })).rejects.toMatchObject({ code: 'InvalidWorkItemListRead' })
 })
 
+test('DynamoDB hierarchy read stops at the limit and bounds the archived rows it evaluates', async () => {
+  /**
+   * Builds a stored Work Item row.
+   *
+   * @param issueId - Work Item ID.
+   * @param archived - Whether the row is archived.
+   * @returns The row.
+   */
+  const createStoredItem = (issueId: string, archived: boolean) => ({
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId,
+    sortOrder: 10,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    ...(archived
+      ? { archivedAt: '2026-07-12T00:00:00.000Z', archivedBy: 'demo@example.com' }
+      : {}),
+  })
+  /**
+   * Creates a client whose Query returns the given pages in order.
+   *
+   * @param pages - Query responses.
+   * @returns The client and the Query inputs it sent.
+   */
+  const createClient = (pages: Array<{ Items: unknown[]; LastEvaluatedKey?: Record<string, unknown> }>) => {
+    const sentInputs: Array<Record<string, unknown>> = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        sentInputs.push(command.input)
+        return pages.shift()
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'WorkItemsTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+    return { client, sentInputs }
+  }
+  /**
+   * Builds the last evaluated key after a Work Item.
+   *
+   * @param issueId - Last evaluated Work Item ID.
+   * @returns The key.
+   */
+  const lastKey = (issueId: string) => ({ directoryTeamId: 'workspace-1#team#core-team', issueId })
+
+  const open = createClient([
+    { Items: [createStoredItem('item-a', true), createStoredItem('item-b', false)], LastEvaluatedKey: lastKey('item-b') },
+    // The row after the limit is invalid; the read stops before parsing it.
+    { Items: [createStoredItem('item-c', false), { issueId: 'item-d' }], LastEvaluatedKey: lastKey('item-d') },
+  ])
+  const entries = await open.client.getTeamHierarchyEntries('workspace-1', 'core-team', 1)
+  expect(entries.map((entry) => entry.issue.id)).toEqual(['item-b', 'item-c'])
+  expect(open.sentInputs.map((input) => [input.ConsistentRead, input.Limit])).toEqual([[true, 20], [true, 18]])
+  expect(open.sentInputs[0]?.ExclusiveStartKey).toBeUndefined()
+  expect(open.sentInputs[1]?.ExclusiveStartKey).toEqual(lastKey('item-b'))
+
+  const archived = createClient([
+    {
+      Items: Array.from({ length: 20 }, (_, index) => createStoredItem(`item-${index}`, true)),
+      LastEvaluatedKey: lastKey('item-19'),
+    },
+  ])
+  await expect(archived.client.getTeamHierarchyEntries('workspace-1', 'core-team', 1))
+    .rejects.toMatchObject({ status: 413, code: 'WorkItemListLimitExceeded' })
+  expect(archived.sentInputs).toHaveLength(1)
+})
+
 test('DynamoDB sort-order pages read in chunks and resume after a returned Work Item', async () => {
   const createStoredItem = (issueId: string, sortOrder: number, archived = false) => ({
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
