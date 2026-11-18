@@ -427,3 +427,45 @@ export const LoadingError: Story = {
     selectedIssueId: undefined,
   },
 }
+
+/** Team Work Items that carry keys, with a description that names other Work Items by key. */
+const keyedIssues = configuredIssues.map((issue, index) => ({
+  ...issue,
+  key: `PT-${12 + index}`,
+  ...(index === 0
+    ? { description: `${issue.description ?? ''} 前提は PT-14 と PT-13 を参照。PT-12 自身は並べない。` }
+    : {}),
+})) satisfies Extract<TeamIssue, { source: 'dynamodb' }>[]
+
+/**
+ * Shows each Work Item key before its title in the table, the key and its copy actions in the
+ * detail pane, and the keys named in the description as links to their key URLs.
+ */
+export const WithWorkItemKeys: Story = {
+  args: {
+    issues: keyedIssues,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('issue-row-key-onboarding-friction')).toHaveTextContent('PT-12')
+    await expect(canvas.getByTestId('issue-row-key-release-readiness')).toHaveTextContent('PT-14')
+    const detail = within(canvas.getByTestId('team-issue-detail-pane'))
+    await expect(detail.getByRole('button', { name: 'key をコピー' })).toBeVisible()
+    const mentioned = within(detail.getByTestId('work-item-mentioned-keys'))
+    await expect(mentioned.getByRole('link', { name: 'PT-14' })).toHaveAttribute('href', '/browse/PT-14')
+    await expect(mentioned.getByRole('link', { name: 'PT-13' })).toHaveAttribute('href', '/browse/PT-13')
+    await expect(mentioned.queryByRole('link', { name: 'PT-12' })).toBeNull()
+  },
+}
+
+/** Shows each Work Item key before its title on the board cards. */
+export const BoardWithWorkItemKeys: Story = {
+  args: {
+    initialViewMode: 'board',
+    issues: keyedIssues,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(await canvas.findByRole('button', { name: /^PT-14\s*リリース準備の判断材料を揃える/ })).toBeVisible()
+  },
+}
