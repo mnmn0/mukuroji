@@ -28,6 +28,7 @@ export function createMemberSignInSecurityPorts(
         const profile = await cognito.getUserProfile(memberKey)
         return {
           softwareTokenMfaConfigured: profile.softwareTokenMfaConfigured === true,
+          mfaConfigured: profile.mfaConfigured === true,
           invitationPending: profile.status === 'FORCE_CHANGE_PASSWORD',
           disabled: profile.enabled === false,
         }
