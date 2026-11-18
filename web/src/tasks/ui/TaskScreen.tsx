@@ -210,6 +210,7 @@ import { CustomerImpactPanel } from '../../customers/ui'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
+import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
@@ -1238,17 +1239,29 @@ export function TaskScreen({
     () => selectedBulkItems.map((item) => item.selectionKey),
     [selectedBulkItems],
   )
+  // An outline hides the children of collapsed parents and orders rows by the hierarchy, so
+  // "select visible" and keyboard moves cover only the rows it shows, in its order.
+  const shownTasks = useMemo(
+    () => outline
+      ? createMultiTeamWorkItemOutlineRows(
+          visibleTasks,
+          outline.hierarchies,
+          outline.collapsedKeys,
+        ).map((row) => row.item)
+      : visibleTasks,
+    [outline, visibleTasks],
+  )
   const visibleBulkItems = useMemo(
-    () => visibleTasks.map((task) => createBulkOperationSelection(task)),
-    [visibleTasks],
+    () => shownTasks.map((task) => createBulkOperationSelection(task)),
+    [shownTasks],
   )
   const visibleActionTargets = useMemo<WorkItemActionTarget[]>(
-    () => visibleTasks.map((task) => ({
+    () => shownTasks.map((task) => ({
       expectedRevision: task.revision,
       teamId: task.teamId,
       workItemId: task.id,
     })),
-    [visibleTasks],
+    [shownTasks],
   )
   const visibleTaskViewKeys = useMemo(
     () => visibleActionTargets.map((target) =>
