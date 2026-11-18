@@ -9,6 +9,11 @@ import type { WorkspaceMember } from '../workspace-access'
 export type MemberSignInProfile = {
   /** Whether an authenticator app (TOTP) is registered. SMS or email MFA does not count. */
   softwareTokenMfaConfigured: boolean
+  /**
+   * Whether any MFA method is enabled, SMS and email included. Sign-in asks only members without
+   * any method to register an authenticator app when the Workspace policy requires MFA.
+   */
+  mfaConfigured: boolean
   /** Whether the member has not yet replaced the invitation's temporary password. */
   invitationPending: boolean
   /** Whether the account is disabled in the identity provider. */
@@ -45,24 +50,36 @@ export async function listMembersSignInSecurity(
   ports: MemberSignInSecurityPorts,
   workspaceId: string,
 ): Promise<WorkspaceMemberSignInSecurity[]> {
-  return await inspectMembers(ports, await ports.listActiveMembers(workspaceId))
+  const inspections = await inspectMembers(ports, await ports.listActiveMembers(workspaceId))
+  return inspections.map((inspection) => inspection.state)
 }
 
 /**
  * Counts the active members that an MFA requirement would send to authenticator setup.
  *
+ * Follows the sign-in rule, so a member with SMS or email MFA but no authenticator app is not
+ * counted: sign-in lets that member through without the setup.
+ *
  * @param ports - Member store and identity provider ports.
  * @param workspaceId - Workspace whose active members are counted.
- * @returns Members without TOTP, and members whose state could not be read.
+ * @returns Members without any MFA method, and members whose state could not be read.
  */
 export async function summarizeMfaEnrollment(ports: MemberSignInSecurityPorts, workspaceId: string) {
   const members = await ports.listActiveMembers(workspaceId)
-  const states = await inspectMembers(ports, members)
+  const inspections = await inspectMembers(ports, members)
   return {
     activeMemberCount: members.length,
-    unenrolledMemberCount: states.filter((state) => state.mfa === 'not-enrolled').length,
-    unknownMemberCount: states.filter((state) => state.mfa === 'unknown').length,
+    unenrolledMemberCount: inspections.filter((inspection) => inspection.setupRequiredByMfaPolicy).length,
+    unknownMemberCount: inspections.filter((inspection) => inspection.state.mfa === 'unknown').length,
   }
+}
+
+/** What inspecting one member found. */
+type MemberInspection = {
+  /** State reported in the roster. */
+  state: WorkspaceMemberSignInSecurity
+  /** Whether sign-in would send the member to authenticator setup if the policy required MFA. */
+  setupRequiredByMfaPolicy: boolean
 }
 
 /**
@@ -70,13 +87,13 @@ export async function summarizeMfaEnrollment(ports: MemberSignInSecurityPorts, w
  *
  * @param ports - Identity provider ports.
  * @param members - Active members.
- * @returns The state of each member, in the order of `members`.
+ * @returns What was found for each member, in the order of `members`.
  */
 async function inspectMembers(
   ports: MemberSignInSecurityPorts,
   members: readonly WorkspaceMember[],
-): Promise<WorkspaceMemberSignInSecurity[]> {
-  const results = new Map<number, WorkspaceMemberSignInSecurity>()
+): Promise<MemberInspection[]> {
+  const results = new Map<number, MemberInspection>()
   let next = 0
   const worker = async () => {
     while (next < members.length) {
@@ -88,7 +105,7 @@ async function inspectMembers(
   await Promise.all(
     Array.from({ length: Math.min(memberInspectionConcurrency, members.length) }, worker),
   )
-  return members.map((member, index) => results.get(index) ?? unknownState(member))
+  return members.map((member, index) => results.get(index) ?? unknownInspection(member))
 }
 
 /**
@@ -96,29 +113,35 @@ async function inspectMembers(
  *
  * @param ports - Identity provider ports.
  * @param member - Active member.
- * @returns The member's sign-in security state.
+ * @returns What was found for the member.
  */
 async function inspectMember(
   ports: MemberSignInSecurityPorts,
   member: WorkspaceMember,
-): Promise<WorkspaceMemberSignInSecurity> {
+): Promise<MemberInspection> {
   // A failed SSO lookup fails the whole request, so an SSO member is never shown as resettable.
   if (await ports.isSsoManagedEmail(member.email)) {
-    return { memberKey: member.memberKey, mfa: 'sso', passwordReset: 'sso' }
+    return {
+      state: { memberKey: member.memberKey, mfa: 'sso', passwordReset: 'sso' },
+      setupRequiredByMfaPolicy: false,
+    }
   }
   try {
     const profile = await ports.readSignInProfile(member.memberKey)
-    if (!profile) return unknownState(member)
+    if (!profile) return unknownInspection(member)
     const mfa: WorkspaceMemberMfaStatus = profile.softwareTokenMfaConfigured ? 'enrolled' : 'not-enrolled'
     const passwordReset: WorkspaceMemberPasswordResetAvailability = profile.invitationPending
       ? 'invitation-pending'
       : profile.disabled
         ? 'unavailable'
         : 'available'
-    return { memberKey: member.memberKey, mfa, passwordReset }
+    return {
+      state: { memberKey: member.memberKey, mfa, passwordReset },
+      setupRequiredByMfaPolicy: !profile.mfaConfigured,
+    }
   } catch (error) {
     ports.reportFailure(error)
-    return unknownState(member)
+    return unknownInspection(member)
   }
 }
 
@@ -126,8 +149,11 @@ async function inspectMember(
  * Describes a member whose sign-in state could not be read.
  *
  * @param member - Active member.
- * @returns The unknown state.
+ * @returns The unknown state, which is counted apart from the members that need setup.
  */
-function unknownState(member: WorkspaceMember): WorkspaceMemberSignInSecurity {
-  return { memberKey: member.memberKey, mfa: 'unknown', passwordReset: 'unavailable' }
+function unknownInspection(member: WorkspaceMember): MemberInspection {
+  return {
+    state: { memberKey: member.memberKey, mfa: 'unknown', passwordReset: 'unavailable' },
+    setupRequiredByMfaPolicy: false,
+  }
 }

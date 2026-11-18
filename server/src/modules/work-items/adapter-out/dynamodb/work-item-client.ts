@@ -590,6 +590,8 @@ type TeamIssueItem = {
   actualStartDate?: string
   /** Local date of the latest effective completion; present only while completed. */
   actualEndDate?: string
+  /** Time the item last returned to open work from completed, canceled, or archived. */
+  reopenedAt?: string
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -2949,6 +2951,18 @@ export class DynamoDbTeamIssuesClient {
           '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
         )
       }
+      const nextArchivedAt = 'archivedAt' in input
+        ? expressionAttributeValues[':archivedAt']
+        : beforeIssue.archivedAt
+      if (
+        isClosedWorkItemState(beforeIssue.statusCategory, beforeIssue.archivedAt) &&
+        !isClosedWorkItemState(nextStatusCategory, nextArchivedAt)
+      ) {
+        // Overdue escalations are keyed by this time, so a reopened item escalates again.
+        expressionAttributeNames['#reopenedAt'] = 'reopenedAt'
+        expressionAttributeValues[':reopenedAt'] = updatedAt
+        setExpressions.push('#reopenedAt = :reopenedAt')
+      }
       if (leavesCompletion) {
         expressionAttributeNames['#customerCompletionPreparationAt'] =
           'customerCompletionPreparationAt'
@@ -5267,11 +5281,26 @@ export function createTeamIssueDeepLink(teamId: string, issueId: string) {
 }
 
 /**
- * Work Item の担当・状態・期限変更から通知対象と理由を組み立てます。
+ * Builds the recipients and reasons for an assignment, status, schedule, or archive change.
+ *
+ * The accountable owner keeps the change-specific reasons. The creator receives one `creator`
+ * candidate for the same change, so a creator who is also the owner still gets one Inbox row
+ * after the projection groups candidates by member. Watchers are added by the projection from
+ * current subscriptions; the actor is removed there as well.
+ *
+ * @param before - Work Item row before the mutation.
+ * @param after - Work Item row after the mutation.
+ * @returns Notification candidates stored in the audit metadata.
  */
-function createWorkItemNotificationCandidates(
-  before: TeamIssueItem,
-  after: TeamIssueItem,
+export function createWorkItemNotificationCandidates(
+  before: Pick<
+    TeamIssueItem,
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+  >,
+  after: Pick<
+    TeamIssueItem,
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+  >,
 ) {
   const candidates: Array<{ memberKey: string; reason: string }> = []
 
@@ -5291,6 +5320,10 @@ function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.assigneeUserId, reason: 'archive-change' })
   }
 
+  if (candidates.length > 0 && after.creatorMemberKey) {
+    candidates.push({ memberKey: after.creatorMemberKey, reason: 'creator' })
+  }
+
   return candidates
 }
 
@@ -5304,6 +5337,10 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
 
   if (before.assigneeUserId !== after.assigneeUserId) {
     return 'Work Item assignment changed.'
+  }
+
+  if (before.statusCategory !== 'completed' && after.statusCategory === 'completed') {
+    return 'Work Item was completed.'
   }
 
   if (before.workflowStatusId !== after.workflowStatusId) {
@@ -5327,4 +5364,15 @@ function getDynamoDbEndpoint() {
 
 function getEnv(name: string) {
   return loadServerConfig().environment[name]
+}
+
+/**
+ * Reports whether a Work Item is out of open work, so dated notifications no longer apply.
+ *
+ * @param statusCategory - Workflow status category.
+ * @param archivedAt - Archive timestamp, when archived.
+ * @returns Whether the item is completed, canceled, or archived.
+ */
+function isClosedWorkItemState(statusCategory: WorkflowStatusCategory, archivedAt: unknown) {
+  return statusCategory === 'completed' || statusCategory === 'canceled' || archivedAt !== undefined
 }
