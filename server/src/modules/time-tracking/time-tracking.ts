@@ -2546,11 +2546,24 @@ function csvCell(value: string | number): string {
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
+/**
+ * Input keys left out of request fingerprints: the key itself, and authorization
+ * context the route derives from current state. A retry after a successful
+ * mutation can derive different values (for example, after an entry moved into a
+ * Project the caller manages) and must still replay the stored result.
+ */
+const IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
+  'idempotencyKey',
+  'canManageRates',
+  'canApprove',
+  'authorizedRevision',
+])
+
 /** Creates a stable request fingerprint while excluding the idempotency key itself. */
 function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
   const body = Object.fromEntries(
     Object.entries(input)
-      .filter(([key]) => key !== 'idempotencyKey' && key !== 'authorizedRevision')
+      .filter(([key]) => !IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS.has(key))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )
