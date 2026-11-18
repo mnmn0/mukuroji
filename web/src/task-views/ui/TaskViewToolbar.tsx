@@ -111,6 +111,8 @@ export type TaskViewToolbarProps = {
   supportsColumnLayoutMetadata?: boolean
   /** Whether the active board can show or hide empty workflow columns. */
   supportsEmptyGroups?: boolean
+  /** Whether the active table can render Work Items as a hierarchy outline. */
+  supportsOutline?: boolean
   /** Whether the effective definition differs from its saved baseline. */
   isDirty: boolean
   /** Whether a saved-view mutation is in progress. */
@@ -171,6 +173,7 @@ export function TaskViewToolbar({
   supportsKeyboardSelection = false,
   supportsColumnLayoutMetadata = false,
   supportsEmptyGroups = false,
+  supportsOutline = false,
   isDirty,
   isSaving = false,
   migrationWarnings = [],
@@ -452,6 +455,7 @@ export function TaskViewToolbar({
           settings={settings}
           supportsColumnLayoutMetadata={supportsColumnLayoutMetadata}
           supportsEmptyGroups={supportsEmptyGroups}
+          supportsOutline={supportsOutline}
           supportsKeyboardSelection={supportsKeyboardSelection}
           supportsLayoutPresentation={supportsLayoutPresentation}
           supportsSubtasks={supportsSubtasks}
@@ -672,6 +676,8 @@ export type TaskViewSettingsPanelProps = {
   supportsColumnLayoutMetadata: boolean
   /** Whether the active board renders empty workflow columns. */
   supportsEmptyGroups: boolean
+  /** Whether the active table renders Work Items as a hierarchy outline. */
+  supportsOutline: boolean
   /** Whether J/K and range-selection shortcuts are implemented by the surface. */
   supportsKeyboardSelection: boolean
   /** Whether child Work Item visibility is implemented by the surface. */
@@ -689,6 +695,7 @@ export function TaskViewSettingsPanel({
   settings,
   supportsColumnLayoutMetadata,
   supportsEmptyGroups,
+  supportsOutline,
   supportsKeyboardSelection,
   supportsLayoutPresentation,
   sortOptions = groupOptions,
@@ -1137,6 +1144,16 @@ export function TaskViewSettingsPanel({
               onChange={(showEmptyGroups) => onChange({
                 ...settings,
                 display: { ...settings.display, showEmptyGroups },
+              })}
+            />
+          ) : null}
+          {supportsOutline ? (
+            <DisplayOption
+              checked={settings.display.showOutline ?? false}
+              label={t('taskViews.display.outline')}
+              onChange={(showOutline) => onChange({
+                ...settings,
+                display: { ...settings.display, showOutline },
               })}
             />
           ) : null}

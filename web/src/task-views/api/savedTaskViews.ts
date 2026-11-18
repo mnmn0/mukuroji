@@ -547,6 +547,7 @@ function isTaskViewDisplayOptions(value: unknown): value is TaskViewDisplayOptio
     value.showEmptyGroups,
     value.wrapText,
     value.showAssigneeAvatars,
+    value.showOutline,
   ].every((option) => option === undefined || typeof option === 'boolean')
 }
 

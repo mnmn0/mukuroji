@@ -19,6 +19,8 @@ export type TaskViewDisplayOptions = {
   showSubtasks: boolean
   /** Whether long Work Item titles may wrap to additional lines. */
   wrapTitles: boolean
+  /** Whether a table shows Work Items as a collapsible outline in hierarchy order. */
+  showOutline?: boolean
 }
 
 /** Presentation settings edited by the shared task-view toolbar. */

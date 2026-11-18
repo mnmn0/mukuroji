@@ -82,6 +82,7 @@ import type {
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  createDefaultWorkItemHierarchyRank,
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
   parseWorkItemKey,
@@ -113,6 +114,12 @@ import type {
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
+
+/**
+ * Rows one hierarchy read may evaluate for each Work Item it may return, so archived rows cannot
+ * make the read unbounded.
+ */
+const TEAM_HIERARCHY_EVALUATED_ROWS_PER_ITEM = 10
 
 /** Keys tried for a new Work Item before giving up on IDs taken by older title-based IDs. */
 const CREATED_WORK_ITEM_ID_ATTEMPT_LIMIT = 5
@@ -530,6 +537,8 @@ type TeamIssueItem = {
    * チーム内の表示順です。
    */
   sortOrder: number
+  /** Sibling order rank under the parent; absent until the Work Item is reordered. */
+  hierarchyRank?: string
   /**
    * Issue タイトルです。
    */
@@ -678,6 +687,14 @@ export type TeamIssueResponseItem = CanonicalWorkItem & {
    * Issue 作成者の Workspace member key です。
    */
   creatorMemberKey: string
+}
+
+/** One Work Item read for the Team hierarchy read model. */
+export type TeamWorkItemHierarchyEntry = {
+  /** Canonical Work Item. */
+  issue: TeamIssueResponseItem
+  /** Stored rank, or the rank derived from the Team creation order when none is stored. */
+  hierarchyRank: string
 }
 
 /** Work Item 一覧 client の読み込み量を制御します。 */
@@ -1246,6 +1263,20 @@ export type TeamIssuesClient = {
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
   /**
+   * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks for
+   * the hierarchy read model.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Most Work Items to read; one more is read to detect a larger Team.
+   * @returns Up to `limit + 1` Work Items with their ranks.
+   */
+  getTeamHierarchyEntries?(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamWorkItemHierarchyEntry[]>
+  /**
    * Resolves a Work Item key to the Team and Work Item that hold it, without authorizing them.
    *
    * @param directoryId - Workspace ID.
@@ -1665,6 +1696,37 @@ export class DynamoDbTeamIssuesClient {
         throw error
       }
 
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Most Work Items to read; one more is read to detect a larger Team.
+   * @returns Up to `limit + 1` Work Items with their ranks.
+   */
+  async getTeamHierarchyEntries(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamWorkItemHierarchyEntry[]> {
+    await this.ensureLocalTables()
+    try {
+      const items = await this.queryTeamHierarchyItems(directoryId, teamId, limit + 1)
+      return items.map((item) => {
+        const issue = toTeamIssueResponseItem(item)
+        return {
+          issue,
+          hierarchyRank: item.hierarchyRank ?? createDefaultWorkItemHierarchyRank(item.sortOrder, issue.id),
+        }
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
       throw toProjectDataError(error)
     }
   }
@@ -3616,6 +3678,59 @@ export class DynamoDbTeamIssuesClient {
     } while (exclusiveStartKey)
 
     return { items }
+  }
+
+  /**
+   * Strongly reads a Team's non-archived rows for the hierarchy, within a budget of evaluated rows.
+   *
+   * Archived rows are read and dropped, so without a budget a Team with many archived Work Items
+   * would make one hierarchy read scan its whole partition.
+   *
+   * @param directoryId - Workspace directory that owns the Team partition.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Non-archived rows after which reading stops.
+   * @returns Up to `limit` non-archived rows.
+   * @throws ProjectDataError `413 WorkItemListLimitExceeded` when the budget runs out first.
+   */
+  private async queryTeamHierarchyItems(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamIssueItem[]> {
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const maxEvaluatedRows = limit * TEAM_HIERARCHY_EVALUATED_ROWS_PER_ITEM
+    const items: TeamIssueItem[] = []
+    let evaluatedCount = 0
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      if (evaluatedCount >= maxEvaluatedRows) {
+        throw new ProjectDataError(
+          413,
+          'WorkItemListLimitExceeded',
+          'This Team has too many archived Work Items to read its hierarchy at once.',
+        )
+      }
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.issueTableName,
+          ConsistentRead: true,
+          KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+          ExpressionAttributeValues: { ':directoryTeamId': directoryTeamId },
+          ExclusiveStartKey: exclusiveStartKey,
+          Limit: maxEvaluatedRows - evaluatedCount,
+        }),
+      )
+      // Validate row by row, so rows after the limit are never parsed and cannot fail the read.
+      for (const stored of response.Items ?? []) {
+        evaluatedCount += 1
+        const row = toTeamIssueItem(stored)
+        if (row.archivedAt !== undefined) continue
+        items.push(row)
+        if (items.length >= limit) return items
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return items
   }
 
   /**
