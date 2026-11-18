@@ -45,7 +45,8 @@ export async function readTeamWorkItemHierarchy(
       'The Work Item hierarchy cannot be read.',
     )
   }
-  const getTeamHierarchyEntries = teamIssues.getTeamHierarchyEntries
+  // Bound so the adapter keeps its receiver: the DynamoDB client reads its tables through `this`.
+  const getTeamHierarchyEntries = teamIssues.getTeamHierarchyEntries.bind(teamIssues)
   /** Reads the Team's current relation graph revision. */
   const readGraphRevision = async () => workItemConfigurations.getRelationGraphRevision
     ? await workItemConfigurations.getRelationGraphRevision(directoryId, teamId)

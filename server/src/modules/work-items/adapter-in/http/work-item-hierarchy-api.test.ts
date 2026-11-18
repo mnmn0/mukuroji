@@ -162,6 +162,31 @@ test('returns the Team hierarchy with WBS numbers and roll-ups of readable Work 
   expect(body.nodes[1]?.rollup).toBeUndefined()
 })
 
+test('reads the Team hierarchy through the adapter as its receiver', async () => {
+  configureFakeProjectClients(true)
+  const receivers: unknown[] = []
+  const teamIssues = createTeamIssuesFake({
+    // A plain method like the DynamoDB client's, which reads its tables through `this`.
+    async getTeamHierarchyEntries(this: unknown) {
+      receivers.push(this)
+      return []
+    },
+  })
+  setTestAppDependencies({
+    teamIssues,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        return 3
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(200)
+  expect(receivers).toEqual([teamIssues])
+})
+
 test('reads the Team hierarchy again when the graph moved while it was read', async () => {
   configureFakeProjectClients(true)
   const base = await readBaseIssue()
