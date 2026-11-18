@@ -62,6 +62,7 @@ import {
 } from '../../issues/api'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
+  canManagePlanningScope,
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
@@ -170,6 +171,10 @@ const standardTaskViewFields = [
   'status',
   'assignee',
   'dueDate',
+  'actualStartDate',
+  'actualEndDate',
+  'startDelayDays',
+  'completionDelayDays',
   'priority',
   'workItemType',
   'project',
@@ -619,7 +624,12 @@ export function TaskPage() {
       'project',
       taskViewScope,
       'table',
-      taskViewCustomFields.length > 0 ? ['customFields'] : [],
+      [
+        // The WBS table shows the recorded actual dates next to the plan by default.
+        'actualStartDate',
+        'actualEndDate',
+        ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
+      ],
     ),
     [taskViewCustomFields.length, taskViewScope],
   )
@@ -649,6 +659,10 @@ export function TaskPage() {
       { id: 'status', label: t('tasks.filter.status') },
       { id: 'assignee', label: t('tasks.filter.assignee') },
       { id: 'dueDate', label: t('tasks.filter.dueDate') },
+      { id: 'actualStartDate', label: t('tasks.column.actualStartDate') },
+      { id: 'actualEndDate', label: t('tasks.column.actualEndDate') },
+      { id: 'startDelayDays', label: t('tasks.column.startDelayDays') },
+      { id: 'completionDelayDays', label: t('tasks.column.completionDelayDays') },
       { id: 'priority', label: t('tasks.filter.priority') },
       { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
@@ -1195,6 +1209,27 @@ export function TaskPage() {
   }
 
   /** Checks one concrete Work Item against the Team-qualified task-view write scopes. */
+  /**
+   * Mirrors the server rule for correcting actual dates: a manager of the assigned Project may
+   * correct them, and a Team manager may correct an unassigned Work Item. A manager of another
+   * Project in the same Team may not. Direct Team manager grants are not visible here, so those
+   * users correct through the API only.
+   */
+  const canCorrectTaskActualDates = (
+    task: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
+  ) =>
+    canMutateContent && (
+      Boolean(user?.isSystemAdmin) ||
+      (task.assignedProjectId === projectId && canManageProjectMembers) ||
+      canManagePlanningScope(
+        user,
+        task.assignedProjectId
+          ? { teamId: task.teamId, projectId: task.assignedProjectId }
+          : { teamId: task.teamId },
+        planningAccess,
+      )
+    )
+
   const canMutateProjectTaskTarget = (
     target: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
   ) => canWriteTaskViewWorkItem(taskViewWriteCapabilities, target)
@@ -1896,6 +1931,7 @@ export function TaskPage() {
           }
         : undefined}
       onCommentDraftDirtyChange={reportCommentDraftDirty}
+      canCorrectActualDates={canCorrectTaskActualDates}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}

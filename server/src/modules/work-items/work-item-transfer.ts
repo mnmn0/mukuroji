@@ -181,6 +181,8 @@ export function createWorkItemExport(
     'priority',
     'priorityUpdatedAt',
     'dueDateUpdatedAt',
+    'actualStartDate',
+    'actualEndDate',
     'revision',
     'createdAt',
     'updatedAt',
@@ -227,6 +229,12 @@ function toExportWorkItem(workItem: CanonicalWorkItem) {
     ...(workItem.dueDateUpdatedAt === undefined
       ? {}
       : { dueDateUpdatedAt: workItem.dueDateUpdatedAt }),
+    ...(workItem.actualStartDate === undefined
+      ? {}
+      : { actualStartDate: workItem.actualStartDate }),
+    ...(workItem.actualEndDate === undefined
+      ? {}
+      : { actualEndDate: workItem.actualEndDate }),
     revision: workItem.revision,
     createdAt: workItem.createdAt,
     updatedAt: workItem.updatedAt,

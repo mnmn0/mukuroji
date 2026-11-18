@@ -288,6 +288,10 @@ import {
   readPublicWorkItemUpdateBody,
 } from '../shared/work-item-schedule'
 import {
+  readWorkItemActualDateCorrection,
+  requireWorkItemActualDateCorrectionPermission,
+} from '../shared/work-item-actual-dates'
+import {
   projectAccessAllows,
   requireActiveWorkspaceAssignee,
   type TeamPermissionContext,
@@ -4970,8 +4974,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const context = await requireTeamPermission(principal, teamId, 'member')
       // Built from public fields only; the raw body never reaches the adapter input.
       const input = readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {})
+      const actualDateRequest = readWorkItemActualDateCorrection(input)
       const body = normalizeTeamIssueInput(
-        input,
+        actualDateRequest.body,
         context.team,
       )
       const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
@@ -4988,6 +4993,18 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         readAssignedProjectId(body.assignedProjectId),
         'member',
       )
+      if (actualDateRequest.correction) {
+        await requireWorkItemActualDateCorrectionPermission(
+          principal,
+          teamId,
+          context,
+          detail.issue.assignedProjectId,
+        )
+        if (detail.issue.revision !== expectedRevision) {
+          // A correction is judged against the dates the manager saw, so a stale request conflicts.
+          throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
+        }
+      }
 
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
@@ -5068,6 +5085,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
             ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+            ...(actualDateRequest.correction
+              ? { actualDateCorrection: actualDateRequest.correction }
+              : {}),
             ...effortChange,
             expectedRevision,
             ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
@@ -5077,6 +5097,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             teamId,
             issueId,
             ...configuredBody,
+            ...actualDateRequest.correction,
             expectedRevision,
           }),
         ),

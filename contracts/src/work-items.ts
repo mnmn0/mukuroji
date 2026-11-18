@@ -489,6 +489,16 @@ export type CanonicalWorkItem = {
   /** Timestamp of the latest mutation that changed the derived due date. */
   dueDateUpdatedAt?: string
   /**
+   * Local `YYYY-MM-DD` date, in the schedule calendar timezone, when the Work Item first entered
+   * the `started` or `completed` category. Absent until work starts.
+   */
+  actualStartDate?: string
+  /**
+   * Local `YYYY-MM-DD` date of the latest effective completion. Removed when the Work Item leaves
+   * the `completed` category, so it is present only while the Work Item is completed.
+   */
+  actualEndDate?: string
+  /**
    * Reversible bulk archive を適用した ISO 8601 timestamp です。
    */
   archivedAt?: string
@@ -708,6 +718,16 @@ export type WorkItemPatch = {
    * 変更後の優先度です。
    */
   priority?: WorkItemPriority
+  /**
+   * Team manager correction of the recorded actual start date (`YYYY-MM-DD`); null removes it.
+   * The correction is recorded in the audit log.
+   */
+  actualStartDate?: string | null
+  /**
+   * Team manager correction of the recorded actual end date (`YYYY-MM-DD`); null removes it.
+   * Only a completed Work Item can carry an actual end date.
+   */
+  actualEndDate?: string | null
 }
 
 /**

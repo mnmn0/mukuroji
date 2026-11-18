@@ -2824,6 +2824,35 @@ test('sanitizes deleted and permission-restricted task view references with stab
   expect(created.migrationWarnings?.every((warning) => warning.referenceId === undefined)).toBe(true)
 })
 
+test('retains plan-versus-actual columns, sorts, and presets in a task view', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const definition = createQualifiedStatusTaskViewDefinition()
+  definition.filters.dueDatePreset = 'completed-late'
+  definition.layout.sort = [{ field: 'completionDelayDays', direction: 'desc' }]
+  definition.layout.columns = [
+    { field: 'title' },
+    { field: 'actualStartDate' },
+    { field: 'actualEndDate' },
+    { field: 'startDelayDays' },
+    { field: 'completionDelayDays' },
+  ]
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: createQualifiedStatusTaskViewAccess(),
+    input: { name: 'Plan versus actual', visibility: 'personal', definition },
+  })
+
+  expect(created.definition.filters.dueDatePreset).toBe('completed-late')
+  expect(created.definition.layout.sort).toEqual(definition.layout.sort)
+  expect(created.definition.layout.columns).toEqual(definition.layout.columns)
+  expect(created.migrationWarnings).toBeUndefined()
+})
+
 test('fails closed when a stored task view status filter is not Team and Type-qualified', async () => {
   const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
   const client = new DynamoDbWorkspaceSearchClient(

@@ -190,8 +190,10 @@ import {
 } from '../model/taskView'
 import {
   formatTaskScheduleRange,
+  taskScheduleInstantToLocalDate,
   taskScheduleModeLabelKeys,
 } from '../model/taskSchedule'
+import { resolveTaskActualDateUndo } from '../model/taskActualDates'
 import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { CreateTaskPanel } from './CreateTaskPanel'
 import { TaskActionFeedback } from './TaskActionFeedback'
@@ -253,6 +255,11 @@ type TaskBulkSelectionState = {
 
 /** Last successful inline update retained for a reversible task action. */
 type TaskUndoState = {
+  /**
+   * Task snapshot before an inline update, used to recheck the actual dates when the undo runs.
+   * Schedule-only undo states built from a schedule preview have none.
+   */
+  before?: CanonicalWorkItem
   /** Task snapshot returned by the successful update. */
   task: CanonicalWorkItem
   /** Patch that restores every field touched by the update. */
@@ -419,6 +426,8 @@ export type TaskScreenProps = {
   isSystemAdmin?: boolean
   /** Whether the current user may manage Project member roles. */
   canManageProjectMembers?: boolean
+  /** Checks whether the current user may correct one Work Item's recorded actual dates. */
+  canCorrectActualDates?: (task: CanonicalWorkItem) => boolean
   /** Project charter section rendered on the permissions tab. */
   projectCharterPanel?: ReactNode
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
@@ -600,6 +609,7 @@ export function TaskScreen({
   assigneeOptions = emptyProjectMembers,
   canAccessTriage = false,
   canManageProjectMembers = false,
+  canCorrectActualDates,
   projectCharterPanel,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
@@ -713,6 +723,38 @@ export function TaskScreen({
   >()
   const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
   const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
+
+  /**
+   * Creates the undo entry for one successful update, or undefined when it cannot be undone.
+   *
+   * @param before - Work Item before the update.
+   * @param input - Forward patch that was saved.
+   * @param after - Work Item returned by the update.
+   * @returns Undo state including any actual dates the reverse status change cannot restore.
+   */
+  const createTaskUndoState = useCallback((
+    before: CanonicalWorkItem,
+    input: UpdateTeamIssueInput,
+    after: CanonicalWorkItem,
+  ): TaskUndoState | undefined => {
+    if (!isReversibleTaskUpdate(input)) return undefined
+    const actualDateUndo = resolveTaskActualDateUndo(
+      before,
+      after,
+      input,
+      canCorrectActualDates?.(before) ?? false,
+      // The undo restores the earlier schedule, so its calendar dates the reverse transition.
+      taskScheduleInstantToLocalDate(new Date(), before.schedule.calendarPolicy),
+    )
+    if (!actualDateUndo.reversible) return undefined
+    return {
+      before,
+      forwardPatch: input,
+      inversePatch: { ...createTaskInversePatch(before, input), ...actualDateUndo.patch },
+      task: after,
+      undoToken: createTaskUpdateUndoToken(after),
+    }
+  }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
   const [isRestoringTask, setIsRestoringTask] = useState(false)
   const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
@@ -1860,16 +1902,7 @@ export function TaskScreen({
 
     try {
       const updatedTask = await onUpdateTask(task, input)
-      if (isReversibleTaskUpdate(input)) {
-        setTaskUndo({
-          forwardPatch: input,
-          inversePatch: createTaskInversePatch(task, input),
-          task: updatedTask,
-          undoToken: createTaskUpdateUndoToken(updatedTask),
-        })
-      } else {
-        setTaskUndo(undefined)
-      }
+      setTaskUndo(createTaskUndoState(task, input, updatedTask))
       setTaskRedo(undefined)
       setTaskAction({
         kind: 'success',
@@ -1888,7 +1921,7 @@ export function TaskScreen({
       })
       throw error
     }
-  }, [onUpdateTask, t])
+  }, [createTaskUndoState, onUpdateTask, t])
 
   /**
    * Previews every schedule patch before allowing the shared persistence path to run.
@@ -2070,10 +2103,21 @@ export function TaskScreen({
       return
     }
 
+    // The reverse status change records today's date, so recheck the actual dates on today's date.
+    const currentUndo = taskUndo.before
+      ? createTaskUndoState(taskUndo.before, taskUndo.forwardPatch, taskUndo.task)
+      : taskUndo
+    if (!currentUndo) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      setTaskAction({ kind: 'error', message: t('tasks.action.undoActualDatesUnavailable') })
+      return
+    }
+
     setIsRestoringTask(true)
 
     try {
-      const result = await performTaskUpdate(taskUndo.task, taskUndo.inversePatch)
+      const result = await performTaskUpdate(taskUndo.task, currentUndo.inversePatch)
       if (!result.applied) {
         setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
         return
@@ -2121,12 +2165,7 @@ export function TaskScreen({
         setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
         return
       }
-      setTaskUndo({
-        forwardPatch: taskRedo.forwardPatch,
-        inversePatch: createTaskInversePatch(taskRedo.task, taskRedo.forwardPatch),
-        task: result.task,
-        undoToken: createTaskUpdateUndoToken(result.task),
-      })
+      setTaskUndo(createTaskUndoState(taskRedo.task, taskRedo.forwardPatch, result.task))
       setTaskRedo(undefined)
       setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
     } catch (error) {
@@ -2201,16 +2240,7 @@ export function TaskScreen({
             const result = await onUpdateIssue(teamId, issueId, input)
             if (result) {
               updatedTask = result
-              if (isReversibleTaskUpdate(input)) {
-                setTaskUndo({
-                  forwardPatch: input,
-                  inversePatch: createTaskInversePatch(detailTask, input),
-                  task: result,
-                  undoToken: createTaskUpdateUndoToken(result),
-                })
-              } else {
-                setTaskUndo(undefined)
-              }
+              setTaskUndo(createTaskUndoState(detailTask, input, result))
               setTaskRedo(undefined)
               setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
             }
@@ -3724,6 +3754,9 @@ export function TaskScreen({
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={isRetainedDetail ? undefined : artifacts}
                   canAccessTriage={isRetainedDetail ? false : canAccessTriage}
+                  canCorrectActualDates={!isRetainedDetail &&
+                    renderedDetailTask !== undefined &&
+                    (canCorrectActualDates?.(renderedDetailTask) ?? false)}
                   canManageScheduleDependencyEndpoint={isRetainedDetail
                     ? undefined
                     : canManageScheduleDependencyEndpoint}

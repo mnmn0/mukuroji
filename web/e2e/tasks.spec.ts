@@ -4129,6 +4129,52 @@ test.describe('authenticated task page', () => {
     await expect(dependencySummary).toContainText('後続 Work Item')
   })
 
+  test('Issue #374: 予定と実績の日付を Table・詳細・Gantt で並べ、完了遅れで絞り込み補正できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    const fixtures = referoTaskFixtures.map((task) => {
+      if (task.id === 'wireframe') {
+        return {
+          ...task,
+          actualStartDate: '2026-06-01',
+          actualEndDate: '2026-06-05',
+          workflowStatusId: 'done',
+          statusCategory: 'completed',
+        } satisfies CanonicalWorkItem
+      }
+      if (task.id === 'brand-guideline') return { ...task, actualStartDate: '2026-06-02' }
+      return task
+    })
+    await mockAuthenticatedTaskPage(page, fixtures)
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/projects/refero/issues')
+
+    await expect(page.getByRole('columnheader', { name: '実績開始' })).toBeVisible()
+    await expect(page.getByRole('columnheader', { name: '実績終了' })).toBeVisible()
+    await expect(page.getByTestId('task-actualEndDate-wireframe')).toHaveText('2026-06-05')
+    await expect(page.getByTestId('task-actualEndDate-seo-research')).toHaveText('—')
+
+    await page.getByRole('button', { name: '期限', exact: true }).click()
+    await page.getByRole('menuitemradio', { name: '完了遅れ' }).click()
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('task-row-seo-research')).toBeHidden()
+    await expect(page.getByTestId('tasks-count')).toContainText('1')
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const actualDates = page.getByTestId('task-detail-pane').getByTestId('task-detail-actual-dates')
+    await expect(actualDates.getByTestId('task-detail-completion-delay')).toHaveText('2 日遅れ')
+    await actualDates.getByLabel('実績開始').fill('2026-05-29')
+    await actualDates.getByRole('button', { name: '実績日を補正' }).click()
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect(actualDates.getByTestId('task-detail-actual-start')).toHaveText('2026-05-29')
+
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    await expect(page.getByTestId('task-gantt-actual-bar-wireframe'))
+      .toHaveAccessibleName('実績: 2026-05-29 – 2026-06-05')
+    await expect(page.getByTestId('task-gantt-actual-bar-brand-guideline'))
+      .toHaveAccessibleName('実績: 2026-06-02 – 進行中')
+  })
+
   test('Issue #190: 依存先への日程波及を preview 後の confirm で一括保存する', async ({ page }) => {
     await setScheduleFixtureClock(page)
     const dependency = {

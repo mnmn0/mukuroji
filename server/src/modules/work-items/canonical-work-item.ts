@@ -14,6 +14,7 @@ import {
 } from '@mukuroji/contracts'
 import { isStoredContributorAssignmentList } from './domain/contributor-assignments'
 import { isStoredAcceptanceCriterionList } from './domain/acceptance-criteria'
+import { isOptionalWorkItemActualDate } from './domain/actual-dates'
 import {
   deriveWorkItemScheduleDueDate,
   isCanonicalWorkItemSchedule,
@@ -88,6 +89,10 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
   dueDateUpdatedAt?: string
+  /** Local date when the Work Item first entered the started or completed category. */
+  actualStartDate?: string
+  /** Local date of the latest effective completion; present only while completed. */
+  actualEndDate?: string
   /**
    * Time the item last returned to open work from completed, canceled, or archived. Overdue
    * escalations restart from it, so Project managers hear about a reopened item again.
@@ -187,7 +192,28 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
       value.createdAt,
       value.updatedAt,
     ) &&
-    hasCanonicalArchiveState(value)
+    hasCanonicalArchiveState(value) &&
+    isOptionalWorkItemActualDate(value.actualStartDate) &&
+    isOptionalWorkItemActualDate(value.actualEndDate) &&
+    hasConsistentActualDates(value)
+}
+
+/**
+ * Checks that a recorded actual end belongs to a completed Work Item that also started.
+ *
+ * Rows without actual dates stay valid, because Work Items recorded before #374 have none.
+ *
+ * @param value - Candidate row whose date fields already passed the format checks.
+ * @returns True when there is no end date, or the row is completed and its start is on or before its end.
+ */
+function hasConsistentActualDates(value: Record<string, unknown>): boolean {
+  if (value.actualEndDate === undefined) {
+    return true
+  }
+  return value.statusCategory === 'completed' &&
+    typeof value.actualStartDate === 'string' &&
+    typeof value.actualEndDate === 'string' &&
+    value.actualStartDate <= value.actualEndDate
 }
 
 /**

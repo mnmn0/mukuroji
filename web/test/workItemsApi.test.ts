@@ -97,6 +97,15 @@ describe('canonical Work Item API', () => {
     }
   })
 
+  test('accepts only real calendar dates as actual dates', () => {
+    const valid = createWorkItem({ dueDate: '2026-07-12', schedule: createDefaultTestSchedule('2026-07-12') })
+    expect(isCanonicalWorkItem({ ...valid, actualStartDate: '2024-02-29' })).toBeTrue()
+    for (const actualStartDate of ['2026-02-30', '2026-99-99', '0026-11-02', '2026-1-2', 20261102]) {
+      expect(isCanonicalWorkItem({ ...valid, actualStartDate })).toBeFalse()
+      expect(isCanonicalWorkItem({ ...valid, actualEndDate: actualStartDate })).toBeFalse()
+    }
+  })
+
   test('validates contributor assignments at the response boundary', () => {
     const contributor = {
       assignmentId: 'a'.repeat(32),

@@ -874,6 +874,10 @@ const taskViewBuiltInLayoutFields = new Set([
   'labels',
   'relations',
   'watchers',
+  'actualStartDate',
+  'actualEndDate',
+  'startDelayDays',
+  'completionDelayDays',
 ])
 
 const searchEntityTypes = new Set<SearchEntityType>([
@@ -895,7 +899,14 @@ const taskViewWorkflowCategories = new Set([
   'canceled',
 ])
 const taskViewPriorities = new Set(['high', 'medium', 'low'])
-const taskViewDueDatePresets = new Set(['overdue', 'today', 'upcoming', 'no-date'])
+const taskViewDueDatePresets = new Set([
+  'overdue',
+  'today',
+  'upcoming',
+  'no-date',
+  'completed-late',
+  'started-late',
+])
 const taskViewDisplayOptionKeys = [
   'showCompleted',
   'showArchived',
@@ -6667,7 +6678,14 @@ function isTaskViewPriority(value: string): value is WorkItemPriority {
 /** Reads one supported relative due-date preset. */
 function requireTaskViewDueDatePreset(value: unknown): TaskViewDueDatePreset {
   if (typeof value === 'string' && taskViewDueDatePresets.has(value)) {
-    if (value === 'overdue' || value === 'today' || value === 'upcoming' || value === 'no-date') {
+    if (
+      value === 'overdue' ||
+      value === 'today' ||
+      value === 'upcoming' ||
+      value === 'no-date' ||
+      value === 'completed-late' ||
+      value === 'started-late'
+    ) {
       return value
     }
   }

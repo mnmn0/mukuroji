@@ -22,6 +22,11 @@ export {
   normalizeAcceptanceCriteria,
 } from './domain/acceptance-criteria'
 export {
+  WorkItemActualDateError,
+  applyWorkItemStatusTransitionToActualDates,
+  type WorkItemActualDateCorrection,
+} from './domain/actual-dates'
+export {
   createResourceId,
 } from './domain/resource-id'
 export {

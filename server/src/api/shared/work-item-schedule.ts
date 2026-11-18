@@ -67,6 +67,8 @@ const publicWorkItemUpdateFields: Readonly<Record<keyof PublicUpdateTeamIssueReq
   workItemTypeId: true,
   customFieldValues: true,
   typeChangeResolution: true,
+  actualStartDate: true,
+  actualEndDate: true,
 }
 
 /**
@@ -165,6 +167,8 @@ export function rejectInternalWorkItemUpdateFields(
     )
   }
   rejectWorkItemInternalFields(input, [
+    'actualDateCorrection',
+    'actualDateTransitionAt',
     'agentRunTransactItems',
     'authorizationConditionChecks',
     'authorizationSnapshot',

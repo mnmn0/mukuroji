@@ -40,6 +40,14 @@ import { isStoredContributorAssignmentList } from '../../domain/contributor-assi
 import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteria'
 import { createResourceId } from '../../domain/resource-id'
 import {
+  WORK_ITEM_ACTUAL_DATE_FIELDS,
+  WorkItemActualDateError,
+  applyWorkItemStatusTransitionToActualDates,
+  correctWorkItemActualDates,
+  type WorkItemActualDateCorrection,
+  type WorkItemActualDates,
+} from '../../domain/actual-dates'
+import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
   readWorkItemKeyLocation,
@@ -48,6 +56,7 @@ import {
 import {
   deriveWorkItemScheduleDueDate,
   normalizeWorkItemSchedule,
+  workItemScheduleInstantToLocalDate,
   WorkItemScheduleError,
 } from '../../domain/work-item-schedule'
 import {
@@ -577,6 +586,10 @@ type TeamIssueItem = {
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
   dueDateUpdatedAt?: string
+  /** Local date when the Work Item first entered the started or completed category. */
+  actualStartDate?: string
+  /** Local date of the latest effective completion; present only while completed. */
+  actualEndDate?: string
   /** Time the item last returned to open work from completed, canceled, or archived. */
   reopenedAt?: string
   /**
@@ -1082,6 +1095,10 @@ export type PublicUpdateTeamIssueRequestBody = {
   customFieldValues?: unknown
   /** Explicit acknowledgement for data affected by changing the Work Item Type. */
   typeChangeResolution?: unknown
+  /** Manager correction of the actual start date; the API handler moves it to `actualDateCorrection`. */
+  actualStartDate?: unknown
+  /** Manager correction of the actual end date; the API handler moves it to `actualDateCorrection`. */
+  actualEndDate?: unknown
 }
 
 /**
@@ -1107,6 +1124,13 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   archivedAt?: unknown
   /** Internal bulk operation が記録する archive actor member key です。 */
   archivedBy?: unknown
+  /** Team manager correction of the actual dates, authorized by the API handler. */
+  actualDateCorrection?: WorkItemActualDateCorrection
+  /**
+   * ISO instant that dates the status transition, set by an internal caller that predicted the
+   * resulting actual dates at that instant. Defaults to the update time.
+   */
+  actualDateTransitionAt?: string
   /**
    * Agent Run claim, fence, and lease writes committed in the same transaction as the update.
    * A conditional failure in these items is reported as an Agent Run fence conflict.
@@ -2170,6 +2194,12 @@ export class DynamoDbTeamIssuesClient {
         item.customerCompletionPreparationAt = now
         item.customerCompletionPreparationRevision = item.revision
       }
+      Object.assign(item, applyWorkItemStatusTransitionToActualDates(
+        {},
+        undefined,
+        statusCategory,
+        workItemScheduleInstantToLocalDate(now, schedule.calendarPolicy),
+      ))
 
       const eventItem = this.createIssueEventItem({
         directoryId,
@@ -2202,6 +2232,8 @@ export class DynamoDbTeamIssuesClient {
           'dueDate',
           'schedule',
           'priority',
+          'actualStartDate',
+          'actualEndDate',
           'sourceRequestId',
           'sourceTriageEntryId',
         ]),
@@ -2952,6 +2984,26 @@ export class DynamoDbTeamIssuesClient {
           '#customerCompletionPreparationRevision',
         )
       }
+      const actualDateUpdate = createWorkItemActualDateUpdate(
+        beforeIssue,
+        nextStatusCategory,
+        workItemScheduleInstantToLocalDate(
+          readActualDateTransitionAt(input.actualDateTransitionAt, updatedAt),
+          schedule.calendarPolicy,
+        ),
+        input.actualDateCorrection,
+      )
+      for (const field of WORK_ITEM_ACTUAL_DATE_FIELDS) {
+        if (actualDateUpdate[field] === beforeIssue[field]) continue
+        expressionAttributeNames[`#${field}`] = field
+        const value = actualDateUpdate[field]
+        if (value === undefined) {
+          removeExpressions.push(`#${field}`)
+        } else {
+          expressionAttributeValues[`:${field}`] = value
+          setExpressions.push(`#${field} = :${field}`)
+        }
+      }
       const updateExpression = [
         `SET ${setExpressions.join(', ')}`,
         removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -3030,6 +3082,8 @@ export class DynamoDbTeamIssuesClient {
           'remainingEffortMinutes',
           'progressPercent',
           'priority',
+          'actualStartDate',
+          'actualEndDate',
           'archivedAt',
           'archivedBy',
         ]),
@@ -3046,6 +3100,7 @@ export class DynamoDbTeamIssuesClient {
           afterRevision: nextRevision,
           ...(completionTransition ? { completionTransition: true } : {}),
           ...(leavesCompletion ? { completionReopened: true } : {}),
+          ...(input.actualDateCorrection ? { actualDateCorrection: true } : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({
@@ -4319,7 +4374,66 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.archivedBy = item.archivedBy
   }
 
+  if (item.actualStartDate) {
+    issue.actualStartDate = item.actualStartDate
+  }
+
+  if (item.actualEndDate) {
+    issue.actualEndDate = item.actualEndDate
+  }
+
   return issue
+}
+
+/**
+ * Reads the instant that dates a status transition.
+ *
+ * @param value - Instant chosen by an internal caller, if any.
+ * @param updatedAt - Update time used when no caller chose an instant.
+ * @returns The instant to date the transition by.
+ * @throws ProjectDataError when the caller passed an invalid instant.
+ */
+function readActualDateTransitionAt(value: string | undefined, updatedAt: string): string {
+  if (value === undefined) return updatedAt
+  if (Number.isNaN(Date.parse(value))) {
+    throw new ProjectDataError(400, 'InvalidWorkItemActualDates', 'Actual date transition time is invalid.')
+  }
+  return value
+}
+
+/**
+ * Resolves the actual dates after one Work Item update.
+ *
+ * @param beforeIssue - Stored Work Item before the update.
+ * @param nextStatusCategory - Status category after the update.
+ * @param today - Local date of the update in the schedule calendar timezone.
+ * @param correction - Optional manager correction authorized by the API handler.
+ * @returns The actual dates to store after the update.
+ */
+function createWorkItemActualDateUpdate(
+  beforeIssue: TeamIssueItem,
+  nextStatusCategory: WorkflowStatusCategory,
+  today: string,
+  correction: WorkItemActualDateCorrection | undefined,
+): WorkItemActualDates {
+  const transitioned = applyWorkItemStatusTransitionToActualDates(
+    {
+      ...(beforeIssue.actualStartDate ? { actualStartDate: beforeIssue.actualStartDate } : {}),
+      ...(beforeIssue.actualEndDate ? { actualEndDate: beforeIssue.actualEndDate } : {}),
+    },
+    beforeIssue.statusCategory,
+    nextStatusCategory,
+    today,
+  )
+  if (!correction) return transitioned
+  try {
+    return correctWorkItemActualDates(transitioned, correction, nextStatusCategory, today)
+  } catch (error) {
+    if (error instanceof WorkItemActualDateError) {
+      throw new ProjectDataError(400, error.code, error.message)
+    }
+    throw error
+  }
 }
 
 function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueActivityResponseItem {
