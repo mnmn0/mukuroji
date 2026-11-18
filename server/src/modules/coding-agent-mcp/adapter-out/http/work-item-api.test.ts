@@ -272,6 +272,12 @@ test('reads a task key and its creation time from the endpoint and treats an old
   const paths: string[] = []
   const api = createAgentWorkItemApi(config, async (url) => {
     paths.push(`${url.pathname}${url.search}`)
+    /**
+     * Builds a hierarchy response with the given fields.
+     *
+     * @param body - Fields that override the empty hierarchy.
+     * @returns The JSON response.
+     */
     const respond = (body: Record<string, unknown>) =>
       Response.json({ schemaVersion: 1, teamId: 'team', createdAt: '2026-09-01T00:00:00.000Z', ...body })
     switch (url.pathname) {
@@ -294,6 +300,12 @@ test('reads a task hierarchy from the endpoint and treats an older server as hav
   const paths: string[] = []
   const api = createAgentWorkItemApi(config, async (url) => {
     paths.push(`${url.pathname}${url.search}`)
+    /**
+     * Builds a hierarchy response with the given fields.
+     *
+     * @param body - Fields that override the empty hierarchy.
+     * @returns The JSON response.
+     */
     const respond = (body: Record<string, unknown>) =>
       Response.json({ schemaVersion: 1, teamId: 'team', parentWorkItemId: null, childWorkItemIds: [], ...body })
     switch (url.pathname) {

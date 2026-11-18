@@ -1312,6 +1312,12 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         evaluateProjectScopes: true,
       })
       const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      /**
+       * Tells whether the credential may read a Work Item in this Team.
+       *
+       * @param issue - Work Item to check.
+       * @returns Whether the Work Item is readable.
+       */
       const isReadable = (issue: TeamIssueResponseItem) =>
         filterAccessibleTeamIssues([issue], principal, context).length > 0
       let hierarchy

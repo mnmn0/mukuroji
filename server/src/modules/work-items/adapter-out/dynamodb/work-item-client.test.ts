@@ -548,6 +548,13 @@ test('DynamoDB Team Work Item read can bound evaluated rows including archived r
 })
 
 test('DynamoDB hierarchy read stops at the limit and bounds the archived rows it evaluates', async () => {
+  /**
+   * Builds a stored Work Item row.
+   *
+   * @param issueId - Work Item ID.
+   * @param archived - Whether the row is archived.
+   * @returns The row.
+   */
   const createStoredItem = (issueId: string, archived: boolean) => ({
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -573,6 +580,12 @@ test('DynamoDB hierarchy read stops at the limit and bounds the archived rows it
       ? { archivedAt: '2026-07-12T00:00:00.000Z', archivedBy: 'demo@example.com' }
       : {}),
   })
+  /**
+   * Creates a client whose Query returns the given pages in order.
+   *
+   * @param pages - Query responses.
+   * @returns The client and the Query inputs it sent.
+   */
   const createClient = (pages: Array<{ Items: unknown[]; LastEvaluatedKey?: Record<string, unknown> }>) => {
     const sentInputs: Array<Record<string, unknown>> = []
     const documentClient = {
@@ -590,6 +603,12 @@ test('DynamoDB hierarchy read stops at the limit and bounds the archived rows it
     )
     return { client, sentInputs }
   }
+  /**
+   * Builds the last evaluated key after a Work Item.
+   *
+   * @param issueId - Last evaluated Work Item ID.
+   * @returns The key.
+   */
   const lastKey = (issueId: string) => ({ directoryTeamId: 'workspace-1#team#core-team', issueId })
 
   const open = createClient([

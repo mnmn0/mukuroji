@@ -202,6 +202,12 @@ describe('parseTeamWorkItemHierarchyResponse', () => {
   })
 
   test('rejects malformed nodes', () => {
+    /**
+     * Replaces the response's nodes with one changed node.
+     *
+     * @param patch - Fields to change on the node.
+     * @returns The response with only that node.
+     */
     const withNode = (patch: Record<string, unknown>) => ({
       ...valid,
       nodes: [{ ...valid.nodes[1], ...patch }],
