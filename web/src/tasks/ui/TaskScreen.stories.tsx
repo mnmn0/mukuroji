@@ -24,7 +24,10 @@ import {
 } from '../../commands/ui/WorkspaceCommandMenuContext'
 import { createDefaultDateRangeTaskSchedule } from '../model/taskSchedule'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
-import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
+import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import {
   collaborationWorkspaceMemberFixtures,
   issueCollaborationControllerFixture,
@@ -195,6 +198,25 @@ const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTe
 const onDeclinedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) =>
   // Status changes stand in for a completion the person declines; other edits are saved.
   input.workflowStatusId === undefined ? createStoryUpdatedTask(task) : CANCELLED_TEAM_ISSUE_UPDATE)
+const onSavedBeforeDetailPatch = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
+  void input
+  return createStoryUpdatedTask(task)
+})
+/** Settles the detail save held by {@link onHeldDetailPatch}. */
+const heldDetailPatch: { settle?: (outcome: CancelledTeamIssueUpdate) => void } = {}
+/** Ends the held detail save the way a person declining the parent completion would. */
+function declineHeldDetailPatch() {
+  heldDetailPatch.settle?.(CANCELLED_TEAM_ISSUE_UPDATE)
+}
+const onHeldDetailPatch = fn((teamId: string, issueId: string, input: UpdateTeamIssueInput) => {
+  void teamId
+  void issueId
+  void input
+  // Stands in for a parent completion still reading its children or waiting on the person.
+  return new Promise<CancelledTeamIssueUpdate>((resolve) => {
+    heldDetailPatch.settle = resolve
+  })
+})
 const onDeniedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
@@ -1702,6 +1724,59 @@ export const DirectInlinePatchDeclined: Story = {
     const [, undoPatch] = onDeclinedDirectPatchMutation.mock.calls[2] ?? []
     expect(undoPatch).toMatchObject({ title: 'ワイヤーフレームを確認する' })
     expect(undoPatch).not.toHaveProperty('workflowStatusId')
+  },
+}
+
+/** Undo waits while a detail pane save, such as a parent completion check, is still pending. */
+export const DetailPatchPendingHoldsUndo: Story = {
+  args: {
+    onUpdateTask: onSavedBeforeDetailPatch,
+  },
+  render: (args) => (
+    <CanonicalDetailFocusHarness
+      canMutate
+      taskScreenProps={{ ...args, onUpdateIssue: onHeldDetailPatch }}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    onHeldDetailPatch.mockClear()
+    onSavedBeforeDetailPatch.mockClear()
+    heldDetailPatch.settle = undefined
+
+    // A saved edit first, so there is an Undo to hold.
+    await userEvent.click(canvas.getByTestId('task-inline-title-wireframe'))
+    const titleInput = canvas.getByTestId('task-inline-title-wireframe-input')
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, '保存したタイトル')
+    await userEvent.tab()
+    const feedback = await canvas.findByTestId('task-action-feedback')
+    await expect(feedback).toHaveTextContent('変更を保存しました。')
+
+    await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
+    const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
+    await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
+    const detailPane = within(canvas.getByTestId('task-detail-pane'))
+    // The fixture's required custom fields are filled so the save reaches the route.
+    await userEvent.type(detailPane.getByRole('textbox', { name: 'Customer impact' }), 'SetupBlocked')
+    await userEvent.selectOptions(detailPane.getByRole('combobox', { name: 'Risk level' }), 'Low')
+    await userEvent.click(detailPane.getByRole('button', { name: '変更を保存' }))
+    await waitFor(() => expect(onHeldDetailPatch).toHaveBeenCalledTimes(1))
+
+    const heldUndo = within(canvas.getByTestId('task-action-feedback')).getByRole('button', { name: '元に戻す' })
+    await expect(heldUndo).toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(heldUndo)
+    await expect(onSavedBeforeDetailPatch).toHaveBeenCalledTimes(1)
+
+    // Once the person declines, Undo runs again and reverses the saved title.
+    declineHeldDetailPatch()
+    const undo = within(canvas.getByTestId('task-action-feedback')).getByRole('button', { name: '元に戻す' })
+    await waitFor(() => expect(undo).not.toHaveAttribute('aria-disabled'))
+    await userEvent.click(undo)
+    await waitFor(() => expect(onSavedBeforeDetailPatch).toHaveBeenCalledTimes(2))
+    const [, undoPatch] = onSavedBeforeDetailPatch.mock.calls[1] ?? []
+    expect(undoPatch).toMatchObject({ title: 'ワイヤーフレームを確認する' })
   },
 }
 

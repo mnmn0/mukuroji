@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useSWRConfig } from 'swr'
+import { unstable_serialize, useSWRConfig } from 'swr'
 import {
   useBlocker,
   useLocation,
@@ -46,6 +46,10 @@ import {
   confirmParentCompletionInBrowser,
 } from '../../issues/mutations/confirmParentCompletion'
 import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
+import {
+  refreshMovedCacheEntry,
+  refreshMovedHierarchyCache,
+} from '../../issues/mutations/hierarchyMoveCacheRefresh'
 import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
@@ -478,7 +482,23 @@ export function TeamIssuePage() {
     error: hierarchyError,
     mutate: mutateHierarchy,
     isValidating: isHierarchyValidating,
+    key: hierarchyKey,
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
+  // The cache keys this page reads now. A hierarchy move that finishes after the person
+  // switched Team or Work Item, or closed the outline, checks it to tell whether a key it
+  // refreshes still has a reader that revalidates it.
+  const shownCacheKeysRef = useRef<ReadonlySet<string>>(new Set())
+  const shownIssuesCacheKey = issuesKey ? unstable_serialize(issuesKey) : ''
+  const shownDetailCacheKey = detailKey ? unstable_serialize(detailKey) : ''
+  const shownHierarchyCacheKey = hierarchyKey ? unstable_serialize(hierarchyKey) : ''
+  useEffect(() => {
+    shownCacheKeysRef.current = new Set(
+      [shownIssuesCacheKey, shownDetailCacheKey, shownHierarchyCacheKey].filter(Boolean),
+    )
+    return () => {
+      shownCacheKeysRef.current = new Set()
+    }
+  }, [shownDetailCacheKey, shownHierarchyCacheKey, shownIssuesCacheKey])
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
     currentUserError,
     [
@@ -751,23 +771,13 @@ export function TeamIssuePage() {
     const movedHierarchyKey = createTeamWorkItemHierarchyKey(accessToken, movedTeamId)
     const movedIssuesKey = issuesKey
     const movedDetailKey = detailKey
-    /**
-     * Reads the moved Team's hierarchy and writes it to the cache. A plain revalidation does
-     * nothing once the outline closed and nothing reads the key, which would leave the
-     * pre-move placement cached for the next time it opens.
-     */
-    const refreshMovedHierarchy = async () => {
-      try {
-        await mutateSWR(
-          movedHierarchyKey,
-          getTeamWorkItemHierarchy(movedTeamId, accessToken),
-          { revalidate: false },
-        )
-      } catch {
-        // The cached hierarchy stays; an open outline still gets the usual revalidation.
-        await mutateSWR(movedHierarchyKey)
-      }
-    }
+    const readShownCacheKeys = () => shownCacheKeysRef.current
+    const refreshMovedHierarchy = () => refreshMovedHierarchyCache(
+      mutateSWR,
+      movedHierarchyKey,
+      () => getTeamWorkItemHierarchy(movedTeamId, accessToken),
+      readShownCacheKeys,
+    )
     try {
       await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:hierarchy:move:${teamId}:${issueId}`,
@@ -793,8 +803,8 @@ export function TeamIssuePage() {
     }
     await Promise.all([
       refreshMovedHierarchy(),
-      movedIssuesKey ? mutateSWR(movedIssuesKey) : undefined,
-      movedDetailKey ? mutateSWR(movedDetailKey) : undefined,
+      movedIssuesKey ? refreshMovedCacheEntry(mutateSWR, movedIssuesKey, readShownCacheKeys) : undefined,
+      movedDetailKey ? refreshMovedCacheEntry(mutateSWR, movedDetailKey, readShownCacheKeys) : undefined,
     ])
   }
 

@@ -542,6 +542,9 @@ export function TeamIssueScreen({
     }
     outlineMovePendingRef.current = true
     setOutlineStatusMessage(undefined)
+    // Kept from the start of the move: if the view is rebuilt while the move saves, such as by
+    // a reload, focus is not handed to a row in the new view the person did not move from.
+    const viewPanel = issueViewPanelRef.current
     saveOutlineMove(issue.id, {
       parentWorkItemId: plan.parentWorkItemId,
       hierarchyRank: plan.hierarchyRank,
@@ -561,7 +564,6 @@ export function TeamIssueScreen({
       setOutlineStatusMessage(t('issues.outline.moved').replace('{title}', resolveIssueTitle(issue, t)))
       // Moving the row in the DOM drops focus; return it so repeated moves keep working. Focus
       // the person moved elsewhere while the move saved stays where it is.
-      const viewPanel = issueViewPanelRef.current
       globalThis.requestAnimationFrame(() => {
         const activeElement = document.activeElement
         if (activeElement !== null && activeElement !== document.body) return
