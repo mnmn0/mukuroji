@@ -171,6 +171,13 @@ export function createDeveloperExportFile(
   }
 }
 
+/**
+ * Builds the JSON export entry of one Work Item.
+ *
+ * @param workItem - Exported Work Item.
+ * @param wbsNumber - Its WBS number, if its Team's hierarchy could be read.
+ * @returns The entry, without the WBS number when it is unknown.
+ */
 function toExportWorkItem(workItem: CanonicalWorkItem, wbsNumber: string | undefined) {
   return {
     id: workItem.id,
@@ -197,6 +204,12 @@ function toExportWorkItem(workItem: CanonicalWorkItem, wbsNumber: string | undef
   }
 }
 
+/**
+ * Turns one CSV cell value into text; objects and arrays become JSON.
+ *
+ * @param value - Cell value.
+ * @returns The text, empty for a missing value.
+ */
 function serializeDeveloperExportCell(value: unknown) {
   if (value === undefined || value === null) {
     return ''
@@ -211,6 +224,12 @@ function serializeDeveloperExportCell(value: unknown) {
   return String(value)
 }
 
+/**
+ * Quotes one CSV cell and prefixes a leading formula character so spreadsheets read it as text.
+ *
+ * @param value - Cell text.
+ * @returns The escaped cell.
+ */
 function escapeDeveloperExportCsvValue(value: string) {
   const safeValue = /^[\t\r\n ]*[=+\-@]/u.test(value)
     ? `'${value}`
