@@ -114,3 +114,36 @@ export const BusyConfirmation: Story = {
     await expect(canvas.getByRole('dialog')).toBeInTheDocument()
   },
 }
+
+/** Shows how many active members must register an authenticator app before MFA is required. */
+export const MfaRequirementImpact: Story = {
+  args: {
+    confirmation: {
+      impact: {
+        callerAllowed: true,
+        mfaImpact: { activeMemberCount: 12, unenrolledMemberCount: 3, unknownMemberCount: 1 },
+        requiresConfirmation: false,
+        warnings: [],
+      },
+      input: {
+        allowedGuestDomains: [],
+        expectedVersion: enterpriseSecuritySnapshotFixture.sessionPolicy.version,
+        externalCollaboratorsAllowed: false,
+        guestSessionLifetimeMinutes: 480,
+        guestsAllowed: false,
+        idleTimeoutMinutes: 60,
+        ipAllowlist: [],
+        mfaRequired: true,
+        reauthenticationMinutes: 480,
+        sensitiveActionReauthenticationMinutes: 15,
+        sessionLifetimeMinutes: 720,
+      },
+      kind: 'session-policy',
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('heading', { name: 'Require MFA?' })).toBeVisible()
+    await expect(canvas.getByText(/3 active members have no MFA/u)).toBeVisible()
+  },
+}

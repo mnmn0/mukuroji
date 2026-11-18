@@ -110,6 +110,7 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
       return {
         Username: 'valid@example.com',
         UserAttributes: [{ Name: 'email', Value: 'valid@example.com' }],
+        UserMFASettingList: ['SMS_MFA'],
       }
     },
   } as unknown as CognitoIdentityProviderClient
@@ -137,13 +138,17 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
         name: undefined,
         enabled: undefined,
         mfaConfigured: false,
+        softwareTokenMfaConfigured: false,
         status: undefined,
       },
     ],
     nextToken: undefined,
   })
+  // SMS MFA counts as MFA, but not as an authenticator app.
   await expect(client.getUserProfile('valid@example.com')).resolves.toMatchObject({
     id: 'valid@example.com',
+    mfaConfigured: true,
+    softwareTokenMfaConfigured: false,
   })
   await expect(client.describeEnterpriseIdentityProvider('EnterpriseOidc'))
     .resolves.toEqual({
@@ -168,6 +173,8 @@ test('uses AWS Cognito SDK commands and excludes users with conflicting workspac
   expect(commandNames).toEqual([
     'InitiateAuthCommand',
     'RespondToAuthChallengeCommand',
+    // Replacing the emailed temporary password proves the address, so reset can reach it later.
+    'AdminUpdateUserAttributesCommand',
     'GetUserCommand',
     'ListUsersCommand',
     'AdminGetUserCommand',
@@ -437,11 +444,17 @@ test('runs the Workspace identity lifecycle through the production AWS Cognito a
     ['missing@example.com', 1],
     ['sub-forbidden@example.com', 1],
   ]))
+  // Replacing the emailed temporary password proves the address, so reset can reach it later.
+  expect(sentCommands.find(({ name, input }) =>
+    name === 'AdminUpdateUserAttributesCommand' &&
+    JSON.stringify(input.UserAttributes) === JSON.stringify([{ Name: 'email_verified', Value: 'true' }])
+  )).toBeDefined()
   expect(sentCommands
     .filter(({ name }) => name !== 'GetUserCommand')
     .map(({ name }) => name)).toEqual([
     'AdminGetUserCommand',
     'RespondToAuthChallengeCommand',
+    'AdminUpdateUserAttributesCommand',
     'AdminListGroupsForUserCommand',
     'AdminGetUserCommand',
     'AdminUpdateUserAttributesCommand',
@@ -1662,5 +1675,47 @@ test('refreshes and revokes tokens with the issuing app client', async () => {
       name: 'RevokeTokenCommand',
       input: { Token: 'sso-refresh-token', ClientId: 'mukuroji-sso-client' },
     },
+  ])
+})
+
+test('repairs a missing email verification of a confirmed invited user when a reset is requested', async () => {
+  const sent: string[] = []
+  const users = new Map([
+    ['confirmed@example.com', 'CONFIRMED'],
+    ['pending@example.com', 'FORCE_CHANGE_PASSWORD'],
+  ])
+  const verified = new Set<string>()
+  const sdkClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const name = command.constructor.name
+      const username = String(command.input.Username)
+      sent.push(`${name}:${username}`)
+      if (name === 'ForgotPasswordCommand') {
+        if (!verified.has(username)) throw createCognitoSdkTestError('InvalidParameterException', 400)
+        return {}
+      }
+      if (name === 'AdminGetUserCommand') {
+        return { Username: username, UserStatus: users.get(username), UserAttributes: [] }
+      }
+      if (name === 'AdminUpdateUserAttributesCommand') {
+        verified.add(username)
+      }
+      return {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const client = new AwsCognitoClient(sdkClient, 'us-east-1_mukuroji', 'mukuroji-client')
+
+  await client.requestPasswordReset('confirmed@example.com')
+  // A user who never replaced the temporary password has not proved the address.
+  await expect(client.requestPasswordReset('pending@example.com'))
+    .rejects.toMatchObject({ code: 'InvalidParameterException' })
+
+  expect(sent).toEqual([
+    'ForgotPasswordCommand:confirmed@example.com',
+    'AdminGetUserCommand:confirmed@example.com',
+    'AdminUpdateUserAttributesCommand:confirmed@example.com',
+    'ForgotPasswordCommand:confirmed@example.com',
+    'ForgotPasswordCommand:pending@example.com',
+    'AdminGetUserCommand:pending@example.com',
   ])
 })

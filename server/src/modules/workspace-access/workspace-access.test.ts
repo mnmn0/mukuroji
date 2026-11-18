@@ -2886,3 +2886,297 @@ test('exposes WorkspaceAccessError status and code for API mapping', () => {
   const error = new WorkspaceAccessError(409, 'WorkspaceVersionConflict', 'conflict')
   expect(error).toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
 })
+
+/**
+ * Creates a client whose members are read from a fixed map and whose transactions are recorded.
+ *
+ * @param members - Members returned by member reads.
+ * @param transactions - Receives each transaction input.
+ * @param auditTableName - Audit table, or null to disable audit.
+ * @returns The configured client.
+ */
+function createCredentialActionClient(
+  members: WorkspaceMember[],
+  transactions: Array<Record<string, unknown>>,
+  auditTableName: string | null = 'AuditTable',
+) {
+  return new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        const member = members.find((candidate) =>
+          `MEMBER#${candidate.memberKey}` === key.recordKey
+        )
+        return member ? { Item: toMemberItem(member) } : {}
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactions.push(command.input)
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    auditTableName ?? undefined,
+    auditTableName ? workspaceAuditPseudonymKey : undefined,
+  )
+}
+
+test('records a member credential reset with actor and target conditions', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('sato@example.com', 'member', 'active', 3),
+  ], transactions)
+
+  const record = await client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'password-reset-requested',
+    createAuditContext('credential-reset'),
+  )
+
+  expect(record).toMatchObject({ member: { memberKey: 'sato@example.com' }, alreadyRecorded: false, completed: false })
+  expect(transactions).toHaveLength(1)
+  const items = transactions[0].TransactItems as Array<Record<string, Record<string, unknown>>>
+  expect(items).toHaveLength(4)
+  expect(items[0].ConditionCheck?.Key).toEqual({
+    workspaceId,
+    recordKey: 'MEMBER#demo@example.com',
+  })
+  expect(items[1].ConditionCheck?.ExpressionAttributeValues).toEqual({
+    ':active': 'active',
+    ':version': 3,
+  })
+  const auditItem = items[2].Put?.Item as Record<string, unknown>
+  expect(auditItem.eventType).toBe('member.password-reset-requested')
+  expect(auditItem.entityId).toBe(createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    'sato@example.com',
+    workspaceAuditPseudonymKey,
+  ))
+  expect(JSON.stringify(auditItem)).not.toContain('sato@example.com')
+  expect(items[3].Put?.Item).toMatchObject({
+    workspaceId,
+    recordKey: `CREDENTIAL_ACTION#${String(auditItem.eventId)}`,
+    memberKey: 'sato@example.com',
+    action: 'password-reset-requested',
+    status: 'recorded',
+    leaseUntil: now.getTime() + 60_000,
+  })
+  expect(items[3].Put?.ConditionExpression).toBe('attribute_not_exists(recordKey)')
+})
+
+test('lets an admin reset members but not owners, and nobody reset themselves', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('owner@example.com', 'owner'),
+  ], transactions)
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'owner@example.com',
+    'mfa-reset',
+    createAuditContext('credential-owner'),
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'demo@example.com',
+    'mfa-reset',
+    createAuditContext('credential-self'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceSelfCredentialReset' })
+  expect(transactions).toEqual([])
+})
+
+test('refuses a member credential reset when no audit table keeps its progress', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('sato@example.com', 'member'),
+  ], transactions, null)
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'mfa-reset',
+    createAuditContext('credential-no-audit'),
+  )).rejects.toMatchObject({ status: 503, code: 'AccountSecurityUnavailable' })
+  expect(transactions).toEqual([])
+})
+
+test('reports a member that changed during a credential reset as a conflict', async () => {
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return key.recordKey === 'MEMBER#demo@example.com'
+          ? { Item: toMemberItem(createWorkspaceMember('demo@example.com')) }
+          : { Item: toMemberItem(createWorkspaceMember('sato@example.com', 'member')) }
+      }
+      throw createConditionalTransactionError(3, 1)
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+    workspaceAuditPseudonymKey,
+  )
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'mfa-reset',
+    createAuditContext('credential-conflict'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+})
+
+test('tracks a credential reset by its idempotency key so that a retry resumes, refuses or skips it', async () => {
+  const progressRecords = new Map<string, Record<string, unknown>>()
+  const leaseTransactions: unknown[][] = []
+  let clock = now
+  const members = [
+    createWorkspaceMember('demo@example.com', 'admin'),
+    createWorkspaceMember('sato@example.com', 'member', 'active', 3),
+  ]
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      const input: Record<string, unknown> = command.input
+      const key = command.input.Key as { recordKey?: string } | undefined
+      if (command.constructor.name === 'GetCommand' && key?.recordKey?.startsWith('CREDENTIAL_ACTION#')) {
+        const record = progressRecords.get(key.recordKey)
+        return record ? { Item: record } : {}
+      }
+      if (command.constructor.name === 'GetCommand') {
+        const member = members.find((candidate) => `MEMBER#${candidate.memberKey}` === key?.recordKey)
+        return member ? { Item: toMemberItem(member) } : {}
+      }
+      if (command.constructor.name === 'UpdateCommand' && key?.recordKey) {
+        const record = progressRecords.get(key.recordKey)
+        const values = input.ExpressionAttributeValues as Record<string, unknown>
+        if (record && values[':completed']) {
+          progressRecords.set(key.recordKey, { ...record, status: 'completed' })
+          return {}
+        }
+        if (values[':applying']) {
+          if (record?.status !== 'recorded') {
+            throw Object.assign(new Error('Condition failed.'), { name: 'ConditionalCheckFailedException' })
+          }
+          progressRecords.set(key.recordKey, { ...record, status: 'applying' })
+        }
+        return {}
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const items = input.TransactItems as Array<{
+          Put?: { Item: Record<string, unknown> }
+          Update?: { Key: { recordKey: string }; ExpressionAttributeValues: Record<string, unknown> }
+        }>
+        const leaseUpdate = items[2]?.Update
+        if (leaseUpdate) {
+          leaseTransactions.push(items)
+          const record = progressRecords.get(leaseUpdate.Key.recordKey)
+          const values = leaseUpdate.ExpressionAttributeValues
+          if (record?.status !== 'recorded' || record.leaseUntil !== values[':observedLeaseUntil']) {
+            throw Object.assign(new Error('Transaction cancelled.'), {
+              name: 'TransactionCanceledException',
+              CancellationReasons: [{ Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+            })
+          }
+          progressRecords.set(leaseUpdate.Key.recordKey, { ...record, leaseUntil: values[':leaseUntil'] })
+          return {}
+        }
+        const progress = items[3]?.Put?.Item
+        const recordKey = String(progress?.recordKey)
+        if (progressRecords.has(recordKey)) {
+          throw Object.assign(new Error('Transaction cancelled.'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'ConditionalCheckFailed' },
+            ],
+          })
+        }
+        if (progress) progressRecords.set(recordKey, progress)
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => clock,
+    'PlanningTable',
+    'AuditTable',
+    workspaceAuditPseudonymKey,
+  )
+  const auditContext = createAuditContext('credential-reset-retry')
+  const record = () => client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'mfa-reset',
+    auditContext,
+  )
+  const readProgress = () => client.readMemberCredentialActionProgress(
+    workspaceId,
+    'sato@example.com',
+    'mfa-reset',
+    auditContext,
+  )
+
+  await expect(readProgress()).resolves.toBe('none')
+  await expect(record()).resolves.toMatchObject({ alreadyRecorded: false, completed: false })
+  await expect(readProgress()).resolves.toBe('recorded')
+  // While the first attempt holds its lease, a concurrent retry must not change Cognito too.
+  await expect(record()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionInProgress' })
+  // Once the lease runs out, one retry takes the action over and the next waits again.
+  clock = new Date(now.getTime() + 61_000)
+  await expect(record()).resolves.toMatchObject({ alreadyRecorded: true, completed: false })
+  await expect(record()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionInProgress' })
+  // The takeover checks in the same transaction that the actor and target are unchanged.
+  expect(leaseTransactions[0]).toMatchObject([
+    { ConditionCheck: { Key: { recordKey: 'MEMBER#demo@example.com' } } },
+    { ConditionCheck: { Key: { recordKey: 'MEMBER#sato@example.com' }, ExpressionAttributeValues: { ':version': 3 } } },
+    { Update: {} },
+  ])
+  // The progress record expires with the audit event that keeps its key taken.
+  expect(typeof [...progressRecords.values()][0]?.expiresAt).toBe('number')
+  // Once an attempt marks the Cognito change as started, no retry repeats it, even inside the
+  // resume window, because the member may have set up a new app since.
+  const markApplying = () => client.markMemberCredentialActionApplying(
+    workspaceId,
+    'sato@example.com',
+    'mfa-reset',
+    auditContext,
+  )
+  await markApplying()
+  await expect(markApplying()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionInProgress' })
+  clock = new Date(now.getTime() + 3 * 60_000)
+  await expect(record()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionExpired' })
+  await expect(readProgress()).resolves.toBe('recorded')
+  // An action left unfinished past the resume window is not repeated automatically either.
+  clock = new Date(now.getTime() + 11 * 60_000)
+  await expect(record()).rejects.toMatchObject({ status: 409, code: 'WorkspaceCredentialActionExpired' })
+  await client.completeMemberCredentialAction(workspaceId, 'sato@example.com', 'mfa-reset', auditContext)
+  await expect(readProgress()).resolves.toBe('completed')
+  await expect(record()).resolves.toMatchObject({ alreadyRecorded: true, completed: true })
+  // Reusing the key for a different action is a conflict, not a silent success.
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'password-reset-requested',
+    auditContext,
+  )).rejects.toMatchObject({ code: 'WorkspaceIdempotencyConflict', status: 409 })
+  expect(progressRecords.size).toBe(1)
+})

@@ -98,6 +98,8 @@ import {
   readJson,
   toAuthErrorResponse,
 } from '../shared/http'
+import { summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { createRequestMemberSignInSecurityPorts } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
 import {
   createWorkspaceMutationContext,
@@ -2659,7 +2661,13 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
     }
   })
 
-  /** IP allowlist 保存前に現在の caller が締め出されるかを preview します。 */
+  /**
+   * Previews whether saving the IP allowlist would lock out the current caller.
+   *
+   * When the change makes MFA required, `mfaImpact` also returns how many active members have
+   * no MFA method at all; sign-in asks them to register an authenticator app. Members with SMS
+   * or email MFA are not counted, because sign-in lets them through.
+   */
   routeApp.post('/api/enterprise/security/policy/preview', async (c) => {
     try {
       const principal = await requireEnterpriseSecurityPrincipal(c)
@@ -2677,13 +2685,24 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
       }
       const ipAllowlist = readEnterpriseStringArray(body?.ipAllowlist, 'IP allowlist')
       validateEnterpriseIpAllowlist(ipAllowlist)
+      const turnsMfaOn = body?.mfaRequired === true && current.mfaRequirement !== 'required'
       return c.json({
-        impact: createEnterprisePolicyCallerImpact(
-          c,
-          principal.directoryId,
-          expectedVersion,
-          ipAllowlist,
-        ),
+        impact: {
+          ...createEnterprisePolicyCallerImpact(
+            c,
+            principal.directoryId,
+            expectedVersion,
+            ipAllowlist,
+          ),
+          ...(turnsMfaOn
+            ? {
+                mfaImpact: await summarizeMfaEnrollment(
+                  createRequestMemberSignInSecurityPorts(),
+                  principal.directoryId,
+                ),
+              }
+            : {}),
+        },
       })
     } catch (error) {
       return toEnterpriseIdentityBoundaryErrorResponse(c, error)

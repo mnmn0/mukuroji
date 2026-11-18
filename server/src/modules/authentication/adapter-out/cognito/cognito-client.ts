@@ -22,16 +22,24 @@ import {
   AdminEnableUserCommand,
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
+  AdminResetUserPasswordCommand,
+  AdminSetUserMFAPreferenceCommand,
   AdminUpdateUserAttributesCommand,
   AdminUserGlobalSignOutCommand,
+  AssociateSoftwareTokenCommand,
+  ChangePasswordCommand,
   CognitoIdentityProviderClient,
+  ConfirmForgotPasswordCommand,
   DescribeIdentityProviderCommand,
   DescribeUserPoolClientCommand,
+  ForgotPasswordCommand,
   GetUserCommand,
   InitiateAuthCommand,
   ListUsersCommand,
   RespondToAuthChallengeCommand,
   RevokeTokenCommand,
+  SetUserMFAPreferenceCommand,
+  VerifySoftwareTokenCommand,
 } from '@aws-sdk/client-cognito-identity-provider'
 
 /**
@@ -149,6 +157,39 @@ export type GetUserResponse = {
      */
     Value?: string
   }>
+  /**
+   * MFA method Cognito prefers, or empty when none is set.
+   */
+  PreferredMfaSetting?: string
+  /**
+   * MFA methods the user has enabled (for example `SOFTWARE_TOKEN_MFA`).
+   */
+  UserMFASettingList?: string[]
+}
+
+/**
+ * Whose authenticator app (TOTP) is being registered.
+ *
+ * A signed-in user is identified by the access token, a user in Cognito's MFA_SETUP challenge by the challenge session.
+ */
+export type SoftwareTokenTarget =
+  | {
+      /** Cognito access token of the user registering. */
+      accessToken: string
+    }
+  | {
+      /** Session Cognito returned in the MFA_SETUP challenge. */
+      session: string
+    }
+
+/**
+ * Result of starting an authenticator app (TOTP) registration.
+ */
+export type SoftwareTokenAssociation = {
+  /** Base32 shared secret to enter in the authenticator app. */
+  secretCode: string
+  /** Session updated during the MFA_SETUP challenge; absent when started with an access token. */
+  session?: string
 }
 
 /**
@@ -270,6 +311,8 @@ export type CognitoUserProfile = {
    * Cognito で MFA enrollment が一つ以上確認できたかどうかです。
    */
   mfaConfigured?: boolean
+  /** Whether an authenticator app (TOTP) is registered. SMS or email MFA does not count. */
+  softwareTokenMfaConfigured?: boolean
   /**
    * Workspace membership の利用状態です。assignment candidate response で付与します。
    */
@@ -495,6 +538,77 @@ export type CognitoClient = {
    */
   revokeRefreshToken?(refreshToken: string, clientId?: string): Promise<void>
   /**
+   * Sends a password reset code to the user's verified email (ForgotPassword).
+   *
+   * @param email - Email address of the user resetting the password.
+   */
+  requestPasswordReset?(email: string): Promise<void>
+  /**
+   * Sets a new password with the reset code (ConfirmForgotPassword).
+   *
+   * @param email - Email address of the user resetting the password.
+   * @param code - Confirmation code from the email.
+   * @param newPassword - New password.
+   */
+  confirmPasswordReset?(email: string, code: string, newPassword: string): Promise<void>
+  /**
+   * Changes the signed-in user's own password (ChangePassword).
+   *
+   * @param accessToken - Cognito access token of the user.
+   * @param previousPassword - Current password.
+   * @param proposedPassword - New password.
+   */
+  changePassword?(
+    accessToken: string,
+    previousPassword: string,
+    proposedPassword: string,
+  ): Promise<void>
+  /**
+   * Starts registering an authenticator app (TOTP) and issues the shared secret (AssociateSoftwareToken).
+   *
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @returns The shared secret and, during a challenge, the updated session.
+   */
+  associateSoftwareToken?(target: SoftwareTokenTarget): Promise<SoftwareTokenAssociation>
+  /**
+   * Confirms the TOTP registration with a code from the authenticator app (VerifySoftwareToken).
+   *
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @param code - Six-digit code shown by the authenticator app.
+   * @returns The updated session during a challenge.
+   */
+  verifySoftwareToken?(
+    target: SoftwareTokenTarget,
+    code: string,
+  ): Promise<{ session?: string }>
+  /**
+   * Enables or disables the user's own TOTP MFA (SetUserMFAPreference).
+   *
+   * @param accessToken - Cognito access token of the user.
+   * @param enabled - True to enable TOTP and make it preferred, false to disable it.
+   */
+  setSoftwareTokenMfaEnabled?(accessToken: string, enabled: boolean): Promise<void>
+  /**
+   * Answers an MFA_SETUP challenge whose TOTP registration finished and receives the tokens.
+   *
+   * @param email - Email address the challenge belongs to.
+   * @param session - Session returned by VerifySoftwareToken.
+   */
+  respondToMfaSetupChallenge?(email: string, session: string): Promise<InitiateAuthResponse>
+  /**
+   * Invalidates a user's password as an administrator and sends a reset code
+   * (AdminResetUserPassword).
+   *
+   * @param userId - Email address of the target user.
+   */
+  adminResetUserPassword?(userId: string): Promise<void>
+  /**
+   * Disables a user's TOTP MFA as an administrator (AdminSetUserMFAPreference).
+   *
+   * @param userId - Email address of the target user.
+   */
+  adminDisableSoftwareTokenMfa?(userId: string): Promise<void>
+  /**
    * Cognito user pool から user 一覧を page 単位で取得します。
    */
   listUsers(input: ListCognitoUsersInput): Promise<CognitoUsersResponse>
@@ -647,6 +761,7 @@ export class AwsCognitoClient implements CognitoClient {
         ClientId: clientId,
         Session: session,
       }))
+      await this.markInvitedEmailVerified(email)
 
       return {
         AuthenticationResult: response.AuthenticationResult,
@@ -656,6 +771,31 @@ export class AwsCognitoClient implements CognitoClient {
       }
     } catch (error) {
       throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Marks the email of a user who just replaced the emailed temporary password as verified.
+   *
+   * Cognito's NEW_PASSWORD_REQUIRED challenge follows a sign-in with the temporary password it
+   * mailed to that address, so the user has proven control of it. Password reset needs a verified
+   * email, so without this an invited user could never reset a forgotten password. A failure is
+   * logged rather than failing the sign-in the user already completed, and the next password
+   * reset request repairs it ({@link repairInvitedEmailVerification}).
+   *
+   * @param email - Email address and username of the user.
+   */
+  private async markInvitedEmailVerified(email: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(email),
+        UserAttributes: [{ Name: 'email_verified', Value: 'true' }],
+      }))
+    } catch (error) {
+      console.error('Failed to mark the invited user email as verified:', toCognitoSdkError(error).code)
     }
   }
 
@@ -740,6 +880,246 @@ export class AwsCognitoClient implements CognitoClient {
   }
 
   /**
+   * Sends a password reset code to the user's verified email.
+   *
+   * @param email - Email address of the user resetting the password.
+   */
+  async requestPasswordReset(email: string): Promise<void> {
+    const { clientId } = this.readRequiredConfiguration()
+    const sendCode = () => this.client.send(new ForgotPasswordCommand({
+      ClientId: clientId,
+      Username: normalizeCognitoUserId(email),
+    }))
+
+    try {
+      await sendCode()
+    } catch (error) {
+      const failure = toCognitoSdkError(error)
+      // Cognito refuses an unverified email. An invited user whose verification was not saved
+      // after the first sign-in gets it repaired here, then the code is sent once more.
+      if (failure.code !== 'InvalidParameterException' || !await this.repairInvitedEmailVerification(email)) {
+        throw failure
+      }
+      try {
+        await sendCode()
+      } catch (retryError) {
+        throw toCognitoSdkError(retryError)
+      }
+    }
+  }
+
+  /**
+   * Marks the email of an invited user verified when saving it after the first sign-in failed.
+   *
+   * Self sign-up is off, so every password user was invited with a temporary password sent to
+   * the address. A confirmed user replaced that password and so proved control of the address,
+   * which is what {@link markInvitedEmailVerified} records.
+   *
+   * @param email - Email address and username of the user.
+   * @returns Whether the email was unverified and is now marked verified.
+   */
+  private async repairInvitedEmailVerification(email: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const username = normalizeCognitoUserId(email)
+
+    try {
+      const user = await this.client.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: username,
+      }))
+      const verified = user.UserAttributes?.find((attribute) => attribute.Name === 'email_verified')?.Value
+      if (user.UserStatus !== 'CONFIRMED' || verified === 'true') {
+        return false
+      }
+      await this.client.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: username,
+        UserAttributes: [{ Name: 'email_verified', Value: 'true' }],
+      }))
+      return true
+    } catch (error) {
+      console.error('Failed to repair the invited user email verification:', toCognitoSdkError(error).code)
+      return false
+    }
+  }
+
+  /**
+   * Sets a new password with the reset code.
+   *
+   * @param email - Email address of the user resetting the password.
+   * @param code - Confirmation code from the email.
+   * @param newPassword - New password.
+   */
+  async confirmPasswordReset(email: string, code: string, newPassword: string): Promise<void> {
+    const { clientId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new ConfirmForgotPasswordCommand({
+        ClientId: clientId,
+        Username: normalizeCognitoUserId(email),
+        ConfirmationCode: code,
+        Password: newPassword,
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Changes the signed-in user's own password.
+   *
+   * @param accessToken - Cognito access token of the user.
+   * @param previousPassword - Current password.
+   * @param proposedPassword - New password.
+   */
+  async changePassword(
+    accessToken: string,
+    previousPassword: string,
+    proposedPassword: string,
+  ): Promise<void> {
+    this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new ChangePasswordCommand({
+        AccessToken: accessToken,
+        PreviousPassword: previousPassword,
+        ProposedPassword: proposedPassword,
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Starts registering an authenticator app (TOTP) and issues the shared secret.
+   *
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @returns The shared secret and, during a challenge, the updated session.
+   */
+  async associateSoftwareToken(target: SoftwareTokenTarget): Promise<SoftwareTokenAssociation> {
+    this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new AssociateSoftwareTokenCommand(
+        'accessToken' in target
+          ? { AccessToken: target.accessToken }
+          : { Session: target.session },
+      ))
+      return toSoftwareTokenAssociation(response.SecretCode, response.Session)
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Confirms the TOTP registration with a code from the authenticator app.
+   *
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @param code - Six-digit code shown by the authenticator app.
+   * @returns The updated session during a challenge.
+   */
+  async verifySoftwareToken(target: SoftwareTokenTarget, code: string) {
+    this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new VerifySoftwareTokenCommand({
+        ...('accessToken' in target
+          ? { AccessToken: target.accessToken }
+          : { Session: target.session }),
+        UserCode: code,
+        FriendlyDeviceName: 'mukuroji',
+      }))
+      return toSoftwareTokenVerification(response.Status, response.Session)
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Enables or disables the user's own TOTP MFA.
+   *
+   * @param accessToken - Cognito access token of the user.
+   * @param enabled - True to enable TOTP and make it preferred, false to disable it.
+   */
+  async setSoftwareTokenMfaEnabled(accessToken: string, enabled: boolean): Promise<void> {
+    this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new SetUserMFAPreferenceCommand({
+        AccessToken: accessToken,
+        SoftwareTokenMfaSettings: { Enabled: enabled, PreferredMfa: enabled },
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Answers an MFA_SETUP challenge whose TOTP registration finished and receives the tokens.
+   *
+   * @param email - Email address the challenge belongs to.
+   * @param session - Session returned by VerifySoftwareToken.
+   * @returns The Cognito authentication result.
+   */
+  async respondToMfaSetupChallenge(email: string, session: string): Promise<InitiateAuthResponse> {
+    const { clientId } = this.readRequiredConfiguration()
+
+    try {
+      const response = await this.client.send(new RespondToAuthChallengeCommand({
+        ChallengeName: 'MFA_SETUP',
+        ChallengeResponses: { USERNAME: normalizeCognitoUserId(email) },
+        ClientId: clientId,
+        Session: session,
+      }))
+      return {
+        AuthenticationResult: response.AuthenticationResult,
+        ChallengeName: response.ChallengeName,
+        Session: response.Session,
+        ChallengeParameters: response.ChallengeParameters,
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Invalidates a user's password as an administrator and sends a reset code.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async adminResetUserPassword(userId: string): Promise<void> {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminResetUserPasswordCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Disables a user's TOTP MFA as an administrator.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async adminDisableSoftwareTokenMfa(userId: string): Promise<void> {
+    const { userPoolId } = this.readRequiredConfiguration()
+
+    try {
+      await this.client.send(new AdminSetUserMFAPreferenceCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+        SoftwareTokenMfaSettings: { Enabled: false, PreferredMfa: false },
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   async getUser(accessToken: string): Promise<GetUserResponse> {
@@ -751,6 +1131,8 @@ export class AwsCognitoClient implements CognitoClient {
       return {
         Username: response.Username,
         UserAttributes: response.UserAttributes,
+        PreferredMfaSetting: response.PreferredMfaSetting,
+        UserMFASettingList: response.UserMFASettingList,
       }
     } catch (error) {
       throw toCognitoSdkError(error)
@@ -1452,6 +1834,140 @@ export class FlociCognitoClient implements CognitoClient {
   }
 
   /**
+   * Sends a password reset code to the user's verified email.
+   *
+   * @param email - Email address of the user resetting the password.
+   */
+  async requestPasswordReset(email: string) {
+    await this.request<Record<string, unknown>>('ForgotPassword', {
+      ClientId: await this.resolveClientId(),
+      Username: normalizeCognitoUserId(email),
+    })
+  }
+
+  /**
+   * Sets a new password with the reset code.
+   *
+   * @param email - Email address of the user resetting the password.
+   * @param code - Confirmation code from the email.
+   * @param newPassword - New password.
+   */
+  async confirmPasswordReset(email: string, code: string, newPassword: string) {
+    await this.request<Record<string, never>>('ConfirmForgotPassword', {
+      ClientId: await this.resolveClientId(),
+      Username: normalizeCognitoUserId(email),
+      ConfirmationCode: code,
+      Password: newPassword,
+    })
+  }
+
+  /**
+   * Changes the signed-in user's own password.
+   *
+   * @param accessToken - Cognito access token of the user.
+   * @param previousPassword - Current password.
+   * @param proposedPassword - New password.
+   */
+  async changePassword(accessToken: string, previousPassword: string, proposedPassword: string) {
+    await this.request<Record<string, never>>('ChangePassword', {
+      AccessToken: accessToken,
+      PreviousPassword: previousPassword,
+      ProposedPassword: proposedPassword,
+    })
+  }
+
+  /**
+   * Starts registering an authenticator app (TOTP) and issues the shared secret.
+   *
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @returns The shared secret and, during a challenge, the updated session.
+   */
+  async associateSoftwareToken(target: SoftwareTokenTarget) {
+    const response = await this.request<{ SecretCode?: string; Session?: string }>(
+      'AssociateSoftwareToken',
+      'accessToken' in target
+        ? { AccessToken: target.accessToken }
+        : { Session: target.session },
+    )
+    return toSoftwareTokenAssociation(response.SecretCode, response.Session)
+  }
+
+  /**
+   * Confirms the TOTP registration with a code from the authenticator app.
+   *
+   * @param target - Access token or MFA_SETUP challenge session to register for.
+   * @param code - Six-digit code shown by the authenticator app.
+   * @returns The updated session during a challenge.
+   */
+  async verifySoftwareToken(target: SoftwareTokenTarget, code: string) {
+    const response = await this.request<{ Status?: string; Session?: string }>(
+      'VerifySoftwareToken',
+      {
+        ...('accessToken' in target
+          ? { AccessToken: target.accessToken }
+          : { Session: target.session }),
+        UserCode: code,
+        FriendlyDeviceName: 'mukuroji',
+      },
+    )
+    return toSoftwareTokenVerification(response.Status, response.Session)
+  }
+
+  /**
+   * Enables or disables the user's own TOTP MFA.
+   *
+   * @param accessToken - Cognito access token of the user.
+   * @param enabled - True to enable TOTP and make it preferred, false to disable it.
+   */
+  async setSoftwareTokenMfaEnabled(accessToken: string, enabled: boolean) {
+    await this.request<Record<string, never>>('SetUserMFAPreference', {
+      AccessToken: accessToken,
+      SoftwareTokenMfaSettings: { Enabled: enabled, PreferredMfa: enabled },
+    })
+  }
+
+  /**
+   * Answers an MFA_SETUP challenge whose TOTP registration finished and receives the tokens.
+   *
+   * @param email - Email address the challenge belongs to.
+   * @param session - Session returned by VerifySoftwareToken.
+   * @returns The Cognito authentication result.
+   */
+  async respondToMfaSetupChallenge(email: string, session: string) {
+    return this.request<InitiateAuthResponse>('RespondToAuthChallenge', {
+      ChallengeName: 'MFA_SETUP',
+      ChallengeResponses: { USERNAME: normalizeCognitoUserId(email) },
+      ClientId: await this.resolveClientId(),
+      Session: session,
+    })
+  }
+
+  /**
+   * Invalidates a user's password as an administrator and sends a reset code.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async adminResetUserPassword(userId: string) {
+    await this.request<Record<string, never>>('AdminResetUserPassword', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+    })
+  }
+
+  /**
+   * Disables a user's TOTP MFA as an administrator.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async adminDisableSoftwareTokenMfa(userId: string) {
+    await this.request<Record<string, never>>('AdminSetUserMFAPreference', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+      SoftwareTokenMfaSettings: { Enabled: false, PreferredMfa: false },
+    })
+  }
+
+  /**
    * access token から Cognito ユーザー情報を取得します。
    */
   async getUser(accessToken: string) {
@@ -2092,6 +2608,54 @@ export class FlociCognitoClient implements CognitoClient {
 }
 
 /**
+ * Validates the shared secret returned when TOTP registration starts.
+ *
+ * @param secretCode - Base32 secret returned by Cognito.
+ * @param session - Updated challenge session, when registration runs inside MFA_SETUP.
+ * @returns The secret and the optional session.
+ */
+function toSoftwareTokenAssociation(
+  secretCode: string | undefined,
+  session: string | undefined,
+): SoftwareTokenAssociation {
+  if (!secretCode?.trim()) {
+    throw new CognitoServiceError(
+      502,
+      'InvalidCognitoResponse',
+      'Cognito did not return an authenticator secret.',
+    )
+  }
+  return {
+    secretCode: secretCode.trim(),
+    ...(session ? { session } : {}),
+  }
+}
+
+/**
+ * Converts the result of a TOTP verification into a session or an error.
+ *
+ * Cognito reports a wrong code either by throwing or by returning status `ERROR`, so both
+ * become `CodeMismatchException`.
+ *
+ * @param status - Verification status returned by Cognito.
+ * @param session - Updated challenge session, when registration runs inside MFA_SETUP.
+ * @returns The optional session.
+ */
+function toSoftwareTokenVerification(
+  status: string | undefined,
+  session: string | undefined,
+): { session?: string } {
+  if (status !== 'SUCCESS') {
+    throw new CognitoServiceError(
+      400,
+      'CodeMismatchException',
+      'The authenticator code is invalid.',
+    )
+  }
+  return session ? { session } : {}
+}
+
+/**
  * Floci Cognito との通信で扱う domain error です。
  */
 export class CognitoServiceError extends Error {
@@ -2280,6 +2844,8 @@ function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | un
       value.PreferredMfaSetting?.trim() ||
       value.UserMFASettingList?.some((setting) => Boolean(setting.trim())),
     ),
+    softwareTokenMfaConfigured: value.PreferredMfaSetting === 'SOFTWARE_TOKEN_MFA' ||
+      value.UserMFASettingList?.includes('SOFTWARE_TOKEN_MFA') === true,
   }
 }
 

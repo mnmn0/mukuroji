@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto'
 import type { Hono } from 'hono'
 import { getConnInfo } from 'hono/aws-lambda'
 import type { Context } from 'hono'
+import type { MfaSetupChallenge } from '@mukuroji/contracts'
 import {
   CognitoServiceError,
+  decidePolicyMfaSetup,
   readCognitoMfaChallengeName,
+  type AuthTokenSet,
   type InitiateAuthResponse,
 } from '../../modules/authentication'
+import { createPolicyMfaSetupPorts } from '../../app/composition/policy-mfa-setup'
 import { ProjectDataError } from '../../modules/directory'
 import { type MutationAuditContext } from '../../modules/audit/audit'
 import {
@@ -17,6 +21,7 @@ import {
   EnterpriseIdentityError,
   EnterpriseSessionActivityError,
 } from '../../modules/enterprise-identity'
+import { readCognitoMfaSetupChallenge } from '../shared/account-security'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { createAuthenticationResponse } from '../shared/authentication-session'
@@ -171,6 +176,37 @@ const retryableCognitoRefreshErrors = new Set([
   'LimitExceededException',
   'InternalErrorException',
 ])
+
+/**
+ * Decides whether a completed password sign-in must register an authenticator app first.
+ *
+ * @param tokens - Tokens of the completed password sign-in.
+ * @returns The decision of the policy-driven MFA setup use case.
+ */
+async function decidePolicyMfaSetupForSignIn(tokens: AuthTokenSet) {
+  return await decidePolicyMfaSetup(
+    createPolicyMfaSetupPorts(authenticationDependencies.cognito),
+    tokens.AccessToken,
+  )
+}
+
+/**
+ * Converts a required policy MFA setup into the sign-in's MFA_SETUP challenge response.
+ *
+ * The response carries the access token, which the authenticator endpoints accept, instead of
+ * the tokens. The refresh token is not returned, so the session cannot be kept; the user signs
+ * in again with the new code.
+ *
+ * @param decision - Decision that requires setup.
+ * @param email - Normalized email address of the user.
+ * @returns The challenge response.
+ */
+function toPolicyMfaSetupChallenge(
+  decision: { setupAccessToken: string },
+  email: string,
+): MfaSetupChallenge {
+  return { challenge: 'MFA_SETUP', email, setupAccessToken: decision.setupAccessToken }
+}
 
 function toSupportedMfaChallenge(response: InitiateAuthResponse, email: string) {
   const challenge = readCognitoMfaChallengeName(response.ChallengeName)
@@ -366,6 +402,8 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         }
         const mfaChallenge = toSupportedMfaChallenge(response, email)
         if (mfaChallenge) return c.json(mfaChallenge)
+        const mfaSetupChallenge = readCognitoMfaSetupChallenge(response, email)
+        if (mfaSetupChallenge) return c.json(mfaSetupChallenge)
 
         return c.json(
           {
@@ -377,13 +415,33 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         )
       }
 
-      return c.json(await createAuthenticationResponse(tokens, c, { email }))
+      const policyMfaSetup = await decidePolicyMfaSetupForSignIn(tokens)
+      if (policyMfaSetup.setupRequired) return c.json(toPolicyMfaSetupChallenge(policyMfaSetup, email))
+
+      return c.json(await createAuthenticationResponse(
+        tokens,
+        c,
+        { email },
+        undefined,
+        [],
+        undefined,
+        policyMfaSetup.user,
+      ))
     } catch (error) {
       if (error instanceof EnterpriseIdentityError) {
         return toEnterpriseIdentityErrorResponse(c, error)
       }
       if (error instanceof WorkspaceAccessError) {
         return toWorkspaceAccessErrorResponse(c, error)
+      }
+      if (error instanceof ProjectDataError) {
+        return toProjectDataErrorResponse(c, error)
+      }
+      if (error instanceof CognitoServiceError && error.code === 'PasswordResetRequiredException') {
+        return c.json({
+          code: 'PasswordResetRequired' as const,
+          message: 'An administrator reset the password. Set a new one with the emailed code.',
+        }, 409)
       }
 
       return toAuthErrorResponse(c, error)
@@ -433,6 +491,8 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         if (!tokens?.AccessToken) {
           const mfaChallenge = toSupportedMfaChallenge(response, email)
           if (mfaChallenge) return c.json(mfaChallenge)
+          const mfaSetupChallenge = readCognitoMfaSetupChallenge(response, email)
+          if (mfaSetupChallenge) return c.json(mfaSetupChallenge)
           return c.json(
             {
               message: response.ChallengeName
@@ -443,11 +503,17 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
           )
         }
 
+        const policyMfaSetup = await decidePolicyMfaSetupForSignIn(tokens)
+        if (policyMfaSetup.setupRequired) return c.json(toPolicyMfaSetupChallenge(policyMfaSetup, email))
+
         return c.json(await createAuthenticationResponse(
           tokens,
           c,
           { email },
           acceptanceState?.auditContext,
+          [],
+          undefined,
+          policyMfaSetup.user,
         ))
       } finally {
         await releaseNewPasswordChallengeInvitationLock(acceptanceState)
