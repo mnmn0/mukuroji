@@ -483,15 +483,18 @@ export function TeamIssueScreen({
       : undefined,
     [collapsedOutlineIds, outlineNodes, visibleIssues],
   )
+  const hasOutlineError = Boolean(isOutlineRequested && issueOutline?.errorMessage)
   useEffect(() => {
-    if (!outlineRows || !outlineRetryFocusPendingRef.current) return
+    // Waits for the error to clear rather than for new rows: a retry that returns the same
+    // hierarchy as before the failure keeps the rows, but the retry button still goes away.
+    if (hasOutlineError || !outlineRows || !outlineRetryFocusPendingRef.current) return
     outlineRetryFocusPendingRef.current = false
     // Only reclaim focus the retry button lost; focus the person moved elsewhere stays put.
     const activeElement = document.activeElement
     if (activeElement === null || activeElement === document.body) {
       issueViewPanelRef.current?.focus()
     }
-  }, [outlineRows])
+  }, [hasOutlineError, outlineRows])
   // Rows hidden under a collapsed parent are left out of keyboard navigation and selection.
   const navigableIssues = useMemo(
     () => outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
@@ -1463,7 +1466,7 @@ export function TeamIssueScreen({
                     {taskActionErrorMessage}
                   </p>
                 ) : null}
-                {isOutlineRequested && issueOutline?.errorMessage ? (
+                {hasOutlineError && issueOutline?.errorMessage ? (
                   <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3" data-testid="team-issue-outline-unavailable">
                     <p className="text-sm font-semibold text-fg-amber-800">{issueOutline.errorMessage}</p>
                     {issueOutline.onRetry ? (
