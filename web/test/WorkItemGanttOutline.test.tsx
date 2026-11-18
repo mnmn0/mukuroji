@@ -22,6 +22,7 @@ import {
   createWorkItemWbsNumberIndex,
 } from '../src/work-items/model/workItemHierarchy'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
+import { withHierarchyRevalidation } from '../src/work-items/mutations/hierarchyRevalidation'
 import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
 
 const [baseFixture] = teamIssueFixtures
@@ -207,37 +208,63 @@ describe('Gantt chart outline', () => {
   })
 })
 
+/**
+ * Renders the Project table as an outline.
+ *
+ * @param tasks - Project Work Items in list order.
+ * @param collapsedKeys - Outline keys of collapsed parents.
+ * @returns The rendered markup.
+ */
+function renderProjectTableOutline(tasks: CanonicalWorkItem[], collapsedKeys: ReadonlySet<string> = new Set()) {
+  return renderToStaticMarkup(
+    <TaskTableView
+      bulkProjectOptions={[]}
+      bulkWorkspaceId=""
+      configurationsByTeam={{ 'core-team': { configuration: teamWorkItemConfigurationFixture } }}
+      locale="ja"
+      onBulkOperationComplete={() => undefined}
+      onSelectTask={() => undefined}
+      onTaskSelectionChange={() => undefined}
+      onVisibleTaskSelectionChange={() => undefined}
+      outline={{
+        rows: createMultiTeamWorkItemOutlineRows(tasks, hierarchies, collapsedKeys),
+        onToggleCollapsed: () => undefined,
+      }}
+      personLabels={{}}
+      projectId="refero"
+      selectedBulkItems={[]}
+      selectedTaskKeys={[]}
+      t={t}
+      tasks={tasks}
+      visibleBulkItems={[]}
+    />,
+  )
+}
+
 describe('Project table outline', () => {
   test('nests the Project rows with WBS numbers and roll-ups', () => {
-    const html = renderToStaticMarkup(
-      <TaskTableView
-        bulkProjectOptions={[]}
-        bulkWorkspaceId=""
-        configurationsByTeam={{ 'core-team': { configuration: teamWorkItemConfigurationFixture } }}
-        locale="ja"
-        onBulkOperationComplete={() => undefined}
-        onSelectTask={() => undefined}
-        onTaskSelectionChange={() => undefined}
-        onVisibleTaskSelectionChange={() => undefined}
-        outline={{
-          rows: createMultiTeamWorkItemOutlineRows([task, deliverable, phase], hierarchies, new Set()),
-          onToggleCollapsed: () => undefined,
-        }}
-        personLabels={{}}
-        projectId="refero"
-        selectedBulkItems={[]}
-        selectedTaskKeys={[]}
-        t={t}
-        tasks={[task, deliverable, phase]}
-        visibleBulkItems={[]}
-      />,
-    )
+    const html = renderProjectTableOutline([task, deliverable, phase])
 
     expect(html.indexOf('task-row-phase"')).toBeLessThan(html.indexOf('task-row-task"'))
     expect(html).toContain('data-testid="task-row-wbs-deliverable"')
     expect(html).toContain('data-testid="task-outline-toggle-phase"')
     expect(html).toContain('padding-inline-start:2.5rem')
     expect(html).toContain('data-testid="work-item-hierarchy-rollup"')
+  })
+
+  test('numbers the rows a paste fills in the order shown, skipping collapsed children', () => {
+    const html = renderProjectTableOutline(
+      [otherTeamItem, task, deliverable, phase],
+      new Set([createWorkItemOutlineKey('core-team', 'deliverable')]),
+    )
+    /** Reads the paste index of one rendered row. */
+    const readRowIndex = (id: string) =>
+      new RegExp(`data-row-index="(-?\\d+)"[^>]*data-testid="task-row-${id}"`, 'u').exec(html)?.[1]
+
+    expect(html).not.toContain('task-row-task"')
+    expect(readRowIndex('other-team-item')).toBe('0')
+    expect(readRowIndex('phase')).toBe('1')
+    expect(readRowIndex('deliverable')).toBe('2')
   })
 })
 
@@ -350,5 +377,29 @@ describe('Search WBS numbers', () => {
 
     expect(html).toContain('data-testid="search-result-wbs"')
     expect(html).toContain('1.1.1</span>')
+  })
+})
+
+describe('hierarchy revalidation after list refreshes', () => {
+  test('re-reads the hierarchies on a refresh or a published list, not on an optimistic edit', async () => {
+    const listCalls: unknown[] = []
+    let hierarchyReads = 0
+    const mutateList = withHierarchyRevalidation<CanonicalWorkItem[]>(
+      async (data) => {
+        listCalls.push(data)
+        return undefined
+      },
+      async () => {
+        hierarchyReads += 1
+      },
+    )
+
+    await mutateList((current = []) => current, { revalidate: false })
+    expect(hierarchyReads).toBe(0)
+    await mutateList()
+    expect(hierarchyReads).toBe(1)
+    await mutateList([task], { revalidate: false })
+    expect(hierarchyReads).toBe(2)
+    expect(listCalls).toHaveLength(3)
   })
 })

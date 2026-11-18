@@ -393,6 +393,42 @@ export function TaskTableView({
     })
   }
 
+  const groupedRows = groupedTasks?.map((group) => ({
+    group,
+    subgroups: presentation?.subgroupBy
+      ? groupTaskViewItems(
+          group.items,
+          presentation.subgroupBy,
+          (task, field) => resolveProjectTaskGroupValue(
+            task,
+            field,
+            configurationsByTeam,
+            configuration,
+            t,
+            teams,
+          ),
+          presentation.subgroupDirection,
+        )
+      : undefined,
+  }))
+  // Thousands of rows are rendered in steps; groups keep counting every Work Item.
+  const outlineRowByKey = outline
+    ? new Map(outline.rows.map((row) => [createTaskKey(row.item), row]))
+    : undefined
+  const displayOrderedTasks = outline
+    ? outline.rows.map((row) => row.item)
+    : groupedRows
+    ? groupedRows.flatMap(({ group, subgroups }) =>
+        subgroups ? subgroups.flatMap((subgroup) => subgroup.items) : group.items
+      )
+    : tasks
+  // Rows look up their index and selection by key; scanning `tasks` per row is quadratic. The index
+  // follows the display order, so a paste fills the rows the user sees below the focused one.
+  const rowIndexByTaskKey = new Map(
+    displayOrderedTasks.map((task, index) => [createTaskKey(task), index]),
+  )
+  const selectedTaskKeySet = new Set(selectedTaskKeys)
+
   /** Handles multi-cell clipboard input for selected or focused table rows. */
   const handleTablePaste = (event: ClipboardEvent<HTMLElement>) => {
     if (!onUpdateTask || isInlineEditorTarget(event.target)) {
@@ -426,7 +462,7 @@ export function TaskTableView({
     event.preventDefault()
     const targetTasks = selectedTasks.length > 0
       ? selectedTasks
-      : tasks.slice(focusedRowIndex ?? 0)
+      : displayOrderedTasks.slice(focusedRowIndex ?? 0)
     const updates: Array<{ task: CanonicalWorkItem; patch: WorkItemPatch }> = []
     let invalidCount = Math.max(0, rows.length - targetTasks.length)
 
@@ -489,38 +525,6 @@ export function TaskTableView({
     )
   }
 
-  // Rows look up their index and selection by key; scanning `tasks` per row is quadratic.
-  const rowIndexByTaskKey = new Map(tasks.map((task, index) => [createTaskKey(task), index]))
-  const selectedTaskKeySet = new Set(selectedTaskKeys)
-  const groupedRows = groupedTasks?.map((group) => ({
-    group,
-    subgroups: presentation?.subgroupBy
-      ? groupTaskViewItems(
-          group.items,
-          presentation.subgroupBy,
-          (task, field) => resolveProjectTaskGroupValue(
-            task,
-            field,
-            configurationsByTeam,
-            configuration,
-            t,
-            teams,
-          ),
-          presentation.subgroupDirection,
-        )
-      : undefined,
-  }))
-  // Thousands of rows are rendered in steps; groups keep counting every Work Item.
-  const outlineRowByKey = outline
-    ? new Map(outline.rows.map((row) => [createTaskKey(row.item), row]))
-    : undefined
-  const displayOrderedTasks = outline
-    ? outline.rows.map((row) => row.item)
-    : groupedRows
-    ? groupedRows.flatMap(({ group, subgroups }) =>
-        subgroups ? subgroups.flatMap((subgroup) => subgroup.items) : group.items
-      )
-    : tasks
   const selectedDetailDisplayIndex = selectedDetailTaskKey
     ? displayOrderedTasks.findIndex((task) => createTaskKey(task) === selectedDetailTaskKey)
     : -1

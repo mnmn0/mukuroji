@@ -16,6 +16,7 @@ import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
+import { withHierarchyRevalidation } from '../../work-items/mutations/hierarchyRevalidation'
 import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
@@ -356,8 +357,8 @@ export function TaskPage() {
     data: projectListIssues = emptyTeamIssues,
     error: taskError,
     isLoading: isProjectListLoading,
-    mutate: mutateProjectTasks,
-    publishIssues: publishProjectTasks,
+    mutate: mutateProjectTaskList,
+    publishIssues: publishProjectTaskList,
     canReadCustomerImpact,
   } = useProjectIssues(
     accessToken,
@@ -688,6 +689,14 @@ export function TaskPage() {
     projectOutlineTeamIds,
     Boolean(user && !currentUserError) && isProjectOutlineShown,
   )
+  // Roll-ups and WBS numbers follow the Project's Work Items, so every refresh of the list, after
+  // an edit, a schedule change, a bulk operation, or a create, also re-reads the hierarchies.
+  const mutateProjectTasks = withHierarchyRevalidation(mutateProjectTaskList, mutateProjectHierarchies)
+  /** Publishes a refreshed Project list and re-reads the hierarchies that total it. */
+  const publishProjectTasks = (...args: Parameters<typeof publishProjectTaskList>) => {
+    void mutateProjectHierarchies().catch(() => undefined)
+    return publishProjectTaskList(...args)
+  }
   const [collapsedProjectOutlineKeys, toggleProjectOutlineKey] = useCollapsedWorkItemOutlineKeys(
     `project.${projectId}`,
   )
@@ -1770,7 +1779,8 @@ export function TaskPage() {
           ),
         )
       }
-      await mutateSelectedIssueDetail()
+      // A parent link moves the Work Item in the hierarchy, so its WBS number and roll-ups change.
+      await Promise.all([mutateSelectedIssueDetail(), mutateProjectHierarchies()])
     } catch (error) {
       redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
@@ -1812,7 +1822,8 @@ export function TaskPage() {
           context,
         ),
       )
-      await mutateSelectedIssueDetail()
+      // A parent link moves the Work Item in the hierarchy, so its WBS number and roll-ups change.
+      await Promise.all([mutateSelectedIssueDetail(), mutateProjectHierarchies()])
     } catch (error) {
       redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
