@@ -1505,6 +1505,13 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+  // Fixture tasks have no children, so completing one never needs the parent completion warning.
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/children\/open-count$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({ json: { openChildCount: 0 } })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/preview$/, async (route) => {
     requestCounts.schedulePreviews += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
