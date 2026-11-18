@@ -147,7 +147,7 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
 | --- | --- | --- | --- |
 | table | `directoryTeamId` | `agent-run#<runId>` | Run の正本 |
 | table | `directoryTeamId` | `agent-run-claim#<workItemId>` | Work Item ごとの `active` Run を 1 件に固定する claim row |
-| table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item で最後に始まった Run の `runId`。start、take over、resume の transaction で書き、resume が強整合で読む |
+| table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item で最後に始まった Run の `runId`。start、take over、resume の transaction で書き、resume と Run 履歴の先頭ページが強整合で読む。index にまだない最新 Run は先頭ページの先頭に足す |
 | table | `directoryTeamId` | `agent-run-revoked#<workItemId>#<member と instance の hash>` | 人が解放した、または別 instance が引き継いだ Run の member と instance。fence が強整合で読む |
 | table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |

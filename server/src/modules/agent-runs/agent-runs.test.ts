@@ -422,6 +422,32 @@ describe('DynamoDB Agent Run store', () => {
     expect(commands[1]?.input).toMatchObject({ ConsistentRead: true, Key: { recordKey: `agent-run#${run.runId}` } })
   })
 
+  test('puts the strongly read newest run first when the history index has not caught up', async () => {
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const older = finishAgentRun(createRun(), 'paused', 'agent', now)
+    const newer = finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000002', startedAt: '2026-10-22T01:00:00.000Z' }), 'failed', 'agent', now)
+    const [olderPut] = builder.createStartItems(older)
+    const [newerPut, , , latestPut] = builder.createStartItems(newer)
+    const olderItem = olderPut?.Put?.Item
+    const newerItem = newerPut?.Put?.Item
+    const latestItem = latestPut?.Put?.Item
+    if (!olderItem || !newerItem || !latestItem) throw new Error('The start items need run and newest-run puts.')
+    // The index returns only the older run; the newest-run row names the newer one.
+    const responses = () => [{ Items: [olderItem] }, { Item: olderItem }, { Item: latestItem }, { Item: newerItem }]
+    const full = await new DynamoDbAgentRunStore(createClient(responses()).client, 'AgentRuns')
+      .listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 20)
+    expect(full.runs.map((run) => [run.runId, run.outcome])).toEqual([[newer.runId, 'failed'], [older.runId, 'paused']])
+    expect(full.nextCursor).toBeUndefined()
+    // A full page keeps its size and continues after the newest run, so the older one comes next.
+    const { client, commands } = createClient([...responses(), { Items: [olderItem] }, { Item: olderItem }])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    const first = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 1)
+    expect(first.runs.map((run) => run.runId)).toEqual([newer.runId])
+    const second = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', first.nextCursor, 1)
+    expect(commands[4]?.input).toMatchObject({ ExclusiveStartKey: { recordKey: `agent-run#${newer.runId}`, workItemRunSortKey: `${newer.startedAt}#${newer.runId}` } })
+    expect(second.runs.map((run) => run.runId)).toEqual([older.runId])
+  })
+
   test('rate-limits explicit heartbeats and reports a finished run as not active', async () => {
     const run = createRun({ lastHeartbeatRequestAt: '2026-10-22T00:00:05.000Z' })
     const [runPut, claimPut] = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(run)

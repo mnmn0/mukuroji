@@ -1149,7 +1149,26 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
         return current
       })))
     }
-    return this.#page(runs, response.LastEvaluatedKey)
+    if (cursor !== undefined) return this.#page(runs, response.LastEvaluatedKey)
+    // The index can still miss a run that just started, so the first page also reads the newest run
+    // strongly; readers such as the next-task selection judge the Work Item by that run.
+    const latestRunId = await this.getLatestRunId(directoryId, teamId, workItemId)
+    if (latestRunId === undefined || runs.some((run) => run.runId === latestRunId)) return this.#page(runs, response.LastEvaluatedKey)
+    const latest = await this.getRun(directoryId, teamId, latestRunId)
+    if (!latest || latest.workItemId !== workItemId) throw createAgentRunIntegrityError()
+    runs.unshift(latest)
+    if (runs.length <= readLimit(limit)) return this.#page(runs, response.LastEvaluatedKey)
+    // The page keeps its size; the next page continues after the last run kept, so the one dropped here
+    // is read there.
+    runs.pop()
+    const last = runs.at(-1)
+    if (!last) throw createAgentRunIntegrityError()
+    return this.#page(runs, {
+      directoryTeamId: createAgentRunPartition(directoryId, teamId),
+      recordKey: runRecordKey(last.runId),
+      workItemRunKey: key,
+      workItemRunSortKey: `${last.startedAt}#${last.runId}`,
+    })
   }
 
   /** @inheritdoc */
