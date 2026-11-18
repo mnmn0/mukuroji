@@ -1368,12 +1368,14 @@ test('rejects a direct dueDate field even when create also includes a schedule',
 test('rejects internal adapter fields at the Work Item create boundary', async () => {
   const calls = configureFakeProjectClients(true)
   const internalFields: ReadonlyArray<readonly [string, unknown]> = [
+    ['agentRunTransactItems', []],
     ['authorizationConditionChecks', []],
     ['authorizationSnapshot', { planningRevision: 0 }],
     ['configurationConditionChecks', []],
     ['idempotencyResourceId', 'caller-selected-id'],
     ['idempotentIssueId', `api-${'a'.repeat(48)}`],
     ['idempotentRequestDigest', 'b'.repeat(64)],
+    ['newWorkItemProjectConditionCheck', { ConditionCheck: {} }],
     ['statusCategory', 'completed'],
     ['workflowSchemaVersion', 99],
   ]

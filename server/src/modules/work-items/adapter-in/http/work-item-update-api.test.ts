@@ -1099,6 +1099,12 @@ test('rejects a direct dueDate field even when update also includes a schedule',
 test('rejects internal adapter fields at the Work Item update boundary', async () => {
   const calls = configureFakeProjectClients(true)
   const internalFields: ReadonlyArray<readonly [string, unknown]> = [
+    ['agentRunTransactItems', [{
+      Delete: {
+        TableName: 'mukuroji-team-issues-local',
+        Key: { directoryTeamId: 'other-workspace#other-team', issueId: 'victim' },
+      },
+    }]],
     ['archivedAt', '2026-07-16T00:00:00.000Z'],
     ['archivedBy', 'demo@example.com'],
     ['authorizationConditionChecks', []],
