@@ -1568,7 +1568,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       storedParents.length === (parentWorkItemId ? 1 : 0) &&
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
-      if (normalized.hierarchyRank !== undefined) {
+      // A rank already stored is declarative success too: the move committed and only its
+      // response was lost, so the retry's older graph revision must not turn it into a conflict.
+      if (
+        normalized.hierarchyRank !== undefined &&
+        await this.readStoredHierarchyRank(workspaceId, teamId, child.workItemId) !== normalized.hierarchyRank
+      ) {
         // The rank was chosen among the siblings the caller saw, so it needs their graph revision.
         // The rank write advances that revision, so a concurrent reorder or parent change conflicts.
         assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
@@ -1694,6 +1699,30 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param graph - Relation graph state read before the unchanged parent was observed.
    * @returns The graph revision after the reorder.
    */
+  /**
+   * Reads the sibling order rank stored on a Work Item.
+   *
+   * @param workspaceId - Workspace that owns the Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item to read.
+   * @returns The stored rank, or undefined when the Work Item follows its default rank.
+   */
+  private async readStoredHierarchyRank(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<string | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.workItemsTableName,
+      Key: { directoryTeamId: `${workspaceId}#team#${teamId}`, issueId: workItemId },
+      ProjectionExpression: '#hierarchyRank',
+      ExpressionAttributeNames: { '#hierarchyRank': 'hierarchyRank' },
+      ConsistentRead: true,
+    }))
+    const rank: unknown = response.Item?.hierarchyRank
+    return typeof rank === 'string' ? rank : undefined
+  }
+
   private async writeHierarchyRank(
     workspaceId: string,
     teamId: string,

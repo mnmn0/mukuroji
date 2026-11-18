@@ -2005,6 +2005,39 @@ test('stores the sibling order rank with a parent change and reorders under the 
   })).rejects.toMatchObject({ code: 'InvalidWorkItemHierarchyRank', status: 400 })
 })
 
+test('returns success without writing when a retried move finds its rank already stored', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+  const indent = {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'k',
+  }
+  const reorder = {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 6,
+    hierarchyRank: 'm',
+  }
+
+  await client.replaceParent('workspace-1', 'core-team', indent)
+  // The response was lost; the same move sent again with its old graph revision succeeds.
+  expect(await client.replaceParent('workspace-1', 'core-team', indent))
+    .toEqual({ previousParentWorkItemId: 'phase-a', parentWorkItemId: 'phase-b', graphRevision: 6 })
+  await client.replaceParent('workspace-1', 'core-team', reorder)
+  expect(await client.replaceParent('workspace-1', 'core-team', reorder))
+    .toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: 'phase-b', graphRevision: 7 })
+  expect(store.transactions).toHaveLength(2)
+  // A different rank from the same stale outline is still refused.
+  await expect(client.replaceParent('workspace-1', 'core-team', { ...reorder, hierarchyRank: 'n' }))
+    .rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+})
+
 test('classifies a canceled reorder by its cancellation reasons', async () => {
   const reorder = {
     child: { workItemId: 'task', expectedRevision: 3 },
@@ -2314,6 +2347,8 @@ function createInMemoryRelationStore(
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
   const rows = new Map<string, Record<string, unknown>>()
+  // Ranks written to Work Item rows, so a later read sees what a reorder stored.
+  const workItemRanks = new Map<string, unknown>()
   const rowsBySource = new Map<string, Map<string, Record<string, unknown>>>()
   const sourceOf = (recordKey: string) => recordKey.split('#')[1] ?? ''
   const setRow = (recordKey: string, item: Record<string, unknown>) => {
@@ -2375,7 +2410,8 @@ function createInMemoryRelationStore(
           if (command.constructor.name === 'GetCommand') {
             const key = input.Key as Record<string, string>
             if (input.TableName !== 'configuration-table') {
-              return { Item: { revision: 1 } }
+              const rank = workItemRanks.get(key.issueId ?? '')
+              return { Item: { revision: 1, ...(rank === undefined ? {} : { hierarchyRank: rank }) } }
             }
             return key.recordKey ? { Item: rows.get(key.recordKey) } : {}
           }
@@ -2419,6 +2455,15 @@ function createInMemoryRelationStore(
               if (item.Delete?.TableName === 'configuration-table') {
                 const key = item.Delete.Key as Record<string, string>
                 deleteRow(String(key.recordKey))
+              }
+              if (item.Update?.TableName === 'work-items-table') {
+                const key = item.Update.Key as Record<string, string>
+                const values = item.Update.ExpressionAttributeValues as Record<string, unknown> | undefined
+                if (String(item.Update.UpdateExpression).includes('REMOVE #hierarchyRank')) {
+                  workItemRanks.delete(String(key.issueId))
+                } else if (values?.[':hierarchyRank'] !== undefined) {
+                  workItemRanks.set(String(key.issueId), values[':hierarchyRank'])
+                }
               }
             }
             return {}
