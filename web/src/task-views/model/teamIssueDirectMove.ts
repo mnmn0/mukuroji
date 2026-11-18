@@ -9,6 +9,10 @@ import {
   type TeamIssue,
   type UpdateTeamIssueInput,
 } from '../../issues/api'
+import {
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import {
   clearTaskStatusMoveRequest,
@@ -16,6 +20,7 @@ import {
   type TaskStatusMoveRequestSlot,
 } from './taskStatusMoveRequest'
 import {
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskActionMutationResult,
 } from './taskActionRegistry'
@@ -25,12 +30,13 @@ import {
  *
  * @param issueId - Team Issue identifier selected by the canonical Move action.
  * @param input - Revalidated workflow status patch.
- * @returns Persisted Team Issue snapshot when supplied by the route mutation.
+ * @returns Persisted Team Issue snapshot when supplied by the route mutation, or the cancelled
+ *   outcome when the person declined the update.
  */
 export type TeamIssueDirectStatusMoveMutation = (
   issueId: string,
   input: UpdateTeamIssueInput,
-) => Promise<TeamIssue | void>
+) => Promise<TeamIssue | CancelledTeamIssueUpdate | void>
 
 /** Localized failure messages returned by a direct Team Board Move action. */
 export type TeamIssueDirectStatusMoveMessages = {
@@ -147,11 +153,9 @@ export function executeTeamIssueDirectStatusMove(
 
   try {
     return onUpdateIssue(issue.id, { workflowStatusId: destinationWorkflowStatusId }).then(
-      (updatedIssue) => createSucceededTaskActionMutationResult(
-        context.actionId,
-        target,
-        updatedIssue?.revision,
-      ),
+      (outcome) => isCancelledTeamIssueUpdate(outcome)
+        ? createCancelledTaskActionResult(context.actionId, [target])
+        : createSucceededTaskActionMutationResult(context.actionId, target, outcome?.revision),
       createMutationFailure,
     )
   } catch (error) {

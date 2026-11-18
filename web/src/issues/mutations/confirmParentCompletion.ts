@@ -26,10 +26,11 @@ export type ConfirmParentCompletionInput = {
   /**
    * Asks the person whether to complete the parent anyway.
    *
-   * @param openChildCount - Number of open children, at least 1.
+   * @param openChildCount - Number of open children, at least 1; `null` when they could not be
+   *   counted, so it is unknown whether any is open.
    * @returns Whether to go ahead.
    */
-  confirm: (openChildCount: number) => boolean
+  confirm: (openChildCount: number | null) => boolean
   /** Counts open children; defaults to the Team Work Item API. */
   countOpenChildren?: (teamId: string, workItemId: string, accessToken: string) => Promise<number>
 }
@@ -39,7 +40,8 @@ export type ConfirmParentCompletionInput = {
  *
  * Every Web screen that changes a status calls this, so the `warn` policy asks the same question
  * everywhere. Under `reject` the server refuses the change, so nothing is asked. If the count
- * cannot be read, the change goes ahead, because `warn` never blocks a completion on the server.
+ * cannot be read, the person is still asked, without a count, so an open child is never skipped
+ * silently.
  *
  * @param input - Work Item, target category, policy, and how to ask.
  * @returns Whether the update should go ahead.
@@ -63,7 +65,7 @@ export async function confirmParentCompletion({
   try {
     openChildCount = await countOpenChildren(workItem.teamId, workItem.id, accessToken)
   } catch {
-    return true
+    return confirm(null)
   }
   return openChildCount === 0 || confirm(openChildCount)
 }
@@ -72,12 +74,14 @@ export async function confirmParentCompletion({
  * Asks the person, with a browser dialog, whether to complete a parent that has open children.
  *
  * @param t - Localized message resolver.
- * @param openChildCount - Number of open children.
+ * @param openChildCount - Number of open children, or `null` when they could not be counted.
  * @returns Whether the person chose to go ahead.
  */
 export function confirmParentCompletionInBrowser(
   t: (key: MessageKey) => string,
-  openChildCount: number,
+  openChildCount: number | null,
 ): boolean {
-  return globalThis.window.confirm(t('issues.outline.completeWarning').replace('{count}', String(openChildCount)))
+  return globalThis.window.confirm(openChildCount === null
+    ? t('issues.outline.completeWarningUncounted')
+    : t('issues.outline.completeWarning').replace('{count}', String(openChildCount)))
 }

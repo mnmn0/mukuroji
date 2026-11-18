@@ -44,6 +44,7 @@ import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
 } from '../../issues/mutations/confirmParentCompletion'
+import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
 import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
@@ -632,7 +633,7 @@ export function TeamIssuePage() {
         'TeamTaskActionAccessDenied',
       )
     }
-    if (!await confirmCompletingParent(currentIssue, input)) return currentIssue
+    if (!await confirmCompletingParent(currentIssue, input)) return CANCELLED_TEAM_ISSUE_UPDATE
 
     try {
       const updatedIssue = await guardEnterpriseSession(mutationRequestRunner.run(
@@ -922,7 +923,9 @@ export function TeamIssuePage() {
       issueOutline={isOutlineShown
         ? {
             ...(hierarchy ? { nodes: hierarchy.nodes } : {}),
-            ...(hierarchyError ? { errorMessage: t('issues.outline.unavailable') } : {}),
+            ...(hierarchyError
+              ? { errorMessage: t('issues.outline.unavailable'), onRetry: () => void mutateHierarchy() }
+              : {}),
             ...(hasWritableWorkItemScope ? { onMove: handleMoveIssueInHierarchy } : {}),
           }
         : undefined}

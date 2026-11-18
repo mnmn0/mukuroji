@@ -203,21 +203,23 @@ export function useFocusQueueActions({
     patch: { assigneeUserId?: string; workflowStatusId?: string },
   ): Promise<void> => {
     if (!accessToken) return
-    if (patch.workflowStatusId !== undefined) {
-      const configuration = configurationsByTeam?.[item.workItem.teamId]?.configuration
-      const nextStatus = resolveWorkItemTypeWorkflow(configuration, item.workItem.workItemTypeId)
-        ?.statuses.find((status) => status.id === patch.workflowStatusId)
-      const confirmed = await confirmParentCompletion({
-        workItem: item.workItem,
-        nextStatusCategory: nextStatus?.category,
-        configuration,
-        accessToken,
-        confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
-      })
-      if (!confirmed) return
-    }
     const cacheScope = createFocusItemCacheRevalidationScope(item, true)
     await runItemAction(item.id, action, cacheScope, async () => {
+      // Asked inside the action so the item stays pending, and a second click is ignored, while
+      // the open children are counted and the person answers.
+      if (patch.workflowStatusId !== undefined) {
+        const configuration = configurationsByTeam?.[item.workItem.teamId]?.configuration
+        const nextStatus = resolveWorkItemTypeWorkflow(configuration, item.workItem.workItemTypeId)
+          ?.statuses.find((status) => status.id === patch.workflowStatusId)
+        const confirmed = await confirmParentCompletion({
+          workItem: item.workItem,
+          nextStatusCategory: nextStatus?.category,
+          configuration,
+          accessToken,
+          confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+        })
+        if (!confirmed) return
+      }
       await guardAuthenticatedRequest(mutationRunner.run(
         `focus:${action}:${item.workItem.teamId}:${item.workItem.id}`,
         JSON.stringify([item.workItem.revision, patch]),

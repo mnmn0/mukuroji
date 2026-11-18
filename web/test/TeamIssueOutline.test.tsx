@@ -74,7 +74,7 @@ function outlinePresentation(overrides: Partial<TaskViewPresentationSettings> = 
 function renderOutline(presentation: TaskViewPresentationSettings, errorMessage?: string) {
   return renderToStaticMarkup(
     <TeamIssueScreen
-      issueOutline={errorMessage ? { errorMessage } : { nodes, onMove: async () => undefined }}
+      issueOutline={errorMessage ? { errorMessage, onRetry: () => undefined } : { nodes, onMove: async () => undefined }}
       issues={[childFixture, parentFixture]}
       locale="ja"
       resolvedConfiguration={{ configuration: teamWorkItemConfigurationFixture }}
@@ -115,6 +115,7 @@ describe('Team Issue outline', () => {
     const html = renderOutline(outlinePresentation(), '階層を読み込めませんでした。')
 
     expect(html).toContain('data-testid="team-issue-outline-unavailable"')
+    expect(html).toContain('階層を再読み込み')
     expect(html).not.toContain('issue-row-wbs-')
   })
 })

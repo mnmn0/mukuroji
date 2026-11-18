@@ -15,6 +15,7 @@ import { type Locale } from '../../shared/i18n/i18n'
 import { type CreateTeamIssueInput, type TeamIssue, type UpdateTeamIssueInput } from '../api'
 import { type IssueCollaborationController } from '../mutations/useIssueCollaboration'
 import { type IssueCollaborationRoute } from '../model/collaborationTabs'
+import { type CancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { type WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -96,6 +97,8 @@ export type TeamIssueOutlineSource = {
   nodes?: readonly TeamWorkItemHierarchyNode[]
   /** Message shown instead of the outline when the hierarchy could not be read. */
   errorMessage?: string
+  /** Reads the hierarchy again after a failed read. */
+  onRetry?: () => void
   /**
    * Saves a planned hierarchy move and refreshes the hierarchy.
    *
@@ -270,12 +273,12 @@ export type TeamIssueScreenProps = {
    */
   onCreateIssue?: (input: CreateTeamIssueInput) => Promise<CreatedTeamIssueMutation | void>
   /**
-   * Issue 更新時の callback です。
+   * Updates a Work Item; resolves with the cancelled outcome when the person declines.
    */
   onUpdateIssue?: (
     issueId: string,
     input: UpdateTeamIssueInput,
-  ) => Promise<TeamIssue | void>
+  ) => Promise<TeamIssue | CancelledTeamIssueUpdate | void>
   /**
    * 選択中 Work Item へ relation を追加する callback です。
    */

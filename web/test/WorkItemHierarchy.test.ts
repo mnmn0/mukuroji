@@ -82,14 +82,14 @@ describe('planWorkItemHierarchyMove', () => {
     expect(planWorkItemHierarchyMove(nodes, 'phase-3', 'down')).toEqual({ ok: false, reason: 'no-next-sibling' })
     expect(planWorkItemHierarchyMove(nodes, 'phase-1', 'outdent')).toEqual({ ok: false, reason: 'top-level' })
     expect(planWorkItemHierarchyMove(nodes, 'missing', 'up')).toEqual({ ok: false, reason: 'not-in-hierarchy' })
-    const hidden = [...nodes, node('orphan', 'secret', 'b', [], { parentHidden: true })]
+    const hidden = [...nodes, node('orphan', null, 'b', [], { parentHidden: true })]
     expect(planWorkItemHierarchyMove(hidden, 'orphan', 'outdent')).toEqual({ ok: false, reason: 'parent-hidden' })
   })
 
   test('does not treat a Work Item under a hidden parent as a top-level sibling', () => {
     const hidden = [
       node('phase-1', null, 'b'),
-      node('orphan', 'secret', 'c', [], { parentHidden: true }),
+      node('orphan', null, 'c', [], { parentHidden: true }),
       node('phase-2', null, 'd'),
     ]
     const plan = planWorkItemHierarchyMove(hidden, 'phase-2', 'indent')

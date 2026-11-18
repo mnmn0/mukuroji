@@ -101,6 +101,15 @@ describe('hierarchy ranks', () => {
     }
   })
 
+  test('finds a shorter rank at the edges when the next rank would be too long', () => {
+    const after = `a${'z'.repeat(63)}`
+    expect(createWorkItemHierarchyRankBetween(after, undefined)).toBe('b')
+    const before = `b${'0'.repeat(62)}1`
+    expect(createWorkItemHierarchyRankBetween(undefined, before)).toBe('b')
+    expect('b' < before).toBe(true)
+    expect(createWorkItemHierarchyRankBetween('z'.repeat(64), undefined)).toBeUndefined()
+  })
+
   test('rejects invalid or unordered neighbours', () => {
     expect(createWorkItemHierarchyRankBetween('b', 'a')).toBeUndefined()
     expect(createWorkItemHierarchyRankBetween('a', 'a')).toBeUndefined()

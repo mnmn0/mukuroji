@@ -1872,15 +1872,15 @@ test('stores the sibling order rank with a parent change and reorders under the 
     nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
     expectedGraphRevision: 6,
     hierarchyRank: 'm',
-  })).toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: 'phase-b', graphRevision: 6 })
-  // The reorder writes only the child's rank, fenced by the graph revision it read.
+  })).toEqual({ previousParentWorkItemId: 'phase-b', parentWorkItemId: 'phase-b', graphRevision: 7 })
+  // The reorder writes only the child's rank and advances the graph revision it read.
   expect(store.transactions).toHaveLength(2)
-  // A rank chosen from a stale outline is refused instead of being written.
+  // A rank chosen from a stale outline, even one only a reorder ago, is refused.
   await expect(client.replaceParent('workspace-1', 'core-team', {
     child: { workItemId: 'task', expectedRevision: 3 },
     currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
     nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
-    expectedGraphRevision: 5,
+    expectedGraphRevision: 6,
     hierarchyRank: 'n',
   })).rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
   expect(store.transactions).toHaveLength(2)
@@ -1890,9 +1890,10 @@ test('stores the sibling order rank with a parent change and reorders under the 
     ExpressionAttributeValues: expect.objectContaining({ ':hierarchyRank': 'm', ':revision': 3 }),
   })
   expect(store.transactions[1]?.TransactItems).toContainEqual({
-    ConditionCheck: expect.objectContaining({
+    Put: expect.objectContaining({
       TableName: 'configuration-table',
-      ExpressionAttributeValues: expect.objectContaining({ ':expectedRevision': 6 }),
+      Item: expect.objectContaining({ revision: 7, edgeCount: 2 }),
+      ExpressionAttributeValues: { ':expectedRevision': 6 },
     }),
   })
 
@@ -1900,7 +1901,7 @@ test('stores the sibling order rank with a parent change and reorders under the 
     child: { workItemId: 'task', expectedRevision: 3 },
     currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
     nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
-    expectedGraphRevision: 6,
+    expectedGraphRevision: 7,
   })
   expect(childUpdate(2)?.UpdateExpression).toBe('SET #relationIds = :relationIds REMOVE #hierarchyRank')
 
@@ -1908,7 +1909,7 @@ test('stores the sibling order rank with a parent change and reorders under the 
     child: { workItemId: 'task', expectedRevision: 3 },
     currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
     nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
-    expectedGraphRevision: 7,
+    expectedGraphRevision: 8,
     hierarchyRank: 'k0',
   })).rejects.toMatchObject({ code: 'InvalidWorkItemHierarchyRank', status: 400 })
 })

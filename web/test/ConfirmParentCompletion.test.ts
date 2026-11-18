@@ -17,7 +17,7 @@ async function check(
   answer = false,
 ) {
   const counted: string[] = []
-  const asked: number[] = []
+  const asked: Array<number | null> = []
   const result = await confirmParentCompletion({
     workItem,
     nextStatusCategory: 'completed',
@@ -57,6 +57,7 @@ test('does not ask when nothing is open, the change does not complete, or the Te
     .toEqual({ result: true, counted: [], asked: [] })
 })
 
-test('goes ahead without asking when the open children cannot be counted', async () => {
-  expect(await check({}, new Error('offline'))).toEqual({ result: true, counted: ['phase-1'], asked: [] })
+test('still asks, without a count, when the open children cannot be counted', async () => {
+  expect(await check({}, new Error('offline'))).toEqual({ result: false, counted: ['phase-1'], asked: [null] })
+  expect((await check({}, new Error('offline'), true)).result).toBe(true)
 })

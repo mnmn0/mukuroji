@@ -816,8 +816,11 @@ export type WorkItemParentMutationInput = {
   /** 読み込み時点の Team relation graph revision です。 */
   expectedGraphRevision: number
   /**
-   * 兄弟の中での新しい順序 rank です（`createWorkItemHierarchyRankBetween` で作ります）。
-   * 省略すると順序を変えません。親が変わらない場合は並べ替えだけを行います。
+   * New sibling order rank, made with `createWorkItemHierarchyRankBetween`.
+   *
+   * With the same parent, only the rank changes (a reorder) and the graph revision advances.
+   * When omitted, the same parent keeps the stored rank, and a parent change clears the stored
+   * rank so the Work Item falls back to its default rank.
    */
   hierarchyRank?: string
 }

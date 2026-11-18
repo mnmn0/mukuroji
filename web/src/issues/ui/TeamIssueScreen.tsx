@@ -93,6 +93,7 @@ import {
   resolveIssueTitle,
   resolveTeamIssueStatusFilter,
 } from '../model/teamIssueDisplay'
+import { isCancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { CreateIssuePanel } from './CreateTeamIssuePanel'
 import { IssueBoard } from './TeamIssueBoard'
 import { IssueDetailPane } from './TeamIssueDetailPane'
@@ -990,13 +991,15 @@ export function TeamIssueScreen({
     setDetailUpdateError(undefined)
 
     try {
-      const updatedIssue = await onUpdateIssue(issueId, input)
+      const outcome = await onUpdateIssue(issueId, input)
       if (claimedContext && target) {
-        taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
-          claimedContext.actionId,
-          target,
-          updatedIssue?.revision,
-        ))
+        taskActionCompletion.settle(claimedContext, isCancelledTeamIssueUpdate(outcome)
+          ? createCancelledTaskActionResult(claimedContext.actionId, [target])
+          : createSucceededTaskActionMutationResult(
+            claimedContext.actionId,
+            target,
+            outcome?.revision,
+          ))
       }
     } catch (error) {
       if (claimedContext) {
@@ -1447,9 +1450,14 @@ export function TeamIssueScreen({
                   </p>
                 ) : null}
                 {isOutlineRequested && issueOutline?.errorMessage ? (
-                  <p className="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800" data-testid="team-issue-outline-unavailable">
-                    {issueOutline.errorMessage}
-                  </p>
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3" data-testid="team-issue-outline-unavailable">
+                    <p className="text-sm font-semibold text-fg-amber-800">{issueOutline.errorMessage}</p>
+                    {issueOutline.onRetry ? (
+                      <button className="workbench-button-secondary min-h-9 px-3" onClick={issueOutline.onRetry} type="button">
+                        {t('issues.outline.retry')}
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
                 {outlineRows ? (
                   <p

@@ -123,9 +123,14 @@ export function createWorkItemHierarchyRankBetween(
 function createRankAfter(lower: string): string {
   const lastIndex = lower.length - 1
   const lastDigit = RANK_DIGITS.indexOf(lower.charAt(lastIndex))
-  return lastDigit < RANK_DIGITS.length - 1
-    ? `${lower.slice(0, lastIndex)}${RANK_DIGITS.charAt(lastDigit + 1)}`
-    : `${lower}i`
+  if (lastDigit < RANK_DIGITS.length - 1) {
+    return `${lower.slice(0, lastIndex)}${RANK_DIGITS.charAt(lastDigit + 1)}`
+  }
+  if (lower.length < WORK_ITEM_HIERARCHY_RANK_MAX_LENGTH) return `${lower}i`
+  // No room to append: raise the last digit that is not `z` and drop the rest, which is shorter.
+  const index = lower.replace(/z+$/u, '').length - 1
+  if (index < 0) return `${lower}i`
+  return `${lower.slice(0, index)}${RANK_DIGITS.charAt(RANK_DIGITS.indexOf(lower.charAt(index)) + 1)}`
 }
 
 /**
@@ -137,9 +142,11 @@ function createRankAfter(lower: string): string {
 function createRankBefore(upper: string): string {
   const lastIndex = upper.length - 1
   const lastDigit = RANK_DIGITS.indexOf(upper.charAt(lastIndex))
-  return lastDigit > 1
-    ? `${upper.slice(0, lastIndex)}${RANK_DIGITS.charAt(lastDigit - 1)}`
-    : `${upper.slice(0, lastIndex)}0i`
+  if (lastDigit > 1) return `${upper.slice(0, lastIndex)}${RANK_DIGITS.charAt(lastDigit - 1)}`
+  if (upper.length < WORK_ITEM_HIERARCHY_RANK_MAX_LENGTH) return `${upper.slice(0, lastIndex)}0i`
+  // No room to append: a proper prefix of `upper` sorts before it and is shorter.
+  const prefix = upper.slice(0, lastIndex).replace(/0+$/u, '')
+  return prefix || `${upper.slice(0, lastIndex)}0i`
 }
 
 /**
@@ -532,8 +539,15 @@ export type PublicWorkItemHierarchy = {
    * archived Work Item, which is outside the tree.
    */
   parentWorkItemId: string | null
-  /** Readable non-archived child Work Item IDs in sibling order; empty for an archived Work Item. */
+  /**
+   * Readable non-archived child Work Item IDs; empty for an archived Work Item. They are in sibling
+   * order, except when the Team is too large for its tree: then `wbsNumber` is absent and the
+   * children are in Work Item ID order.
+   */
   childWorkItemIds: string[]
-  /** WBS number such as `1.2.3`; absent for an archived Work Item. */
+  /**
+   * WBS number such as `1.2.3`; absent for an archived Work Item and when the Team is too large
+   * for its tree.
+   */
   wbsNumber?: string
 }

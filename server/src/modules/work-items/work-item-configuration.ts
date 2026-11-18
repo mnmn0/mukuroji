@@ -105,6 +105,48 @@ export type WorkItemConfigurationGuard = {
 }
 
 /**
+ * Creates the conditional write that advances a Team's relation graph revision by one.
+ *
+ * @param tableName - Work Item configuration table that holds the graph metadata.
+ * @param scopeKey - Team configuration scope key.
+ * @param expectedRevision - Revision the caller read; `0` means the metadata row does not exist yet.
+ * @param nextEdgeCount - Directed relation row count after the change.
+ * @returns A Put that fails unless the stored revision still equals `expectedRevision`.
+ */
+function createRelationGraphAdvance(
+  tableName: string,
+  scopeKey: string,
+  expectedRevision: number,
+  nextEdgeCount: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const graphItem = {
+    scopeKey,
+    recordKey: RELATION_GRAPH_RECORD_KEY,
+    entryType: 'relation-graph',
+    schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    revision: expectedRevision + 1,
+    edgeCount: nextEdgeCount,
+  }
+  return expectedRevision === 0
+    ? {
+        Put: {
+          TableName: tableName,
+          Item: graphItem,
+          ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+        },
+      }
+    : {
+        Put: {
+          TableName: tableName,
+          Item: graphItem,
+          ConditionExpression: '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        },
+      }
+}
+
+/**
  * Creates a DynamoDB guard for the semantic relation graph revision observed by a schedule preview.
  *
  * Schedule dependencies are owned by Planning, but a confirmed preview also preserves the
@@ -1523,10 +1565,16 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     ) {
       if (normalized.hierarchyRank !== undefined) {
         // The rank was chosen among the siblings the caller saw, so it needs their graph revision.
-        // The rank write is fenced on that revision, so no second read is needed.
+        // The rank write advances that revision, so a concurrent reorder or parent change conflicts.
         assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
-        await this.writeHierarchyRank(workspaceId, teamId, child, normalized.hierarchyRank, graph.revision)
-        return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
+        const graphRevision = await this.writeHierarchyRank(
+          workspaceId,
+          teamId,
+          child,
+          normalized.hierarchyRank,
+          graph,
+        )
+        return { previousParentWorkItemId, parentWorkItemId, graphRevision }
       }
       const after = await this.getRelationGraphRevision(workspaceId, teamId)
       assertStableGraphRevision(graph.revision, after)
@@ -1630,23 +1678,24 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   /**
    * Stores a child's sibling order rank without changing its parent.
    *
-   * The graph revision read before the parent was compared fences the write, so a parent changed
-   * meanwhile makes the reorder fail instead of overwriting the rank chosen under the new parent.
-   * The graph revision itself does not advance for a rank-only change.
+   * The write advances the graph revision the caller read, in the same transaction. A parent
+   * change or another reorder made meanwhile therefore makes this reorder fail with a conflict
+   * instead of overwriting a rank chosen from a newer outline.
    *
    * @param workspaceId - Workspace that owns the Work Item.
    * @param teamId - Team that owns the Work Item.
    * @param child - Child snapshot whose revision and Project assignment fence the write.
    * @param hierarchyRank - Validated rank to store.
-   * @param graphRevision - Relation graph revision read before the unchanged parent was observed.
+   * @param graph - Relation graph state read before the unchanged parent was observed.
+   * @returns The graph revision after the reorder.
    */
   private async writeHierarchyRank(
     workspaceId: string,
     teamId: string,
     child: WorkItemRelationEndpointSnapshot,
     hierarchyRank: string,
-    graphRevision: number,
-  ) {
+    graph: { revision: number, edgeCount: number },
+  ): Promise<number> {
     const item = createRelationEndpointTransactionItem(
       this.workItemsTableName,
       `${workspaceId}#team#${teamId}`,
@@ -1659,9 +1708,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           item,
-          createWorkItemRelationGraphRevisionConditionCheck(this.tableName, workspaceId, teamId, graphRevision),
+          createRelationGraphAdvance(
+            this.tableName,
+            createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+            graph.revision,
+            graph.edgeCount,
+          ),
         ],
       }))
+      return graph.revision + 1
     } catch (error) {
       if (
         isTransactionConditionalFailureAt(error, 0) ||
@@ -2225,31 +2280,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     const workItemPartitionKey = `${workspaceId}#team#${teamId}`
     const configurationConditionStartIndex =
       input.endpoints.length + 1 + input.edgeMutations.length
-    const graphItem = {
+    const graphMutation = createRelationGraphAdvance(
+      this.tableName,
       scopeKey,
-      recordKey: RELATION_GRAPH_RECORD_KEY,
-      entryType: 'relation-graph',
-      schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-      revision: input.expectedRevision + 1,
-      edgeCount: input.nextEdgeCount,
-    }
-    const graphMutation = input.expectedRevision === 0
-      ? {
-          Put: {
-            TableName: this.tableName,
-            Item: graphItem,
-            ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-          },
-        }
-      : {
-          Put: {
-            TableName: this.tableName,
-            Item: graphItem,
-            ConditionExpression: '#revision = :expectedRevision',
-            ExpressionAttributeNames: { '#revision': 'revision' },
-            ExpressionAttributeValues: { ':expectedRevision': input.expectedRevision },
-          },
-        }
+      input.expectedRevision,
+      input.nextEdgeCount,
+    )
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [

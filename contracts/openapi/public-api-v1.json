@@ -3516,7 +3516,7 @@
         "description": "Position of one Work Item in its Team's tree of non-archived Work Items. Only Work Items the client may read are listed. Properties may be added later, so clients must ignore those they do not know.",
         "properties": {
           "childWorkItemIds": {
-            "description": "Readable non-archived child Work Item IDs in sibling order; empty for an archived Work Item.",
+            "description": "Readable non-archived child Work Item IDs; empty for an archived Work Item. They are in sibling order, except when the Team is too large for its tree: then wbsNumber is absent and the children are in Work Item ID order.",
             "items": {
               "type": "string"
             },
@@ -3537,7 +3537,7 @@
             "type": "string"
           },
           "wbsNumber": {
-            "description": "WBS number such as 1.2.3, derived from sibling order when read. Absent for an archived Work Item.",
+            "description": "WBS number such as 1.2.3, derived from sibling order when read. Absent for an archived Work Item and when the Team is too large for its tree.",
             "pattern": "^[1-9][0-9]*(\\.[1-9][0-9]*)*$",
             "type": "string"
           },

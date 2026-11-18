@@ -6,6 +6,7 @@ import {
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../src/issues/api'
 import { teamIssueFixtures } from '../src/issues/fixtures'
+import { CANCELLED_TEAM_ISSUE_UPDATE } from '../src/issues/model/teamIssueUpdateOutcome'
 import { executeTeamIssueDirectStatusMove } from '../src/task-views/model/teamIssueDirectMove'
 import {
   createTaskStatusMoveRequest,
@@ -148,6 +149,23 @@ describe('Team Issue direct Move action', () => {
       retryable: true,
     })
     expect(result.items[0]?.failure).toEqual(result.failure)
+  })
+
+  test('reports a Move the person declined as cancelled, not succeeded', async () => {
+    const issue = teamIssueFixtures[0]
+    if (!issue) throw new Error('Expected one Team Issue fixture.')
+
+    const result = requireResult(await executeTeamIssueDirectStatusMove(
+      createMoveContext(issue.revision),
+      createMoveRequestSlot(issue.revision),
+      [issue],
+      teamWorkItemConfigurationFixture,
+      async () => CANCELLED_TEAM_ISSUE_UPDATE,
+      messages,
+    ))
+
+    expect(result.status).toBe('cancelled')
+    expect(result.items.map((item) => item.status)).toEqual(['cancelled'])
   })
 
   test('rejects a stale visible revision before dispatching the direct mutation', async () => {
