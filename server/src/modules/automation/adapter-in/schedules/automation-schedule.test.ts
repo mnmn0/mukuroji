@@ -122,6 +122,14 @@ const enabledAutomationEntitlement: AutomationFeatureEntitlementPort = {
   },
 }
 
+/** Skip policy の 2026-07-16T00:00:00.000Z slot を定刻として処理すべき wall clock です。 */
+const ON_TIME_SKIP_WALL_CLOCKS = [
+  '2026-07-16T00:00:00.000Z',
+  '2026-07-16T00:00:00.004Z',
+  '2026-07-16T00:00:37.412Z',
+  '2026-07-16T00:01:59.999Z',
+]
+
 describe('automation schedule handler', () => {
   test('validates event time without using an old delivery time for processing leases', () => {
     const wallClock = new Date('2026-07-17T12:00:00.000Z')
@@ -163,7 +171,8 @@ describe('automation schedule handler', () => {
     expect(result).toEqual(definition)
   })
 
-  test('materializes an on-time skip slot once across schedule redelivery', async () => {
+  // EventBridge の rate(1 minute) tick と Lambda 起動は分境界から遅れるため、wall clock の遅れも定刻とみなす (#483)。
+  test.each(ON_TIME_SKIP_WALL_CLOCKS)('materializes an on-time skip slot once across schedule redelivery at %s', async (wallClock) => {
     const definition = createRecurringWork()
     const executions = new Map<string, AutomationExecution>()
     const events = new Map<
@@ -247,7 +256,7 @@ describe('automation schedule handler', () => {
         },
       },
     } satisfies AutomationScheduleDependencies
-    const now = new Date('2026-07-16T00:00:00.000Z')
+    const now = new Date(wallClock)
 
     const first = await processRecurringWorkDefinition(definition, now, dependencies)
     const second = await processRecurringWorkDefinition(definition, now, dependencies)
@@ -356,7 +365,7 @@ describe('automation schedule handler', () => {
     expect(executions.size).toBe(1)
   })
 
-  test('runs a schedule-trigger rule once and advances its slot with CAS', async () => {
+  test.each(ON_TIME_SKIP_WALL_CLOCKS)('runs a schedule-trigger rule once and advances its slot with CAS at %s', async (wallClock) => {
     const rule = createScheduledRule()
     const executions = new Map<string, AutomationExecution>()
     const receipts = new Set<string>()
@@ -428,7 +437,7 @@ describe('automation schedule handler', () => {
         },
       },
     } satisfies AutomationScheduleDependencies
-    const now = new Date('2026-07-16T00:00:00.000Z')
+    const now = new Date(wallClock)
 
     const first = await processScheduledAutomationRule(rule, now, dependencies)
     const second = await processScheduledAutomationRule(rule, now, dependencies)
@@ -483,7 +492,8 @@ describe('automation schedule handler', () => {
         },
       },
     } satisfies AutomationScheduleDependencies
-    const now = new Date('2026-07-16T00:01:00.000Z')
+    // 定刻判定の許容幅 (2 tick) ちょうど遅れた slot は逃した slot として skip する。
+    const now = new Date('2026-07-16T00:02:00.000Z')
 
     const recurringResult = await processRecurringWorkDefinition(currentDefinition, now, dependencies)
     const ruleResult = await processScheduledAutomationRule(currentRule, now, dependencies)

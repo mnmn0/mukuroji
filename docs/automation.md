@@ -101,7 +101,7 @@ DST の扱いは次で固定する。
 
 - spring-forward で local time が存在しない場合は同日の最初の有効時刻へ進める。
 - fall-back で local time が 2 回存在する場合は早い instant を選び、同じ local slot を 1 回だけ生成する。
-- catch-up `skip` は過去分を生成せず次回へ進める。
+- catch-up `skip` は過去分を生成せず次回へ進める。minute worker の tick と Lambda 起動の遅れを吸収するため、wall clock から 2 分未満の slot は定刻として 1 回だけ生成し、それより古い slot だけを逃した分として skip する。
 - catch-up `latest` は直近 1 slot だけ生成する。
 - catch-up `all` は設定上限まで古い順に生成し、残りは次の schedule invocation へ持ち越す。
 
