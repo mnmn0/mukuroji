@@ -262,6 +262,43 @@ export type PlanningUpdatePublishTransactionResult = {
   revision: number
   /** Complete immutable update value committed by the publish. */
   update: PlanningUpdate
+  /** Health transition and cadence recipients read from the state the publish committed against. */
+  notification: PlanningUpdatePublishNotificationContext
+}
+
+/** Health transition and cadence recipients of one committed update publish. */
+export type PlanningUpdatePublishNotificationContext = {
+  /** Health of the previous update, or of the Initiative before its first update. */
+  previousHealth?: PlanningHealth
+  /** Whether the new health is at-risk or off-track and worse than the previous health. */
+  healthDegraded: boolean
+  /** Update owner of the cadence the publish covered. */
+  updateOwnerMemberKey: string
+  /** Escalation recipient of the cadence the publish covered, when configured. */
+  escalationMemberKey?: string
+}
+
+/** Severity order used to decide whether a health change is a degradation. */
+const planningHealthSeverity: Record<PlanningHealth, number> = {
+  unknown: 0,
+  'on-track': 0,
+  'at-risk': 1,
+  'off-track': 2,
+}
+
+/**
+ * Reports whether a newly published health is worse than the previous one and needs attention.
+ *
+ * @param previous - Health before the publish, when known.
+ * @param next - Health of the new update.
+ * @returns True when the new health is at-risk or off-track and more severe than before.
+ */
+export function isPlanningHealthDegraded(
+  previous: PlanningHealth | undefined,
+  next: PlanningHealth,
+) {
+  return planningHealthSeverity[next] > 0 &&
+    planningHealthSeverity[next] > planningHealthSeverity[previous ?? 'unknown']
 }
 
 /** Minimal result exposed while preparing a durable Planning cadence receipt. */
@@ -285,6 +322,8 @@ export type PlanningMutationTransactionResult =
 type PlanningMutationTransactionContribution = {
   /** Conditional receipt write committed after Planning row mutations. */
   transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  /** Append-only audit outbox writes committed after the receipt, at most two. */
+  additionalTransactWriteItems?: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /** Adds one durable completion receipt to a supported Planning mutation transaction. */
@@ -653,6 +692,8 @@ type PlanningMutationResult = {
   workItemDependencyTransactionSource?: PlanningWorkItemDependencyTransactionSource
   /** 同じ transaction で append-only 保存する structured update です。 */
   publishedUpdate?: PlanningUpdate
+  /** Health transition and cadence recipients of the published update. */
+  publishedUpdateNotification?: PlanningUpdatePublishNotificationContext
   /** Target whose summary is retained for a durable cadence receipt. */
   planningUpdateCadenceTransactionTarget?: PlanningUpdateTarget
   /** Archive rows written or removed in the same transaction as the live graph change. */
@@ -1662,12 +1703,25 @@ abstract class BasePlanningClient implements PlanningClient {
           latestContextSnapshot: structuredClone(contextSnapshot),
           updatedAt: now,
         }
+        const previousHealth = current.latestUpdate?.health ?? (
+          target.type === 'initiative'
+            ? requireActiveEntity(state, target.entityId).health
+            : undefined
+        )
+        const publishedUpdateNotification: PlanningUpdatePublishNotificationContext = {
+          ...(previousHealth ? { previousHealth } : {}),
+          healthDegraded: isPlanningHealthDegraded(previousHealth, health),
+          updateOwnerMemberKey: current.cadence.updateOwnerMemberKey,
+          ...(current.cadence.escalationMemberKey
+            ? { escalationMemberKey: current.cadence.escalationMemberKey }
+            : {}),
+        }
         let next = replacePlanningUpdateTarget(state, updatedTarget)
         if (target.type === 'initiative') {
           const entity = requireActiveEntity(next, target.entityId)
           next = replaceEntity(next, { ...entity, health, risk, updatedAt: now })
         }
-        return { state: next, publishedUpdate: update }
+        return { state: next, publishedUpdate: update, publishedUpdateNotification }
       },
       authorizationConditionChecks,
       transaction,
@@ -2338,6 +2392,7 @@ abstract class BasePlanningClient implements PlanningClient {
             kind: 'publish',
             revision: after.revision,
             update: structuredClone(result.publishedUpdate),
+            notification: requirePublishedUpdateNotification(result.publishedUpdateNotification),
           }
     const transactionContribution = transaction
       ? await preparePlanningMutationTransactionContribution(
@@ -2406,13 +2461,32 @@ async function preparePlanningMutationTransactionContribution<
  * Validates an opaque caller contribution before it crosses into the Planning DynamoDB adapter.
  *
  * @param value - Unknown contribution returned by the application transaction port.
- * @returns Whether the value contains exactly one supported DynamoDB transaction action.
+ * @returns Whether the value contains one receipt action and at most two audit Put actions.
  */
 function isPlanningMutationTransactionContribution(
   value: unknown,
 ): value is PlanningMutationTransactionContribution {
   if (!isRecord(value)) return false
-  return isPlanningTransactWriteItem(value.transactWriteItem)
+  const additional = value.additionalTransactWriteItems
+  return isPlanningTransactWriteItem(value.transactWriteItem) && (
+    additional === undefined ||
+    Array.isArray(additional) && additional.length <= 2 &&
+      additional.every((item) => isRecord(item) && isRecord(item.Put) && isPlanningTransactWriteItem(item))
+  )
+}
+
+/**
+ * Lists every DynamoDB action of an optional caller contribution in commit order.
+ *
+ * @param contribution - Validated caller contribution.
+ * @returns The receipt write followed by its audit outbox writes.
+ */
+function planningTransactionContributionItems(
+  contribution: PlanningMutationTransactionContribution | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return contribution
+    ? [contribution.transactWriteItem, ...(contribution.additionalTransactWriteItems ?? [])]
+    : []
 }
 
 /**
@@ -3276,9 +3350,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
               },
             },
           },
-          ...(transactionContribution === undefined
-            ? []
-            : [transactionContribution.transactWriteItem]),
+          ...planningTransactionContributionItems(transactionContribution),
         ],
       }))
     } catch (error) {
@@ -3412,13 +3484,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
             },
           },
           ...activityWrites,
-          ...(transactionContribution === undefined
-            ? []
-            : [transactionContribution.transactWriteItem]),
+          ...planningTransactionContributionItems(transactionContribution),
         ],
       }))
     } catch (error) {
-      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + (transactionContribution ? 1 : 0))) throw toPersistenceError(error)
+      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + planningTransactionContributionItems(transactionContribution).length)) throw toPersistenceError(error)
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
@@ -3548,9 +3618,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         ExpressionAttributeValues: { ':expectedRevision': condition.revision },
       },
     }))
-    const transactionContributionItems = transactionContribution
-      ? [transactionContribution.transactWriteItem]
-      : []
+    const transactionContributionItems = planningTransactionContributionItems(transactionContribution)
     const publishedUpdateItems: NonNullable<TransactWriteCommandInput['TransactItems']> =
       publishedUpdate === undefined
         ? []
@@ -7714,12 +7782,28 @@ function createPlanningUpdateTargetRecordSuffix(target: PlanningUpdateTarget) {
 }
 
 /**
+ * Returns the notification context that every publish mutation records with its update.
+ *
+ * @param value - Context returned by the publish mutation.
+ * @returns A copy of the context.
+ * @throws PlanningError when the publish mutation did not record it.
+ */
+function requirePublishedUpdateNotification(
+  value: PlanningUpdatePublishNotificationContext | undefined,
+): PlanningUpdatePublishNotificationContext {
+  if (!value) {
+    throw new PlanningError(503, 'PlanningUpdateUnavailable', 'Published update is unavailable.')
+  }
+  return { ...value }
+}
+
+/**
  * Creates the sort key of one UPDATE_TARGET row.
  *
  * @param target - Canonical target.
  * @returns Size-checked DynamoDB sort key.
  */
-function createPlanningUpdateTargetRecordKey(target: PlanningUpdateTarget) {
+export function createPlanningUpdateTargetRecordKey(target: PlanningUpdateTarget): string {
   return readRecordKey(
     `${UPDATE_TARGET_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}`,
     'Planning update target record key',

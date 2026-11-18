@@ -7,6 +7,7 @@ import { findWorkItemKeys, readWorkItemKeyInput } from '../src/work-items/model/
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 import { WorkItemKeyActions } from '../src/issues/ui/WorkItemKeyActions'
 import { WorkItemKeyStatus } from '../src/issues/ui/WorkItemKeyStatus'
+import { SearchKeyJump } from '../src/search/SearchKeyJump'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createWorkItemKeyPath } from '../src/shared/routing/paths'
 
@@ -95,5 +96,25 @@ describe('WorkItemKeyStatus', () => {
     expect(renderStatus('not-found')).not.toContain('Try again')
     expect(renderStatus('not-found')).toContain('Search instead')
     expect(renderStatus('failed')).toContain('Try again')
+  })
+})
+
+describe('SearchKeyJump', () => {
+  /**
+   * Renders the key jump for one search keyword.
+   *
+   * @param keyword - Search keyword as typed.
+   * @returns The rendered HTML.
+   */
+  const renderJump = (keyword: string) => renderToStaticMarkup(
+    <MemoryRouter>
+      <SearchKeyJump keyword={keyword} t={createTranslator('en')} />
+    </MemoryRouter>,
+  )
+
+  test('links a keyword that is exactly one key, in any case, to its key URL', () => {
+    expect(renderJump('PT-12')).toContain('href="/browse/PT-12"')
+    expect(renderJump(' pt-12 ')).toContain('Open PT-12')
+    expect(renderJump('PT-12 login bug')).toBe('')
   })
 })

@@ -98,7 +98,7 @@ export const planningMessages = {
   'planning.field.change': '前回からの変更',
   'planning.field.comment': 'コメント',
   'planning.field.reaction': 'リアクション',
-  'planning.field.commentPlaceholder': 'この更新についてコメント…',
+  'planning.field.commentPlaceholder': 'この更新についてコメント（@name@example.com で mention）…',
   'planning.field.watcherCount': '{count} 人がウォッチ',
   'planning.field.goalFramework': 'Goal / OKR の役割',
   'planning.type.cycle': 'Cycle',

@@ -27,6 +27,8 @@ import {
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningMutationTransaction,
+  type PlanningUpdatePublishNotificationContext,
+  type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from './planning'
 import {
@@ -2294,6 +2296,70 @@ describe('planning structured updates', () => {
     expect(secondPage.nextCursor).toBeUndefined()
   })
 
+  test('records the health transition and cadence recipients with each publish', async () => {
+    const client = new InMemoryPlanningClient(() => new Date('2026-02-28T12:00:00.000Z'))
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        escalationMemberKey: 'lead@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-03-01T15:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 12,
+      },
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)
+    const contexts: PlanningUpdatePublishNotificationContext[] = []
+    const transaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> = {
+      async prepare(result) {
+        contexts.push(result.notification)
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'AuditEventsTable',
+              Item: { eventId: `publish-${result.revision}` },
+            },
+          },
+        }
+      },
+    }
+    const publish = (revision: number, health: PublishPlanningUpdateInput['health']) =>
+      client.publishUpdate(
+        'workspace-1',
+        createPlanningUpdateInput(revision, { target, id: `update-${revision}`, health }),
+        'owner@example.com',
+        EMPTY_WORK_ITEMS,
+        [],
+        transaction,
+      )
+
+    await publish(1, 'on-track')
+    await publish(2, 'at-risk')
+    await publish(3, 'at-risk')
+    await publish(4, 'on-track')
+
+    expect(contexts).toEqual([
+      { healthDegraded: false, updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com' },
+      {
+        previousHealth: 'on-track', healthDegraded: true,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+      },
+      {
+        previousHealth: 'at-risk', healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+      },
+      {
+        previousHealth: 'at-risk', healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+      },
+    ])
+  })
+
   test('retains the original monthly day across shorter calendar months', async () => {
     for (const scenario of [
       {
@@ -3392,6 +3458,57 @@ describe('planning persistence', () => {
     )
     expect(attemptedKeys[1]?.[0]).toBe(attemptedKeys[0]?.[0])
     expect(attemptedKeys[1]?.[1]).not.toBe(attemptedKeys[0]?.[1])
+  })
+
+  test('commits caller audit outbox writes after the receipt and rejects unsupported actions', async () => {
+    const committed: Array<Array<Record<string, unknown>>> = []
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          committed.push(command.input.TransactItems as Array<Record<string, unknown>>)
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => new Date('2026-07-16T09:00:00.000Z'),
+    )
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    const receipt = { Put: { TableName: 'IdempotencyTable', Item: { recordKey: 'RECEIPT#comment-1' } } }
+    const audit = { Put: { TableName: 'AuditTable', Item: { eventId: 'event-1' } } }
+
+    await client.createUpdateComment('workspace-1', {
+      target, updateVersion: 1, id: 'comment-1', body: 'Looks good',
+    }, 'member@example.com', {
+      async prepare() {
+        return { transactWriteItem: receipt, additionalTransactWriteItems: [audit] }
+      },
+    })
+    const items = committed[0] ?? []
+    expect(items.slice(-2)).toEqual([receipt, audit])
+
+    await expect(client.createUpdateComment('workspace-1', {
+      target, updateVersion: 1, id: 'comment-2', body: 'Again',
+    }, 'member@example.com', {
+      async prepare() {
+        return {
+          transactWriteItem: receipt,
+          additionalTransactWriteItems: [{ Delete: { TableName: 'AuditTable', Key: { eventId: 'event-1' } } }],
+        }
+      },
+    })).rejects.toMatchObject({ status: 503, code: 'PlanningIdempotencyUnavailable' })
+    expect(committed).toHaveLength(1)
   })
 
   test('condition-checks canonical Work Item revision in link transactions', async () => {
