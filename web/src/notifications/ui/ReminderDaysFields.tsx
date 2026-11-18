@@ -1,5 +1,5 @@
 import {
-  NOTIFICATION_REMINDER_DAYS_MAXIMUM,
+  getNotificationReminderDaysMaximum,
   type NotificationReminderDayField,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -64,7 +64,7 @@ export function ReminderDaysFields<Field extends NotificationReminderDayField>({
               data-testid={`${testIdPrefix}-${field}`}
               disabled={disabled}
               inputMode="numeric"
-              max={NOTIFICATION_REMINDER_DAYS_MAXIMUM}
+              max={getNotificationReminderDaysMaximum(field)}
               min={1}
               placeholder={placeholderFor(field)}
               step={1}

@@ -1,5 +1,5 @@
 import {
-  NOTIFICATION_REMINDER_DAYS_MAXIMUM,
+  getNotificationReminderDaysMaximum,
   type NotificationReminderDayField,
 } from '@mukuroji/contracts'
 
@@ -42,7 +42,7 @@ export function readReminderDaysDraft<Field extends NotificationReminderDayField
     if (!text) continue
     if (!/^\d+$/u.test(text)) return undefined
     const value = Number(text)
-    if (value < 1 || value > NOTIFICATION_REMINDER_DAYS_MAXIMUM) return undefined
+    if (value < 1 || value > getNotificationReminderDaysMaximum(field)) return undefined
     days[field] = value
   }
   return days

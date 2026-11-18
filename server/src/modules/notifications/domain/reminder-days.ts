@@ -1,7 +1,8 @@
 import {
   NOTIFICATION_REMINDER_DAY_FIELDS,
-  NOTIFICATION_REMINDER_DAYS_MAXIMUM,
   PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS,
+  getNotificationReminderDaysMaximum,
+  type NotificationReminderDayField,
   type PersonalNotificationReminderDays,
   type TeamNotificationReminderDays,
 } from '@mukuroji/contracts'
@@ -11,13 +12,17 @@ import { NotificationError } from './notification-error'
  * Reports whether a value is an accepted reminder day threshold.
  *
  * @param value - Untrusted value.
- * @returns Whether the value is an integer from 1 to the shared maximum.
+ * @param field - Threshold the value is for.
+ * @returns Whether the value is an integer from 1 to the field's maximum.
  */
-export function isNotificationReminderDayCount(value: unknown): value is number {
+export function isNotificationReminderDayCount(
+  value: unknown,
+  field: NotificationReminderDayField,
+): value is number {
   return typeof value === 'number' &&
     Number.isSafeInteger(value) &&
     value >= 1 &&
-    value <= NOTIFICATION_REMINDER_DAYS_MAXIMUM
+    value <= getNotificationReminderDaysMaximum(field)
 }
 
 /**
@@ -64,7 +69,7 @@ export function reminderDaysEqual(
  * @returns The overrides with only the set fields.
  * @throws NotificationError (400) for a non-object, an unknown field, or an invalid day count.
  */
-function normalizeReminderDays<Field extends string>(
+function normalizeReminderDays<Field extends NotificationReminderDayField>(
   value: unknown,
   fields: readonly Field[],
 ): Partial<Record<Field, number>> {
@@ -82,15 +87,16 @@ function normalizeReminderDays<Field extends string>(
       )
     }
     if (days === null || days === undefined) continue
-    if (!isNotificationReminderDayCount(days)) {
-      throw new NotificationError(
-        400,
-        'InvalidNotificationReminderDays',
-        `Reminder days must be integers between 1 and ${NOTIFICATION_REMINDER_DAYS_MAXIMUM}.`,
-      )
-    }
     for (const candidate of fields) {
-      if (candidate === field) normalized[candidate] = days
+      if (candidate !== field) continue
+      if (!isNotificationReminderDayCount(days, candidate)) {
+        throw new NotificationError(
+          400,
+          'InvalidNotificationReminderDays',
+          `Reminder days "${candidate}" must be an integer between 1 and ${getNotificationReminderDaysMaximum(candidate)}.`,
+        )
+      }
+      normalized[candidate] = days
     }
   }
   return normalized

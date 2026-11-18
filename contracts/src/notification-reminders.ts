@@ -31,6 +31,22 @@ export type PersonalNotificationReminderDayField =
 /** Largest accepted value for any reminder day threshold. */
 export const NOTIFICATION_REMINDER_DAYS_MAXIMUM = 365
 
+/**
+ * Largest accepted timesheet reminder threshold. The schedule looks back a bounded window of
+ * time entries, so a longer threshold could never find an entry old enough.
+ */
+export const TIMESHEET_REMINDER_DAYS_MAXIMUM = 31
+
+/**
+ * Returns the largest accepted value of one reminder threshold.
+ *
+ * @param field - Threshold name.
+ * @returns The maximum number of days.
+ */
+export function getNotificationReminderDaysMaximum(field: NotificationReminderDayField): number {
+  return field === 'timesheetReminderDays' ? TIMESHEET_REMINDER_DAYS_MAXIMUM : NOTIFICATION_REMINDER_DAYS_MAXIMUM
+}
+
 /** Complete set of reminder day thresholds. */
 export type NotificationReminderDays = {
   /** Days before the due date when the owner gets the due-soon notification. */

@@ -349,6 +349,7 @@ describe('Team reminder settings routes', () => {
     const manager = createRouter({ manager: true })
     for (const body of [
       { expectedRevision: 0, days: { dueSoonDays: 0 } },
+      { expectedRevision: 0, days: { timesheetReminderDays: 32 } },
       { expectedRevision: 0, days: { unknownDays: 1 } },
       { expectedRevision: -1, days: {} },
       { days: {} },

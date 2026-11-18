@@ -1,8 +1,9 @@
 import {
   NOTIFICATION_REMINDER_DAY_FIELDS,
-  NOTIFICATION_REMINDER_DAYS_MAXIMUM,
   PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
+  getNotificationReminderDaysMaximum,
+  type NotificationReminderDayField,
   type NotificationReminderDays,
   type PersonalNotificationReminderDays,
   type TeamNotificationReminderDays,
@@ -283,14 +284,15 @@ export function normalizeWorkItemReminderPolicy(
 ): WorkItemReminderPolicy {
   const merged = { ...DEFAULT_WORK_ITEM_REMINDER_POLICY, ...policy }
   return {
-    dueSoonDays: readPolicyDays(merged.dueSoonDays, 'Due-soon days'),
+    dueSoonDays: readPolicyDays(merged.dueSoonDays, 'dueSoonDays', 'Due-soon days'),
     overdueReminderIntervalDays: readPolicyDays(
       merged.overdueReminderIntervalDays,
+      'overdueReminderIntervalDays',
       'Overdue reminder interval days',
     ),
-    overdueEscalationDays: readPolicyDays(merged.overdueEscalationDays, 'Overdue escalation days'),
-    staleStartedDays: readPolicyDays(merged.staleStartedDays, 'Stale started days'),
-    timesheetReminderDays: readPolicyDays(merged.timesheetReminderDays, 'Timesheet reminder days'),
+    overdueEscalationDays: readPolicyDays(merged.overdueEscalationDays, 'overdueEscalationDays', 'Overdue escalation days'),
+    staleStartedDays: readPolicyDays(merged.staleStartedDays, 'staleStartedDays', 'Stale started days'),
+    timesheetReminderDays: readPolicyDays(merged.timesheetReminderDays, 'timesheetReminderDays', 'Timesheet reminder days'),
   }
 }
 
@@ -303,14 +305,15 @@ function isActiveWorkflowStatusCategory(value: string | undefined) {
  * Validates one reminder threshold.
  *
  * @param value - Configured number of days.
+ * @param field - Threshold the value is for.
  * @param label - Threshold name used in the error.
  * @returns The validated number of days.
- * @throws RangeError when the value is not an integer from 1 to the shared maximum.
+ * @throws RangeError when the value is not an integer from 1 to the field's maximum.
  */
-function readPolicyDays(value: number, label: string) {
-  if (!isNotificationReminderDayCount(value)) {
+function readPolicyDays(value: number, field: NotificationReminderDayField, label: string) {
+  if (!isNotificationReminderDayCount(value, field)) {
     throw new RangeError(
-      `${label} must be an integer between 1 and ${NOTIFICATION_REMINDER_DAYS_MAXIMUM}.`,
+      `${label} must be an integer between 1 and ${getNotificationReminderDaysMaximum(field)}.`,
     )
   }
 
