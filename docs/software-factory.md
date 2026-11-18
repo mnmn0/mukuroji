@@ -752,10 +752,12 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   直前の Run を返す。設定値 `resumableStatusIds` は開いた `AgentContext` で返す。Web の内部 API の
   Run には `resumedFromRunId` を含める。
 - MCP の `get_next_task` は、自 instance の Run を `in_progress` として返した後、Team が
-  `resumableStatusIds` を選んでいる場合だけ、claim のない `started` タスクを優先順に見て最新 Run を 1 件ずつ読み（依存関係の読み取りと合わせて 100 回まで）、最新 Run が
+  `resumableStatusIds` を選んでいる場合だけ、その status にある claim のない `started` タスクを優先順に見て
+  最新 Run を 1 件ずつ読み（依存関係の読み取りと合わせて 100 回まで）、最新 Run が
   `paused` または `completed` で終了していれば `action=resume` と `resumedFromRun` を返す。最新 Run が
-  `failed` / `released` のもの、Run がないものは人の判断を待つため候補にしない。status が
-  `resumableStatusIds` の外のものは `skipped` に `not_resumable` として残す。候補がなければ従来どおり
+  `failed` / `released` のもの、Run がないものは人の判断を待つため候補にしない。`resumableStatusIds` の外の
+  status にあるタスクは読み取らず、`skipped` にも出さない（レビュー待ちのタスクが多くても読み取りの上限に
+  達しない）。候補がなければ従来どおり
   Ready の新規タスクを選ぶ。`resumableStatusIds` が空の Team で再開候補を示さないのは、レビュー待ちで
   `paused` にした Work Item をすぐ再開してしまうためである。その場合 agent はユーザーの指示でだけ
   `resume_task` を呼ぶ。

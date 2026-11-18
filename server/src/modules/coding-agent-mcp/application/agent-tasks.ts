@@ -50,7 +50,7 @@ export type AgentTaskScope = {
 export type OtherAgentRun = Pick<AgentRunRecord, 'runId' | 'workItemId' | 'runtime' | 'agentName' | 'startedAt' | 'leaseExpiresAt' | 'stalled'>
 
 /** Why a candidate task was not selected. */
-export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready' | 'not_resumable'
+export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready'
 
 /**
  * Outcomes of a task's newest run that make a started task a resume candidate: the agent paused it,
@@ -485,13 +485,14 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       // it waits for review would be offered straight back, so resume then happens only when asked.
       for (const task of resumableStatusIds.size > 0 ? tasks : []) {
         if (task.statusCategory !== 'started' || claimed.has(task.id)) continue
+        // The server rejects a resume from any other status, so such tasks cost no read and are never
+        // offered; tasks waiting for people in an excluded status cannot use up the read budget.
+        if (!resumableStatusIds.has(task.workflowStatusId)) continue
         dependencyReads += 1
         if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
         // A started task without a run, or whose newest run failed or was released, waits for a person.
         const latest = await api.latestRun(task.id)
         if (latest === undefined || latest.state !== 'finished' || !resumableOutcomes.has(latest.outcome ?? '')) continue
-        // The server rejects a resume from any other status, so such tasks are never offered.
-        if (!resumableStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_resumable'); continue }
         // A task paused on an unfinished dependency waits for it like new work does.
         dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
         if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)

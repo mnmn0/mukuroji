@@ -323,7 +323,7 @@ describe('agent task lifecycle', () => {
       task('failed', { priority: 'high' }), task('review', { priority: 'high' }), task('waiting', { priority: 'high' }),
       task('fresh', { priority: 'low' }),
     ]
-    const { service, records } = fixture(rows, {
+    const { service, records, api } = fixture(rows, {
       async agentSettings() {
         return {
           schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
@@ -343,10 +343,15 @@ describe('agent task lifecycle', () => {
     const paused = records.get('waiting')
     if (!paused) throw new Error('Missing task.')
     records.set('waiting', { ...paused, relationIds: ['blockedBy:missing'] })
+    const latestReads: string[] = []
+    const latestRun = api.latestRun.bind(api)
+    api.latestRun = async (id) => { latestReads.push(id); return latestRun(id) }
     expect(await service.next({})).toMatchObject({
       action: 'start', task: { id: 'fresh' }, blockedCount: 1,
-      skipped: [{ taskId: 'review', reason: 'not_resumable' }, { taskId: 'waiting', reason: 'blocked' }],
+      skipped: [{ taskId: 'waiting', reason: 'blocked' }],
     })
+    // A task in a status the Team does not resume from costs no read of its runs.
+    expect(latestReads).toEqual(['failed', 'waiting'])
     expect((await service.configuration()).agentSettings.resumableStatusIds).toEqual(['coding'])
   })
 

@@ -166,7 +166,7 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 | `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
 | `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうかを取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
-| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`not_resumable`）も返す |
+| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`）も返す |
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール |
