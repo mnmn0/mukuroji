@@ -269,7 +269,7 @@ Team ごとの設定を Work Item configuration とは別の `agent-settings` co
 | `requireAcceptanceCriteria` | `false` | `true` なら受け入れ条件が 1 件以上ある Work Item だけを Ready とする。 |
 | `leaseMinutes` | `30` | 新しい Run の lease。 |
 | `allowTakeoverAfterLeaseExpiry` | `false` | `true` なら停滞 Run を同じ assignee の別 instance が `take_over_task` で引き継げる。 |
-| `resumableStatusIds[]` | `[]` | `active` Run のない Work Item を resume してよい `started` category の status ID（最大 50 件）。空の場合はどの `started` status でも resume できる。 |
+| `resumableStatusIds[]` | `[]` | `active` Run のない Work Item を resume してよい `started` category の status ID（最大 50 件）。`get_next_task` はこの status の Work Item だけを再開候補として示す。空の場合は明示的な resume がどの `started` status でもでき、`get_next_task` は再開候補を示さない。 |
 | `brief` | なし | Team の agent brief。Markdown、最大 16 KiB。 |
 | `projectBriefs{}` | `{}` | Project ID ごとの brief。Team brief の後に連結して返す。 |
 | `acceptanceCriteriaFieldId` | なし | 受け入れ条件の代替 custom field。 |
@@ -481,7 +481,7 @@ tool は次のとおり変更・追加する。
 | Tool | 変更 |
 | --- | --- |
 | `get_configuration` | `agentSettings`（`readyStatusIds`、`resumableStatusIds`、`requireAcceptanceCriteria`、`leaseMinutes`、`allowTakeoverAfterLeaseExpiry`）と `brief` を追加。 |
-| `get_next_task` | `ownRuns`、`otherRuns`、`skipped` を追加。Ready 判定を Agent settings に従わせる。新規の作業より先に、`paused` で止めた、または差し戻された `started` の Work Item を `action=resume` と `resumedFromRun` で返す。 |
+| `get_next_task` | `ownRuns`、`otherRuns`、`skipped` を追加。Ready 判定を Agent settings に従わせる。Team が `resumableStatusIds` を選んでいれば、新規の作業より先に、その status で `paused` で止めた、または差し戻された `started` の Work Item を `action=resume` と `resumedFromRun` で返す。 |
 | `get_task` | `acceptanceCriteria` と `activeRun`（自他の区別付き）を追加。 |
 | `start_task` | Run の start endpoint を呼ぶ。戻り値に `run` を追加。`not_ready` と `agent_run_conflict` をそのまま返す。 |
 | `heartbeat`（新規） | `runId` を受け取り lease を延長する。 |
@@ -745,12 +745,14 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
 - Public の `AgentRun` schema は閉じているため `resumedFromRunId` は載せず、応答の `resumedFromRun` で
   直前の Run を返す。設定値 `resumableStatusIds` は開いた `AgentContext` で返す。Web の内部 API の
   Run には `resumedFromRunId` を含める。
-- MCP の `get_next_task` は、自 instance の Run を `in_progress` として返した後、claim のない `started`
-  タスクを優先順に見て最新 Run を 1 件ずつ読み（依存関係の読み取りと合わせて 100 回まで）、最新 Run が
+- MCP の `get_next_task` は、自 instance の Run を `in_progress` として返した後、Team が
+  `resumableStatusIds` を選んでいる場合だけ、claim のない `started` タスクを優先順に見て最新 Run を 1 件ずつ読み（依存関係の読み取りと合わせて 100 回まで）、最新 Run が
   `paused` または `completed` で終了していれば `action=resume` と `resumedFromRun` を返す。最新 Run が
   `failed` / `released` のもの、Run がないものは人の判断を待つため候補にしない。status が
   `resumableStatusIds` の外のものは `skipped` に `not_resumable` として残す。候補がなければ従来どおり
-  Ready の新規タスクを選ぶ。
+  Ready の新規タスクを選ぶ。`resumableStatusIds` が空の Team で再開候補を示さないのは、レビュー待ちで
+  `paused` にした Work Item をすぐ再開してしまうためである。その場合 agent はユーザーの指示でだけ
+  `resume_task` を呼ぶ。
 - Web: Agent settings 画面に「再開できる status」を足し、`started` category の status だけを選べる。
   Work Item の Run パネルと Factory board（tile、ライン表示、detail）は、再開で始まった Run に
   「再開」の印を付ける。lane は既存どおり `classifyFactoryBoardItem` で決まり、再開した `active` Run は
@@ -774,8 +776,8 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
 - lease は tool 呼び出しで延長し、停滞は人が判断する。自動 take over は既定で無効。
 - Ready は Agent settings が指す workflow status で表し、workflow configuration の schema は変えない。
 - Run のない `started` Work Item は Ready に含めず自動でも拾わないが、assignee は resume で明示的に
-  続けられる。`get_next_task` が再開候補として示すのは、最新 Run が `paused` / `completed` で終わった
-  ものだけとする。
+  続けられる。`get_next_task` が再開候補として示すのは、Team が選んだ再開可能 status にあり、最新 Run が
+  `paused` / `completed` で終わったものだけとする。
 - Run と report は public API の Work Item sub-resource とし、新しい scope を作らない。
 
 保留:

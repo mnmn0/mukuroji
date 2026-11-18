@@ -481,7 +481,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       let blockedCount = 0
       let dependencyReads = 0
       // Paused or sent-back work comes before new work, so started tasks are offered for resume first.
-      for (const task of tasks) {
+      // Only a Team that chose its resumable statuses gets offers: with none chosen, a task paused while
+      // it waits for review would be offered straight back, so resume then happens only when asked.
+      for (const task of resumableStatusIds.size > 0 ? tasks : []) {
         if (task.statusCategory !== 'started' || claimed.has(task.id)) continue
         dependencyReads += 1
         if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
@@ -489,7 +491,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         const latest = await api.latestRun(task.id)
         if (latest === undefined || latest.state !== 'finished' || !resumableOutcomes.has(latest.outcome ?? '')) continue
         // The server rejects a resume from any other status, so such tasks are never offered.
-        if (resumableStatusIds.size > 0 && !resumableStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_resumable'); continue }
+        if (!resumableStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_resumable'); continue }
         return { action: 'resume', task, resumedFromRun: latest, blockedCount, skipped, ...runSummary }
       }
       for (const task of tasks) {

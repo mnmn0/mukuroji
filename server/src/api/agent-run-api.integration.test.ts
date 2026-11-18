@@ -1332,6 +1332,44 @@ describe('Agent Run reports', () => {
     expect(store.state.reports.size).toBe(2)
   })
 
+  test('reports verification results and artifacts on a run that resumed a paused run', async () => {
+    const { store, held, service } = configureReport()
+    /**
+     * Mutation identifiers for one request.
+     *
+     * @param key - Idempotency key.
+     * @returns Context and reservation token.
+     */
+    const ids = (key: string) => [
+      { requestId: key, idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ] as const
+    await runWithTestAppDependencies(() => service.finish(
+      credential, 'core-team', held.runId, { outcome: 'paused', instanceIdHash: hashAgentInstanceId('laptop-1') }, ...ids('pause'),
+    ))
+    const resumed = await runWithTestAppDependencies(() => service.resume(
+      credential, 'core-team', 'task-1',
+      { expectedRevision: 1, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') }, ...ids('resume'),
+    ))
+    expect(resumed.resumedFromRun).toMatchObject({ runId: held.runId, outcome: 'paused' })
+    const reported = await runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', resumed.run.runId, readReportAgentRunRequest({
+        instanceId: 'laptop-2', kind: 'verification', message: 'Review comments fixed',
+        verifications: [{ command: 'bun run server:test', status: 'passed' }],
+        artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/2', label: 'PR 2' }],
+      }), ...ids('report-after-resume'),
+    ))
+    expect(reported).toMatchObject({
+      report: {
+        runId: resumed.run.runId, sequence: 1,
+        verifications: [{ command: 'bun run server:test', status: 'passed' }],
+        artifacts: [{ type: 'pull-request', url: 'https://github.com/example/repo/pull/2', label: 'PR 2' }],
+      },
+      run: { runId: resumed.run.runId, reportCount: 1, state: 'active' },
+    })
+    expect(store.state.runs.get(`${workspaceId}|core-team|${resumed.run.runId}`)).toMatchObject({ resumedFromRunId: held.runId })
+  })
+
   test('refuses reports from another instance, after the run closed, or after a reassignment', async () => {
     const { store, held, comments, service } = configureReport()
     await expect(runWithTestAppDependencies(() => service.report(

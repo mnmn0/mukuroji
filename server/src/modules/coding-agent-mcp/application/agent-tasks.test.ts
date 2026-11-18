@@ -271,7 +271,14 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
 describe('agent task lifecycle', () => {
   test('offers a paused started task for resume before new work and resumes it with a linked run', async () => {
     const rows = [task('paused', { priority: 'low' }), task('fresh', { priority: 'high' })]
-    const { service, records } = fixture(rows)
+    const { service, records } = fixture(rows, {
+      async agentSettings() {
+        return {
+          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+          readyStatusIds: [], resumableStatusIds: ['coding'], requireAcceptanceCriteria: false, projectBriefs: {},
+        }
+      },
+    })
     const started = await service.transition('paused', 1, 'coding', 'start', '00000000-0000-4000-8000-000000000101')
     if (!('run' in started)) throw new Error('start_task must return a run.')
     await service.finishRun(started.run.runId, 'paused', '00000000-0000-4000-8000-000000000102')
@@ -290,6 +297,16 @@ describe('agent task lifecycle', () => {
     expect(await service.report('paused', { message: 'Fixed review comments', kind: 'verification', verifications: [{ command: 'bun test', status: 'passed' }] }, '00000000-0000-4000-8000-000000000105'))
       .toMatchObject({ report: { runId: resumed.run.runId } })
     await expect(service.resume('paused', 2, '00000000-0000-4000-8000-000000000106')).rejects.toMatchObject({ code: 'already_running' })
+  })
+
+  test('offers no resume until the Team chooses resumable statuses, but resumes when asked', async () => {
+    const { service } = fixture([task('paused', { priority: 'high' }), task('fresh', { priority: 'low' })])
+    const started = await service.transition('paused', 1, 'review', 'start', '00000000-0000-4000-8000-000000000401')
+    if (!('run' in started)) throw new Error('start_task must return a run.')
+    await service.finishRun(started.run.runId, 'paused', '00000000-0000-4000-8000-000000000402')
+    // A task paused while it waits for review is not offered straight back.
+    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'fresh' }, skipped: [] })
+    expect((await service.resume('paused', 2, '00000000-0000-4000-8000-000000000403')).resumedFromRun?.runId).toBe(started.run.runId)
   })
 
   test('does not offer started tasks whose newest run failed or that are outside the resumable statuses', async () => {
