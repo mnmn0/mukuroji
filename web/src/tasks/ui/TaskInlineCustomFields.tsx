@@ -14,6 +14,7 @@ import {
 } from '../../work-items/model/customFields'
 import { resolveWorkItemTypeCustomFields } from '../../work-items/model/workItemDisplay'
 import { TaskInlineField } from './TaskInlineField'
+import type { CancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 
 /** Props accepted by the compact inline custom-field editor. */
 export type TaskInlineCustomFieldsProps = {
@@ -30,7 +31,7 @@ export type TaskInlineCustomFieldsProps = {
   /** Work Item whose custom fields are being edited. */
   task: CanonicalWorkItem
   /** Shared optimistic mutation callback. */
-  onUpdateTask: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
 }
 
 /**

@@ -510,6 +510,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/issues*',
     permission: 'work-items.read',
   },
+  // The Team hierarchy is Work Item data, so it needs the same permission as the Team list.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/work-item-hierarchy',
+    permission: 'work-items.read',
+  },
   {
     method: '*',
     pathPattern: '/api/teams/:teamId/issues*',

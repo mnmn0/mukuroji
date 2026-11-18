@@ -2,6 +2,7 @@ import {
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
   isCanonicalWorkItemKey,
+  isWorkItemHierarchyRank,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_RELATION_ID_LIMIT,
   WORK_ITEM_SCHEMA_VERSION,
@@ -49,6 +50,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   importRequestDigest?: string
   /** Team/project 一覧で利用する表示順です。 */
   sortOrder: number
+  /** Sibling order rank under the parent; absent until the Work Item is reordered. */
+  hierarchyRank?: string
   /** Work Item の literal title です。 */
   title: string
   /** Work Item の説明です。 */
@@ -150,6 +153,7 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
       isSha256Digest(value.importRequestDigest)) &&
     typeof value.sortOrder === 'number' &&
     Number.isFinite(value.sortOrder) &&
+    (value.hierarchyRank === undefined || isWorkItemHierarchyRank(value.hierarchyRank)) &&
     isNonEmptyString(value.title) &&
     (value.description === undefined || typeof value.description === 'string') &&
     isNonEmptyString(value.assigneeUserId) &&

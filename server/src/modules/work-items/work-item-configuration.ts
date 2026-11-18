@@ -9,6 +9,7 @@ import {
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
+  type GetCommandOutput,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -17,6 +18,9 @@ import {
 import {
   DEFAULT_WORK_ITEM_PROGRESS_MODE,
   isWorkItemProgressMode,
+  isWorkItemHierarchyRank,
+  isWorkItemParentCompletionPolicy,
+  DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
   WORK_ITEM_RELATION_ID_LIMIT,
@@ -99,6 +103,48 @@ export type WorkItemConfigurationGuard = {
   scopeKey: string
   /** 0 は CONFIG row が存在しないことを表します。 */
   revision: number
+}
+
+/**
+ * Creates the conditional write that advances a Team's relation graph revision by one.
+ *
+ * @param tableName - Work Item configuration table that holds the graph metadata.
+ * @param scopeKey - Team configuration scope key.
+ * @param expectedRevision - Revision the caller read; `0` means the metadata row does not exist yet.
+ * @param nextEdgeCount - Directed relation row count after the change.
+ * @returns A Put that fails unless the stored revision still equals `expectedRevision`.
+ */
+function createRelationGraphAdvance(
+  tableName: string,
+  scopeKey: string,
+  expectedRevision: number,
+  nextEdgeCount: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const graphItem = {
+    scopeKey,
+    recordKey: RELATION_GRAPH_RECORD_KEY,
+    entryType: 'relation-graph',
+    schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    revision: expectedRevision + 1,
+    edgeCount: nextEdgeCount,
+  }
+  return expectedRevision === 0
+    ? {
+        Put: {
+          TableName: tableName,
+          Item: graphItem,
+          ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+        },
+      }
+    : {
+        Put: {
+          TableName: tableName,
+          Item: graphItem,
+          ConditionExpression: '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        },
+      }
 }
 
 /**
@@ -304,6 +350,11 @@ export type ReplaceWorkItemParentInput = {
   nextParent?: WorkItemRelationEndpointSnapshot
   /** Team relation graph revision observed by the caller. */
   expectedGraphRevision: number
+  /**
+   * Sibling order rank to store on the child. With an unchanged parent it only reorders the child;
+   * omitted with a new parent, the stored rank is removed so the child follows creation order.
+   */
+  hierarchyRank?: string
 }
 
 /** Graph metadata read before a relation mutation. */
@@ -326,6 +377,11 @@ type RelationProjectionChange = {
 type RelationTransactionEndpoint = WorkItemRelationEndpointSnapshot & {
   /** Next projection; omitted only checks the endpoint snapshot. */
   relationIds?: readonly string[]
+  /**
+   * Sibling order rank written with the projection; `null` removes the stored rank and
+   * `undefined` leaves it unchanged.
+   */
+  hierarchyRank?: string | null
 }
 
 /** Items committed by one relation transaction. */
@@ -569,6 +625,13 @@ export function validateWorkItemConfiguration(
     throw invalidConfiguration('Progress mode must be status-category, remaining-effort, or manual.')
   }
   const progressMode = value.progressMode
+  if (
+    value.parentCompletionPolicy !== undefined &&
+    !isWorkItemParentCompletionPolicy(value.parentCompletionPolicy)
+  ) {
+    throw invalidConfiguration('Parent completion policy must be warn or reject.')
+  }
+  const parentCompletionPolicy = value.parentCompletionPolicy
 
   return {
     scopeType,
@@ -581,6 +644,7 @@ export function validateWorkItemConfiguration(
     ...(workItemTypes === undefined ? {} : { workItemTypes }),
     ...(jobRoles === undefined ? {} : { jobRoles }),
     ...(progressMode === undefined ? {} : { progressMode }),
+    ...(parentCompletionPolicy === undefined ? {} : { parentCompletionPolicy }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
@@ -1362,6 +1426,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           expectedRevision: normalized.sourceExpectedRevision,
           assignedProjectId: normalized.sourceAssignedProjectId,
           relationIds: sourceRelationIds,
+          // A child that gains a parent starts from the default order there, as with replaceParent.
+          ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
         },
         {
           workItemId: normalized.targetWorkItemId,
@@ -1438,12 +1504,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           expectedRevision: normalized.sourceExpectedRevision,
           assignedProjectId: normalized.sourceAssignedProjectId,
           relationIds: sourceRelationIds,
+          // A child that loses its parent drops the sibling rank that only meant something under it.
+          ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
         },
         {
           workItemId: normalized.targetWorkItemId,
           expectedRevision: normalized.targetExpectedRevision,
           assignedProjectId: normalized.targetAssignedProjectId,
           relationIds: targetRelationIds,
+          ...(normalized.type === 'child' ? { hierarchyRank: null } : {}),
         },
       ],
       edgeMutations: [
@@ -1500,6 +1569,29 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       storedParents.length === (parentWorkItemId ? 1 : 0) &&
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
+      // A rank already stored is declarative success too: the move committed and only its
+      // response was lost, so the retry's older graph revision must not turn it into a conflict.
+      if (
+        normalized.hierarchyRank !== undefined &&
+        await this.readStoredHierarchyRank(workspaceId, teamId, child.workItemId) !== normalized.hierarchyRank
+      ) {
+        // The rank was chosen among the siblings the caller saw, so it needs their graph revision.
+        // The rank write advances that revision, so a concurrent reorder or parent change conflicts.
+        assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
+        const graphRevision = await this.writeHierarchyRank(
+          workspaceId,
+          teamId,
+          child,
+          normalized.hierarchyRank,
+          graph,
+          // The parent and the configuration guards authorized the reorder, so a parent moved to
+          // another Project or a guard that changed before the commit refuses it.
+          normalized.nextParent
+            ? { parent: normalized.nextParent, configurationConditionChecks }
+            : undefined,
+        )
+        return { previousParentWorkItemId, parentWorkItemId, graphRevision }
+      }
       const after = await this.getRelationGraphRevision(workspaceId, teamId)
       assertStableGraphRevision(graph.revision, after)
       return { previousParentWorkItemId, parentWorkItemId, graphRevision: after }
@@ -1581,7 +1673,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       expectedRevision: graph.revision,
       nextEdgeCount,
       endpoints: [
-        { ...child, relationIds: childRelationIds },
+        { ...child, relationIds: childRelationIds, hierarchyRank: normalized.hierarchyRank ?? null },
         ...(normalized.currentParent ? [normalized.currentParent] : []),
         ...(normalized.nextParent ? [normalized.nextParent] : []),
       ],
@@ -1597,6 +1689,137 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       ),
     })
     return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision + 1 }
+  }
+
+  /**
+   * Reads the sibling order rank stored on a Work Item.
+   *
+   * @param workspaceId - Workspace that owns the Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item to read.
+   * @returns The stored rank, or undefined when the Work Item follows its default rank.
+   */
+  private async readStoredHierarchyRank(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<string | undefined> {
+    let response: GetCommandOutput
+    try {
+      response = await this.documentClient.send(new GetCommand({
+        TableName: this.workItemsTableName,
+        Key: { directoryTeamId: `${workspaceId}#team#${teamId}`, issueId: workItemId },
+        ProjectionExpression: '#hierarchyRank',
+        ExpressionAttributeNames: { '#hierarchyRank': 'hierarchyRank' },
+        ConsistentRead: true,
+      }))
+    } catch (error) {
+      if (error instanceof WorkItemConfigurationError) throw error
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemRelationUnavailable',
+        'The Work Item hierarchy cannot be read now. Try again.',
+      )
+    }
+    const rank: unknown = response.Item?.hierarchyRank
+    return typeof rank === 'string' ? rank : undefined
+  }
+
+  /**
+   * Stores a child's sibling order rank without changing its parent.
+   *
+   * The write advances the graph revision the caller read, in the same transaction. A parent
+   * change or another reorder made meanwhile therefore makes this reorder fail with a conflict
+   * instead of overwriting a rank chosen from a newer outline.
+   *
+   * @param workspaceId - Workspace that owns the Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param child - Child snapshot whose revision and Project assignment fence the write.
+   * @param hierarchyRank - Validated rank to store.
+   * @param graph - Relation graph state read before the unchanged parent was observed.
+   * @param authorization - The unchanged parent and the configuration guards that authorized the
+   *   reorder, checked again in the transaction; omitted for a top-level Work Item.
+   * @returns The graph revision after the reorder.
+   */
+  private async writeHierarchyRank(
+    workspaceId: string,
+    teamId: string,
+    child: WorkItemRelationEndpointSnapshot,
+    hierarchyRank: string,
+    graph: { revision: number, edgeCount: number },
+    authorization?: {
+      parent: WorkItemRelationEndpointSnapshot
+      configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+    },
+  ): Promise<number> {
+    const item = createRelationEndpointTransactionItem(
+      this.workItemsTableName,
+      `${workspaceId}#team#${teamId}`,
+      { ...child, hierarchyRank },
+    )
+    if (!item.Update) {
+      throw new WorkItemConfigurationError(500, 'WorkItemHierarchyRankWriteInvalid', 'The rank write is invalid.')
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          item,
+          createRelationGraphAdvance(
+            this.tableName,
+            createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+            graph.revision,
+            graph.edgeCount,
+          ),
+          ...(authorization
+            ? [
+                createRelationEndpointTransactionItem(
+                  this.workItemsTableName,
+                  `${workspaceId}#team#${teamId}`,
+                  authorization.parent,
+                ),
+                ...authorization.configurationConditionChecks,
+              ]
+            : []),
+        ],
+      }))
+      return graph.revision + 1
+    } catch (error) {
+      const itemCount = 2 + (authorization ? 1 + authorization.configurationConditionChecks.length : 0)
+      if (Array.from({ length: itemCount }, (_, index) => index)
+        .some((index) => isTransactionConditionalFailureAt(error, index))) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemRelationGraphConflict',
+          'The Work Item changed. Reload and try again.',
+        )
+      }
+      if (isPermanentTransactionRejection(error)) {
+        throw createRelationStoragePermanentError()
+      }
+      if (isTransactionCancellationReason(error, 'TransactionConflict')) {
+        // Another write to the same rows in flight cancels this one without a failed condition.
+        // A revision that moved meanwhile is a conflict; otherwise the reorder can be retried.
+        let after: number
+        try {
+          after = await this.getRelationGraphRevision(workspaceId, teamId)
+        } catch (readError) {
+          throw toPersistenceError(readError)
+        }
+        if (after !== graph.revision) {
+          throw new WorkItemConfigurationError(
+            409,
+            'WorkItemRelationGraphConflict',
+            'The Work Item hierarchy changed. Reload and try again.',
+          )
+        }
+        throw new WorkItemConfigurationError(
+          503,
+          'WorkItemRelationUnavailable',
+          'The reorder was canceled by a concurrent write. Try again.',
+        )
+      }
+      throw toPersistenceError(error)
+    }
   }
 
   private async ensureTable() {
@@ -2147,31 +2370,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     const workItemPartitionKey = `${workspaceId}#team#${teamId}`
     const configurationConditionStartIndex =
       input.endpoints.length + 1 + input.edgeMutations.length
-    const graphItem = {
+    const graphMutation = createRelationGraphAdvance(
+      this.tableName,
       scopeKey,
-      recordKey: RELATION_GRAPH_RECORD_KEY,
-      entryType: 'relation-graph',
-      schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-      revision: input.expectedRevision + 1,
-      edgeCount: input.nextEdgeCount,
-    }
-    const graphMutation = input.expectedRevision === 0
-      ? {
-          Put: {
-            TableName: this.tableName,
-            Item: graphItem,
-            ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-          },
-        }
-      : {
-          Put: {
-            TableName: this.tableName,
-            Item: graphItem,
-            ConditionExpression: '#revision = :expectedRevision',
-            ExpressionAttributeNames: { '#revision': 'revision' },
-            ExpressionAttributeValues: { ':expectedRevision': input.expectedRevision },
-          },
-        }
+      input.expectedRevision,
+      input.nextEdgeCount,
+    )
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -2194,6 +2398,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           'WorkItemConfigurationRevisionConflict',
           'Work Item configuration changed during the relation mutation.',
         )
+      }
+      if (isPermanentTransactionRejection(error)) {
+        throw createRelationStoragePermanentError()
       }
       if (isNamedError(error, 'TransactionCanceledException')) {
         throw await input.classifyCancellation()
@@ -2426,6 +2633,9 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
     revision: configuration.revision,
     // The calculation policy changes every displayed progress percentage, so its value is audited.
     progressMode: configuration.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE,
+    // Whether open children block completing a parent is a Team policy, so its value is audited.
+    parentCompletionPolicy:
+      configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),
@@ -3223,18 +3433,33 @@ function createRelationEndpointTransactionItem(
         : { ':assignedProjectId': endpoint.assignedProjectId }),
     },
   }
-  if (endpoint.relationIds === undefined) {
+  if (endpoint.relationIds === undefined && endpoint.hierarchyRank === undefined) {
     return { ConditionCheck: guard }
+  }
+  const setExpressions: string[] = []
+  const names: Record<string, string> = { ...guard.ExpressionAttributeNames }
+  const values: Record<string, unknown> = { ...guard.ExpressionAttributeValues }
+  if (endpoint.relationIds !== undefined) {
+    setExpressions.push('#relationIds = :relationIds')
+    names['#relationIds'] = 'relationIds'
+    values[':relationIds'] = [...endpoint.relationIds]
+  }
+  if (typeof endpoint.hierarchyRank === 'string') {
+    setExpressions.push('#hierarchyRank = :hierarchyRank')
+    names['#hierarchyRank'] = 'hierarchyRank'
+    values[':hierarchyRank'] = endpoint.hierarchyRank
+  } else if (endpoint.hierarchyRank === null) {
+    names['#hierarchyRank'] = 'hierarchyRank'
   }
   return {
     Update: {
       ...guard,
-      UpdateExpression: 'SET #relationIds = :relationIds',
-      ExpressionAttributeNames: { ...guard.ExpressionAttributeNames, '#relationIds': 'relationIds' },
-      ExpressionAttributeValues: {
-        ...guard.ExpressionAttributeValues,
-        ':relationIds': [...endpoint.relationIds],
-      },
+      UpdateExpression: [
+        setExpressions.length > 0 ? `SET ${setExpressions.join(', ')}` : undefined,
+        endpoint.hierarchyRank === null ? 'REMOVE #hierarchyRank' : undefined,
+      ].filter((part) => part !== undefined).join(' '),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
     },
   }
 }
@@ -3410,7 +3635,27 @@ function normalizeReplaceParentInput(input: ReplaceWorkItemParentInput): Replace
     ...(input.currentParent ? { currentParent: readEndpoint(input.currentParent, 'Current parent') } : {}),
     ...(input.nextParent ? { nextParent: readEndpoint(input.nextParent, 'Parent') } : {}),
     expectedGraphRevision: readNonNegativeInteger(input.expectedGraphRevision, 'Relation graph revision'),
+    ...(input.hierarchyRank === undefined
+      ? {}
+      : { hierarchyRank: readWorkItemHierarchyRank(input.hierarchyRank) }),
   }
+}
+
+/**
+ * Validates a requested sibling order rank.
+ *
+ * @param value - Untrusted rank.
+ * @returns The rank.
+ */
+function readWorkItemHierarchyRank(value: unknown): string {
+  if (!isWorkItemHierarchyRank(value)) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemHierarchyRank',
+      'The hierarchy rank must be 1 to 64 lowercase base-36 digits that do not end in 0.',
+    )
+  }
+  return value
 }
 
 function assertExpectedGraphRevision(current: number, expected: number) {
@@ -3725,6 +3970,46 @@ function isConfigurationConditionalTransactionCancellation(error: unknown) {
   const reasonCodes = reasons.slice(0, 2).map((reason) => isRecord(reason) ? reason.Code : undefined)
   return reasonCodes.includes('ConditionalCheckFailed') &&
     reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
+}
+
+/**
+ * Returns whether a DynamoDB transaction cancellation lists a reason code for any item.
+ *
+ * @param error - Unknown error thrown by a TransactWrite.
+ * @param code - Cancellation reason code, such as `TransactionConflict`.
+ * @returns Whether any item of the canceled transaction carries the code.
+ */
+function isTransactionCancellationReason(error: unknown, code: string) {
+  if (!isNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  return Array.isArray(reasons) && reasons.some((reason) => isRecord(reason) && reason.Code === code)
+}
+
+/**
+ * Returns whether DynamoDB rejected an item of a canceled transaction, such as a row grown past
+ * the item size limit. Such a rejection fails the same way on every retry.
+ *
+ * @param error - Unknown error thrown by a TransactWrite.
+ * @returns Whether any item carries `ValidationError` or `ItemCollectionSizeLimitExceeded`.
+ */
+function isPermanentTransactionRejection(error: unknown) {
+  return isTransactionCancellationReason(error, 'ValidationError') ||
+    isTransactionCancellationReason(error, 'ItemCollectionSizeLimitExceeded')
+}
+
+/**
+ * Creates the non-retryable error for a relation or rank write that storage rejected.
+ *
+ * @returns `502 WorkItemRelationStoragePermanent`, which is neither a conflict nor transient.
+ */
+function createRelationStoragePermanentError() {
+  return new WorkItemConfigurationError(
+    502,
+    'WorkItemRelationStoragePermanent',
+    'The change was rejected by storage. Contact an administrator.',
+  )
 }
 
 /** Returns whether a DynamoDB transaction cancellation identifies a conditional failure at an index. */
