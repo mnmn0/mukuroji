@@ -6,6 +6,10 @@ import type {
   WorkItemActionTarget,
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../../issues/api'
+import {
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import {
   clearTaskStatusMoveRequest,
@@ -13,6 +17,7 @@ import {
   type TaskStatusMoveRequestSlot,
 } from './taskStatusMoveRequest'
 import {
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskActionMutationResult,
 } from './taskActionRegistry'
@@ -27,7 +32,7 @@ import {
 export type MyTaskDirectStatusMoveMutation = (
   task: CanonicalWorkItem,
   workflowStatusId: string,
-) => Promise<CanonicalWorkItem | undefined>
+) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | undefined>
 
 /** Localized safe failure messages returned by a direct My Tasks Move action. */
 export type MyTaskDirectStatusMoveMessages = {
@@ -39,6 +44,8 @@ export type MyTaskDirectStatusMoveMessages = {
   notFound: string
   /** Message shown when the target, configuration, or destination is no longer available. */
   unavailable: string
+  /** Message shown when the Team refuses to complete a parent whose children are still open. */
+  openChildren: string
 }
 
 /**
@@ -134,6 +141,15 @@ export function executeMyTaskDirectStatusMove(
 
   /** Converts a rejected direct mutation into the same canonical failure as selector Move. */
   const createMutationFailure = (error: unknown): WorkItemActionResult => {
+    if (isMyTaskOpenChildrenRefusal(error)) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'WorkItemOpenChildren',
+        'validation',
+        messages.openChildren,
+      )
+    }
     const conflict = isMyTaskDirectMoveRevisionConflict(error)
     return createFailedTaskActionResult(
       context.actionId,
@@ -147,7 +163,9 @@ export function executeMyTaskDirectStatusMove(
 
   try {
     return moveTaskStatus(task, destinationWorkflowStatusId).then(
-      (updatedTask) => updatedTask
+      (updatedTask) => isCancelledTeamIssueUpdate(updatedTask)
+        ? createCancelledTaskActionResult(context.actionId, [target])
+        : updatedTask
         ? createSucceededTaskActionMutationResult(
             context.actionId,
             target,
@@ -179,6 +197,16 @@ export function isMyTaskDirectMoveRevisionConflict(error: unknown): boolean {
   }
   const cause = error instanceof Error ? error.cause : undefined
   return cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict'
+}
+
+/**
+ * Identifies a Team refusing to complete a parent whose children are still open.
+ *
+ * @param error - Unknown My Tasks status mutation failure.
+ * @returns Whether the failure has the stable `WorkItemOpenChildren` code.
+ */
+export function isMyTaskOpenChildrenRefusal(error: unknown): boolean {
+  return error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren'
 }
 
 /**

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  isWorkItemHierarchyRank,
   readSearchWorkItemTypeKey,
   type AcceptCreateTriageAction,
   type ApprovalSummary,
@@ -30,6 +31,7 @@ import {
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
   type WorkItemKeyLookupResponse,
+  type WorkItemOpenChildCountResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -195,6 +197,7 @@ import {
   requireApprovalReviewers,
   requireCanonicalFileProofingWorkItem,
   resolveFileApprovalCompletionTransition,
+  validateFileApprovalCompletionTransition,
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import {
@@ -261,6 +264,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
+import { readOpenWorkItemChildCount, readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
 import {
   readScopedWorkItemPage,
   readScopedWorkItemPageQuery,
@@ -4049,6 +4053,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         body.expectedGraphRevision,
         'Relation graph revision',
       )
+      if (body.hierarchyRank !== undefined && !isWorkItemHierarchyRank(body.hierarchyRank)) {
+        throw new WorkItemConfigurationError(
+          400,
+          'InvalidWorkItemHierarchyRank',
+          'The hierarchy rank must be 1 to 64 lowercase base-36 digits that do not end in 0.',
+        )
+      }
+      const hierarchyRank = body.hierarchyRank
       const currentParents = await workItemDependencies.workItemConfigurations.listRelations(
         principal.directoryId,
         teamId,
@@ -4095,6 +4107,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             : {}),
           ...(nextParent ? { nextParent } : {}),
           expectedGraphRevision,
+          ...(hierarchyRank === undefined ? {} : { hierarchyRank }),
         },
         resolvedConfiguration
           ? createWorkItemConfigurationGuardConditionChecks(
@@ -4449,6 +4462,72 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       }
 
       return toProjectDataErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Team の Work Item 階層（outline 順、WBS 番号、親への roll-up）を返します。
+   *
+   * Archive 済みの Work Item は含みません。閲覧できない Work Item は返さず、roll-up にも数えません。
+   */
+  routeApp.get('/api/teams/:teamId/work-item-hierarchy', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    if (!teamId) {
+      return c.json({ message: 'Team ID is required.' }, 400)
+    }
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      return c.json(await readTeamWorkItemHierarchy(
+        principal.directoryId,
+        context.team.id,
+        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+      ))
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Counts the open direct children of a Work Item, so the Web can ask before completing a
+   * parent under the Team's `warn` completion policy.
+   */
+  routeApp.get('/api/teams/:teamId/issues/:issueId/children/open-count', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    if (!teamId || !issueId) {
+      return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+    }
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        context.team.id,
+        issueId,
+        { consistentIssueRead: true, includeEvents: false },
+      )
+      requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+      const openChildCount = await readOpenWorkItemChildCount(
+        principal.directoryId,
+        context.team.id,
+        detail.issue,
+        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+      )
+      return c.json({ openChildCount } satisfies WorkItemOpenChildCountResponse)
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toCognitoDirectoryErrorResponse(c, error)
+      }
+      return toWorkItemConfigurationErrorResponse(c, error)
     }
   })
 
@@ -5716,7 +5795,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         }
       }
       if (body.completionTransition !== undefined) {
-        await resolveFileApprovalCompletionTransition(
+        await validateFileApprovalCompletionTransition(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
