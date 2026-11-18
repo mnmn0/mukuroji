@@ -537,6 +537,21 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.manage',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
+    permission: 'projects.manage',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/lifecycle',
+    permission: 'projects.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',
     permission: 'projects.write',
@@ -1638,9 +1653,17 @@ async function resolveEnterpriseAuthorizationResource(
         .filter((team) => team.projects.some((project) => project.id === decodedProjectId))
         .map((team) => team.id),
     )
-    const parentTeamId = ownerTeamIds.size === 1
-      ? ownerTeamIds.values().next().value
-      : undefined
+    // A Team-qualified path names the owner directly, which also tells apart two Teams that use
+    // the same Project ID. The route reads the Project under that Team, so the qualifier stays
+    // authoritative even when the directory lists the Project only under another Team (for
+    // example, when the qualified Team's Project is archived); a grant on the other Team's
+    // Project then never covers it.
+    const qualifiedTeamId = path?.match(/\/teams\/([^/]+)\/projects\/[^/]+/u)?.[1]
+    const parentTeamId = qualifiedTeamId
+      ? decodePathSegment(qualifiedTeamId)
+      : ownerTeamIds.size === 1
+        ? ownerTeamIds.values().next().value
+        : undefined
     return {
       workspaceId,
       kind: 'project' as const,

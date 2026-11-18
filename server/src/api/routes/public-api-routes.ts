@@ -169,6 +169,7 @@ import {
   createWorkItemIdempotencyTransaction,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
@@ -706,6 +707,11 @@ async function createCanonicalPublicWorkItem(
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(input, permission.team)
+  const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+    principal.directoryId,
+    permission.team,
+    readAssignedProjectId(body.assignedProjectId),
+  )
   requireAssignedProjectPermission(
     principal,
     permission,
@@ -737,6 +743,7 @@ async function createCanonicalPublicWorkItem(
           }
         : {}),
       authorizationSnapshot,
+      ...newWorkItemProjectFence,
     },
     principal.userKey,
     createPublicMutationAuditContext(principal, context, {

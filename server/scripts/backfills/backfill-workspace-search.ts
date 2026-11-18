@@ -1,5 +1,6 @@
 import {
   DynamoDBDocumentClient,
+  GetCommand,
   ScanCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
@@ -24,6 +25,7 @@ import {
   isWorkItemKeyRegistryRecord,
 } from '../../src/modules/work-items'
 import { validateDocumentPayload } from '../../src/modules/documents'
+import { isStoredProjectCharter } from '../../src/modules/directory'
 import {
   createCommentWorkspaceSearchDocument,
   createCommentWorkspaceSearchEntityId,
@@ -31,6 +33,7 @@ import {
   createProjectWorkspaceSearchDocument,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
+  createWorkspaceSearchDocument,
   createWorkspaceSearchDocumentRecordKey,
   ensureLocalWorkspaceSearchTable,
   type WorkspaceSearchDocument,
@@ -105,6 +108,17 @@ export type SearchProjectionOperation =
        * 保存する versioned search document です。
        */
       document: WorkspaceSearchDocument
+      /**
+       * Source revision the row was scanned at, for sources that fence their live projections.
+       * The write then never replaces a document projected from a newer revision; `0` means the
+       * row has no revision yet, so any document that carries one is newer.
+       */
+      sourceRevision?: number
+      /**
+       * The source row does not record who created the entity, so the creator and creation time
+       * of the stored document are kept instead of being dropped by the replacement.
+       */
+      preserveCreator?: boolean
     }
   | {
       /**
@@ -484,7 +498,11 @@ export async function runBackfill(
           continue
         }
 
-        await applyProjectionOperation(client, workspaceSearchTableName, operation)
+        if (!await applyProjectionOperation(client, workspaceSearchTableName, operation)) {
+          // A live projection of a newer revision won; the scanned row is already stale.
+          counters[definition.name].projected -= 1
+          counters[definition.name].skipped += 1
+        }
       }
 
       lastEvaluatedKey = response.LastEvaluatedKey
@@ -522,23 +540,40 @@ function printDryRunOperation(source: SourceName, operation: SearchProjectionOpe
   )
 }
 
+/**
+ * Writes one projection operation to the search table.
+ *
+ * @param client - DynamoDB document client.
+ * @param tableName - Workspace search table name.
+ * @param operation - Operation to apply.
+ * @returns Whether the operation was written; `false` when a newer projection was kept.
+ */
 async function applyProjectionOperation(
   client: DynamoDBDocumentClient,
   tableName: string,
   operation: SearchProjectionOperation,
 ) {
   if (operation.action === 'put') {
-    await client.send(
-      new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: tableName,
-            Item: operation.document,
-          },
-        }],
-      }),
-    )
-    return
+    if (operation.preserveCreator && operation.document.creatorUserId === undefined) {
+      return await putPreservingCreator(client, tableName, operation.document, operation.sourceRevision)
+    }
+    try {
+      await client.send(
+        new TransactWriteCommand({
+          TransactItems: [{
+            Put: {
+              TableName: tableName,
+              Item: operation.document,
+              ...createSourceRevisionCondition(operation.sourceRevision),
+            },
+          }],
+        }),
+      )
+    } catch (error) {
+      if (operation.sourceRevision !== undefined && isConditionalCheckFailure(error)) return false
+      throw error
+    }
+    return true
   }
 
   await client.send(
@@ -554,6 +589,143 @@ async function applyProjectionOperation(
       }],
     }),
   )
+  return true
+}
+
+/**
+ * Replaces a document that lacks a creator while keeping the stored creator and creation time.
+ *
+ * Mirrors the live creator-preserving projection: the stored row is read consistently and the
+ * write is conditioned on it being exactly that row, or still absent, so a creator added between
+ * the read and the write is never dropped. A conflict re-reads the row and tries again, up to a
+ * bounded number of attempts.
+ *
+ * @param client - DynamoDB document client.
+ * @param tableName - Workspace search table name.
+ * @param replacement - Replacement document that lacks a creator.
+ * @param sourceRevision - Revision the source row was scanned at, if the source is fenced.
+ * @returns Whether the document was written; `false` when a newer projection was kept.
+ */
+async function putPreservingCreator(
+  client: DynamoDBDocumentClient,
+  tableName: string,
+  replacement: WorkspaceSearchDocument,
+  sourceRevision: number | undefined,
+) {
+  for (let attempt = 1; ; attempt += 1) {
+    const response = await client.send(new GetCommand({
+      TableName: tableName,
+      Key: { workspaceId: replacement.workspaceId, recordKey: replacement.recordKey },
+      ConsistentRead: true,
+    }))
+    const stored = response.Item
+    if (isNewerProjection(stored?.sourceRevision, sourceRevision)) return false
+    const document = withStoredCreator(replacement, stored)
+    try {
+      await client.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: tableName,
+            Item: document,
+            ...(stored
+              ? {
+                  ConditionExpression: '#projectionDigest = :projectionDigest',
+                  ExpressionAttributeNames: { '#projectionDigest': 'projectionDigest' },
+                  ExpressionAttributeValues: { ':projectionDigest': stored.projectionDigest },
+                }
+              : {
+                  ConditionExpression: 'attribute_not_exists(#recordKey)',
+                  ExpressionAttributeNames: { '#recordKey': 'recordKey' },
+                }),
+          },
+        }],
+      }))
+      return true
+    } catch (error) {
+      if (!isConditionalCheckFailure(error)) throw error
+      if (attempt >= creatorPreservingWriteAttempts) {
+        throw new Error(
+          `Workspace search backfill kept conflicting with concurrent writes on "${replacement.recordKey}".`,
+          { cause: error },
+        )
+      }
+    }
+  }
+}
+
+/** Reads before a contended creator-preserving backfill write gives up. */
+const creatorPreservingWriteAttempts = 5
+
+/**
+ * Checks whether a stored document was projected from a newer source revision than the scan.
+ *
+ * Matches {@link createSourceRevisionCondition}: an unfenced scan never yields, a scan without a
+ * revision yields to any revisioned row, and a revisioned scan yields only to a higher revision.
+ *
+ * @param storedRevision - Source revision on the stored row, if any.
+ * @param sourceRevision - Revision the source row was scanned at, if the source is fenced.
+ * @returns Whether the stored document must be kept.
+ */
+function isNewerProjection(storedRevision: unknown, sourceRevision: number | undefined) {
+  if (sourceRevision === undefined || storedRevision === undefined) return false
+  if (sourceRevision === 0) return true
+  return typeof storedRevision !== 'number' || storedRevision > sourceRevision
+}
+
+/**
+ * Copies the creator and creation time of a stored document onto a replacement without them.
+ *
+ * @param document - Replacement document that lacks a creator.
+ * @param stored - Stored row, if any.
+ * @returns The replacement, with the stored creator and creation time it lacks.
+ */
+function withStoredCreator(document: WorkspaceSearchDocument, stored: Record<string, unknown> | undefined) {
+  const creatorUserId = document.creatorUserId ??
+    (typeof stored?.creatorUserId === 'string' ? stored.creatorUserId : undefined)
+  const createdAt = document.createdAt ??
+    (typeof stored?.createdAt === 'string' ? stored.createdAt : undefined)
+  if (creatorUserId === document.creatorUserId && createdAt === document.createdAt) return document
+  return createWorkspaceSearchDocument({
+    ...document,
+    ...(creatorUserId ? { creatorUserId } : {}),
+    ...(createdAt ? { createdAt } : {}),
+  })
+}
+
+/**
+ * Builds the write condition that keeps a document projected from a newer source revision.
+ *
+ * @param sourceRevision - Revision the source row was scanned at, if the source is fenced.
+ * @returns The condition parts of the Put, or nothing for an unfenced source.
+ */
+function createSourceRevisionCondition(sourceRevision: number | undefined) {
+  if (sourceRevision === undefined) return {}
+  if (sourceRevision === 0) {
+    return {
+      ConditionExpression: 'attribute_not_exists(#sourceRevision)',
+      ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+    }
+  }
+  return {
+    ConditionExpression: 'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+    ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+    ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+  }
+}
+
+/**
+ * Checks whether a write failed only because its condition did not hold.
+ *
+ * @param error - Write failure.
+ * @returns Whether the failure is a conditional check failure.
+ */
+function isConditionalCheckFailure(error: unknown) {
+  if (!(error instanceof Error)) return false
+  if (error.name === 'ConditionalCheckFailedException') return true
+  if (error.name !== 'TransactionCanceledException') return false
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  return Array.isArray(reasons) &&
+    reasons.some((reason: unknown) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
 }
 
 /**
@@ -638,6 +810,24 @@ function mapProjectDirectoryItemRow(
     return undefined
   }
 
+  // A Project row without a charter is valid; a charter that is present but invalid is corrupt
+  // data, and indexing the row without it would silently hide the problem.
+  if (item.charter !== undefined && !isStoredProjectCharter(item.charter)) {
+    throw new TypeError(
+      `Workspace search backfill encountered an invalid charter on Project "${teamId}/${projectId}".`,
+    )
+  }
+
+  // Charter edits project synchronously behind the charter revision, so the backfill is fenced by
+  // the same revision and cannot replace a newer charter with the one it scanned earlier.
+  const charterRevision = readPositiveInteger(item.charterRevision)
+  // Only a Project that never had a charter edit may lack the revision; a stored value that is not
+  // a positive safe integer is corrupt and must not be projected as revision 0.
+  if (item.charterRevision !== undefined && charterRevision === undefined) {
+    throw new TypeError(
+      `Workspace search backfill encountered an invalid charter revision on Project "${teamId}/${projectId}".`,
+    )
+  }
   return {
     action: 'put',
     document: createProjectWorkspaceSearchDocument({
@@ -646,9 +836,14 @@ function mapProjectDirectoryItemRow(
       subtitle,
       teamId,
       projectId,
+      ...(item.charter === undefined ? {} : { charter: item.charter }),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
+      ...(charterRevision === undefined ? {} : { sourceRevision: charterRevision }),
     }),
+    sourceRevision: charterRevision ?? 0,
+    // The directory row does not record the creator; the live projection of the creation does.
+    preserveCreator: true,
   }
 }
 

@@ -28,8 +28,26 @@ export {
 } from './adapter-out/dynamodb/project-directory-client'
 export { createDirectoryProjectId } from './domain/project-key'
 export {
+  createProjectCharter,
+  createProjectCharterPerson,
+  isStoredProjectCharter,
+  normalizeProjectCode,
+  readProjectCharterUpdate,
+  readProjectLifecycleTransition,
+  decideProjectLifecycleTransition,
+  type ProjectCharterUpdate,
+} from './domain/project-charter'
+export {
   createProjectQuickAccessIdentity,
   isProjectQuickAccessIdentifier,
   isProjectQuickAccessItems,
 } from './domain/project-quick-access'
 export { ProjectDataError } from './project-data-error'
+export {
+  transitionProjectLifecycleUseCase,
+  updateProjectCharterUseCase,
+  type ProjectCharterCallerAuthorization,
+  type ProjectCharterScope,
+  type ProjectCharterStore,
+  type ResolvedProjectCharterPerson,
+} from './application/project-charter-use-cases'

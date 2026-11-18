@@ -24,6 +24,9 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   parseWorkItemKey,
   readSearchWorkItemTypeKey,
+  type ProjectCharter,
+  type ProjectCharterState,
+  type ProjectLifecycleState,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -1541,6 +1544,8 @@ function configureFakeProjectClients(
       issueId: string
     }) => Promise<void> | void
     teamProjects?: Array<{ id: string; name: string; tone: 'blue' | 'purple' | 'green' | 'yellow' }>
+    /** Initial lifecycle states keyed by `teamId/projectId`; other Projects are `active`. */
+    projectLifecycleStates?: Readonly<Record<string, ProjectLifecycleState>>
     /** owner Team ambiguity を再現する追加 Team です。 */
     additionalTeams?: Array<{
       /** Team ID です。 */
@@ -1586,8 +1591,57 @@ function configureFakeProjectClients(
   let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
+  const projectCharterStates = new Map<string, ProjectCharterState>()
+  /** Reads the fake charter state of one Team-owned Project. */
+  const readProjectCharterState = (teamId: string, projectId: string): ProjectCharterState =>
+    projectCharterStates.get(`${teamId}/${projectId}`) ?? {
+      teamId,
+      projectId,
+      lifecycleState: options.projectLifecycleStates?.[`${teamId}/${projectId}`] ?? 'active',
+      charter: { tags: [], repositoryUrls: [] },
+      revision: 0,
+    }
+  /** Rejects a fake charter write whose revision is stale or whose Project is archived. */
+  const requireMutableProjectCharterState = (
+    teamId: string,
+    projectId: string,
+    expectedRevision: number,
+  ) => {
+    const current = readProjectCharterState(teamId, projectId)
+    if (current.lifecycleState === 'archived') {
+      throw new ProjectDataError(409, 'ProjectArchived', 'An archived Project cannot be changed.')
+    }
+    if (current.revision !== expectedRevision) {
+      throw new ProjectDataError(409, 'ProjectCharterRevisionConflict', 'The Project charter changed.')
+    }
+    return current
+  }
+  /** Charter updates the fake directory received. */
+  const projectCharterUpdates: Array<{
+    directoryId: string
+    teamId: string
+    projectId: string
+    expectedRevision: number
+    charter: ProjectCharter
+    audited: boolean
+    /** Record keys named by the caller's authorization fences. */
+    authorizationRecordKeys: string[]
+  }> = []
+  /** Lifecycle transitions the fake directory received. */
+  const projectLifecycleTransitions: Array<{
+    directoryId: string
+    teamId: string
+    projectId: string
+    expectedRevision: number
+    state: ProjectLifecycleState
+    audited: boolean
+    /** Record keys named by the caller's authorization fences. */
+    authorizationRecordKeys: string[]
+  }> = []
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
+    projectCharterUpdates,
+    projectLifecycleTransitions,
     cognitoIdentityProviderDescriptions: [] as string[],
     cognitoSsoAppClientDescriptions: [] as string[],
     directoryReads: [] as Array<{
@@ -2153,17 +2207,24 @@ function configureFakeProjectClients(
               id: 'core-team',
               name: locale === 'en' ? 'Core Team' : 'コアチーム',
               expanded: true,
-              projects: options.teamProjects ?? [
+              projects: (options.teamProjects ?? [
                 {
                   id: 'refero',
                   name: 'Refero',
                   tone: 'blue',
                 },
-              ],
+              ]).map((project) => ({
+                ...project,
+                lifecycleState: readProjectCharterState('core-team', project.id).lifecycleState,
+              })),
             },
             ...(options.additionalTeams ?? []).map((team) => ({
               ...team,
               expanded: true,
+              projects: team.projects.map((project) => ({
+                ...project,
+                lifecycleState: readProjectCharterState(team.id, project.id).lifecycleState,
+              })),
             })),
           ],
         }
@@ -2323,6 +2384,7 @@ function configureFakeProjectClients(
               ? input.idempotencyResourceId
               : 'new-project',
             name: String(input.nameJa ?? input.name),
+            lifecycleState: 'active',
             tone: input.tone === 'blue' ||
                 input.tone === 'purple' ||
                 input.tone === 'green' ||
@@ -2368,6 +2430,79 @@ function configureFakeProjectClients(
           projectId,
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
+      },
+      /** Returns a copy of the stored charter state, so callers cannot mutate the fake's state. */
+      async getProjectCharter(_directoryId, teamId, projectId) {
+        return structuredClone(readProjectCharterState(teamId, projectId))
+      },
+      /**
+       * Replaces the charter when the revision matches and advances the revision.
+       *
+       * Condition checks are recorded but not evaluated: person checks are ignored and only the
+       * record keys of the authorization checks are captured, so tests can assert which fences a
+       * route sends but not how DynamoDB would evaluate them.
+       */
+      async updateProjectCharter(
+        directoryId,
+        teamId,
+        projectId,
+        expectedRevision,
+        charter,
+        auditContext,
+        _personConditionChecks,
+        authorizationConditionChecks,
+      ) {
+        const current = requireMutableProjectCharterState(teamId, projectId, expectedRevision)
+        calls.projectCharterUpdates.push({
+          directoryId,
+          teamId,
+          projectId,
+          expectedRevision,
+          charter: structuredClone(charter),
+          audited: auditContext !== undefined,
+          authorizationRecordKeys: readConditionCheckRecordKeys(authorizationConditionChecks),
+        })
+        const next: ProjectCharterState = {
+          ...current,
+          charter: structuredClone(charter),
+          revision: expectedRevision + 1,
+          updatedAt: '2026-06-06T00:00:00.000Z',
+        }
+        projectCharterStates.set(`${teamId}/${projectId}`, next)
+        return structuredClone(next)
+      },
+      /**
+       * Moves the lifecycle state when the revision matches and advances the revision.
+       *
+       * Authorization condition checks are recorded by record key but not evaluated.
+       */
+      async transitionProjectLifecycle(
+        directoryId,
+        teamId,
+        projectId,
+        expectedRevision,
+        state,
+        auditContext,
+        authorizationConditionChecks,
+      ) {
+        const current = requireMutableProjectCharterState(teamId, projectId, expectedRevision)
+        calls.projectLifecycleTransitions.push({
+          directoryId,
+          teamId,
+          projectId,
+          expectedRevision,
+          state,
+          audited: auditContext !== undefined,
+          authorizationRecordKeys: readConditionCheckRecordKeys(authorizationConditionChecks),
+        })
+        const next: ProjectCharterState = {
+          ...current,
+          lifecycleState: state,
+          revision: expectedRevision + 1,
+          updatedAt: '2026-06-06T00:00:00.000Z',
+        }
+        projectCharterStates.set(`${teamId}/${projectId}`, next)
+        return structuredClone(next)
       },
     },
     workspaceAccess: {
@@ -3388,6 +3523,18 @@ function createCognitoSdkTestError(name: string, status: number) {
   return Object.assign(error, {
     $metadata: { httpStatusCode: status },
   })
+}
+
+/**
+ * Lists the record keys a fake store received as condition checks.
+ *
+ * @param checks - Transaction condition checks passed to the store.
+ * @returns The `recordKey` of each check, in order.
+ */
+function readConditionCheckRecordKeys(
+  checks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+) {
+  return checks.map((check) => String(check.ConditionCheck?.Key?.recordKey ?? ''))
 }
 
 function createWorkspaceBootstrapItems() {
