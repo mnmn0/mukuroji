@@ -100,7 +100,7 @@ describe('createTimeTrackingRouter', () => {
     const fixture = createProjectFixture()
     const created = await requestAs(fixture.router, 'bob', 'POST', '/api/teams/team-1/time-entries', draftBody('work-item-p1'))
     expect(created.status).toBe(201)
-    const { entry } = await created.json() as { entry: { id: string; revision: number } }
+    const entry = readEntryRef(await created.json())
 
     const mutations: Array<[string, string, unknown]> = [
       ['POST', '/api/teams/team-1/time-entries', draftBody('work-item-p1')],
@@ -149,6 +149,60 @@ describe('createTimeTrackingRouter', () => {
     expect(allowed.status).toBe(200)
   })
 
+  test('decides who manages an entry from its stored Project, not its Work Item', async () => {
+    const fixture = createProjectFixture()
+    const entry = await createDraft(fixture.router, 'bob', 'work-item-p2')
+    fixture.workItemProjects['work-item-p2'] = 'project-1'
+
+    const response = await requestAs(fixture.router, 'alice', 'PATCH', `/api/teams/team-1/time-entries/${entry.id}`, {
+      expectedRevision: entry.revision,
+      billable: false,
+    })
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'TimeEntryAccessDenied' })
+  })
+
+  test('rejects an edit that targets a revision newer than the one authorized', async () => {
+    const fixture = createProjectFixture()
+    const entry = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    fixture.hooks.beforeVerifyWorkItem = async () => {
+      await fixture.service.updateEntry({
+        workspaceId: 'workspace-1',
+        teamId: 'team-1',
+        entryId: entry.id,
+        actorUserId: 'bob',
+        canManageRates: false,
+        expectedRevision: entry.revision,
+        workItemId: 'work-item-p2',
+        projectId: 'project-2',
+      })
+    }
+
+    const response = await requestAs(fixture.router, 'alice', 'PATCH', `/api/teams/team-1/time-entries/${entry.id}`, {
+      expectedRevision: entry.revision + 1,
+      billable: false,
+    })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'TimeEntryRevisionConflict' })
+    expect((await fixture.service.getEntry('workspace-1', 'team-1', entry.id)).billable).toBe(true)
+  })
+
+  test('does not let a Project manager approve another member entry without a Project', async () => {
+    const fixture = createProjectFixture()
+    const entry = await createDraft(fixture.router, 'bob', 'work-item-none')
+    const submitted = await requestAs(fixture.router, 'bob', 'POST', `/api/teams/team-1/time-entries/${entry.id}/submit`, {
+      expectedRevision: entry.revision,
+    })
+    expect(submitted.status).toBe(200)
+    const submittedEntry = readEntryRef(await submitted.json())
+
+    const approved = await requestAs(fixture.router, 'alice', 'POST', `/api/teams/team-1/time-entries/${entry.id}/approve`, {
+      expectedRevision: submittedEntry.revision,
+    })
+    expect(approved.status).toBe(403)
+    expect(await approved.json()).toMatchObject({ code: 'TimesheetApprovalDenied' })
+  })
+
   test('lists other users entries and history only from the Projects the manager manages', async () => {
     const fixture = createProjectFixture()
     const managed = await createDraft(fixture.router, 'bob', 'work-item-p1')
@@ -157,13 +211,13 @@ describe('createTimeTrackingRouter', () => {
 
     const everyone = await requestAs(fixture.router, 'alice', 'GET', '/api/teams/team-1/time-entries')
     expect(everyone.status).toBe(200)
-    expect(((await everyone.json()) as { entries: Array<{ id: string }> }).entries.map((entry) => entry.id)).toEqual([managed.id])
+    expect(readEntryIds(await everyone.json())).toEqual([managed.id])
 
     const bob = await requestAs(fixture.router, 'alice', 'GET', '/api/teams/team-1/time-entries?userId=bob')
-    expect(((await bob.json()) as { entries: Array<{ id: string }> }).entries.map((entry) => entry.id)).toEqual([managed.id])
+    expect(readEntryIds(await bob.json())).toEqual([managed.id])
 
     const self = await requestAs(fixture.router, 'alice', 'GET', '/api/teams/team-1/time-entries?userId=alice')
-    expect(((await self.json()) as { entries: Array<{ id: string }> }).entries.map((entry) => entry.id)).toEqual([aliceOwn.id])
+    expect(readEntryIds(await self.json())).toEqual([aliceOwn.id])
 
     const deniedHistory = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/time-entries/${unmanaged.id}/history`)
     expect(deniedHistory.status).toBe(403)
@@ -222,10 +276,12 @@ function createProjectFixture() {
     bob: { 'project-1': 'member', 'project-2': 'member' },
     guest: { 'project-1': 'manager' },
   }
-  const workItemProjects: Record<string, string> = {
+  const workItemProjects: Record<string, string | null> = {
     'work-item-p1': 'project-1',
     'work-item-p2': 'project-2',
+    'work-item-none': null,
   }
+  const hooks: { beforeVerifyWorkItem?: () => Promise<void> } = {}
   const rank = { viewer: 0, member: 1, manager: 2 } as const
   const projectsWith = (userKey: string, minimum: keyof typeof rank) =>
     new Set(Object.entries(roles[userKey] ?? {}).filter(([, role]) => rank[role] >= rank[minimum]).map(([projectId]) => projectId))
@@ -248,8 +304,16 @@ function createProjectFixture() {
       if (!projectsWith(principal.userKey, minimum).has(projectId)) throw deny()
     },
     verifyWorkItem: async (principal, _teamId, workItemId, minimum = 'member') => {
+      const hook = hooks.beforeVerifyWorkItem
+      hooks.beforeVerifyWorkItem = undefined
+      await hook?.()
       const projectId = workItemProjects[workItemId]
-      if (!projectId || !projectsWith(principal.userKey, minimum).has(projectId)) throw deny()
+      if (projectId === undefined) throw deny()
+      if (projectId === null) {
+        if (projectsWith(principal.userKey, minimum).size === 0) throw deny()
+        return undefined
+      }
+      if (!projectsWith(principal.userKey, minimum).has(projectId)) throw deny()
       return projectId
     },
     getTimeTracking: () => service,
@@ -261,7 +325,7 @@ function createProjectFixture() {
       throw error
     },
   })
-  return { router, service }
+  return { router, service, workItemProjects, hooks }
 }
 
 /**
@@ -319,6 +383,44 @@ async function createDraft(
 ): Promise<{ id: string; revision: number }> {
   const response = await requestAs(router, userKey, 'POST', '/api/teams/team-1/time-entries', draftBody(workItemId))
   expect(response.status).toBe(201)
-  const { entry } = await response.json() as { entry: { id: string; revision: number } }
+  return readEntryRef(await response.json())
+}
+
+/**
+ * Reads the ID and revision of the entry in a single-entry response.
+ *
+ * @param body - Parsed JSON response body.
+ * @returns The entry ID and revision.
+ */
+function readEntryRef(body: unknown): { id: string; revision: number } {
+  const entry = isFixtureRecord(body) ? body.entry : undefined
+  if (!isFixtureRecord(entry) || typeof entry.id !== 'string' || typeof entry.revision !== 'number') {
+    throw new Error('The response does not contain a time entry.')
+  }
   return { id: entry.id, revision: entry.revision }
+}
+
+/**
+ * Reads the entry IDs of a list response.
+ *
+ * @param body - Parsed JSON response body.
+ * @returns Entry IDs in response order.
+ */
+function readEntryIds(body: unknown): string[] {
+  const entries = isFixtureRecord(body) ? body.entries : undefined
+  if (!Array.isArray(entries)) throw new Error('The response does not contain an entry list.')
+  return entries.map((entry: unknown) => {
+    if (!isFixtureRecord(entry) || typeof entry.id !== 'string') throw new Error('The entry list contains an invalid entry.')
+    return entry.id
+  })
+}
+
+/**
+ * Checks whether a parsed JSON value is an object record.
+ *
+ * @param value - Value to check.
+ * @returns `true` for a non-array object.
+ */
+function isFixtureRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

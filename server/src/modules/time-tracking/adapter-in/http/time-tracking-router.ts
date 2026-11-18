@@ -144,7 +144,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       }
       const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       const canManageEntry = canManage &&
-        canManageProject(managedProjectIds, currentProjectId) &&
+        canManageProject(managedProjectIds, current.projectId) &&
         canManageProject(managedProjectIds, nextProjectId)
       const entry = await dependencies.getTimeTracking().updateEntry({
         workspaceId: principal.directoryId,
@@ -153,6 +153,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         actorUserId: principal.userKey,
         canManageRates: canManageEntry,
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        authorizedRevision: current.revision,
         ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
         ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
         ...(body.workItemId === undefined ? {} : { workItemId: readRequiredString(body.workItemId, 'Work Item ID') }),
@@ -179,18 +180,19 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         )
         await dependencies.verifyWorkItem(principal, teamId, current.workItemId, minimum)
         if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, minimum)
+        const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
         const entry = await dependencies.getTimeTracking().transitionEntry({
           workspaceId: principal.directoryId,
           teamId,
           entryId: readRequiredString(context.req.param('entryId'), 'Time entry ID'),
           actorUserId: principal.userKey,
-          canApprove: canManage,
+          canApprove: canManage && canManageProject(managedProjectIds, current.projectId),
           expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+          authorizedRevision: current.revision,
           action,
           ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
           ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
         })
-        const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
         return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
       })
     })

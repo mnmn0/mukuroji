@@ -147,6 +147,12 @@ export type UpdateTimeEntryInput = {
   canManageRates: boolean
   /** Expected entry revision. */
   expectedRevision: number
+  /**
+   * Revision that the caller's authorization checks read. When set, a request whose
+   * expected revision differs is rejected as a conflict, so a concurrent change cannot
+   * reuse an authorization decided on an older revision. Excluded from idempotency fingerprints.
+   */
+  authorizedRevision?: number
   /** Optional new start. */
   startAt?: string
   /** Optional new end. */
@@ -181,6 +187,12 @@ export type TransitionTimeEntryInput = {
   canApprove: boolean
   /** Expected entry revision. */
   expectedRevision: number
+  /**
+   * Revision that the caller's authorization checks read. When set, a request whose
+   * expected revision differs is rejected as a conflict, so a concurrent change cannot
+   * reuse an authorization decided on an older revision. Excluded from idempotency fingerprints.
+   */
+  authorizedRevision?: number
   /** Requested transition. */
   action: 'submit' | 'approve' | 'reject' | 'lock'
   /** Optional rejection reason. */
@@ -549,7 +561,7 @@ export class TimeTrackingService {
     if (current.status !== 'draft' && current.status !== 'rejected') {
       throw new TimeTrackingError(409, 'TimeEntryNotEditable', 'Submitted, approved, and locked entries cannot be edited.')
     }
-    if (current.revision !== input.expectedRevision) {
+    if (current.revision !== input.expectedRevision || (input.authorizedRevision !== undefined && input.authorizedRevision !== input.expectedRevision)) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
     const startAt = input.startAt === undefined
@@ -619,7 +631,7 @@ export class TimeTrackingService {
     completion?: TimeTrackingIdempotencyCompletion,
   ): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
-    if (current.revision !== input.expectedRevision) {
+    if (current.revision !== input.expectedRevision || (input.authorizedRevision !== undefined && input.authorizedRevision !== input.expectedRevision)) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
     const isOwner = current.userId === input.actorUserId
@@ -2538,7 +2550,7 @@ function csvCell(value: string | number): string {
 function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
   const body = Object.fromEntries(
     Object.entries(input)
-      .filter(([key]) => key !== 'idempotencyKey')
+      .filter(([key]) => key !== 'idempotencyKey' && key !== 'authorizedRevision')
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )
