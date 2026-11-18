@@ -87,8 +87,11 @@ export async function requireWorkItemActualDateCorrectionPermission(
     return
   }
   if (canAccessAssignedProject(principal, context, assignedProjectId, 'manager')) return
+  // The update route's context is read at member level, so a direct Team member grant can hide a
+  // Project manager role; re-read the roles at manager level before deciding.
   const teamContext = await requireTeamPermission(principal, teamId, 'manager')
   if (teamContext.directTeamGrant) return
+  if (canAccessAssignedProject(principal, teamContext, assignedProjectId, 'manager')) return
   throw new ProjectDataError(
     403,
     'ProjectAccessDenied',

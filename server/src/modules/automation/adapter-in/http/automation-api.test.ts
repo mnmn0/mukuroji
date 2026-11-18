@@ -3601,6 +3601,12 @@ test('finishes an accepted Triage delivery after the endpoint secret is rotated'
   }
 })
 
+/**
+ * Builds a completed Bulk status edit whose single item undoes with the given payload.
+ *
+ * @param undoPayload - Undo snapshot stored for the edited Work Item.
+ * @returns Bulk Operation ready to be undone.
+ */
 function createBulkStatusUndoOperation(
   undoPayload: BulkOperation['items'][number]['undoPayload'],
 ): BulkOperation {
@@ -3627,6 +3633,12 @@ function createBulkStatusUndoOperation(
   }
 }
 
+/**
+ * Undoes a stored Bulk Operation through the API.
+ *
+ * @param operation - Bulk Operation the fake store returns.
+ * @returns The HTTP response of the undo request.
+ */
 async function requestBulkUndo(operation: BulkOperation) {
   const automationFake = createBulkOperationAutomationFake(operation)
   setTestAppDependencies({
