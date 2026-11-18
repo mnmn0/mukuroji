@@ -372,6 +372,12 @@ async function resolveCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
+    const guardConditionChecks = createWorkItemConfigurationGuardConditionChecks(
+      getWorkItemConfigurationTableName(),
+      directoryId,
+      teamId,
+      resolved,
+    )
     // An approval that completes a parent follows the Team's completion policy like any update.
     const childCompletionConditionChecks = applyParentCompletionPolicy
       ? await prepareParentCompletionConditionChecks(
@@ -382,6 +388,7 @@ async function resolveCompletionTransition(
           resolved.configuration,
           dependencies,
           true,
+          guardConditionChecks.length,
         )
       : []
     return {
@@ -398,12 +405,7 @@ async function resolveCompletionTransition(
         nextStatus.statusCategory,
         workItemScheduleInstantToLocalDate(new Date(), workItem.schedule.calendarPolicy),
       ),
-      configurationConditionChecks: createWorkItemConfigurationGuardConditionChecks(
-        getWorkItemConfigurationTableName(),
-        directoryId,
-        teamId,
-        resolved,
-      ).concat(childCompletionConditionChecks),
+      configurationConditionChecks: guardConditionChecks.concat(childCompletionConditionChecks),
     }
   } catch (error) {
     if (error instanceof WorkItemConfigurationError) {
@@ -575,6 +577,12 @@ export async function prepareConfiguredUpdateWorkItem(
         resolved.configuration,
       )
     : []
+  const otherConditionChecks = createWorkItemConfigurationGuardConditionChecks(
+    getWorkItemConfigurationTableName(),
+    directoryId,
+    teamId,
+    resolved,
+  ).concat(relationTransactionItems, approvalTransitionConditionChecks)
   const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
     directoryId,
     teamId,
@@ -584,6 +592,7 @@ export async function prepareConfiguredUpdateWorkItem(
     options.relationDependencies ?? workItemDependencies,
     // A Type change already fences the graph revision it read before this one.
     relationTransactionItems.length === 0,
+    otherConditionChecks.length,
   )
   return {
     ...inputWithoutTypeChangeResolution,
@@ -592,12 +601,7 @@ export async function prepareConfiguredUpdateWorkItem(
     workflowStatusId: nextWorkflowStatus.workflowStatusId,
     statusCategory: nextWorkflowStatus.statusCategory,
     customFieldValues,
-    configurationConditionChecks: createWorkItemConfigurationGuardConditionChecks(
-      getWorkItemConfigurationTableName(),
-      directoryId,
-      teamId,
-      resolved,
-    ).concat(relationTransactionItems, approvalTransitionConditionChecks, childCompletionConditionChecks),
+    configurationConditionChecks: otherConditionChecks.concat(childCompletionConditionChecks),
   }
 }
 
@@ -611,6 +615,7 @@ export async function prepareConfiguredUpdateWorkItem(
  * @param configuration - Team Work Item configuration.
  * @param dependencies - Relation and Work Item persistence.
  * @param fenceGraph - Whether to fence the graph revision; false when the change already does.
+ * @param otherConditionCheckCount - Configuration condition checks the change already sends.
  * @returns Condition checks to commit with the change; none unless a `reject` Team completes it.
  * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is still open.
  */
@@ -622,37 +627,48 @@ async function prepareParentCompletionConditionChecks(
   configuration: WorkItemConfiguration,
   dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
   fenceGraph: boolean,
+  otherConditionCheckCount: number,
 ): Promise<WorkItemConfigurationTransactionItems> {
   const policy = configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY
   if (current.statusCategory === 'completed' || nextStatusCategory !== 'completed' || policy !== 'reject') {
     return []
   }
-  return assertWorkItemChildrenClosed(directoryId, teamId, current.id, dependencies, fenceGraph)
+  return assertWorkItemChildrenClosed(
+    directoryId,
+    teamId,
+    current.id,
+    dependencies,
+    fenceGraph,
+    otherConditionCheckCount,
+  )
 }
 
 /** Child Work Items read at once while checking that a parent can be completed. */
 const CHILD_COMPLETION_READ_CONCURRENCY = 16
 
 /**
- * Most children whose revisions fence a parent's completion.
+ * Most configuration condition checks one Work Item update sends.
  *
- * DynamoDB allows 100 items per transaction and the Work Item update needs some of them.
+ * DynamoDB allows 100 items per transaction. The rest are left for the update itself, its event,
+ * audit, authorization, and other fences the persistence adapter adds.
  */
-const CHILD_COMPLETION_FENCE_LIMIT = 64
+const WORK_ITEM_UPDATE_CONFIGURATION_CHECK_BUDGET = 70
 
 /**
  * Rejects completing a parent while one of its non-archived children is still open, and fences
  * what it read into the parent's update transaction.
  *
  * The relation graph revision fences a child attached meanwhile, and each child's revision fences
- * a child reopened meanwhile. Beyond {@link CHILD_COMPLETION_FENCE_LIMIT} children only the graph
- * is fenced, so a child reopened while the parent's update commits is not detected.
+ * a child reopened meanwhile. When the children's checks would push the update past
+ * {@link WORK_ITEM_UPDATE_CONFIGURATION_CHECK_BUDGET} together with its other checks, only the
+ * graph is fenced, so a child reopened while the parent's update commits is not detected.
  *
  * @param directoryId - Workspace directory ID.
  * @param teamId - Team that owns the parent.
  * @param parentWorkItemId - Parent about to be completed.
  * @param dependencies - Relation and Work Item persistence.
  * @param fenceGraph - Whether to fence the graph revision; false when the update already does.
+ * @param otherConditionCheckCount - Configuration condition checks the update already sends.
  * @returns Condition checks to commit with the parent's update.
  * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is neither completed nor canceled.
  */
@@ -662,6 +678,7 @@ async function assertWorkItemChildrenClosed(
   parentWorkItemId: string,
   dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
   fenceGraph: boolean,
+  otherConditionCheckCount: number,
 ): Promise<WorkItemConfigurationTransactionItems> {
   const children = await dependencies.workItemConfigurations.listRelations(
     directoryId,
@@ -707,16 +724,19 @@ async function assertWorkItemChildrenClosed(
       'A child Work Item is still open. Complete or cancel the children before completing the parent.',
     )
   }
+  const graphConditionChecks = fenceGraph
+    ? [createWorkItemRelationGraphRevisionConditionCheck(
+        getWorkItemConfigurationTableName(),
+        directoryId,
+        teamId,
+        children.graphRevision,
+      )]
+    : []
+  const childFencesFit = otherConditionCheckCount + graphConditionChecks.length + childRevisions.length <=
+    WORK_ITEM_UPDATE_CONFIGURATION_CHECK_BUDGET
   return [
-    ...(fenceGraph
-      ? [createWorkItemRelationGraphRevisionConditionCheck(
-          getWorkItemConfigurationTableName(),
-          directoryId,
-          teamId,
-          children.graphRevision,
-        )]
-      : []),
-    ...(childRevisions.length <= CHILD_COMPLETION_FENCE_LIMIT
+    ...graphConditionChecks,
+    ...(childFencesFit
       ? childRevisions.map((child) => createWorkItemRevisionConditionCheck(
           getTeamIssuesTableName(),
           directoryId,

@@ -204,7 +204,7 @@ Configuration の `parentCompletionPolicy` は、完了でもキャンセルで�
 | `warn` | server は許可する。Web は status を完了にするどの画面（Team の Work Item、Project の task、My Tasks、Focus）でも、`GET /api/teams/{teamId}/issues/{issueId}/children/open-count` で読んだ未完了の子の数を示して確認してから更新する。数は読める・archive されていない直接の子だけを数える。数を読めなかったときも、数を示さずに確認してから更新する。 |
 | `reject` | Work Item が completed category の status に移るとき、server が直接の子を読み、archive されていない未完了の子があれば `409 WorkItemOpenChildren` で拒否する。判定には呼び出し元が読めない子も含めるので、応答に件数は入れない。拒否の条件は Web・Public API・MCP・自動化のどの経路でも同じだが、応答の形は経路で異なる。Team の API は `409` と `code: "WorkItemOpenChildren"` を返し、Public API は共通の error 形式に写すので `409` と `code: "conflict"`、`retryable: false` を返す（message は同じ）。承認で完了する場合は、承認を決定して status を変えるときに確認する。承認の依頼は status を変えないので、子が残っていても依頼できる。 |
 
-子は relation graph の `child` row から読み、各子の詳細を 16 件ずつ読む。数えるのは直接の子だけで、孫は数えない。読んだ graph revision と各子の revision を親の更新 transaction の条件に入れるので、確認の後に子が付いたり子が再開されたりすると更新は `409` で失敗する（子が 64 件を超えると graph revision だけを条件にし、子の再開は検出しない）。ポリシーの変更は他の configuration と同じく監査に残る。
+子は relation graph の `child` row から読み、各子の詳細を 16 件ずつ読む。数えるのは直接の子だけで、孫は数えない。読んだ graph revision と各子の revision を親の更新 transaction の条件に入れるので、確認の後に子が付いたり子が再開されたりすると更新は `409` で失敗する（子の revision の条件は、同じ更新で送る他の configuration 条件（configuration guard、Type 変更の relation と承認の条件など）と合わせて 70 件に収まるときだけ入れる。収まらないときは graph revision だけを条件にし、子の再開は検出しない）。ポリシーの変更は他の configuration と同じく監査に残る。
 
 ### Reciprocal transaction と graph CAS
 

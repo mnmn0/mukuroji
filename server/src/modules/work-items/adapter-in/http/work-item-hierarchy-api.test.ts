@@ -215,11 +215,13 @@ test('passes a sibling order rank to the parent replacement and rejects an inval
  *
  * @param policy - Team parent completion policy.
  * @param teamIssues - Work Item persistence to use; the default fake when omitted.
+ * @param childIds - Children listed under the Work Item; one `open-child` when omitted.
  * @returns Child relation reads made by the update.
  */
 function configureParentWithOpenChild(
   policy: WorkItemParentCompletionPolicy,
   teamIssues?: ReturnType<typeof createTeamIssuesFake>,
+  childIds: string[] = ['open-child'],
 ) {
   const childReads: string[] = []
   setTestAppDependencies({
@@ -237,7 +239,7 @@ function configureParentWithOpenChild(
         if (options?.types?.includes('child')) childReads.push(workItemId)
         return {
           relations: options?.types?.includes('child')
-            ? [{ sourceWorkItemId: workItemId, targetWorkItemId: 'open-child', type: 'child' }]
+            ? childIds.map((childId) => ({ sourceWorkItemId: workItemId, targetWorkItemId: childId, type: 'child' }))
             : [],
           graphRevision: 6,
         }
@@ -313,6 +315,51 @@ test('fences the relation graph and the closed children into completing a parent
       ExpressionAttributeValues: { ':expectedRevision': 4 },
     }),
   })
+})
+
+/**
+ * Completes a guarded parent whose children are all closed and records the update's checks.
+ *
+ * @param childCount - Closed children listed under the parent.
+ * @returns The response status and the configuration condition checks sent with the update.
+ */
+async function completeParentWithClosedChildren(childCount: number) {
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const fenceChecks: unknown[] = []
+  const childIds = Array.from({ length: childCount }, (_, index) => `closed-child-${index}`)
+  configureParentWithOpenChild('reject', createTeamIssuesFake({
+    async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+      if (!issueId.startsWith('closed-child-')) {
+        return teamIssues.getTeamIssueDetail(directoryId, teamId, issueId, options)
+      }
+      const detail = await teamIssues.getTeamIssueDetail(directoryId, teamId, 'onboarding-friction', options)
+      return { ...detail, issue: { ...detail.issue, id: issueId, statusCategory: 'completed', revision: 4 } }
+    },
+    async updateTeamIssue(directoryId, teamId, issueId, input, ...rest) {
+      fenceChecks.push(...(input.configurationConditionChecks ?? []))
+      return teamIssues.updateTeamIssue(directoryId, teamId, issueId, input, ...rest)
+    },
+  }), childIds)
+  const response = await request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    body: { workflowStatusId: 'done', expectedRevision: 1 },
+  })
+  const childFenceCount = fenceChecks.filter((check) =>
+    JSON.stringify(check).includes('"issueId":"closed-child-')
+  ).length
+  return { status: response.status, checkCount: fenceChecks.length, childFenceCount }
+}
+
+test('fences closed children only while their checks fit the update transaction', async () => {
+  configureFakeProjectClients(true)
+  const fitting = await completeParentWithClosedChildren(60)
+  expect(fitting).toMatchObject({ status: 200, childFenceCount: 60 })
+
+  // Too many children for the transaction: only the graph revision fences the completion.
+  const crowded = await completeParentWithClosedChildren(70)
+  expect(crowded).toMatchObject({ status: 200, childFenceCount: 0 })
+  expect(crowded.checkCount).toBeGreaterThan(0)
+  expect(crowded.checkCount).toBeLessThanOrEqual(70)
 })
 
 test('completes a parent whose only child was deleted but left its relation behind', async () => {
