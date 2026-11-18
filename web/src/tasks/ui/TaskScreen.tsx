@@ -255,6 +255,11 @@ type TaskBulkSelectionState = {
 
 /** Last successful inline update retained for a reversible task action. */
 type TaskUndoState = {
+  /**
+   * Task snapshot before an inline update, used to recheck the actual dates when the undo runs.
+   * Schedule-only undo states built from a schedule preview have none.
+   */
+  before?: CanonicalWorkItem
   /** Task snapshot returned by the successful update. */
   task: CanonicalWorkItem
   /** Patch that restores every field touched by the update. */
@@ -742,6 +747,7 @@ export function TaskScreen({
     )
     if (!actualDateUndo.reversible) return undefined
     return {
+      before,
       forwardPatch: input,
       inversePatch: { ...createTaskInversePatch(before, input), ...actualDateUndo.patch },
       task: after,
@@ -2096,10 +2102,21 @@ export function TaskScreen({
       return
     }
 
+    // The reverse status change records today's date, so recheck the actual dates on today's date.
+    const currentUndo = taskUndo.before
+      ? createTaskUndoState(taskUndo.before, taskUndo.forwardPatch, taskUndo.task)
+      : taskUndo
+    if (!currentUndo) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      setTaskAction({ kind: 'error', message: t('tasks.action.undoActualDatesUnavailable') })
+      return
+    }
+
     setIsRestoringTask(true)
 
     try {
-      const result = await performTaskUpdate(taskUndo.task, taskUndo.inversePatch)
+      const result = await performTaskUpdate(taskUndo.task, currentUndo.inversePatch)
       if (!result.applied) {
         setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
         return

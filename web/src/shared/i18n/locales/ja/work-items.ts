@@ -24,6 +24,7 @@ export const workItemsMessages = {
   'tasks.action.updateError': '変更を保存できませんでした。もう一度お試しください。',
   'tasks.action.undo': '元に戻す',
   'tasks.action.undoing': '元に戻しています。',
+  'tasks.action.undoActualDatesUnavailable': '日付が変わったため、元に戻すと記録済みの実績終了日が変わります。実績日を補正できる人に依頼してください。',
   'tasks.action.redo': 'やり直す',
   'tasks.action.redoing': 'やり直しています。',
   'tasks.action.dismiss': '通知を閉じる',

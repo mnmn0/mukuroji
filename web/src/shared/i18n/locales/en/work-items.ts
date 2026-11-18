@@ -24,6 +24,7 @@ export const workItemsMessages = {
   'tasks.action.updateError': 'The change could not be saved. Please try again.',
   'tasks.action.undo': 'Undo',
   'tasks.action.undoing': 'Undoing the change.',
+  'tasks.action.undoActualDatesUnavailable': 'The date has changed, so undoing would change the recorded actual end date. Ask someone who can correct actual dates.',
   'tasks.action.redo': 'Redo',
   'tasks.action.redoing': 'Redoing the change.',
   'tasks.action.dismiss': 'Dismiss notification',
