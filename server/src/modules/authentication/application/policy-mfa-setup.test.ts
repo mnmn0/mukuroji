@@ -1,7 +1,13 @@
 import { expect, test } from 'bun:test'
 import { decidePolicyMfaSetup, type PolicyMfaSetupPorts } from './policy-mfa-setup'
 
-type User = { name: string; mfa: boolean }
+/** Identity provider user the test ports read. */
+type User = {
+  /** Name recorded in the policy check calls. */
+  name: string
+  /** Whether the user has any MFA method enabled. */
+  mfa: boolean
+}
 
 /**
  * Builds ports that record which checks ran.

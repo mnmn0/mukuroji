@@ -85,7 +85,10 @@ export type WorkspaceMembersSignInSecurityResponse = {
 export type EnterpriseMfaRequirementImpact = {
   /** Active members inspected. */
   activeMemberCount: number
-  /** Active members without an authenticator app; they must register one at their next sign-in. */
+  /**
+   * Active members without any MFA method; they must register an authenticator app at their next
+   * sign-in. Members with SMS or email MFA are not counted.
+   */
   unenrolledMemberCount: number
   /** Active members whose state could not be read. */
   unknownMemberCount: number

@@ -76,7 +76,7 @@ export type EnterpriseSessionPolicyImpact = {
   warnings: string[]
   /** Caller IP 除外を確認した場合だけ PUT へ渡す短時間 token です。 */
   confirmationToken?: string
-  /** Members without an authenticator app, returned only when the change turns MFA on. */
+  /** Members without any MFA method, returned only when the change turns MFA on. */
   mfaImpact?: EnterpriseMfaRequirementImpact
 }
 

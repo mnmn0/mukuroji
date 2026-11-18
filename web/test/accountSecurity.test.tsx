@@ -27,7 +27,10 @@ import {
   resetWorkspaceMemberCredential,
   WorkspaceAccessApiError,
 } from '../src/workspace/api'
-import { shouldRetainCredentialResetContext } from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
+import {
+  shouldCloseCredentialResetDialog,
+  shouldRetainCredentialResetContext,
+} from '../src/workspace/mutations/useWorkspaceMemberCredentialReset'
 import {
   createWorkspaceAccessMutationSession,
   getCredentialResetRunner,
@@ -169,6 +172,10 @@ describe('member credential reset retry', () => {
     expect(shouldRetainCredentialResetContext(new TypeError('Failed to fetch'))).toBe(true)
     expect(shouldRetainCredentialResetContext(new WorkspaceAccessApiError(502, 'Bad gateway'))).toBe(true)
     expect(shouldRetainCredentialResetContext(new WorkspaceAccessApiError(500, 'Failed'))).toBe(true)
+    // An expired session is refused before the reset runs, so the retry after a token refresh
+    // still resumes the earlier attempt.
+    expect(shouldRetainCredentialResetContext(new WorkspaceAccessApiError(401, 'Unauthorized'))).toBe(true)
+    expect(shouldRetainCredentialResetContext(new WorkspaceAccessApiError(403, 'Forbidden'))).toBe(false)
     expect(shouldRetainCredentialResetContext(
       new WorkspaceAccessApiError(409, 'Running', 'WorkspaceCredentialActionInProgress'),
     )).toBe(true)
@@ -178,6 +185,16 @@ describe('member credential reset retry', () => {
     expect(shouldRetainCredentialResetContext(
       new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
     )).toBe(false)
+  })
+
+  test('closes the confirmation only when the reset expired', () => {
+    expect(shouldCloseCredentialResetDialog(
+      new WorkspaceAccessApiError(409, 'Expired', 'WorkspaceCredentialActionExpired'),
+    )).toBe(true)
+    expect(shouldCloseCredentialResetDialog(
+      new WorkspaceAccessApiError(409, 'Running', 'WorkspaceCredentialActionInProgress'),
+    )).toBe(false)
+    expect(shouldCloseCredentialResetDialog(new TypeError('Failed to fetch'))).toBe(false)
   })
 
   test('keeps an unknown reset outcome across a snapshot refresh and an access token refresh', async () => {
@@ -203,6 +220,29 @@ describe('member credential reset retry', () => {
 
     expect(keys).toHaveLength(2)
     expect(keys[1]).toBe(keys[0])
+  })
+
+  test('keeps the key when a retry is refused for an expired session', async () => {
+    const keys: string[] = []
+    const reset = () => getCredentialResetRunner('session-expiry@example.com').run(
+      'workspace-member:password-reset:sato@example.com',
+      'fingerprint',
+      async (context) => {
+        keys.push(context.idempotencyKey)
+        if (keys.length === 1) throw new TypeError('Failed to fetch')
+        if (keys.length === 2) throw new WorkspaceAccessApiError(401, 'Unauthorized')
+      },
+      shouldRetainCredentialResetContext,
+    )
+
+    await expect(reset()).rejects.toThrow('Failed to fetch')
+    await expect(reset()).rejects.toThrow('Unauthorized')
+    // The access token is refreshed and the administrator tries again.
+    createWorkspaceAccessMutationSession('token-refreshed')
+    await reset()
+
+    expect(keys).toHaveLength(3)
+    expect(new Set(keys).size).toBe(1)
   })
 
   test('keeps the reset keys of each administrator apart', () => {

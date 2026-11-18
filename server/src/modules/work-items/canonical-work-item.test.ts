@@ -334,6 +334,12 @@ describe('canonical Work Item validation', () => {
       dueDateUpdatedAt: '2026-07-13T09:00:00.000Z',
     }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      reopenedAt: '2026-07-10T09:00:00.000Z',
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      reopenedAt: '2026-07-13T09:00:00.000Z',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       priorityUpdatedAt: '2026-07-10T09:00:00Z',
     }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({

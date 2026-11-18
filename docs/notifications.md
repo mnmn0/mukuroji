@@ -13,7 +13,10 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Work Item 作成・担当変更: `assignment`
 - Work Item status 変更: `status-change`
 - Work Item schedule 変更: `schedule-change`
-- 定期 due scan: `due` / `overdue`
+- Work Item archive / restore: `archive-change`
+- 上記の変更の作成者: `creator`（責任者と同じ人なら 1 件にまとまる）
+- 上記の変更の item watcher: `watcher`（projection が現在の購読から解決する。Project watcher には送らない。title や説明だけの変更では送らない）
+- 定期 due scan: `due` / `due-soon` / `overdue` / `escalation` / `stale`
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
 - Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
 
@@ -172,5 +175,18 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 ## Due / overdue scan
 
 EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
+
+同じ scan は次の段階も作ります。日数は schedule Lambda の環境変数で上書きでき、未設定なら括弧内の既定値を使います。
+
+| event type | 宛先 | 条件 | 重複排除の単位 |
+| --- | --- | --- | --- |
+| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3）。配信が期限当日以降にずれた場合や、配信時点の残日数が scan 時より多い場合は捨てる | 期限・責任者・calendar の timezone |
+| `work-item.overdue-reminder` | 責任者 | 期限日から数えて interval 日ごと（`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、7）。初回の通知を受けた日ではなく期限日を起点に数えるため、超過から時間が経って初めて走査された item は、すでに過ぎた回の再通知を 1 回だけ受けます。初回の超過は従来どおり `work-item.overdue` で、超過中は毎回同じ key で試行するため、超過から時間が経って初めて走査された item にも一度だけ出る | 期限・責任者・何回目か |
+| `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（archive 済みの membership と責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外。manager ごとに別 event にし、配信時点の超過日数が scan 時より少なければ捨てる | 期限・Project・manager・calendar の timezone・再開時刻 |
+| `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知。期限超過中は超過の再通知に任せて送らない。配送時に期限を過ぎていた場合も捨てる | 最終更新時刻・責任者・何回目か |
+
+期限前・再通知・escalation の概要文は「あと n 日」ではなく期限日そのものを書きます。quiet hours や digest で配信が翌日以降にずれても内容が古くならないためです。再通知は `work-item.overdue` と別の event type にしているため、Automation の `due` trigger（`overdue`）は初回だけ発火します。archived の Work Item はどの段階も作りません。projection は配送時に Work Item を強整合で読み直し、完了・archive・期限変更・責任者変更・更新済みの段階と、別 Project へ移った後の escalation を捨てます。escalation の宛先は schedule が notifications の application port（`ScheduledProjectManagerReader`）経由で読み、Project Directory の DynamoDB 実装は composition root で注入します。配送時点でも Project manager であることを確認します。schedule event は scan 時の残日数（`daysUntilDue`、超過時は負）を metadata に持ち、通知行にも保存します。projection と Slack 送信時の再認可は、Work Item の calendar での今日と比べて段階を再判定します。通知の保存 transaction は読み直した Work Item の `revision` を条件にするため、読み直しと保存の間に Work Item が更新されると stream の retry で再判定します。due-soon と escalation の重複排除 key には Work Item の calendar の timezone を含めます。timezone の変更で配信時に捨てた段階を、新しい calendar で条件を満たしたときに出し直せるようにするためです（timezone を変えた直後は同じ段階が再度届くことがあります）。期限当日の `work-item.due` は配信時点でも期限当日のとき、`work-item.overdue` と再通知は配信時点でも期限を過ぎているときだけ届けます。`due` と `overdue` の key は timezone を含まないため、timezone の変更で期限当日に戻って捨てた初回の超過通知は出し直さず、次の再通知に任せます。
+
+escalation は Work Item が完了・中止・archive で配信時に捨てられることがあります。Work Item を未完了に戻すか archive を解除すると、Work Item の `reopenedAt` を更新し、escalation の重複排除 key に含めます。そのため、再開後も同じ期限・Project・manager の条件を満たしていれば、次の scan で escalation を出し直します。再開した時点で超過日数が条件を満たしていれば、前に届いた escalation があっても manager にもう一度届きます。escalation の event と通知行は scan 時の `reopenedAt` を `workItemReopenedAt` として持ち、projection と Slack 送信時の再認可は現在の Work Item の `reopenedAt` と一致しない escalation を捨てます。そのため、再開前に作られて配信待ちだった escalation と、再開後の escalation が両方届くことはありません。
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。
