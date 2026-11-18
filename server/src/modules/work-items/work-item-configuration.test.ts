@@ -1996,7 +1996,10 @@ test('classifies a canceled reorder by its cancellation reasons', async () => {
     .rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
   // A deterministic failure is not reported as a concurrent write.
   await expect(createCanceledClient(['ValidationError', 'None']).replaceParent('workspace-1', 'core-team', reorder))
-    .rejects.not.toMatchObject({ code: 'WorkItemRelationUnavailable' })
+    .rejects.toMatchObject({ code: 'WorkItemRelationStoragePermanent', status: 502 })
+  // A deterministic failure wins even when another item also reports a concurrent write.
+  await expect(createCanceledClient(['ValidationError', 'TransactionConflict']).replaceParent('workspace-1', 'core-team', reorder))
+    .rejects.toMatchObject({ code: 'WorkItemRelationStoragePermanent', status: 502 })
 })
 
 test('returns success without writing when a lost-response retry finds the requested parent', async () => {

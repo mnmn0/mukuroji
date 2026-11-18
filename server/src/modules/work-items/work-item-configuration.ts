@@ -1733,6 +1733,17 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           'The Work Item changed. Reload and try again.',
         )
       }
+      if (
+        isTransactionCancellationReason(error, 'ValidationError') ||
+        isTransactionCancellationReason(error, 'ItemCollectionSizeLimitExceeded')
+      ) {
+        // A rejected item fails the same way on every retry, so it is neither a conflict nor transient.
+        throw new WorkItemConfigurationError(
+          502,
+          'WorkItemRelationStoragePermanent',
+          'The reorder was rejected by storage. Contact an administrator.',
+        )
+      }
       if (isTransactionCancellationReason(error, 'TransactionConflict')) {
         // Another write to the same rows in flight cancels this one without a failed condition.
         // A revision that moved meanwhile is a conflict; otherwise the reorder can be retried.
