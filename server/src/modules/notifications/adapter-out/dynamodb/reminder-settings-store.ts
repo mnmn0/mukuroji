@@ -151,7 +151,8 @@ export class DynamoDbReminderSettingsStore
       },
       ConsistentRead: true,
     }))
-    return parseStoredNotificationPreferences(response.Item).reminderDays
+    // Strict: a corrupt row fails the run instead of silently using the Team or default days.
+    return parseStoredNotificationPreferences(response.Item, true).reminderDays
   }
 }
 

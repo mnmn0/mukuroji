@@ -1,6 +1,7 @@
 import type { TimesheetReminderRevalidator } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import type { ScheduledTimesheetReader } from '../../modules/notifications'
-import type { TimeTrackingRepository } from '../../modules/time-tracking'
+import { DynamoDbTimeTrackingRepository, type TimeTrackingRepository } from '../../modules/time-tracking'
+import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 
 /**
  * Adapts the time tracking repository to the schedule's unsubmitted entry reader.
@@ -55,4 +56,20 @@ export function createTimesheetReminderRevalidator(
       return false
     },
   }
+}
+
+/**
+ * Builds the projection's timesheet reminder revalidator over the Analytics table.
+ *
+ * @param analyticsTableName - Analytics table that holds time entries, when configured.
+ * @returns The revalidator, or undefined so timesheet reminders are dropped (fail closed).
+ */
+export function createConfiguredTimesheetReminderRevalidator(
+  analyticsTableName: string | undefined,
+): TimesheetReminderRevalidator | undefined {
+  if (!analyticsTableName) return undefined
+  return createTimesheetReminderRevalidator(new DynamoDbTimeTrackingRepository(
+    analyticsTableName,
+    createDynamoDbDocumentClient(createDynamoDbClient()),
+  ))
 }

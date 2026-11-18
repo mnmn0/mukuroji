@@ -215,6 +215,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、UTC の `NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC` 時（既定 0 時、日本時間 9 時）の実行だけです。その回が失敗した日は送らず、翌日の実行で送ります
 - 対象は Work Item の scan で見つかった Team です。工数は必ず Team の Work Item に付くため、工数のある Team は漏れません。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
 - 重複排除 key は Workspace・Team・member・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
+- 対象の Team は、その実行で Work Item を走査した Team です。Work Item が 1 件も残っていない Team の工数は督促しません。
 - 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む月曜始まりの週に直します）を開きます。title は持たず、概要は件数と最も古い日付です
 - event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。読み直す手段がない projection では督促を届けません
 - 宛先の権限は Team scope の通知として確認します（Team の Project のどれかを読めること）

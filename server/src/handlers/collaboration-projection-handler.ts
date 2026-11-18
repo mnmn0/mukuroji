@@ -22,9 +22,7 @@ import {
   DynamoDbWorkspaceSearchClient,
 } from '../modules/workspace-search/workspace-search'
 import { loadServerConfig } from '../infrastructure/config/server-config'
-import { createTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
-import { createDynamoDbClient, createDynamoDbDocumentClient } from '../infrastructure/aws/dynamodb-client'
-import { DynamoDbTimeTrackingRepository } from '../modules/time-tracking'
+import { createConfiguredTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
 const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
@@ -40,13 +38,9 @@ const enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> 
     ? new DynamoDbEnterpriseIdentityReadClient(enterpriseIdentityTableName)
     : undefined
 
-const analyticsTableName = readOptionalEnvironment('ANALYTICS_TABLE_NAME')
-const timesheetReminders = analyticsTableName
-  ? createTimesheetReminderRevalidator(new DynamoDbTimeTrackingRepository(
-      analyticsTableName,
-      createDynamoDbDocumentClient(createDynamoDbClient()),
-    ))
-  : undefined
+const timesheetReminders = createConfiguredTimesheetReminderRevalidator(
+  readOptionalEnvironment('ANALYTICS_TABLE_NAME'),
+)
 
 const curatedContextSearch = {
   /** Upserts the latest canonical non-superseded context item into Workspace search. */

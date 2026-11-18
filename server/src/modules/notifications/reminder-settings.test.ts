@@ -193,6 +193,15 @@ describe('Team reminder settings store', () => {
     const store = new DynamoDbReminderSettingsStore(recording.documentClient, 'NotificationsTable')
     await expect(store.readTeamReminderDays('workspace-1', 'core-team')).rejects.toThrow('invalid')
   })
+
+  test('fails instead of falling back for a corrupt personal row and uses nothing for a missing one', async () => {
+    let item: Record<string, unknown> | undefined
+    const recording = createRecordingClient(() => ({ Item: item }))
+    const store = new DynamoDbReminderSettingsStore(recording.documentClient, 'NotificationsTable')
+    expect(await store.readPersonalReminderDays('workspace-1', 'member@example.com')).toBeUndefined()
+    item = { reminderDays: { dueSoonDays: 'soon' } }
+    await expect(store.readPersonalReminderDays('workspace-1', 'member@example.com')).rejects.toThrow()
+  })
 })
 
 describe('reminder policy resolution', () => {
