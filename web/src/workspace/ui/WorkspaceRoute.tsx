@@ -172,6 +172,11 @@ const collectionsRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'collections.title',
   descriptionKey: 'collections.description',
 }
+const workItemKeyRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'issues.keyPage.eyebrow',
+  titleKey: 'issues.keyPage.title',
+  descriptionKey: 'issues.keyPage.description',
+}
 const searchRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
   eyebrowKey: 'search.eyebrow',
@@ -747,6 +752,10 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/search', pathname)) {
     return searchRouteMetadata
+  }
+
+  if (matchPath('/browse/:workItemKey', pathname)) {
+    return workItemKeyRouteMetadata
   }
 
   if (

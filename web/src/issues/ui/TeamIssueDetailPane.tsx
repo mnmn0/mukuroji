@@ -39,7 +39,9 @@ import {
   type WorkItemEffortProgressChange,
 } from '../../work-items/model/workItemEffort'
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
-import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
+import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
+import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
+import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {
   isCustomFieldApplicable,
   parseCustomFieldFormData,
@@ -842,6 +844,35 @@ function IssueDetailContent({
     </>
   )
 
+  // Keys written in the saved description, as links, because the description is edited as plain text.
+  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '').map((match) => match.key))]
+    .filter((key) => key !== issue.key)
+  /**
+   * Lists the Work Item keys written in the saved description, each opening its key URL in a new tab.
+   *
+   * @returns The list of key links, or nothing when the description names no other Work Item.
+   */
+  const renderMentionedWorkItemKeys = (): ReactNode => mentionedWorkItemKeys.length > 0 ? (
+    <nav
+      aria-label={t('issues.key.mentioned')}
+      className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]"
+      data-testid="work-item-mentioned-keys"
+    >
+      <span>{t('issues.key.mentioned')}</span>
+      {mentionedWorkItemKeys.map((key) => (
+        <a
+          className="font-mono text-[var(--workbench-primary-text)] underline underline-offset-2"
+          href={createWorkItemKeyPath(key)}
+          key={key}
+          rel="noreferrer noopener"
+          target="_blank"
+        >
+          {key}
+        </a>
+      ))}
+    </nav>
+  ) : null
+
   /** Renders one configured Team Issue detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
@@ -946,6 +977,7 @@ function IssueDetailContent({
                 name="description"
               />
             </label>
+            {renderMentionedWorkItemKeys()}
           </fieldset>
         )
       case 'custom-fields':
@@ -1151,6 +1183,11 @@ function IssueDetailContent({
             <p className="mt-1 truncate text-lg font-semibold leading-6 text-[var(--workbench-text)]">
               {resolveIssueTitle(issue, t)}
             </p>
+            {issue.key ? (
+              <div className="mt-2">
+                <WorkItemKeyActions key={issue.key} t={t} workItemKey={issue.key} />
+              </div>
+            ) : null}
           </div>
           <IssuePriorityBadge priority={issue.priority} t={t} />
         </div>

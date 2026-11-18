@@ -1,6 +1,7 @@
 import Markdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
+import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
 
 /**
  * SafeCommentBody の props です。
@@ -18,6 +19,7 @@ export type SafeCommentBodyProps = {
 
 /**
  * raw HTML を無効にし、GFM と sanitize を通した comment 本文を描画します。
+ * 本文中の Work Item key（`PT-12`）は key のページへの link にします。
  */
 export function SafeCommentBody({ bodyMarkdown, className = '' }: SafeCommentBodyProps) {
   return (
@@ -42,7 +44,7 @@ export function SafeCommentBody({ bodyMarkdown, className = '' }: SafeCommentBod
           img: () => null,
         }}
         rehypePlugins={[rehypeSanitize]}
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkWorkItemKeyLinks]}
         skipHtml
         urlTransform={sanitizeCommentUrl}
       >
