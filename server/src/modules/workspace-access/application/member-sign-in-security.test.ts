@@ -26,7 +26,12 @@ function member(memberKey: string): WorkspaceMember {
   }
 }
 
-const profile: MemberSignInProfile = { softwareTokenMfaConfigured: false, invitationPending: false, disabled: false }
+const profile: MemberSignInProfile = {
+  softwareTokenMfaConfigured: false,
+  mfaConfigured: false,
+  invitationPending: false,
+  disabled: false,
+}
 
 /**
  * Builds ports over fixed members and profiles.
@@ -55,7 +60,7 @@ function createPorts(
 
 test('reports MFA and password reset state of each member in order', async () => {
   const { ports, failures } = createPorts({
-    'sato@example.com': { ...profile, softwareTokenMfaConfigured: true },
+    'sato@example.com': { ...profile, softwareTokenMfaConfigured: true, mfaConfigured: true },
     'suzuki@example.com': profile,
     'viewer@example.com': { ...profile, invitationPending: true },
     'disabled@example.com': { ...profile, disabled: true },
@@ -87,14 +92,16 @@ test('fails the roster when the SSO lookup fails, rather than offering a reset',
 
 test('counts the members an MFA requirement would send to setup', async () => {
   const { ports } = createPorts({
-    'sato@example.com': { ...profile, softwareTokenMfaConfigured: true },
+    'sato@example.com': { ...profile, softwareTokenMfaConfigured: true, mfaConfigured: true },
+    // Sign-in accepts SMS MFA, so this member is not sent to setup.
+    'sms@example.com': { ...profile, mfaConfigured: true },
     'suzuki@example.com': profile,
     'broken@example.com': new Error('Cognito is unavailable.'),
     'sso@corp.example': profile,
   }, ['sso@corp.example'])
 
   expect(await summarizeMfaEnrollment(ports, 'workspace#demo')).toEqual({
-    activeMemberCount: 4,
+    activeMemberCount: 5,
     unenrolledMemberCount: 1,
     unknownMemberCount: 1,
   })
