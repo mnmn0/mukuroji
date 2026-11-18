@@ -296,7 +296,12 @@ test('rejects excessive approval reviewers before external member fan-out', asyn
 
 test('validates and stores an approval completion target from the current workflow', async () => {
   configureFakeProjectClients(true, { role: 'member' })
-  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  // Requesting an approval does not complete the Work Item, so open children do not block it.
+  const configuration = {
+    ...createTestWorkItemConfiguration('team', 'core-team'),
+    parentCompletionPolicy: 'reject' as const,
+  }
+  let childReads = 0
   configuration.workflow.statuses.push({
     id: 'approval-complete',
     name: 'Approval complete',
@@ -331,6 +336,13 @@ test('validates and stores an approval completion target from the current workfl
       async getTeamConfiguration() {
         return { configuration }
       },
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        childReads += 1
+        return {
+          relations: [{ sourceWorkItemId: workItemId, targetWorkItemId: 'open-child', type: 'child' }],
+          graphRevision: 2,
+        }
+      },
     }),
   })
 
@@ -351,6 +363,7 @@ test('validates and stores an approval completion target from the current workfl
 
   expect(response.status).toBe(201)
   expect(receivedTransitions).toEqual(['approval-complete'])
+  expect(childReads).toBe(0)
 })
 
 test('resolves approval completion with workflow metadata and configuration guards', async () => {
@@ -439,6 +452,61 @@ test('resolves approval completion with workflow metadata and configuration guar
     consistentIssueRead: true,
     includeEvents: false,
   })
+})
+
+test('rejects an approval that would complete a parent with an open child when the Team rejects it', async () => {
+  configureFakeProjectClients(true, {
+    role: 'member',
+    detailWorkflowStatusIds: ['in-progress'],
+  })
+  const configuration = {
+    ...createTestWorkItemConfiguration('team', 'core-team', 4),
+    parentCompletionPolicy: 'reject' as const,
+  }
+  configuration.workflow.statuses.push({
+    id: 'approval-complete',
+    name: 'Approval complete',
+    category: 'completed',
+    sortOrder: 50,
+  })
+  configuration.workflow.transitions.push({
+    fromStatusId: 'in-progress',
+    toStatusId: 'approval-complete',
+  })
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async decideApproval(_scope, _actor, _approvalId, _input, _auditContext, resolver) {
+        await resolver?.('approval-complete')
+        return createApprovalRequestFixture({ status: 'approved' })
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          relations: [{ sourceWorkItemId: workItemId, targetWorkItemId: 'open-child', type: 'child' }],
+          graphRevision: 2,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/issue-1/approvals/approval-1/decisions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approve', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'WorkItemOpenChildren' })
 })
 
 test('does not project a Work Item when an approval decision has no completion transition', async () => {

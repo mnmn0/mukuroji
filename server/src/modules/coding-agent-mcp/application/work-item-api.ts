@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, PublicWorkItemEffort, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -253,7 +253,19 @@ export interface AgentWorkItemApi {
    * the task predates keys), or `undefined` when the server predates the endpoint.
    */
   taskKey(id: string): Promise<AgentTaskKey | undefined>
+  /**
+   * Reads where a task sits in its Team's Work Item tree.
+   * @param id - Task ID.
+   * @returns The parent, children, and WBS number, or `undefined` when the server predates the endpoint.
+   */
+  hierarchy(id: string): Promise<AgentTaskHierarchy | undefined>
 }
+
+/** Parent, children, and WBS number of a task, as get_task shows them. */
+export type AgentTaskHierarchy = Pick<
+  PublicWorkItemHierarchy,
+  'parentWorkItemId' | 'childWorkItemIds' | 'wbsNumber'
+>
 
 /** Key of a task together with the creation time that identifies which Work Item it belongs to. */
 export type AgentTaskKey = {

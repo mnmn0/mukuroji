@@ -2,9 +2,17 @@ import type {
   CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyedMutator } from 'swr'
 import { TeamIssuesApiError } from '../../issues/api'
+import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../issues/mutations/confirmParentCompletion'
+import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { updateWorkspaceTaskRemote } from '../../issues/mutations/updateWorkspaceTask'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -35,17 +43,32 @@ export type UseWorkspaceTaskStatusMutationOptions = {
   tasks: readonly CanonicalWorkItem[]
 }
 
+/** Options for one My Tasks status move. */
+export type WorkspaceTaskStatusMoveOptions = {
+  /**
+   * Whether `errorMessage` reports a refusal to complete a parent with open children. A caller
+   * that reports the refusal in its own action result passes `false`, so the reason is not
+   * shown and read out twice. Defaults to `true`.
+   */
+  reportOpenChildrenRefusal?: boolean
+}
+
 /**
  * Return value for the My Tasks status mutation controller.
  */
 export type WorkspaceTaskStatusMutationController = {
   /** Latest user-facing optimistic update error message. */
   errorMessage?: string
-  /** Moves a Work Item to a validated workflow status and returns its persisted snapshot. */
+  /**
+   * Moves a Work Item to a validated workflow status and returns its persisted snapshot, the
+   * cancelled outcome when the person declined the parent completion warning, or `undefined` when
+   * the move was not applied.
+   */
   moveTaskStatus?: (
     task: CanonicalWorkItem,
     workflowStatusId: string,
-  ) => Promise<CanonicalWorkItem | undefined>
+    options?: WorkspaceTaskStatusMoveOptions,
+  ) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | undefined>
 }
 
 /**
@@ -66,10 +89,17 @@ export function useWorkspaceTaskStatusMutation({
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const pendingTaskMoveKeysRef = useRef(new Set<string>())
   const [errorMessage, setErrorMessage] = useState<string>()
+  // Latest list, read after the parent completion warning, which can stay open while the list
+  // refreshes.
+  const latestTasksRef = useRef(tasks)
+  useEffect(() => {
+    latestTasksRef.current = tasks
+  }, [tasks])
 
   const moveTaskStatus = useCallback(async (
     task: CanonicalWorkItem,
     workflowStatusId: string,
+    options?: WorkspaceTaskStatusMoveOptions,
   ) => {
     const canonicalTask = tasks.find(
       (candidate) => createWorkspaceTaskKey(candidate) === createWorkspaceTaskKey(task),
@@ -99,9 +129,31 @@ export function useWorkspaceTaskStatusMutation({
     if (pendingTaskMoveKeysRef.current.has(taskKey)) {
       return
     }
+    // Hold the move while the person decides, so a second drag cannot start another one.
+    pendingTaskMoveKeysRef.current.add(taskKey)
+    const confirmed = await confirmParentCompletion({
+      workItem: canonicalTask,
+      nextStatusCategory: nextStatus.category,
+      configuration,
+      accessToken,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+    })
+    if (!confirmed) {
+      pendingTaskMoveKeysRef.current.delete(taskKey)
+      return CANCELLED_TEAM_ISSUE_UPDATE
+    }
+    // A newer revision that arrived while the person decided would make this request stale, so
+    // it is reported as the conflict the server would return instead of being sent.
+    const latestTask = latestTasksRef.current.find((candidate) =>
+      createWorkspaceTaskKey(candidate) === taskKey
+    )
+    if (!latestTask || latestTask.revision !== canonicalTask.revision) {
+      pendingTaskMoveKeysRef.current.delete(taskKey)
+      setErrorMessage(t('workspace.myTasks.conflict'))
+      throw new TeamIssuesApiError(409, t('workspace.myTasks.conflict'), 'WorkItemRevisionConflict')
+    }
 
     setErrorMessage(undefined)
-    pendingTaskMoveKeysRef.current.add(taskKey)
     const nextTasks = updateWorkspaceTaskStatus(
       tasks,
       canonicalTask,
@@ -136,14 +188,26 @@ export function useWorkspaceTaskStatusMutation({
       )
       return updatedTask
     } catch (error) {
+      // Only this attempt's optimistic status is undone, and only while the row still shows it;
+      // a newer row read meanwhile is kept as it is.
       await mutateWorkItems(
-        (currentTasks = nextTasks) => replaceWorkspaceTask(currentTasks, canonicalTask),
+        (currentTasks = nextTasks) => currentTasks.some((candidate) =>
+          createWorkspaceTaskKey(candidate) === taskKey &&
+          candidate.revision === canonicalTask.revision &&
+          candidate.workflowStatusId === workflowStatusId
+        )
+          ? replaceWorkspaceTask(currentTasks, canonicalTask)
+          : currentTasks,
         { revalidate: false },
       )
 
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         setErrorMessage(t('workspace.myTasks.conflict'))
         await mutateWorkItems()
+      } else if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
+        if (options?.reportOpenChildrenRefusal !== false) {
+          setErrorMessage(t('issues.error.openChildren'))
+        }
       } else {
         setErrorMessage(t('workspace.myTasks.moveError'))
       }

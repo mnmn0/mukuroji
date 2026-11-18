@@ -168,6 +168,11 @@ export type TaskViewDisplayOptions = {
   wrapText?: boolean
   /** Whether assignee avatars are rendered alongside assignee names. */
   showAssigneeAvatars?: boolean
+  /**
+   * Whether a table renders Work Items as an indented, collapsible outline in hierarchy (WBS)
+   * order with WBS numbers, instead of the view's sort order.
+   */
+  showOutline?: boolean
 }
 
 /** Reproducible layout shared by every task view surface. */
