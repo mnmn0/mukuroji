@@ -2495,13 +2495,17 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
 
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
+  // Read the reopen fields before toMatchObject below can replace them with matchers.
   const firstItem = Array.isArray(transactItems) ? transactItems[0] : undefined
   const reopenUpdate = isUnknownRecord(firstItem) && isUnknownRecord(firstItem.Update)
-    ? structuredClone(firstItem.Update) as {
-        UpdateExpression?: string
-        ExpressionAttributeValues?: Record<string, unknown>
-      }
+    ? firstItem.Update
     : undefined
+  const reopenUpdateExpression = reopenUpdate?.UpdateExpression
+  const reopenValues = isUnknownRecord(reopenUpdate?.ExpressionAttributeValues)
+    ? reopenUpdate.ExpressionAttributeValues
+    : undefined
+  const reopenedAt = reopenValues?.[':reopenedAt']
+  const reopenUpdatedAt = reopenValues?.[':updatedAt']
   expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
     Update: {
       ExpressionAttributeNames: expect.objectContaining({
@@ -2514,9 +2518,12 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
     },
   })
   // Reopening restarts overdue escalation, which is keyed by this time.
-  expect(reopenUpdate?.UpdateExpression).toContain('#reopenedAt = :reopenedAt')
-  expect(reopenUpdate?.ExpressionAttributeValues?.[':reopenedAt'])
-    .toBe(reopenUpdate?.ExpressionAttributeValues?.[':updatedAt'])
+  if (typeof reopenUpdateExpression !== 'string') throw new Error('Expected the update expression')
+  expect(reopenUpdateExpression).toContain('#reopenedAt = :reopenedAt')
+  if (typeof reopenedAt !== 'string' || typeof reopenUpdatedAt !== 'string') {
+    throw new Error('Expected the reopen and update timestamps')
+  }
+  expect(reopenedAt).toBe(reopenUpdatedAt)
   expect(Array.isArray(transactItems)
     ? transactItems.find((item) => {
         if (!isUnknownRecord(item) || !isUnknownRecord(item.Put)) return false

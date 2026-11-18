@@ -450,6 +450,12 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.includes('assign')) {
     return 'workspace.inbox.event.assignment'
   }
+  if (normalizedEventType.includes('health-degraded')) {
+    return 'workspace.inbox.event.healthDegraded'
+  }
+  if (normalizedEventType === 'planning-update.published') {
+    return 'workspace.inbox.event.healthUpdate'
+  }
   if (normalizedEventType.includes('escalation')) {
     return 'workspace.inbox.event.escalation'
   }
@@ -495,6 +501,15 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   }
   if (normalizedReason.includes('watch')) {
     return t('workspace.inbox.reason.watcher')
+  }
+  if (normalizedReason === 'project-member') {
+    return t('workspace.inbox.reason.projectMember')
+  }
+  if (normalizedReason === 'update-author') {
+    return t('workspace.inbox.reason.updateAuthor')
+  }
+  if (normalizedReason === 'update-owner') {
+    return t('workspace.inbox.reason.updateOwner')
   }
   if (normalizedReason === 'creator') {
     return t('workspace.inbox.reason.creator')
@@ -556,7 +571,8 @@ function resolveEventToneClassName(eventType: string) {
     eventKey === 'workspace.inbox.event.automation' ||
     eventKey === 'workspace.inbox.event.overdue' ||
     eventKey === 'workspace.inbox.event.overdueReminder' ||
-    eventKey === 'workspace.inbox.event.escalation'
+    eventKey === 'workspace.inbox.event.escalation' ||
+    eventKey === 'workspace.inbox.event.healthDegraded'
   ) {
     return 'border-red-200 bg-red-50 text-fg-red-700'
   }
