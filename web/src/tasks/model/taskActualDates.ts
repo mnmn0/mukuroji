@@ -73,7 +73,7 @@ export type TaskActualDateUndo =
  *
  * @param before - Work Item before the update.
  * @param after - Work Item returned by the update.
- * @param patch - Forward patch; its own actual date corrections are reversed by the inverse patch.
+ * @param patch - Forward patch; when it corrects either actual date, the undo restores both earlier dates.
  * @param canCorrectActualDates - Whether the current user may correct actual dates.
  * @param today - Current local date in the Work Item's calendar timezone.
  * @returns Whether the update stays undoable and any dates to restore explicitly.
@@ -86,7 +86,14 @@ export function resolveTaskActualDateUndo(
   today: string,
 ): TaskActualDateUndo {
   if (patch.actualStartDate !== undefined || patch.actualEndDate !== undefined) {
-    return { reversible: true }
+    // A correction of one date may also move the other on the server, so restore both.
+    return {
+      reversible: true,
+      patch: {
+        actualStartDate: before.actualStartDate ?? null,
+        actualEndDate: before.actualEndDate ?? null,
+      },
+    }
   }
   const reversed = applyWorkItemStatusTransitionToActualDates(
     {

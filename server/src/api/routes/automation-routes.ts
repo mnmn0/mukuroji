@@ -38,6 +38,7 @@ import {
   readAssignedProjectId,
   readTeamIssueAssigneeUserId,
   applyWorkItemStatusTransitionToActualDates,
+  normalizeWorkItemSchedule,
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
   type UpdateTeamIssueRequestBody,
@@ -1107,17 +1108,23 @@ function createApiBulkOperationAdapter(
         readAssignedProjectId(configuredBody.assignedProjectId) !==
           loaded.detail.issue.assignedProjectId
       const restoresArchive = typeof configuredBody.archivedAt === 'string'
+      // One instant dates both the prediction and the write, so a day boundary between them
+      // cannot change the restored completion date.
+      const actualDateTransitionAt = new Date().toISOString()
       const actualDateCorrection = actualDateRequest.correction
         ? await resolveBulkUndoActualDateCorrection(
             principal,
             loaded,
             configuredBody,
             actualDateRequest.correction,
+            actualDateTransitionAt,
           )
         : undefined
-      let mutationBody: UpdateTeamIssueRequestBody = actualDateCorrection
-        ? { ...configuredBody, actualDateCorrection }
-        : configuredBody
+      let mutationBody: UpdateTeamIssueRequestBody = {
+        ...configuredBody,
+        ...(actualDateRequest.correction ? { actualDateTransitionAt } : {}),
+        ...(actualDateCorrection ? { actualDateCorrection } : {}),
+      }
       if (changesSchedule || restoresArchive || changesAssignedProject) {
         try {
           mutationBody = {
@@ -1200,6 +1207,7 @@ const workflowStatusCategories: readonly WorkflowStatusCategory[] = [
  * @param loaded - Current Work Item and Team context, read for the undo.
  * @param configuredBody - Undo body after the Work Item configuration resolved the target status.
  * @param captured - Actual dates captured before the Bulk edit; null means no date.
+ * @param transitionAt - Instant that dates the undo's status transition, also sent with the write.
  * @returns The correction to send with the undo, or undefined when none is needed.
  * @throws AutomationError when a non-manager undo would lose a recorded completion date.
  */
@@ -1212,6 +1220,7 @@ async function resolveBulkUndoActualDateCorrection(
   },
   configuredBody: UpdateTeamIssueRequestBody,
   captured: { actualStartDate?: string | null, actualEndDate?: string | null },
+  transitionAt: string,
 ): Promise<{ actualStartDate: string | null, actualEndDate: string | null } | undefined> {
   const current = loaded.detail.issue
   const before = {
@@ -1228,9 +1237,10 @@ async function resolveBulkUndoActualDateCorrection(
     },
     current.statusCategory,
     nextStatusCategory,
+    // The write records the date in the calendar of the schedule the undo restores.
     workItemScheduleInstantToLocalDate(
-      new Date().toISOString(),
-      current.schedule.calendarPolicy,
+      transitionAt,
+      readBulkUndoRestoredSchedule(configuredBody, current).calendarPolicy,
     ),
   )
   const reversedEnd = reversed.actualEndDate ?? null
@@ -1255,6 +1265,26 @@ async function resolveBulkUndoActualDateCorrection(
     'BulkUndoUnavailable',
     'Undoing this status change would replace the recorded actual end date. Ask a Project or Team manager to undo it.',
   )
+}
+
+/**
+ * Reads the schedule a Bulk undo leaves on the Work Item.
+ *
+ * @param configuredBody - Undo body after the Work Item configuration resolved it.
+ * @param current - Current Work Item.
+ * @returns The restored schedule, or the current one when the undo does not restore a valid schedule.
+ */
+function readBulkUndoRestoredSchedule(
+  configuredBody: UpdateTeamIssueRequestBody,
+  current: TeamIssueResponseItem,
+) {
+  if (!('schedule' in configuredBody) || configuredBody.schedule === undefined) return current.schedule
+  try {
+    return normalizeWorkItemSchedule(configuredBody.schedule)
+  } catch {
+    // An invalid schedule fails the write itself, so the prediction falls back to the current one.
+    return current.schedule
+  }
 }
 
 function isExpectedBulkMutationAuditProof(

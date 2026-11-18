@@ -743,7 +743,8 @@ export function TaskScreen({
       after,
       input,
       canCorrectActualDates?.(before) ?? false,
-      taskScheduleInstantToLocalDate(new Date(), after.schedule.calendarPolicy),
+      // The undo restores the earlier schedule, so its calendar dates the reverse transition.
+      taskScheduleInstantToLocalDate(new Date(), before.schedule.calendarPolicy),
     )
     if (!actualDateUndo.reversible) return undefined
     return {

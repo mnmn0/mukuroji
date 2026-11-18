@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createWorkItemKeyPath } from '../../shared/routing/paths'
 
@@ -22,14 +22,25 @@ type CopyFeedback = 'key' | 'link' | 'failed'
  */
 export function WorkItemKeyActions({ workItemKey, t, writeText = writeToClipboard }: WorkItemKeyActionsProps) {
   const [feedback, setFeedback] = useState<CopyFeedback>()
+  const latestCopy = useRef(0)
   /**
-   * Copies text and shows whether it worked.
+   * Copies text and shows whether it worked. Only the latest copy updates the feedback,
+   * so a slow earlier copy cannot replace the result of a later one.
    *
    * @param text - Text to put on the clipboard.
    * @param done - Feedback to show when the copy succeeds.
    */
   const copy = (text: string, done: CopyFeedback) => {
-    writeText(text).then(() => setFeedback(done), () => setFeedback('failed'))
+    const copyId = ++latestCopy.current
+    /**
+     * Shows a copy result when it belongs to the latest copy.
+     *
+     * @param result - Feedback for this copy.
+     */
+    const show = (result: CopyFeedback) => {
+      if (copyId === latestCopy.current) setFeedback(result)
+    }
+    writeText(text).then(() => show(done), () => show('failed'))
   }
   const feedbackMessage = feedback === 'key'
     ? t('issues.key.copied')

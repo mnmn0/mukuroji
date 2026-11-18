@@ -1322,7 +1322,8 @@ export function TaskDetailPane({
               void submitIssueUpdate(patch)
             }}
             t={t}
-            task={task}
+            // The loaded detail is newer than the list row, so the panel shows its dates.
+            task={issue ?? task}
           />
           </>
         )

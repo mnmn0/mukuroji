@@ -1215,12 +1215,25 @@ export function TaskPage() {
 
   /** Checks one concrete Work Item against the Team-qualified task-view write scopes. */
   /**
-   * Mirrors the server rule for correcting actual dates: a manager of the assigned Project or of
-   * its Team may correct them.
+   * Mirrors the server rule for correcting actual dates: a manager of the assigned Project may
+   * correct them, and a Team manager may correct an unassigned Work Item. A manager of another
+   * Project in the same Team may not. Direct Team manager grants are not visible here, so those
+   * users correct through the API only.
    */
-  const canCorrectTaskActualDates = (task: Pick<CanonicalWorkItem, 'teamId'>) =>
-    canManageProjectMembers ||
-    (canMutateContent && canManagePlanningScope(user, { teamId: task.teamId }, planningAccess))
+  const canCorrectTaskActualDates = (
+    task: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
+  ) =>
+    canMutateContent && (
+      Boolean(user?.isSystemAdmin) ||
+      (task.assignedProjectId === projectId && canManageProjectMembers) ||
+      canManagePlanningScope(
+        user,
+        task.assignedProjectId
+          ? { teamId: task.teamId, projectId: task.assignedProjectId }
+          : { teamId: task.teamId },
+        planningAccess,
+      )
+    )
 
   const canMutateProjectTaskTarget = (
     target: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,

@@ -409,6 +409,23 @@ describe('task-view surface adapters', () => {
     ])
   })
 
+  test('keeps the completion-delay sort within the saved-view rule limit', () => {
+    const fields = ['dueDate', 'priority', 'title', 'status', 'updatedAt', 'createdAt', 'assignee', 'startDate', 'actualStartDate', 'actualEndDate'] as const
+    const base = createProjectDefinition()
+    const definition = {
+      ...base,
+      layout: { ...base.layout, sort: fields.map((field) => ({ direction: 'asc' as const, field })) },
+    } as TaskViewDefinition
+    const delayed = projectStateToTaskViewDefinition(definition, {
+      ...taskViewDefinitionToProjectState(definition),
+      sortOrder: 'completion-delay-desc',
+    })
+
+    expect(delayed.layout.sort).toHaveLength(10)
+    expect(delayed.layout.sort[0]).toEqual({ direction: 'desc', field: 'completionDelayDays' })
+    expect(delayed.layout.sort.at(-1)).toEqual({ direction: 'asc', field: 'actualStartDate' })
+  })
+
   test('sorts by actual dates and completion delay through persisted sort rules', () => {
     const late = { ...taskViewStoryTasks[0], actualStartDate: '2026-06-01', actualEndDate: '2026-06-20' }
     const onTime = { ...taskViewStoryTasks[1], actualStartDate: '2026-06-02', actualEndDate: taskViewStoryTasks[1].dueDate }

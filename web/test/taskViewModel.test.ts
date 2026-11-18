@@ -379,9 +379,38 @@ describe('task plan-versus-actual model', () => {
     })
     expect(resolveTaskActualDateUndo(unstarted, started, statusPatch, false, '2026-07-25'))
       .toEqual({ reversible: true })
-    // Explicit corrections are reversed by the generic inverse patch.
-    expect(resolveTaskActualDateUndo(completed, completed, { actualStartDate: '2026-07-09' }, false, '2026-07-25'))
-      .toEqual({ reversible: true })
+    // A correction of one date restores both earlier dates, since the server may move the other.
+    const corrected = createTask({ actualStartDate: '2026-07-09', statusCategory: 'completed' })
+    expect(resolveTaskActualDateUndo(completed, corrected, { actualStartDate: '2026-07-09' }, false, '2026-07-25'))
+      .toEqual({ reversible: true, patch: { actualStartDate: '2026-07-10', actualEndDate: '2026-07-20' } })
+    expect(resolveTaskActualDateUndo(unstarted, started, { actualStartDate: '2026-07-25' }, true, '2026-07-25'))
+      .toEqual({ reversible: true, patch: { actualStartDate: null, actualEndDate: null } })
+  })
+
+  test('restores both actual dates when undoing a reopen that also corrected the start', () => {
+    const completed = createTask({
+      actualEndDate: '2026-07-20',
+      actualStartDate: '2026-07-10',
+      statusCategory: 'completed',
+      workflowStatusId: 'done',
+    })
+    const forward = { workflowStatusId: 'active', actualStartDate: '2026-07-09' }
+    const reopened = createTask({ actualStartDate: '2026-07-09', statusCategory: 'started', workflowStatusId: 'active' })
+
+    // Undo happens on a later day, so the reverse transition alone would record 2026-07-25.
+    const undo = resolveTaskActualDateUndo(completed, reopened, forward, true, '2026-07-25')
+    expect(undo.reversible).toBeTrue()
+    const inversePatch = { ...createTaskInversePatch(completed, forward), ...(undo.reversible ? undo.patch : {}) }
+
+    expect(inversePatch).toEqual({
+      workflowStatusId: 'done',
+      actualStartDate: '2026-07-10',
+      actualEndDate: '2026-07-20',
+    })
+    expect(applyTaskPatchOptimistically(reopened, inversePatch)).toMatchObject({
+      actualStartDate: '2026-07-10',
+      actualEndDate: '2026-07-20',
+    })
   })
 
   test('applies an actual date correction optimistically and builds its undo patch', () => {
