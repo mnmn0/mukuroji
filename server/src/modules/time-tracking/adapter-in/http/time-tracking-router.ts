@@ -24,6 +24,8 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   readBearerAccessToken(context: Context): string | undefined
   /** Resolves a bearer token to an authenticated Workspace principal. */
   authenticate(accessToken: string, context: Context): Promise<Principal>
+  /** Rejects principals, such as Workspace guests, that may not change business data. */
+  requireWrite(principal: Principal): void | Promise<void>
   /** Returns whether the principal can read, write, or manage a Team. */
   requireTeamPermission(principal: Principal, teamId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Returns whether the principal may view confidential rates and costs. */
@@ -90,13 +92,20 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   router.get('/api/teams/:teamId/time-entries', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const requestedUserId = context.req.query('userId')?.trim() || undefined
-      const userId = canManage ? requestedUserId : principal.userKey
-      const projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+      const accessibleProjectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
       const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      const scope = resolveEntryListScope(
+        principal.userKey,
+        requestedUserId,
+        canManage,
+        accessibleProjectIds,
+        managedProjectIds,
+      )
+      const projectIds = scope.projectIds
       const entries = await dependencies.getTimeTracking().listEntries({
         workspaceId: principal.directoryId,
         teamId,
-        userId,
+        userId: scope.userId,
         ...(context.req.query('from') ? { from: context.req.query('from') } : {}),
         ...(context.req.query('to') ? { to: context.req.query('to') } : {}),
         ...(context.req.query('status') ? { status: readStatus(context.req.query('status')) } : {}),
@@ -133,12 +142,16 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           body.hourlyRateMinor === undefined ? 'member' : 'manager',
         )
       }
+      const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      const canManageEntry = canManage &&
+        canManageProject(managedProjectIds, currentProjectId) &&
+        canManageProject(managedProjectIds, nextProjectId)
       const entry = await dependencies.getTimeTracking().updateEntry({
         workspaceId: principal.directoryId,
         teamId,
         entryId: readRequiredString(context.req.param('entryId'), 'Time entry ID'),
         actorUserId: principal.userKey,
-        canManageRates: canManage,
+        canManageRates: canManageEntry,
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
         ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
@@ -150,7 +163,6 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.hourlyRateMinor === null ? { hourlyRateMinor: null } : body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
-      const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
     })
   })
@@ -191,7 +203,11 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         const body = asRecord(await dependencies.readJson(context.req))
         const from = readRequiredString(body.from, 'Period start')
         const to = readRequiredString(body.to, 'Period end')
-        const projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+        const accessibleProjectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+        const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+        const projectIds = action === 'submit'
+          ? accessibleProjectIds
+          : intersectProjectIds(accessibleProjectIds, managedProjectIds)
         const entries = await dependencies.getTimeTracking().listAllEntries({
           workspaceId: principal.directoryId,
           teamId,
@@ -225,7 +241,6 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
             failedEntryIds.push(entry.id)
           }
         }
-        const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
         return context.json({
           count: updated.length,
           failedEntryIds,
@@ -245,7 +260,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       )
       await dependencies.verifyWorkItem(principal, teamId, entry.workItemId, 'viewer')
       if (entry.projectId) await dependencies.verifyProject(principal, teamId, entry.projectId, 'viewer')
-      if (!canManage && entry.userId !== principal.userKey) {
+      const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      if (entry.userId !== principal.userKey && !(canManage && canManageProject(managedProjectIds, entry.projectId))) {
         throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner or a manager may view its history.')
       }
       const history = await dependencies.getTimeTracking().listHistory(principal.directoryId, teamId, entry.id)
@@ -415,7 +431,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   return router
 }
 
-/** Runs an operation after bearer authentication. */
+/** Runs an operation after bearer authentication and, for mutations, the business write check. */
 async function withAuthenticated<Principal extends TimeTrackingPrincipal>(
   context: Context,
   dependencies: TimeTrackingRouterDependencies<Principal>,
@@ -424,7 +440,9 @@ async function withAuthenticated<Principal extends TimeTrackingPrincipal>(
   const accessToken = dependencies.readBearerAccessToken(context)
   if (!accessToken) return context.json({ message: 'Bearer token is required.' }, 401)
   try {
-    return await operation(await dependencies.authenticate(accessToken, context))
+    const principal = await dependencies.authenticate(accessToken, context)
+    if (context.req.method !== 'GET' && context.req.method !== 'HEAD') await dependencies.requireWrite(principal)
+    return await operation(principal)
   } catch (error) {
     return dependencies.mapError(context, error)
   }
@@ -487,6 +505,65 @@ function readReportInput(
     ...(budgetScope ? { budgetScope } : {}),
     ...(budgetScopeId ? { budgetScopeId } : {}),
   }
+}
+
+/**
+ * Returns whether the principal manages the Project that owns a time entry.
+ *
+ * @param managedProjectIds - Managed Project IDs, or `undefined` for a principal who manages every Project.
+ * @param projectId - Project of the entry; entries without a Project are managed only by unrestricted principals.
+ * @returns `true` when the principal may manage time recorded on the Project.
+ */
+function canManageProject(managedProjectIds: ReadonlySet<string> | undefined, projectId: string | undefined): boolean {
+  return managedProjectIds === undefined || (projectId !== undefined && managedProjectIds.has(projectId))
+}
+
+/**
+ * Narrows the visible Project allowlist to the Projects the principal manages.
+ *
+ * @param accessibleProjectIds - Visible Project IDs, or `undefined` when every Project is visible.
+ * @param managedProjectIds - Managed Project IDs, or `undefined` when every Project is managed.
+ * @returns The Projects that are both visible and managed, or `undefined` when neither set restricts.
+ */
+function intersectProjectIds(
+  accessibleProjectIds: ReadonlySet<string> | undefined,
+  managedProjectIds: ReadonlySet<string> | undefined,
+): ReadonlySet<string> | undefined {
+  if (managedProjectIds === undefined) return accessibleProjectIds
+  if (accessibleProjectIds === undefined) return managedProjectIds
+  return new Set([...managedProjectIds].filter((projectId) => accessibleProjectIds.has(projectId)))
+}
+
+/** User and Project filters applied to a time entry list request. */
+type EntryListScope = {
+  /** Owner filter; `undefined` lists every user in the allowed Projects. */
+  userId: string | undefined
+  /** Project allowlist; `undefined` lists every Project in the Team. */
+  projectIds: ReadonlySet<string> | undefined
+}
+
+/**
+ * Chooses which entries a list request may return.
+ *
+ * Other users' entries are listed only from the Projects the principal manages,
+ * so managing one Project does not expose time recorded on another.
+ *
+ * @param actorUserId - Member key of the requesting principal.
+ * @param requestedUserId - Owner filter from the query, if any.
+ * @param canManage - Whether the principal manages any Project of the Team.
+ * @param accessibleProjectIds - Visible Project IDs, or `undefined` when every Project is visible.
+ * @param managedProjectIds - Managed Project IDs, or `undefined` when every Project is managed.
+ * @returns The owner and Project filters for the repository query.
+ */
+function resolveEntryListScope(
+  actorUserId: string,
+  requestedUserId: string | undefined,
+  canManage: boolean,
+  accessibleProjectIds: ReadonlySet<string> | undefined,
+  managedProjectIds: ReadonlySet<string> | undefined,
+): EntryListScope {
+  if (requestedUserId === actorUserId || !canManage) return { userId: actorUserId, projectIds: accessibleProjectIds }
+  return { userId: requestedUserId, projectIds: intersectProjectIds(accessibleProjectIds, managedProjectIds) }
 }
 
 /** Removes confidential money fields for general Workspace members. */

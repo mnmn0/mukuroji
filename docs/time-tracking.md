@@ -23,6 +23,12 @@ All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`.
 
 Mutation endpoints accept an optional `Idempotency-Key`; when supplied, the shared durable receipt store binds it to the actor, operation, and request fingerprint, then replays the stored result for an equivalent retry. An in-progress duplicate receives a stable conflict response.
 
+## Write access and manager scope
+
+Workspace guests have read-only access: every non-`GET` time tracking route (entries, timers, timesheet actions, and budgets) rejects them with `WorkspaceRoleDenied`, whatever Project role they hold.
+
+Managing time is decided per Project, not per Team. A caller who manages one Project of a Team can edit other members' entries, list their entries and history, run the week-wide approve / reject / lock actions, and read a Project budget only for the Projects they manage; approving, rejecting, or locking a single entry also requires managing its Project. Moving an entry while editing another member's time, or changing a rate, requires managing both the current and the new Project. Other members' entries without a Project can be edited, listed, and read in history only by system administrators. A direct enterprise Team grant with `teams.manage` manages every Project of the Team.
+
 ## Confidential cost fields
 
 Members can record billable status and duration but cannot set or read `hourlyRateMinor` or `actualCostMinor`. The API resolves the caller's Work Item Project assignment before persisting an entry and filters reports by the caller's Project allowlist. Confidential money fields are evaluated against the Projects the caller manages for each entry; only authorized managers receive them in entry, summary, and export responses. Mixed-currency reports expose currency-keyed totals rather than combining minor units.

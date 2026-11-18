@@ -1013,9 +1013,16 @@ export class TimeTrackingService {
     })
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
-    const budget = input.budgetScope === 'project' && input.budgetScopeId
-      ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
-      : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
+    const includeBudget = input.includeCosts && (
+      input.budgetScope !== 'project' ||
+      input.managedProjectIds === undefined ||
+      (input.budgetScopeId !== undefined && input.managedProjectIds.has(input.budgetScopeId))
+    )
+    const budget = !includeBudget
+      ? undefined
+      : input.budgetScope === 'project' && input.budgetScopeId
+        ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
+        : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
     const totalEstimateMinutes = [...new Set(entries.map((entry) => entry.workItemId))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostByCurrency = input.includeCosts
@@ -1034,7 +1041,7 @@ export class TimeTrackingService {
       ...(totalActualCostByCurrency !== undefined && Object.keys(totalActualCostByCurrency).length === 1
         ? { totalActualCostMinor: Object.values(totalActualCostByCurrency)[0] }
         : {}),
-      ...(input.includeCosts && budget ? { budget } : {}),
+      ...(budget ? { budget } : {}),
       costsRedacted: !input.includeCosts,
     }
   }

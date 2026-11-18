@@ -176,6 +176,37 @@ test('uses Team teams.write access for time-entry creation', async () => {
   })
 })
 
+test('treats Team teams.manage access as managing every Project for time entry costs', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess([
+      'teams.read',
+      'teams.write',
+      'teams.manage',
+    ])
+
+    const response = await app.request('/api/teams/core-team/time-entries', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workItemId: 'onboarding-friction',
+        startAt: '2026-08-10T09:00:00.000Z',
+        endAt: '2026-08-10T10:00:00.000Z',
+        billable: true,
+        currency: 'USD',
+        hourlyRateMinor: 4_000,
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({
+      entry: { projectId: 'refero', hourlyRateMinor: 4_000, actualCostMinor: 4_000 },
+    })
+  })
+})
+
 test('uses Team teams.manage access for capacity request creation', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     const authorization = await configureEnterpriseTeamAccess([
