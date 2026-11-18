@@ -469,6 +469,10 @@ export function TeamIssueScreen({
   )
   const [outlineStatusMessage, setOutlineStatusMessage] = useState<string>()
   const outlineMovePendingRef = useRef(false)
+  const issueViewPanelRef = useRef<HTMLDivElement>(null)
+  // Set when the person retries the hierarchy from the retry button, which disappears once the
+  // read succeeds; focus then moves to the loaded view instead of falling back to the page.
+  const outlineRetryFocusPendingRef = useRef(false)
   const isOutlineRequested = viewMode === 'table' &&
     (taskViewPresentation?.display.showOutline ?? false) &&
     !taskViewPresentation?.groupBy
@@ -479,6 +483,15 @@ export function TeamIssueScreen({
       : undefined,
     [collapsedOutlineIds, outlineNodes, visibleIssues],
   )
+  useEffect(() => {
+    if (!outlineRows || !outlineRetryFocusPendingRef.current) return
+    outlineRetryFocusPendingRef.current = false
+    // Only reclaim focus the retry button lost; focus the person moved elsewhere stays put.
+    const activeElement = document.activeElement
+    if (activeElement === null || activeElement === document.body) {
+      issueViewPanelRef.current?.focus()
+    }
+  }, [outlineRows])
   // Rows hidden under a collapsed parent are left out of keyboard navigation and selection.
   const navigableIssues = useMemo(
     () => outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
@@ -678,6 +691,7 @@ export function TeamIssueScreen({
         conflict: t('tasks.action.conflict'),
         failed: t('taskViews.action.failed'),
         unavailable: teamActionDisabledReasons.unavailable,
+        openChildren: t('issues.error.openChildren'),
       },
     ) ?? createFailedTaskActionResult(
       context.actionId,
@@ -1453,8 +1467,20 @@ export function TeamIssueScreen({
                   <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3" data-testid="team-issue-outline-unavailable">
                     <p className="text-sm font-semibold text-fg-amber-800">{issueOutline.errorMessage}</p>
                     {issueOutline.onRetry ? (
-                      <button className="workbench-button-secondary min-h-9 px-3" onClick={issueOutline.onRetry} type="button">
-                        {t('issues.outline.retry')}
+                      <button
+                        aria-busy={issueOutline.isRetrying ? true : undefined}
+                        // aria-disabled rather than disabled keeps focus on the button while the
+                        // read runs, so a failed retry leaves the person where they were.
+                        aria-disabled={issueOutline.isRetrying ? true : undefined}
+                        className="workbench-button-secondary min-h-9 px-3 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+                        onClick={(event) => {
+                          if (issueOutline.isRetrying) return
+                          outlineRetryFocusPendingRef.current = document.activeElement === event.currentTarget
+                          issueOutline.onRetry?.()
+                        }}
+                        type="button"
+                      >
+                        {issueOutline.isRetrying ? t('issues.outline.retrying') : t('issues.outline.retry')}
                       </button>
                     ) : null}
                   </div>
@@ -1473,7 +1499,9 @@ export function TeamIssueScreen({
                 <div
                   aria-label={t(`issues.view.${viewMode}`)}
                   id={issueViewPanelId}
+                  ref={issueViewPanelRef}
                   role="region"
+                  tabIndex={-1}
                 >
                   {viewMode === 'table' ? (
                     <IssueTable

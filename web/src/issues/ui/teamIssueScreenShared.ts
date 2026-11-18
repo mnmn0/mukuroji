@@ -99,6 +99,8 @@ export type TeamIssueOutlineSource = {
   errorMessage?: string
   /** Reads the hierarchy again after a failed read. */
   onRetry?: () => void
+  /** Whether a retried read is in flight; the retry button ignores clicks meanwhile. */
+  isRetrying?: boolean
   /**
    * Saves a planned hierarchy move and refreshes the hierarchy.
    *

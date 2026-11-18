@@ -46,6 +46,8 @@ export type TeamIssueDirectStatusMoveMessages = {
   failed: string
   /** Message shown when a retained target or destination is no longer valid. */
   unavailable: string
+  /** Message shown when the Team refuses to complete a parent that has open children. */
+  openChildren: string
 }
 
 /**
@@ -140,6 +142,15 @@ export function executeTeamIssueDirectStatusMove(
 
   /** Converts a rejected direct mutation into the same canonical failure returned by detail Move. */
   const createMutationFailure = (error: unknown): WorkItemActionResult => {
+    if (hasTeamIssueErrorCode(error, 'WorkItemOpenChildren')) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'WorkItemOpenChildren',
+        'validation',
+        messages.openChildren,
+      )
+    }
     const conflict = isTeamIssueRevisionConflict(error)
     return createFailedTaskActionResult(
       context.actionId,
@@ -170,11 +181,22 @@ export function executeTeamIssueDirectStatusMove(
  * @returns Whether the failure has the canonical Work Item revision conflict code.
  */
 export function isTeamIssueRevisionConflict(error: unknown): boolean {
+  return hasTeamIssueErrorCode(error, 'WorkItemRevisionConflict')
+}
+
+/**
+ * Checks a Team Issue API error code preserved either directly or as a route-level error cause.
+ *
+ * @param error - Unknown Team Issue mutation failure.
+ * @param code - API error code to look for.
+ * @returns Whether the failure or its cause carries the code.
+ */
+function hasTeamIssueErrorCode(error: unknown, code: string): boolean {
   if (error instanceof TeamIssuesApiError) {
-    return error.code === 'WorkItemRevisionConflict'
+    return error.code === code
   }
   const cause = error instanceof Error ? error.cause : undefined
-  return cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict'
+  return cause instanceof TeamIssuesApiError && cause.code === code
 }
 
 /**

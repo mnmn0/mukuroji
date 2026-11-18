@@ -1655,6 +1655,42 @@ test('derives sorted relation projections without child rows for create and dele
   expect(store.graph()).toMatchObject({ revision: 3, edgeCount: 8 })
 })
 
+test('clears the child sibling rank when its parent link is deleted from either side', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('task', 'phase', 'parent')
+  store.seedRelation('phase', 'other-task', 'child')
+  store.seedGraph(1, 4)
+  const client = store.createClient()
+  /** Reads each Work Item endpoint's update expression, or `check` for a condition-only endpoint. */
+  const endpointExpressions = (index: number) =>
+    ((store.transactions[index]?.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>)
+      .filter((item) =>
+        item.Update?.TableName === 'work-items-table' ||
+        item.ConditionCheck?.TableName === 'work-items-table'
+      )
+      .map((item) => item.Update?.UpdateExpression ?? 'check')
+
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'task',
+    targetWorkItemId: 'phase',
+    type: 'parent',
+    expectedGraphRevision: 1,
+    sourceExpectedRevision: 3,
+    targetExpectedRevision: 2,
+  })
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'phase',
+    targetWorkItemId: 'other-task',
+    type: 'child',
+    expectedGraphRevision: 2,
+    sourceExpectedRevision: 2,
+    targetExpectedRevision: 4,
+  })
+
+  expect(endpointExpressions(0)).toEqual(['SET #relationIds = :relationIds REMOVE #hierarchyRank', 'check'])
+  expect(endpointExpressions(1)).toEqual(['check', 'SET #relationIds = :relationIds REMOVE #hierarchyRank'])
+})
+
 test('validates canonical derived relation IDs as bounded unique sorted keys', () => {
   expect(createWorkItemRelationIds([
     { sourceWorkItemId: 'source', targetWorkItemId: 'z', type: 'related' },
@@ -1893,6 +1929,8 @@ test('stores the sibling order rank with a parent change and reorders under the 
     Put: expect.objectContaining({
       TableName: 'configuration-table',
       Item: expect.objectContaining({ revision: 7, edgeCount: 2 }),
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
       ExpressionAttributeValues: { ':expectedRevision': 6 },
     }),
   })
@@ -1912,6 +1950,22 @@ test('stores the sibling order rank with a parent change and reorders under the 
     expectedGraphRevision: 8,
     hierarchyRank: 'k0',
   })).rejects.toMatchObject({ code: 'InvalidWorkItemHierarchyRank', status: 400 })
+})
+
+test('reports a reorder canceled by a concurrent write as retryable while the graph revision is unchanged', async () => {
+  const store = createInMemoryRelationStore({ cancelTransactions: true })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+
+  await expect(client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'm',
+  })).rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
+  expect(store.graph()).toMatchObject({ revision: 5 })
 })
 
 test('returns success without writing when a lost-response retry finds the requested parent', async () => {

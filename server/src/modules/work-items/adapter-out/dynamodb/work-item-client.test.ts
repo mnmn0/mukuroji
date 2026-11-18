@@ -613,11 +613,14 @@ test('DynamoDB hierarchy read stops at the limit and bounds the archived rows it
 
   const open = createClient([
     { Items: [createStoredItem('item-a', true), createStoredItem('item-b', false)], LastEvaluatedKey: lastKey('item-b') },
-    { Items: [createStoredItem('item-c', false), createStoredItem('item-d', false)], LastEvaluatedKey: lastKey('item-d') },
+    // The row after the limit is invalid; the read stops before parsing it.
+    { Items: [createStoredItem('item-c', false), { issueId: 'item-d' }], LastEvaluatedKey: lastKey('item-d') },
   ])
   const entries = await open.client.getTeamHierarchyEntries('workspace-1', 'core-team', 1)
   expect(entries.map((entry) => entry.issue.id)).toEqual(['item-b', 'item-c'])
   expect(open.sentInputs.map((input) => [input.ConsistentRead, input.Limit])).toEqual([[true, 20], [true, 18]])
+  expect(open.sentInputs[0]?.ExclusiveStartKey).toBeUndefined()
+  expect(open.sentInputs[1]?.ExclusiveStartKey).toEqual(lastKey('item-b'))
 
   const archived = createClient([
     {

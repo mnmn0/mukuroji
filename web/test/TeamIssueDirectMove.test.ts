@@ -18,6 +18,7 @@ const messages = {
   conflict: 'conflict',
   failed: 'failed',
   unavailable: 'unavailable',
+  openChildren: 'open children',
 }
 
 /** Creates a revision-bound Team Move context for direct Board entrance tests. */
@@ -149,6 +150,32 @@ describe('Team Issue direct Move action', () => {
       retryable: true,
     })
     expect(result.items[0]?.failure).toEqual(result.failure)
+  })
+
+  test('explains a completion the Team refuses because of open children', async () => {
+    const issue = teamIssueFixtures[0]
+    if (!issue) throw new Error('Expected one Team Issue fixture.')
+
+    const result = requireResult(await executeTeamIssueDirectStatusMove(
+      createMoveContext(issue.revision),
+      createMoveRequestSlot(issue.revision),
+      [issue],
+      teamWorkItemConfigurationFixture,
+      async () => {
+        throw new Error('open children', {
+          cause: new TeamIssuesApiError(409, 'open children', 'WorkItemOpenChildren'),
+        })
+      },
+      messages,
+    ))
+
+    expect(result.status).toBe('failed')
+    expect(result.failure).toEqual({
+      category: 'validation',
+      code: 'WorkItemOpenChildren',
+      message: 'open children',
+      retryable: false,
+    })
   })
 
   test('reports a Move the person declined as cancelled, not succeeded', async () => {

@@ -1501,12 +1501,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           expectedRevision: normalized.sourceExpectedRevision,
           assignedProjectId: normalized.sourceAssignedProjectId,
           relationIds: sourceRelationIds,
+          // A child that loses its parent drops the sibling rank that only meant something under it.
+          ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
         },
         {
           workItemId: normalized.targetWorkItemId,
           expectedRevision: normalized.targetExpectedRevision,
           assignedProjectId: normalized.targetAssignedProjectId,
           relationIds: targetRelationIds,
+          ...(normalized.type === 'child' ? { hierarchyRank: null } : {}),
         },
       ],
       edgeMutations: [
@@ -1726,6 +1729,23 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           409,
           'WorkItemRelationGraphConflict',
           'The Work Item changed. Reload and try again.',
+        )
+      }
+      if (isNamedError(error, 'TransactionCanceledException')) {
+        // Another write to the graph row in flight cancels this one without a failed condition.
+        // A revision that moved meanwhile is a conflict; otherwise the reorder can be retried.
+        const after = await this.getRelationGraphRevision(workspaceId, teamId)
+        if (after !== graph.revision) {
+          throw new WorkItemConfigurationError(
+            409,
+            'WorkItemRelationGraphConflict',
+            'The Work Item hierarchy changed. Reload and try again.',
+          )
+        }
+        throw new WorkItemConfigurationError(
+          503,
+          'WorkItemRelationUnavailable',
+          'The reorder was canceled by a concurrent write. Try again.',
         )
       }
       throw toPersistenceError(error)

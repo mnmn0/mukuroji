@@ -203,6 +203,15 @@ export function useFocusQueueActions({
     patch: { assigneeUserId?: string; workflowStatusId?: string },
   ): Promise<void> => {
     if (!accessToken) return
+    // Complete and status both change the workflow status, so one waits for the other on the
+    // same item instead of racing it, including while the completion confirm is open.
+    const competingStatusAction = action === 'complete' ? 'status' : action === 'status' ? 'complete' : undefined
+    if (
+      competingStatusAction !== undefined &&
+      pendingKeysRef.current.has(createPendingKey(item.id, competingStatusAction))
+    ) {
+      return
+    }
     const cacheScope = createFocusItemCacheRevalidationScope(item, true)
     await runItemAction(item.id, action, cacheScope, async () => {
       // Asked inside the action so the item stays pending, and a second click is ignored, while

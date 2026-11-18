@@ -61,6 +61,7 @@ export const issuesMessages = {
   'issues.outline.move.not-in-hierarchy': 'This Work Item is not in the hierarchy. Reload and try again.',
   'issues.outline.unavailable': 'The hierarchy could not be loaded, so the list is shown without it.',
   'issues.outline.retry': 'Load the hierarchy again',
+  'issues.outline.retrying': 'Loading the hierarchy…',
   'issues.outline.rollup.summary': 'Child Work Item totals',
   'issues.outline.rollup.closed': '{closed} of {total} done',
   'issues.outline.rollup.estimate': 'Estimate {hours} h',

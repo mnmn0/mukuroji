@@ -69,12 +69,15 @@ function outlinePresentation(overrides: Partial<TaskViewPresentationSettings> = 
  *
  * @param presentation - Table presentation settings.
  * @param errorMessage - Hierarchy read failure, when any.
+ * @param isRetrying - Whether a retried hierarchy read is in flight.
  * @returns Static markup of the screen.
  */
-function renderOutline(presentation: TaskViewPresentationSettings, errorMessage?: string) {
+function renderOutline(presentation: TaskViewPresentationSettings, errorMessage?: string, isRetrying = false) {
   return renderToStaticMarkup(
     <TeamIssueScreen
-      issueOutline={errorMessage ? { errorMessage, onRetry: () => undefined } : { nodes, onMove: async () => undefined }}
+      issueOutline={errorMessage
+        ? { errorMessage, onRetry: () => undefined, isRetrying }
+        : { nodes, onMove: async () => undefined }}
       issues={[childFixture, parentFixture]}
       locale="ja"
       resolvedConfiguration={{ configuration: teamWorkItemConfigurationFixture }}
@@ -117,5 +120,11 @@ describe('Team Issue outline', () => {
     expect(html).toContain('data-testid="team-issue-outline-unavailable"')
     expect(html).toContain('階層を再読み込み')
     expect(html).not.toContain('issue-row-wbs-')
+  })
+
+  test('disables the retry button while the hierarchy is read again', () => {
+    const html = renderOutline(outlinePresentation(), '階層を読み込めませんでした。', true)
+
+    expect(html).toMatch(/<button aria-busy="true" aria-disabled="true"[^>]*>階層を読み込み中…<\/button>/)
   })
 })

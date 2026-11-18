@@ -359,25 +359,6 @@ export function TeamIssuePage() {
       .charAt(0)
       .toUpperCase() || 'J'
   const canManageStructure = canManageWorkspaceStructure(user)
-  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
-    currentUserError,
-    [
-      workspaceAccessError,
-      planningError,
-      projectDirectoryError,
-      projectRolesError,
-      ...(projectRolesResult?.errors ?? []),
-      issueError,
-      workItemConfigurationError,
-      detailError,
-      assigneeOptionsError,
-      ...(assigneeOptionsResult?.errors ?? []),
-      authenticatedApiError,
-      ...(artifacts.sessionErrors ?? []),
-      ...(collaboration.sessionErrors ?? []),
-    ],
-    `${location.pathname}${location.search}${location.hash}`,
-  )
   const guardEnterpriseSession = async <Result,>(request: Promise<Result>) => {
     try {
       return await request
@@ -396,18 +377,6 @@ export function TeamIssuePage() {
     t,
     user,
   })
-  const isLoading =
-    !session ||
-    isCurrentUserLoading ||
-    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay') ||
-    Boolean(user && isProjectDirectoryLoading) ||
-    Boolean(user && isIssuesLoading) ||
-    Boolean(user && isWorkItemConfigurationLoading)
-  const issueErrorMessage = currentUserErrorAction?.kind === 'stay'
-    ? t('issues.error.loading')
-    : issueError
-      ? describeScopedWorkItemListError(issueError, t) ?? t('issues.error.loading')
-      : undefined
   const detailErrorMessage = detailError
     ? t('issues.error.detail')
     : undefined
@@ -501,7 +470,40 @@ export function TeamIssuePage() {
     data: hierarchy,
     error: hierarchyError,
     mutate: mutateHierarchy,
+    isValidating: isHierarchyValidating,
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      workspaceAccessError,
+      planningError,
+      projectDirectoryError,
+      projectRolesError,
+      ...(projectRolesResult?.errors ?? []),
+      issueError,
+      workItemConfigurationError,
+      detailError,
+      hierarchyError,
+      assigneeOptionsError,
+      ...(assigneeOptionsResult?.errors ?? []),
+      authenticatedApiError,
+      ...(artifacts.sessionErrors ?? []),
+      ...(collaboration.sessionErrors ?? []),
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
+  const isLoading =
+    !session ||
+    isCurrentUserLoading ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay') ||
+    Boolean(user && isProjectDirectoryLoading) ||
+    Boolean(user && isIssuesLoading) ||
+    Boolean(user && isWorkItemConfigurationLoading)
+  const issueErrorMessage = currentUserErrorAction?.kind === 'stay'
+    ? t('issues.error.loading')
+    : issueError
+      ? describeScopedWorkItemListError(issueError, t) ?? t('issues.error.loading')
+      : undefined
   const taskViewTeams = useMemo(
     () => {
       const writableTeamIds = new Set(taskViewController.writableTeamIds)
@@ -924,7 +926,11 @@ export function TeamIssuePage() {
         ? {
             ...(hierarchy ? { nodes: hierarchy.nodes } : {}),
             ...(hierarchyError
-              ? { errorMessage: t('issues.outline.unavailable'), onRetry: () => void mutateHierarchy() }
+              ? {
+                  errorMessage: t('issues.outline.unavailable'),
+                  onRetry: () => void mutateHierarchy(),
+                  isRetrying: isHierarchyValidating,
+                }
               : {}),
             ...(hasWritableWorkItemScope ? { onMove: handleMoveIssueInHierarchy } : {}),
           }

@@ -59,5 +59,6 @@ test('does not ask when nothing is open, the change does not complete, or the Te
 
 test('still asks, without a count, when the open children cannot be counted', async () => {
   expect(await check({}, new Error('offline'))).toEqual({ result: false, counted: ['phase-1'], asked: [null] })
-  expect((await check({}, new Error('offline'), true)).result).toBe(true)
+  expect(await check({}, new Error('offline'), true))
+    .toEqual({ result: true, counted: ['phase-1'], asked: [null] })
 })

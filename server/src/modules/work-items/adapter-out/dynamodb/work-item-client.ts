@@ -3714,9 +3714,10 @@ export class DynamoDbTeamIssuesClient {
           Limit: maxEvaluatedRows - evaluatedCount,
         }),
       )
-      const rows = (response.Items ?? []).map(toTeamIssueItem)
-      evaluatedCount += rows.length
-      for (const row of rows) {
+      // Validate row by row, so rows after the limit are never parsed and cannot fail the read.
+      for (const stored of response.Items ?? []) {
+        evaluatedCount += 1
+        const row = toTeamIssueItem(stored)
         if (row.archivedAt !== undefined) continue
         items.push(row)
         if (items.length >= limit) return items
