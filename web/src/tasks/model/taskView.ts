@@ -285,6 +285,12 @@ export function createTaskInversePatch(
       : { schedule: task.schedule }),
     ...(patch.priority === undefined ? {} : { priority: task.priority }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: task.workflowStatusId }),
+    ...(patch.remainingEffortMinutes === undefined
+      ? {}
+      : { remainingEffortMinutes: task.remainingEffortMinutes ?? null }),
+    ...(patch.progressPercent === undefined
+      ? {}
+      : { progressPercent: task.progressPercent ?? null }),
     ...(inverseCustomFieldValues === undefined
       ? {}
       : { customFieldValues: inverseCustomFieldValues }),

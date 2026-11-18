@@ -1494,12 +1494,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     const previousParentWorkItemId = normalized.currentParent?.workItemId ?? null
     const parentWorkItemId = normalized.nextParent?.workItemId ?? null
     // Setting a parent is declarative: when the child already has exactly the requested parent,
-    // including on a retry after a lost response, report success without writing.
+    // including on a retry after a lost response, report success without writing. The revision is
+    // read again so the response never pairs the stored parent with a revision older than it.
     if (
       storedParents.length === (parentWorkItemId ? 1 : 0) &&
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
-      return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
+      const after = await this.getRelationGraphRevision(workspaceId, teamId)
+      assertStableGraphRevision(graph.revision, after)
+      return { previousParentWorkItemId, parentWorkItemId, graphRevision: after }
     }
     assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
     if (

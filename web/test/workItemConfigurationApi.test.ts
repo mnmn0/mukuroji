@@ -149,6 +149,25 @@ describe('Work Item configuration API', () => {
     })
   })
 
+  test('rejects a successful parent response that does not match the contract', async () => {
+    for (const responseBody of [
+      {},
+      { previousParentWorkItemId: 'phase/1', parentWorkItemId: 'phase/2' },
+      { previousParentWorkItemId: 1, parentWorkItemId: 'phase/2', graphRevision: 5 },
+      { previousParentWorkItemId: null, parentWorkItemId: null, graphRevision: -1 },
+    ]) {
+      installFetchRecorder(responseBody)
+
+      await expect(replaceWorkItemParent(
+        'core-team',
+        'issue-1',
+        'access-token',
+        { parentWorkItemId: null, expectedGraphRevision: 4 },
+        mutationContext,
+      )).rejects.toMatchObject({ status: 502, code: 'InvalidWorkItemParentResponse' })
+    }
+  })
+
   test('preserves API status and error code for conflict handling', async () => {
     globalThis.fetch = (async () => new Response(JSON.stringify({
       code: 'WorkItemConfigurationRevisionConflict',

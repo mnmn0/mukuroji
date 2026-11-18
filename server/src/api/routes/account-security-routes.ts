@@ -11,9 +11,12 @@ import {
   changeAccountPassword,
   CognitoServiceError,
   confirmAccountPasswordReset,
+  confirmMfaSetupChallenge,
   confirmSoftwareTokenEnrollment,
+  MfaSetupChallengeError,
   removeSoftwareToken,
   requestAccountPasswordReset,
+  startMfaSetupChallenge,
   SoftwareTokenEnrollmentError,
   startSoftwareTokenEnrollment,
   type GetUserResponse,
@@ -27,9 +30,11 @@ import {
   createPasswordResetPorts,
   createSoftwareTokenRemovalPorts,
 } from '../../app/composition/account-credential-changes'
+import { createMfaSetupChallengePorts } from '../../app/composition/mfa-setup-challenge'
 import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
 import { createSoftwareTokenEnrollmentPorts } from '../../app/composition/software-token-enrollment'
 import {
+  listMembersSignInSecurity,
   resetMemberCredential,
   WorkspaceAccessError,
   type WorkspaceMemberCredentialAction,
@@ -49,7 +54,7 @@ import {
 } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
-  inspectMembersSignInSecurity,
+  createRequestMemberSignInSecurityPorts,
   isSsoManagedEmail,
 } from '../shared/member-sign-in-security'
 import {
@@ -235,6 +240,17 @@ async function ssoRequiredResponse(c: Context, email: string) {
 }
 
 /**
+ * Tells whether the domain of an email address now enforces enterprise SSO.
+ *
+ * @param email - Email address of the signed-in user, if Cognito returned one.
+ * @returns True when an identity provider must handle the sign-in of that address.
+ */
+async function isSsoEnforcedEmail(email: string | undefined) {
+  if (!email || !isEnterpriseSsoConfigured()) return false
+  return Boolean(await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email))
+}
+
+/**
  * Maps a failed account security request to an HTTP response.
  *
  * @param c - Hono request context.
@@ -273,6 +289,9 @@ function toAccountSecurityErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, error.status)
   }
   if (error instanceof AccountCredentialChangeError) {
+    return c.json({ code: error.code, message: error.message }, error.status)
+  }
+  if (error instanceof MfaSetupChallengeError) {
     return c.json({ code: error.code, message: error.message }, error.status)
   }
   if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
@@ -406,8 +425,8 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
    * Changes the signed-in user's password after checking the current one.
    *
    * @remarks
-   * A wrong current password answers 400 `CurrentPasswordIncorrect`. An SSO session answers
-   * 409 `PasswordManagedBySso`. Success answers 204.
+   * A wrong current password answers 400 `CurrentPasswordIncorrect`. An SSO session, or a user
+   * whose email domain now enforces SSO, answers 409 `PasswordManagedBySso`. Success answers 204.
    */
   routeApp.post('/api/auth/password/change', async (c) => {
     c.header('Cache-Control', 'no-store')
@@ -424,9 +443,12 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const caller = await readCognitoCaller(c)
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
+      // A password sign-in from before the domain started enforcing SSO still cannot change it.
+      const ssoManaged = isSsoSessionAccessToken(caller.accessToken) ||
+        await isSsoEnforcedEmail(readUserAttribute(caller.user, 'email')?.trim().toLowerCase())
       await changeAccountPassword(
         createPasswordChangePorts(authenticationDependencies.cognito),
-        { accessToken: caller.accessToken, ssoSession: isSsoSessionAccessToken(caller.accessToken) },
+        { accessToken: caller.accessToken, ssoSession: ssoManaged },
         currentPassword,
         newPassword,
       )
@@ -540,13 +562,14 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const sso = await ssoRequiredResponse(c, email)
       if (sso) return sso
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.associateSoftwareToken) return unavailableResponse(c)
-      const association = await cognito.associateSoftwareToken({ session })
+      const association = await startMfaSetupChallenge(
+        createMfaSetupChallengePorts(authenticationDependencies.cognito),
+        { email, session },
+      )
       const response: SoftwareTokenSetupStart = {
         secretCode: association.secretCode,
         accountName: email,
-        session: association.session ?? session,
+        session: association.session,
       }
       return c.json(response)
     } catch (error) {
@@ -579,21 +602,11 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const sso = await ssoRequiredResponse(c, email)
       if (sso) return sso
-      const cognito = authenticationDependencies.cognito
-      if (!cognito.verifySoftwareToken || !cognito.respondToMfaSetupChallenge) {
-        return unavailableResponse(c)
-      }
-      const verified = await cognito.verifySoftwareToken({ session }, code)
-      const response = await cognito.respondToMfaSetupChallenge(email, verified.session ?? session)
-      const tokens = response.AuthenticationResult
-      if (!tokens?.AccessToken) {
-        return c.json({
-          code: 'UnsupportedAuthenticationChallenge' as const,
-          message: response.ChallengeName
-            ? `Unsupported Cognito challenge: ${response.ChallengeName}`
-            : 'Cognito did not return an access token.',
-        }, 409)
-      }
+      const tokens = await confirmMfaSetupChallenge(
+        createMfaSetupChallengePorts(authenticationDependencies.cognito),
+        { email, session },
+        code,
+      )
       return c.json(await createAuthenticationResponse(
         tokens,
         c,
@@ -619,11 +632,11 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceAdministration(principal)
-      const members = await workspaceDependencies.workspaceAccess.listActiveMembers(
-        principal.directoryId,
-      )
       const response: WorkspaceMembersSignInSecurityResponse = {
-        members: await inspectMembersSignInSecurity(members),
+        members: await listMembersSignInSecurity(
+          createRequestMemberSignInSecurityPorts(),
+          principal.directoryId,
+        ),
       }
       return c.json(response)
     } catch (error) {
