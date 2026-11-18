@@ -1802,6 +1802,21 @@ export const DetailPatchPendingHoldsUndo: Story = {
   },
 }
 
+/**
+ * Edits one row's title in the Project table and leaves the field.
+ *
+ * @param canvas - Story canvas queries.
+ * @param taskId - Work Item whose row is edited.
+ * @param title - Title typed into the row.
+ */
+async function editTaskRowTitle(canvas: ReturnType<typeof within>, taskId: string, title: string) {
+  await userEvent.click(canvas.getByTestId(`task-inline-title-${taskId}`))
+  const titleInput = canvas.getByTestId(`task-inline-title-${taskId}-input`)
+  await userEvent.clear(titleInput)
+  await userEvent.type(titleInput, title)
+  await userEvent.tab()
+}
+
 /** The detail pane of a Work Item waits while its Undo is saving, so the two never race. */
 export const UndoPendingHoldsDetailSave: Story = {
   args: {
@@ -1820,17 +1835,16 @@ export const UndoPendingHoldsDetailSave: Story = {
     onDetailSaveAfterUndo.mockClear()
 
     // A saved edit first, so there is an Undo to run.
-    await userEvent.click(canvas.getByTestId('task-inline-title-wireframe'))
-    const titleInput = canvas.getByTestId('task-inline-title-wireframe-input')
-    await userEvent.clear(titleInput)
-    await userEvent.type(titleInput, '保存したタイトル')
-    await userEvent.tab()
+    await editTaskRowTitle(canvas, 'wireframe', '保存したタイトル')
     await expect(await canvas.findByTestId('task-action-feedback')).toHaveTextContent('変更を保存しました。')
 
     await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
     const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
     await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
     const detailPane = within(canvas.getByTestId('task-detail-pane'))
+    // The fixture's required custom fields are filled so the save reaches the route.
+    await userEvent.type(detailPane.getByRole('textbox', { name: 'Customer impact' }), 'SetupBlocked')
+    await userEvent.selectOptions(detailPane.getByRole('combobox', { name: 'Risk level' }), 'Low')
     const save = detailPane.getByRole('button', { name: '変更を保存' })
     await expect(save).toBeEnabled()
 
@@ -1841,11 +1855,59 @@ export const UndoPendingHoldsDetailSave: Story = {
     }))
     await userEvent.click(within(canvas.getByTestId('task-action-feedback')).getByRole('button', { name: '元に戻す' }))
     await waitFor(() => expect(onSavedBeforeHeldUndo).toHaveBeenCalledTimes(2))
-    await expect(save).toBeDisabled()
 
+    // A save tried during the Undo does not reach the route.
+    await expect(save).toBeDisabled()
+    fireEvent.click(save)
+    await new Promise((resolve) => globalThis.requestAnimationFrame(resolve))
+    await expect(onDetailSaveAfterUndo).not.toHaveBeenCalled()
+
+    // Once the Undo ends, the edits made before it save exactly once.
     finishUndo?.()
     await waitFor(() => expect(save).toBeEnabled())
-    await expect(onDetailSaveAfterUndo).not.toHaveBeenCalled()
+    await userEvent.click(save)
+    await waitFor(() => expect(onDetailSaveAfterUndo).toHaveBeenCalledTimes(1))
+  },
+}
+
+/**
+ * A table edit of the Work Item whose Undo is saving is dropped; another Work Item's row saves,
+ * and the same row saves again once the Undo ends.
+ */
+export const UndoPendingHoldsSameRowEdit: Story = {
+  args: {
+    onUpdateTask: onSavedBeforeHeldUndo,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onSavedBeforeHeldUndo.mockClear()
+
+    await editTaskRowTitle(canvas, 'wireframe', '保存したタイトル')
+    await expect(await canvas.findByTestId('task-action-feedback')).toHaveTextContent('変更を保存しました。')
+
+    let finishUndo: (() => void) | undefined
+    onSavedBeforeHeldUndo.mockImplementationOnce((task) => new Promise((resolve) => {
+      finishUndo = () => resolve(createStoryUpdatedTask(task))
+    }))
+    await userEvent.click(within(canvas.getByTestId('task-action-feedback')).getByRole('button', { name: '元に戻す' }))
+    await waitFor(() => expect(onSavedBeforeHeldUndo).toHaveBeenCalledTimes(2))
+
+    await editTaskRowTitle(canvas, 'wireframe', 'Undo 中のタイトル')
+    await new Promise((resolve) => globalThis.requestAnimationFrame(resolve))
+    await expect(onSavedBeforeHeldUndo).toHaveBeenCalledTimes(2)
+
+    await editTaskRowTitle(canvas, 'brand-guideline', '別の Work Item のタイトル')
+    await waitFor(() => expect(onSavedBeforeHeldUndo).toHaveBeenCalledTimes(3))
+    const [otherTask] = onSavedBeforeHeldUndo.mock.calls[2] ?? []
+    expect(otherTask).toMatchObject({ id: 'brand-guideline' })
+
+    finishUndo?.()
+    await waitFor(() => expect(canvas.getByTestId('task-action-feedback')).not.toHaveTextContent('元に戻しています'))
+    await editTaskRowTitle(canvas, 'wireframe', 'Undo 後のタイトル')
+    await waitFor(() => expect(onSavedBeforeHeldUndo).toHaveBeenCalledTimes(4))
+    const [retriedTask, retriedPatch] = onSavedBeforeHeldUndo.mock.calls[3] ?? []
+    expect(retriedTask).toMatchObject({ id: 'wireframe' })
+    expect(retriedPatch).toMatchObject({ title: 'Undo 後のタイトル' })
   },
 }
 

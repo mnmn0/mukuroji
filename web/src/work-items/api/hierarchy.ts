@@ -12,6 +12,11 @@ const workItemsApiBaseUrl = resolveApiBaseUrl()
 
 const defaultHierarchyErrorMessage = 'Unable to load the Work Item hierarchy.'
 
+const hierarchyTimeoutErrorMessage = 'The Work Item hierarchy took too long to load. Try again.'
+
+/** Time a hierarchy read may take, body included, before it fails like any other failed read. */
+const hierarchyRequestTimeoutMilliseconds = 15_000
+
 const defaultOpenChildCountErrorMessage = 'Unable to count the open child Work Items.'
 
 const statusCategories: readonly WorkflowStatusCategory[] = [
@@ -25,20 +30,37 @@ const statusCategories: readonly WorkflowStatusCategory[] = [
 /**
  * Reads a Team's Work Item hierarchy with WBS numbers and roll-ups.
  *
+ * A read that takes longer than the timeout is stopped and fails with a 504
+ * `WorkItemHierarchyTimeout`, so the outline shows its retry instead of loading forever and a
+ * refresh after a write clears the old hierarchy instead of waiting on it.
+ *
  * @param teamId - Team whose hierarchy is read.
  * @param accessToken - Access token sent as the bearer token.
+ * @param timeoutMilliseconds - Time the read may take, response body included.
  * @returns The validated hierarchy.
- * @throws WorkItemConfigurationApiError when the request fails or the response is malformed.
+ * @throws WorkItemConfigurationApiError when the request fails, times out, or the response is
+ * malformed.
  */
 export async function getTeamWorkItemHierarchy(
   teamId: string,
   accessToken: string,
+  timeoutMilliseconds = hierarchyRequestTimeoutMilliseconds,
 ): Promise<TeamWorkItemHierarchyResponse> {
-  const response = await fetch(
-    `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-item-hierarchy`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  )
-  const data = await readJson(response)
+  const signal = AbortSignal.timeout(timeoutMilliseconds)
+  let response: Response
+  let data: unknown
+  try {
+    response = await fetch(
+      `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-item-hierarchy`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, signal },
+    )
+    data = await readJson(response)
+  } catch (error) {
+    if (signal.aborted) {
+      throw new WorkItemConfigurationApiError(504, hierarchyTimeoutErrorMessage, 'WorkItemHierarchyTimeout')
+    }
+    throw error
+  }
   if (!response.ok) {
     const message = readStringProperty(data, 'message')?.trim()
     throw new WorkItemConfigurationApiError(

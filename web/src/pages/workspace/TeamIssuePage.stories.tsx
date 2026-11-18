@@ -524,12 +524,21 @@ export const HierarchyOutline: Story = {
     await userEvent.keyboard('{Alt>}{Shift>}{ArrowLeft}{/Shift}{/Alt}')
     await expect(canvas.getByTestId('team-issue-outline-status')).toHaveTextContent('最上位の Work Item')
 
+    // Choose the row with J from the page itself, as a keyboard user would after leaving the table.
+    const releaseRow = canvas.getByTestId('issue-row-release-readiness').closest('tr')
+    if (!releaseRow) throw new Error('Expected the release-readiness table row.')
+    const activeElement = canvasElement.ownerDocument.activeElement
+    if (activeElement instanceof HTMLElement) activeElement.blur()
+    for (let press = 0; press < 5 && releaseRow.getAttribute('data-task-view-focused') !== 'true'; press += 1) {
+      await userEvent.keyboard('j')
+    }
+    await expect(releaseRow).toHaveAttribute('data-task-view-focused', 'true')
+
     // With focus on another part of the page, such as a focusable heading outside the table, the
     // shortcut leaves the chosen row alone.
     const outsideTarget = canvasElement.ownerDocument.createElement('div')
     outsideTarget.tabIndex = -1
     canvasElement.prepend(outsideTarget)
-    canvas.getByTestId('issue-row-release-readiness').focus()
     const movesBefore = onHierarchyOutlineMove.mock.calls.length
     const statusBefore = canvas.getByTestId('team-issue-outline-status').textContent
     try {
@@ -541,6 +550,16 @@ export const HierarchyOutline: Story = {
     } finally {
       outsideTarget.remove()
     }
+
+    // From the page itself, the same shortcut moves the row chosen with J.
+    await expect(canvasElement.ownerDocument.activeElement).toBe(canvasElement.ownerDocument.body)
+    await expect(releaseRow).toHaveAttribute('data-task-view-focused', 'true')
+    await userEvent.keyboard('{Alt>}{Shift>}{ArrowRight}{/Shift}{/Alt}')
+    await waitFor(() => expect(onHierarchyOutlineMove).toHaveBeenCalledTimes(movesBefore + 1))
+    await expect(onHierarchyOutlineMove).toHaveBeenLastCalledWith(
+      'release-readiness',
+      expect.objectContaining({ parentWorkItemId: 'onboarding-friction' }),
+    )
   },
 }
 

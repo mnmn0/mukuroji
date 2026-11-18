@@ -162,6 +162,65 @@ test('returns the Team hierarchy with WBS numbers and roll-ups of readable Work 
   expect(body.nodes[1]?.rollup).toBeUndefined()
 })
 
+test('reads the Team hierarchy again when the graph moved while it was read', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const revisions = [7, 8, 8]
+  const reads: number[] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        reads.push(reads.length)
+        // The first read sees the tree before a move, the second the tree after it.
+        return reads.length === 1
+          ? [hierarchyEntry(base, 'phase-1', 'a'), hierarchyEntry(base, 'task-1', 'b')]
+          : [hierarchyEntry(base, 'phase-1', 'a'), hierarchyEntry(base, 'task-1', 'a', { parentId: 'phase-1' })]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        return revisions.shift() ?? 8
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as TeamWorkItemHierarchyResponse
+  expect(reads).toHaveLength(2)
+  // The tree and the revision both come from after the move.
+  expect(body.graphRevision).toBe(8)
+  expect(body.nodes.map((node) => [node.workItemId, node.wbsNumber])).toEqual([['phase-1', '1'], ['task-1', '1.1']])
+})
+
+test('returns the revision read before the last tree when the graph keeps moving', async () => {
+  configureFakeProjectClients(true)
+  let revision = 10
+  let reads = 0
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        reads += 1
+        return []
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        revision += 1
+        return revision
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(200)
+  // Three reads at most; the older revision makes the reader's next move a graph conflict.
+  expect(reads).toBe(3)
+  expect((await response.json() as TeamWorkItemHierarchyResponse).graphRevision).toBe(13)
+})
+
 test('rejects a Team hierarchy larger than the read model bound', async () => {
   configureFakeProjectClients(true)
   const base = await readBaseIssue()

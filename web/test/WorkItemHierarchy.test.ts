@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import type { TeamWorkItemHierarchyNode } from '@mukuroji/contracts'
-import { parseTeamWorkItemHierarchyResponse } from '../src/work-items/api/hierarchy'
+import { getTeamWorkItemHierarchy, parseTeamWorkItemHierarchyResponse } from '../src/work-items/api/hierarchy'
+import { WorkItemConfigurationApiError } from '../src/work-items/api/errors'
 import {
   createWorkItemOutlineRows,
   planWorkItemHierarchyMove,
@@ -217,5 +218,27 @@ describe('parseTeamWorkItemHierarchyResponse', () => {
     expect(parseTeamWorkItemHierarchyResponse(withNode({ parentHidden: false }))).toBeUndefined()
     expect(parseTeamWorkItemHierarchyResponse(withNode({ rollup: { childCount: 1 } }))).toBeUndefined()
     expect(parseTeamWorkItemHierarchyResponse({ ...valid, schemaVersion: 2 })).toBeUndefined()
+  })
+})
+
+describe('getTeamWorkItemHierarchy', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test('fails as a timed-out read when the server does not answer in time', async () => {
+    // Never answers, and rejects like fetch does once the request's signal aborts.
+    const hangingFetch = async (_input: string | URL | Request, init: RequestInit = {}) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+      })
+    globalThis.fetch = Object.assign(hangingFetch, { preconnect: originalFetch.preconnect })
+
+    const failure = await getTeamWorkItemHierarchy('core-team', 'token', 10).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(WorkItemConfigurationApiError)
+    expect(failure).toMatchObject({ status: 504, code: 'WorkItemHierarchyTimeout' })
   })
 })

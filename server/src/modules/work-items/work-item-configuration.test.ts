@@ -1978,6 +1978,14 @@ test('stores the sibling order rank with a parent change and reorders under the 
     UpdateExpression: 'SET #hierarchyRank = :hierarchyRank',
     ExpressionAttributeValues: expect.objectContaining({ ':hierarchyRank': 'm', ':revision': 3 }),
   })
+  // The parent that authorized the reorder must still be the same row in the same Project.
+  expect(store.transactions[1]?.TransactItems).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'work-items-table',
+      Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'phase-b' },
+      ExpressionAttributeValues: { ':revision': 2 },
+    }),
+  })
   expect(store.transactions[1]?.TransactItems).toContainEqual({
     Put: expect.objectContaining({
       TableName: 'configuration-table',
@@ -2039,7 +2047,11 @@ test('returns success without writing when a retried move finds its rank already
 })
 
 test('reports a failed rank read as unavailable storage', async () => {
-  const store = createInMemoryRelationStore({ workItemReadFailure: 'ProvisionedThroughputExceededException' })
+  const reads: Record<string, string>[] = []
+  const store = createInMemoryRelationStore({
+    workItemReadFailure: 'ProvisionedThroughputExceededException',
+    onWorkItemRead: (key) => reads.push(key),
+  })
   store.seedRelation('task', 'phase-a', 'parent')
   store.seedGraph(5, 2)
 
@@ -2049,8 +2061,28 @@ test('reports a failed rank read as unavailable storage', async () => {
     nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
     expectedGraphRevision: 5,
     hierarchyRank: 'm',
-  })).rejects.toMatchObject({ code: 'ProvisionedThroughputExceededException', status: 503 })
+  })).rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
+  // The failed read is the moved child's own row, not its parent's.
+  expect(reads).toEqual([{
+    TableName: 'work-items-table',
+    directoryTeamId: 'workspace-1#team#core-team',
+    issueId: 'task',
+  }])
   expect(store.transactions).toHaveLength(0)
+})
+
+test('checks no parent when reordering top-level Work Items', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedGraph(5, 0)
+
+  await store.createClient().replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'm',
+  })
+
+  expect(store.transactions).toHaveLength(1)
+  expect(store.transactions[0]?.TransactItems).toHaveLength(2)
 })
 
 test('classifies a canceled reorder by its cancellation reasons', async () => {
@@ -2074,6 +2106,9 @@ test('classifies a canceled reorder by its cancellation reasons', async () => {
     .rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
   // A stale child is a conflict even though the graph did not move.
   await expect(createCanceledClient(['ConditionalCheckFailed', 'None']).replaceParent('workspace-1', 'core-team', reorder))
+    .rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+  // So is a parent that moved to another Project after it authorized the reorder.
+  await expect(createCanceledClient(['None', 'None', 'ConditionalCheckFailed']).replaceParent('workspace-1', 'core-team', reorder))
     .rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
   // A deterministic failure is not reported as a concurrent write.
   await expect(createCanceledClient(['ValidationError', 'None']).replaceParent('workspace-1', 'core-team', reorder))
@@ -2360,6 +2395,8 @@ function createInMemoryRelationStore(
     afterQuery?: (prefix: string) => void
     /** Error name thrown by every Work Item row read. */
     workItemReadFailure?: string
+    /** Records the key of every Work Item row read. */
+    onWorkItemRead?: (key: Record<string, string>) => void
   } = {},
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
@@ -2427,6 +2464,7 @@ function createInMemoryRelationStore(
           if (command.constructor.name === 'GetCommand') {
             const key = input.Key as Record<string, string>
             if (input.TableName !== 'configuration-table') {
+              options.onWorkItemRead?.({ TableName: String(input.TableName), ...key })
               if (options.workItemReadFailure) {
                 throw Object.assign(new Error('Work Item read failed.'), { name: options.workItemReadFailure })
               }

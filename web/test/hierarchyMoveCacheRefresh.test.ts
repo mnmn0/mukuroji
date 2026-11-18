@@ -43,8 +43,11 @@ describe('hierarchy move cache refresh', () => {
     const revalidators = SWRGlobalState.get(cache)?.[0]
     if (!revalidators) throw new Error('The default SWR cache is not initialized.')
     const outlineReads: string[] = []
+    // What the cache held each time the outline was asked to read again.
+    const cachedWhenRead: unknown[] = []
     const stopReading = subscribeCallback(unstable_serialize(key), revalidators, () => {
       outlineReads.push('read')
+      cachedWhenRead.push(cache.get(unstable_serialize(key))?.data)
       return Promise.resolve(true)
     })
 
@@ -59,6 +62,8 @@ describe('hierarchy move cache refresh', () => {
     }
 
     expect(outlineReads).toEqual(['read'])
+    // The old hierarchy was already gone when the outline started reading again.
+    expect(cachedWhenRead).toEqual([undefined])
     // The outline shows its loading or error state, not the old placement, while it reads.
     expect(await readCached(key)).toBeUndefined()
   })

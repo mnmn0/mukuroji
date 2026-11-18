@@ -761,10 +761,17 @@ export function TaskScreen({
     }
   }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
-  // Work Item whose Undo or Redo is saving, as `teamId:workItemId`. Its detail form waits for it:
-  // a detail save meanwhile would leave the restore with a stale revision.
-  const [restoringTaskKey, setRestoringTaskKey] = useState<string>()
+  // Work Item whose Undo or Redo is saving, as `teamId:workItemId`. Its detail form and its table
+  // and board controls wait for it: a save meanwhile would leave the restore with a stale revision.
+  const [restoringTaskKey, setRestoringTaskKeyState] = useState<string>()
+  // Same key for callbacks created before the render that shows it.
+  const restoringTaskKeyRef = useRef<string | undefined>(undefined)
   const isRestoringTask = restoringTaskKey !== undefined
+  /** Marks the Work Item whose Undo or Redo is saving, or clears it. */
+  const setRestoringTaskKey = (key: string | undefined) => {
+    restoringTaskKeyRef.current = key
+    setRestoringTaskKeyState(key)
+  }
   // Saves still waiting for their outcome. Undo/Redo waits for them: running one meanwhile would
   // advance the revision the pending save was built on.
   const [pendingTaskUpdateCount, setPendingTaskUpdateCount] = useState(0)
@@ -3083,6 +3090,10 @@ export function TaskScreen({
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
   ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
+    // A table or board edit of the Work Item whose Undo or Redo is saving is dropped like a
+    // declined one: it was built on the revision the restore is replacing. Other Work Items, and
+    // the same one once the restore ends, save as usual.
+    if (restoringTaskKeyRef.current === `${task.teamId}:${task.id}`) return CANCELLED_TEAM_ISSUE_UPDATE
     const target = {
       expectedRevision: task.revision,
       teamId: task.teamId,

@@ -1584,6 +1584,11 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           child,
           normalized.hierarchyRank,
           graph,
+          // The parent and the configuration guards authorized the reorder, so a parent moved to
+          // another Project or a guard that changed before the commit refuses it.
+          normalized.nextParent
+            ? { parent: normalized.nextParent, configurationConditionChecks }
+            : undefined,
         )
         return { previousParentWorkItemId, parentWorkItemId, graphRevision }
       }
@@ -1709,7 +1714,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ConsistentRead: true,
       }))
     } catch (error) {
-      throw toPersistenceError(error)
+      if (error instanceof WorkItemConfigurationError) throw error
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemRelationUnavailable',
+        'The Work Item hierarchy cannot be read now. Try again.',
+      )
     }
     const rank: unknown = response.Item?.hierarchyRank
     return typeof rank === 'string' ? rank : undefined
@@ -1727,6 +1737,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param child - Child snapshot whose revision and Project assignment fence the write.
    * @param hierarchyRank - Validated rank to store.
    * @param graph - Relation graph state read before the unchanged parent was observed.
+   * @param authorization - The unchanged parent and the configuration guards that authorized the
+   *   reorder, checked again in the transaction; omitted for a top-level Work Item.
    * @returns The graph revision after the reorder.
    */
   private async writeHierarchyRank(
@@ -1735,6 +1747,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     child: WorkItemRelationEndpointSnapshot,
     hierarchyRank: string,
     graph: { revision: number, edgeCount: number },
+    authorization?: {
+      parent: WorkItemRelationEndpointSnapshot
+      configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+    },
   ): Promise<number> {
     const item = createRelationEndpointTransactionItem(
       this.workItemsTableName,
@@ -1754,14 +1770,23 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
             graph.revision,
             graph.edgeCount,
           ),
+          ...(authorization
+            ? [
+                createRelationEndpointTransactionItem(
+                  this.workItemsTableName,
+                  `${workspaceId}#team#${teamId}`,
+                  authorization.parent,
+                ),
+                ...authorization.configurationConditionChecks,
+              ]
+            : []),
         ],
       }))
       return graph.revision + 1
     } catch (error) {
-      if (
-        isTransactionConditionalFailureAt(error, 0) ||
-        isTransactionConditionalFailureAt(error, 1)
-      ) {
+      const itemCount = 2 + (authorization ? 1 + authorization.configurationConditionChecks.length : 0)
+      if (Array.from({ length: itemCount }, (_, index) => index)
+        .some((index) => isTransactionConditionalFailureAt(error, index))) {
         throw new WorkItemConfigurationError(
           409,
           'WorkItemRelationGraphConflict',
