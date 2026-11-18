@@ -20,6 +20,8 @@ const lambdaPaths = [
   'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
+  'CognitoClientContractFunction/Resource',
+  'CognitoClientContractProvider/framework-onEvent/Resource',
   'ApiFunction/Resource',
   'AuditExportWorkerFunction/Resource',
   'WorkItemImportFunction/Resource',
@@ -39,6 +41,8 @@ const managedPolicyRolePaths = [
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
+  'CognitoClientContractFunction/ServiceRole/Resource',
+  'CognitoClientContractProvider/framework-onEvent/ServiceRole/Resource',
   'ApiFunction/ServiceRole/Resource',
   'AuditExportWorkerFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
@@ -263,6 +267,12 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<CognitoClientContractFunction2E0ABB34.Arn>:*]',
+    [
+      'CognitoClientContractProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
     [
       'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
@@ -458,6 +468,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<CognitoClientContractFunction2E0ABB34.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',

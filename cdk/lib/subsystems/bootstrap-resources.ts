@@ -2,6 +2,9 @@ import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import {
   createCanonicalWorkItemTransactItems,
   createDemoProjectOwnerAccessTransactItems,
@@ -12,6 +15,10 @@ import {
   createWorkspaceBootstrapTransactItems,
   createWorkspaceDemoMemberTransactItems,
 } from '../bootstrap-data';
+import {
+  type LambdaBuildPaths,
+  resolveLambdaHandlerEntry,
+} from '../config/lambda-build-paths';
 import type { StackParameters } from '../config/stack-parameters';
 import type { DataStoreResources } from './data-stores';
 
@@ -25,6 +32,8 @@ export interface BootstrapResourcesInput {
   readonly parameters: StackParameters;
   /** Seeds the demo members, Teams, Projects, and Work Items in addition to the owner. */
   readonly demoDataEnabled: boolean;
+  /** Source paths used to bundle the Cognito client contract check. */
+  readonly lambdaBuildPaths: LambdaBuildPaths;
 }
 
 /**
@@ -46,7 +55,6 @@ export function buildBootstrapResources(
   } = input.dataStores;
   const {
     cognitoUserPoolArn,
-    cognitoUserPoolClientId,
     cognitoUserPoolId,
     initialOwnerEmail,
     initialOwnerUsername,
@@ -57,28 +65,11 @@ export function buildBootstrapResources(
 
   const cognitoPolicy = customResources.AwsCustomResourcePolicy.fromStatements([
     new iam.PolicyStatement({
-      actions: [
-        'cognito-idp:AdminUpdateUserAttributes',
-        'cognito-idp:DescribeUserPoolClient',
-      ],
+      actions: ['cognito-idp:AdminUpdateUserAttributes'],
       resources: [cognitoUserPoolArn],
     }),
   ]);
-  const validateCognitoClientCall: customResources.AwsSdkCall = {
-    service: 'CognitoIdentityServiceProvider',
-    action: 'describeUserPoolClient',
-    parameters: {
-      UserPoolId: cognitoUserPoolId,
-      ClientId: cognitoUserPoolClientId,
-    },
-    logging: customResources.Logging.withDataHidden(),
-    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-cognito-client-validation'),
-  };
-  const validateCognitoClient = new customResources.AwsCustomResource(
-    scope,
-    'ValidateCognitoUserPoolClient',
-    createIdempotentAwsCustomResourceProps(validateCognitoClientCall, cognitoPolicy),
-  );
+  const validateCognitoClient = buildCognitoClientContractCheck(scope, input);
   // A stack-owned pool starts empty, so the stack invites the initial owner by email. Cognito
   // sends a temporary password that the owner replaces at the first sign-in.
   const createInitialOwnerCall: customResources.AwsSdkCall = {
@@ -390,4 +381,69 @@ export function buildBootstrapResources(
   );
 
   seedWorkspaceDemoMembers.node.addDependency(seedWorkspaceAccess);
+}
+
+/**
+ * Fails the deploy unless the trusted user pool admits users only through administrators and its
+ * password client cannot write the attributes the API authorizes by. The API reads `email` and
+ * the Workspace attributes from `GetUser` on every request, so a user who could rewrite them with
+ * their own access token could act as another user. A stack-owned pool passes by construction;
+ * an existing pool is checked against the same contract.
+ *
+ * @param scope Stack scope used directly to keep construct paths flat.
+ * @param input Stack parameters and Lambda build paths.
+ * @returns The custom resource, so later bootstrap steps can wait for it.
+ */
+function buildCognitoClientContractCheck(
+  scope: cdk.Stack,
+  input: BootstrapResourcesInput,
+): cdk.CustomResource {
+  const { cognitoUserPoolArn, cognitoUserPoolClientId, cognitoUserPoolId } = input.parameters;
+  const logGroup = new logs.LogGroup(scope, 'CognitoClientContractLogGroup', {
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retention: logs.RetentionDays.THREE_MONTHS,
+  });
+  const checkFunction = new NodejsFunction(scope, 'CognitoClientContractFunction', {
+    bundling: {
+      bundleAwsSDK: true,
+      minify: true,
+      sourceMap: true,
+      target: 'node22',
+    },
+    depsLockFilePath: input.lambdaBuildPaths.depsLockFilePath,
+    description: 'Checks that users cannot rewrite the Cognito attributes the API authorizes by.',
+    entry: resolveLambdaHandlerEntry(input.lambdaBuildPaths, 'cognito-client-contract-handler.ts'),
+    handler: 'onEventHandler',
+    logGroup,
+    memorySize: 256,
+    projectRoot: input.lambdaBuildPaths.projectRoot,
+    runtime: lambda.Runtime.NODEJS_22_X,
+    timeout: cdk.Duration.seconds(30),
+    tracing: lambda.Tracing.ACTIVE,
+  });
+  checkFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: [
+      'cognito-idp:DescribeUserPool',
+      'cognito-idp:DescribeUserPoolClient',
+    ],
+    resources: [cognitoUserPoolArn],
+  }));
+
+  const providerLogGroup = new logs.LogGroup(scope, 'CognitoClientContractProviderLogGroup', {
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retention: logs.RetentionDays.THREE_MONTHS,
+  });
+  const provider = new customResources.Provider(scope, 'CognitoClientContractProvider', {
+    logGroup: providerLogGroup,
+    onEventHandler: checkFunction,
+  });
+  return new cdk.CustomResource(scope, 'ValidateCognitoClientContract', {
+    properties: {
+      UserPoolId: cognitoUserPoolId,
+      ClientId: cognitoUserPoolClientId,
+      ContractVersion: 'v1',
+    },
+    resourceType: 'Custom::CognitoClientContract',
+    serviceToken: provider.serviceToken,
+  });
 }

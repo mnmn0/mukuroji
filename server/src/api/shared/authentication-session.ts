@@ -206,6 +206,14 @@ export function toProjectPrincipal(user: GetUserResponse, accessToken: string): 
     )
   }
 
+  if (isSelfChangedEmail(user)) {
+    throw new ProjectDataError(
+      403,
+      'ProjectPrincipalMissing',
+      'Cognito user email is unverified and differs from the username.',
+    )
+  }
+
   const normalizedUserKey = userKey.trim().toLowerCase()
   const actorId = readUserAttribute(user, 'sub')?.trim() || user.Username?.trim() || normalizedUserKey
   const directoryId = readProjectDirectoryId(user) ?? `${projectDirectoryIdPrefix}${normalizedUserKey}`
@@ -218,6 +226,26 @@ export function toProjectPrincipal(user: GetUserResponse, accessToken: string): 
     isSystemAdmin: groups.some((group) => getSystemAdminGroups().includes(group)),
     groups,
   }
+}
+
+/**
+ * Detects an email the user changed with their own access token.
+ *
+ * The API authorizes by email, so a user who rewrites it could act as another user. The deploy
+ * checks keep that attribute out of the password client's WriteAttributes; this check is the
+ * second layer. Cognito marks an email `email_verified=false` when the user changes it, and the
+ * new address then no longer matches a username that was created from the original email.
+ * Invited users keep their email as the username, and federated users carry a verified email, so
+ * neither is affected.
+ *
+ * @param user - Cognito user.
+ * @returns Whether the email is explicitly unverified and differs from the username.
+ */
+function isSelfChangedEmail(user: GetUserResponse) {
+  const email = readUserAttribute(user, 'email')?.trim().toLowerCase()
+  if (!email) return false
+  if (readUserAttribute(user, 'email_verified')?.trim().toLowerCase() !== 'false') return false
+  return email !== user.Username?.trim().toLowerCase()
 }
 
 function getConfiguredWorkspaceDirectoryId() {
