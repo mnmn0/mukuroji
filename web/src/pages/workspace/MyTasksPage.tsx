@@ -45,7 +45,10 @@ import {
   resolvePendingTaskActionContext,
 } from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
-import { executeMyTaskDirectStatusMove } from '../../task-views/model/myTaskDirectMove'
+import {
+  executeMyTaskDirectStatusMove,
+  isMyTaskOpenChildrenRefusal,
+} from '../../task-views/model/myTaskDirectMove'
 import { canWriteTaskViewWorkItem } from '../../task-views/model/taskViewWorkItemPermission'
 import {
   clearTaskStatusMoveRequest,
@@ -369,6 +372,7 @@ export function MyTasksPage() {
           conflict: t('workspace.myTasks.conflict'),
           failed: t('workspace.myTasks.moveError'),
           notFound: t('taskViews.action.notFound'),
+          openChildren: t('issues.error.openChildren'),
           unavailable: myTaskActionDisabledReasons.unavailable,
         },
       ) ?? createFailedTaskActionResult(
@@ -703,14 +707,22 @@ export function MyTasksPage() {
           taskActionCompletion,
           claimedContext,
         )
-        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
-          claimedContext.actionId,
-          target,
-          isConflict ? 'WorkItemRevisionConflict' : 'MyTasksMoveFailed',
-          isConflict ? 'conflict' : 'unknown',
-          isConflict ? t('workspace.myTasks.conflict') : t('workspace.myTasks.moveError'),
-          isConflict,
-        ))
+        taskActionCompletion.settle(claimedContext, isMyTaskOpenChildrenRefusal(error)
+          ? createFailedTaskActionResult(
+              claimedContext.actionId,
+              target,
+              'WorkItemOpenChildren',
+              'validation',
+              t('issues.error.openChildren'),
+            )
+          : createFailedTaskActionResult(
+              claimedContext.actionId,
+              target,
+              isConflict ? 'WorkItemRevisionConflict' : 'MyTasksMoveFailed',
+              isConflict ? 'conflict' : 'unknown',
+              isConflict ? t('workspace.myTasks.conflict') : t('workspace.myTasks.moveError'),
+              isConflict,
+            ))
         if (canDismissOwner) {
           setRevealedStatusTaskKey((currentKey) =>
             currentKey === taskKey ? undefined : currentKey

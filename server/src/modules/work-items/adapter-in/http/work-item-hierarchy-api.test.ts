@@ -257,7 +257,10 @@ test('rejects completing a parent with an open child when the Team rejects it', 
   })
 
   expect(response.status).toBe(409)
-  expect(await response.json()).toMatchObject({ code: 'WorkItemOpenChildren' })
+  const body: unknown = await response.json()
+  expect(body).toMatchObject({ code: 'WorkItemOpenChildren' })
+  // Unreadable children count too, so the message must not reveal how many are open.
+  expect(body).toMatchObject({ message: expect.not.stringMatching(/\d/) })
   expect(childReads).toEqual(['onboarding-friction'])
 })
 
@@ -313,8 +316,10 @@ test('fences the relation graph and the closed children into completing a parent
 test('completes a parent whose only child was deleted but left its relation behind', async () => {
   configureFakeProjectClients(true)
   const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const detailReads: string[] = []
   configureParentWithOpenChild('reject', createTeamIssuesFake({
     async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+      detailReads.push(issueId)
       if (issueId === 'open-child') throw new ProjectDataError(404, 'TeamIssueNotFound', 'Missing.')
       return teamIssues.getTeamIssueDetail(directoryId, teamId, issueId, options)
     },
@@ -329,6 +334,7 @@ test('completes a parent whose only child was deleted but left its relation behi
   })
 
   expect(response.status).toBe(200)
+  expect(detailReads).toContain('open-child')
 })
 
 test('reads the readable parent and children of one Work Item without the Team tree', async () => {

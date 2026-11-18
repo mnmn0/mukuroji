@@ -29,6 +29,7 @@ import {
 } from '../api/focusQueue'
 import {
   isFocusAffectedCacheKey,
+  isFocusAffectedHierarchyCacheKey,
   isFocusMutationConflict,
   isFocusOpenChildrenRefusal,
   revalidateFocusCachesOnConflict,
@@ -162,6 +163,11 @@ export function useFocusQueueActions({
         (key) => isFocusAffectedCacheKey(key, scope),
         undefined,
         { revalidate: true },
+      ),
+      mutateSWR(
+        (key) => isFocusAffectedHierarchyCacheKey(key, scope),
+        undefined,
+        { populateCache: false, revalidate: true },
       ),
     ])
   }, [mutateFocusQueue, mutateSWR])

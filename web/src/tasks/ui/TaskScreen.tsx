@@ -762,6 +762,10 @@ export function TaskScreen({
   }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
   const [isRestoringTask, setIsRestoringTask] = useState(false)
+  // Saves still waiting for their outcome. Undo/Redo waits for them: running one meanwhile would
+  // advance the revision the pending save was built on.
+  const [pendingTaskUpdateCount, setPendingTaskUpdateCount] = useState(0)
+  const isTaskUpdatePending = pendingTaskUpdateCount > 0
   const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
   const [isApplyingScheduleUpdate, setIsApplyingScheduleUpdate] = useState(false)
   const scheduleUpdateQueueRef = useRef<PendingTaskScheduleUpdate[]>([])
@@ -1911,7 +1915,8 @@ export function TaskScreen({
     }
 
     // The previous message stays until the outcome is known, so a declined patch keeps it and the
-    // Undo/Redo controls it carries.
+    // Undo/Redo controls it carries; those controls cannot run until then.
+    setPendingTaskUpdateCount((count) => count + 1)
     try {
       const outcome = await onUpdateTask(task, input)
       if (isCancelledTeamIssueUpdate(outcome)) return { applied: false, task }
@@ -1933,6 +1938,8 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
       throw error
+    } finally {
+      setPendingTaskUpdateCount((count) => count - 1)
     }
   }, [createTaskUndoState, onUpdateTask, t])
 
@@ -2108,6 +2115,7 @@ export function TaskScreen({
       !taskUndo ||
       !onUpdateTask ||
       isRestoringTask ||
+      isTaskUpdatePending ||
       !isTaskUpdateUndoTokenForTask(taskUndo.undoToken, taskUndo.task)
     ) {
       return
@@ -2161,7 +2169,7 @@ export function TaskScreen({
       setTaskRedo(undefined)
       return
     }
-    if (!taskRedo || !onUpdateTask || isRestoringTask) {
+    if (!taskRedo || !onUpdateTask || isRestoringTask || isTaskUpdatePending) {
       return
     }
 
@@ -3530,6 +3538,7 @@ export function TaskScreen({
                   setTaskUndo(undefined)
                   setTaskRedo(undefined)
                 }}
+                isUndoDisabled={isTaskUpdatePending}
                 onUndo={!isRestoringTask && (taskUndo || taskRedo)
                   ? () => void (taskUndo ? handleUndoTask() : handleRedoTask())
                   : undefined}

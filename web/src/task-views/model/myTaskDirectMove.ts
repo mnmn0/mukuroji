@@ -44,6 +44,8 @@ export type MyTaskDirectStatusMoveMessages = {
   notFound: string
   /** Message shown when the target, configuration, or destination is no longer available. */
   unavailable: string
+  /** Message shown when the Team refuses to complete a parent whose children are still open. */
+  openChildren: string
 }
 
 /**
@@ -139,6 +141,15 @@ export function executeMyTaskDirectStatusMove(
 
   /** Converts a rejected direct mutation into the same canonical failure as selector Move. */
   const createMutationFailure = (error: unknown): WorkItemActionResult => {
+    if (isMyTaskOpenChildrenRefusal(error)) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'WorkItemOpenChildren',
+        'validation',
+        messages.openChildren,
+      )
+    }
     const conflict = isMyTaskDirectMoveRevisionConflict(error)
     return createFailedTaskActionResult(
       context.actionId,
@@ -186,6 +197,16 @@ export function isMyTaskDirectMoveRevisionConflict(error: unknown): boolean {
   }
   const cause = error instanceof Error ? error.cause : undefined
   return cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict'
+}
+
+/**
+ * Identifies a Team refusing to complete a parent whose children are still open.
+ *
+ * @param error - Unknown My Tasks status mutation failure.
+ * @returns Whether the failure has the stable `WorkItemOpenChildren` code.
+ */
+export function isMyTaskOpenChildrenRefusal(error: unknown): boolean {
+  return error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren'
 }
 
 /**

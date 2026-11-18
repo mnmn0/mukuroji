@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   isFocusAffectedCacheKey,
+  isFocusAffectedHierarchyCacheKey,
   isFocusMutationConflict,
   isFocusOpenChildrenRefusal,
   revalidateFocusCachesOnConflict,
@@ -10,6 +11,21 @@ import { FocusQueueApiError } from '../src/features/focus-queue/api/focusQueue'
 import { TeamIssuesApiError } from '../src/issues/api/errors'
 
 describe('Focus cache revalidation', () => {
+  test('revalidates the affected Team hierarchy apart from the cleared projections', () => {
+    const scope: FocusCacheRevalidationScope = {
+      includePlanning: false,
+      projectIds: [],
+      workItems: [{ teamId: 'team-a', workItemId: 'WI-1' }],
+    }
+    const hierarchyKey = ['team-work-item-hierarchy', 'token', 'team-a']
+
+    expect(isFocusAffectedHierarchyCacheKey(hierarchyKey, scope)).toBe(true)
+    expect(isFocusAffectedHierarchyCacheKey(['team-work-item-hierarchy', 'token', 'team-b'], scope)).toBe(false)
+    expect(isFocusAffectedHierarchyCacheKey(['team-issues', 'token', 'team-a'], scope)).toBe(false)
+    // The hierarchy keeps its rows while it reloads, so the clearing filter leaves it out.
+    expect(isFocusAffectedCacheKey(hierarchyKey, scope)).toBe(false)
+  })
+
   test('matches loaded Workspace, Team, Project, and detail projections for one item', () => {
     const scope: FocusCacheRevalidationScope = {
       includePlanning: false,

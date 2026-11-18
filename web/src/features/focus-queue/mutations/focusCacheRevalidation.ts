@@ -22,9 +22,10 @@ export type FocusCacheRevalidationScope = {
 const teamListCacheScopes: ReadonlySet<string> = new Set([
   'project-relation-candidates',
   'team-issues',
-  // Hierarchy roll-ups total the status, estimate, and dates of the Team's Work Items.
-  'team-work-item-hierarchy',
 ])
+
+/** SWR scope of a Team's Work Item hierarchy read. */
+const teamHierarchyCacheScope = 'team-work-item-hierarchy'
 
 const workItemDetailCacheScopes: ReadonlySet<string> = new Set([
   'project-issue-detail',
@@ -73,6 +74,28 @@ export function isFocusAffectedCacheKey(
   }
 
   return false
+}
+
+/**
+ * Returns whether one loaded SWR cache key is a Team hierarchy affected by a Focus mutation.
+ *
+ * Hierarchy roll-ups total the status, estimate, and dates of the Team's Work Items, so they
+ * change with them. These keys are revalidated apart from {@link isFocusAffectedCacheKey}
+ * because they keep their data while they reload: an outline that fails to reload keeps its
+ * rows instead of falling back to the flat table.
+ *
+ * @param key - Unknown SWR cache key supplied by the global mutator.
+ * @param scope - Team, Project, and Planning projections affected by the mutation.
+ * @returns Whether the hierarchy entry must be revalidated.
+ */
+export function isFocusAffectedHierarchyCacheKey(
+  key: unknown,
+  scope: FocusCacheRevalidationScope,
+): boolean {
+  return Array.isArray(key) &&
+    key[0] === teamHierarchyCacheScope &&
+    typeof key[2] === 'string' &&
+    scope.workItems.some((item) => item.teamId === key[2])
 }
 
 /**

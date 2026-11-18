@@ -143,6 +143,29 @@ test('uses Team teams.read access for a Work Item route', async () => {
   })
 })
 
+test('requires work-items.read for the Team Work Item hierarchy, like the Team list', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const teamsOnly = await configureEnterpriseTeamAccess(['teams.read'])
+    const deniedList = await app.request('/api/teams/core-team/issues', {
+      headers: { Authorization: teamsOnly },
+    })
+    const deniedHierarchy = await app.request('/api/teams/core-team/work-item-hierarchy', {
+      headers: { Authorization: teamsOnly },
+    })
+
+    expect(deniedList.status).toBe(403)
+    expect(deniedHierarchy.status).toBe(403)
+
+    const workItems = await configureEnterpriseTeamAccess(['teams.read', 'work-items.read'])
+    const hierarchy = await app.request('/api/teams/core-team/work-item-hierarchy', {
+      headers: { Authorization: workItems },
+    })
+
+    // The test store has no hierarchy rows, so only the authorization outcome is checked here.
+    expect([401, 403]).not.toContain(hierarchy.status)
+  })
+})
+
 test('uses Team teams.write access for time-entry creation', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     const authorization = await configureEnterpriseTeamAccess([

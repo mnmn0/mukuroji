@@ -1693,7 +1693,15 @@ export const DirectInlinePatchDeclined: Story = {
     await expect(onDeclinedDirectPatchMutation).toHaveBeenCalledTimes(2)
     const feedbackAfterDecline = canvas.getByTestId('task-action-feedback')
     await expect(feedbackAfterDecline).toHaveTextContent('変更を保存しました。')
-    await expect(within(feedbackAfterDecline).getByRole('button', { name: '元に戻す' })).toBeEnabled()
+    const undo = within(feedbackAfterDecline).getByRole('button', { name: '元に戻す' })
+    await expect(undo).not.toHaveAttribute('aria-disabled')
+
+    // The kept Undo still reverses the saved title, not the declined status change.
+    await userEvent.click(undo)
+    await waitFor(() => expect(onDeclinedDirectPatchMutation).toHaveBeenCalledTimes(3))
+    const [, undoPatch] = onDeclinedDirectPatchMutation.mock.calls[2] ?? []
+    expect(undoPatch).toMatchObject({ title: 'ワイヤーフレームを確認する' })
+    expect(undoPatch).not.toHaveProperty('workflowStatusId')
   },
 }
 

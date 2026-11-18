@@ -703,7 +703,8 @@ async function assertWorkItemChildrenClosed(
     throw new WorkItemConfigurationError(
       409,
       'WorkItemOpenChildren',
-      `${openChildCount} child Work Item(s) are still open. Complete or cancel them before completing the parent.`,
+      // The count can include children the caller cannot read, so the message leaves it out.
+      'A child Work Item is still open. Complete or cancel the children before completing the parent.',
     )
   }
   return [

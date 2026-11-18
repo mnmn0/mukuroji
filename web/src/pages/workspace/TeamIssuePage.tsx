@@ -78,6 +78,7 @@ import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRo
 import {
   createWorkItemRelation,
   deleteWorkItemRelation,
+  getTeamWorkItemHierarchy,
   replaceWorkItemParent,
 } from '../../work-items/api'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
@@ -239,6 +240,7 @@ export function TeamIssuePage() {
     error: issueError,
     isLoading: isIssuesLoading,
     mutate: mutateIssues,
+    key: issuesKey,
   } = useTeamIssues(accessToken, teamId, Boolean(user && !currentUserError), true)
   const {
     data: resolvedConfiguration,
@@ -743,11 +745,29 @@ export function TeamIssuePage() {
     if (!accessToken || !hierarchy || !currentIssue || !canMutateTeamIssue(currentIssue)) {
       throw new TeamIssuesApiError(403, t('taskViews.action.unavailable'), 'TeamTaskActionAccessDenied')
     }
-    // Fixed now, so the moved Team's hierarchy is refreshed even if the person switches Team
-    // before the save returns.
-    const movedHierarchyKey = createTeamWorkItemHierarchyKey(accessToken, teamId)
-    /** Revalidates the hierarchy of the Team the move was saved in. */
-    const refreshMovedHierarchy = () => mutateSWR(movedHierarchyKey)
+    // Fixed now, so the moved Team's caches are refreshed even if the person switches Team or
+    // Work Item before the save returns.
+    const movedTeamId = teamId
+    const movedHierarchyKey = createTeamWorkItemHierarchyKey(accessToken, movedTeamId)
+    const movedIssuesKey = issuesKey
+    const movedDetailKey = detailKey
+    /**
+     * Reads the moved Team's hierarchy and writes it to the cache. A plain revalidation does
+     * nothing once the outline closed and nothing reads the key, which would leave the
+     * pre-move placement cached for the next time it opens.
+     */
+    const refreshMovedHierarchy = async () => {
+      try {
+        await mutateSWR(
+          movedHierarchyKey,
+          getTeamWorkItemHierarchy(movedTeamId, accessToken),
+          { revalidate: false },
+        )
+      } catch {
+        // The cached hierarchy stays; an open outline still gets the usual revalidation.
+        await mutateSWR(movedHierarchyKey)
+      }
+    }
     try {
       await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:hierarchy:move:${teamId}:${issueId}`,
@@ -771,7 +791,11 @@ export function TeamIssuePage() {
       }
       throw error
     }
-    await Promise.all([refreshMovedHierarchy(), mutateIssues(), mutateIssueDetail()])
+    await Promise.all([
+      refreshMovedHierarchy(),
+      movedIssuesKey ? mutateSWR(movedIssuesKey) : undefined,
+      movedDetailKey ? mutateSWR(movedDetailKey) : undefined,
+    ])
   }
 
   const handleDeleteRelation = async (issueId: string, relation: WorkItemRelation) => {

@@ -1655,10 +1655,7 @@ test('derives sorted relation projections without child rows for create and dele
   expect(store.graph()).toMatchObject({ revision: 3, edgeCount: 8 })
   // The child that gained a parent drops its old sibling rank; a non-hierarchy relation keeps it.
   const updateExpressions = store.transactions.map((transaction) =>
-    (transaction.TransactItems as Array<Record<string, Record<string, unknown>>>)
-      .map((item) => item.Update)
-      .filter((update) => update?.TableName === 'work-items-table')
-      .map((update) => [(update?.Key as Record<string, unknown> | undefined)?.issueId, update?.UpdateExpression]))
+    readWorkItemEndpointWrites(transaction.TransactItems).filter(([, expression]) => expression !== 'check'))
   expect(updateExpressions).toEqual([
     [['source', 'SET #relationIds = :relationIds REMOVE #hierarchyRank']],
     [
@@ -1668,21 +1665,57 @@ test('derives sorted relation projections without child rows for create and dele
   ])
 })
 
+/**
+ * Pairs each Work Item endpoint of a transaction with what the transaction does to it.
+ *
+ * Every item is validated at runtime, so a fixture of another shape fails the assertion instead
+ * of passing silently.
+ *
+ * @param transactItems - Recorded `TransactItems` of one transaction.
+ * @returns `[issueId, UpdateExpression]` for an update, or `[issueId, 'check']` for a condition check.
+ */
+function readWorkItemEndpointWrites(transactItems: unknown): [string, string][] {
+  if (!Array.isArray(transactItems)) throw new Error('Expected recorded TransactItems.')
+  const writes: [string, string][] = []
+  for (const item of transactItems) {
+    if (!isPlainRecord(item)) throw new Error('Expected a transaction item object.')
+    const update = item.Update
+    const check = item.ConditionCheck
+    const operation = isPlainRecord(update) ? update : isPlainRecord(check) ? check : undefined
+    if (!operation || operation.TableName !== 'work-items-table') continue
+    const key = operation.Key
+    if (!isPlainRecord(key) || typeof key.issueId !== 'string') {
+      throw new Error('Expected a Work Item endpoint key with an issueId.')
+    }
+    if (isPlainRecord(update)) {
+      if (typeof update.UpdateExpression !== 'string') throw new Error('Expected an UpdateExpression.')
+      writes.push([key.issueId, update.UpdateExpression])
+    } else {
+      writes.push([key.issueId, 'check'])
+    }
+  }
+  return writes
+}
+
+/**
+ * Narrows an unknown value to a plain object record.
+ *
+ * @param value - Value read from a recorded command.
+ * @returns Whether the value is a non-null, non-array object.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 test('clears the child sibling rank when its parent link is deleted from either side', async () => {
   const store = createInMemoryRelationStore()
   store.seedRelation('task', 'phase', 'parent')
   store.seedRelation('phase', 'other-task', 'child')
   store.seedGraph(1, 4)
   const client = store.createClient()
-  /** Pairs each Work Item endpoint's key with its update expression, or `check` for a condition-only endpoint. */
+  /** Reads the Work Item endpoint writes of one recorded transaction. */
   const endpointExpressions = (index: number) =>
-    ((store.transactions[index]?.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>)
-      .map((item) => item.Update ?? item.ConditionCheck)
-      .filter((operation) => operation?.TableName === 'work-items-table')
-      .map((operation) => [
-        (operation?.Key as Record<string, unknown> | undefined)?.issueId,
-        operation?.UpdateExpression ?? 'check',
-      ])
+    readWorkItemEndpointWrites(store.transactions[index]?.TransactItems)
 
   await client.deleteRelation('workspace-1', 'core-team', {
     sourceWorkItemId: 'task',
@@ -2000,6 +2033,23 @@ test('classifies a canceled reorder by its cancellation reasons', async () => {
   // A deterministic failure wins even when another item also reports a concurrent write.
   await expect(createCanceledClient(['ValidationError', 'TransactionConflict']).replaceParent('workspace-1', 'core-team', reorder))
     .rejects.toMatchObject({ code: 'WorkItemRelationStoragePermanent', status: 502 })
+})
+
+test('reports a parent change that storage rejected as a permanent failure', async () => {
+  const store = createInMemoryRelationStore({
+    cancelTransactions: true,
+    cancellationReasons: ['ValidationError', 'None', 'None', 'None', 'None', 'None'],
+  })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+
+  await expect(store.createClient().replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'm',
+  })).rejects.toMatchObject({ code: 'WorkItemRelationStoragePermanent', status: 502 })
 })
 
 test('returns success without writing when a lost-response retry finds the requested parent', async () => {

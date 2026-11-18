@@ -611,6 +611,8 @@ export const HierarchyOutlineRetryFocus: Story = {
     await userEvent.keyboard('{Enter}')
     await expect(retry).toHaveAttribute('aria-disabled', 'true')
     await expect(retry).toHaveTextContent('階層を読み込み中…')
+    // The busy button keeps focus, so the second press below really reaches it.
+    await expect(retry).toHaveFocus()
     // A second press while the read runs does not start another one.
     await userEvent.keyboard('{Enter}')
     await expect(onOutlineRetry).toHaveBeenCalledTimes(2)

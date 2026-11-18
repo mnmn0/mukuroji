@@ -1733,16 +1733,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           'The Work Item changed. Reload and try again.',
         )
       }
-      if (
-        isTransactionCancellationReason(error, 'ValidationError') ||
-        isTransactionCancellationReason(error, 'ItemCollectionSizeLimitExceeded')
-      ) {
-        // A rejected item fails the same way on every retry, so it is neither a conflict nor transient.
-        throw new WorkItemConfigurationError(
-          502,
-          'WorkItemRelationStoragePermanent',
-          'The reorder was rejected by storage. Contact an administrator.',
-        )
+      if (isPermanentTransactionRejection(error)) {
+        throw createRelationStoragePermanentError()
       }
       if (isTransactionCancellationReason(error, 'TransactionConflict')) {
         // Another write to the same rows in flight cancels this one without a failed condition.
@@ -2346,6 +2338,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           'WorkItemConfigurationRevisionConflict',
           'Work Item configuration changed during the relation mutation.',
         )
+      }
+      if (isPermanentTransactionRejection(error)) {
+        throw createRelationStoragePermanentError()
       }
       if (isNamedError(error, 'TransactionCanceledException')) {
         throw await input.classifyCancellation()
@@ -3930,6 +3925,31 @@ function isTransactionCancellationReason(error: unknown, code: string) {
   }
   const reasons = error.CancellationReasons
   return Array.isArray(reasons) && reasons.some((reason) => isRecord(reason) && reason.Code === code)
+}
+
+/**
+ * Returns whether DynamoDB rejected an item of a canceled transaction, such as a row grown past
+ * the item size limit. Such a rejection fails the same way on every retry.
+ *
+ * @param error - Unknown error thrown by a TransactWrite.
+ * @returns Whether any item carries `ValidationError` or `ItemCollectionSizeLimitExceeded`.
+ */
+function isPermanentTransactionRejection(error: unknown) {
+  return isTransactionCancellationReason(error, 'ValidationError') ||
+    isTransactionCancellationReason(error, 'ItemCollectionSizeLimitExceeded')
+}
+
+/**
+ * Creates the non-retryable error for a relation or rank write that storage rejected.
+ *
+ * @returns `502 WorkItemRelationStoragePermanent`, which is neither a conflict nor transient.
+ */
+function createRelationStoragePermanentError() {
+  return new WorkItemConfigurationError(
+    502,
+    'WorkItemRelationStoragePermanent',
+    'The change was rejected by storage. Contact an administrator.',
+  )
 }
 
 /** Returns whether a DynamoDB transaction cancellation identifies a conditional failure at an index. */

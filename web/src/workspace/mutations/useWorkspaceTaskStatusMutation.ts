@@ -2,7 +2,7 @@ import type {
   CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyedMutator } from 'swr'
 import { TeamIssuesApiError } from '../../issues/api'
 import {
@@ -78,6 +78,12 @@ export function useWorkspaceTaskStatusMutation({
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const pendingTaskMoveKeysRef = useRef(new Set<string>())
   const [errorMessage, setErrorMessage] = useState<string>()
+  // Latest list, read after the parent completion warning, which can stay open while the list
+  // refreshes.
+  const latestTasksRef = useRef(tasks)
+  useEffect(() => {
+    latestTasksRef.current = tasks
+  }, [tasks])
 
   const moveTaskStatus = useCallback(async (
     task: CanonicalWorkItem,
@@ -124,6 +130,16 @@ export function useWorkspaceTaskStatusMutation({
       pendingTaskMoveKeysRef.current.delete(taskKey)
       return CANCELLED_TEAM_ISSUE_UPDATE
     }
+    // A newer revision that arrived while the person decided would make this request stale, so
+    // it is reported as the conflict the server would return instead of being sent.
+    const latestTask = latestTasksRef.current.find((candidate) =>
+      createWorkspaceTaskKey(candidate) === taskKey
+    )
+    if (!latestTask || latestTask.revision !== canonicalTask.revision) {
+      pendingTaskMoveKeysRef.current.delete(taskKey)
+      setErrorMessage(t('workspace.myTasks.conflict'))
+      throw new TeamIssuesApiError(409, t('workspace.myTasks.conflict'), 'WorkItemRevisionConflict')
+    }
 
     setErrorMessage(undefined)
     const nextTasks = updateWorkspaceTaskStatus(
@@ -160,14 +176,24 @@ export function useWorkspaceTaskStatusMutation({
       )
       return updatedTask
     } catch (error) {
+      // Only this attempt's optimistic status is undone, and only while the row still shows it;
+      // a newer row read meanwhile is kept as it is.
       await mutateWorkItems(
-        (currentTasks = nextTasks) => replaceWorkspaceTask(currentTasks, canonicalTask),
+        (currentTasks = nextTasks) => currentTasks.some((candidate) =>
+          createWorkspaceTaskKey(candidate) === taskKey &&
+          candidate.revision === canonicalTask.revision &&
+          candidate.workflowStatusId === workflowStatusId
+        )
+          ? replaceWorkspaceTask(currentTasks, canonicalTask)
+          : currentTasks,
         { revalidate: false },
       )
 
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         setErrorMessage(t('workspace.myTasks.conflict'))
         await mutateWorkItems()
+      } else if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
+        setErrorMessage(t('issues.error.openChildren'))
       } else {
         setErrorMessage(t('workspace.myTasks.moveError'))
       }

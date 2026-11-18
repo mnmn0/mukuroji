@@ -472,6 +472,15 @@ export function TeamIssueScreen({
   useEffect(() => {
     collapsedOutlineIdsRef.current = collapsedOutlineIds
   }, [collapsedOutlineIds])
+  // The Team this screen currently shows; cleared on unmount, so a move that finishes after the
+  // person left the screen or switched Team changes nothing here.
+  const shownTeamIdRef = useRef<string | undefined>(teamId)
+  useEffect(() => {
+    shownTeamIdRef.current = teamId
+    return () => {
+      shownTeamIdRef.current = undefined
+    }
+  }, [teamId])
   const [outlineStatusMessage, setOutlineStatusMessage] = useState<string>()
   const outlineMovePendingRef = useRef(false)
   const issueViewPanelRef = useRef<HTMLDivElement>(null)
@@ -537,6 +546,9 @@ export function TeamIssueScreen({
       parentWorkItemId: plan.parentWorkItemId,
       hierarchyRank: plan.hierarchyRank,
     }).then(() => {
+      // The move saved, but the screen that started it is gone or shows another Team: its
+      // collapsed rows and focus belong to that other view now.
+      if (shownTeamIdRef.current !== teamId) return
       // Indenting under a collapsed row would hide the moved row, so the new parent opens.
       const latestCollapsedIds = collapsedOutlineIdsRef.current
       if (plan.parentWorkItemId !== null && latestCollapsedIds.has(plan.parentWorkItemId)) {
@@ -549,12 +561,17 @@ export function TeamIssueScreen({
       setOutlineStatusMessage(t('issues.outline.moved').replace('{title}', resolveIssueTitle(issue, t)))
       // Moving the row in the DOM drops focus; return it so repeated moves keep working. Focus
       // the person moved elsewhere while the move saved stays where it is.
+      const viewPanel = issueViewPanelRef.current
       globalThis.requestAnimationFrame(() => {
         const activeElement = document.activeElement
         if (activeElement !== null && activeElement !== document.body) return
-        document.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
+        // Only the view that started the move is searched, so a row with the same ID in another
+        // Team's view never takes focus.
+        if (!viewPanel?.isConnected || shownTeamIdRef.current !== teamId) return
+        viewPanel.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
       })
     }, (error: unknown) => {
+      if (shownTeamIdRef.current !== teamId) return
       setOutlineStatusMessage(
         error instanceof Error && error.message ? error.message : t('issues.outline.move.failed'),
       )

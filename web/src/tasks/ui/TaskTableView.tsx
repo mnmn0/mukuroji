@@ -347,18 +347,21 @@ export function TaskTableView({
       result.status === 'fulfilled' && isCancelledTeamIssueUpdate(result.value)
     ).length
 
+    const cancelledMessage = cancelledCount > 0
+      ? t('tasks.action.cancelledCount').replace('{count}', String(cancelledCount))
+      : undefined
     if (failedCount > 0) {
+      // Declined rows are reported next to the failures, so they are not taken for saved ones.
       setTableAction({
         kind: 'error',
-        message: t('tasks.action.partial').replace('{count}', String(failedCount)),
+        message: [t('tasks.action.partial').replace('{count}', String(failedCount)), cancelledMessage]
+          .filter((part) => part !== undefined)
+          .join(' '),
       })
       return
     }
 
     const savedCount = updates.length - cancelledCount
-    const cancelledMessage = cancelledCount > 0
-      ? t('tasks.action.cancelledCount').replace('{count}', String(cancelledCount))
-      : undefined
     setTableAction({
       kind: 'success',
       message: savedCount > 0

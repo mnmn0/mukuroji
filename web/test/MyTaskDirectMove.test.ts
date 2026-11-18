@@ -21,6 +21,7 @@ const messages = {
   conflict: 'conflict',
   failed: 'failed',
   notFound: 'not found',
+  openChildren: 'open children',
   unavailable: 'unavailable',
 }
 
@@ -110,6 +111,27 @@ describe('My Tasks direct Move action', () => {
     expect(result.status).toBe('cancelled')
     expect(result.failure).toBeUndefined()
     expect(result.items).toEqual([{ status: 'cancelled', target: createMoveTarget() }])
+  })
+
+  test('explains a Team refusing to complete a parent with open children', async () => {
+    const result = requireResult(await executeMyTaskDirectStatusMove(
+      createMoveContext(),
+      createMoveRequestSlot(),
+      [taskViewStorySelectedTask],
+      taskViewStoryConfigurationsByTeam,
+      async () => {
+        throw new TeamIssuesApiError(409, 'API body', 'WorkItemOpenChildren')
+      },
+      messages,
+    ))
+
+    expect(result.status).toBe('failed')
+    expect(result.failure).toMatchObject({
+      category: 'validation',
+      code: 'WorkItemOpenChildren',
+      message: 'open children',
+      retryable: false,
+    })
   })
 
   test('rejects a destination that is not an editable workflow transition', async () => {
