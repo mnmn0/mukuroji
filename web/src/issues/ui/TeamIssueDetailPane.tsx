@@ -40,7 +40,7 @@ import {
 } from '../../work-items/model/workItemEffort'
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
-import { findWorkItemKeys } from '../model/workItemKeys'
+import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {
   isCustomFieldApplicable,
