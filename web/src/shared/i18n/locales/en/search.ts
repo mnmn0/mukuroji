@@ -7,6 +7,7 @@ export const searchMessages = {
   'search.description': 'Find accessible Work Items, projects, documents, whiteboards, and comments from one place.',
   'search.input.label': 'Search workspace',
   'search.input.placeholder': 'Enter a keyword or combine filters',
+  'search.keyJump': 'Open {key}',
   'search.loading': 'Loading search results.',
   'search.error': 'Search results could not be loaded.',
   'search.emptyTitle': 'No results match these conditions',

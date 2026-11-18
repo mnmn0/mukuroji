@@ -433,6 +433,11 @@ export function IssueBoard({
                             onClick={() => onOpenIssue?.(issue)}
                             type="button"
                           >
+                            {issue.key ? (
+                              <span className="mr-2 font-mono text-xs font-semibold text-[var(--workbench-muted)]">
+                                {issue.key}
+                              </span>
+                            ) : null}
                             {resolveIssueTitle(issue, t)}
                           </button>
                           {onIssueActionMenuOpen ? (
