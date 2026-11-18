@@ -1,7 +1,7 @@
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import type { TeamWorkItemHierarchyNode, WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useState, type ComponentProps } from 'react'
+import { useRef, useState, type ComponentProps } from 'react'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
 import {
@@ -520,5 +520,92 @@ export const HierarchyOutline: Story = {
 
     await userEvent.keyboard('{Alt>}{Shift>}{ArrowLeft}{/Shift}{/Alt}')
     await expect(canvas.getByTestId('team-issue-outline-status')).toHaveTextContent('最上位の Work Item')
+  },
+}
+
+type OutlineRetryHarnessProps = {
+  /** Team Issue screen inputs; the harness owns the outline source. */
+  teamIssueScreenProps: ComponentProps<typeof TeamIssueScreen>
+}
+
+/**
+ * Simulates a hierarchy read that failed while the previous hierarchy stays cached.
+ *
+ * A retry resolves on its own with the same nodes, unless a later failure asked the next retry
+ * to wait for the finish button.
+ */
+function OutlineRetryHarness({ teamIssueScreenProps }: OutlineRetryHarnessProps) {
+  const [hasError, setHasError] = useState(true)
+  const [isRetrying, setIsRetrying] = useState(false)
+  const holdNextRetryRef = useRef(false)
+
+  /** Clears the failure the way a successful SWR revalidation of the same data would. */
+  const finishRetry = () => {
+    setHasError(false)
+    setIsRetrying(false)
+  }
+
+  return (
+    <>
+      <button
+        data-testid="simulate-outline-failure"
+        onClick={() => {
+          holdNextRetryRef.current = true
+          setHasError(true)
+        }}
+        type="button"
+      >
+        Simulate hierarchy failure
+      </button>
+      <button data-testid="finish-outline-retry" onClick={finishRetry} type="button">
+        Finish hierarchy retry
+      </button>
+      <TeamIssueScreen
+        {...teamIssueScreenProps}
+        issueOutline={{
+          nodes: outlineNodes,
+          ...(hasError
+            ? {
+                errorMessage: '階層を読み込めませんでした。',
+                isRetrying,
+                onRetry: () => {
+                  setIsRetrying(true)
+                  if (!holdNextRetryRef.current) window.setTimeout(finishRetry, 20)
+                },
+              }
+            : {}),
+        }}
+      />
+    </>
+  )
+}
+
+/** A retry that returns the same hierarchy hands focus to the view, unless the person moved on. */
+export const HierarchyOutlineRetryFocus: Story = {
+  args: {
+    issues: configuredIssues.slice(0, 3),
+    selectedIssueId: undefined,
+    taskViewPresentation: HierarchyOutline.args?.taskViewPresentation,
+  },
+  render: (args) => <OutlineRetryHarness teamIssueScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const viewPanel = canvas.getByRole('region', { name: 'テーブル' })
+
+    canvas.getByRole('button', { name: '階層を再読み込み' }).focus()
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(canvas.queryByTestId('team-issue-outline-unavailable')).not.toBeInTheDocument())
+    await waitFor(() => expect(viewPanel).toHaveFocus())
+
+    await userEvent.click(canvas.getByTestId('simulate-outline-failure'))
+    const retry = canvas.getByRole('button', { name: '階層を再読み込み' })
+    retry.focus()
+    await userEvent.keyboard('{Enter}')
+    await expect(retry).toHaveAttribute('aria-disabled', 'true')
+    await expect(retry).toHaveTextContent('階層を読み込み中…')
+    const finish = canvas.getByTestId('finish-outline-retry')
+    await userEvent.click(finish)
+    await waitFor(() => expect(canvas.queryByTestId('team-issue-outline-unavailable')).not.toBeInTheDocument())
+    await expect(finish).toHaveFocus()
   },
 }
