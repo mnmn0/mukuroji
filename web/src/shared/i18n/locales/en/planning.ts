@@ -98,7 +98,7 @@ export const planningMessages = {
   'planning.field.change': 'Changes since previous update',
   'planning.field.comment': 'Comment',
   'planning.field.reaction': 'Reaction',
-  'planning.field.commentPlaceholder': 'Comment on this update…',
+  'planning.field.commentPlaceholder': 'Comment on this update. Mention with @name@example.com…',
   'planning.field.watcherCount': '{count} watching',
   'planning.field.goalFramework': 'Goal / OKR role',
   'planning.type.cycle': 'Cycle',

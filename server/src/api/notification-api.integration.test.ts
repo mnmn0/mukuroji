@@ -1246,3 +1246,282 @@ test('hides an existing Planning notification after its Initiative is archived',
   expect(probe.visibility.get(archived.id)).toBe(false)
   expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
 })
+
+test('shows Planning update publish and comment notifications only for readable current targets', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const workspaceId = 'user#demo@example.com'
+  let revision = 0
+  for (const projectId of ['refero', 'private-project']) {
+    await planning.configureUpdateCadence(workspaceId, {
+      target: { type: 'project', teamId: 'core-team', projectId },
+      cadence: {
+        updateOwnerMemberKey: 'sato@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: revision,
+    }, { workItems: [] })
+    revision += 1
+  }
+  const published = createNotificationItem({
+    id: 'planning-published-member',
+    eventType: 'planning-update.published',
+    reasons: ['project-member'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+  })
+  const mentioned = createNotificationItem({
+    ...published,
+    id: 'planning-comment-mention',
+    eventType: 'planning-update.commented',
+    reasons: ['mention'],
+  })
+  const unsubscribedWatcher = createNotificationItem({
+    ...mentioned,
+    id: 'planning-comment-unsubscribed-watcher',
+    reasons: ['watcher'],
+  })
+  const inaccessible = createNotificationItem({
+    ...published,
+    id: 'planning-degraded-inaccessible',
+    eventType: 'planning-update.health-degraded',
+    reasons: ['update-owner'],
+    projectId: 'private-project',
+    planningTargetId: 'private-project',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#private-project',
+  })
+  const missingTarget = createNotificationItem({
+    ...published,
+    id: 'planning-published-missing-target',
+    projectId: 'handoff',
+    planningTargetId: 'handoff',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#handoff',
+  })
+  const forgedRecordKey = createNotificationItem({
+    ...published,
+    id: 'planning-published-forged-record-key',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#private-project',
+  })
+  const probe = createNotificationVisibilityProbe([
+    published,
+    mentioned,
+    unsubscribedWatcher,
+    inaccessible,
+    missingTarget,
+    forgedRecordKey,
+  ])
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getWatcherState() {
+        return { subscribed: false, explicit: false, automatic: false, reasons: [], watcherCount: 0 }
+      },
+    }),
+    notifications: probe.client,
+  })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [published.id, true],
+    [mentioned.id, true],
+    [unsubscribedWatcher.id, false],
+    [inaccessible.id, false],
+    [missingTarget.id, false],
+    [forgedRecordKey.id, false],
+  ]))
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: published.id }, { id: mentioned.id }],
+    unreadCount: 2,
+  })
+})
+
+test('requires both the captured and current Initiative scope for Planning update comments', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [
+      { projectId: 'refero', role: 'viewer' },
+      { projectId: 'handoff', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'handoff', name: 'Handoff', tone: 'green' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const workspaceId = 'user#demo@example.com'
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('comment-scope-portfolio', 0),
+    type: 'portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('comment-scope-roadmap', 1),
+    type: 'roadmap',
+    parentId: 'comment-scope-portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  let revision = 2
+  for (const projectId of ['refero', 'handoff', 'private-project']) {
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(`${projectId}-initiative`, revision),
+      type: 'initiative',
+      parentId: 'comment-scope-roadmap',
+      projectId,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, { workItems: [] })
+    revision += 1
+    await planning.configureUpdateCadence(workspaceId, {
+      target: { type: 'initiative', entityId: `${projectId}-initiative` },
+      cadence: {
+        updateOwnerMemberKey: 'sato@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: revision,
+    }, { workItems: [] })
+    revision += 1
+  }
+  const currentReadable = createNotificationItem({
+    id: 'planning-comment-current-readable',
+    eventType: 'planning-update.commented',
+    reasons: ['update-author'],
+    issueId: undefined,
+    planningTargetType: 'initiative',
+    planningTargetId: 'refero-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#refero-initiative',
+  })
+  const capturedInaccessible = createNotificationItem({
+    ...currentReadable,
+    id: 'planning-comment-captured-inaccessible',
+    projectId: 'private-project',
+  })
+  const movedToInaccessible = createNotificationItem({
+    ...currentReadable,
+    id: 'planning-comment-moved-to-inaccessible',
+    planningTargetId: 'private-project-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#private-project-initiative',
+  })
+  const movedToReadable = createNotificationItem({
+    ...currentReadable,
+    id: 'planning-comment-moved-to-readable',
+    planningTargetId: 'handoff-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#handoff-initiative',
+  })
+  const probe = createNotificationVisibilityProbe([
+    currentReadable,
+    capturedInaccessible,
+    movedToInaccessible,
+    movedToReadable,
+  ])
+  setTestAppDependencies({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [currentReadable.id, true],
+    [capturedInaccessible.id, false],
+    [movedToInaccessible.id, false],
+    [movedToReadable.id, true],
+  ]))
+  // The filter keeps the captured scope, because Inbox actions save the filtered row.
+  expect(await response.json()).toMatchObject({
+    notifications: [
+      { id: currentReadable.id, teamId: 'core-team', projectId: 'refero' },
+      { id: movedToReadable.id, teamId: 'core-team', projectId: 'refero' },
+    ],
+    unreadCount: 2,
+  })
+})
+
+test('shows Planning update activity to an Enterprise member with only Planning read access', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (requestedWorkspaceId) => ({
+    ...await readSnapshot(requestedWorkspaceId),
+    customRoles: [{
+      workspaceId,
+      roleId: 'custom:planning-reader',
+      name: 'Planning reader',
+      permissions: ['planning.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    }],
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'notification-planning-reader',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId: 'custom:planning-reader',
+      scope: { workspaceId, kind: 'project', targetId: 'refero' },
+      source: 'direct',
+    }],
+  })
+  await getTestAppDependencies().workItems.planning.configureUpdateCadence(workspaceId, {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'sato@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const comment = createNotificationItem({
+    id: 'enterprise-planning-comment',
+    eventType: 'planning-update.commented',
+    reasons: ['mention'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+  })
+  const probe = createNotificationVisibilityProbe([comment])
+  setTestAppDependencies({ enterpriseIdentity: identity, notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(comment.id)).toBe(true)
+})
