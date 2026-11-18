@@ -1166,7 +1166,8 @@ function createAnalyticsDeliveryDefinitionHash(report: AnalyticsReport) {
       timeZone: report.timeZone,
       filter: report.filter,
       forecastBaseline: report.forecastBaseline,
-      forecastWeighting: report.forecastWeighting,
+      // Leave the key out when unset so reports saved before effort weighting keep their hash.
+      ...(report.forecastWeighting === undefined ? {} : { forecastWeighting: report.forecastWeighting }),
       widgets: report.widgets,
       schedule: schedule === undefined
         ? undefined

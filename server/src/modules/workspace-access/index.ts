@@ -39,3 +39,9 @@ export {
   type MemberCredentialResetPorts,
   type MemberSignInAccount,
 } from './application/member-credential-reset'
+export {
+  listMembersSignInSecurity,
+  summarizeMfaEnrollment,
+  type MemberSignInProfile,
+  type MemberSignInSecurityPorts,
+} from './application/member-sign-in-security'

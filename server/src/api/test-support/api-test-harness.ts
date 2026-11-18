@@ -694,6 +694,7 @@ function createWorkspaceAccessFake(
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
     recordMemberCredentialAction: unsupported,
+    markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
     completeMemberCredentialAction: async () => undefined,
     reconcileDirectoryMember: unsupported,
@@ -1636,28 +1637,32 @@ function configureFakeProjectClients(
     }
     return current
   }
+  /** Charter updates the fake directory received. */
+  const projectCharterUpdates: Array<{
+    directoryId: string
+    teamId: string
+    projectId: string
+    expectedRevision: number
+    charter: ProjectCharter
+    audited: boolean
+    /** Record keys named by the caller's authorization fences. */
+    authorizationRecordKeys: string[]
+  }> = []
+  /** Lifecycle transitions the fake directory received. */
+  const projectLifecycleTransitions: Array<{
+    directoryId: string
+    teamId: string
+    projectId: string
+    expectedRevision: number
+    state: ProjectLifecycleState
+    audited: boolean
+    /** Record keys named by the caller's authorization fences. */
+    authorizationRecordKeys: string[]
+  }> = []
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
-    projectCharterUpdates: [] as Array<{
-      directoryId: string
-      teamId: string
-      projectId: string
-      expectedRevision: number
-      charter: ProjectCharter
-      audited: boolean
-      /** Record keys named by the caller's authorization fences. */
-      authorizationRecordKeys: string[]
-    }>,
-    projectLifecycleTransitions: [] as Array<{
-      directoryId: string
-      teamId: string
-      projectId: string
-      expectedRevision: number
-      state: ProjectLifecycleState
-      audited: boolean
-      /** Record keys named by the caller's authorization fences. */
-      authorizationRecordKeys: string[]
-    }>,
+    projectCharterUpdates,
+    projectLifecycleTransitions,
     cognitoIdentityProviderDescriptions: [] as string[],
     cognitoSsoAppClientDescriptions: [] as string[],
     directoryReads: [] as Array<{

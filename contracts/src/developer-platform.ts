@@ -1489,6 +1489,13 @@ export type UpdatePublicWorkItemRequest = Omit<WorkItemPatch, 'contributorAssign
    * with `acceptanceCriteria`.
    */
   acceptanceCriteriaMarks?: WorkItemAcceptanceCriterionMark[]
+  /**
+   * Replaces only the estimate (`schedule.plannedEffortMinutes`) in minutes, or clears it with
+   * `null`. The server writes it into the stored schedule, so the body does not depend on the dates
+   * the client read and a retry with the same body replays. Requires the latest revision and cannot
+   * be combined with `schedule`.
+   */
+  plannedEffortMinutes?: number | null
 }
 
 /** Public Work Item Type change preview endpoint の request body です。 */

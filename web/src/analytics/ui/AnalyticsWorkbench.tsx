@@ -2177,6 +2177,12 @@ function AnalyticsForecastCard({
             <ForecastValue label={t('analytics.forecast.remaining')} value={String(forecast.remainingWorkItems)} />
           )}
         </dl>
+        {forecast.weighting === 'effort' && forecast.unestimatedRemainingWorkItems !== undefined ? (
+          <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+            {t('analytics.forecast.unestimatedRemaining')
+              .replace('{count}', String(forecast.unestimatedRemainingWorkItems))}
+          </p>
+        ) : null}
         <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
           {t(forecast.weighting === 'effort' ? 'analytics.forecast.sampleEffort' : 'analytics.forecast.sample')
             .replace('{count}', String(forecast.sampleSize))
@@ -2650,6 +2656,14 @@ function formatAnalyticsWarning(
   }
   if (warning === 'No SLA samples are available.') {
     return t('analytics.warning.noSlaSamples')
+  }
+  const unestimatedCompletions = /^(\d+) completed Work Item\(s\) had no estimate and counted as zero effort\.$/u
+    .exec(warning)
+  if (unestimatedCompletions?.[1]) {
+    return t('analytics.warning.unestimatedCompletions').replace(
+      '{count}',
+      unestimatedCompletions[1],
+    )
   }
   const invalidDueDates = /^(\d+) Work Item due date value\(s\) were invalid and excluded\.$/u
     .exec(warning)

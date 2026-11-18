@@ -94,8 +94,8 @@ export type WorkItemTimePanelContainerProps = {
   memberKey?: string
   /** Canonical estimate (`schedule.plannedEffortMinutes`) of the Work Item. */
   plannedEffortMinutes?: number
-  /** Remaining effort recorded on the Work Item. */
-  remainingEffortMinutes?: number
+  /** Remaining effort recorded on the Work Item, 0 once it is completed or canceled, undefined when not recorded. */
+  remainingEffortMinutes?: number | undefined
 }
 
 /**

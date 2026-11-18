@@ -41,6 +41,16 @@ export type MemberCredentialResetPorts = {
     action: WorkspaceMemberCredentialAction,
     auditContext: MutationAuditContext | undefined,
   ): Promise<{ completed: boolean }>
+  /**
+   * Marks that this attempt is about to change the account, so that a retry does not repeat a
+   * change that may already have happened.
+   */
+  markActionApplying(
+    workspaceId: string,
+    memberKey: string,
+    action: WorkspaceMemberCredentialAction,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<void>
   /** Marks the recorded action as finished, so that a retry does not change the account again. */
   completeAction(
     workspaceId: string,
@@ -54,8 +64,11 @@ export type MemberCredentialResetPorts = {
   disableAuthenticator(memberKey: string): Promise<void>
   /** Signs the member out of every session. */
   signOutEverywhere(memberKey: string): Promise<void>
-  /** Records a failure that does not undo the completed reset. */
-  reportFailure(message: string, error: unknown): void
+  /**
+   * Records a failure that does not undo the completed reset, with the request's correlation
+   * ID so that an operator can find the action to recover.
+   */
+  reportFailure(message: string, error: unknown, correlationId: string | undefined): void
 }
 
 /** Input of {@link resetMemberCredential}. */
@@ -79,8 +92,10 @@ export type MemberCredentialResetInput = {
  * after it. A retry with the same idempotency key does nothing once the action completed, so a
  * late retry cannot undo an app or password the member set up since. A retry of an action that
  * was recorded but not completed checks the actor's authority again and resumes it without the
- * eligibility checks, because the earlier attempt may already have changed the account. Each
- * attempt claims the action before changing the account, so concurrent retries do not repeat it.
+ * eligibility checks, as long as the earlier attempt stopped before it started changing the
+ * account. Each attempt claims the action and marks the change as started before it calls the
+ * identity provider, so neither a concurrent retry nor a late one repeats a change that may
+ * already have happened.
  *
  * @param ports - Member, identity, and audit ports.
  * @param input - Actor, member, action, and audit context.
@@ -128,33 +143,69 @@ export async function resetMemberCredential(
     return
   }
 
+  const markApplying = () => ports.markActionApplying(
+    input.workspaceId,
+    member.memberKey,
+    input.action,
+    input.auditContext,
+  )
   if (input.action === 'mfa-reset') {
+    await markApplying()
     await ports.disableAuthenticator(member.memberKey)
   } else {
+    // Signing out first must succeed: if it fails, nothing changed yet and a retry with the same
+    // key resumes safely, whereas repeating the reset could undo a password the member already
+    // set. The second sign-out closes sessions started in between and is best effort.
+    await ports.signOutEverywhere(member.memberKey)
+    await markApplying()
     await ports.resetPassword(member.memberKey)
-    try {
-      await ports.signOutEverywhere(member.memberKey)
-    } catch (error) {
-      ports.reportFailure('Failed to sign the member out after a password reset.', error)
-    }
+    await retryBestEffort(
+      ports,
+      () => ports.signOutEverywhere(member.memberKey),
+      'Failed to sign the member out again after a password reset.',
+      input.auditContext?.correlationId,
+    )
   }
 
   // An unmarked action can be resumed by a retry within the resume window, which would repeat
   // the reset, so marking it is worth a few attempts.
+  await retryBestEffort(
+    ports,
+    () => ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext),
+    'Failed to mark the credential reset as completed.',
+    input.auditContext?.correlationId,
+  )
+}
+
+/** How many times the use case tries a best-effort step after the credential changed. */
+const bestEffortAttempts = 3
+
+/**
+ * Runs a step that follows a finished credential change, retrying it a few times and reporting
+ * the last failure instead of throwing, because the change itself already happened.
+ *
+ * @param ports - Ports that report the failure.
+ * @param step - Step to run.
+ * @param failureMessage - Message reported when every attempt fails.
+ * @param correlationId - Correlation ID of the request, reported with the failure.
+ */
+async function retryBestEffort(
+  ports: Pick<MemberCredentialResetPorts, 'reportFailure'>,
+  step: () => Promise<void>,
+  failureMessage: string,
+  correlationId: string | undefined,
+) {
   let lastError: unknown
-  for (let attempt = 0; attempt < completionAttempts; attempt += 1) {
+  for (let attempt = 0; attempt < bestEffortAttempts; attempt += 1) {
     try {
-      await ports.completeAction(input.workspaceId, member.memberKey, input.action, input.auditContext)
+      await step()
       return
     } catch (error) {
       lastError = error
     }
   }
-  ports.reportFailure('Failed to mark the credential reset as completed.', lastError)
+  ports.reportFailure(failureMessage, lastError, correlationId)
 }
-
-/** How many times the use case tries to mark a finished reset as completed. */
-const completionAttempts = 3
 
 /**
  * Explains why a reset does not apply to the member's current account.

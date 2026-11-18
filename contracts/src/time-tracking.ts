@@ -147,8 +147,11 @@ export type TimeSummaryGroup = {
   /** Number of entries contributing to the group. */
   entryCount: number
   /**
-   * Sum of the canonical estimates (`schedule.plannedEffortMinutes`) of the Work Items in the group;
-   * absent when none has one.
+   * Canonical estimates (`schedule.plannedEffortMinutes`) attributed to the group; absent when none
+   * has one.
+   *
+   * Day and week groups split each Work Item's estimate across the calendar groups in proportion to
+   * its recorded actual time in each. Other groups add each Work Item's estimate once.
    */
   estimateMinutes?: number
   /** Confidential actual cost in minor currency units. */

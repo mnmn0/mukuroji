@@ -313,6 +313,10 @@ export type AnalyticsForecast = {
   remainingWorkItems: number
   /** `effort` 重み付けで forecast が対象にした残工数（時間）です。 */
   remainingEffortHours?: number
+  /**
+   * `effort` 重み付けで、見積も残工数もないため 0 として数えた未完了 Work Item 数です。0 件のときは省きます。
+   */
+  unestimatedRemainingWorkItems?: number
   /** Historical sample 数です。 */
   sampleSize: number
   /** Historical throughput の1日平均です。`effort` 重み付けでは1日あたりの完了工数（時間）です。 */

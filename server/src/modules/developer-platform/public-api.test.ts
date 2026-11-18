@@ -971,7 +971,7 @@ describe('public API router', () => {
     expect(receivedDueDates).toEqual(['1000-01-01', '2024-02-29', '2026-04-30'])
   })
 
-  test('passes remaining effort and manual progress updates, including clears, and rejects invalid amounts', async () => {
+  test('passes estimate, remaining effort, and manual progress updates, including clears, and rejects invalid amounts', async () => {
     const inputs: unknown[] = []
     const workItems = createDefaultWorkItemService({
       async update(_credential, _teamId, _workItemId, input) {
@@ -993,7 +993,14 @@ describe('public API router', () => {
 
     expect((await request('effort-set', { remainingEffortMinutes: 90, progressPercent: 40 })).status).toBe(200)
     expect((await request('effort-clear', { remainingEffortMinutes: null, progressPercent: null })).status).toBe(200)
+    expect((await request('estimate-set', { plannedEffortMinutes: 480 })).status).toBe(200)
+    expect((await request('estimate-clear', { plannedEffortMinutes: null })).status).toBe(200)
     for (const [key, body] of [
+      ['estimate-negative', { plannedEffortMinutes: -1 }],
+      ['estimate-with-schedule', {
+        plannedEffortMinutes: 60,
+        schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
+      }],
       ['effort-negative', { remainingEffortMinutes: -1 }],
       ['effort-fraction', { remainingEffortMinutes: 1.5 }],
       ['progress-over', { progressPercent: 101 }],
@@ -1006,6 +1013,8 @@ describe('public API router', () => {
     expect(inputs).toEqual([
       { expectedRevision: 1, remainingEffortMinutes: 90, progressPercent: 40 },
       { expectedRevision: 1, remainingEffortMinutes: null, progressPercent: null },
+      { expectedRevision: 1, plannedEffortMinutes: 480 },
+      { expectedRevision: 1, plannedEffortMinutes: null },
     ])
   })
 
