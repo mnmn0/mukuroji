@@ -14,6 +14,7 @@ import {
 import { TriageError } from '../../domain/triage-entry'
 import {
   createTriageScheduleTransactionItems,
+  createTriageWakeIndexRepairItem,
   decodeTriageEntryRow,
   DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
 } from '../../adapter-out/dynamodb/triage-transactions'
@@ -70,6 +71,8 @@ export type TriageScheduleResult = {
   escalatedEntries: number
   /** Number of entries newly redacted by retention policy. */
   redactedEntries: number
+  /** Number of unchanged entries whose stale wake-index position was rewritten. */
+  repairedWakeIndexEntries: number
   /** Number of revision races safely skipped. */
   conflicts: number
 }
@@ -178,6 +181,7 @@ export async function runTriageSchedule(
     breachedEntries: 0,
     escalatedEntries: 0,
     redactedEntries: 0,
+    repairedWakeIndexEntries: 0,
     conflicts: 0,
   }
 
@@ -231,7 +235,23 @@ export async function runTriageSchedule(
         now,
         wakeShardCount,
       })
-      if (contribution.transactItems.length === 0) continue
+      if (contribution.transactItems.length === 0) {
+        const repair = createTriageWakeIndexRepairItem({
+          tableName,
+          entry,
+          storedItem: read.Item,
+          wakeShardCount,
+        })
+        if (!repair) continue
+        try {
+          await options.documentClient.send(new TransactWriteCommand({ TransactItems: [repair] }))
+          result.repairedWakeIndexEntries += 1
+        } catch (error) {
+          if (!isConditionalConflict(error)) throw error
+          result.conflicts += 1
+        }
+        continue
+      }
       const escalationOwnerUserId = contribution.escalated
         ? await readEscalationOwnerUserId(options.documentClient, tableName, entry)
         : undefined

@@ -456,6 +456,60 @@ export function createTriageScheduleTransactionItems(
   }
 }
 
+/** Wake-index repair input for an entry whose schedule evaluation changed nothing. */
+export type CreateTriageWakeIndexRepairItemInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Canonical entry read with a strongly consistent read. */
+  entry: TriageEntry
+  /** Root row as stored, including its sparse wake-index attributes. */
+  storedItem: Record<string, unknown>
+  /** Wake-index shard count. */
+  wakeShardCount?: number
+}
+
+/** Rewrites a stale sparse wake-index position for an entry the schedule did not change.
+ *
+ * Rows written before the snoozed-SLA fix (#484), or any other row whose index position no
+ * longer matches its deadlines, would otherwise stay due forever and use up the shard's page
+ * on every run. The update is revision-conditional so it never overwrites a concurrent change.
+ *
+ * @param input The entry, its stored row, and the table settings.
+ * @returns A revision-conditional Update, or undefined when the index is already correct.
+ */
+export function createTriageWakeIndexRepairItem(
+  input: CreateTriageWakeIndexRepairItemInput,
+): TriageTransactionItem | undefined {
+  const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
+  validateTriageEntryProjection(input.entry)
+  const expected = createStoredEntry(input.entry, normalizeWakeShardCount(input.wakeShardCount))
+  const storedShard = input.storedItem.triageWakeShard
+  const storedNextWakeAt = input.storedItem.triageNextWakeAt
+  if (
+    storedShard === expected.triageWakeShard &&
+    storedNextWakeAt === expected.triageNextWakeAt
+  ) {
+    return undefined
+  }
+  const values: Record<string, unknown> = { ':expectedRevision': input.entry.revision }
+  let updateExpression = 'REMOVE triageWakeShard, triageNextWakeAt'
+  if (expected.triageWakeShard && expected.triageNextWakeAt) {
+    values[':wakeShard'] = expected.triageWakeShard
+    values[':nextWakeAt'] = expected.triageNextWakeAt
+    updateExpression = 'SET triageWakeShard = :wakeShard, triageNextWakeAt = :nextWakeAt'
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: createTriageEntryKey(input.entry.workspaceId, input.entry.id),
+      UpdateExpression: updateExpression,
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: values,
+    },
+  }
+}
+
 /** Returns the physical primary key for an entry.
  *
  * @param workspaceId The owning Workspace ID.
@@ -865,12 +919,20 @@ function findNewEvents(current: TriageEntry, next: TriageEntry): TriageEntryEven
   return next.events.filter((event) => !currentIds.has(event.id))
 }
 
-/** Calculates the earliest deadline represented by the sparse wake index. */
+/** Calculates the earliest deadline represented by the sparse wake index.
+ *
+ * A snoozed entry suspends SLA and escalation evaluation, so only its snooze deadline and
+ * retention expiry may wake it. Indexing a suspended SLA deadline would keep a past-due row
+ * at the head of its shard that the schedule reads every run without changing (#484).
+ */
 function calculateNextWakeAt(entry: TriageEntry): string | undefined {
   const candidates: string[] = []
   if (!entry.retention.redactedAt) candidates.push(entry.retention.expiresAt)
-  if (entry.state !== 'accepted' && entry.state !== 'duplicate' && entry.state !== 'declined') {
-    if (entry.state === 'snoozed' && entry.snoozedUntil) candidates.push(entry.snoozedUntil)
+  if (entry.state === 'snoozed') {
+    if (entry.snoozedUntil) candidates.push(entry.snoozedUntil)
+  } else if (
+    entry.state !== 'accepted' && entry.state !== 'duplicate' && entry.state !== 'declined'
+  ) {
     if (entry.sla && !entry.sla.breachedAt) candidates.push(entry.sla.dueAt)
     if (entry.sla?.escalationDueAt && !entry.sla.escalatedAt) {
       candidates.push(entry.sla.escalationDueAt)
