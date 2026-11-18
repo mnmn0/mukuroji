@@ -84,11 +84,9 @@ import {
   readWorkItemExpectedRevision,
   WorkItemScheduleError,
   WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
-  type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
   type ConfirmWorkItemScheduleChangeCommand,
   type ProjectIssuesResponse,
-  type PublicUpdateTeamIssueRequestBody,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesResponse,
@@ -290,8 +288,8 @@ import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
   createWorkItemScheduleIdempotencyUserId,
   createWorkItemScheduleIdempotencyWorkspaceId,
-  rejectInternalWorkItemCreateFields,
-  rejectInternalWorkItemUpdateFields,
+  readPublicWorkItemCreateBody,
+  readPublicWorkItemUpdateBody,
 } from '../shared/work-item-schedule'
 import {
   readWorkItemActualDateCorrection,
@@ -4490,10 +4488,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
       ))
     } catch (error) {
-      if (error instanceof CognitoServiceError) {
-        return toCognitoDirectoryErrorResponse(c, error)
-      }
-      return toProjectDataErrorResponse(c, error)
+      return toWorkItemConfigurationErrorResponse(c, error)
     }
   })
 
@@ -4622,11 +4617,12 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'member')
-      const requestBody = await readJson<CreateTeamIssueRequestBody>(c.req)
-      if (!requestBody) {
+      const rawRequestBody = await readJson<unknown>(c.req)
+      if (!rawRequestBody) {
         throw new ProjectDataError(400, 'InvalidProjectWrite', 'Work Item body is required.')
       }
-      rejectInternalWorkItemCreateFields(requestBody)
+      // Built from public fields only; the raw body never reaches the adapter input.
+      const requestBody = readPublicWorkItemCreateBody(rawRequestBody)
       const body = normalizeTeamIssueInput(
         requestBody,
         context.team,
@@ -5055,8 +5051,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'member')
-      const input = await readJson<PublicUpdateTeamIssueRequestBody>(c.req) ?? {}
-      rejectInternalWorkItemUpdateFields(input)
+      // Built from public fields only; the raw body never reaches the adapter input.
+      const input = readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {})
       const actualDateRequest = readWorkItemActualDateCorrection(input)
       const body = normalizeTeamIssueInput(
         actualDateRequest.body,

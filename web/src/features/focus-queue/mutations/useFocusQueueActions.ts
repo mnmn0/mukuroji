@@ -19,8 +19,10 @@ import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
 } from '../../../issues/mutations/confirmParentCompletion'
+import { refreshMovedHierarchyCache } from '../../../issues/mutations/hierarchyMoveCacheRefresh'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../../shared/i18n/i18n'
+import { getTeamWorkItemHierarchy } from '../../../work-items/api/hierarchy'
 import { resolveWorkItemTypeWorkflow } from '../../../work-items/model/workItemDisplay'
 import {
   updateFocusPolicy,
@@ -102,7 +104,7 @@ export type FocusQueueMutationController = {
     item: FocusItem,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
-  /** Removes the latest mutation error notice. */
+  /** Removes the latest item action error notice; a policy save failure stays on the policy editor. */
   clearError: () => void
   /** Removes the latest snooze feedback without changing server state. */
   dismissSnoozeFeedback: () => void
@@ -145,13 +147,35 @@ export function useFocusQueueActions({
   const mutationRunner = mutationRunnerRef.current
   const pendingKeysRef = useRef(new Set<string>())
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set())
-  const [failedAction, setFailedAction] = useState<{
-    /** Action that failed. */
-    action: FocusQueueActionId
-    /** User-facing failure category. */
-    kind: FocusQueueMutationError
-  }>()
+  const [itemError, setItemError] = useState<FocusQueueMutationError>()
+  const [policyError, setPolicyError] = useState(false)
   const [snoozeFeedback, setSnoozeFeedback] = useState<FocusQueueSnoozeFeedback>()
+  // Counts the item actions and the policy saves apart, so a failure that finishes after a newer
+  // action of the same kind started does not replace that action's message, and an item action
+  // never hides a policy save failure or the other way around.
+  const actionGenerationRef = useRef({ item: 0, policy: 0 })
+
+  /**
+   * Reads every loaded Team hierarchy the action affected again and writes it to the cache. A
+   * hierarchy that cannot be read is cleared, so the outline shows its retry instead of the
+   * totals from before the action.
+   */
+  const refreshAffectedHierarchies = useCallback(async (scope: FocusCacheRevalidationScope) => {
+    const hierarchyKeys: (readonly [string, string, string])[] = []
+    // Only collects the loaded keys; returning false leaves every entry untouched.
+    await mutateSWR((key) => {
+      if (isFocusAffectedHierarchyCacheKey(key, scope)) hierarchyKeys.push(key)
+      return false
+    })
+    await Promise.all(hierarchyKeys.map((key) => {
+      const [, hierarchyAccessToken, teamId] = key
+      return refreshMovedHierarchyCache(
+        mutateSWR,
+        key,
+        () => getTeamWorkItemHierarchy(teamId, hierarchyAccessToken),
+      )
+    }))
+  }, [mutateSWR])
 
   /** Revalidates Focus and every loaded canonical projection affected by one action. */
   const refreshAffectedCaches = useCallback(async (
@@ -164,13 +188,9 @@ export function useFocusQueueActions({
         undefined,
         { revalidate: true },
       ),
-      mutateSWR(
-        (key) => isFocusAffectedHierarchyCacheKey(key, scope),
-        undefined,
-        { populateCache: false, revalidate: true },
-      ),
+      refreshAffectedHierarchies(scope),
     ])
-  }, [mutateFocusQueue, mutateSWR])
+  }, [mutateFocusQueue, mutateSWR, refreshAffectedHierarchies])
 
   /** Runs one item action once while publishing pending and failure state. */
   const runItemAction = useCallback(async <Result,>(
@@ -184,7 +204,11 @@ export function useFocusQueueActions({
 
     pendingKeysRef.current.add(pendingKey)
     setPendingKeys(new Set(pendingKeysRef.current))
-    setFailedAction(undefined)
+    const channel = action === 'policy' ? 'policy' : 'item'
+    if (channel === 'policy') setPolicyError(false)
+    else setItemError(undefined)
+    const generation = actionGenerationRef.current[channel] + 1
+    actionGenerationRef.current[channel] = generation
     try {
       return await request()
     } catch (error) {
@@ -192,12 +216,14 @@ export function useFocusQueueActions({
         error,
         () => refreshAffectedCaches(conflictScope),
       )
-      setFailedAction({
-        action,
-        kind: isFocusOpenChildrenRefusal(error)
-          ? 'openChildren'
-          : isFocusMutationConflict(error) ? 'conflict' : 'failure',
-      })
+      if (generation === actionGenerationRef.current[channel]) {
+        if (channel === 'policy') setPolicyError(true)
+        else setItemError(
+          isFocusOpenChildrenRefusal(error)
+            ? 'openChildren'
+            : isFocusMutationConflict(error) ? 'conflict' : 'failure',
+        )
+      }
       throw error
     } finally {
       pendingKeysRef.current.delete(pendingKey)
@@ -480,16 +506,14 @@ export function useFocusQueueActions({
 
   return {
     assignToViewer,
-    clearError: () => setFailedAction(undefined),
+    clearError: () => setItemError(undefined),
     complete,
     confirmSchedule,
     dismissSnoozeFeedback: () => setSnoozeFeedback(undefined),
-    ...(failedAction !== undefined && failedAction.action !== 'policy'
-      ? { error: failedAction.kind }
-      : {}),
+    ...(itemError !== undefined ? { error: itemError } : {}),
     isPending: (itemId, action) => pendingKeys.has(createPendingKey(itemId, action)),
     previewSchedule,
-    policyError: failedAction?.action === 'policy',
+    policyError,
     snoozeFeedback,
     undoSnooze,
     updatePolicy,

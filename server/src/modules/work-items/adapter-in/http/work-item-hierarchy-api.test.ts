@@ -25,6 +25,7 @@ import {
   expect,
   test,
 } from 'bun:test'
+import { WorkItemConfigurationError } from '../../index'
 import type { TeamIssueResponseItem, TeamWorkItemHierarchyEntry } from '../../index'
 
 afterEach(() => {
@@ -161,6 +162,90 @@ test('returns the Team hierarchy with WBS numbers and roll-ups of readable Work 
   expect(body.nodes[1]?.rollup).toBeUndefined()
 })
 
+test('reads the Team hierarchy through the adapter as its receiver', async () => {
+  configureFakeProjectClients(true)
+  const receivers: unknown[] = []
+  const teamIssues = createTeamIssuesFake({
+    // A plain method like the DynamoDB client's, which reads its tables through `this`.
+    async getTeamHierarchyEntries(this: unknown) {
+      receivers.push(this)
+      return []
+    },
+  })
+  setTestAppDependencies({
+    teamIssues,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        return 3
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(200)
+  expect(receivers).toEqual([teamIssues])
+})
+
+test('reads the Team hierarchy again when the graph moved while it was read', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const revisions = [7, 8, 8]
+  const reads: number[] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        reads.push(reads.length)
+        // The first read sees the tree before a move, the second the tree after it.
+        return reads.length === 1
+          ? [hierarchyEntry(base, 'phase-1', 'a'), hierarchyEntry(base, 'task-1', 'b')]
+          : [hierarchyEntry(base, 'phase-1', 'a'), hierarchyEntry(base, 'task-1', 'a', { parentId: 'phase-1' })]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        return revisions.shift() ?? 8
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as TeamWorkItemHierarchyResponse
+  expect(reads).toHaveLength(2)
+  // The tree and the revision both come from after the move.
+  expect(body.graphRevision).toBe(8)
+  expect(body.nodes.map((node) => [node.workItemId, node.wbsNumber])).toEqual([['phase-1', '1'], ['task-1', '1.1']])
+})
+
+test('returns the revision read before the last tree when the graph keeps moving', async () => {
+  configureFakeProjectClients(true)
+  let revision = 10
+  let reads = 0
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        reads += 1
+        return []
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        revision += 1
+        return revision
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(200)
+  // Three reads at most; the older revision makes the reader's next move a graph conflict.
+  expect(reads).toBe(3)
+  expect((await response.json() as TeamWorkItemHierarchyResponse).graphRevision).toBe(13)
+})
+
 test('rejects a Team hierarchy larger than the read model bound', async () => {
   configureFakeProjectClients(true)
   const base = await readBaseIssue()
@@ -177,6 +262,23 @@ test('rejects a Team hierarchy larger than the read model bound', async () => {
 
   expect(response.status).toBe(413)
   expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
+})
+
+test('keeps the status and code of a relation graph failure while reading the Team hierarchy', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({ getTeamHierarchyEntries: async () => [] }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        throw new WorkItemConfigurationError(409, 'WorkItemRelationGraphConflict', 'The graph changed.')
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'WorkItemRelationGraphConflict' })
 })
 
 test('passes a sibling order rank to the parent replacement and rejects an invalid one', async () => {
@@ -215,11 +317,13 @@ test('passes a sibling order rank to the parent replacement and rejects an inval
  *
  * @param policy - Team parent completion policy.
  * @param teamIssues - Work Item persistence to use; the default fake when omitted.
+ * @param childIds - Children listed under the Work Item; one `open-child` when omitted.
  * @returns Child relation reads made by the update.
  */
 function configureParentWithOpenChild(
   policy: WorkItemParentCompletionPolicy,
   teamIssues?: ReturnType<typeof createTeamIssuesFake>,
+  childIds: string[] = ['open-child'],
 ) {
   const childReads: string[] = []
   setTestAppDependencies({
@@ -237,7 +341,7 @@ function configureParentWithOpenChild(
         if (options?.types?.includes('child')) childReads.push(workItemId)
         return {
           relations: options?.types?.includes('child')
-            ? [{ sourceWorkItemId: workItemId, targetWorkItemId: 'open-child', type: 'child' }]
+            ? childIds.map((childId) => ({ sourceWorkItemId: workItemId, targetWorkItemId: childId, type: 'child' }))
             : [],
           graphRevision: 6,
         }
@@ -258,9 +362,11 @@ test('rejects completing a parent with an open child when the Team rejects it', 
 
   expect(response.status).toBe(409)
   const body: unknown = await response.json()
-  expect(body).toMatchObject({ code: 'WorkItemOpenChildren' })
-  // Unreadable children count too, so the message must not reveal how many are open.
-  expect(body).toMatchObject({ message: expect.not.stringMatching(/\d/) })
+  // Unreadable children count too, so the public message must not reveal how many are open.
+  expect(body).toEqual({
+    code: 'WorkItemOpenChildren',
+    message: 'A child Work Item is still open. Complete or cancel the children before completing the parent.',
+  })
   expect(childReads).toEqual(['onboarding-friction'])
 })
 
@@ -311,6 +417,51 @@ test('fences the relation graph and the closed children into completing a parent
       ExpressionAttributeValues: { ':expectedRevision': 4 },
     }),
   })
+})
+
+/**
+ * Completes a guarded parent whose children are all closed and records the update's checks.
+ *
+ * @param childCount - Closed children listed under the parent.
+ * @returns The response status and the configuration condition checks sent with the update.
+ */
+async function completeParentWithClosedChildren(childCount: number) {
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const fenceChecks: unknown[] = []
+  const childIds = Array.from({ length: childCount }, (_, index) => `closed-child-${index}`)
+  configureParentWithOpenChild('reject', createTeamIssuesFake({
+    async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+      if (!issueId.startsWith('closed-child-')) {
+        return teamIssues.getTeamIssueDetail(directoryId, teamId, issueId, options)
+      }
+      const detail = await teamIssues.getTeamIssueDetail(directoryId, teamId, 'onboarding-friction', options)
+      return { ...detail, issue: { ...detail.issue, id: issueId, statusCategory: 'completed', revision: 4 } }
+    },
+    async updateTeamIssue(directoryId, teamId, issueId, input, ...rest) {
+      fenceChecks.push(...(input.configurationConditionChecks ?? []))
+      return teamIssues.updateTeamIssue(directoryId, teamId, issueId, input, ...rest)
+    },
+  }), childIds)
+  const response = await request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    body: { workflowStatusId: 'done', expectedRevision: 1 },
+  })
+  const childFenceCount = fenceChecks.filter((check) =>
+    JSON.stringify(check).includes('"issueId":"closed-child-')
+  ).length
+  return { status: response.status, checkCount: fenceChecks.length, childFenceCount }
+}
+
+test('fences closed children only while their checks fit the update transaction', async () => {
+  configureFakeProjectClients(true)
+  const fitting = await completeParentWithClosedChildren(60)
+  expect(fitting).toMatchObject({ status: 200, childFenceCount: 60 })
+
+  // Too many children for the transaction: only the graph revision fences the completion.
+  const crowded = await completeParentWithClosedChildren(70)
+  expect(crowded).toMatchObject({ status: 200, childFenceCount: 0 })
+  expect(crowded.checkCount).toBeGreaterThan(0)
+  expect(crowded.checkCount).toBeLessThanOrEqual(70)
 })
 
 test('completes a parent whose only child was deleted but left its relation behind', async () => {

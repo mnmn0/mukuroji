@@ -1,5 +1,5 @@
 import { unstable_serialize } from 'swr'
-import type { Arguments, ScopedMutator } from 'swr'
+import type { Arguments, Cache, ScopedMutator } from 'swr'
 
 /**
  * Revalidates one cache entry that a hierarchy move changed.
@@ -32,7 +32,9 @@ export async function refreshMovedCacheEntry(
  *
  * When the read fails, the cached pre-move hierarchy is cleared whether or not the outline is
  * open, and an open outline reads it again. The outline then shows its loading or error state
- * instead of the old placement, and no further move is planned from it.
+ * instead of the old placement, and no further move is planned from it. The failure is written
+ * through the same mutation as a success, so a newer hierarchy that another write stored while
+ * this read ran is kept rather than cleared.
  *
  * @param mutate - Global SWR mutator.
  * @param key - Key of the moved Team's hierarchy.
@@ -44,9 +46,34 @@ export async function refreshMovedHierarchyCache<Data>(
   key: Arguments,
   load: () => Promise<Data>,
 ): Promise<void> {
-  try {
-    await mutate(key, load(), { revalidate: false })
-  } catch {
-    await mutate(key, undefined, { revalidate: true })
-  }
+  let failed = false
+  const read = load().catch(() => {
+    failed = true
+    return undefined
+  })
+  await mutate(key, read, { revalidate: false })
+  if (failed) await mutate(key)
+}
+
+/**
+ * Refreshes a Team's hierarchy after a write that changes it, when that hierarchy is cached.
+ *
+ * A hierarchy nobody read is not cached and is left alone, so the write costs no extra read.
+ * A cached one is refreshed as {@link refreshMovedHierarchyCache} does, whether or not the
+ * outline that read it is still open.
+ *
+ * @param cache - SWR cache the page reads from.
+ * @param mutate - Global SWR mutator of that cache.
+ * @param key - Key of the written Team's hierarchy.
+ * @param load - Reads the hierarchy.
+ * @returns Resolves once the entry holds the new hierarchy, is cleared, or was not cached.
+ */
+export async function refreshCachedHierarchy<Data>(
+  cache: Pick<Cache, 'get'>,
+  mutate: ScopedMutator,
+  key: Arguments,
+  load: () => Promise<Data>,
+): Promise<void> {
+  if (cache.get(unstable_serialize(key)) === undefined) return
+  await refreshMovedHierarchyCache(mutate, key, load)
 }

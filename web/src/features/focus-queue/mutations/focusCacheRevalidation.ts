@@ -80,20 +80,22 @@ export function isFocusAffectedCacheKey(
  * Returns whether one loaded SWR cache key is a Team hierarchy affected by a Focus mutation.
  *
  * Hierarchy roll-ups total the status, estimate, and dates of the Team's Work Items, so they
- * change with them. These keys are revalidated apart from {@link isFocusAffectedCacheKey}
- * because they keep their data while they reload: an outline that fails to reload keeps its
- * rows instead of falling back to the flat table.
+ * change with them. These keys are handled apart from {@link isFocusAffectedCacheKey}: each one
+ * is read again explicitly, because a plain revalidation does nothing once the outline that read
+ * it closed, and its pre-mutation totals would come back the next time the outline opens.
  *
  * @param key - Unknown SWR cache key supplied by the global mutator.
  * @param scope - Team, Project, and Planning projections affected by the mutation.
- * @returns Whether the hierarchy entry must be revalidated.
+ * @returns Whether the key is an affected hierarchy entry, typed as its scope, access token, and
+ *   Team ID.
  */
 export function isFocusAffectedHierarchyCacheKey(
   key: unknown,
   scope: FocusCacheRevalidationScope,
-): boolean {
+): key is readonly [typeof teamHierarchyCacheScope, string, string] {
   return Array.isArray(key) &&
     key[0] === teamHierarchyCacheScope &&
+    typeof key[1] === 'string' &&
     typeof key[2] === 'string' &&
     scope.workItems.some((item) => item.teamId === key[2])
 }

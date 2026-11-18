@@ -766,7 +766,17 @@ export function TaskScreen({
     }
   }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
-  const [isRestoringTask, setIsRestoringTask] = useState(false)
+  // Work Item whose Undo or Redo is saving, as `teamId:workItemId`. Its detail form and its table
+  // and board controls wait for it: a save meanwhile would leave the restore with a stale revision.
+  const [restoringTaskKey, setRestoringTaskKeyState] = useState<string>()
+  // Same key for callbacks created before the render that shows it.
+  const restoringTaskKeyRef = useRef<string | undefined>(undefined)
+  const isRestoringTask = restoringTaskKey !== undefined
+  /** Marks the Work Item whose Undo or Redo is saving, or clears it. */
+  const setRestoringTaskKey = (key: string | undefined) => {
+    restoringTaskKeyRef.current = key
+    setRestoringTaskKeyState(key)
+  }
   // Saves still waiting for their outcome. Undo/Redo waits for them: running one meanwhile would
   // advance the revision the pending save was built on.
   const [pendingTaskUpdateCount, setPendingTaskUpdateCount] = useState(0)
@@ -2149,7 +2159,7 @@ export function TaskScreen({
       return
     }
 
-    setIsRestoringTask(true)
+    setRestoringTaskKey(`${taskUndo.task.teamId}:${taskUndo.task.id}`)
 
     try {
       const result = await performTaskUpdate(taskUndo.task, currentUndo.inversePatch)
@@ -2175,7 +2185,7 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsRestoringTask(false)
+      setRestoringTaskKey(undefined)
     }
   }
 
@@ -2190,7 +2200,7 @@ export function TaskScreen({
       return
     }
 
-    setIsRestoringTask(true)
+    setRestoringTaskKey(`${taskRedo.task.teamId}:${taskRedo.task.id}`)
 
     try {
       const result = await performTaskUpdate(taskRedo.task, taskRedo.forwardPatch)
@@ -2210,7 +2220,7 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsRestoringTask(false)
+      setRestoringTaskKey(undefined)
     }
   }
 
@@ -2271,9 +2281,13 @@ export function TaskScreen({
             // Undo and Redo wait for this save too: completing a parent reads its children
             // first, and an undo meanwhile would leave the completion with a stale revision.
             setPendingTaskUpdateCount((count) => count + 1)
-            const result = await onUpdateIssue(teamId, issueId, input).finally(() => {
+            let result: Awaited<ReturnType<typeof onUpdateIssue>>
+            try {
+              result = await onUpdateIssue(teamId, issueId, input)
+            } finally {
+              // Also runs when the callback throws before returning its promise.
               setPendingTaskUpdateCount((count) => count - 1)
-            })
+            }
             if (isCancelledTeamIssueUpdate(result)) {
               if (claimedContext && target) {
                 taskActionCompletion.settle(
@@ -3093,6 +3107,10 @@ export function TaskScreen({
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
   ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
+    // A table or board edit of the Work Item whose Undo or Redo is saving is dropped like a
+    // declined one: it was built on the revision the restore is replacing. Other Work Items, and
+    // the same one once the restore ends, save as usual.
+    if (restoringTaskKeyRef.current === `${task.teamId}:${task.id}`) return CANCELLED_TEAM_ISSUE_UPDATE
     const target = {
       expectedRevision: task.revision,
       teamId: task.teamId,
@@ -3839,6 +3857,10 @@ export function TaskScreen({
                     renderedDetailTask && bulkMutationPendingEntries.some((entry) =>
                       entry.targetKeys.includes(`${renderedDetailTask.teamId}:${renderedDetailTask.id}`),
                     ),
+                  )}
+                  isHistoryRestorePending={Boolean(
+                    renderedDetailTask &&
+                      restoringTaskKey === `${renderedDetailTask.teamId}:${renderedDetailTask.id}`,
                   )}
                   isRetainedDetail={isRetainedDetail}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}

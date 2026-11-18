@@ -1368,12 +1368,14 @@ test('rejects a direct dueDate field even when create also includes a schedule',
 test('rejects internal adapter fields at the Work Item create boundary', async () => {
   const calls = configureFakeProjectClients(true)
   const internalFields: ReadonlyArray<readonly [string, unknown]> = [
+    ['agentRunTransactItems', []],
     ['authorizationConditionChecks', []],
     ['authorizationSnapshot', { planningRevision: 0 }],
     ['configurationConditionChecks', []],
     ['idempotencyResourceId', 'caller-selected-id'],
     ['idempotentIssueId', `api-${'a'.repeat(48)}`],
     ['idempotentRequestDigest', 'b'.repeat(64)],
+    ['newWorkItemProjectConditionCheck', { ConditionCheck: {} }],
     ['statusCategory', 'completed'],
     ['workflowSchemaVersion', 99],
   ]
@@ -1401,6 +1403,38 @@ test('rejects internal adapter fields at the Work Item create boundary', async (
     })
   }
   expect(calls.issueCreates).toEqual([])
+})
+
+test('applies public create fields while unknown body keys never reach the adapter', async () => {
+  const adapterInputKeys: string[][] = []
+  const calls = configureFakeProjectClients(true, {
+    issueCreateHook(input) {
+      adapterInputKeys.push(Object.keys(input))
+    },
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      assigneeUserId: 'sato@example.com',
+      priority: 'medium',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
+      title: 'Whitelisted create',
+      workflowStatusId: 'todo',
+      unknownAdapterInput: 'dropped',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toMatchObject({ issue: { title: 'Whitelisted create' } })
+  expect(calls.issueCreates).toHaveLength(1)
+  expect(adapterInputKeys).toHaveLength(1)
+  expect(adapterInputKeys[0]).toContain('title')
+  expect(adapterInputKeys[0]).not.toContain('unknownAdapterInput')
 })
 
 test('rejects non-object Work Item create bodies before reading schedule fields', async () => {

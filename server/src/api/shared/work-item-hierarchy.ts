@@ -12,11 +12,17 @@ import {
 } from '../../modules/work-items'
 import { workItemDependencies } from './app-dependencies'
 
+/** Reads of the Team's Work Items one hierarchy request makes at most while the graph moves. */
+const HIERARCHY_READ_ATTEMPTS = 3
+
 /**
  * Reads a Team's hierarchy read model for one reader.
  *
- * The graph revision is read before the Work Items, so a move made in between makes the
- * reader's next move fail with a graph conflict instead of applying to a stale tree.
+ * The graph revision is read before and after the Work Items. When a move lands in between, the
+ * read starts again, so the returned tree and revision match and the reader's next move is not
+ * refused for a change already shown. If the graph keeps moving, the last read is returned with
+ * the revision read before it: the reader's next move then fails with a graph conflict instead of
+ * applying to a stale tree.
  *
  * @param directoryId - Workspace directory ID.
  * @param teamId - Team whose hierarchy is read.
@@ -39,21 +45,32 @@ export async function readTeamWorkItemHierarchy(
       'The Work Item hierarchy cannot be read.',
     )
   }
-  const graphRevision = workItemConfigurations.getRelationGraphRevision
+  // Bound so the adapter keeps its receiver: the DynamoDB client reads its tables through `this`.
+  const getTeamHierarchyEntries = teamIssues.getTeamHierarchyEntries.bind(teamIssues)
+  /** Reads the Team's current relation graph revision. */
+  const readGraphRevision = async () => workItemConfigurations.getRelationGraphRevision
     ? await workItemConfigurations.getRelationGraphRevision(directoryId, teamId)
     : (await workItemConfigurations.listRelationGraph(directoryId, teamId)).graphRevision
-  const entries = await teamIssues.getTeamHierarchyEntries(
-    directoryId,
-    teamId,
-    WORK_ITEM_HIERARCHY_MAX_ITEMS,
-  )
-  if (entries.length > WORK_ITEM_HIERARCHY_MAX_ITEMS) {
-    throw new ProjectDataError(
-      413,
-      'WorkItemListLimitExceeded',
-      `This Team has more than ${WORK_ITEM_HIERARCHY_MAX_ITEMS} Work Items, so its hierarchy ` +
-        'cannot be read at once. Archive finished Work Items to read it.',
-    )
+  /** Reads the Team's Work Items, refusing a Team too large to read at once. */
+  const readEntries = async () => {
+    const read = await getTeamHierarchyEntries(directoryId, teamId, WORK_ITEM_HIERARCHY_MAX_ITEMS)
+    if (read.length > WORK_ITEM_HIERARCHY_MAX_ITEMS) {
+      throw new ProjectDataError(
+        413,
+        'WorkItemListLimitExceeded',
+        `This Team has more than ${WORK_ITEM_HIERARCHY_MAX_ITEMS} Work Items, so its hierarchy ` +
+          'cannot be read at once. Archive finished Work Items to read it.',
+      )
+    }
+    return read
+  }
+  let graphRevision = await readGraphRevision()
+  let entries = await readEntries()
+  for (let attempt = 1; attempt < HIERARCHY_READ_ATTEMPTS; attempt += 1) {
+    const after = await readGraphRevision()
+    if (after === graphRevision) break
+    graphRevision = after
+    entries = await readEntries()
   }
   return createTeamWorkItemHierarchyResponse({ teamId, graphRevision, entries, isReadable })
 }

@@ -2,11 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { matchRoutes, MemoryRouter } from 'react-router'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { appRoutes } from '../src/app/router'
-import { getWorkItemByKey, TeamIssuesApiError } from '../src/issues/api'
+import { getWorkItemByKey, TeamIssuesApiError, type TeamIssue } from '../src/issues/api'
+import { loadWorkItemKeyLocation } from '../src/issues/queries/useWorkItemKeyLocation'
 import { findWorkItemKeys, readWorkItemKeyInput } from '../src/work-items/model/workItemKeys'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 import { WorkItemKeyActions } from '../src/issues/ui/WorkItemKeyActions'
 import { WorkItemKeyStatus } from '../src/issues/ui/WorkItemKeyStatus'
+import { SearchKeyJump } from '../src/search/SearchKeyJump'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createWorkItemKeyPath } from '../src/shared/routing/paths'
 
@@ -62,6 +64,46 @@ describe('Work Item key URLs', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  test('reloads a cached Team list that lacks the resolved Work Item before the redirect', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      requests.push(url)
+      const body = url.includes('/work-items/keys/')
+        ? { key: 'PT-12', teamId: 'core-team', workItemId: 'pt-12' }
+        : { issues: [{ id: 'pt-12' }] }
+      return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    }) as typeof fetch
+    try {
+      const stored: { key: readonly unknown[], issues: TeamIssue[] }[] = []
+      /**
+       * Builds a cache double whose Team list holds the given Work Item IDs.
+       *
+       * @param cachedIds - Work Item IDs in the cached list, or undefined for no cached list.
+       * @returns Cache callbacks that record each stored list.
+       */
+      const cacheWith = (cachedIds?: string[]) => ({
+        readTeamIssues: () => cachedIds?.map((id) => ({ id }) as TeamIssue),
+        storeTeamIssues: async (key: readonly unknown[], issues: Promise<TeamIssue[]>) => {
+          stored.push({ key, issues: await issues })
+        },
+      })
+
+      await loadWorkItemKeyLocation('PT-12', 'token', cacheWith(['pt-1']))
+      expect(stored).toHaveLength(1)
+      expect(stored[0]?.key).toEqual(['team-issues', 'token', 'core-team', true])
+      expect(stored[0]?.issues.map((issue) => issue.id)).toEqual(['pt-12'])
+      expect(requests.some((url) => url.includes('/teams/core-team/issues'))).toBe(true)
+
+      await loadWorkItemKeyLocation('PT-12', 'token', cacheWith(['pt-12']))
+      await loadWorkItemKeyLocation('PT-12', 'token', cacheWith())
+      expect(stored).toHaveLength(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
 
 describe('WorkItemKeyActions', () => {
@@ -95,5 +137,25 @@ describe('WorkItemKeyStatus', () => {
     expect(renderStatus('not-found')).not.toContain('Try again')
     expect(renderStatus('not-found')).toContain('Search instead')
     expect(renderStatus('failed')).toContain('Try again')
+  })
+})
+
+describe('SearchKeyJump', () => {
+  /**
+   * Renders the key jump for one search keyword.
+   *
+   * @param keyword - Search keyword as typed.
+   * @returns The rendered HTML.
+   */
+  const renderJump = (keyword: string) => renderToStaticMarkup(
+    <MemoryRouter>
+      <SearchKeyJump keyword={keyword} t={createTranslator('en')} />
+    </MemoryRouter>,
+  )
+
+  test('links a keyword that is exactly one key, in any case, to its key URL', () => {
+    expect(renderJump('PT-12')).toContain('href="/browse/PT-12"')
+    expect(renderJump(' pt-12 ')).toContain('Open PT-12')
+    expect(renderJump('PT-12 login bug')).toBe('')
   })
 })

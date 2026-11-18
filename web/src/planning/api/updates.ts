@@ -170,7 +170,11 @@ export function createPlanningUpdateComment(
     `${planningApiBaseUrl}/planning/updates/${input.updateVersion}/comments?${query.toString()}`,
     accessToken,
     {
-      body: JSON.stringify({ body: input.body, id: input.id }),
+      body: JSON.stringify({
+        body: input.body,
+        id: input.id,
+        ...(input.mentionMemberKeys?.length ? { mentionMemberKeys: input.mentionMemberKeys } : {}),
+      }),
       headers: {
         'Content-Type': 'application/json',
         ...createMutationHeaders(mutationContext),

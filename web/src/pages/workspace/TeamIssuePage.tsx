@@ -10,7 +10,6 @@ import {
   useRef,
   useState,
 } from 'react'
-import { unstable_serialize, useSWRConfig } from 'swr'
 import {
   useBlocker,
   useLocation,
@@ -38,7 +37,10 @@ import {
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../../issues/api'
-import { useTeamIssueDetail, useTeamIssues } from '../../issues/queries/useWorkItems'
+import {
+  useTeamIssueDetail,
+  useTeamIssues,
+} from '../../issues/queries/useWorkItems'
 import { describeScopedWorkItemListError } from '../../issues/model/workItemListError'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
@@ -46,10 +48,8 @@ import {
   confirmParentCompletionInBrowser,
 } from '../../issues/mutations/confirmParentCompletion'
 import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
-import {
-  refreshMovedCacheEntry,
-  refreshMovedHierarchyCache,
-} from '../../issues/mutations/hierarchyMoveCacheRefresh'
+import { useTeamWorkItemHierarchyMove } from '../../issues/mutations/useTeamWorkItemHierarchyMove'
+import { useTeamWorkItemHierarchyRefresh } from '../../issues/mutations/useTeamWorkItemHierarchyRefresh'
 import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
@@ -82,12 +82,10 @@ import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRo
 import {
   createWorkItemRelation,
   deleteWorkItemRelation,
-  getTeamWorkItemHierarchy,
   replaceWorkItemParent,
 } from '../../work-items/api'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import {
-  createTeamWorkItemHierarchyKey,
   useTeamWorkItemHierarchy,
 } from '../../work-items/queries/useTeamWorkItemHierarchy'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
@@ -118,7 +116,6 @@ import {
   emptyWorkspaceMembers,
   type TeamIssueHierarchyPlacement,
 } from '../../issues/ui/teamIssueScreenShared'
-import { isWorkItemRelationGraphConflict } from '../../issues/model/teamIssueDisplay'
 import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -158,7 +155,6 @@ export function TeamIssuePage() {
   const params = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
-  const { mutate: mutateSWR } = useSWRConfig()
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -486,20 +482,18 @@ export function TeamIssuePage() {
     mutate: mutateHierarchy,
     isValidating: isHierarchyValidating,
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
-  // The list and detail cache keys this page reads now. A hierarchy move that finishes after
-  // the person switched Team or Work Item checks it to tell whether a key it refreshes still
-  // has a reader that revalidates it.
-  const shownCacheKeysRef = useRef<ReadonlySet<string>>(new Set())
-  const shownIssuesCacheKey = issuesKey ? unstable_serialize(issuesKey) : ''
-  const shownDetailCacheKey = detailKey ? unstable_serialize(detailKey) : ''
-  useEffect(() => {
-    shownCacheKeysRef.current = new Set(
-      [shownIssuesCacheKey, shownDetailCacheKey].filter(Boolean),
-    )
-    return () => {
-      shownCacheKeysRef.current = new Set()
-    }
-  }, [shownDetailCacheKey, shownIssuesCacheKey])
+  // Refreshes the hierarchy of the Team a write went to, even after the person left it.
+  const refreshTeamHierarchy = useTeamWorkItemHierarchyRefresh(accessToken, teamId)
+  const moveIssueInHierarchy = useTeamWorkItemHierarchyMove({
+    accessToken,
+    teamId,
+    graphRevision: hierarchy?.graphRevision,
+    issuesKey,
+    detailKey,
+    guardEnterpriseSession,
+    mutationRequestRunner,
+    conflictMessage: t('issues.error.conflict'),
+  })
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
     currentUserError,
     [
@@ -612,7 +606,7 @@ export function TeamIssuePage() {
     )
     navigate(navigationPath)
     // The outline places the new Work Item and the parent roll-ups count it.
-    await Promise.all([mutateIssues(), mutateHierarchy()])
+    await Promise.all([mutateIssues(), refreshTeamHierarchy()])
     return { issue, navigationPath }
   }
 
@@ -683,7 +677,7 @@ export function TeamIssuePage() {
       await mutateIssues()
       await mutateIssueDetail()
       // Status, estimate, and dates feed the parent roll-ups shown in the outline.
-      await mutateHierarchy()
+      await refreshTeamHierarchy()
       return updatedIssue
     } catch (error) {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
@@ -747,7 +741,7 @@ export function TeamIssuePage() {
           ),
         ))
       }
-      await Promise.all([mutateIssueDetail(), mutateHierarchy()])
+      await Promise.all([mutateIssueDetail(), refreshTeamHierarchy()])
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
       throw error
@@ -766,46 +760,7 @@ export function TeamIssuePage() {
     if (!accessToken || !hierarchy || !currentIssue || !canMutateTeamIssue(currentIssue)) {
       throw new TeamIssuesApiError(403, t('taskViews.action.unavailable'), 'TeamTaskActionAccessDenied')
     }
-    // Fixed now, so the moved Team's caches are refreshed even if the person switches Team or
-    // Work Item before the save returns.
-    const movedTeamId = teamId
-    const movedHierarchyKey = createTeamWorkItemHierarchyKey(accessToken, movedTeamId)
-    const movedIssuesKey = issuesKey
-    const movedDetailKey = detailKey
-    const readShownCacheKeys = () => shownCacheKeysRef.current
-    const refreshMovedHierarchy = () => refreshMovedHierarchyCache(
-      mutateSWR,
-      movedHierarchyKey,
-      () => getTeamWorkItemHierarchy(movedTeamId, accessToken),
-    )
-    try {
-      await guardEnterpriseSession(mutationRequestRunner.run(
-        `issue:hierarchy:move:${teamId}:${issueId}`,
-        JSON.stringify([hierarchy.graphRevision, placement]),
-        (context) => replaceWorkItemParent(
-          teamId,
-          issueId,
-          accessToken,
-          {
-            parentWorkItemId: placement.parentWorkItemId,
-            expectedGraphRevision: hierarchy.graphRevision,
-            hierarchyRank: placement.hierarchyRank,
-          },
-          context,
-        ),
-      ))
-    } catch (error) {
-      if (isWorkItemRelationGraphConflict(error)) {
-        await refreshMovedHierarchy()
-        throw new Error(t('issues.error.conflict'), { cause: error })
-      }
-      throw error
-    }
-    await Promise.all([
-      refreshMovedHierarchy(),
-      movedIssuesKey ? refreshMovedCacheEntry(mutateSWR, movedIssuesKey, readShownCacheKeys) : undefined,
-      movedDetailKey ? refreshMovedCacheEntry(mutateSWR, movedDetailKey, readShownCacheKeys) : undefined,
-    ])
+    await moveIssueInHierarchy(issueId, placement)
   }
 
   const handleDeleteRelation = async (issueId: string, relation: WorkItemRelation) => {
@@ -842,7 +797,7 @@ export function TeamIssuePage() {
           context,
         ),
       ))
-      await Promise.all([mutateIssueDetail(), mutateHierarchy()])
+      await Promise.all([mutateIssueDetail(), refreshTeamHierarchy()])
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
       throw error

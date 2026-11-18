@@ -468,8 +468,16 @@ export function TeamIssueScreen({
       taskViewDefinition,
     ],
   )
-  const [collapsedOutlineIds, setCollapsedOutlineIds] = useState(
-    () => readCollapsedWorkItemOutlineIds(teamId),
+  // Collapsed rows belong to one Team: the screen stays mounted when the person switches Team,
+  // so rows saved for the previous Team are dropped and the new Team's saved rows are read.
+  const [collapsedOutlineState, setCollapsedOutlineState] = useState(
+    () => ({ teamId, ids: readCollapsedWorkItemOutlineIds(teamId) }),
+  )
+  const collapsedOutlineIds = useMemo(
+    () => collapsedOutlineState.teamId === teamId
+      ? collapsedOutlineState.ids
+      : readCollapsedWorkItemOutlineIds(teamId),
+    [collapsedOutlineState, teamId],
   )
   // Latest collapsed rows, read when a move finishes so collapses made while it saved are kept.
   const collapsedOutlineIdsRef = useRef(collapsedOutlineIds)
@@ -503,6 +511,20 @@ export function TeamIssueScreen({
     [collapsedOutlineIds, outlineNodes, viewMode, visibleIssues],
   )
   const hasOutlineError = Boolean(isOutlineRequested && issueOutline?.errorMessage)
+  // Whether the outline is on screen, and how many times it has been hidden. A move that
+  // finishes after the outline gave way to the flat table, such as while the hierarchy reloads,
+  // leaves focus alone instead of moving it to the flat row with the same ID. That holds even if
+  // the outline came back meanwhile, because the rows were rebuilt.
+  const outlineShownRef = useRef({ shown: false, hiddenCount: 0 })
+  useEffect(() => {
+    const shown = outlineRows !== undefined
+    if (outlineShownRef.current.shown && !shown) outlineShownRef.current.hiddenCount += 1
+    outlineShownRef.current.shown = shown
+  }, [outlineRows])
+  useEffect(() => {
+    // A retry started before the outline closed does not move focus once it is shown again.
+    if (!isOutlineRequested) outlineRetryFocusPendingRef.current = false
+  }, [isOutlineRequested])
   useEffect(() => {
     // Waits for the error to clear rather than for new rows: a retry that returns the same
     // hierarchy as before the failure keeps the rows, but the retry button still goes away.
@@ -520,7 +542,7 @@ export function TeamIssueScreen({
     const next = new Set(collapsedOutlineIds)
     if (!next.delete(issueId)) next.add(issueId)
     writeCollapsedWorkItemOutlineIds(teamId, next)
-    setCollapsedOutlineIds(next)
+    setCollapsedOutlineState({ teamId, ids: next })
   }, [collapsedOutlineIds, teamId])
 
   const ganttOutline = useMemo<TaskGanttOutline | undefined>(() => outlineNodes && viewMode === 'gantt'
@@ -575,6 +597,7 @@ export function TeamIssueScreen({
     // Kept from the start of the move: if the view is rebuilt while the move saves, such as by
     // a reload, focus is not handed to a row in the new view the person did not move from.
     const viewPanel = issueViewPanelRef.current
+    const outlineHiddenCountAtStart = outlineShownRef.current.hiddenCount
     saveOutlineMove(issue.id, {
       parentWorkItemId: plan.parentWorkItemId,
       hierarchyRank: plan.hierarchyRank,
@@ -589,7 +612,7 @@ export function TeamIssueScreen({
         next.delete(plan.parentWorkItemId)
         writeCollapsedWorkItemOutlineIds(teamId, next)
         collapsedOutlineIdsRef.current = next
-        setCollapsedOutlineIds(next)
+        setCollapsedOutlineState({ teamId, ids: next })
       }
       setOutlineStatusMessage(t('issues.outline.moved').replace('{title}', resolveIssueTitle(issue, t)))
       // Moving the row in the DOM drops focus; return it so repeated moves keep working. Focus
@@ -600,6 +623,8 @@ export function TeamIssueScreen({
         // Only the view that started the move is searched, so a row with the same ID in another
         // Team's view never takes focus.
         if (!viewPanel?.isConnected || shownTeamIdRef.current !== teamId) return
+        const outlineShown = outlineShownRef.current
+        if (!outlineShown.shown || outlineShown.hiddenCount !== outlineHiddenCountAtStart) return
         viewPanel.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
       })
     }, (error: unknown) => {
@@ -1275,7 +1300,12 @@ export function TeamIssueScreen({
         event,
         isCreateOpen || Boolean(taskActionContextMenuState),
       )
-      const outlineDirection = outlineRows && !input.isEditableTarget && !input.isModalOpen
+      // A move applies to the row chosen in the table, so it needs the key press to come from the
+      // table or from the page itself after J/K; focus on another control leaves the row alone.
+      const target = event.target
+      const isOutlineKeyTarget = target === document.body ||
+        (target instanceof Node && issueViewPanelRef.current?.contains(target) === true)
+      const outlineDirection = outlineRows && isOutlineKeyTarget && !input.isEditableTarget && !input.isModalOpen
         ? readWorkItemHierarchyMoveShortcut(event)
         : undefined
       const outlineIssue = outlineDirection
@@ -1539,7 +1569,7 @@ export function TeamIssueScreen({
                 ) : null}
                 {hasOutlineError && issueOutline?.errorMessage ? (
                   <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3" data-testid="team-issue-outline-unavailable">
-                    <p className="text-sm font-semibold text-fg-amber-800">{issueOutline.errorMessage}</p>
+                    <p className="text-sm font-semibold text-fg-amber-800" role="alert">{issueOutline.errorMessage}</p>
                     {issueOutline.onRetry ? (
                       <button
                         aria-busy={issueOutline.isRetrying ? true : undefined}

@@ -37,7 +37,6 @@ export function WorkItemKeyStatus({ workItemKey, status, retrying = false, onRet
       className="mx-auto grid w-full max-w-xl gap-3 px-5 py-10"
       data-testid="work-item-key-page"
     >
-      <p className="workbench-eyebrow">{t('issues.keyPage.title')}</p>
       <p
         aria-live="polite"
         className="text-base font-semibold text-[var(--workbench-text)]"
