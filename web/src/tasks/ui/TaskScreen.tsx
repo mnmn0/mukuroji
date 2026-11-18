@@ -211,6 +211,7 @@ import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
 import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
+import { listTaskGanttRowTasks } from '../model/taskGanttRows'
 
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
@@ -1249,17 +1250,20 @@ export function TaskScreen({
     () => selectedBulkItems.map((item) => item.selectionKey),
     [selectedBulkItems],
   )
-  // An outline hides the children of collapsed parents and orders rows by the hierarchy, so
-  // "select visible" and keyboard moves cover only the rows it shows, in its order.
+  // "Select visible" and keyboard moves cover only the rows shown, in their order: the Gantt
+  // chart's schedule and outline order, or the table's outline order. An outline leaves out the
+  // children of collapsed parents.
   const shownTasks = useMemo(
-    () => outline
-      ? createMultiTeamWorkItemOutlineRows(
-          visibleTasks,
-          outline.hierarchies,
-          outline.collapsedKeys,
-        ).map((row) => row.item)
-      : visibleTasks,
-    [outline, visibleTasks],
+    () => activeTab === 'gantt'
+      ? listTaskGanttRowTasks(visibleTasks, outline ? { outline } : {})
+      : outline
+        ? createMultiTeamWorkItemOutlineRows(
+            visibleTasks,
+            outline.hierarchies,
+            outline.collapsedKeys,
+          ).map((row) => row.item)
+        : visibleTasks,
+    [activeTab, outline, visibleTasks],
   )
   const visibleBulkItems = useMemo(
     () => shownTasks.map((task) => createBulkOperationSelection(task)),
