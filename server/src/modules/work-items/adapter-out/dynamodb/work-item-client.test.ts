@@ -4360,3 +4360,138 @@ test('DynamoDB idempotent Work Item create retry replays without using up a key 
   // The keyless insert can never succeed, even if the Work Item was deleted after the read.
   expect(issueConditions).toEqual(['attribute_exists(issueId) AND attribute_not_exists(issueId)'])
 })
+
+test('DynamoDB Work Item creation fences the assigned Project against a concurrent closure', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactions.push(command.input)
+        const transactItems = command.input.TransactItems as Array<Record<string, unknown>>
+        const fenceIndex = transactItems.findIndex((item) =>
+          (item.ConditionCheck as { TableName?: string } | undefined)?.TableName === 'DirectoryTable'
+        )
+        const error = new Error('The Project was closed.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === fenceIndex ? 'ConditionalCheckFailed' : 'None',
+          })),
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    withWorkItemKeyCounter(documentClient),
+    {} as DynamoDBClient,
+    false,
+  )
+  const projectRowKey = { directoryId: 'workspace-1', entryKey: '000010#000010#PROJECT#refero' }
+  const fence = {
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: projectRowKey,
+      ConditionExpression: 'attribute_not_exists(#archivedAt) AND NOT (#lifecycleState IN (:closed))',
+    },
+  }
+  const activeReference = {
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: projectRowKey,
+      ConditionExpression: 'attribute_not_exists(#archivedAt)',
+    },
+  }
+
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Created while the Project closes',
+      assigneeUserId: 'demo@example.com',
+      assignedProjectId: 'refero',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      schedule: createDueDateSchedule('2026-08-14'),
+      priority: 'high',
+      authorizationConditionChecks: [activeReference],
+      newWorkItemProjectConditionCheck: fence,
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ProjectClosedForNewWorkItems', status: 409 })
+
+  const transactItems = transactions[0]?.TransactItems as Array<Record<string, unknown>>
+  const projectRowChecks = transactItems.filter((item) =>
+    (item.ConditionCheck as { TableName?: string } | undefined)?.TableName === 'DirectoryTable'
+  )
+  expect(projectRowChecks).toEqual([fence])
+})
+
+test('DynamoDB Work Item creation replays a committed deterministic create after the Project closes', async () => {
+  let committedItem: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') return { Items: [] }
+      if (command.constructor.name === 'GetCommand') return { Item: committedItem }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const transactItems = command.input.TransactItems as Array<Record<string, unknown>>
+        const put = transactItems[0]?.Put as { Item: Record<string, unknown> }
+        if (!committedItem) {
+          committedItem = put.Item
+          return {}
+        }
+        // The retry finds its own Work Item row and a Project that has closed since.
+        const fenceIndex = transactItems.findIndex((item) =>
+          (item.ConditionCheck as { TableName?: string } | undefined)?.TableName === 'DirectoryTable'
+        )
+        const error = new Error('Already created, and the Project was closed.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: transactItems.map((_, index) => ({
+            Code: index === 0 || index === fenceIndex ? 'ConditionalCheckFailed' : 'None',
+          })),
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    withWorkItemKeyCounter(documentClient),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    title: 'Retried while the Project closes',
+    assigneeUserId: 'demo@example.com',
+    assignedProjectId: 'refero',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted' as const,
+    customFieldValues: {},
+    schedule: createDueDateSchedule('2026-08-14'),
+    priority: 'high' as const,
+    idempotentIssueId: `api-${'c'.repeat(48)}`,
+    idempotentRequestDigest: 'd'.repeat(64),
+    newWorkItemProjectConditionCheck: {
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: { directoryId: 'workspace-1', entryKey: '000010#000010#PROJECT#refero' },
+        ConditionExpression: 'attribute_not_exists(#archivedAt) AND NOT (#lifecycleState IN (:closed))',
+      },
+    },
+  }
+
+  const created = await client.createTeamIssue('workspace-1', 'core-team', input, 'demo@example.com')
+  const replay = await client.createTeamIssue('workspace-1', 'core-team', input, 'demo@example.com')
+
+  expect(replay).toEqual(created)
+})

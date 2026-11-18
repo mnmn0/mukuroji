@@ -14,7 +14,12 @@ import {
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import type { IdempotencyMutationToken } from '../../modules/developer-platform/application/ports'
-import { developerPlatformDependencies, workItemDependencies } from './app-dependencies'
+import {
+  developerPlatformDependencies,
+  workItemDependencies,
+  workspaceDependencies,
+  type AutomationActionExecutorDependencies,
+} from './app-dependencies'
 import { WORK_ITEMS_PARTITION_SCAN_LIMIT } from './constants'
 import {
   canAccessAssignedProject,
@@ -23,6 +28,7 @@ import {
   requireTeamPermission,
   type WorkspacePrincipal,
 } from './project-access'
+import { projectLifecycleAcceptsNewWorkItems } from '@mukuroji/contracts'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
 import { projectAccessAllows, type TeamPermissionContext } from './workspace-access'
@@ -235,6 +241,51 @@ export function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBod
     ...input,
     assignedProjectId,
   }
+}
+
+/**
+ * Rejects creating a Work Item in a Project whose lifecycle no longer accepts new work.
+ *
+ * Existing Work Items of a `closed` Project stay readable and editable; only creation is
+ * rejected. When the directory can build a commit-time fence, the creating transaction makes the
+ * decision: it first recognizes a retry of a create that already succeeded and returns that Work
+ * Item, so closing the Project after the first attempt does not turn an idempotent retry into a
+ * failure. Without a fence, the directory snapshot decides.
+ *
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param team - Active Team row whose Projects carry their lifecycle state.
+ * @param assignedProjectId - Normalized Project the new Work Item is assigned to.
+ * @param projectDirectory - Directory port that builds the commit-time fence.
+ * @returns Create input fields carrying the commit-time Project fence.
+ */
+export async function requireAssignedProjectAcceptsNewWorkItems(
+  directoryId: string,
+  team: ProjectDirectoryTeamResponse,
+  assignedProjectId: string | null | undefined,
+  projectDirectory: AutomationActionExecutorDependencies['projectDirectory'] =
+    workspaceDependencies.projectDirectory,
+): Promise<Pick<CreateTeamIssueRequestBody, 'newWorkItemProjectConditionCheck'>> {
+  if (!assignedProjectId) return {}
+  const createConditionCheck = projectDirectory.createNewWorkItemProjectConditionCheck
+  if (createConditionCheck) {
+    return {
+      newWorkItemProjectConditionCheck: await createConditionCheck.call(
+        projectDirectory,
+        directoryId,
+        team.id,
+        assignedProjectId,
+      ),
+    }
+  }
+  const project = team.projects.find((candidate) => candidate.id === assignedProjectId)
+  if (project && !projectLifecycleAcceptsNewWorkItems(project.lifecycleState)) {
+    throw new ProjectDataError(
+      409,
+      'ProjectClosedForNewWorkItems',
+      `Project "${assignedProjectId}" is ${project.lifecycleState} and does not accept new Work Items.`,
+    )
+  }
+  return {}
 }
 
 /**

@@ -259,6 +259,7 @@ import {
   filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
+  requireAssignedProjectAcceptsNewWorkItems,
   type WorkItemsResponse,
 } from '../shared/work-item-access'
 import {
@@ -3456,6 +3457,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           )
         },
         'project creation',
+        // A charter saved before this projection lands carries a revision; keep it.
+        { unrevisioned: true },
       )
       return c.json(response, 201)
     } catch (error) {
@@ -3700,6 +3703,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
+        teamContext.team,
+        readAssignedProjectId(normalized.assignedProjectId),
+      )
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         conversion.target.teamId,
@@ -3727,15 +3735,18 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversion.target.projectId,
       )
-      const guardedConfigured = authorizationConditionChecks.length === 0
-        ? configured
-        : {
-            ...configured,
-            authorizationConditionChecks: mergeTriageConditionChecks(
-              configured.authorizationConditionChecks ?? [],
-              authorizationConditionChecks,
-            ),
-          };
+      const guardedConfigured = {
+        ...(authorizationConditionChecks.length === 0
+          ? configured
+          : {
+              ...configured,
+              authorizationConditionChecks: mergeTriageConditionChecks(
+                configured.authorizationConditionChecks ?? [],
+                authorizationConditionChecks,
+              ),
+            }),
+        ...newWorkItemProjectFence,
+      };
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
         readTeamIssueAssigneeUserId(guardedConfigured),
@@ -4376,6 +4387,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         requestBody,
         context.team,
       )
+      const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
+        principal.directoryId,
+        context.team,
+        readAssignedProjectId(body.assignedProjectId),
+      )
       requireAssignedProjectPermission(
         principal,
         context,
@@ -4408,6 +4424,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             assigneeUserId,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            ...newWorkItemProjectFence,
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),
