@@ -15,8 +15,9 @@ const {
 import {
   CognitoServiceError,
 } from '../..'
-import type {
-  WorkspaceAccessClient,
+import {
+  WorkspaceAccessError,
+  type WorkspaceAccessClient,
 } from '../../../workspace-access/workspace-access'
 import {
   InMemoryEnterpriseIdentityClient,
@@ -293,6 +294,7 @@ test('returns a stable error when a new password violates the Cognito policy', a
 test('holds the invitation acceptance lock across the Cognito password challenge', async () => {
   const sequence: string[] = []
   const auditContexts: ObservedWorkspaceMutationAuditContext[] = []
+  const lockAuditContexts: unknown[] = []
   const invitation = {
     id: 'invitee@example.com',
     email: 'invitee@example.com',
@@ -353,7 +355,7 @@ test('holds the invitation acceptance lock across the Cognito password challenge
         auditContext,
       ) {
         sequence.push('acquire-lock')
-        auditContexts.push({ stage: 'acquireInvitationAcceptanceLock', context: auditContext })
+        lockAuditContexts.push(auditContext)
         return invitation
       },
       async releaseInvitationAcceptanceLock(
@@ -363,7 +365,7 @@ test('holds the invitation acceptance lock across the Cognito password challenge
         auditContext,
       ) {
         sequence.push('release-lock')
-        auditContexts.push({ stage: 'releaseInvitationAcceptanceLock', context: auditContext })
+        lockAuditContexts.push(auditContext)
         return {
           ...invitation,
           acceptanceLockExpiresAt: undefined,
@@ -422,13 +424,11 @@ test('holds the invitation acceptance lock across the Cognito password challenge
     method: 'POST',
     requestBody: { email: 'invitee@example.com' },
     route: '/api/auth/challenge/new-password',
-    stages: [
-      'acquireInvitationAcceptanceLock',
-      'reconcileAuthenticatedMember',
-      'releaseInvitationAcceptanceLock',
-    ],
+    stages: ['reconcileAuthenticatedMember'],
     workspaceId: 'workspace#production',
   })
+  // The lock runs before Cognito proves the session, so it must not audit in the invitee's name.
+  expect(lockAuditContexts).toEqual([undefined, undefined])
 })
 
 test('lets an active Workspace member complete a new password challenge without an invitation lock', async () => {
@@ -515,6 +515,139 @@ test('lets an active Workspace member complete a new password challenge without 
     'get-user',
     'reconcile-member',
   ])
+})
+
+function configureNewPasswordChallengeInvitee(options: {
+  email: string
+  sequence: string[]
+  acquireError?: Error
+  challengeError?: Error
+  lockAuditContexts?: unknown[]
+}) {
+  const invitation = {
+    id: options.email,
+    email: options.email,
+    role: 'member' as const,
+    status: 'pending' as const,
+    deliveryStatus: 'sent' as const,
+    identityOwnership: 'workspace-created' as const,
+    cognitoIdentityId: 'sub-invitee',
+    version: 2,
+    expiresAt: '2026-07-18T00:00:00.000Z',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+    acceptanceLockExpiresAt: '2026-07-11T00:01:00.000Z',
+  }
+  setTestAppDependencies({
+    cognito: {
+      async findWorkspaceUser() {
+        options.sequence.push('find-user')
+        return {
+          profile: {
+            id: options.email,
+            username: 'InviteeIdentity',
+            email: options.email,
+            enabled: true,
+            status: 'FORCE_CHANGE_PASSWORD',
+          },
+          identityId: 'sub-invitee',
+          directoryId: 'workspace#production',
+        }
+      },
+      async respondToNewPasswordChallenge() {
+        options.sequence.push('complete-challenge')
+        throw options.challengeError ??
+          new CognitoServiceError(400, 'NotAuthorizedException', 'Invalid session for the user.')
+      },
+    } as unknown as NonNullable<
+      Parameters<typeof setTestAppDependencies>[0]['cognito']
+    >,
+    workspaceAccess: {
+      ...createWorkspaceAccessFake(),
+      async getActiveMember() {
+        options.sequence.push('get-active-member')
+        return undefined
+      },
+      async acquireInvitationAcceptanceLock(_workspaceId, _invitationId, auditContext) {
+        options.sequence.push('acquire-lock')
+        options.lockAuditContexts?.push(auditContext)
+        if (options.acquireError) throw options.acquireError
+        return invitation
+      },
+      async releaseInvitationAcceptanceLock(_workspaceId, _invitationId, _expectedVersion, auditContext) {
+        options.sequence.push('release-lock')
+        options.lockAuditContexts?.push(auditContext)
+        return { ...invitation, acceptanceLockExpiresAt: undefined, version: 3 }
+      },
+    },
+  })
+}
+
+function requestNewPasswordChallenge(email: string, session = 'forged-session') {
+  return app.request('/api/auth/challenge/new-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, newPassword: 'Permanent123!', session }),
+  })
+}
+
+test('releases the invitation lock without audit events when Cognito rejects a forged session', async () => {
+  const sequence: string[] = []
+  const lockAuditContexts: unknown[] = []
+  configureNewPasswordChallengeInvitee({
+    email: 'forged-session@example.com',
+    sequence,
+    lockAuditContexts,
+  })
+
+  const response = await requestNewPasswordChallenge('forged-session@example.com')
+
+  expect(response.status).toBe(401)
+  expect(await response.json()).toEqual({ message: 'Invalid email or password.' })
+  expect(sequence).toEqual([
+    'find-user',
+    'get-active-member',
+    'acquire-lock',
+    'complete-challenge',
+    'release-lock',
+  ])
+  expect(lockAuditContexts).toEqual([undefined, undefined])
+})
+
+test('answers a revoked or busy invitation like a rejected session before calling Cognito', async () => {
+  for (const [email, code] of [
+    ['revoked-invitee@example.com', 'WorkspaceInvitationNotAcceptable'],
+    ['busy-invitee@example.com', 'WorkspaceInvitationAcceptanceInProgress'],
+  ] as const) {
+    const sequence: string[] = []
+    configureNewPasswordChallengeInvitee({
+      email,
+      sequence,
+      acquireError: new WorkspaceAccessError(409, code, 'Hidden invitation state.'),
+    })
+
+    const response = await requestNewPasswordChallenge(email)
+
+    expect(response.status).toBe(401)
+    expect(await response.json()).toEqual({ message: 'Invalid email or password.' })
+    expect(sequence).toEqual(['find-user', 'get-active-member', 'acquire-lock'])
+  }
+})
+
+test('rate limits new password attempts before touching the invitation', async () => {
+  const sequence: string[] = []
+  configureNewPasswordChallengeInvitee({ email: 'rate-limit-invitee@example.com', sequence })
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    expect((await requestNewPasswordChallenge('Rate-Limit-Invitee@example.com')).status).toBe(401)
+  }
+  sequence.length = 0
+  const limited = await requestNewPasswordChallenge('rate-limit-invitee@example.com')
+
+  expect(limited.status).toBe(429)
+  expect(limited.headers.get('Retry-After')).toBeTruthy()
+  expect(await limited.json()).toMatchObject({ code: 'AuthenticationChallengeRateLimited' })
+  expect(sequence).toEqual([])
 })
 
 test('retries membership reconcile on normal login after password completion succeeded alone', async () => {
