@@ -98,3 +98,17 @@ export const ChallengeRecovery: Story = {
     initialChallengeFailed: true,
   },
 }
+
+/**
+ * The workspace requires MFA and the user has no authenticator app yet, so sign-in asks them to
+ * register one before continuing.
+ */
+export const MfaSetupRequired: Story = {
+  args: {
+    initialChallenge: {
+      challenge: 'MFA_SETUP',
+      email: 'member@example.com',
+      setupAccessToken: 'storybook-setup-token',
+    },
+  },
+}

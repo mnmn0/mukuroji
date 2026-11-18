@@ -950,6 +950,8 @@ export function buildApiRuntime(
         'cognito-idp:AdminEnableUser',
         'cognito-idp:AdminGetUser',
         'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:AdminResetUserPassword',
+        'cognito-idp:AdminSetUserMFAPreference',
         'cognito-idp:AdminUserGlobalSignOut',
         'cognito-idp:AdminUpdateUserAttributes',
         'cognito-idp:DescribeIdentityProvider',

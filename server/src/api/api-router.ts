@@ -4,6 +4,7 @@ import { appDependencyRuntime } from './shared/app-dependencies'
 import { registerEnterpriseIdentityRoutes } from './routes/enterprise-identity-routes'
 import { registerDocumentsRoutes } from './routes/documents-routes'
 import { registerAuthenticationRoutes } from './routes/authentication-routes'
+import { registerAccountSecurityRoutes } from './routes/account-security-routes'
 import { registerWorkspaceRoutes } from './routes/workspace-routes'
 import { registerAnalyticsRoutes } from './routes/analytics-routes'
 import { registerAuditRoutes } from './routes/audit-routes'
@@ -157,6 +158,7 @@ export function bindApiDependencies(
 registerEnterpriseIdentityRoutes(routeApp)
 registerDocumentsRoutes(routeApp)
 registerAuthenticationRoutes(routeApp)
+registerAccountSecurityRoutes(routeApp)
 registerWorkspaceRoutes(routeApp)
 registerAnalyticsRoutes(routeApp)
 registerAuditRoutes(routeApp)

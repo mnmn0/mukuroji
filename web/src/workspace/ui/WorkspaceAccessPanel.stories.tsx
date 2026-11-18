@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import type { WorkspaceAccess } from '../api'
 import { WorkspaceAccessPanel } from './WorkspaceAccessPanel'
 
@@ -249,5 +249,42 @@ export const LoadError: Story = {
 export const English: Story = {
   args: {
     locale: 'en',
+  },
+}
+
+/**
+ * An owner sees each active member's MFA enrollment and can send a password reset or reset MFA.
+ */
+export const SignInSecurity: Story = {
+  args: {
+    onResetMemberCredential: async () => undefined,
+    signInSecurity: [
+      { memberKey: 'owner@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'admin@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'member@example.com', mfa: 'not-enrolled', passwordReset: 'available' },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('workspace-member-mfa-summary')).toHaveTextContent('1 人')
+    await expect(canvas.getByTestId('workspace-member-mfa-reset-admin-example-com')).toBeVisible()
+    await expect(canvas.queryByTestId('workspace-member-mfa-reset-member-example-com')).toBeNull()
+    await expect(canvas.queryByTestId('workspace-member-password-reset-owner-example-com')).toBeNull()
+  },
+}
+
+/**
+ * Members' MFA enrollment could not be loaded; the ledger says so and offers a reload.
+ */
+export const SignInSecurityLoadError: Story = {
+  args: {
+    onResetMemberCredential: async () => undefined,
+    onRetrySignInSecurity: fn(),
+    signInSecurityLoadFailed: true,
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('workspace-member-mfa-retry'))
+    await expect(args.onRetrySignInSecurity).toHaveBeenCalledTimes(1)
   },
 }

@@ -9,7 +9,6 @@ import {
   type RefObject,
 } from 'react'
 import { useSWRConfig } from 'swr'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -26,10 +25,22 @@ import {
   type WorkspaceInvitation,
   type WorkspaceInvitationStatus,
   type WorkspaceMember,
+  type WorkspaceMemberCredentialAction,
+  type WorkspaceMemberSignInSecurity,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from '../api'
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
+import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
+import {
+  shouldCloseCredentialResetDialog,
+  useWorkspaceMemberCredentialReset,
+} from '../mutations/useWorkspaceMemberCredentialReset'
+import {
+  createWorkspaceAccessMutationSession,
+  getCredentialResetRunner,
+} from '../mutations/workspaceAccessMutationSession'
+import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -103,6 +114,25 @@ type WorkspaceAccessPanelProps = {
    * Workspace access の再取得 callback です。
    */
   onRetry?: () => Promise<void> | void
+  /**
+   * Each active member's MFA enrollment and password reset availability, for owners and admins.
+   */
+  signInSecurity?: WorkspaceMemberSignInSecurity[]
+  /**
+   * Whether loading the sign-in security failed.
+   */
+  signInSecurityLoadFailed?: boolean
+  /**
+   * Loads the sign-in security again after a failure.
+   */
+  onRetrySignInSecurity?: () => void
+  /**
+   * Sends a password reset code to a member or resets the member's authenticator app.
+   */
+  onResetMemberCredential?: (
+    memberKey: string,
+    action: WorkspaceMemberCredentialAction,
+  ) => Promise<void>
 }
 
 /**
@@ -136,6 +166,20 @@ type WorkspaceAccessAction =
        * 変更後の status です。
        */
       status: WorkspaceMemberStatus
+    }
+  | {
+      /**
+       * Discriminant of a password reset or MFA reset for a member.
+       */
+      kind: 'member-credential'
+      /**
+       * Member to act on.
+       */
+      member: WorkspaceMember
+      /**
+       * Which credential to reset.
+       */
+      action: WorkspaceMemberCredentialAction
     }
   | {
       /**
@@ -231,10 +275,10 @@ export function WorkspaceAccessPanelContainer({
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { mutate: mutateCache } = useSWRConfig()
-  const mutationSession = useMemo(() => ({
-    accessToken,
-    requestRunner: createMutationRequestRunner(),
-  }), [accessToken])
+  const mutationSession = useMemo(
+    () => createWorkspaceAccessMutationSession(accessToken),
+    [accessToken],
+  )
   const mutationRequestRunner = mutationSession.requestRunner
   const {
     data: access,
@@ -242,6 +286,27 @@ export function WorkspaceAccessPanelContainer({
     isLoading,
     key: accessKey,
   } = useWorkspaceAccess(mutationSession.accessToken)
+  const {
+    data: signInSecurity,
+    error: signInSecurityError,
+    mutate: mutateSignInSecurity,
+  } = useWorkspaceMembersSignInSecurity(
+    mutationSession.accessToken,
+    access?.capabilities.canManageMembers === true,
+  )
+
+  const administratorKey = access?.currentMember.memberKey
+  const credentialResetRunner = useMemo(
+    () => administratorKey === undefined
+      ? createMutationRequestRunner()
+      : getCredentialResetRunner(administratorKey),
+    [administratorKey],
+  )
+  const resetMemberCredential = useWorkspaceMemberCredentialReset({
+    accessToken: mutationSession.accessToken,
+    requestRunner: credentialResetRunner,
+    revalidateSignInSecurity: mutateSignInSecurity,
+  })
 
   const refresh = async () => {
     if (!accessKey) {
@@ -325,6 +390,7 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
+      onResetMemberCredential={resetMemberCredential}
       onRetry={retryLoad}
       onRevokeInvitation={async (invitationId) => {
         await mutationRequestRunner.run(
@@ -343,7 +409,12 @@ export function WorkspaceAccessPanelContainer({
           shouldRetainWorkspaceMutationContext,
         )
         await refresh()
+        // Members reactivated or given another role change who the MFA list covers.
+        void mutateSignInSecurity()
       }}
+      signInSecurity={signInSecurity}
+      signInSecurityLoadFailed={Boolean(signInSecurityError)}
+      onRetrySignInSecurity={() => void mutateSignInSecurity()}
     />
   )
 }
@@ -363,6 +434,10 @@ export function WorkspaceAccessPanel({
   onRetry,
   onRevokeInvitation,
   onUpdateMember,
+  onResetMemberCredential,
+  signInSecurity,
+  signInSecurityLoadFailed = false,
+  onRetrySignInSecurity,
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>('member')
@@ -370,6 +445,7 @@ export function WorkspaceAccessPanel({
   const [operationErrorMessage, setOperationErrorMessage] = useState<string | undefined>()
   const [action, setAction] = useState<WorkspaceAccessAction | undefined>()
   const [isActionBusy, setIsActionBusy] = useState(false)
+  const [noticeMessage, setNoticeMessage] = useState<string | undefined>()
   const actionReturnFocusRef = useRef<HTMLElement | null>(null)
 
   if (isLoading && !access) {
@@ -426,6 +502,7 @@ export function WorkspaceAccessPanel({
       ? document.activeElement
       : null
     setOperationErrorMessage(undefined)
+    setNoticeMessage(undefined)
     setAction(nextAction)
   }
 
@@ -441,6 +518,15 @@ export function WorkspaceAccessPanel({
     setOperationErrorMessage(originalErrorMessage)
   }
 
+  /**
+   * Returns focus to another control of the member's row, because the reload after an
+   * authenticator reset removes the reset button that opened the dialog.
+   */
+  const moveReturnFocusOffResetButton = () => {
+    actionReturnFocusRef.current = findRowFocusFallback(actionReturnFocusRef.current) ??
+      actionReturnFocusRef.current
+  }
+
   const confirmAction = async () => {
     if (!action || isActionBusy) {
       return
@@ -448,6 +534,31 @@ export function WorkspaceAccessPanel({
 
     setIsActionBusy(true)
     setOperationErrorMessage(undefined)
+
+    if (action.kind === 'member-credential') {
+      try {
+        await onResetMemberCredential?.(action.member.memberKey, action.action)
+        if (action.action === 'mfa-reset') moveReturnFocusOffResetButton()
+        setAction(undefined)
+        setNoticeMessage(
+          t(action.action === 'password-reset'
+            ? 'memberSecurity.done.passwordReset'
+            : 'memberSecurity.done.mfaReset')
+            .replace('{name}', action.member.name?.trim() || action.member.email),
+        )
+      } catch (error) {
+        // The dialog closes on an expired reset, so the error shows in the panel instead.
+        if (shouldCloseCredentialResetDialog(error)) {
+          // The reload that follows may remove the reset button, as after a completed reset.
+          if (action.action === 'mfa-reset') moveReturnFocusOffResetButton()
+          setAction(undefined)
+        }
+        setOperationErrorMessage(resolveMemberCredentialErrorMessage(error, t))
+      } finally {
+        setIsActionBusy(false)
+      }
+      return
+    }
 
     try {
       if (action.kind === 'member-role') {
@@ -559,6 +670,15 @@ export function WorkspaceAccessPanel({
           </div>
         ) : null}
 
+        {noticeMessage && !action ? (
+          <p
+            className="rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]"
+            role="status"
+          >
+            {noticeMessage}
+          </p>
+        ) : null}
+
         {canInvite ? (
           <form
             className="grid min-w-0 gap-4"
@@ -613,9 +733,13 @@ export function WorkspaceAccessPanel({
 
         <WorkspaceMemberLedger
           access={access}
+          canResetCredentials={Boolean(onResetMemberCredential)}
           locale={locale}
+          signInSecurity={signInSecurity}
+          signInSecurityLoadFailed={signInSecurityLoadFailed}
           t={t}
           onRequestAction={requestAction}
+          onRetrySignInSecurity={onRetrySignInSecurity}
         />
 
         <WorkspaceInvitationLedger
@@ -683,18 +807,30 @@ function AccessLedgerMetric({
 
 function WorkspaceMemberLedger({
   access,
+  canResetCredentials,
   locale,
+  signInSecurity,
+  signInSecurityLoadFailed,
   t,
   onRequestAction,
+  onRetrySignInSecurity,
 }: {
   access: WorkspaceAccess
+  canResetCredentials: boolean
   locale: Locale
+  signInSecurity?: WorkspaceMemberSignInSecurity[]
+  signInSecurityLoadFailed: boolean
   t: (key: MessageKey) => string
   onRequestAction: (action: WorkspaceAccessAction) => void
+  onRetrySignInSecurity?: () => void
 }) {
   const activeOwners = access.members.filter(
     (member) => member.role === 'owner' && member.status === 'active',
   )
+  const signInSecurityByMember = new Map(
+    (signInSecurity ?? []).map((entry) => [entry.memberKey, entry]),
+  )
+  const unenrolledMemberCount = signInSecurity?.filter((entry) => entry.mfa === 'not-enrolled').length
 
   return (
     <section className="min-w-0 border-t border-[var(--workbench-border)] bg-surface">
@@ -702,6 +838,30 @@ function WorkspaceMemberLedger({
         description={t('workspace.access.members.description')}
         title={t('workspace.access.members.title')}
       />
+      {signInSecurityLoadFailed ? (
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('memberSecurity.loadError')}
+          </p>
+          {onRetrySignInSecurity ? (
+            <button
+              className="workbench-button-secondary min-h-9 px-3"
+              data-testid="workspace-member-mfa-retry"
+              type="button"
+              onClick={onRetrySignInSecurity}
+            >
+              {t('memberSecurity.retry')}
+            </button>
+          ) : null}
+        </div>
+      ) : unenrolledMemberCount !== undefined ? (
+        <p
+          className="border-t border-[var(--workbench-border)] px-4 py-3 text-sm font-semibold text-[var(--workbench-muted)]"
+          data-testid="workspace-member-mfa-summary"
+        >
+          {t('memberSecurity.summary').replace('{count}', String(unenrolledMemberCount))}
+        </p>
+      ) : null}
       <div className="relative overflow-x-auto">
         <table className="w-full border-collapse text-left min-[761px]:min-w-[860px]" data-testid="workspace-member-ledger">
           <thead className="max-[760px]:sr-only">
@@ -729,6 +889,13 @@ function WorkspaceMemberLedger({
               const cannotChangeStatus = !canManage ||
                 (isCurrentMember && nextStatus === 'deactivated') ||
                 (isLastActiveOwner && nextStatus === 'deactivated')
+              const memberSignInSecurity = member.status === 'active'
+                ? signInSecurityByMember.get(member.memberKey)
+                : undefined
+              const canResetMemberCredentials = canResetCredentials && canManage && !isCurrentMember
+              const canSendPasswordReset = canResetMemberCredentials &&
+                memberSignInSecurity?.passwordReset === 'available'
+              const canResetMfa = canResetMemberCredentials && memberSignInSecurity?.mfa === 'enrolled'
 
               return (
                 <tr
@@ -745,6 +912,17 @@ function WorkspaceMemberLedger({
                         ) : null}
                       </div>
                       <p className="mt-1 break-all text-sm text-[var(--workbench-muted)]">{member.email}</p>
+                      {memberSignInSecurity ? (
+                        <span
+                          className="mt-1.5 inline-flex"
+                          data-testid={`workspace-member-mfa-${createAccessTestId(member.memberKey)}`}
+                        >
+                          <AccessStatusBadge
+                            label={t(`memberSecurity.mfa.${memberSignInSecurity.mfa}`)}
+                            tone={getMemberMfaTone(memberSignInSecurity.mfa)}
+                          />
+                        </span>
+                      ) : null}
                       <p className="mt-1 text-xs font-medium text-[var(--workbench-muted-soft)]">
                         {t('workspace.access.updatedAt').replace('{date}', formatAccessDate(member.updatedAt, locale))}
                       </p>
@@ -786,23 +964,45 @@ function WorkspaceMemberLedger({
                     </label>
                   </td>
                   <td className="px-4 py-4 text-right max-[760px]:col-span-2 max-[760px]:py-2">
-                    <button
-                      className={member.status === 'active'
-                        ? 'min-h-10 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-fg-slate-400'
-                        : 'workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-60'}
-                      disabled={cannotChangeStatus}
-                      title={isCurrentMember && nextStatus === 'deactivated'
-                        ? t('workspace.access.members.selfDeactivateBlocked')
-                        : isLastActiveOwner && nextStatus === 'deactivated'
-                          ? t('workspace.access.members.lastOwnerBlocked')
-                          : undefined}
-                      type="button"
-                      onClick={() => onRequestAction({ kind: 'member-status', member, status: nextStatus })}
-                    >
-                      {nextStatus === 'active'
-                        ? t('workspace.access.action.reactivate')
-                        : t('workspace.access.action.deactivate')}
-                    </button>
+                    <div className="flex flex-wrap justify-end gap-2 max-[760px]:justify-start">
+                      {canSendPasswordReset ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-password-reset-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onRequestAction({ kind: 'member-credential', member, action: 'password-reset' })}
+                        >
+                          {t('memberSecurity.action.passwordReset')}
+                        </button>
+                      ) : null}
+                      {canResetMfa ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-mfa-reset-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onRequestAction({ kind: 'member-credential', member, action: 'mfa-reset' })}
+                        >
+                          {t('memberSecurity.action.mfaReset')}
+                        </button>
+                      ) : null}
+                      <button
+                        className={member.status === 'active'
+                          ? 'min-h-10 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-fg-slate-400'
+                          : 'workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-60'}
+                        disabled={cannotChangeStatus}
+                        title={isCurrentMember && nextStatus === 'deactivated'
+                          ? t('workspace.access.members.selfDeactivateBlocked')
+                          : isLastActiveOwner && nextStatus === 'deactivated'
+                            ? t('workspace.access.members.lastOwnerBlocked')
+                            : undefined}
+                        type="button"
+                        onClick={() => onRequestAction({ kind: 'member-status', member, status: nextStatus })}
+                      >
+                        {nextStatus === 'active'
+                          ? t('workspace.access.action.reactivate')
+                          : t('workspace.access.action.deactivate')}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               )
@@ -940,6 +1140,59 @@ function AccessStatusBadge({
   )
 }
 
+/** Controls that can take focus inside a member row. */
+const rowFocusableSelector = 'button:not([disabled]), a[href], select:not([disabled]), input:not([disabled])'
+
+/**
+ * Finds another control in the member row of a control, for when an action removes that control.
+ *
+ * @param control - Control that opened the dialog.
+ * @returns The first other focusable control of the row, or undefined.
+ */
+function findRowFocusFallback(control: HTMLElement | null) {
+  const row = control?.closest<HTMLElement>('tr')
+  return Array.from(row?.querySelectorAll<HTMLElement>(rowFocusableSelector) ?? [])
+    .find((candidate) => candidate !== control)
+}
+
+/**
+ * Reads the control a dialog returns focus to when it closes.
+ *
+ * The confirmed action can change it after the dialog opened, so it is read on close.
+ *
+ * @param returnFocusRef - Ref of the control.
+ * @returns The control, or null.
+ */
+function readReturnFocusTarget(returnFocusRef: RefObject<HTMLElement | null>) {
+  return returnFocusRef.current
+}
+
+/**
+ * Returns focus to the control that opened a dialog, or to its row when the control is gone.
+ *
+ * @param returnFocusElement - Control that opened the dialog.
+ * @param fallbackContainer - Row of that control, read when the dialog opened.
+ */
+function restoreDialogFocus(
+  returnFocusElement: HTMLElement | null | undefined,
+  fallbackContainer: HTMLElement | null | undefined,
+) {
+  if (returnFocusElement?.isConnected) {
+    returnFocusElement.focus()
+    return
+  }
+  if (!fallbackContainer?.isConnected) {
+    return
+  }
+  const fallback = fallbackContainer.querySelector<HTMLElement>(rowFocusableSelector)
+  if (fallback) {
+    fallback.focus()
+    return
+  }
+  fallbackContainer.tabIndex = -1
+  fallbackContainer.focus()
+}
+
 function WorkspaceAccessConfirmationDialog({
   confirmLabel,
   description,
@@ -959,10 +1212,15 @@ function WorkspaceAccessConfirmationDialog({
 
   useEffect(() => {
     const returnFocusElement = returnFocusRef.current
+    // An action can remove its own button, such as resetting MFA, so the row is the fallback.
+    const fallbackContainer = returnFocusElement?.closest<HTMLElement>('tr')
     dialogRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
 
     return () => {
-      window.requestAnimationFrame(() => returnFocusElement?.isConnected && returnFocusElement.focus())
+      // The confirmed action may point the ref at another control of the row, such as after an
+      // MFA reset whose button the next reload removes, so the ref is read again on close.
+      const focusTarget = readReturnFocusTarget(returnFocusRef) ?? returnFocusElement
+      window.requestAnimationFrame(() => restoreDialogFocus(focusTarget, fallbackContainer))
     }
   }, [returnFocusRef])
 
@@ -1121,6 +1379,24 @@ function createWorkspaceAccessActionCopy(
     }
   }
 
+  if (action.kind === 'member-credential') {
+    const isPasswordReset = action.action === 'password-reset'
+
+    return {
+      confirmLabel: t(isPasswordReset
+        ? 'memberSecurity.action.passwordReset'
+        : 'memberSecurity.action.mfaReset'),
+      description: t(isPasswordReset
+        ? 'memberSecurity.dialog.passwordResetDescription'
+        : 'memberSecurity.dialog.mfaResetDescription')
+        .replace('{name}', action.member.name?.trim() || action.member.email),
+      destructive: true,
+      title: t(isPasswordReset
+        ? 'memberSecurity.dialog.passwordResetTitle'
+        : 'memberSecurity.dialog.mfaResetTitle'),
+    }
+  }
+
   if (action.kind === 'member-status') {
     const isDeactivation = action.status === 'deactivated'
 
@@ -1212,6 +1488,67 @@ function resolveWorkspaceAccessErrorMessage(
   }
 
   return t('workspace.access.error.operation')
+}
+
+/**
+ * Picks the badge tone for a member's MFA enrollment.
+ *
+ * @param status - MFA enrollment.
+ * @returns The badge tone.
+ */
+function getMemberMfaTone(status: WorkspaceMemberSignInSecurity['mfa']) {
+  if (status === 'enrolled') {
+    return 'success' as const
+  }
+
+  if (status === 'not-enrolled') {
+    return 'warning' as const
+  }
+
+  return 'neutral' as const
+}
+
+/**
+ * Maps a failed password reset or MFA reset to a message.
+ *
+ * @param error - Error from the API.
+ * @param t - Translator.
+ * @returns The message.
+ */
+function resolveMemberCredentialErrorMessage(
+  error: unknown,
+  t: (key: MessageKey) => string,
+) {
+  if (error instanceof WorkspaceAccessApiError) {
+    if (error.code === 'MemberInvitationPending') {
+      return t('memberSecurity.error.invitationPending')
+    }
+
+    if (error.code === 'MemberSignInManagedBySso') {
+      return t('memberSecurity.error.sso')
+    }
+
+    if (error.code === 'MemberMfaNotEnrolled') {
+      return t('memberSecurity.error.notEnrolled')
+    }
+
+    if (error.code === 'WorkspaceCredentialActionInProgress') {
+      return t('memberSecurity.error.inProgress')
+    }
+
+    if (error.code === 'WorkspaceCredentialActionExpired') {
+      return t('memberSecurity.error.expired')
+    }
+
+    if (
+      error.code === 'MemberPasswordResetUnavailable' ||
+      error.code === 'MemberSignInUnavailable'
+    ) {
+      return t('memberSecurity.error.unavailable')
+    }
+  }
+
+  return resolveWorkspaceAccessErrorMessage(error, t)
 }
 
 function trapWorkspaceAccessDialogFocus(event: KeyboardEvent | globalThis.KeyboardEvent, dialog: HTMLElement) {
