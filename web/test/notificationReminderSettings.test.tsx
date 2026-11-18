@@ -34,6 +34,7 @@ function createTeamController(canManage: boolean): TeamReminderSettingsControlle
     },
     isLoading: false,
     hasLoadError: false,
+    isUnavailable: false,
     isSaving: false,
     sessionErrors: [],
     refresh: async () => undefined,

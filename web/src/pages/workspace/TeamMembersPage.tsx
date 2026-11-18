@@ -141,7 +141,9 @@ export function TeamMembersPage() {
           snapshot={workload.data}
           t={t}
         />
-        {activeTeam ? <TeamReminderSettingsPanel controller={reminderSettings} t={t} /> : null}
+        {activeTeam && !reminderSettings.isUnavailable
+          ? <TeamReminderSettingsPanel controller={reminderSettings} t={t} />
+          : null}
       </div>
     </WorkspaceRouteContent>
   )

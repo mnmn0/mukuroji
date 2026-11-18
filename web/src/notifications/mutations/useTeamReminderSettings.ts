@@ -16,6 +16,8 @@ export type TeamReminderSettingsController = {
   isLoading: boolean
   /** Whether the load failed. */
   hasLoadError: boolean
+  /** Whether the caller may not see this Team's settings, so the panel stays hidden. */
+  isUnavailable: boolean
   /** Whether a save is running. */
   isSaving: boolean
   /** Outcome of the last save. */
@@ -93,6 +95,7 @@ export function useTeamReminderSettings(
     ...(data ? { settings: data } : {}),
     isLoading: Boolean(key) && isLoading,
     hasLoadError: Boolean(error),
+    isUnavailable: error instanceof NotificationsApiError && (error.status === 403 || error.status === 404),
     isSaving,
     ...(saveResult ? { saveResult } : {}),
     sessionErrors: [error, saveError],

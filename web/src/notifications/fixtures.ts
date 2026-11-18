@@ -132,6 +132,7 @@ export const teamReminderSettingsControllerFixture: TeamReminderSettingsControll
   },
   isLoading: false,
   hasLoadError: false,
+  isUnavailable: false,
   isSaving: false,
   sessionErrors: [],
   refresh: async () => undefined,
