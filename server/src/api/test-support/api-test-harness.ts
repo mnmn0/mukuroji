@@ -1550,6 +1550,8 @@ function configureFakeProjectClients(
       configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
       /** Agent Run writes committed with the update. */
       agentRunTransactItems?: UpdateTeamIssueRequestBody['agentRunTransactItems']
+      /** Every key of the adapter update input, so tests can prove unknown keys never arrive. */
+      inputKeys: string[]
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -3017,6 +3019,7 @@ function configureFakeProjectClients(
           authorizationConditionChecks: input.authorizationConditionChecks,
           configurationConditionChecks: input.configurationConditionChecks,
           ...(input.agentRunTransactItems ? { agentRunTransactItems: input.agentRunTransactItems } : {}),
+          inputKeys: Object.keys(input),
         })
         if ('acceptanceCriteria' in input) {
           // An empty list removes the criteria, like the DynamoDB adapter.
