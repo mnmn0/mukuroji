@@ -15,10 +15,12 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
   fitWorkItemTitle,
+  toWorkspaceLocalDate,
   type CreateRequestFormInput,
   type MarkDuplicateRequestSubmissionAction,
   type PublicRequestForm,
@@ -748,7 +750,14 @@ export function createRequestWorkItemInput(
       customFieldValues[fieldId] = value
     }
   }
-  const dueDate = new Date(`${submission.createdAt.slice(0, 10)}T00:00:00.000Z`)
+  // The offset counts from the submission's Workspace-local date, not its UTC date, so a form
+  // submitted early in the morning in Japan does not get a deadline one day too early.
+  const calendarPolicy = {
+    holidays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.holidays],
+    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
+    workingWeekdays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.workingWeekdays],
+  }
+  const dueDate = new Date(`${toWorkspaceLocalDate(submission.createdAt, calendarPolicy.timeZone)}T00:00:00.000Z`)
   dueDate.setUTCDate(dueDate.getUTCDate() + target.dueDateOffsetDays)
   const scheduleDueDate = dueDate.toISOString().slice(0, 10)
   return {
@@ -762,11 +771,7 @@ export function createRequestWorkItemInput(
       ...(target.workflowStatusId ? { workflowStatusId: target.workflowStatusId } : {}),
       customFieldValues,
       schedule: {
-        calendarPolicy: {
-          holidays: [],
-          timeZone: 'UTC',
-          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
-        },
+        calendarPolicy,
         dueDate: scheduleDueDate,
         mode: 'due-date',
       },

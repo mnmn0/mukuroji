@@ -891,7 +891,7 @@ test('uses the first matching routing rule and maps a submission into a canonica
       schedule: {
         calendarPolicy: {
           holidays: [],
-          timeZone: 'UTC',
+          timeZone: 'Asia/Tokyo',
           workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
         },
         dueDate: '2026-07-17',
@@ -939,6 +939,19 @@ test('uses the first matching routing rule and maps a submission into a canonica
     priority: 'low',
   })
   expect(overridden.input.customFieldValues).toEqual({ estimate: 13 })
+})
+
+test('counts the request due date from the submission date in the Workspace time zone', () => {
+  // 2026-07-16T16:30Z is 2026-07-17 01:30 in Japan, so a one-day offset lands on 2026-07-18.
+  const mapped = createRequestWorkItemInput(
+    createStoredSubmission({ createdAt: '2026-07-16T16:30:00.000Z' }) as RequestSubmission,
+    { action: 'convert', expectedRevision: 1 },
+  )
+  expect(mapped.input.schedule).toMatchObject({
+    calendarPolicy: { timeZone: 'Asia/Tokyo' },
+    dueDate: '2026-07-18',
+    mode: 'due-date',
+  })
 })
 
 test('creates a form with a digest-keyed link lookup and CAS-protected form row', async () => {

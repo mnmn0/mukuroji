@@ -1315,7 +1315,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
         mode: 'due-date',
         dueDate: '2026-06-20',
         calendarPolicy: {
-          timeZone: 'UTC',
+          timeZone: 'Asia/Tokyo',
           workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
           holidays: [],
         },

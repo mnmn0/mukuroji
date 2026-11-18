@@ -61,6 +61,7 @@ import {
 import { TaskGanttPeriodNavigation } from './TaskScheduleWindowToolbar'
 import {
   createTaskGanttWindow,
+  getCurrentTaskDate,
   listTaskScheduleWindowDates,
   type TaskScheduleWindow,
 } from '../model/taskScheduleWindow'
@@ -1222,7 +1223,7 @@ function createGanttRows(tasks: readonly CanonicalWorkItem[]): GanttTaskRow[] {
 function createGanttTimelineColumns(
   schedules: readonly WorkItemSchedule[],
 ): GanttTimelineColumn[] {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getCurrentTaskDate()
   const range = createTaskTimelineDateRange(schedules, today)
   const totalDays = differenceGanttCalendarDays(range.startDate, range.endDate) + 1
   const daysPerColumn = Math.max(
