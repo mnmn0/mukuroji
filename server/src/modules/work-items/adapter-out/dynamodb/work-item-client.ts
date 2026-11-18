@@ -236,7 +236,7 @@ function createDynamoDbWorkItemAuthorizationConditionChecks(
  * @param snapshot - Authorization generations observed by the application layer.
  * @returns DynamoDB condition checks for the canonical mutation transaction.
  */
-function createAuthorizationSnapshotConditionChecks(
+export function createAuthorizationSnapshotConditionChecks(
   snapshot: WorkItemAuthorizationSnapshot | undefined,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
   return createAuthorizationSnapshotConditionEntries(snapshot)

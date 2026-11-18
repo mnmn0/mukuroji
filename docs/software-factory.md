@@ -732,7 +732,7 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
 - `POST /v1/work-items/{workItemId}/agent-runs/resume` は、credential の member が Work Item の
   assignee、Work Item が `started`、`resumableStatusIds` が空かその status を含み、`expectedRevision` が
   現在の revision と一致し、claim row がない場合だけ新しい `active` Run を作る。Run と claim の put、
-  Work Item revision と設定 revision と呼び出した member（status と version）の ConditionCheck、新しい Run の `agent-run.resumed` audit event
+  Work Item revision と設定 revision の ConditionCheck、start と同じ認可 snapshot（member の status と version、Team と Project の権限が変わると上がる planning revision）の ConditionCheck、新しい Run の `agent-run.resumed` audit event
   （`metadata.resumedFromRunId` に直前の Run）、idempotency receipt を 1 つの transaction で確定する。Work Item の status は変えないため、
   レビュー待ちなどから作業中へ戻す場合は agent が続けて `move_task` を呼ぶ。
 - 直前の Run は `agent-run-latest#<workItemId>` row を強整合で読んで決め、その `runId` を新しい Run の
@@ -745,7 +745,8 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   `paused` の Run を見て再開候補を示した後に、別の Run が始まって `failed` などで終わった場合に、
   人の判断が要る Run から自動で再開しないためである。指定しない resume（ユーザーが明示的に頼んだもの）は
   従来どおり直前の Run が何で終わっていても再開できる。
-- 新しい Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。Run 履歴
+- 新しい Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。動かすのは `startedAt` だけで、
+  `lastHeartbeatAt` と lease はこのサーバーの現在時刻から数えるため、再開直後の heartbeat と report は拒まれない。Run 履歴
   index は `startedAt#runId` の降順なので、`agent-run-latest` row が指す Run と履歴の先頭が一致する。履歴の
   1 ページ目で index にまだない最新 Run を補うときも、同じ順序の位置に入れて cursor と矛盾させない。
 - MCP の `resume_task` は claim の判定を API に任せる。応答を失った再送は、その後に別 instance が再開していても

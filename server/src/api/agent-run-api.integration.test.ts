@@ -1130,9 +1130,9 @@ describe('public Agent Run service', () => {
     expect(await store.getLatestRunId(workspaceId, 'core-team', 'task-1')).toBe(resumed.run.runId)
   })
 
-  test('resumes only after the expected run, starts after it, and needs an active member at commit', async () => {
+  test('resumes only after the expected run, starts after it, and fences the caller\'s access at commit', async () => {
     const service = createCanonicalPublicAgentRunService()
-    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     setTestAppDependencies({
       transactions: {
         /**
@@ -1144,6 +1144,23 @@ describe('public Agent Run service', () => {
           return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
         },
       },
+      collaboration: createCollaborationStub({
+        /**
+         * Commits the report's co-writes with the comment.
+         *
+         * @param input - Comment write.
+         * @returns The stored comment.
+         */
+        async createComment(input) {
+          store.applyTransactItems(input.coWrites ?? [])
+          const id = deriveAuditedCommentId(input.entityKey, input.auditContext!)
+          return {
+            id, rootCommentId: id, authorMemberKey: input.actorMemberKey, bodyMarkdown: input.bodyMarkdown, version: 1,
+            mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+            createdAt: input.auditContext!.occurredAt, updatedAt: input.auditContext!.occurredAt,
+          }
+        },
+      }),
     })
     const offered = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'paused', 'agent', new Date())
     // The run that came after the offered one started on a server whose clock is ahead of this one.
@@ -1170,12 +1187,29 @@ describe('public Agent Run service', () => {
     // An offer of the paused run does not resume after the failed run that came later.
     await expect(resume('offered', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
-    // A member removed after authorization does not get a run.
-    projectOptions.deactivatedBeforeFenceMemberKeys = ['demo@example.com']
-    await expect(resume('removed', later.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('membership changed') })
-    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
-    projectOptions.deactivatedBeforeFenceMemberKeys = []
+    const committed: unknown[][] = []
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      committed.push([...items])
+      return commit(items, fenceItemCount)
+    }
     const resumed = await resume('expected', later.runId)
+    // The commit fails if the caller's membership or Team and Project access changed since authorization.
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { workspaceId, recordKey: 'MEMBER#demo@example.com' },
+    }) })
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: 'META' },
+    }) })
+    // Only the history position moves after the earlier run: heartbeats and reports keep this server's clock.
+    expect(Date.parse(resumed.run.lastHeartbeatAt)).toBeLessThanOrEqual(Date.now())
+    await runWithTestAppDependencies(() => service.heartbeat(credential, 'core-team', resumed.run.runId, hashAgentInstanceId('laptop-2')))
+    const reported = await runWithTestAppDependencies(() => service.report(
+      credential, 'core-team', resumed.run.runId, readReportAgentRunRequest({ instanceId: 'laptop-2', kind: 'progress', message: 'Resumed' }),
+      { requestId: 'report', idempotencyKey: 'report-after-resume' },
+      { credentialId: 'agent-key', idempotencyKey: 'report-after-resume', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    expect(reported.run).toMatchObject({ reportCount: 1, state: 'active' })
     expect(resumed.resumedFromRun?.runId).toBe(later.runId)
     expect(Date.parse(resumed.run.startedAt)).toBeGreaterThan(Date.parse(ahead))
     const history = await store.listWorkItemRuns(workspaceId, 'core-team', 'task-1', undefined, 3)

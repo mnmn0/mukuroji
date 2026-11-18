@@ -23,7 +23,6 @@ import {
   isClaimHeldBy,
   toAgentRun,
   toAgentRunReport,
-  type AgentRunTransactItem,
   type StoredAgentRun,
   type StoredAgentRunReport,
 } from '../../modules/agent-runs'
@@ -35,9 +34,13 @@ import {
 } from '../../modules/collaboration'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
 import type { PublicAgentRunService } from '../../modules/developer-platform/public-api'
-import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
+import { ProjectDataError } from '../../modules/directory'
 import { createTeamIssueDeepLink } from '../../modules/work-items'
-import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
+import {
+  createAuthorizationSnapshotConditionChecks,
+  createWorkItemAuthorizationChangedError,
+  createWorkItemRevisionConditionCheck,
+} from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
@@ -48,7 +51,7 @@ import {
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
-import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { workItemDependencies } from '../shared/app-dependencies'
 import {
   createCollaborationCommentAuthorizationConditionChecks,
   createTeamIssueAutomaticWatcherCandidates,
@@ -68,7 +71,7 @@ import {
   loadAuthorizedTeamIssue,
 } from '../shared/work-item-access'
 import { createMutationAuditContext } from '../../modules/audit/audit'
-import { projectPublicWorkItem, updateCanonicalPublicWorkItem } from './public-api-routes'
+import { projectPublicWorkItem, resolveStableWorkItemAuthorization, updateCanonicalPublicWorkItem } from './public-api-routes'
 
 /**
  * Resolves the credential owner for an Agent Run read.
@@ -320,36 +323,16 @@ function requireResumable(
 
 /**
  * Chooses the start time of a resumed run: now, but always after the run it resumes, so that a clock
- * behind that run's still lists the resumed run first in the history.
+ * behind that run's still lists the resumed run first in the history. Only the start time moves; the
+ * heartbeat and lease keep this server's time, so the run's own reports and heartbeats are not refused.
  *
  * @param previous - Run the new run resumes, if any.
+ * @param now - This server's time.
  * @returns Start time of the new run.
  */
-function resumeStartTime(previous: StoredAgentRun | undefined): Date {
-  const now = Date.now()
-  if (previous === undefined) return new Date(now)
-  return new Date(Math.max(now, Date.parse(previous.startedAt) + 1))
-}
-
-/**
- * Builds the commit-time check that the caller is still the same active member, so a removal or role
- * change after authorization stops the resume.
- *
- * @param principal - Caller resolved for the resume.
- * @returns The check, or undefined for a system administrator, who is not a member.
- */
-async function createResumeMembershipCheck(principal: WorkspacePrincipal): Promise<AgentRunTransactItem | undefined> {
-  if (principal.isSystemAdmin) return undefined
-  const workspaceAccess = workspaceDependencies.workspaceAccess
-  if (!workspaceAccess.createActiveMemberConditionCheck) {
-    throw new AgentRunError('temporarily_unavailable', 'Membership checks are unavailable. Retry the resume.')
-  }
-  const check = await workspaceAccess.createActiveMemberConditionCheck(
-    principal.directoryId,
-    normalizeProjectMemberKey(principal.userKey),
-  )
-  if (!check) throw new AgentRunError('conflict', 'Your Workspace membership changed during the request. Retry the resume.')
-  return check
+function resumeStartedAt(previous: StoredAgentRun | undefined, now: Date): string {
+  if (previous === undefined) return now.toISOString()
+  return new Date(Math.max(now.getTime(), Date.parse(previous.startedAt) + 1)).toISOString()
 }
 
 /** Concurrent reads per run listing page. */
@@ -865,8 +848,15 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
      * Item's newest earlier run. The Work Item itself does not change.
      */
     async resume(credential, teamId, workItemId, input, context, idempotency) {
-      const principal = await resolveWriter(credential, teamId)
-      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      // Like a start, the resume commits only while the member, Team, and Project access it was
+      // authorized with is unchanged.
+      const authorization = await resolveStableWorkItemAuthorization(
+        credential.workspaceId,
+        async () => await resolveWriter(credential, teamId),
+        async (principal) => (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')).detail,
+      )
+      const { principal, authorizationSnapshot } = authorization
+      const detail = authorization.value
       const store = workItemDependencies.agentRuns
       const settings = await store.getSettings(principal.directoryId, teamId)
       requireResumable(principal, detail.issue, input.expectedRevision, settings.resumableStatusIds)
@@ -886,10 +876,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         // came after it may have ended in a way that needs a person, so the agent must look again.
         throw new AgentRunError('conflict', 'Another run came after the run you expected to resume from. Reload the task and its runs before resuming.')
       }
-      // The new run starts after the run it resumes, so the history, ordered by start time, lists it first.
-      const now = resumeStartTime(previous)
-      const membershipCheck = await createResumeMembershipCheck(principal)
-      const run = createActiveAgentRun({
+      const now = new Date()
+      const created = createActiveAgentRun({
         directoryId: principal.directoryId,
         teamId,
         workItemId,
@@ -901,6 +889,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         now,
         ...(previous === undefined ? {} : { resumedFromRunId: previous.runId }),
       })
+      // The new run starts after the run it resumes, so the history, ordered by start time, lists it first.
+      const run = { ...created, startedAt: resumeStartedAt(previous, now) }
       const path = `/api/v1/work-items/${encodeURIComponent(workItemId)}/agent-runs/resume`
       const auditContext = createMutationAuditContext({
         workspaceId: principal.directoryId,
@@ -937,8 +927,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           // The resume was authorized against this status, assignment, and these settings.
           createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
           store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
-          // The caller must still be an active member when the run is created.
-          ...(membershipCheck ? [membershipCheck] : []),
+          // The caller's membership and Team and Project access must not have changed since authorization.
+          ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
           ...(auditPut ? [auditPut] : []),
           ...(receipt ? [receipt.transactWriteItem] : []),
         ], 2)
@@ -952,11 +942,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         }
         if (error.category !== 'temporarily_unavailable') throw error
         // A guard failed: report what changed instead of a retryable failure. Access is resolved again
-        // first, so a member removed meanwhile gets the same answer as on a new request.
+        // first, so a caller who lost access meanwhile gets the same answer as on a new request.
         const current = await resolveWriter(credential, teamId)
-        if (membershipCheck && current.workspaceMember.version !== principal.workspaceMember.version) {
-          throw new AgentRunError('conflict', 'Your Workspace membership changed during the request. Retry the resume.')
-        }
         const latest = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'member')
         const latestSettings = await store.getSettings(principal.directoryId, teamId)
         // A change of assignee, status, or revision is reported as such.
@@ -966,6 +953,12 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         }
         if (await store.getLatestRunId(principal.directoryId, teamId, workItemId) !== latestRunId) {
           throw new AgentRunError('conflict', 'Another run started on the Work Item during the request. Reload the task and retry.')
+        }
+        if (
+          current.workspaceMember.version !== principal.workspaceMember.version ||
+          await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId) !== authorizationSnapshot.planningRevision
+        ) {
+          throw createWorkItemAuthorizationChangedError()
         }
         throw error
       }

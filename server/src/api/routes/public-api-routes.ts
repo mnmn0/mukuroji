@@ -459,7 +459,16 @@ function resolvePersonalCredentialEligibility(
   return 'eligible'
 }
 
-async function resolveStableWorkItemAuthorization<T>(
+/**
+ * Authorizes a Work Item mutation between two reads of the Planning authorization revision, retrying
+ * when access changed in between, and captures the snapshot the commit fences.
+ *
+ * @param workspaceId - Workspace of the credential.
+ * @param resolvePrincipal - Resolves the caller.
+ * @param authorize - Checks the caller's access and returns what the mutation needs.
+ * @returns The principal, the authorized value, and the authorization snapshot.
+ */
+export async function resolveStableWorkItemAuthorization<T>(
   workspaceId: string,
   resolvePrincipal: () => Promise<WorkspacePrincipal>,
   authorize: (principal: WorkspacePrincipal) => Promise<T>,
