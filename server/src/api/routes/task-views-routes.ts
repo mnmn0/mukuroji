@@ -1228,6 +1228,9 @@ function readTaskViewDisplayOptions(value: unknown): TaskViewDisplayOptions {
             'Task view showAssigneeAvatars',
           ),
         }),
+    ...(value.showOutline === undefined
+      ? {}
+      : { showOutline: readTaskViewBoolean(value.showOutline, 'Task view showOutline') }),
   }
 }
 

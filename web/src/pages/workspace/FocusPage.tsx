@@ -43,8 +43,10 @@ export function FocusPage() {
   )
   const mutations = useFocusQueueActions({
     accessToken: workspace.accessToken,
+    configurationsByTeam: configurationQuery.data?.configurationsByTeam,
     guardAuthenticatedRequest: workspace.guardEnterpriseSession,
     mutateFocusQueue: focusQuery.mutate,
+    t,
   })
   const requestedSourceEventId = searchParams.get('sourceEventId')?.trim() || undefined
   const requestedTeamId = searchParams.get('teamId')?.trim() || undefined
