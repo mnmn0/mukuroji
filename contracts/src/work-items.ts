@@ -532,7 +532,12 @@ export type CanonicalWorkItem = {
   workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
   /** Work Item に保存された custom field value です。 */
   customFieldValues: Record<string, CustomFieldValue>
-  /** Relation Graph から同期した search/filter 用の派生 relation ID 一覧です。 */
+  /**
+   * Relation Graph から同期した search/filter 用の派生 relation ID 一覧です。
+   *
+   * `child` relation は含めません。子は子側の `parent:<id>` で引けるため、親の子の数に上限はありません。
+   * それ以外の relation は {@link WORK_ITEM_RELATION_ID_LIMIT} 件までです。
+   */
   relationIds: string[]
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
@@ -699,7 +704,25 @@ export type UpdateWorkItemInput = WorkItemPatch & {
 }
 
 /**
+ * 1 つの Work Item が `relationIds` に持てる relation の上限です。
+ *
+ * `child` relation は数えないため、1 つの親に付けられる子の数には上限がありません。
+ */
+export const WORK_ITEM_RELATION_ID_LIMIT = 100
+
+/**
+ * 1 つの Team が保存できる親子・依存・関連 relation（reciprocal の 2 row で 1 link）の上限です。
+ *
+ * Relation の作成・削除・付け替えはこの件数の全件読み取りに依存しません。Focus や Team 設定の検証のように
+ * Team の relation を一括で読む処理の読み取り量を抑えるための上限です。
+ */
+export const WORK_ITEM_TEAM_RELATION_LINK_LIMIT = 10_000
+
+/**
  * Work Item 間で管理できる relation 種別です。
+ *
+ * `parent` は 1 つの Work Item につき最大 1 件です。2 つ目の親は作成 API で拒否され、
+ * 親の付け替えは {@link WorkItemParentMutationInput} の API で 1 回の原子的な置換として行います。
  */
 export type WorkItemRelationType =
   | 'parent'
@@ -744,6 +767,28 @@ export type WorkItemRelationMutationResponse = {
   /** 終点 Work Item に保存する reciprocal relation です。 */
   reciprocalRelation: WorkItemRelation
   /** Mutation 後の Team relation graph revision です。 */
+  graphRevision: number
+}
+
+/**
+ * 親の設定・付け替え・解除 API の入力です。
+ */
+export type WorkItemParentMutationInput = {
+  /** 新しい親 Work Item ID です。`null` は親を外します。 */
+  parentWorkItemId: string | null
+  /** 読み込み時点の Team relation graph revision です。 */
+  expectedGraphRevision: number
+}
+
+/**
+ * 親の設定・付け替え・解除 API の response です。
+ */
+export type WorkItemParentMutationResponse = {
+  /** 変更前の親 Work Item ID です。親が無かった場合は `null` です。 */
+  previousParentWorkItemId: string | null
+  /** 変更後の親 Work Item ID です。親を外した場合は `null` です。 */
+  parentWorkItemId: string | null
+  /** Mutation 後の Team relation graph revision です。変更が無い場合は読み込み時点の revision です。 */
   graphRevision: number
 }
 

@@ -987,6 +987,13 @@ function createFakeWorkItemConfigurationClient(
     async deleteRelation(_workspaceId, _teamId, input) {
       return createFakeRelationMutationResponse(input)
     },
+    async replaceParent(_workspaceId, _teamId, input) {
+      return {
+        previousParentWorkItemId: input.currentParent?.workItemId ?? null,
+        parentWorkItemId: input.nextParent?.workItemId ?? null,
+        graphRevision: input.expectedGraphRevision + 1,
+      }
+    },
     ...overrides,
   }
 }

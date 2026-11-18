@@ -550,14 +550,17 @@ function relationClaims(
       [],
       'RELATION_RECIPROCAL_MISSING',
     ),
-    requirement(
-      digestKey,
-      originToken,
-      'projection',
-      [token(digestKey, 'relation-projection', exactValues)],
-      [],
-      'WORK_ITEM_RELATION_PROJECTION_MISMATCH',
-    ),
+    // A parent's relationIds omit its children; each child projects `parent:<id>` instead.
+    ...(item.relationType === 'child'
+      ? []
+      : [requirement(
+          digestKey,
+          originToken,
+          'projection',
+          [token(digestKey, 'relation-projection', exactValues)],
+          [],
+          'WORK_ITEM_RELATION_PROJECTION_MISMATCH',
+        )]),
     requirement(
       digestKey,
       originToken,

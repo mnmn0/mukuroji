@@ -453,6 +453,13 @@ export function createDefaultWorkItemConfigurationClient(): WorkItemConfiguratio
     async deleteRelation(_workspaceId, _teamId, input) {
       return createDefaultRelationMutationResponse(input)
     },
+    async replaceParent(_workspaceId, _teamId, input) {
+      return {
+        previousParentWorkItemId: input.currentParent?.workItemId ?? null,
+        parentWorkItemId: input.nextParent?.workItemId ?? null,
+        graphRevision: input.expectedGraphRevision + 1,
+      }
+    },
   }
 }
 

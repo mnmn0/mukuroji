@@ -1018,6 +1018,117 @@ test('calls reciprocal relation mutations and preserves their stable conflict re
   expect(deletes).toBe(1)
 })
 
+test('replaces a Work Item parent through one atomic store call', async () => {
+  configureFakeProjectClients(true)
+  const listCalls: unknown[] = []
+  const replacements: Array<{ input: unknown; checks: unknown }> = []
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId, options) {
+        listCalls.push({ workItemId, options })
+        return {
+          relations: [{
+            sourceWorkItemId: workItemId,
+            targetWorkItemId: 'old-parent',
+            type: 'parent',
+          }],
+          graphRevision: 4,
+        }
+      },
+      async replaceParent(_workspaceId, _teamId, input, checks) {
+        replacements.push({ input, checks })
+        return {
+          previousParentWorkItemId: input.currentParent?.workItemId ?? null,
+          parentWorkItemId: input.nextParent?.workItemId ?? null,
+          graphRevision: 5,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/parent', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ parentWorkItemId: 'new-parent', expectedGraphRevision: 4 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    previousParentWorkItemId: 'old-parent',
+    parentWorkItemId: 'new-parent',
+    graphRevision: 5,
+  })
+  expect(listCalls).toEqual([{ workItemId: 'onboarding-friction', options: { types: ['parent'] } }])
+  expect(replacements).toHaveLength(1)
+  expect(replacements[0]?.input).toEqual({
+    child: { workItemId: 'onboarding-friction', expectedRevision: 1, assignedProjectId: 'refero' },
+    currentParent: { workItemId: 'old-parent', expectedRevision: 1, assignedProjectId: 'refero' },
+    nextParent: { workItemId: 'new-parent', expectedRevision: 1, assignedProjectId: 'refero' },
+    expectedGraphRevision: 4,
+  })
+  expect(Array.isArray(replacements[0]?.checks)).toBe(true)
+})
+
+test('removes a Work Item parent with null and rejects a missing parent field', async () => {
+  configureFakeProjectClients(true)
+  const replacements: unknown[] = []
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations(_workspaceId, _teamId, workItemId) {
+        return {
+          relations: [{
+            sourceWorkItemId: workItemId,
+            targetWorkItemId: 'old-parent',
+            type: 'parent',
+          }],
+          graphRevision: 2,
+        }
+      },
+      async replaceParent(_workspaceId, _teamId, input, checks) {
+        replacements.push({ input, checks })
+        return {
+          previousParentWorkItemId: 'old-parent',
+          parentWorkItemId: null,
+          graphRevision: 3,
+        }
+      },
+    }),
+  })
+  const request = (body: unknown) => app.request(
+    '/api/teams/core-team/issues/onboarding-friction/parent',
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    },
+  )
+
+  const removed = await request({ parentWorkItemId: null, expectedGraphRevision: 2 })
+  const missing = await request({ expectedGraphRevision: 2 })
+
+  expect(removed.status).toBe(200)
+  expect(await removed.json()).toEqual({
+    previousParentWorkItemId: 'old-parent',
+    parentWorkItemId: null,
+    graphRevision: 3,
+  })
+  expect(replacements).toEqual([{
+    input: {
+      child: { workItemId: 'onboarding-friction', expectedRevision: 1, assignedProjectId: 'refero' },
+      currentParent: { workItemId: 'old-parent', expectedRevision: 1, assignedProjectId: 'refero' },
+      expectedGraphRevision: 2,
+    },
+    checks: undefined,
+  }])
+  expect(missing.status).toBe(400)
+})
+
 test('reprojects both Work Item relation endpoints after relation creation and deletion', async () => {
   const calls = configureFakeProjectClients(true)
   let graphRevision = 4

@@ -1,4 +1,9 @@
-import type { WorkItemRelationMutationInput, WorkItemRelationMutationResponse } from '@mukuroji/contracts'
+import type {
+  WorkItemParentMutationInput,
+  WorkItemParentMutationResponse,
+  WorkItemRelationMutationInput,
+  WorkItemRelationMutationResponse,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkItemConfigurationApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -67,6 +72,78 @@ export function deleteWorkItemRelation(
       method: 'DELETE',
     },
   )
+}
+
+/**
+ * Sets, replaces, or removes a Work Item's parent in one atomic replacement.
+ *
+ * @param teamId - Team that owns the relation.
+ * @param workItemId - Child Work Item whose parent changes.
+ * @param accessToken - Access token sent in the Authorization header.
+ * @param input - Next parent Work Item ID (null removes the parent) and the observed graph revision.
+ * @param mutationContext - Mutation request context shared across retries.
+ * @returns The previous and next parent Work Item IDs and the resulting graph revision.
+ * @throws WorkItemConfigurationApiError with code `InvalidWorkItemParentResponse` when a successful
+ * response does not match `WorkItemParentMutationResponse`.
+ */
+export async function replaceWorkItemParent(
+  teamId: string,
+  workItemId: string,
+  accessToken: string,
+  input: WorkItemParentMutationInput,
+  mutationContext: MutationRequestContext,
+): Promise<WorkItemParentMutationResponse> {
+  const data = await requestJson<unknown>(
+    `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(workItemId)}/parent`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'PUT',
+    },
+  )
+
+  if (!isWorkItemParentMutationResponse(data)) {
+    throw new WorkItemConfigurationApiError(
+      502,
+      'Work Item API returned an invalid parent response.',
+      'InvalidWorkItemParentResponse',
+    )
+  }
+
+  return data
+}
+
+/**
+ * Checks that a successful parent response matches `WorkItemParentMutationResponse`.
+ *
+ * @param value - Parsed response body.
+ * @returns True when both parent IDs are a string or null and `graphRevision` is a non-negative integer.
+ */
+function isWorkItemParentMutationResponse(value: unknown): value is WorkItemParentMutationResponse {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const response = value as Record<string, unknown>
+
+  return isNullableString(response.previousParentWorkItemId) &&
+    isNullableString(response.parentWorkItemId) &&
+    Number.isInteger(response.graphRevision) &&
+    (response.graphRevision as number) >= 0
+}
+
+/**
+ * Checks for a nullable string value.
+ *
+ * @param value - Value to check.
+ * @returns True when the value is null or a string.
+ */
+function isNullableString(value: unknown) {
+  return value === null || typeof value === 'string'
 }
 
 function createRelationsPath(teamId: string, workItemId: string) {

@@ -124,6 +124,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import {
   createWorkItemRelation,
+  replaceWorkItemParent,
   deleteWorkItemRelation,
 } from '../../work-items/api'
 import {
@@ -1623,19 +1624,35 @@ export function TaskPage() {
     requireProjectTaskWriteScope(currentIssue)
 
     const graphRevision = readSelectedRelationGraphRevision(selectedIssueDetail, issueId, t)
+    const replacesParent = input.type === 'parent' &&
+      (selectedIssueDetail?.relations ?? []).some((relation) => relation.type === 'parent')
 
     try {
-      await mutationRequestRunner.run(
-        `issue:relation:create:${teamId}:${issueId}`,
-        JSON.stringify([graphRevision, input]),
-        (context) => createWorkItemRelation(
-          teamId,
-          issueId,
-          accessToken,
-          { ...input, expectedGraphRevision: graphRevision },
-          context,
-        ),
-      )
+      if (replacesParent) {
+        await mutationRequestRunner.run(
+          `issue:relation:parent:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input.targetWorkItemId]),
+          (context) => replaceWorkItemParent(
+            teamId,
+            issueId,
+            accessToken,
+            { parentWorkItemId: input.targetWorkItemId, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        )
+      } else {
+        await mutationRequestRunner.run(
+          `issue:relation:create:${teamId}:${issueId}`,
+          JSON.stringify([graphRevision, input]),
+          (context) => createWorkItemRelation(
+            teamId,
+            issueId,
+            accessToken,
+            { ...input, expectedGraphRevision: graphRevision },
+            context,
+          ),
+        )
+      }
       await mutateSelectedIssueDetail()
     } catch (error) {
       redirectEnterpriseSessionError(error)
