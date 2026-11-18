@@ -883,11 +883,9 @@ export type TeamIssueDetailResponse = {
 }
 
 /**
- * チーム Issue 作成 API が受け取る request body です。
+ * Client が Work Item 作成 API に送れる公開 field だけの request body です。
  */
-export type CreateTeamIssueRequestBody = {
-  /** Internal automation create action が再配送間で固定する resource ID です。 */
-  idempotencyResourceId?: unknown
+export type PublicCreateTeamIssueRequestBody = {
   /**
    * Issue タイトルです。
    */
@@ -924,6 +922,14 @@ export type CreateTeamIssueRequestBody = {
   customFieldValues?: unknown
   /** Quick capture では required custom field の入力を後回しにします。 */
   quickCapture?: unknown
+}
+
+/**
+ * 検証済みの設定値と内部 adapter 専用 field を含むチーム Issue 作成入力です。
+ */
+export type CreateTeamIssueRequestBody = PublicCreateTeamIssueRequestBody & {
+  /** Internal automation create action が再配送間で固定する resource ID です。 */
+  idempotencyResourceId?: unknown
   /** API handler が検証後に付与する workflow extension schema version です。 */
   workflowSchemaVersion?: unknown
   /** API handler が検証後に付与する workflow status category です。 */

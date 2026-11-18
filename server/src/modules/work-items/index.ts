@@ -151,6 +151,7 @@ export {
   type CreateTriageDuplicateContextTransactionItemsInput,
   type NamedWorkItemDeletionFence,
   type ProjectIssuesResponse,
+  type PublicCreateTeamIssueRequestBody,
   type PublicUpdateTeamIssueRequestBody,
   type PublicWorkItemPageReadOptions,
   type SortedWorkItemPage,
