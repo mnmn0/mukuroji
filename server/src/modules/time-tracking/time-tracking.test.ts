@@ -8,11 +8,21 @@ import {
 function createFixture() {
   let id = 0
   const repository = new InMemoryTimeTrackingRepository()
+  /** Canonical Work Item estimates keyed by Workspace, Team, and Work Item. */
+  const plannedEffort = new Map<string, number>()
   const service = new TimeTrackingService(repository, {
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: () => `id-${++id}`,
+    estimates: {
+      async listPlannedEffort(workspaceId, teamId) {
+        const prefix = `${workspaceId}\0${teamId}\0`
+        return new Map([...plannedEffort].flatMap(([key, minutes]) =>
+          key.startsWith(prefix) ? [[key.slice(prefix.length), minutes] as const] : []
+        ))
+      },
+    },
   })
-  return { repository, service }
+  return { repository, service, plannedEffort }
 }
 
 describe('TimeTrackingService', () => {
@@ -146,16 +156,10 @@ describe('TimeTrackingService', () => {
     expect(sheet.costsRedacted).toBe(true)
   })
 
-  test('compares Work Item estimates with project grouped actual time', async () => {
-    const { service } = createFixture()
-    await service.saveEstimate({
-      workspaceId: 'workspace-1',
-      teamId: 'team-1',
-      workItemId: 'work-item-1',
-      estimateMinutes: 120,
-      expectedRevision: 0,
-      updatedBy: 'manager-1',
-    })
+  test('compares canonical Work Item estimates with project grouped actual time', async () => {
+    const { service, plannedEffort } = createFixture()
+    plannedEffort.set('workspace-1\0team-1\0work-item-1', 120)
+    plannedEffort.set('workspace-1\0team-2\0work-item-1', 999)
     await service.createEntry({
       workspaceId: 'workspace-1',
       teamId: 'team-1',
@@ -224,12 +228,9 @@ describe('TimeTrackingService', () => {
       includeCosts: false,
     })
     expect(userSummary.totalEstimateMinutes).toBe(120)
-    expect(await service.getEstimate('workspace-1', 'team-1', 'work-item-1')).toMatchObject({
-      estimateMinutes: 120,
-    })
   })
 
-  test('clears stale costs, enforces estimate and budget revisions, and rejects invalid dates', async () => {
+  test('clears stale costs, enforces budget revisions, and rejects invalid dates', async () => {
     const { service } = createFixture()
     const entry = await service.createEntry({
       workspaceId: 'workspace-1',
@@ -255,22 +256,6 @@ describe('TimeTrackingService', () => {
     })
     expect(updated.actualCostMinor).toBeUndefined()
 
-    const estimate = await service.saveEstimate({
-      workspaceId: 'workspace-1',
-      teamId: 'team-1',
-      workItemId: 'work-item-1',
-      estimateMinutes: 60,
-      expectedRevision: 0,
-      updatedBy: 'manager-1',
-    })
-    await expect(service.saveEstimate({
-      workspaceId: 'workspace-1',
-      teamId: 'team-1',
-      workItemId: 'work-item-1',
-      estimateMinutes: 90,
-      expectedRevision: 0,
-      updatedBy: 'manager-1',
-    })).rejects.toMatchObject({ code: 'TimeEstimateRevisionConflict' })
     await expect(service.saveBudget({
       workspaceId: 'workspace-1',
       teamId: 'team-1',
@@ -302,7 +287,6 @@ describe('TimeTrackingService', () => {
       expectedRevision: 0,
       updatedBy: 'manager-1',
     })).rejects.toMatchObject({ code: 'TimeBudgetRevisionConflict' })
-    expect(estimate.revision).toBe(1)
     expect(budget.revision).toBe(1)
   })
 

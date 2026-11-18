@@ -99,6 +99,7 @@ import {
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
 import { emptyWorkspaceMembers } from '../../issues/ui/teamIssueScreenShared'
+import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 
@@ -427,6 +428,7 @@ export function TeamIssuePage() {
   )
   const taskViewColumns = [
     ...taskViewBuiltInFields,
+    ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
     ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
     ...taskViewCustomFields.map((field) => `custom:${field.id}`),
   ]
@@ -434,6 +436,7 @@ export function TeamIssuePage() {
     ...taskViewBuiltInFields,
     ...taskViewCustomFields.map((field) => `custom:${field.id}`),
   ]
+  const taskViewSortFields = [...taskViewFields, ...WORK_ITEM_EFFORT_COLUMN_FIELDS]
   const taskViewWorkflowStatuses = resolveWorkItemTypeWorkflowStatuses(taskViewConfiguration).map(({
     status,
     workItemTypeId,
@@ -444,6 +447,8 @@ export function TeamIssuePage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
+      // Effort values sort but do not group, because they have no shared buckets.
+      sortFields: taskViewSortFields,
       layoutModes: ['table', 'board'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
@@ -736,6 +741,9 @@ export function TeamIssuePage() {
     { id: 'priority', label: t('tasks.column.priority') },
     { id: 'workItemType', label: t('tasks.column.workItemType') },
     { id: 'project', label: t('issues.column.project') },
+    { id: 'estimate', label: t('tasks.column.estimate') },
+    { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
+    { id: 'progress', label: t('tasks.column.progress') },
     ...(taskViewCustomFields.length > 0
       ? [{ id: 'customFields', label: t('workItems.fields.title') }]
       : []),
@@ -744,9 +752,8 @@ export function TeamIssuePage() {
       label: field.name,
     })),
   ]
-  const taskViewGroupOptions = taskViewFieldOptions.filter(
-    (option) => option.id !== 'customFields',
-  )
+  const taskViewSortOptions = taskViewFieldOptions.filter((option) => option.id !== 'customFields')
+  const taskViewGroupOptions = taskViewSortOptions.filter((option) => !isWorkItemEffortColumnField(option.id))
   const taskViewOptions = taskViewController.views.map(createTaskViewOption)
   const selectedTaskView = taskViewController.activeSavedView
     ? createTaskViewOption(taskViewController.activeSavedView)
@@ -760,6 +767,7 @@ export function TeamIssuePage() {
       columnOptions={taskViewFieldOptions}
       errorMessage={taskViewController.errorMessage}
       groupOptions={taskViewGroupOptions}
+      sortOptions={taskViewSortOptions}
       isDirty={taskViewController.isDirty}
       isSaving={taskViewController.isSaving}
       migrationWarnings={taskViewController.migrationWarnings.map(

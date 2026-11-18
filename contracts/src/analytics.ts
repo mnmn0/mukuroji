@@ -12,6 +12,16 @@ export type AnalyticsMetricKey =
   | 'velocity'
   | 'sla'
 
+/**
+ * How throughput, velocity, and forecast count completed and remaining work.
+ *
+ * - `count`: one per Work Item.
+ * - `effort`: the Work Item's canonical estimate (`schedule.plannedEffortMinutes`) in hours. A
+ *   Work Item without an estimate counts as zero and is reported in the warnings. Remaining work
+ *   uses the recorded remaining effort, otherwise the estimate.
+ */
+export type AnalyticsWeighting = 'count' | 'effort'
+
 /** Analytics query が扱う inclusive な UTC instant range です。 */
 export type AnalyticsDateRange = {
   /** Range の開始を表す ISO 8601 timestamp です。 */
@@ -98,6 +108,8 @@ export type AnalyticsWidget = {
   groupBy?: AnalyticsGroupBy
   /** SLA metric の達成判定に使う lead time 上限です。 */
   slaTargetHours?: number
+  /** Throughput と velocity の重み付けです。省略時は `count` です。 */
+  weighting?: AnalyticsWeighting
 }
 
 /** 保存済み report の定期 snapshot 配信設定です。 */
@@ -148,6 +160,8 @@ export type AnalyticsReport = {
   filter: AnalyticsFilter
   /** Forecast risk と比較する保存済み baseline です。 */
   forecastBaseline?: AnalyticsDateRange
+  /** Forecast の重み付けです。省略時は `count` です。 */
+  forecastWeighting?: AnalyticsWeighting
   /** Builder で並べる widget 一覧です。 */
   widgets: AnalyticsWidget[]
   /** 任意の定期配信設定です。 */
@@ -184,6 +198,8 @@ export type CreateAnalyticsReportInput = {
   filter: AnalyticsFilter
   /** Forecast risk と比較する保存済み baseline です。 */
   forecastBaseline?: AnalyticsDateRange
+  /** Forecast の重み付けです。省略時は `count` です。 */
+  forecastWeighting?: AnalyticsWeighting
   /** Builder で保存する widget 一覧です。 */
   widgets: AnalyticsWidget[]
   /** 任意の定期配信設定です。 */
@@ -208,6 +224,8 @@ export type UpdateAnalyticsReportInput = {
   filter?: AnalyticsFilter
   /** 変更後の forecast baseline です。null で削除します。 */
   forecastBaseline?: AnalyticsDateRange | null
+  /** 変更後の forecast 重み付けです。null で既定の `count` に戻します。 */
+  forecastWeighting?: AnalyticsWeighting | null
   /** 変更後の widget 一覧です。 */
   widgets?: AnalyticsWidget[]
   /** 変更後の schedule です。null で削除します。 */
@@ -223,7 +241,7 @@ export type AnalyticsMetricDefinition = {
   /** Metric の表示名です。 */
   label: string
   /** Metric value の単位です。 */
-  unit: 'count' | 'hours' | 'items-per-week' | 'percent'
+  unit: 'count' | 'hours' | 'items-per-week' | 'hours-per-week' | 'percent'
   /** Metric 算出規則の短い説明です。 */
   description: string
 }
@@ -289,11 +307,19 @@ export type AnalyticsWidgetResult = {
  * 計算した forecast です。
  */
 export type AnalyticsForecast = {
+  /** Forecast の重み付けです。`effort` では throughput と残量を時間で数えます。 */
+  weighting?: AnalyticsWeighting
   /** Forecast が対象にした未完了 Work Item 数です。 */
   remainingWorkItems: number
+  /** `effort` 重み付けで forecast が対象にした残工数（時間）です。 */
+  remainingEffortHours?: number
+  /**
+   * `effort` 重み付けで、見積も残工数もないため 0 として数えた未完了 Work Item 数です。0 件のときは省きます。
+   */
+  unestimatedRemainingWorkItems?: number
   /** Historical sample 数です。 */
   sampleSize: number
-  /** Historical throughput の1日平均です。 */
+  /** Historical throughput の1日平均です。`effort` 重み付けでは1日あたりの完了工数（時間）です。 */
   dailyThroughput: number
   /** Historical daily sequence の開始offset scenarioにおける50 percentile完了instantです。 */
   p50: string | null
@@ -403,6 +429,8 @@ export type AnalyticsQueryInput = {
   timeZone: string
   /** Forecast risk と比較する baseline です。 */
   forecastBaseline?: AnalyticsDateRange
+  /** Forecast の重み付けです。省略時は `count` です。 */
+  forecastWeighting?: AnalyticsWeighting
 }
 
 /** Analytics drill-down API の入力です。 */
@@ -417,6 +445,8 @@ export type AnalyticsEvidenceInput = {
   timeZone: string
   /** SLA evidence の達成判定時間です。 */
   slaTargetHours?: number
+  /** Throughput と velocity evidence の重み付けです。省略時は `count` です。 */
+  weighting?: AnalyticsWeighting
   /** 一度に返す最大件数です。 */
   limit?: number
   /** 前 page の scope-bound opaque cursor です。 */

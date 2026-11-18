@@ -1125,6 +1125,11 @@ export function TaskScreen({
   const visibleTasks = useMemo(
     () => taskViewDefinition
       ? applyTaskViewDefinitionToTasks(tasks, taskViewDefinition, {
+          resolveProgressMode: (task) => resolveProjectTaskConfiguration(
+            task,
+            resolvedConfigurationsByTeam,
+            configuration,
+          )?.progressMode,
           keywordMatcher: (task, normalizedKeyword) => matchesProjectTaskKeyword(
             task,
             normalizedKeyword,

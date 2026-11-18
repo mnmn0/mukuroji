@@ -172,6 +172,11 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
+import {
+  changesWorkItemSchedulePlacement,
+  readWorkItemEffortChange,
+  withWorkItemPlannedEffort,
+} from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -319,30 +324,43 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // Contributors are internal planning data, and acceptance criteria have their own endpoint
-    // because the public Work Item schema is closed, so both are excluded from export rows.
+    // Contributors are internal planning data, and acceptance criteria, remaining effort, and
+    // progress have their own endpoints because the public Work Item schema is closed, so all of
+    // them are excluded from export rows.
     items: page.issues.map(omitWorkItemExportExcludedFields),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
 }
 
+/** Work Item fields that export rows leave out. */
+type WorkItemExportExcludedField =
+  | 'contributorAssignments'
+  | 'acceptanceCriteria'
+  | 'remainingEffortMinutes'
+  | 'progressPercent'
+
 /**
- * Removes contributor assignments and acceptance criteria from a Work Item export row.
+ * Removes contributor assignments, acceptance criteria, remaining effort, and progress from a
+ * Work Item export row.
  *
  * @param workItem - Work Item read for the export page.
  * @returns The Work Item without the fields excluded from exports.
  */
 function omitWorkItemExportExcludedFields<
-  T extends { readonly contributorAssignments?: unknown; readonly acceptanceCriteria?: unknown },
->(workItem: T): Omit<T, 'contributorAssignments' | 'acceptanceCriteria'> {
+  T extends { readonly [Field in WorkItemExportExcludedField]?: unknown },
+>(workItem: T): Omit<T, WorkItemExportExcludedField> {
   const {
     contributorAssignments: _contributorAssignments,
     acceptanceCriteria: _acceptanceCriteria,
+    remainingEffortMinutes: _remainingEffortMinutes,
+    progressPercent: _progressPercent,
     ...exported
   } = workItem
   void _contributorAssignments
   void _acceptanceCriteria
+  void _remainingEffortMinutes
+  void _progressPercent
   return exported
 }
 
@@ -862,6 +880,9 @@ export async function updateCanonicalPublicWorkItem(
   principal: WorkspacePrincipal
 }> {
   rejectInternalWorkItemUpdateFields(input)
+  // An estimate sent on its own is written into the stored schedule, so the request body does not
+  // depend on the dates the client read and a retry under the same key stays the same request.
+  const { plannedEffortMinutes, ...scheduleInput } = input
   const authorization = await resolveStableWorkItemAuthorization(
     credential.workspaceId,
     async () => await resolveDeveloperCredentialPrincipal(credential, {
@@ -872,13 +893,16 @@ export async function updateCanonicalPublicWorkItem(
     async (principal) => {
       requireWorkspaceBusinessWrite(principal)
       const permission = await requireTeamPermission(principal, teamId, 'member')
-      const body = normalizeTeamIssueInput(input, permission.team)
+      const normalized = normalizeTeamIssueInput(scheduleInput, permission.team)
       const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
         principal.directoryId,
         teamId,
         workItemId,
         { consistentIssueRead: true, includeEvents: false },
       )
+      const body = plannedEffortMinutes === undefined
+        ? normalized
+        : { ...normalized, schedule: withWorkItemPlannedEffort(detail.issue.schedule, plannedEffortMinutes) }
       requireAssignedProjectPermission(
         principal,
         permission,
@@ -894,8 +918,8 @@ export async function updateCanonicalPublicWorkItem(
       const dependencyAuthorizationSnapshot =
         'schedule' in body &&
           body.schedule !== undefined &&
-          stableDigestStringify(body.schedule) !==
-            stableDigestStringify(detail.issue.schedule)
+          // An estimate-only change moves no date, so it needs no dependency confirmation.
+          changesWorkItemSchedulePlacement(body.schedule, detail.issue.schedule)
           ? await createDependencyFencedWorkItemAuthorizationSnapshot(
               principal,
               teamId,
@@ -939,13 +963,18 @@ export async function updateCanonicalPublicWorkItem(
     ...('acceptanceCriteria' in writableBody ? { acceptanceCriteria: writableBody.acceptanceCriteria } : {}),
     ...('acceptanceCriteriaMarks' in input ? { acceptanceCriteriaMarks: input.acceptanceCriteriaMarks } : {}),
   }
-  if (Object.keys(criteriaChange).length > 0 && detail.issue.revision !== expectedRevision) {
-    // Criterion IDs refer to the observed list, so a stale request is a revision conflict.
+  if (
+    (Object.keys(criteriaChange).length > 0 || plannedEffortMinutes !== undefined) &&
+    detail.issue.revision !== expectedRevision
+  ) {
+    // Criterion IDs and an estimate written into the stored schedule both refer to the observed Work
+    // Item, so a stale request is a revision conflict.
     throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
   }
   const acceptanceCriteria = readAcceptanceCriteriaChange(
     criteriaChange, detail.issue.acceptanceCriteria ?? [], options.agentFenced === true,
   )
+  const effortChange = readWorkItemEffortChange(writableBody)
   const auditContext = createPublicMutationAuditContext(
     principal,
     mutationContext,
@@ -973,6 +1002,7 @@ export async function updateCanonicalPublicWorkItem(
       {
         ...writableBody,
         ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+        ...effortChange,
         expectedRevision,
         authorizationSnapshot,
         ...(prepared && prepared.transactItems.length > 0
@@ -1209,6 +1239,33 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId: issue.id,
         revision: issue.revision,
         items: (issue.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion })),
+      }
+    },
+
+    /**
+     * Reads the estimate, remaining effort, and recorded progress of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The schema version, Team ID, Work Item ID, the Work Item revision the values were read at,
+     * and each value that is set.
+     */
+    async getEffort(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        ...(issue.schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: issue.schedule.plannedEffortMinutes }),
+        ...(issue.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: issue.remainingEffortMinutes }),
+        ...(issue.progressPercent === undefined ? {} : { progressPercent: issue.progressPercent }),
       }
     },
 

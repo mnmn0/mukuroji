@@ -32,6 +32,13 @@ import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkIte
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import {
+  resolveRecordedRemainingEffortMinutes,
+  resolveWorkItemDraftRevision,
+  toWorkItemEffortPatch,
+  type WorkItemEffortProgressChange,
+} from '../../work-items/model/workItemEffort'
+import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import {
   isCustomFieldApplicable,
@@ -373,11 +380,16 @@ function IssueDetailContent({
         sessionKey: createAiAssistantSessionKey(aiSummarySource),
       }
     : undefined
+  // The other forms keep their unsaved input when only the estimate, remaining effort, or progress
+  // changed, such as after the effort editor saved on its own; any change to a field they edit resets them.
+  const [draftBase, setDraftBase] = useState({ item: issue, revision: issue.revision })
+  const draftRevision = resolveWorkItemDraftRevision(draftBase, issue, pickTeamIssueDraftFields)
+  if (draftBase.item !== issue) setDraftBase({ item: issue, revision: draftRevision })
   const [selectedProject, setSelectedProject] = useState({
     revision: issue.revision,
     value: issue.assignedProjectId ?? '',
   })
-  const selectedProjectId = selectedProject.revision === issue.revision
+  const selectedProjectId = selectedProject.revision === draftRevision
     ? selectedProject.value
     : issue.assignedProjectId ?? ''
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
@@ -388,7 +400,7 @@ function IssueDetailContent({
     revision: issue.revision,
     value: currentWorkItemTypeId,
   })
-  const selectedWorkItemTypeId = selectedWorkItemType.revision === issue.revision
+  const selectedWorkItemTypeId = selectedWorkItemType.revision === draftRevision
     ? selectedWorkItemType.value
     : currentWorkItemTypeId
   const workItemTypeSelectionIdentity = `${issue.teamId}:${issue.id}:${issue.revision}`
@@ -535,7 +547,7 @@ function IssueDetailContent({
       handleCommentDraftDirtyChange(false)
     }
     setSelectedWorkItemType({
-      revision: issue.revision,
+      revision: draftRevision,
       value: nextWorkItemTypeId,
     })
     setFieldErrors((current) => ({ ...current, typeChange: undefined }))
@@ -552,7 +564,7 @@ function IssueDetailContent({
     void requestWorkItemTypePreview(nextWorkItemTypeId)
   }
   const editorFormId = useId()
-  const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
+  const editorIdentity = [issue.teamId, issue.id, draftRevision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
   const acceptanceCriteriaDraftState = useAcceptanceCriteriaDraft(editorIdentity)
@@ -673,6 +685,21 @@ function IssueDetailContent({
     void onUpdateIssue(issue.id, nextIssueInput)
       .catch(() => undefined)
       .finally(() => setIssueUpdatePending(false))
+  }
+
+  /**
+   * Saves the estimate, remaining effort, and manual progress on their own, outside the editor form.
+   *
+   * @param change - Validated effort and progress change.
+   */
+  const saveEffortProgress = async (change: WorkItemEffortProgressChange) => {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) return
+    setIssueUpdatePending(true)
+    try {
+      await onUpdateIssue(issue.id, toWorkItemEffortPatch(change, issue.schedule))
+    } finally {
+      setIssueUpdatePending(false)
+    }
   }
 
   /** Renders the Work Item Type selector and any pending type-change resolution UI. */
@@ -845,7 +872,7 @@ function IssueDetailContent({
                     form={editorFormId}
                     name="assignedProjectId"
                     onChange={(event) => setSelectedProject({
-                      revision: issue.revision,
+                      revision: draftRevision,
                       value: event.target.value,
                     })}
                     value={selectedProjectId}
@@ -970,6 +997,22 @@ function IssueDetailContent({
             <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
               {describeTeamIssueSchedule(issue.schedule, t)}
             </output>
+            <div className="workbench-panel-muted p-3 font-normal">
+              <WorkItemEffortProgressEditor
+                // Unlike the other forms, it resets to every new revision, including its own saves.
+                editorIdentity={[issue.teamId, issue.id, issue.revision].join(':')}
+                item={issue}
+                // Remounts per Work Item so a save still pending for another item never carries over.
+                key={`${issue.teamId}:${issue.id}:effort`}
+                locale={locale}
+                {...(configuration?.progressMode ? { progressMode: configuration.progressMode } : {})}
+                canEditEstimate
+                {...(onUpdateIssue ? { onSave: saveEffortProgress } : {})}
+                // A pending mutation only disables the inputs, so typed values survive a failed save.
+                disabled={isAiSummaryOperationPending || isIssueUpdatePending}
+                readOnly={isIssueReadOnly}
+              />
+            </div>
           </div>
         )
       case 'relations':
@@ -1048,7 +1091,9 @@ function IssueDetailContent({
             key={issue.teamId + ':' + issue.id + ':time'}
             locale={locale}
             {...(currentWorkspaceMemberKey ? { memberKey: currentWorkspaceMemberKey } : {})}
+            {...(issue.schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: issue.schedule.plannedEffortMinutes })}
             readOnly={isIssueReadOnly}
+            remainingEffortMinutes={resolveRecordedRemainingEffortMinutes(issue)}
             teamId={issue.teamId}
             timesheetHref={createTeamTimeTrackingPath(issue.teamId)}
             workItemId={issue.id}
@@ -1151,4 +1196,26 @@ function IssueDetailContent({
       </div>
     </aside>
   )
+}
+
+/**
+ * Picks the fields edited by the detail forms other than the effort editor, in a fixed order.
+ *
+ * @param item - Team Issue to read.
+ * @returns The fields, compared to decide whether the forms' unsaved input must reset.
+ */
+function pickTeamIssueDraftFields(item: TeamIssue): unknown {
+  return [
+    item.teamId,
+    item.title,
+    item.description,
+    item.assignedProjectId,
+    item.assigneeUserId,
+    item.priority,
+    item.workflowStatusId,
+    item.workItemTypeId,
+    item.customFieldValues,
+    item.contributorAssignments,
+    item.acceptanceCriteria,
+  ]
 }

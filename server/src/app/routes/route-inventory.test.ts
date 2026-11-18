@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(477)
-  expect(new Set(inventory).size).toBe(473)
+  expect(inventory).toHaveLength(476)
+  expect(new Set(inventory).size).toBe(472)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/work-items/keys/:key')
@@ -62,6 +62,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/agent-settings')
   expect(inventory).toContain('GET /api/v1/agent-context')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/acceptance-criteria')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/effort')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
@@ -74,8 +75,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('DELETE /api/developer/me/api-keys/:apiKeyId')
   expect(inventory).toContain('GET /api/developer/credential-policy')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
+  // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
+  expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '6532d11483d59de3ffd79a88fda9f7772551f7c32a01cdacc1d8031bb4285cdd',
+    'cfd7e80740e863a74f8bb5310409373a8b740e3fc2c999f608facbf40a5b4808',
   )
 })

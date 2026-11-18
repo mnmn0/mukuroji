@@ -49,12 +49,19 @@ export type WorkloadTimeEntry = {
   status: string
 }
 
-/** A Work Item estimate projection used by capacity calculations. */
+/**
+ * The canonical estimate of one Work Item used by capacity calculations.
+ *
+ * The estimate is the Work Item's `schedule.plannedEffortMinutes`; assignment planned effort only
+ * weights how a Work Item's remaining effort is shared between its assignments.
+ */
 export type WorkloadEstimate = {
   /** Canonical Work Item identifier. */
   workItemId: string
-  /** Planned effort in minutes. */
-  estimateMinutes: number
+  /** Canonical planned effort (estimate) in minutes, when set. */
+  estimateMinutes?: number
+  /** Recorded remaining effort, or 0 for a completed or canceled Work Item, when known. */
+  remainingEffortMinutes?: number
 }
 
 /** Read-only source data needed to reconcile capacity with actual time. */
@@ -70,7 +77,7 @@ export type CapacityPlanningDataSource = {
     /** Exclusive instant upper bound. */
     to: string
   }): Promise<WorkloadTimeEntry[]>
-  /** Lists Work Item estimates for the selected Team. */
+  /** Lists the canonical Work Item estimates and remaining effort for the selected Team. */
   listEstimates(workspaceId: string, teamId: string): Promise<WorkloadEstimate[]>
 }
 
@@ -213,9 +220,7 @@ export function buildWorkloadSnapshot(
     toDate,
   )
   const actualByWorkItemId = aggregateActualMinutesByWorkItem(actualByMember)
-  const estimateByWorkItemId = new Map(
-    estimates.map((estimate) => [estimate.workItemId, Math.max(0, estimate.estimateMinutes)]),
-  )
+  const estimateByWorkItemId = new Map(estimates.map((estimate) => [estimate.workItemId, estimate]))
   const remainingEffortByAssignmentId = calculateRemainingEffortByAssignment(
     visibleAssignments,
     actualByWorkItemId,
@@ -920,11 +925,17 @@ function aggregateActualMinutesByWorkItem(
   return result
 }
 
-/** Distributes each Work Item's remaining effort across its visible assignments. */
+/**
+ * Distributes each Work Item's remaining effort across its visible assignments.
+ *
+ * A Work Item's remaining effort comes from one source only, so the same work is never counted
+ * twice: the recorded remaining effort, otherwise the canonical estimate minus actual time, and
+ * only for a Work Item without an estimate, the assignments' planned effort minus actual time.
+ */
 function calculateRemainingEffortByAssignment(
   assignments: readonly ResourceAssignment[],
   actualByWorkItemId: ReadonlyMap<string, number>,
-  estimateByWorkItemId: ReadonlyMap<string, number>,
+  estimateByWorkItemId: ReadonlyMap<string, WorkloadEstimate>,
   fromDate: string,
   toDate: string,
 ): Map<string, number> {
@@ -939,8 +950,11 @@ function calculateRemainingEffortByAssignment(
   const result = new Map<string, number>()
   for (const [workItemId, group] of assignmentsByWorkItemId) {
     const plannedTotal = sum(group, (assignment) => assignment.plannedEffortMinutes)
-    const baseline = Math.max(estimateByWorkItemId.get(workItemId) ?? plannedTotal, plannedTotal)
-    const remainingTotal = Math.max(0, baseline - (actualByWorkItemId.get(workItemId) ?? 0))
+    const estimate = estimateByWorkItemId.get(workItemId)
+    const actual = actualByWorkItemId.get(workItemId) ?? 0
+    const remainingTotal = estimate?.remainingEffortMinutes !== undefined
+      ? Math.max(0, estimate.remainingEffortMinutes)
+      : Math.max(0, (estimate?.estimateMinutes ?? plannedTotal) - actual)
     const weights = group.map((assignment) => assignment.plannedEffortMinutes || assignment.allocationMinutes)
     const weightTotal = sum(weights, (weight) => weight)
     let remainder = remainingTotal

@@ -68,6 +68,7 @@ import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
 import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRendering'
+import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
 
 const GANTT_DAY_WIDTH = 42
 const GANTT_TABLE_WIDTH = 360
@@ -691,6 +692,11 @@ export function TaskGanttView({
             const taskKey = createTaskKey(row.task)
             const isBusy = busyTaskKey === taskKey
             const bar = createGanttBar(row.schedule, timelineColumns)
+            const progressPercent = resolveWorkItemEffortColumnValue(
+              row.task,
+              'progress',
+              resolveProjectTaskConfiguration(row.task, configurationsByTeam, configuration),
+            )
             return (
               <article
                 className="grid min-w-max border-b border-tone-e4e7ec last:border-b-0"
@@ -832,13 +838,25 @@ export function TaskGanttView({
                         width: `${bar.width}px`,
                       }}
                     >
+                      {progressPercent !== undefined && progressPercent > 0 ? (
+                        <span
+                          aria-hidden="true"
+                          className="pointer-events-none absolute inset-y-0 left-0 bg-black/15"
+                          data-testid={`task-gantt-progress-${row.task.id}`}
+                          style={{ width: `${progressPercent}%` }}
+                        />
+                      ) : null}
                       <button
-                        aria-label={canEditSchedule && !isBusy
+                        aria-label={`${canEditSchedule && !isBusy
                           ? t('tasks.schedule.moveA11y').replace(
                               '{task}',
                               resolveWorkItemTitle(row.task),
                             )
-                          : `${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
+                          : `${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}${
+                          progressPercent === undefined
+                            ? ''
+                            : `, ${t('workItems.effort.progress')} ${progressPercent}%`
+                        }`}
                         className="flex h-full w-full items-center px-2 text-left focus:outline-none focus:ring-2 focus:ring-[var(--workbench-primary)]"
                         data-task-action="open"
                         data-task-open-variant="bar"
@@ -861,7 +879,10 @@ export function TaskGanttView({
                         }}
                         type="button"
                       >
-                        <span className="pointer-events-none truncate">{resolveGanttBarText(row.schedule, t)}</span>
+                        <span className="pointer-events-none truncate">
+                          {resolveGanttBarText(row.schedule, t)}
+                          {progressPercent === undefined ? '' : ` · ${progressPercent}%`}
+                        </span>
                       </button>
                       {row.schedule.mode === 'date-range' ? (
                         <button

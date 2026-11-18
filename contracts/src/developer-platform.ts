@@ -1489,6 +1489,13 @@ export type UpdatePublicWorkItemRequest = Omit<WorkItemPatch, 'contributorAssign
    * with `acceptanceCriteria`.
    */
   acceptanceCriteriaMarks?: WorkItemAcceptanceCriterionMark[]
+  /**
+   * Replaces only the estimate (`schedule.plannedEffortMinutes`) in minutes, or clears it with
+   * `null`. The server writes it into the stored schedule, so the body does not depend on the dates
+   * the client read and a retry with the same body replays. Requires the latest revision and cannot
+   * be combined with `schedule`.
+   */
+  plannedEffortMinutes?: number | null
 }
 
 /** Public Work Item Type change preview endpoint の request body です。 */
@@ -1551,10 +1558,13 @@ export type DeletePublicWorkItemRequest = {
  * Public API が返す Work Item です。
  *
  * Contributors are managed only through the Workspace API, so public responses never
- * contain `contributorAssignments`. Acceptance criteria are read from their own endpoint because
- * the public Work Item schema is closed.
+ * contain `contributorAssignments`. Acceptance criteria, remaining effort, and progress are read
+ * from their own endpoints because the public Work Item schema is closed.
  */
-export type PublicWorkItem = Omit<CanonicalWorkItem, 'contributorAssignments' | 'acceptanceCriteria'>
+export type PublicWorkItem = Omit<
+  CanonicalWorkItem,
+  'contributorAssignments' | 'acceptanceCriteria' | 'remainingEffortMinutes' | 'progressPercent'
+>
 
 /**
  * Public Work Item list endpoint の cursor page です。

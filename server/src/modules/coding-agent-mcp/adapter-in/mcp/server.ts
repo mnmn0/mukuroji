@@ -18,6 +18,7 @@ const revision = z.number().int().positive().describe('Revision read from the ta
 const pageFields = { cursor: z.string().min(1).max(16384).optional(), limit: z.number().int().min(1).max(100).default(20) }
 const selectionFields = { assignedProjectId: id.optional(), workItemTypeId: id.optional() }
 const runId = z.string().regex(/^run_[0-9a-f-]{36}$/u).describe('Run ID returned by start_task or get_next_task ownRuns.')
+const effortMinutes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const readAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
 const writeAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
 const customValues = z.record(id, z.union([z.string().max(4096), z.number().finite(), z.boolean(), z.array(z.string().max(256)).max(100)]))
@@ -110,7 +111,7 @@ export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTa
     schedule: dueDate ? createDefaultDueDateWorkItemSchedule(dueDate) : createDefaultUnscheduledWorkItemSchedule(),
   }, idempotencyKey)))
   server.registerTool('update_task', {
-    description: 'Update assigned task title, description, priority, or custom fields with revision conflict protection, and mark acceptance criteria met or unmet by ID. Description replaces the full text; use report_progress to append notes. Only people add, remove, or reword acceptance criteria.',
+    description: 'Update assigned task title, description, priority, custom fields, estimate (plannedEffortMinutes), remaining effort, or progress percent with revision conflict protection, and mark acceptance criteria met or unmet by ID. Description replaces the full text; use report_progress to append notes. Only people add, remove, or reword acceptance criteria.',
     inputSchema: z.object({
       taskId: id, expectedRevision: revision, idempotencyKey: key,
       title: z.string().trim().min(1).max(256).optional(), description: z.string().trim().min(1).max(4096).optional(),
@@ -118,8 +119,14 @@ export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTa
       customFieldValues: z.record(id, z.union([z.string().max(4096), z.number().finite(), z.boolean(), z.array(z.string().max(256)).max(100), z.null()])).optional(),
       acceptanceCriteria: z.array(z.object({ id: z.string().regex(/^[0-9a-f]{32}$/u), satisfied: z.boolean() })).min(1).max(20).optional()
         .describe('Criteria from get_task to mark met (true) or unmet (false); others keep their state.'),
+      plannedEffortMinutes: effortMinutes.nullable().optional()
+        .describe('Estimate in minutes (the task schedule\'s plannedEffortMinutes); null clears it. Requires the latest revision.'),
+      remainingEffortMinutes: effortMinutes.nullable().optional().describe('Effort still remaining in minutes; null clears it.'),
+      progressPercent: z.number().int().min(0).max(100).nullable().optional()
+        .describe('Progress percent recorded by hand (used when the Team progress mode is manual); null clears it.'),
     }).refine((input) => input.title !== undefined || input.description !== undefined || input.priority !== undefined ||
-      input.customFieldValues !== undefined || input.acceptanceCriteria !== undefined, 'Provide at least one changed field.'), annotations: { ...writeAnnotations, destructiveHint: true },
+      input.customFieldValues !== undefined || input.acceptanceCriteria !== undefined || input.plannedEffortMinutes !== undefined ||
+      input.remainingEffortMinutes !== undefined || input.progressPercent !== undefined, 'Provide at least one changed field.'), annotations: { ...writeAnnotations, destructiveHint: true },
   }, ({ taskId, idempotencyKey, ...input }) => result(() => tasks.update(taskId, input, idempotencyKey)))
   for (const [name, action, description] of [
     ['start_task', 'start', 'Claim assigned backlog/todo work with an Agent Run and move it to a started status in one transaction. Checks blockers and expectedRevision; only the successful caller should begin work. Returns the task and the run.'],

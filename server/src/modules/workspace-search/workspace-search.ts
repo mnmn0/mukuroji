@@ -868,6 +868,7 @@ const taskViewBuiltInLayoutFields = new Set([
   'statusId',
   'startDate',
   'estimate',
+  'remainingEffort',
   'progress',
   'parent',
   'labels',

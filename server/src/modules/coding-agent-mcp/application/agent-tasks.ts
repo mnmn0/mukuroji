@@ -18,7 +18,11 @@ import {
 } from './work-item-api'
 
 /** Metadata changes an agent may make, including marking its task's acceptance criteria met or unmet. */
-export type AgentTaskUpdate = Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'> & {
+export type AgentTaskUpdate = Pick<
+  UpdatePublicWorkItemRequest,
+  | 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'
+  | 'plannedEffortMinutes' | 'remainingEffortMinutes' | 'progressPercent'
+> & {
   /** Criteria to mark met or unmet by ID; criteria not listed keep their state. */
   acceptanceCriteria?: {
     /** ID of a criterion on the task. */
@@ -418,7 +422,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const page = await api.list(filters(input), cursor, limit)
       return { ...page, items: page.items.map(inScope) }
     },
-    /** Returns canonical details, dependency readiness, and the task's active run. */
+    /** Returns canonical details, acceptance criteria, effort, dependency readiness, and the task's active run. */
     async get(id: string) {
       // Keys are never reused, so the same key before and after the task read means the task read
       // saw that Work Item, even when another one was created under the same ID at the same instant.
@@ -433,7 +437,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      return { task, acceptanceCriteria: await api.acceptanceCriteria(id), blockers: await blockers(task), activeRun }
+      const [acceptanceCriteria, effort] = await Promise.all([api.acceptanceCriteria(id), api.effort(id)])
+      return { task, acceptanceCriteria, effort: effort ?? null, blockers: await blockers(task), activeRun }
     },
     /** Resumes this instance's run first, then selects ready work by priority, deadline, creation time, and ID. */
     async next(input: AgentTaskFilters) {
@@ -495,8 +500,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
       }
       const { acceptanceCriteria: marks, ...fields } = input
-      // The server applies the marks to the stored list inside the request's idempotency boundary, so a
-      // retry with the same arguments replays even if a person edited the criteria meanwhile.
+      // The server writes the estimate into the stored schedule and applies the marks to the stored
+      // list inside the request's idempotency boundary, so the body does not depend on what this call
+      // read: a retry with the same arguments replays even if a person moved the dates or edited the
+      // criteria meanwhile, also after a restart.
       return api.update(id, {
         ...fields,
         ...(marks === undefined ? {} : { acceptanceCriteriaMarks: marks }),
@@ -620,6 +627,7 @@ function composeBrief(settings: AgentSettingsRecord, projectId: string | undefin
   const parts = [settings.brief, projectBrief].filter((part): part is string => typeof part === 'string')
   return parts.length === 0 ? null : parts.join('\n\n')
 }
+
 
 /** Orders ready work deterministically; undated work follows dated work at equal priority. */
 function compareTasks(first: AgentTask, second: AgentTask): number {

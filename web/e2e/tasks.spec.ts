@@ -2204,14 +2204,13 @@ async function mockAuthenticatedTaskPage(
 
   // Time tracking reads from the Work Item "time" section start empty; tests that need state override them.
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
-  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|timesheet|time-tracking\/summary|work-items\/[^/]+\/time-estimate)$/u.test(url.pathname), async (route) => {
+  await page.route((url) => /^\/api\/teams\/[^/]+\/(?:time-entries|timesheet|time-tracking\/summary)$/u.test(url.pathname), async (route) => {
     if (route.request().method() !== 'GET') {
       await route.fallback()
       return
     }
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/time-entries')) await route.fulfill({ json: { entries: [] } })
-    else if (path.endsWith('/time-estimate')) await route.fulfill({ json: { estimate: null } })
     else if (path.endsWith('/timesheet')) await route.fulfill({ json: { from: '2026-11-10', to: '2026-11-10', timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: true } })
     else await route.fulfill({ json: { totalMinutes: 0, groups: [] } })
   })
@@ -5525,7 +5524,7 @@ test.describe('authenticated task page', () => {
       entries.push(entry)
       return route.fulfill({ json: { entry } })
     })
-    await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') || url.pathname.includes('/time-estimate') || url.pathname === '/api/teams/core-team/timers', async (route) => {
+    await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') || url.pathname === '/api/teams/core-team/timers', async (route) => {
       const request = route.request()
       const path = new URL(request.url()).pathname
       const key = request.headers()['idempotency-key']
@@ -5535,7 +5534,6 @@ test.describe('authenticated task page', () => {
         timer = { schemaVersion: 1, id: 'timer-1', workspaceId: 'workspace-demo', teamId: 'core-team', projectId: 'refero', workItemId: input.workItemId, userId: 'demo@example.com', startedAt: new Date(Date.now() - 60_000).toISOString(), billable: input.billable, revision: 1, updatedAt: new Date().toISOString() }
         return route.fulfill({ status: 201, json: { timer } })
       }
-      if (path.endsWith('/time-estimate')) return route.fulfill({ json: { estimate: null } })
       if (path.endsWith('/time-tracking/summary')) {
         return route.fulfill({ json: { totalMinutes: 25 * entries.length, groups: entries.length ? [{ key: 'wireframe', label: 'wireframe', minutes: 25, billableMinutes: 0, entryCount: 1 }] : [] } })
       }
@@ -5687,6 +5685,87 @@ test.describe('authenticated task page', () => {
     // A new draft starts without the abandoned draft's error.
     await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
     await expect(contributors).not.toContainText('メンバーかジョブロールのどちらかを選んでください。')
+  })
+
+  test('Issue #335: 工数だけを保存しても Team Issue の未保存の入力と選択を保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        workItemTypes: [DEFAULT_WORK_ITEM_TYPE, { ...DEFAULT_WORK_ITEM_TYPE, id: 'compact', name: 'Compact' }],
+      },
+    })
+    const previewRevisions: number[] = []
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/work-item-type-preview$/u, async (route) => {
+      const body = route.request().postDataJSON() as { expectedRevision: number }
+      previewRevisions.push(body.expectedRevision)
+      await route.fulfill({
+        json: {
+          approvalCompletionTransitionConflict: false,
+          currentWorkflowStatusId: 'active',
+          currentWorkItemTypeId: DEFAULT_WORK_ITEM_TYPE.id,
+          expectedRevision: body.expectedRevision,
+          lostCustomFieldIds: [],
+          missingRequiredCustomFieldDefinitions: [],
+          missingRequiredCustomFieldIds: [],
+          requiresResolution: false,
+          targetInitialWorkflowStatusId: 'todo',
+          targetWorkItemTypeId: 'compact',
+        },
+      })
+    })
+    const effortPatches: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
+        effortPatches.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    const titleInput = detailPane.locator('input[name="title"]')
+    const projectSelect = detailPane.locator('select[name="assignedProjectId"]')
+    const typeSelect = detailPane.getByRole('combobox', { name: 'Work Item Type' })
+    await titleInput.fill('工数保存後も残るタイトル')
+    await projectSelect.selectOption('')
+    await typeSelect.selectOption('compact')
+    await expect.poll(() => previewRevisions).toEqual([1])
+
+    const effort = detailPane.getByTestId('work-item-effort-progress')
+    await effort.getByLabel('残工数（時間）').fill('3')
+    await effort.getByRole('button', { name: '工数と進捗を保存' }).click()
+    await expect.poll(() => effortPatches).toEqual([{ expectedRevision: 1, remainingEffortMinutes: 180 }])
+    await expect(effort).toContainText('3 時間')
+
+    // Saving only the effort keeps the other unsaved input and choices.
+    await expect(titleInput).toHaveValue('工数保存後も残るタイトル')
+    await expect(projectSelect).toHaveValue('')
+    await expect(typeSelect).toHaveValue('compact')
+    // The type change preview read before the effort save is stale, so saving reads it again at the new revision.
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await expect.poll(() => previewRevisions).toEqual([1, 2])
+  })
+
+  test('Issue #335: Project 詳細でも工数だけの保存で未保存の入力と選択を保持する', async ({ page }) => {
+    const patches: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
+        patches.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const titleInput = detailPane.locator('input[name="title"]')
+    const projectSelect = detailPane.locator('select[name="assignedProjectId"]')
+    await titleInput.fill('工数保存後も残る Project 詳細のタイトル')
+    await projectSelect.selectOption('')
+
+    const effort = detailPane.getByTestId('work-item-effort-progress')
+    await effort.getByLabel('残工数（時間）').fill('3')
+    await effort.getByRole('button', { name: '工数と進捗を保存' }).click()
+    await expect.poll(() => patches).toEqual([{ expectedRevision: 1, remainingEffortMinutes: 180 }])
+    await expect(effort).toContainText('3 時間')
+
+    await expect(titleInput).toHaveValue('工数保存後も残る Project 詳細のタイトル')
+    await expect(projectSelect).toHaveValue('')
   })
 
   test('Issue #239: Team Issue の保存中は保存ボタンを無効にする', async ({ page }) => {

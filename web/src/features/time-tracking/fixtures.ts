@@ -1,4 +1,4 @@
-import type { RunningTimer, TimeEntry, TimeEstimate, TimeSheet } from '@mukuroji/contracts'
+import type { RunningTimer, TimeEntry, TimeSheet } from '@mukuroji/contracts'
 
 /** Monday of the fixture week. */
 export const timeTrackingFixtureWeekStart = '2026-11-09'
@@ -122,18 +122,6 @@ export const timeTrackingFixtureTimer: RunningTimer = {
   billable: false,
   revision: 1,
   updatedAt: '2026-11-10T02:45:00.000Z',
-}
-
-/** Estimate of the onboarding Work Item. */
-export const timeTrackingFixtureEstimate: TimeEstimate = {
-  schemaVersion: 1,
-  workspaceId: 'workspace-demo',
-  teamId: 'core-team',
-  workItemId: 'onboarding',
-  estimateMinutes: 480,
-  revision: 2,
-  updatedBy: 'aoi@example.com',
-  updatedAt: '2026-11-08T00:00:00.000Z',
 }
 
 /** Team totals of the fixture week as a manager sees them. */

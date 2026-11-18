@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createAnalyticsQueryInput,
   createDefaultAnalyticsFilter,
   parseAnalyticsRouteState,
   serializeAnalyticsRouteState,
@@ -26,6 +27,17 @@ describe('Analytics report URL state', () => {
     expect(canonical.get('timezone')).toBe('Asia/Tokyo')
     expect(canonical.get('edit')).toBe('1')
     expect(canonical.get('v')).toBe('1')
+  })
+
+  test('round-trips effort-weighted forecasts into the query and omits the count default', () => {
+    const effort = parseAnalyticsRouteState(new URLSearchParams('v=1&forecast=effort'))
+    expect(effort.forecastWeighting).toBe('effort')
+    expect(serializeAnalyticsRouteState(effort).get('forecast')).toBe('effort')
+    expect(createAnalyticsQueryInput(effort, '2026-07-17T00:00:00.000Z', []).forecastWeighting).toBe('effort')
+    const count = parseAnalyticsRouteState(new URLSearchParams('v=1&forecast=count'))
+    expect(count.forecastWeighting).toBeUndefined()
+    expect(serializeAnalyticsRouteState(count).has('forecast')).toBe(false)
+    expect('forecastWeighting' in createAnalyticsQueryInput(count, '2026-07-17T00:00:00.000Z', [])).toBe(false)
   })
 
   test('rejects a URL without the canonical version', () => {

@@ -98,6 +98,16 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   一覧が変わっていても replay になります。`acceptanceCriteria` と同時には送れません。
   Agent context の `requireAcceptanceCriteria` が `true` の場合、受け入れ条件（または `acceptanceCriteriaFieldId` の
   custom field の値）がない Work Item の Run start は `not_ready` です。
+- 見積の正本は `WorkItem` の `schedule.plannedEffortMinutes` です。残工数と手入力の進捗率は
+  `GET /api/v1/work-items/{workItemId}/effort?teamId={teamId}` で読みます。応答は
+  `{ schemaVersion, teamId, workItemId, revision, plannedEffortMinutes?, remainingEffortMinutes?, progressPercent? }` で、
+  記録されていない値は省きます。`WorkItem` の response schema は閉じた object のため、残工数と進捗率は含めません
+  （export の行にも含めません）。PATCH は `remainingEffortMinutes`（分）/ `progressPercent`（0〜100）を受け付け、`null` で
+  消します。見積は `schedule` の置換で変えるか、`plannedEffortMinutes`（分、`null` で消す）だけを送って変えます。
+  `plannedEffortMinutes` は server が保存済みの schedule に書き込むため、body が読み込んだ日付に依存せず、同じ
+  idempotency key の再試行は途中で日付が動いても同じ request として replay されます。最新の revision が必要で、
+  `schedule` とは同時に送れません。見積だけの変更は dependency の確認を必要としません。不正な値は
+  `400 validation_failed` です。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress) を参照してください。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。

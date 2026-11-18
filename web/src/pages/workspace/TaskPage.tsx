@@ -140,6 +140,7 @@ import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workI
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { taskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui'
+import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -603,10 +604,15 @@ export function TaskPage() {
   const taskViewColumns = useMemo(
     () => [
       ...standardTaskViewFields,
+      ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
       ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
       ...taskViewCustomFields.map((field) => `custom:${field.id}`),
     ],
     [taskViewCustomFields],
+  )
+  const taskViewSortFields = useMemo(
+    () => [...taskViewFields, ...WORK_ITEM_EFFORT_COLUMN_FIELDS],
+    [taskViewFields],
   )
   const builtInTaskViewDefinition = useMemo(
     () => createBuiltInTaskViewDefinition(
@@ -623,6 +629,8 @@ export function TaskPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
+      // Effort values sort but do not group, because they have no shared buckets.
+      sortFields: taskViewSortFields,
       layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
@@ -645,6 +653,9 @@ export function TaskPage() {
       { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
       { id: 'team', label: t('workspace.column.team') },
+      { id: 'estimate', label: t('tasks.column.estimate') },
+      { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
+      { id: 'progress', label: t('tasks.column.progress') },
       ...(taskViewCustomFields.length > 0
         ? [{ id: 'customFields', label: t('workItems.fields.title') }]
         : []),
@@ -655,9 +666,13 @@ export function TaskPage() {
     ],
     [t, taskViewCustomFields],
   )
-  const taskViewGroupOptions = useMemo(
+  const taskViewSortOptions = useMemo(
     () => taskViewFieldOptions.filter((option) => option.id !== 'customFields'),
     [taskViewFieldOptions],
+  )
+  const taskViewGroupOptions = useMemo(
+    () => taskViewSortOptions.filter((option) => !isWorkItemEffortColumnField(option.id)),
+    [taskViewSortOptions],
   )
   const taskViewTeams = useMemo(
     () => {
@@ -1803,6 +1818,7 @@ export function TaskPage() {
       columnOptions={taskViewFieldOptions}
       errorMessage={taskViewController.errorMessage}
       groupOptions={taskViewGroupOptions}
+      sortOptions={taskViewSortOptions}
       isDirty={taskViewController.isDirty}
       isSaving={taskViewController.isSaving}
       migrationWarnings={taskViewController.migrationWarnings.map(

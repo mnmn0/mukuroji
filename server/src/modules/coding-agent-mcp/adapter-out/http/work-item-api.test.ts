@@ -5,6 +5,7 @@ import { createAgentTasks } from '../../application/agent-tasks'
 const config = { origin: 'https://mukuroji.example.test', token: 'secret-test-token', teamId: 'team' }
 const validTask = { id: 'task', teamId: 'team', revision: 1, title: 'Task', assigneeUserId: 'agent',
   workflowStatusId: 'todo', statusCategory: 'unstarted', priority: 'medium', dueDate: '',
+  schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] }, plannedEffortMinutes: 240 },
   createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
 
 test('pins origin and Team, encodes IDs, forwards idempotency unchanged, and refuses redirects', async () => {
@@ -152,6 +153,31 @@ test('reads acceptance criteria from their endpoint and treats an older server a
   expect(paths[0]).toBe('/api/v1/work-items/task/acceptance-criteria?teamId=team')
   expect(await api.acceptanceCriteria('legacy')).toEqual([])
   await expect(api.acceptanceCriteria('other')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads effort from its endpoint and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    if (url.pathname === '/api/v1/work-items/task/effort') {
+      return Response.json({
+        schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3,
+        plannedEffortMinutes: 240, remainingEffortMinutes: 60, progressPercent: 75,
+      })
+    }
+    if (url.pathname === '/api/v1/work-items/other/effort') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 3 })
+    }
+    if (url.pathname === '/api/v1/work-items/invalid/effort') {
+      return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'invalid', revision: 3, progressPercent: 101 })
+    }
+    return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+  })
+  expect(await api.effort('task')).toEqual({ revision: 3, plannedEffortMinutes: 240, remainingEffortMinutes: 60, progressPercent: 75 })
+  expect(paths[0]).toBe('/api/v1/work-items/task/effort?teamId=team')
+  expect(await api.effort('legacy')).toBeUndefined()
+  await expect(api.effort('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.effort('invalid')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
 const validRun = {

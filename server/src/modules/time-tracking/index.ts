@@ -7,7 +7,7 @@ export {
   type CreateTimeEntryInput,
   type ListTimeEntriesInput,
   type SaveTimeBudgetInput,
-  type SaveTimeEstimateInput,
+  type TimeTrackingEstimateSource,
   type StartTimerInput,
   type StopTimerInput,
   type TimeTrackingAuditOptions,

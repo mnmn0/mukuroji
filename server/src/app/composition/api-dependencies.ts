@@ -175,6 +175,7 @@ import {
   type CapacityPlanningDataSource,
 } from '../../modules/capacity-planning'
 import { createConfiguredAuditExportService } from './audit-export'
+import { listTeamWorkItemEffort } from '../../api/shared/work-item-effort'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -348,6 +349,14 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
         retentionDays: getConfiguredAuditRetentionDays(),
       },
       ...(idempotency ? { idempotency } : {}),
+      estimates: {
+        async listPlannedEffort(workspaceId, teamId) {
+          // Archived Work Items keep their estimate, because their recorded time still counts in reports.
+          return new Map((await listTeamWorkItemEffort(workspaceId, teamId, { includeArchived: true })).flatMap((effort) =>
+            effort.plannedEffortMinutes === undefined ? [] : [[effort.workItemId, effort.plannedEffortMinutes] as const]
+          ))
+        },
+      },
     },
   )
 }
@@ -370,7 +379,11 @@ function createCapacityPlanningDataSource(
       }))
     },
     async listEstimates(workspaceId, teamId) {
-      return await timeTrackingService.listEstimates(workspaceId, teamId)
+      return (await listTeamWorkItemEffort(workspaceId, teamId)).map((effort) => ({
+        workItemId: effort.workItemId,
+        ...(effort.plannedEffortMinutes === undefined ? {} : { estimateMinutes: effort.plannedEffortMinutes }),
+        ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
+      }))
     },
   }
 }

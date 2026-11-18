@@ -412,37 +412,6 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   })
 
-  router.put('/api/teams/:teamId/work-items/:workItemId/time-estimate', async (context) => {
-    return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
-      const workItemId = readRequiredString(context.req.param('workItemId'), 'Work Item ID')
-      await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
-      const body = asRecord(await dependencies.readJson(context.req))
-      const estimate = await dependencies.getTimeTracking().saveEstimate({
-        workspaceId: principal.directoryId,
-        teamId,
-        workItemId,
-        estimateMinutes: readRequiredNumber(body.estimateMinutes, 'Estimate minutes'),
-        expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
-        updatedBy: principal.userKey,
-        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
-      })
-      return context.json({ estimate })
-    })
-  })
-
-  router.get('/api/teams/:teamId/work-items/:workItemId/time-estimate', async (context) => {
-    return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
-      const workItemId = readRequiredString(context.req.param('workItemId'), 'Work Item ID')
-      await dependencies.verifyWorkItem(principal, teamId, workItemId, 'viewer')
-      const estimate = await dependencies.getTimeTracking().getEstimate(
-        principal.directoryId,
-        teamId,
-        workItemId,
-      )
-      return context.json({ estimate: estimate ?? null })
-    })
-  })
-
   return router
 }
 

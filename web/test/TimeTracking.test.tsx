@@ -5,11 +5,9 @@ import { listTimeEntries, transitionTimeEntry, transitionTimesheet, updateTimeEn
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
 import { getActiveTimer, stopTimer } from '../src/features/time-tracking/api/timers'
 import { getTeamTimesheet } from '../src/features/time-tracking/api/teamTimesheet'
-import { getTimeEstimate } from '../src/features/time-tracking/api/timeEstimates'
 import {
   createTimeEntryFixture,
   timeTrackingFixtureEntries,
-  timeTrackingFixtureEstimate,
   timeTrackingFixtureMemberNames,
   timeTrackingFixtureNow,
   timeTrackingFixtureRejectionReasons,
@@ -304,9 +302,7 @@ describe('time tracking API', () => {
     expect(requests[0]?.url).toEndWith('/time-tracking/timers/timer-1/stop')
   })
 
-  test('reads estimates and the manager signal of the Team timesheet', async () => {
-    respondWith({ estimate: timeTrackingFixtureEstimate })
-    expect(await getTimeEstimate('token', 'core-team', 'onboarding')).toEqual(timeTrackingFixtureEstimate)
+  test('reads the manager signal of the Team timesheet', async () => {
     const requests = respondWith({ ...timeTrackingFixtureTeamTimesheet, costsRedacted: true })
     expect((await getTeamTimesheet('token', 'core-team', { ...week, timeZone: 'Asia/Tokyo' })).costsRedacted).toBe(true)
     expect(new URL(requests[0]?.url ?? '', 'http://localhost').searchParams.get('timeZone')).toBe('Asia/Tokyo')
@@ -321,18 +317,17 @@ describe('time tracking API', () => {
 })
 
 describe('time tracking views', () => {
-  test('the Work Item panel shows estimate against actual and the running timer', () => {
+  test('the Work Item panel shows the canonical estimate against actual and the running timer', () => {
     const html = renderToStaticMarkup(
       <WorkItemTimePanel
         actualMinutes={540}
         entries={timeTrackingFixtureEntries.filter((entry) => entry.workItemId === 'onboarding')}
-        estimate={timeTrackingFixtureEstimate}
+        plannedEffortMinutes={480}
         formatters={formatters}
         now={timeTrackingFixtureNow}
         onCreateEntry={noop}
         onDiscardTimer={noop}
         onRetry={() => undefined}
-        onSaveEstimate={noop}
         onStartTimer={noop}
         onStopTimer={noop}
         onSubmitEntry={noop}
@@ -351,20 +346,20 @@ describe('time tracking views', () => {
     expect(html).toContain('Stop and record')
     expect(html).not.toContain('Start timer')
     expect(html).toContain('href="/teams/core-team/timesheet"')
-    // Only Team managers may set the estimate, so a member sees the timer but no estimate controls.
-    expect(html).not.toContain(`>${t('timeTracking.estimate.edit')}<`)
-    const managerHtml = renderToStaticMarkup(
+    // The estimate is edited on the Work Item itself, so the panel has no estimate controls.
+    expect(html).not.toContain('estimateHours')
+    // Recorded remaining effort wins over the estimate minus actual time.
+    const recordedHtml = renderToStaticMarkup(
       <WorkItemTimePanel
         actualMinutes={540}
-        canEditEstimate
         entries={[]}
-        estimate={timeTrackingFixtureEstimate}
+        plannedEffortMinutes={480}
+        remainingEffortMinutes={120}
         formatters={formatters}
         now={timeTrackingFixtureNow}
         onCreateEntry={noop}
         onDiscardTimer={noop}
         onRetry={() => undefined}
-        onSaveEstimate={noop}
         onStartTimer={noop}
         onStopTimer={noop}
         onSubmitEntry={noop}
@@ -375,7 +370,8 @@ describe('time tracking views', () => {
         workItemId="onboarding"
       />,
     )
-    expect(managerHtml).toContain(`>${t('timeTracking.estimate.edit')}<`)
+    expect(recordedHtml).toContain('2:00')
+    expect(recordedHtml).not.toContain('Over')
   })
 
   test('a timer on another Work Item blocks starting a second one', () => {
@@ -383,13 +379,11 @@ describe('time tracking views', () => {
       <WorkItemTimePanel
         actualMinutes={0}
         entries={[]}
-        estimate={null}
         formatters={formatters}
         now={timeTrackingFixtureNow}
         onCreateEntry={noop}
         onDiscardTimer={noop}
         onRetry={() => undefined}
-        onSaveEstimate={noop}
         onStartTimer={noop}
         onStopTimer={noop}
         onSubmitEntry={noop}
@@ -408,13 +402,11 @@ describe('time tracking views', () => {
       <WorkItemTimePanel
         actualMinutes={0}
         entries={[]}
-        estimate={null}
         formatters={formatters}
         now={timeTrackingFixtureNow}
         onCreateEntry={noop}
         onDiscardTimer={noop}
         onRetry={() => undefined}
-        onSaveEstimate={noop}
         onStartTimer={noop}
         onStopTimer={noop}
         onSubmitEntry={noop}
@@ -605,13 +597,11 @@ describe('time tracking views', () => {
     expect(render(true)).not.toContain(t('timeTracking.timesheet.noWritableItems'))
   })
 
-  test('shows a partial own-entry list and hides estimate controls until the estimate loads', () => {
-    const render = (props: { estimate?: typeof timeTrackingFixtureEstimate | null; isPartial?: boolean; hasLoadError?: boolean }) => renderToStaticMarkup(
+  test('shows a partial own-entry list and an empty list only after a complete read', () => {
+    const render = (props: { isPartial?: boolean; hasLoadError?: boolean }) => renderToStaticMarkup(
       <WorkItemTimePanel
         actualMinutes={540}
-        canEditEstimate
         entries={[]}
-        estimate={props.estimate}
         formatters={formatters}
         hasLoadError={props.hasLoadError ?? false}
         isPartial={props.isPartial ?? false}
@@ -619,7 +609,6 @@ describe('time tracking views', () => {
         onCreateEntry={noop}
         onDiscardTimer={noop}
         onRetry={() => undefined}
-        onSaveEstimate={noop}
         onStartTimer={noop}
         onStopTimer={noop}
         onSubmitEntry={noop}
@@ -633,11 +622,8 @@ describe('time tracking views', () => {
     const loading = render({ isPartial: true })
     expect(loading).toContain(t('timeTracking.panel.partial'))
     expect(loading).not.toContain(t('timeTracking.panel.empty'))
-    expect(render({ estimate: null })).toContain(t('timeTracking.panel.empty'))
-    expect(loading).not.toContain(t('timeTracking.estimate.add'))
-    expect(loading).not.toContain(t('timeTracking.estimate.edit'))
-    expect(render({ estimate: timeTrackingFixtureEstimate })).toContain(t('timeTracking.estimate.edit'))
-    const failed = render({ estimate: timeTrackingFixtureEstimate, hasLoadError: true })
+    expect(render({})).toContain(t('timeTracking.panel.empty'))
+    const failed = render({ hasLoadError: true })
     expect(failed).not.toContain(t('timeTracking.panel.empty'))
   })
 

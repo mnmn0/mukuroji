@@ -188,6 +188,7 @@ export function ReportsPage() {
       builder: false,
       filter: selectedReport?.filter ?? initialFilter,
       forecastBaseline: selectedReport?.forecastBaseline,
+      forecastWeighting: selectedReport?.forecastWeighting,
       reportId: selectedReport?.id,
       snapshotId: undefined,
       timezone: selectedReport?.timeZone ?? initialTimeZone,
@@ -198,6 +199,7 @@ export function ReportsPage() {
       parsedRouteState,
       selectedReport?.filter,
       selectedReport?.forecastBaseline,
+      selectedReport?.forecastWeighting,
       selectedReport?.id,
       selectedReport?.timeZone,
     ],
@@ -250,6 +252,9 @@ export function ReportsPage() {
   const displayedForecastBaseline = selectedSnapshotRecord
     ? selectedSnapshotRecord.query.forecastBaseline
     : routeState.forecastBaseline
+  const displayedForecastWeighting = selectedSnapshotRecord
+    ? selectedSnapshotRecord.query.forecastWeighting
+    : routeState.forecastWeighting
   const displayedTimeZone = selectedSnapshotRecord?.query.timeZone ??
     routeState.timezone
   const displayedWidgets = selectedSnapshotRecord?.query.widgets ?? widgets
@@ -369,6 +374,7 @@ export function ReportsPage() {
       builder: false,
       filter: report.filter,
       forecastBaseline: report.forecastBaseline,
+      forecastWeighting: report.forecastWeighting,
       reportId: report.id,
       snapshotId: undefined,
       timezone: report.timeZone,
@@ -397,6 +403,7 @@ export function ReportsPage() {
       builder: false,
       filter: initialFilter,
       forecastBaseline: undefined,
+      forecastWeighting: undefined,
       reportId: undefined,
       snapshotId: undefined,
       timezone: initialTimeZone,
@@ -446,6 +453,9 @@ export function ReportsPage() {
       forecastBaseline: selectedSnapshotRecord
         ? selectedSnapshotRecord.query.forecastBaseline
         : routeState.forecastBaseline,
+      forecastWeighting: selectedSnapshotRecord
+        ? selectedSnapshotRecord.query.forecastWeighting
+        : routeState.forecastWeighting,
       timezone: selectedSnapshotRecord?.query.timeZone ?? routeState.timezone,
       ...patch,
       snapshotId: undefined,
@@ -485,6 +495,7 @@ export function ReportsPage() {
             expectedRevision: current.revision,
             filter: input.filter,
             forecastBaseline: input.forecastBaseline ?? null,
+            forecastWeighting: input.forecastWeighting ?? null,
             name: input.name,
             schedule: input.schedule ?? null,
             teamId: input.teamId ?? null,
@@ -512,6 +523,7 @@ export function ReportsPage() {
       builder: false,
       filter: saved.filter,
       forecastBaseline: saved.forecastBaseline,
+      forecastWeighting: saved.forecastWeighting,
       reportId: saved.id,
       snapshotId: undefined,
       timezone: saved.timeZone,
@@ -548,6 +560,7 @@ export function ReportsPage() {
         builder: false,
         filter: nextReport.filter,
         forecastBaseline: nextReport.forecastBaseline,
+        forecastWeighting: nextReport.forecastWeighting,
         reportId: nextReport.id,
         snapshotId: undefined,
         timezone: nextReport.timeZone,
@@ -558,6 +571,7 @@ export function ReportsPage() {
         builder: false,
         filter: initialFilter,
         forecastBaseline: undefined,
+        forecastWeighting: undefined,
         timezone: initialTimeZone,
       })
     }
@@ -759,6 +773,7 @@ export function ReportsPage() {
           evidenceMetric={evidenceInput?.metric}
           filter={displayedFilter}
           forecastBaseline={displayedForecastBaseline}
+          {...(displayedForecastWeighting ? { forecastWeighting: displayedForecastWeighting } : {})}
           isEvidenceLoading={isEvidenceLoading}
           isLoading={isLoading}
           locale={locale}
@@ -792,6 +807,7 @@ export function ReportsPage() {
               builder: true,
               filter: initialFilter,
               forecastBaseline: undefined,
+              forecastWeighting: undefined,
               reportId: undefined,
               timezone: initialTimeZone,
             }, [], 'ad-hoc')
@@ -803,6 +819,8 @@ export function ReportsPage() {
             refreshQuery({ filter })}
           onForecastBaselineChange={(forecastBaseline) =>
             refreshQuery({ forecastBaseline })}
+          onForecastWeightingChange={(forecastWeighting) =>
+            refreshQuery({ forecastWeighting })}
           onLoadMoreEvidence={loadMoreEvidence}
           onLoadMoreSnapshots={() => {
             if (!hasMoreSnapshots || isLoadingMoreSnapshots) return
@@ -836,6 +854,7 @@ export function ReportsPage() {
                 builder: false,
                 filter: report.filter,
                 forecastBaseline: report.forecastBaseline,
+                forecastWeighting: report.forecastWeighting,
                 reportId: report.id,
                 snapshotId: undefined,
                 timezone: report.timeZone,
@@ -848,6 +867,7 @@ export function ReportsPage() {
               builder: false,
               filter: initialFilter,
               forecastBaseline: undefined,
+              forecastWeighting: undefined,
               reportId: undefined,
               timezone: initialTimeZone,
             }, createDefaultAnalyticsWidgets(locale), 'ad-hoc')
@@ -862,6 +882,7 @@ export function ReportsPage() {
               builder: false,
               filter: initialFilter,
               forecastBaseline: undefined,
+              forecastWeighting: undefined,
               reportId: undefined,
               timezone: initialTimeZone,
             }, createDefaultAnalyticsWidgets(locale), 'ad-hoc')

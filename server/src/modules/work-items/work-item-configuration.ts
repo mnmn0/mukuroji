@@ -15,6 +15,8 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORK_ITEM_PROGRESS_MODE,
+  isWorkItemProgressMode,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
   WORK_ITEM_RELATION_ID_LIMIT,
@@ -563,6 +565,10 @@ export function validateWorkItemConfiguration(
   const jobRoles = value.jobRoles === undefined
     ? undefined
     : readJobRoleDefinitions(value.jobRoles)
+  if (value.progressMode !== undefined && !isWorkItemProgressMode(value.progressMode)) {
+    throw invalidConfiguration('Progress mode must be status-category, remaining-effort, or manual.')
+  }
+  const progressMode = value.progressMode
 
   return {
     scopeType,
@@ -574,6 +580,7 @@ export function validateWorkItemConfiguration(
     customFields,
     ...(workItemTypes === undefined ? {} : { workItemTypes }),
     ...(jobRoles === undefined ? {} : { jobRoles }),
+    ...(progressMode === undefined ? {} : { progressMode }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
@@ -2417,6 +2424,8 @@ function createScopedDefaultConfiguration(
 function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfiguration) {
   return {
     revision: configuration.revision,
+    // The calculation policy changes every displayed progress percentage, so its value is audited.
+    progressMode: configuration.progressMode ?? DEFAULT_WORK_ITEM_PROGRESS_MODE,
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),

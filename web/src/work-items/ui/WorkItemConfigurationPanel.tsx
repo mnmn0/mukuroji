@@ -35,6 +35,7 @@ import {
 } from '../model/workItemConfigurationEditor'
 import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 import { JobRolesConfigurationSection } from './JobRolesConfigurationSection'
+import { ProgressModeConfigurationSection } from './ProgressModeConfigurationSection'
 
 /**
  * Configuration panel の scope selector に表示する選択肢です。
@@ -261,6 +262,11 @@ function WorkItemConfigurationPanelContent({
               locale={locale}
               onChange={setDraft}
               savedJobRoleIds={savedJobRoleIds}
+            />
+            <ProgressModeConfigurationSection
+              configuration={draft}
+              locale={locale}
+              onChange={setDraft}
             />
             <WorkItemTypesConfigurationSection
               configuration={draft}

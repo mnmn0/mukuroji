@@ -2945,6 +2945,15 @@
             "minimum": 1,
             "type": "integer"
           },
+          "plannedEffortMinutes": {
+            "description": "Replaces only the estimate (`schedule.plannedEffortMinutes`) in minutes; null clears it. The server writes it into the stored schedule, so a retry with the same body replays even if the dates changed. Requires the latest revision and cannot be combined with `schedule`.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "priority": {
             "enum": [
               "high",
@@ -2952,6 +2961,24 @@
               "low"
             ],
             "type": "string"
+          },
+          "progressPercent": {
+            "description": "Manually recorded progress percentage; null clears it. Teams choose whether progress uses it with their Work Item configuration progressMode. Read the current value from `GET /api/v1/work-items/{workItemId}/effort`.",
+            "maximum": 100,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remainingEffortMinutes": {
+            "description": "Remaining effort in minutes; null clears it. Read the current value from `GET /api/v1/work-items/{workItemId}/effort`.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "schedule": {
             "$ref": "#/components/schemas/WorkItemSchedule"
@@ -3437,6 +3464,51 @@
         "required": [
           "id",
           "satisfied"
+        ],
+        "type": "object"
+      },
+      "WorkItemEffort": {
+        "description": "Estimate, remaining effort, and recorded progress of one Work Item. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "plannedEffortMinutes": {
+            "description": "Canonical estimate in minutes, the same value as `schedule.plannedEffortMinutes`; absent when not set.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "progressPercent": {
+            "description": "Manually recorded progress percentage; absent when not recorded. Teams choose whether progress uses it with their Work Item configuration progressMode.",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remainingEffortMinutes": {
+            "description": "Recorded remaining effort in minutes; absent when not recorded.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "description": "Work Item revision the values were read at; send it as `expectedRevision` when changing them.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "revision"
         ],
         "type": "object"
       },
@@ -10188,6 +10260,99 @@
           }
         ],
         "summary": "Add an idempotent progress note to the canonical discussion",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/effort": {
+      "get": {
+        "operationId": "getPublicWorkItemEffort",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemEffort"
+                }
+              }
+            },
+            "description": "Effort and progress",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the estimate, remaining effort, and progress of a Work Item",
         "tags": [
           "Work Items"
         ]
