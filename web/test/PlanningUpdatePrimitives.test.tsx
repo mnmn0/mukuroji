@@ -240,5 +240,8 @@ describe('Planning update evidence composer', () => {
     expect(extractPlanningUpdateCommentMentions(
       Array.from({ length: 25 }, (_, index) => `@m${String(index).padStart(2, '0')}@example.com`).join(' '),
     )).toHaveLength(20)
+    expect(extractPlanningUpdateCommentMentions(
+      `@${'a'.repeat(321)}@example.com and @dev@example.com`,
+    )).toEqual(['dev@example.com'])
   })
 })

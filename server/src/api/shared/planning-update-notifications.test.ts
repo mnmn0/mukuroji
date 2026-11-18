@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { PLANNING_UPDATE_CONTENT_VERSION } from '@mukuroji/contracts'
 import type { PlanningUpdate, PlanningUpdateComment } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../../modules/audit/audit'
 import { isPlanningHealthDegraded } from '../../modules/planning'
@@ -9,21 +10,43 @@ import {
   withPlanningAuditOutbox,
 } from './planning-update-notifications'
 
-/** Creates the minimal committed update fields read by the audit builders. */
+/** Creates a complete committed update; tests override only the fields they exercise. */
 function createUpdate(overrides: Partial<PlanningUpdate> = {}): PlanningUpdate {
-  const update = {
+  const progressSnapshot = { percent: 40, linkedWorkItemCount: 5 }
+  const update: PlanningUpdate = {
     id: 'update-1',
     target: { type: 'project', teamId: 'core', projectId: 'platform' },
     version: 3,
+    contentVersion: PLANNING_UPDATE_CONTENT_VERSION,
+    origin: 'manual',
     health: 'off-track',
+    risk: 'high',
     summary: 'Vendor delay pushes the launch.\nNeed a decision.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    progressSnapshot,
+    contextSnapshot: createContextSnapshot({ teamId: 'core', projectId: 'platform' }),
+    changes: [],
+    evidence: [],
     authorMemberKey: 'owner@example.com',
+    coveredDueAt: '2026-07-16T00:00:00.000Z',
     createdAt: '2026-07-16T09:00:00.000Z',
-    contextSnapshot: { scope: { teamId: 'core', projectId: 'platform' } },
-    ...overrides,
   }
-  // The builders read only the fields above; the rest of the snapshot is irrelevant here.
-  return update as unknown as PlanningUpdate
+  return { ...update, ...overrides }
+}
+
+/** Creates a complete context snapshot for one target scope. */
+function createContextSnapshot(scope: PlanningUpdate['contextSnapshot']['scope']): PlanningUpdate['contextSnapshot'] {
+  return {
+    health: 'off-track',
+    risk: 'high',
+    progress: { percent: 40, linkedWorkItemCount: 5 },
+    scope,
+    milestones: [],
+    dependencies: [],
+  }
 }
 
 /** Creates an audit context for transaction tests. */
@@ -86,7 +109,7 @@ describe('Planning update notifications', () => {
       update: createUpdate({
         health: 'on-track',
         target: { type: 'initiative', entityId: 'launch' },
-        contextSnapshot: { scope: {} } as PlanningUpdate['contextSnapshot'],
+        contextSnapshot: createContextSnapshot({}),
       }),
       notification: {
         previousHealth: 'on-track',
@@ -156,6 +179,10 @@ describe('Planning update notifications', () => {
 
   test('adds the audit write after a receipt or uses it alone without one', async () => {
     const previous = process.env.AUDIT_EVENTS_TABLE_NAME
+    // A local DynamoDB endpoint makes the audit table name default, so isolate it for the no-table case.
+    const endpointKeys = ['DYNAMODB_ENDPOINT', 'AWS_ENDPOINT_URL_DYNAMODB', 'AWS_ENDPOINT_URL']
+    const previousEndpoints = endpointKeys.map((key): [string, string | undefined] => [key, process.env[key]])
+    for (const key of endpointKeys) delete process.env[key]
     process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEventsTable'
     try {
       const result = {
@@ -199,6 +226,10 @@ describe('Planning update notifications', () => {
     } finally {
       if (previous === undefined) delete process.env.AUDIT_EVENTS_TABLE_NAME
       else process.env.AUDIT_EVENTS_TABLE_NAME = previous
+      for (const [key, value] of previousEndpoints) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
     }
   })
 })

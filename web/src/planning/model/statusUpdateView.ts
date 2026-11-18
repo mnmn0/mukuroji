@@ -220,6 +220,8 @@ export function readPlanningEvidenceHttpsUrl(
 
 /** Maximum number of members one update comment may mention. */
 const maxPlanningUpdateCommentMentions = 20
+/** Longest member key the server accepts as a mention. */
+const maxPlanningUpdateCommentMentionLength = 320
 /** `@member@example.com` token at the start of the body or after whitespace. */
 const planningUpdateCommentMentionPattern = /(?:^|\s)@([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/giu
 
@@ -227,13 +229,14 @@ const planningUpdateCommentMentionPattern = /(?:^|\s)@([a-z0-9._%+-]+@[a-z0-9.-]
  * Extracts the members mentioned as `@member@example.com` in an update comment.
  *
  * @param bodyMarkdown - Comment body typed by the member.
- * @returns Sorted, deduplicated, lower-case member keys, at most 20.
+ * @returns Sorted, deduplicated, lower-case member keys of at most 320 characters, at most 20 keys.
  */
 export function extractPlanningUpdateCommentMentions(bodyMarkdown: string): string[] {
   const keys = new Set<string>()
   for (const match of bodyMarkdown.matchAll(planningUpdateCommentMentionPattern)) {
     const key = match[1]?.replace(/\.+$/u, '').toLowerCase()
-    if (key) keys.add(key)
+    // An over-long token stays in the body as text so the comment can still be sent.
+    if (key && key.length <= maxPlanningUpdateCommentMentionLength) keys.add(key)
   }
   return [...keys].sort().slice(0, maxPlanningUpdateCommentMentions)
 }
