@@ -31,6 +31,9 @@ import {
   type WorkItemDependencySummary,
 } from '../../work-items/model/workItemDependencies'
 import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
+import type { WorkItemOutlineRow } from '../../work-items/model/workItemHierarchy'
+import { WorkItemHierarchyRollupSummary } from '../../work-items/ui/WorkItemHierarchyRollupSummary'
+import { ChevronIcon } from '../../shared/ui/icons'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
@@ -97,6 +100,17 @@ type TaskTableTranslator = (key: MessageKey) => string
 /** Width reserved for row-level create and action-menu controls. */
 const taskTableActionColumnWidth = 96
 
+/** Widest indentation step count, so deep outlines keep room for the title. */
+const maxTaskOutlineIndentLevels = 8
+
+/** Hierarchy outline shown by the Project task table instead of groups. */
+export type TaskTableOutline = {
+  /** Visible rows in outline order. */
+  rows: readonly WorkItemOutlineRow<CanonicalWorkItem>[]
+  /** Shows or hides the rows nested under a Work Item. */
+  onToggleCollapsed: (task: CanonicalWorkItem) => void
+}
+
 /** Props for the independent project task table view. */
 export type TaskTableViewProps = {
   /** Active Project members available to inline assignee editors. */
@@ -127,6 +141,8 @@ export type TaskTableViewProps = {
   personLabels: Readonly<Record<string, string>>
   /** Visible fields, density, wrapping, and grouping selected by the effective view. */
   presentation?: TaskViewPresentationSettings
+  /** Hierarchy outline; when present, rows nest by hierarchy and grouping is not applied. */
+  outline?: TaskTableOutline
   /** Project identifier used to reset bulk-operation toolbar state. */
   projectId: string
   /** Bulk-operation snapshots selected across visible and hidden rows. */
@@ -208,6 +224,10 @@ type TaskTableRowProps = {
   personLabels: Readonly<Record<string, string>>
   /** Effective density and text-wrapping settings. */
   presentation?: TaskViewPresentationSettings
+  /** Placement of the row in the hierarchy outline; absent outside an outline. */
+  outlineRow?: WorkItemOutlineRow<CanonicalWorkItem>
+  /** Shows or hides the rows nested under this row's Work Item. */
+  onToggleOutlineCollapsed?: (task: CanonicalWorkItem) => void
   /** Project receiving contextual creates from this row. */
   projectId: string
   /** Zero-based position after filtering and sorting. */
@@ -256,6 +276,7 @@ export function TaskTableView({
   personOptions = [],
   personLabels,
   presentation,
+  outline,
   projectId,
   selectedBulkItems,
   selectedDetailTaskKey,
@@ -305,7 +326,7 @@ export function TaskTableView({
       taskTableActionColumnWidth,
     ),
   )
-  const groupedTasks = presentation?.groupBy
+  const groupedTasks = presentation?.groupBy && !outline
     ? groupTaskViewItems(
         tasks,
         presentation.groupBy,
@@ -490,7 +511,12 @@ export function TaskTableView({
       : undefined,
   }))
   // Thousands of rows are rendered in steps; groups keep counting every Work Item.
-  const displayOrderedTasks = groupedRows
+  const outlineRowByKey = outline
+    ? new Map(outline.rows.map((row) => [createTaskKey(row.item), row]))
+    : undefined
+  const displayOrderedTasks = outline
+    ? outline.rows.map((row) => row.item)
+    : groupedRows
     ? groupedRows.flatMap(({ group, subgroups }) =>
         subgroups ? subgroups.flatMap((subgroup) => subgroup.items) : group.items
       )
@@ -528,6 +554,12 @@ export function TaskTableView({
       personOptions={personOptions}
       personLabels={personLabels}
       presentation={presentation}
+      {...(outlineRowByKey?.has(createTaskKey(task)) && outline
+        ? {
+            outlineRow: outlineRowByKey.get(createTaskKey(task)),
+            onToggleOutlineCollapsed: outline.onToggleCollapsed,
+          }
+        : {})}
       projectId={projectId}
       rowIndex={rowIndexByTaskKey.get(createTaskKey(task)) ?? -1}
       onTaskSelectionChange={onTaskSelectionChange}
@@ -775,6 +807,8 @@ function TaskTableRow({
   personOptions,
   personLabels,
   presentation,
+  outlineRow,
+  onToggleOutlineCollapsed,
   projectId,
   rowIndex,
   selected,
@@ -877,7 +911,40 @@ function TaskTableRow({
         switch (field) {
           case 'title': return (
             <td {...columnCellProps} className={titleCellPadding} key={field}>
-              <div className="flex min-w-0 items-center gap-3">
+              <div
+                className="flex min-w-0 items-center gap-3"
+                style={outlineRow
+                  ? { paddingInlineStart: `${Math.min(outlineRow.depth, maxTaskOutlineIndentLevels) * 1.25}rem` }
+                  : undefined}
+              >
+                {outlineRow ? (
+                  outlineRow.hasChildren ? (
+                    <button
+                      aria-expanded={!outlineRow.collapsed}
+                      aria-label={`${t(outlineRow.collapsed ? 'issues.outline.expand' : 'issues.outline.collapse')}: ${taskTitle}`}
+                      className="-my-1.5 grid h-8 w-6 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tone-2563eb/10 max-[640px]:h-11 max-[640px]:w-11"
+                      data-testid={`task-outline-toggle-${task.id}`}
+                      onClick={() => onToggleOutlineCollapsed?.(task)}
+                      type="button"
+                    >
+                      <ChevronIcon className={`h-4 w-4 fill-none stroke-current stroke-2 transition-transform ${outlineRow.collapsed ? '-rotate-90' : ''}`} />
+                    </button>
+                  ) : <span aria-hidden="true" className="w-6 flex-none max-[640px]:w-11" />
+                ) : null}
+                {outlineRow ? (
+                  <span className="sr-only">
+                    {`${t('issues.outline.level').replace('{level}', String(outlineRow.depth + 1))} `}
+                  </span>
+                ) : null}
+                {outlineRow?.node ? (
+                  <span
+                    className="flex-none font-mono text-xs font-semibold tabular-nums text-[var(--workbench-muted)]"
+                    data-testid={`task-row-wbs-${task.id}`}
+                  >
+                    <span className="sr-only">{`${t('issues.outline.wbs')} `}</span>
+                    {outlineRow.node.wbsNumber}
+                  </span>
+                ) : null}
                 <input
                   aria-label={taskTitle}
                   checked={selected}
@@ -945,6 +1012,22 @@ function TaskTableRow({
                 ) : null}
                 <WorkItemDependencyChips summary={dependencySummary} t={t} />
               </div>
+              {outlineRow?.node?.rollup ? (
+                <div
+                  className="pt-1"
+                  style={{ paddingInlineStart: `${Math.min(outlineRow.depth, maxTaskOutlineIndentLevels) * 1.25 + 2.25}rem` }}
+                >
+                  <WorkItemHierarchyRollupSummary
+                    labels={{
+                      summary: t('issues.outline.rollup.summary'),
+                      closed: t('issues.outline.rollup.closed'),
+                      estimate: t('issues.outline.rollup.estimate'),
+                      span: t('issues.outline.rollup.span'),
+                    }}
+                    rollup={outlineRow.node.rollup}
+                  />
+                </div>
+              ) : null}
             </td>
           )
           case 'assignee': return (

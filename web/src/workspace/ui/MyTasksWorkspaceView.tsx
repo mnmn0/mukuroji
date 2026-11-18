@@ -33,6 +33,11 @@ import {
   createWorkspaceTaskTestId,
   createWorkspaceTaskTestToken,
 } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
+import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import type { TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
+
+/** Layouts of the My Tasks view. */
+export type MyTasksViewMode = 'board' | 'gantt'
 
 /**
  * Props for the Workspace personal task board.
@@ -78,6 +83,14 @@ export type MyTasksWorkspaceViewProps = {
   taskViewToolbar?: ReactNode
   /** Team-qualified keys selected through the shared task-view reducer. */
   selectedTaskKeys?: readonly string[]
+  /** Active layout; the board is shown when omitted. */
+  viewMode?: MyTasksViewMode
+  /** Switches the layout; the layout switch is hidden when omitted. */
+  onViewModeChange?: (mode: MyTasksViewMode) => void
+  /** Hierarchy shown as an outline by the Gantt chart. */
+  ganttOutline?: TaskGanttOutline
+  /** Notice about the outline, such as loading or Teams shown without it. */
+  outlineNotice?: ReactNode
   /** Work Items the current user owns or contributes to. */
   tasks: readonly CanonicalWorkItem[]
   /** Workspace directory used to label Team-scoped workflow columns. */
@@ -111,7 +124,20 @@ export function MyTasksWorkspaceView({
   tasks,
   teams,
   onMoveTaskStatus,
+  viewMode = 'board',
+  onViewModeChange,
+  ganttOutline,
+  outlineNotice,
 }: MyTasksWorkspaceViewProps) {
+  const ganttGroupBy = presentation?.groupBy
+  const ganttGroupDirection = presentation?.groupDirection ?? 'asc'
+  const ganttGroup = useMemo<TaskGanttGrouping | undefined>(() => ganttGroupBy
+    ? {
+        direction: ganttGroupDirection,
+        resolve: (task) => resolveMyTaskGroupValue(task, ganttGroupBy, configurationsByTeam, teams, t),
+      }
+    : undefined, [configurationsByTeam, ganttGroupBy, ganttGroupDirection, t, teams])
+  const ganttTasks = useMemo(() => [...tasks], [tasks])
   const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string | undefined>()
   const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
@@ -274,9 +300,51 @@ export function MyTasksWorkspaceView({
     }
   }
 
+  const viewModeSwitch = onViewModeChange ? (
+    <div
+      aria-label={t('workspace.myTasks.layout')}
+      className="inline-flex h-9 w-fit overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface"
+      role="group"
+    >
+      {(['board', 'gantt'] as const).map((mode) => (
+        <button
+          aria-pressed={viewMode === mode}
+          className={`px-3.5 text-sm font-semibold transition ${
+            viewMode === mode ? 'bg-[var(--workbench-primary)] text-white' : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
+          }`}
+          data-testid={`my-tasks-view-${mode}`}
+          key={mode}
+          onClick={() => onViewModeChange(mode)}
+          type="button"
+        >
+          {t(`issues.view.${mode}`)}
+        </button>
+      ))}
+    </div>
+  ) : null
+
+  if (viewMode === 'gantt') {
+    return (
+      <div className="grid gap-4">
+        {taskViewToolbar}
+        {viewModeSwitch}
+        {outlineNotice}
+        <TaskGanttView
+          configurationsByTeam={configurationsByTeam}
+          group={ganttGroup}
+          onSelectTask={onOpenTask}
+          outline={ganttOutline}
+          t={t}
+          tasks={ganttTasks}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="grid gap-4">
       {taskViewToolbar}
+      {viewModeSwitch}
       {taskMoveErrorMessage ? (
         <p
           className="workbench-badge-danger rounded-lg px-4 py-3 text-sm"

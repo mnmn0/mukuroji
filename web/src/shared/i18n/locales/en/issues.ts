@@ -11,6 +11,7 @@ export const issuesMessages = {
   'issues.action.new': 'New issue',
   'issues.view.table': 'Table',
   'issues.view.board': 'Board',
+  'issues.view.gantt': 'Gantt',
   'issues.filter.status': 'Issue status',
   'issues.column.title': 'Issue',
   'issues.column.project': 'Execution project',

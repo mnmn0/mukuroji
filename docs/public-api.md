@@ -254,4 +254,4 @@ Worker retry を使い切った job は `failed` として source を削除し�
 
 Worker が retry 上限に達した message は原因調査用 DLQ に保持する。DLQ の redrive で terminal job を再開せず、原因を修正した後に新しい idempotency key と source で import を作成し直す。
 
-Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。
+Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。Web の export file は、各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）から `wbsNumber` を足す（CSV では `teamId` の次の列、JSON では値があるときだけ）。階層を読めない Team と archive 済みの Work Item では空になる。API の export page 自体は `wbsNumber` を持たない。

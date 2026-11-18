@@ -294,6 +294,14 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 
 Web の Team Work Item テーブルは、表示設定の「階層（WBS）で表示する」をオンにすると（グループ化していないとき）この木を outline として表示する。行は階層の順に並び、WBS 番号・字下げ・折りたたみ（ブラウザごとに Team 単位で記憶）・子の集計を示す。フィルタで親が隠れた行は、表示されている一番近い祖先の下に入る。タイトルにフォーカスがある行（または J/K で選んだ行）で Alt+Shift+→ / ← を押すと 1 つ下 / 上の階層へ、Alt+Shift+↑ / ↓ で兄弟の中で並べ替える。折りたたまれた行は J/K と一括選択の対象から外れる。
 
+同じ表示設定は、ほかの画面の outline とガントにも効く。複数 Team の Work Item を並べる画面は、表示中の Work Item の Team ごとに階層を読み（`useTeamWorkItemHierarchies`）、Team ごとの木を最初に現れた順に並べる。階層を読めなかった Team（1,000 件超の `413` など）の Work Item は階層なしで並べ、「一部の Team の階層を読み込めませんでした」と再読み込みボタンを出す。
+
+- Project のテーブル: グループ化していないとき、Team 画面と同じく階層の順・WBS 番号・字下げ・折りたたみ・子の集計を示す。階層の移動（Alt+Shift+矢印）は Team 画面だけで行う。折りたたみはブラウザごと・Project 単位で記憶する。
+- ガント（Project・Team・マイタスク）: 行を階層の順に並べ、WBS 番号と字下げを示し、子を持つ行は折りたためる。子孫を持つ行には、計画バーの上に子孫の最早開始〜最遅終了（roll-up の `startDate` / `endDate`）を示すサマリーバーを描く。サマリーバーの日付は読める子孫すべてから作るので、フィルタや表示期間で子が隠れていても変わらない。表示期間を決めないガントは、サマリーバーも入るように期間を広げる。
+- Team とマイタスクのガント: Team 画面の表示形式に「ガント」を、マイタスクに「ボード / ガント」の切り替えを足した。表示設定のグループで「プロジェクト」を選ぶと、複数 Project の Work Item を Project ごとの見出しの下にまとめる（ほかのグループ項目でもまとめられる）。グループの件数には折りたたんで隠れた行も数える。階層の outline はグループの中で作り、親が別のグループにある行はそのグループの最上位に置く。この 2 つのガントは表示専用で、日程の変更は詳細 pane で行う。マイタスクの折りたたみはブラウザごとに記憶する。
+- 検索: Work Item の結果のタイトルの前に WBS 番号を示す。番号は結果に含まれる Team の階層から読み、読めない Team の結果は番号なしで示す。WBS 番号での絞り込みはしない。
+- Export: 開発者設定の Work Item export（CSV / JSON）に `wbsNumber` を入れる。Team ごとに階層を 1 回読み、読めない Team と archive 済みの Work Item は空にする。
+
 ## 運用
 
 開発中の schema は既存 row を自動変換しない。Schema を更新した環境は保持済みの開発データを削除し、現行 application/CDK の seed または API で strict schema v2 row を作り直す。Seed には `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds`、正しい `schedule`、および schedule から導出した `dueDate` が必要である。

@@ -118,6 +118,10 @@ import {
 } from '../../shared/lib/preferences/workItemOutlineCollapse'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
+import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import type { TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
+import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 
 /** Message shown when a hierarchy move cannot be made. */
 const outlineMoveBlockMessageKeys = {
@@ -487,15 +491,16 @@ export function TeamIssueScreen({
   // Set when the person retries the hierarchy from the retry button, which disappears once the
   // read succeeds; focus then moves to the loaded view instead of falling back to the page.
   const outlineRetryFocusPendingRef = useRef(false)
-  const isOutlineRequested = viewMode === 'table' &&
-    (taskViewPresentation?.display.showOutline ?? false) &&
-    !taskViewPresentation?.groupBy
+  // The table nests rows only without grouping; the Gantt chart nests them within each group.
+  const isOutlineRequested = (taskViewPresentation?.display.showOutline ?? false) && (
+    viewMode === 'gantt' || (viewMode === 'table' && !taskViewPresentation?.groupBy)
+  )
   const outlineNodes = isOutlineRequested ? issueOutline?.nodes : undefined
   const outlineRows = useMemo(
-    () => outlineNodes
+    () => outlineNodes && viewMode === 'table'
       ? createWorkItemOutlineRows(visibleIssues, outlineNodes, collapsedOutlineIds)
       : undefined,
-    [collapsedOutlineIds, outlineNodes, visibleIssues],
+    [collapsedOutlineIds, outlineNodes, viewMode, visibleIssues],
   )
   const hasOutlineError = Boolean(isOutlineRequested && issueOutline?.errorMessage)
   useEffect(() => {
@@ -531,6 +536,25 @@ export function TeamIssueScreen({
     setCollapsedOutlineIds(next)
   }, [collapsedOutlineIds, teamId])
 
+  const ganttOutline = useMemo<TaskGanttOutline | undefined>(() => outlineNodes && viewMode === 'gantt'
+    ? {
+        hierarchies: new Map([[teamId, outlineNodes]]),
+        collapsedKeys: new Set([...collapsedOutlineIds].map((id) => createWorkItemOutlineKey(teamId, id))),
+        onToggleCollapsed: (issue) => toggleOutlineCollapsed(issue.id),
+      }
+    : undefined, [collapsedOutlineIds, outlineNodes, teamId, toggleOutlineCollapsed, viewMode])
+  const ganttGroupBy = viewMode === 'gantt' ? taskViewPresentation?.groupBy : undefined
+  const ganttGroupDirection = taskViewPresentation?.groupDirection ?? 'asc'
+  const ganttGroup = useMemo<TaskGanttGrouping | undefined>(() => ganttGroupBy
+    ? {
+        direction: ganttGroupDirection,
+        resolve: (issue) => resolveTeamIssueGroupValue(issue, ganttGroupBy, configuration, activeTeam, t),
+      }
+    : undefined, [activeTeam, configuration, ganttGroupBy, ganttGroupDirection, t])
+  const ganttConfigurationsByTeam = useMemo(
+    () => resolvedConfiguration ? { [teamId]: resolvedConfiguration } : {},
+    [resolvedConfiguration, teamId],
+  )
   const saveOutlineMove = issueOutline?.onMove
   /** Plans and saves one indent, outdent, or sibling move, then reports the outcome. */
   const moveIssueInOutline = useCallback((issue: TeamIssue, direction: WorkItemHierarchyMoveDirection) => {
@@ -1570,6 +1594,17 @@ export function TeamIssueScreen({
                       selectedIssueId={selectedIssueId}
                       t={t}
                       workspaceMembers={workspaceMembers}
+                    />
+                  ) : viewMode === 'gantt' ? (
+                    <TaskGanttView
+                      configuration={configuration}
+                      configurationsByTeam={ganttConfigurationsByTeam}
+                      group={ganttGroup}
+                      onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
+                      outline={ganttOutline}
+                      planningSnapshot={planningSnapshot}
+                      t={t}
+                      tasks={visibleIssues}
                     />
                   ) : (
                     <IssueBoard

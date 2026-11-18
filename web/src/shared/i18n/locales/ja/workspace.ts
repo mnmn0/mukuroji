@@ -162,6 +162,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.fieldError': '許可された範囲の値を入力してください。',
   'workspace.myTasks.eyebrow': '自分の担当',
   'workspace.myTasks.title': 'マイタスク',
+  'workspace.myTasks.layout': 'マイタスクの表示形式',
   'workspace.myTasks.description':
     '自分が次に進めるタスク、レビュー待ち、完了済みの作業をひとつの流れで扱えます。',
   'workspace.myTasks.involvement.contributor': '参加',

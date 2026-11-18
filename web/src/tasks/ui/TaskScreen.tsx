@@ -205,6 +205,7 @@ import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
+import type { TaskGanttOutline } from './TaskGanttView'
 import { CustomerImpactPanel } from '../../customers/ui'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
@@ -373,6 +374,8 @@ export type TaskScreenProps = {
   taskViewDefinition?: TaskViewDefinition
   /** Presentation settings rendered by table and board layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Hierarchy shown as an outline by the table and the Gantt chart. */
+  outline?: TaskGanttOutline
   /** Optional route-controlled task view state. */
   viewState?: TaskScreenViewState
   /** Persists one complete next route-controlled task view state. */
@@ -660,6 +663,7 @@ export function TaskScreen({
   taskViewToolbar,
   taskViewDefinition,
   taskViewPresentation,
+  outline,
   planningErrorMessage,
   planningSnapshot,
   onLoadMoreProjectUsers,
@@ -3781,6 +3785,7 @@ export function TaskScreen({
                 taskErrorMessage={taskErrorMessage}
                 taskViewToolbar={taskViewToolbar}
                 taskViewPresentation={taskViewPresentation}
+                outline={outline}
                 tasks={visibleTasks}
                 visibleBulkItems={visibleBulkItems}
                 workspaceMembers={workspaceMembers}

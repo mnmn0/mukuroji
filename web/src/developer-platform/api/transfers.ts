@@ -11,6 +11,11 @@ import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
+import { getTeamWorkItemHierarchies } from '../../work-items/api/hierarchy'
+import {
+  createWorkItemOutlineKey,
+  createWorkItemWbsNumberIndex,
+} from '../../work-items/model/workItemHierarchy'
 
 /**
  * Work Item export response と download metadata です。
@@ -114,7 +119,31 @@ export async function exportDeveloperWorkItems(
     cursor = page.nextCursor
   } while (cursor)
 
-  return createDeveloperExportFile(format, workItems)
+  return createDeveloperExportFile(
+    format,
+    workItems,
+    await readDeveloperExportWbsNumbers(accessToken, workItems),
+  )
+}
+
+/**
+ * Reads the WBS number of each exported Work Item from its Team's hierarchy.
+ *
+ * Each Team is read once. A Team whose hierarchy cannot be read, such as one too large for a
+ * single tree, leaves its Work Items without a number instead of failing the export.
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param workItems - Exported Work Items.
+ * @returns WBS numbers by `createWorkItemOutlineKey` key.
+ */
+async function readDeveloperExportWbsNumbers(
+  accessToken: string,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<ReadonlyMap<string, string>> {
+  const teamIds = [...new Set(workItems.map((workItem) => workItem.teamId))]
+  if (teamIds.length === 0) return new Map()
+  const hierarchies = await getTeamWorkItemHierarchies(teamIds, accessToken)
+  return createWorkItemWbsNumberIndex(hierarchies.nodesByTeam)
 }
 
 async function requestDeveloperExportPage(
@@ -148,12 +177,16 @@ function waitForDeveloperExportRetry(seconds: number) {
 function createDeveloperExportFile(
   format: DeveloperExportFormat,
   workItems: readonly CanonicalWorkItem[],
+  wbsNumbers: ReadonlyMap<string, string>,
 ): DeveloperExportFile {
   const suffix = new Date().toISOString().slice(0, 10)
+  /** Reads the WBS number of one exported Work Item. */
+  const readWbsNumber = (workItem: CanonicalWorkItem) =>
+    wbsNumbers.get(createWorkItemOutlineKey(workItem.teamId, workItem.id))
   if (format === 'json') {
     const body = `${JSON.stringify({
       apiVersion: '2026-07-01',
-      workItems: workItems.map(toExportWorkItem),
+      workItems: workItems.map((workItem) => toExportWorkItem(workItem, readWbsNumber(workItem))),
     }, null, 2)}\n`
 
     return {
@@ -172,6 +205,7 @@ function createDeveloperExportFile(
   const headers = [
     'id',
     'teamId',
+    'wbsNumber',
     'title',
     'description',
     'assignedProjectId',
@@ -196,7 +230,9 @@ function createDeveloperExportFile(
           ? workItem.customFieldValues[
               header.slice('customFieldValues.'.length)
             ]
-          : readRecord(workItem)[header]
+          : header === 'wbsNumber'
+            ? readWbsNumber(workItem)
+            : readRecord(workItem)[header]
 
         return escapeDeveloperExportCsvValue(
           serializeDeveloperExportCell(value),
@@ -214,10 +250,11 @@ function createDeveloperExportFile(
   }
 }
 
-function toExportWorkItem(workItem: CanonicalWorkItem) {
+function toExportWorkItem(workItem: CanonicalWorkItem, wbsNumber: string | undefined) {
   return {
     id: workItem.id,
     teamId: workItem.teamId,
+    ...(wbsNumber ? { wbsNumber } : {}),
     title: workItem.title,
     ...(workItem.description
       ? { description: workItem.description }

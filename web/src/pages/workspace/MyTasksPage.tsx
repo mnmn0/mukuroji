@@ -93,7 +93,12 @@ import {
   WorkspaceConfigurationLoadNotice,
   WorkspaceTaskLoadNotice,
 } from '../../workspace/ui/WorkspaceDataNotices'
-import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
+import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
+import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
+import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
+import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
+import type { TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -218,7 +223,7 @@ export function MyTasksPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
-      layoutModes: ['board'],
+      layoutModes: ['board', 'gantt'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -251,6 +256,38 @@ export function MyTasksPage() {
       taskViewController.effectiveDefinition,
     ),
     [myTasks, taskViewController.effectiveDefinition],
+  )
+  const myTasksViewMode: MyTasksViewMode =
+    taskViewController.effectiveDefinition.layout.mode === 'gantt' ? 'gantt' : 'board'
+  const isMyTasksOutlineShown = myTasksViewMode === 'gantt' &&
+    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false)
+  const myTasksOutlineTeamIds = useMemo(
+    // Every loaded Team, not only the filtered ones, so changing a filter keeps the cached read.
+    () => isMyTasksOutlineShown ? myTasks.map((task) => task.teamId) : [],
+    [isMyTasksOutlineShown, myTasks],
+  )
+  const {
+    data: myTasksHierarchies,
+    error: myTasksHierarchiesError,
+    isLoading: isMyTasksHierarchiesLoading,
+    isValidating: isMyTasksHierarchiesValidating,
+    mutate: mutateMyTasksHierarchies,
+  } = useTeamWorkItemHierarchies(
+    workspace.accessToken,
+    myTasksOutlineTeamIds,
+    workspace.canLoadWorkspaceData && isMyTasksOutlineShown,
+  )
+  const [collapsedMyTasksOutlineKeys, toggleMyTasksOutlineKey] =
+    useCollapsedWorkItemOutlineKeys('my-tasks')
+  const myTasksGanttOutline = useMemo<TaskGanttOutline | undefined>(
+    () => isMyTasksOutlineShown && myTasksHierarchies
+      ? {
+          hierarchies: myTasksHierarchies.nodesByTeam,
+          collapsedKeys: collapsedMyTasksOutlineKeys,
+          onToggleCollapsed: (task) => toggleMyTasksOutlineKey(createWorkItemOutlineKey(task.teamId, task.id)),
+        }
+      : undefined,
+    [collapsedMyTasksOutlineKeys, isMyTasksOutlineShown, myTasksHierarchies, toggleMyTasksOutlineKey],
   )
   const visibleMyTaskActionTargets = useMemo(
     () => visibleMyTasks.map((task) => ({
@@ -805,7 +842,8 @@ export function MyTasksPage() {
       onUpdate={taskViewController.updateActiveView}
       selectedView={selectedTaskView}
       settings={taskViewPresentation}
-      supportsEmptyGroups
+      supportsEmptyGroups={myTasksViewMode === 'board'}
+      supportsOutline={myTasksViewMode === 'gantt'}
       t={t}
       teams={taskViewTeams}
       views={taskViewOptions}
@@ -818,6 +856,8 @@ export function MyTasksPage() {
         workItems.workItemsError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
+        myTasksHierarchiesError,
+        ...(myTasksHierarchies ? [...myTasksHierarchies.errorsByTeam.values()] : []),
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
@@ -874,6 +914,25 @@ export function MyTasksPage() {
           taskMoveErrorMessage={statusMutation.errorMessage}
           taskViewToolbar={taskViewToolbar}
           presentation={taskViewPresentation}
+          viewMode={myTasksViewMode}
+          onViewModeChange={(mode) => {
+            const definition = taskViewController.effectiveDefinition
+            taskViewController.setEffectiveDefinition({
+              ...definition,
+              layout: { ...definition.layout, mode },
+            })
+          }}
+          ganttOutline={myTasksGanttOutline}
+          outlineNotice={isMyTasksOutlineShown ? (
+            <WorkItemOutlineNotice
+              failedTeamCount={myTasksHierarchies?.errorsByTeam.size ?? (myTasksHierarchiesError ? 1 : 0)}
+              isLoading={isMyTasksHierarchiesLoading}
+              isRetrying={isMyTasksHierarchiesValidating}
+              onRetry={() => void mutateMyTasksHierarchies()}
+              t={t}
+              testId="my-tasks-outline"
+            />
+          ) : undefined}
           tasks={visibleMyTasks}
           teams={workspace.teams}
           contributorTaskKeys={contributorTaskKeys}
