@@ -227,6 +227,18 @@ const onHeldDetailPatch = fn((teamId: string, issueId: string, input: UpdateTeam
     heldDetailPatch.settle = resolve
   })
 })
+/** Saves inline edits and their Undo; the story holds the Undo open per run. */
+const onSavedBeforeHeldUndo = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
+  void input
+  return createStoryUpdatedTask(task)
+})
+/** Records the detail saves {@link UndoPendingHoldsDetailSave} lets through. */
+const onDetailSaveAfterUndo = fn(async (teamId: string, issueId: string, input: UpdateTeamIssueInput) => {
+  void teamId
+  void issueId
+  void input
+  return undefined
+})
 const onDeniedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
@@ -1787,6 +1799,53 @@ export const DetailPatchPendingHoldsUndo: Story = {
     await waitFor(() => expect(onSavedBeforeDetailPatch).toHaveBeenCalledTimes(2))
     const [, undoPatch] = onSavedBeforeDetailPatch.mock.calls[1] ?? []
     expect(undoPatch).toMatchObject({ title: 'ワイヤーフレームを確認する' })
+  },
+}
+
+/** The detail pane of a Work Item waits while its Undo is saving, so the two never race. */
+export const UndoPendingHoldsDetailSave: Story = {
+  args: {
+    onUpdateTask: onSavedBeforeHeldUndo,
+  },
+  render: (args) => (
+    <CanonicalDetailFocusHarness
+      canMutate
+      taskScreenProps={{ ...args, onUpdateIssue: onDetailSaveAfterUndo }}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    onSavedBeforeHeldUndo.mockClear()
+    onDetailSaveAfterUndo.mockClear()
+
+    // A saved edit first, so there is an Undo to run.
+    await userEvent.click(canvas.getByTestId('task-inline-title-wireframe'))
+    const titleInput = canvas.getByTestId('task-inline-title-wireframe-input')
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, '保存したタイトル')
+    await userEvent.tab()
+    await expect(await canvas.findByTestId('task-action-feedback')).toHaveTextContent('変更を保存しました。')
+
+    await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
+    const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
+    await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
+    const detailPane = within(canvas.getByTestId('task-detail-pane'))
+    const save = detailPane.getByRole('button', { name: '変更を保存' })
+    await expect(save).toBeEnabled()
+
+    // This run's Undo stays open until the story finishes it.
+    let finishUndo: (() => void) | undefined
+    onSavedBeforeHeldUndo.mockImplementationOnce((task) => new Promise((resolve) => {
+      finishUndo = () => resolve(createStoryUpdatedTask(task))
+    }))
+    await userEvent.click(within(canvas.getByTestId('task-action-feedback')).getByRole('button', { name: '元に戻す' }))
+    await waitFor(() => expect(onSavedBeforeHeldUndo).toHaveBeenCalledTimes(2))
+    await expect(save).toBeDisabled()
+
+    finishUndo?.()
+    await waitFor(() => expect(save).toBeEnabled())
+    await expect(onDetailSaveAfterUndo).not.toHaveBeenCalled()
   },
 }
 

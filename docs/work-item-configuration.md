@@ -45,6 +45,7 @@ CDK は table を `PAY_PER_REQUEST`、PITR enabled、`Retain` で作成する。
 | `customFields` | yes | Scope に適用する custom field definition の配列。 |
 | `jobRoles` | no | Contributor を計画するジョブロールの配列。最大 100 件。各要素は stable `id`、表示名 `name`、任意の `archived` を持つ。 |
 | `progressMode` | no | Work Item の進捗率の求め方。`status-category`（省略時）、`remaining-effort`、`manual`。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress)。 |
+| `parentCompletionPolicy` | no | 未完了の子がある親を完了にするときの扱い。`warn`（省略時）または `reject`。詳細は [親の完了ポリシー](#親の完了ポリシー)。 |
 | `updatedAt` | no | 永続化済み configuration の最終更新を表す UTC ISO 8601 timestamp。built-in default では省略する。 |
 
 未知の `schemaVersion`、不正 revision、scope key と payload の不一致を黙って読み飛ばさない。API は stable error を返し、管理 mutation と Work Item mutation を停止する。

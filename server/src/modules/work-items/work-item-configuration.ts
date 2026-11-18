@@ -9,6 +9,7 @@ import {
   DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
+  type GetCommandOutput,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -1686,6 +1687,35 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   }
 
   /**
+   * Reads the sibling order rank stored on a Work Item.
+   *
+   * @param workspaceId - Workspace that owns the Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item to read.
+   * @returns The stored rank, or undefined when the Work Item follows its default rank.
+   */
+  private async readStoredHierarchyRank(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<string | undefined> {
+    let response: GetCommandOutput
+    try {
+      response = await this.documentClient.send(new GetCommand({
+        TableName: this.workItemsTableName,
+        Key: { directoryTeamId: `${workspaceId}#team#${teamId}`, issueId: workItemId },
+        ProjectionExpression: '#hierarchyRank',
+        ExpressionAttributeNames: { '#hierarchyRank': 'hierarchyRank' },
+        ConsistentRead: true,
+      }))
+    } catch (error) {
+      throw toPersistenceError(error)
+    }
+    const rank: unknown = response.Item?.hierarchyRank
+    return typeof rank === 'string' ? rank : undefined
+  }
+
+  /**
    * Stores a child's sibling order rank without changing its parent.
    *
    * The write advances the graph revision the caller read, in the same transaction. A parent
@@ -1699,30 +1729,6 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param graph - Relation graph state read before the unchanged parent was observed.
    * @returns The graph revision after the reorder.
    */
-  /**
-   * Reads the sibling order rank stored on a Work Item.
-   *
-   * @param workspaceId - Workspace that owns the Work Item.
-   * @param teamId - Team that owns the Work Item.
-   * @param workItemId - Work Item to read.
-   * @returns The stored rank, or undefined when the Work Item follows its default rank.
-   */
-  private async readStoredHierarchyRank(
-    workspaceId: string,
-    teamId: string,
-    workItemId: string,
-  ): Promise<string | undefined> {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.workItemsTableName,
-      Key: { directoryTeamId: `${workspaceId}#team#${teamId}`, issueId: workItemId },
-      ProjectionExpression: '#hierarchyRank',
-      ExpressionAttributeNames: { '#hierarchyRank': 'hierarchyRank' },
-      ConsistentRead: true,
-    }))
-    const rank: unknown = response.Item?.hierarchyRank
-    return typeof rank === 'string' ? rank : undefined
-  }
-
   private async writeHierarchyRank(
     workspaceId: string,
     teamId: string,

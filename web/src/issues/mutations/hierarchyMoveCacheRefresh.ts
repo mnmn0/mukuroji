@@ -1,5 +1,5 @@
 import { unstable_serialize } from 'swr'
-import type { Arguments, ScopedMutator } from 'swr'
+import type { Arguments, Cache, ScopedMutator } from 'swr'
 
 /**
  * Revalidates one cache entry that a hierarchy move changed.
@@ -53,4 +53,27 @@ export async function refreshMovedHierarchyCache<Data>(
   })
   await mutate(key, read, { revalidate: false })
   if (failed) await mutate(key)
+}
+
+/**
+ * Refreshes a Team's hierarchy after a write that changes it, when that hierarchy is cached.
+ *
+ * A hierarchy nobody read is not cached and is left alone, so the write costs no extra read.
+ * A cached one is refreshed as {@link refreshMovedHierarchyCache} does, whether or not the
+ * outline that read it is still open.
+ *
+ * @param cache - SWR cache the page reads from.
+ * @param mutate - Global SWR mutator of that cache.
+ * @param key - Key of the written Team's hierarchy.
+ * @param load - Reads the hierarchy.
+ * @returns Resolves once the entry holds the new hierarchy, is cleared, or was not cached.
+ */
+export async function refreshCachedHierarchy<Data>(
+  cache: Pick<Cache, 'get'>,
+  mutate: ScopedMutator,
+  key: Arguments,
+  load: () => Promise<Data>,
+): Promise<void> {
+  if (cache.get(unstable_serialize(key)) === undefined) return
+  await refreshMovedHierarchyCache(mutate, key, load)
 }

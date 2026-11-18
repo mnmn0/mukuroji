@@ -2038,6 +2038,21 @@ test('returns success without writing when a retried move finds its rank already
     .rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
 })
 
+test('reports a failed rank read as unavailable storage', async () => {
+  const store = createInMemoryRelationStore({ workItemReadFailure: 'ProvisionedThroughputExceededException' })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+
+  await expect(store.createClient().replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    expectedGraphRevision: 5,
+    hierarchyRank: 'm',
+  })).rejects.toMatchObject({ code: 'ProvisionedThroughputExceededException', status: 503 })
+  expect(store.transactions).toHaveLength(0)
+})
+
 test('classifies a canceled reorder by its cancellation reasons', async () => {
   const reorder = {
     child: { workItemId: 'task', expectedRevision: 3 },
@@ -2343,6 +2358,8 @@ function createInMemoryRelationStore(
     cancelTransactions?: boolean
     cancellationReasons?: readonly string[]
     afterQuery?: (prefix: string) => void
+    /** Error name thrown by every Work Item row read. */
+    workItemReadFailure?: string
   } = {},
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
@@ -2410,6 +2427,9 @@ function createInMemoryRelationStore(
           if (command.constructor.name === 'GetCommand') {
             const key = input.Key as Record<string, string>
             if (input.TableName !== 'configuration-table') {
+              if (options.workItemReadFailure) {
+                throw Object.assign(new Error('Work Item read failed.'), { name: options.workItemReadFailure })
+              }
               const rank = workItemRanks.get(key.issueId ?? '')
               return { Item: { revision: 1, ...(rank === undefined ? {} : { hierarchyRank: rank }) } }
             }

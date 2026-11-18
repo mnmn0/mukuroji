@@ -49,6 +49,7 @@ import {
 } from '../../issues/mutations/confirmParentCompletion'
 import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
 import { useTeamWorkItemHierarchyMove } from '../../issues/mutations/useTeamWorkItemHierarchyMove'
+import { useTeamWorkItemHierarchyRefresh } from '../../issues/mutations/useTeamWorkItemHierarchyRefresh'
 import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
@@ -478,6 +479,8 @@ export function TeamIssuePage() {
     mutate: mutateHierarchy,
     isValidating: isHierarchyValidating,
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
+  // Refreshes the hierarchy of the Team a write went to, even after the person left it.
+  const refreshTeamHierarchy = useTeamWorkItemHierarchyRefresh(accessToken, teamId)
   const moveIssueInHierarchy = useTeamWorkItemHierarchyMove({
     accessToken,
     teamId,
@@ -600,7 +603,7 @@ export function TeamIssuePage() {
     )
     navigate(navigationPath)
     // The outline places the new Work Item and the parent roll-ups count it.
-    await Promise.all([mutateIssues(), mutateHierarchy()])
+    await Promise.all([mutateIssues(), refreshTeamHierarchy()])
     return { issue, navigationPath }
   }
 
@@ -671,7 +674,7 @@ export function TeamIssuePage() {
       await mutateIssues()
       await mutateIssueDetail()
       // Status, estimate, and dates feed the parent roll-ups shown in the outline.
-      await mutateHierarchy()
+      await refreshTeamHierarchy()
       return updatedIssue
     } catch (error) {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
@@ -735,7 +738,7 @@ export function TeamIssuePage() {
           ),
         ))
       }
-      await Promise.all([mutateIssueDetail(), mutateHierarchy()])
+      await Promise.all([mutateIssueDetail(), refreshTeamHierarchy()])
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
       throw error
@@ -791,7 +794,7 @@ export function TeamIssuePage() {
           context,
         ),
       ))
-      await Promise.all([mutateIssueDetail(), mutateHierarchy()])
+      await Promise.all([mutateIssueDetail(), refreshTeamHierarchy()])
     } catch (error) {
       await refreshRelationDetailAfterConflict(error, mutateIssueDetail)
       throw error

@@ -761,7 +761,10 @@ export function TaskScreen({
     }
   }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
-  const [isRestoringTask, setIsRestoringTask] = useState(false)
+  // Work Item whose Undo or Redo is saving, as `teamId:workItemId`. Its detail form waits for it:
+  // a detail save meanwhile would leave the restore with a stale revision.
+  const [restoringTaskKey, setRestoringTaskKey] = useState<string>()
+  const isRestoringTask = restoringTaskKey !== undefined
   // Saves still waiting for their outcome. Undo/Redo waits for them: running one meanwhile would
   // advance the revision the pending save was built on.
   const [pendingTaskUpdateCount, setPendingTaskUpdateCount] = useState(0)
@@ -2132,7 +2135,7 @@ export function TaskScreen({
       return
     }
 
-    setIsRestoringTask(true)
+    setRestoringTaskKey(`${taskUndo.task.teamId}:${taskUndo.task.id}`)
 
     try {
       const result = await performTaskUpdate(taskUndo.task, currentUndo.inversePatch)
@@ -2158,7 +2161,7 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsRestoringTask(false)
+      setRestoringTaskKey(undefined)
     }
   }
 
@@ -2173,7 +2176,7 @@ export function TaskScreen({
       return
     }
 
-    setIsRestoringTask(true)
+    setRestoringTaskKey(`${taskRedo.task.teamId}:${taskRedo.task.id}`)
 
     try {
       const result = await performTaskUpdate(taskRedo.task, taskRedo.forwardPatch)
@@ -2193,7 +2196,7 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsRestoringTask(false)
+      setRestoringTaskKey(undefined)
     }
   }
 
@@ -3825,6 +3828,10 @@ export function TaskScreen({
                     renderedDetailTask && bulkMutationPendingEntries.some((entry) =>
                       entry.targetKeys.includes(`${renderedDetailTask.teamId}:${renderedDetailTask.id}`),
                     ),
+                  )}
+                  isHistoryRestorePending={Boolean(
+                    renderedDetailTask &&
+                      restoringTaskKey === `${renderedDetailTask.teamId}:${renderedDetailTask.id}`,
                   )}
                   isRetainedDetail={isRetainedDetail}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}

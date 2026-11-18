@@ -4488,10 +4488,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
       ))
     } catch (error) {
-      if (error instanceof CognitoServiceError) {
-        return toCognitoDirectoryErrorResponse(c, error)
-      }
-      return toProjectDataErrorResponse(c, error)
+      return toWorkItemConfigurationErrorResponse(c, error)
     }
   })
 

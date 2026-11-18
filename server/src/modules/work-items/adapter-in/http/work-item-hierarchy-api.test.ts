@@ -25,6 +25,7 @@ import {
   expect,
   test,
 } from 'bun:test'
+import { WorkItemConfigurationError } from '../../index'
 import type { TeamIssueResponseItem, TeamWorkItemHierarchyEntry } from '../../index'
 
 afterEach(() => {
@@ -177,6 +178,23 @@ test('rejects a Team hierarchy larger than the read model bound', async () => {
 
   expect(response.status).toBe(413)
   expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
+})
+
+test('keeps the status and code of a relation graph failure while reading the Team hierarchy', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({ getTeamHierarchyEntries: async () => [] }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getRelationGraphRevision() {
+        throw new WorkItemConfigurationError(409, 'WorkItemRelationGraphConflict', 'The graph changed.')
+      },
+    }),
+  })
+
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'WorkItemRelationGraphConflict' })
 })
 
 test('passes a sibling order rank to the parent replacement and rejects an invalid one', async () => {

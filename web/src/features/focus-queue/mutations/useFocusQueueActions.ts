@@ -154,6 +154,9 @@ export function useFocusQueueActions({
     kind: FocusQueueMutationError
   }>()
   const [snoozeFeedback, setSnoozeFeedback] = useState<FocusQueueSnoozeFeedback>()
+  // Counts item actions, so a failure that finishes after a newer action started does not
+  // replace the newer action's message.
+  const itemActionGenerationRef = useRef(0)
 
   /**
    * Reads every loaded Team hierarchy the action affected again and writes it to the cache. A
@@ -205,6 +208,8 @@ export function useFocusQueueActions({
     pendingKeysRef.current.add(pendingKey)
     setPendingKeys(new Set(pendingKeysRef.current))
     setFailedAction(undefined)
+    const generation = itemActionGenerationRef.current + 1
+    itemActionGenerationRef.current = generation
     try {
       return await request()
     } catch (error) {
@@ -212,7 +217,7 @@ export function useFocusQueueActions({
         error,
         () => refreshAffectedCaches(conflictScope),
       )
-      setFailedAction({
+      if (generation === itemActionGenerationRef.current) setFailedAction({
         action,
         kind: isFocusOpenChildrenRefusal(error)
           ? 'openChildren'
