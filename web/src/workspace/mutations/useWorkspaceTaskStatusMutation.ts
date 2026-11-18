@@ -9,6 +9,10 @@ import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
 } from '../../issues/mutations/confirmParentCompletion'
+import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { updateWorkspaceTaskRemote } from '../../issues/mutations/updateWorkspaceTask'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -45,11 +49,15 @@ export type UseWorkspaceTaskStatusMutationOptions = {
 export type WorkspaceTaskStatusMutationController = {
   /** Latest user-facing optimistic update error message. */
   errorMessage?: string
-  /** Moves a Work Item to a validated workflow status and returns its persisted snapshot. */
+  /**
+   * Moves a Work Item to a validated workflow status and returns its persisted snapshot, the
+   * cancelled outcome when the person declined the parent completion warning, or `undefined` when
+   * the move was not applied.
+   */
   moveTaskStatus?: (
     task: CanonicalWorkItem,
     workflowStatusId: string,
-  ) => Promise<CanonicalWorkItem | undefined>
+  ) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | undefined>
 }
 
 /**
@@ -114,7 +122,7 @@ export function useWorkspaceTaskStatusMutation({
     })
     if (!confirmed) {
       pendingTaskMoveKeysRef.current.delete(taskKey)
-      return
+      return CANCELLED_TEAM_ISSUE_UPDATE
     }
 
     setErrorMessage(undefined)

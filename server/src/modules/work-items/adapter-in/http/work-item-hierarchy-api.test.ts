@@ -124,7 +124,7 @@ test('returns the Team hierarchy with WBS numbers and roll-ups of readable Work 
     }),
   })
 
-  const response = await request('/api/teams/core-team/issues/hierarchy')
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
 
   expect(response.status).toBe(200)
   const body = await response.json() as TeamWorkItemHierarchyResponse
@@ -173,7 +173,7 @@ test('rejects a Team hierarchy larger than the read model bound', async () => {
     }),
   })
 
-  const response = await request('/api/teams/core-team/issues/hierarchy')
+  const response = await request('/api/teams/core-team/work-item-hierarchy')
 
   expect(response.status).toBe(413)
   expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
@@ -308,6 +308,27 @@ test('fences the relation graph and the closed children into completing a parent
       ExpressionAttributeValues: { ':expectedRevision': 4 },
     }),
   })
+})
+
+test('completes a parent whose only child was deleted but left its relation behind', async () => {
+  configureFakeProjectClients(true)
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  configureParentWithOpenChild('reject', createTeamIssuesFake({
+    async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+      if (issueId === 'open-child') throw new ProjectDataError(404, 'TeamIssueNotFound', 'Missing.')
+      return teamIssues.getTeamIssueDetail(directoryId, teamId, issueId, options)
+    },
+    async updateTeamIssue(...args) {
+      return teamIssues.updateTeamIssue(...args)
+    },
+  }))
+
+  const response = await request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    body: { workflowStatusId: 'done', expectedRevision: 1 },
+  })
+
+  expect(response.status).toBe(200)
 })
 
 test('reads the readable parent and children of one Work Item without the Team tree', async () => {

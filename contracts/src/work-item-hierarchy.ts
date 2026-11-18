@@ -511,7 +511,7 @@ export type WorkItemOpenChildCountResponse = {
   openChildCount: number
 }
 
-/** Response of `GET /api/teams/{teamId}/issues/hierarchy`. */
+/** Response of `GET /api/teams/{teamId}/work-item-hierarchy`. */
 export type TeamWorkItemHierarchyResponse = {
   /** Response schema version. */
   schemaVersion: 1

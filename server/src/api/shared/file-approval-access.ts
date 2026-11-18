@@ -15,6 +15,7 @@ import {
   applyWorkItemStatusTransitionToActualDates,
   createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemRevisionConditionCheck,
+  isTeamIssueNotFoundError,
   readAssignedProjectId,
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
@@ -674,13 +675,24 @@ async function assertWorkItemChildrenClosed(
   for (let index = 0; index < childIds.length; index += CHILD_COMPLETION_READ_CONCURRENCY) {
     const details = await Promise.all(childIds
       .slice(index, index + CHILD_COMPLETION_READ_CONCURRENCY)
-      .map((childId) => dependencies.teamIssues.getTeamIssueDetail(
-        directoryId,
-        teamId,
-        childId,
-        { consistentIssueRead: true, includeEvents: false },
-      )))
-    for (const { issue } of details) {
+      .map(async (childId) => {
+        try {
+          return await dependencies.teamIssues.getTeamIssueDetail(
+            directoryId,
+            teamId,
+            childId,
+            { consistentIssueRead: true, includeEvents: false },
+          )
+        } catch (error) {
+          // A deleted child can leave its relation behind. It can never be reopened, so it is
+          // not open, and the graph revision fence still catches a child added meanwhile.
+          if (isTeamIssueNotFoundError(error)) return undefined
+          throw error
+        }
+      }))
+    for (const detail of details) {
+      if (!detail) continue
+      const { issue } = detail
       childRevisions.push({ workItemId: issue.id, revision: issue.revision })
       if (issue.archivedAt === undefined && !isWorkItemHierarchyClosedCategory(issue.statusCategory)) {
         openChildCount += 1

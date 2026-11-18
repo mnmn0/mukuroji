@@ -15,7 +15,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
-  expect(inventory).toContain('GET /api/teams/:teamId/issues/hierarchy')
+  expect(inventory).toContain('GET /api/teams/:teamId/work-item-hierarchy')
+  // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
+  expect(inventory).not.toContain('GET /api/teams/:teamId/issues/hierarchy')
   expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/children/open-count')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/hierarchy')
   expect(inventory).toContain('POST /api/auth/refresh')
@@ -82,6 +84,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'b4c15599ac8e1801885036bca3a22f96147485674dd6354c485eb0c5c4c0943f',
+    '9300ad30b5a914250f75b30d929af019683f61dd9812556baf22d17bcab294ca',
   )
 })

@@ -9,6 +9,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
+import { isCancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
   createBuiltInTaskViewDefinition,
@@ -29,6 +30,7 @@ import {
 } from '../../task-views/model/taskViewSelection'
 import {
   allowTaskAction,
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskActionResult,
   createSucceededTaskActionMutationResult,
@@ -671,7 +673,13 @@ export function MyTasksPage() {
     try {
       const updatedTask = await moveTaskStatus(task, workflowStatusId)
       if (claimedContext && target) {
-        if (updatedTask) {
+        if (isCancelledTeamIssueUpdate(updatedTask)) {
+          // The person declined the parent completion warning; nothing failed.
+          taskActionCompletion.settle(
+            claimedContext,
+            createCancelledTaskActionResult(claimedContext.actionId, [target]),
+          )
+        } else if (updatedTask) {
           taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
             claimedContext.actionId,
             target,

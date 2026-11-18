@@ -6,6 +6,7 @@ import {
   type WorkItemActionTarget,
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../src/issues/api'
+import { CANCELLED_TEAM_ISSUE_UPDATE } from '../src/issues/model/teamIssueUpdateOutcome'
 import { executeMyTaskDirectStatusMove } from '../src/task-views/model/myTaskDirectMove'
 import {
   createTaskStatusMoveRequest,
@@ -94,6 +95,21 @@ describe('My Tasks direct Move action', () => {
     expect(mutations).toEqual(['core-team:wireframe:review'])
     expect(result.status).toBe('succeeded')
     expect(result.items[0]?.resultingRevision).toBe(taskViewStorySelectedTask.revision + 1)
+  })
+
+  test('reports a declined parent completion warning as cancelled, not as a failure', async () => {
+    const result = requireResult(await executeMyTaskDirectStatusMove(
+      createMoveContext(),
+      createMoveRequestSlot(),
+      [taskViewStorySelectedTask],
+      taskViewStoryConfigurationsByTeam,
+      async () => CANCELLED_TEAM_ISSUE_UPDATE,
+      messages,
+    ))
+
+    expect(result.status).toBe('cancelled')
+    expect(result.failure).toBeUndefined()
+    expect(result.items).toEqual([{ status: 'cancelled', target: createMoveTarget() }])
   })
 
   test('rejects a destination that is not an editable workflow transition', async () => {

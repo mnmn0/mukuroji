@@ -35,7 +35,7 @@ export async function getTeamWorkItemHierarchy(
   accessToken: string,
 ): Promise<TeamWorkItemHierarchyResponse> {
   const response = await fetch(
-    `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/hierarchy`,
+    `${workItemsApiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-item-hierarchy`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
   const data = await readJson(response)

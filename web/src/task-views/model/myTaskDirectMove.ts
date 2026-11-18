@@ -6,6 +6,10 @@ import type {
   WorkItemActionTarget,
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../../issues/api'
+import {
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import {
   clearTaskStatusMoveRequest,
@@ -13,6 +17,7 @@ import {
   type TaskStatusMoveRequestSlot,
 } from './taskStatusMoveRequest'
 import {
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskActionMutationResult,
 } from './taskActionRegistry'
@@ -27,7 +32,7 @@ import {
 export type MyTaskDirectStatusMoveMutation = (
   task: CanonicalWorkItem,
   workflowStatusId: string,
-) => Promise<CanonicalWorkItem | undefined>
+) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | undefined>
 
 /** Localized safe failure messages returned by a direct My Tasks Move action. */
 export type MyTaskDirectStatusMoveMessages = {
@@ -147,7 +152,9 @@ export function executeMyTaskDirectStatusMove(
 
   try {
     return moveTaskStatus(task, destinationWorkflowStatusId).then(
-      (updatedTask) => updatedTask
+      (updatedTask) => isCancelledTeamIssueUpdate(updatedTask)
+        ? createCancelledTaskActionResult(context.actionId, [target])
+        : updatedTask
         ? createSucceededTaskActionMutationResult(
             context.actionId,
             target,

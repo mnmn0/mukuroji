@@ -4472,7 +4472,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
    *
    * Archive 済みの Work Item は含みません。閲覧できない Work Item は返さず、roll-up にも数えません。
    */
-  routeApp.get('/api/teams/:teamId/issues/hierarchy', async (c) => {
+  routeApp.get('/api/teams/:teamId/work-item-hierarchy', async (c) => {
     const accessToken = readBearerAccessToken(c)
     const teamId = c.req.param('teamId')
     if (!accessToken) {
