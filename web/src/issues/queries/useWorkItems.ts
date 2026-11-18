@@ -49,6 +49,24 @@ function isTransientIssueDetailError(error: unknown): boolean {
 }
 
 /**
+ * Builds the SWR key of a Team Work Item list, so other queries can read or refresh that cache.
+ *
+ * @param accessToken - Work Item API access token.
+ * @param teamId - Team whose Work Items the list holds.
+ * @param includeArchived - Whether the list includes archived Work Items.
+ * @param scope - SWR key scope that separates uses of the same Team list.
+ * @returns The key that `useTeamIssues` uses for the same arguments.
+ */
+export function createTeamIssuesKey(
+  accessToken: string,
+  teamId: string,
+  includeArchived: boolean,
+  scope = 'team-issues',
+) {
+  return [scope, accessToken, teamId, includeArchived] as const
+}
+
+/**
  * Team の Work Item 一覧を取得します。
  *
  * @param accessToken - Work Item API の access token です。
@@ -66,7 +84,7 @@ export function useTeamIssues(
   scope = 'team-issues',
 ) {
   const key = accessToken && teamId && enabled
-    ? [scope, accessToken, teamId, includeArchived] as const
+    ? createTeamIssuesKey(accessToken, teamId, includeArchived, scope)
     : null
 
   const query = useSWR(
