@@ -91,8 +91,10 @@ export function defineAnalyticsScheduleJob(input: ScheduleWorkerInput): Schedule
  */
 export function defineNotificationScheduleJob(input: ScheduleWorkerInput): ScheduledJobGrant {
   const {
+    analyticsTable,
     auditEventsTable,
     customersTable,
+    notificationsTable,
     planningTable,
     projectDirectoryTable,
     workItemsTable,
@@ -103,11 +105,13 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     id: 'NotificationSchedule',
     runtimeScope: 'notification-schedule',
     environment: {
+      ANALYTICS_TABLE_NAME: analyticsTable.tableName,
       AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
       AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
       CUSTOMERS_TABLE_NAME: customersTable.tableName,
       NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
       NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
+      NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
       PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -161,6 +165,16 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
         resources: [customersTable.tableArn, `${customersTable.tableArn}/index/CustomerRetentionIndex`],
+      }));
+      // Team and personal reminder overrides.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem'],
+        resources: [notificationsTable.tableArn],
+      }));
+      // Unsubmitted time entries for timesheet reminders.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
       }));
     },
   };

@@ -3,10 +3,24 @@ import {
   createNotificationRouter,
 } from '../../modules/notifications/adapter-in/http/notification-router'
 import { createPushSubscriptionRouter } from '../../modules/notifications/adapter-in/http/push-subscription-router'
+import { createTeamReminderSettingsRouter } from '../../modules/notifications/adapter-in/http/team-reminder-settings-router'
+import {
+  DynamoDbReminderSettingsStore,
+  readReminderPolicyDefaultsFromEnvironment,
+} from '../../modules/notifications'
+import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
+import { createMutationAuditEventPut, getConfiguredAuditTableName } from '../../modules/audit/audit'
+import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
+import { NOTIFICATION_REMINDER_DAY_FIELDS } from '@mukuroji/contracts'
 import { createPushConfiguration } from '../../modules/notifications/domain/push-subscription'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { workItemDependencies } from '../shared/app-dependencies'
-import { readJson } from '../shared/http'
+import { createRequestMutationContext, readJson } from '../shared/http'
+import {
+  canWorkspaceBusinessWrite,
+  requireTeamPermission,
+  requireWorkspaceBusinessWrite,
+} from '../shared/project-access'
 import {
   createNotificationVisibilityFilter,
   toNotificationErrorResponse,
@@ -27,6 +41,60 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
     mapError: toNotificationErrorResponse,
     readJson,
   }))
+  routeApp.route('/', createTeamReminderSettingsRouter({
+    authenticate: async (accessToken, context) =>
+      await authenticateWorkspacePrincipal(accessToken, undefined, context),
+    async requireTeamAccess(principal, teamId, access) {
+      if (access === 'manage') requireWorkspaceBusinessWrite(principal)
+      await requireTeamPermission(principal, teamId, access === 'manage' ? 'manager' : 'viewer')
+    },
+    async canManageTeam(principal, teamId) {
+      if (!canWorkspaceBusinessWrite(principal)) return false
+      try {
+        await requireTeamPermission(principal, teamId, 'manager')
+        return true
+      } catch {
+        return false
+      }
+    },
+    getStore: getReminderSettingsStore,
+    getDefaults: readReminderPolicyDefaultsFromEnvironment,
+    createAuditPut(context, principal, input) {
+      return createMutationAuditEventPut(
+        getConfiguredAuditTableName(),
+        createRequestMutationContext(
+          context,
+          principal.directoryId,
+          principal.actorId,
+          principal.userKey,
+          input.body,
+        ),
+        {
+          directoryId: principal.directoryId,
+          eventType: 'notification-reminders.updated',
+          entityType: 'notification-reminders',
+          entityId: `team/${input.teamId}/notification-reminders`,
+          action: 'updated',
+          summary: 'Team reminder settings were updated.',
+          changes: NOTIFICATION_REMINDER_DAY_FIELDS
+            .map((field) => ({
+              field,
+              before: input.before[field] ?? '',
+              after: input.after[field] ?? '',
+            }))
+            .filter((change) => change.before !== change.after),
+          metadata: {
+            adapter: 'notification-reminders',
+            teamId: input.teamId,
+            beforeRevision: input.beforeRevision,
+          },
+        },
+      )
+    },
+    mapError: toNotificationErrorResponse,
+    readJson,
+    now: () => new Date(),
+  }))
   routeApp.route('/', createPushSubscriptionRouter({
     authenticate: async (accessToken, context) =>
       await authenticateWorkspacePrincipal(accessToken, undefined, context),
@@ -36,4 +104,19 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
     readJson,
     now: () => new Date(),
   }))
+}
+
+let reminderSettingsStore: DynamoDbReminderSettingsStore | undefined
+
+/**
+ * Returns the process-wide Team reminder settings store, creating it on first use.
+ *
+ * @returns Store bound to the configured NotificationsTable.
+ */
+function getReminderSettingsStore() {
+  reminderSettingsStore ??= new DynamoDbReminderSettingsStore(
+    createDynamoDbDocumentClient(createDynamoDbClient()),
+    getConfiguredNotificationsTableName(),
+  )
+  return reminderSettingsStore
 }

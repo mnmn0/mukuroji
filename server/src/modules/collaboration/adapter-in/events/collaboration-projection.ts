@@ -39,6 +39,7 @@ import {
   createNotificationDeliveryPlan,
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
+  TIMESHEET_REMINDER_EVENT_TYPE,
   slackDeliveryShard,
   isDocumentDeliveryVisible,
   resolveDocumentDeliveryAccess,
@@ -144,6 +145,8 @@ export type AuditProjectionEvent = {
   planningNextDueAt?: string
   /** Scheduled Planning event の reminder / overdue / escalation kind です。 */
   planningNotificationKind?: PlanningScheduledNotificationKind
+  /** Unsubmitted time entries a timesheet reminder was scanned for. */
+  timeEntryIds?: string[]
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -190,6 +193,28 @@ export interface CollaborationProjectionDependencies {
   realtime: CollaborationRealtimePublisher
   /** Optional authoritative Enterprise Identity reader for cadence authorization. */
   enterpriseIdentity?: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>
+  /** Revalidates timesheet reminders; without it every timesheet reminder is dropped. */
+  timesheetReminders?: TimesheetReminderRevalidator
+}
+
+/** Checks that a timesheet reminder still names an unsubmitted entry of its recipient. */
+export type TimesheetReminderRevalidator = {
+  /**
+   * Reports whether at least one named entry is still draft or rejected and owned by the member.
+   *
+   * @param input - Workspace, Team, recipient, and the entries the schedule found.
+   * @returns Whether the reminder is still current.
+   */
+  hasUnsubmittedEntry(input: {
+    /** Canonical Workspace ID. */
+    workspaceId: string
+    /** Team ID. */
+    teamId: string
+    /** Lower-case member key of the recipient. */
+    memberKey: string
+    /** Entry IDs the schedule found unsubmitted. */
+    entryIds: readonly string[]
+  }): Promise<boolean>
 }
 
 /** Canonical scope passed to the curated context Search projection. */
@@ -673,7 +698,10 @@ async function processRecord(
     currentScope,
     event.projectId,
   )
-  if (!workItemAuthorizationEvent) {
+  if (
+    !workItemAuthorizationEvent ||
+    !await isTimesheetReminderCurrent(event, dependencies.timesheetReminders)
+  ) {
     await markProjectionProcessed(event.eventId)
     return
   }
@@ -1539,6 +1567,42 @@ function isScheduledStageStillCurrent(
     return currentDaysUntilDue <= event.daysUntilDue
   }
   return true
+}
+
+/**
+ * Reports whether a timesheet reminder still names an unsubmitted entry of its recipient. Other
+ * events are always current.
+ *
+ * A reminder whose entries were all submitted, deleted, or moved to another owner between the
+ * scan and the projection is dropped. Without a revalidator the reminder is dropped too, so a
+ * stale reminder is never delivered.
+ *
+ * @param event - Parsed audit event.
+ * @param revalidator - Current time entry reader.
+ * @returns Whether the event should still be projected.
+ */
+export async function isTimesheetReminderCurrent(
+  event: AuditProjectionEvent,
+  revalidator: TimesheetReminderRevalidator | undefined,
+): Promise<boolean> {
+  if (event.eventType !== TIMESHEET_REMINDER_EVENT_TYPE) return true
+  const recipient = event.notificationCandidates.find((candidate) => candidate.reason === 'timesheet')
+  const memberKey = normalizeMemberKey(recipient?.memberKey)
+  if (
+    !revalidator ||
+    !event.teamId ||
+    !memberKey ||
+    event.notificationCandidates.length !== 1 ||
+    !event.timeEntryIds?.length
+  ) {
+    return false
+  }
+  return revalidator.hasUnsubmittedEntry({
+    workspaceId: event.workspaceId,
+    teamId: event.teamId,
+    memberKey,
+    entryIds: event.timeEntryIds,
+  })
 }
 
 /**
@@ -2753,6 +2817,9 @@ export function parseAuditProjectionEvent(
     planningNotificationKind: readPlanningNotificationKind(
       metadata.planningNotificationKind,
     ),
+    ...(Array.isArray(metadata.timeEntryIds)
+      ? { timeEntryIds: metadata.timeEntryIds.flatMap((entryId) => readString(entryId) ?? []) }
+      : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

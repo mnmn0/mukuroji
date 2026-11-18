@@ -1,8 +1,18 @@
-import { WORK_ITEM_SCHEDULE_MIN_YEAR } from '@mukuroji/contracts'
+import {
+  NOTIFICATION_REMINDER_DAY_FIELDS,
+  NOTIFICATION_REMINDER_DAYS_MAXIMUM,
+  PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
+  type NotificationReminderDays,
+  type PersonalNotificationReminderDays,
+  type TeamNotificationReminderDays,
+} from '@mukuroji/contracts'
 import {
   isCanonicalWorkItemRecord,
   workItemScheduleInstantToLocalDate,
 } from '../../work-items'
+import { isNotificationReminderDayCount } from '../domain/reminder-days'
+import type { ScheduledReminderSettingsReader } from './ports/reminder-settings-reader'
 
 /**
  * Work Item notification stages emitted by the schedule. Each stage maps to the audit event type
@@ -16,24 +26,48 @@ export type ScheduledNotificationReason =
   | 'overdue-escalation'
   | 'stale'
 
-/** Day-based thresholds for scheduled Work Item reminders. */
-export type WorkItemReminderPolicy = {
-  /** Days before the due date when the owner gets the due-soon notification. */
-  dueSoonDays: number
-  /** Interval in days between repeated overdue notifications to the owner. */
-  overdueReminderIntervalDays: number
-  /** Days past the due date after which Project managers are notified once. */
-  overdueEscalationDays: number
-  /** Days without an update after which a started Work Item's owner is reminded. */
-  staleStartedDays: number
-}
+/**
+ * Day-based thresholds for scheduled Work Item and timesheet reminders. The schedule resolves one
+ * policy per recipient from the member's own overrides, the Team's overrides, and the deployment
+ * defaults, in that order.
+ */
+export type WorkItemReminderPolicy = NotificationReminderDays
 
 /** Default reminder thresholds used when no environment override is configured. */
-export const DEFAULT_WORK_ITEM_REMINDER_POLICY: WorkItemReminderPolicy = {
+export const DEFAULT_WORK_ITEM_REMINDER_POLICY: WorkItemReminderPolicy = Object.freeze({
   dueSoonDays: 3,
   overdueReminderIntervalDays: 7,
   overdueEscalationDays: 7,
   staleStartedDays: 7,
+  timesheetReminderDays: 7,
+})
+
+/**
+ * Resolves the effective thresholds for one recipient.
+ *
+ * A member's own value wins over the Team's, which wins over the deployment default. Overdue
+ * escalation is not a personal setting, so it always comes from the Team or the default.
+ *
+ * @param defaults - Validated deployment defaults.
+ * @param team - Team overrides, when the Team saved any.
+ * @param personal - The recipient's own overrides, when they saved any.
+ * @returns Complete thresholds for the recipient.
+ */
+export function resolveWorkItemReminderPolicy(
+  defaults: WorkItemReminderPolicy,
+  team: TeamNotificationReminderDays | undefined,
+  personal: PersonalNotificationReminderDays | undefined,
+): WorkItemReminderPolicy {
+  const resolved: WorkItemReminderPolicy = { ...defaults }
+  for (const field of NOTIFICATION_REMINDER_DAY_FIELDS) {
+    const teamValue = team?.[field]
+    if (teamValue !== undefined) resolved[field] = teamValue
+  }
+  for (const field of PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS) {
+    const personalValue = personal?.[field]
+    if (personalValue !== undefined) resolved[field] = personalValue
+  }
+  return resolved
 }
 
 /** Work Item から正規化した期限通知 candidate です。 */
@@ -60,6 +94,8 @@ export type ScheduledNotificationCandidate = {
   repetition?: number
   /** Work Item `updatedAt` that a stale reminder was computed from. */
   workItemUpdatedAt?: string
+  /** Interval in days that numbered a repeated overdue or stale reminder. */
+  reminderIntervalDays?: number
   /** Project manager notified by an escalation stage; other stages notify the owner. */
   escalationMemberKey?: string
   /** IANA time zone of the Work Item calendar the stage was evaluated in. */
@@ -180,7 +216,14 @@ export function evaluateScheduledWorkItemNotifications(
       // scanned long after its due date still emits it for Automation overdue triggers.
       candidates.push({ ...base, dueDate, reason: 'overdue', daysUntilDue })
       if (repetition > 0) {
-        candidates.push({ ...base, dueDate, reason: 'overdue-reminder', daysUntilDue, repetition })
+        candidates.push({
+          ...base,
+          dueDate,
+          reason: 'overdue-reminder',
+          daysUntilDue,
+          repetition,
+          reminderIntervalDays: policy.overdueReminderIntervalDays,
+        })
       }
       if (overdueDays >= policy.overdueEscalationDays && base.projectId) {
         escalation = {
@@ -208,6 +251,7 @@ export function evaluateScheduledWorkItemNotifications(
         dueDate: dueDate ?? '',
         reason: 'stale',
         repetition,
+        reminderIntervalDays: policy.staleStartedDays,
         workItemUpdatedAt: item.updatedAt,
       })
     }
@@ -239,18 +283,14 @@ export function normalizeWorkItemReminderPolicy(
 ): WorkItemReminderPolicy {
   const merged = { ...DEFAULT_WORK_ITEM_REMINDER_POLICY, ...policy }
   return {
-    dueSoonDays: readPolicyDays(merged.dueSoonDays, 'Due-soon days', 365),
+    dueSoonDays: readPolicyDays(merged.dueSoonDays, 'Due-soon days'),
     overdueReminderIntervalDays: readPolicyDays(
       merged.overdueReminderIntervalDays,
       'Overdue reminder interval days',
-      365,
     ),
-    overdueEscalationDays: readPolicyDays(
-      merged.overdueEscalationDays,
-      'Overdue escalation days',
-      365,
-    ),
-    staleStartedDays: readPolicyDays(merged.staleStartedDays, 'Stale started days', 365),
+    overdueEscalationDays: readPolicyDays(merged.overdueEscalationDays, 'Overdue escalation days'),
+    staleStartedDays: readPolicyDays(merged.staleStartedDays, 'Stale started days'),
+    timesheetReminderDays: readPolicyDays(merged.timesheetReminderDays, 'Timesheet reminder days'),
   }
 }
 
@@ -264,13 +304,14 @@ function isActiveWorkflowStatusCategory(value: string | undefined) {
  *
  * @param value - Configured number of days.
  * @param label - Threshold name used in the error.
- * @param maximum - Largest accepted number of days.
  * @returns The validated number of days.
- * @throws RangeError when the value is not an integer from 1 to `maximum`.
+ * @throws RangeError when the value is not an integer from 1 to the shared maximum.
  */
-function readPolicyDays(value: number, label: string, maximum: number) {
-  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
-    throw new RangeError(`${label} must be an integer between 1 and ${maximum}.`)
+function readPolicyDays(value: number, label: string) {
+  if (!isNotificationReminderDayCount(value)) {
+    throw new RangeError(
+      `${label} must be an integer between 1 and ${NOTIFICATION_REMINDER_DAYS_MAXIMUM}.`,
+    )
   }
 
   return value
@@ -279,4 +320,45 @@ function readPolicyDays(value: number, label: string, maximum: number) {
 /** Reads a non-blank string with surrounding whitespace removed. */
 function readText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/** Resolves the effective reminder thresholds for one Work Item owner in one Team. */
+export type ReminderPolicyResolver = (
+  workspaceId: string,
+  teamId: string,
+  memberKey: string,
+) => Promise<WorkItemReminderPolicy>
+
+/**
+ * Creates a resolver that reads Team and personal overrides once per schedule run.
+ *
+ * Without a reader every recipient gets the deployment defaults. Reads are cached for the run, so
+ * a Team or member read by many Work Items costs one lookup.
+ *
+ * @param defaults - Validated deployment defaults.
+ * @param reader - Saved override reader, when settings are configured.
+ * @returns Resolver for one schedule run.
+ */
+export function createReminderPolicyResolver(
+  defaults: WorkItemReminderPolicy,
+  reader: ScheduledReminderSettingsReader | undefined,
+): ReminderPolicyResolver {
+  const teams = new Map<string, Promise<TeamNotificationReminderDays | undefined>>()
+  const members = new Map<string, Promise<PersonalNotificationReminderDays | undefined>>()
+  return async (workspaceId, teamId, memberKey) => {
+    if (!reader) return defaults
+    const teamKey = `${workspaceId}\0${teamId}`
+    let team = teams.get(teamKey)
+    if (!team) {
+      team = reader.readTeamReminderDays(workspaceId, teamId)
+      teams.set(teamKey, team)
+    }
+    const memberCacheKey = `${workspaceId}\0${memberKey}`
+    let personal = members.get(memberCacheKey)
+    if (!personal) {
+      personal = reader.readPersonalReminderDays(workspaceId, memberKey)
+      members.set(memberCacheKey, personal)
+    }
+    return resolveWorkItemReminderPolicy(defaults, await team, await personal)
+  }
 }

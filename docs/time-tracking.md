@@ -42,4 +42,6 @@ Two limits to keep in mind when rolling this out:
 - A Work Item Type saved before this change keeps its stored `detailSections`, so the 工数 section stays hidden on that Type until an admin adds `time` in the Type settings. Only the default Type and new Types include it automatically. No data migration was done.
 - Entries recorded on a Work Item with no Project are dropped by the server's Project allowlist, so they appear on nobody's timesheet, the member's own included. This is existing server behavior and is tracked in #453.
 
+Members whose draft or rejected entries stay unsubmitted get a daily-checked Inbox reminder; the number of days is a Team and personal notification setting (see [Notifications](notifications.md#工数の督促)).
+
 Every Web mutation sends an `Idempotency-Key`. A request that does not reach the API, an in-progress duplicate, or a 5xx keeps the same key so repeating the action after reconnecting cannot record it twice; a revision conflict reloads every time tracking query before the member retries. Project budgets, summary reports, and CSV export do not have screens yet.

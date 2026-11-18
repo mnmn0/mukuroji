@@ -17,6 +17,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - 上記の変更の作成者: `creator`（責任者と同じ人なら 1 件にまとまる）
 - 上記の変更の item watcher: `watcher`（projection が現在の購読から解決する。Project watcher には送らない。title や説明だけの変更では送らない）
 - 定期 due scan: `due` / `due-soon` / `overdue` / `escalation` / `stale`
+- 定期 timesheet scan: `timesheet`（未提出の工数の督促）
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
 - Planning update の publish / health 悪化 / コメント: `watcher` / `project-member` / `escalation` / `update-owner` / `update-author` / `mention`（詳細は [Planning](./planning.md)）
 - Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
@@ -48,6 +49,8 @@ PATCH /api/notifications/{notificationId}
 POST /api/notifications/mark-all-read
 GET  /api/notification-preferences
 PUT  /api/notification-preferences
+GET  /api/teams/{teamId}/notification-reminders
+PUT  /api/teams/{teamId}/notification-reminders
 GET  /api/push/config
 PUT  /api/push-subscriptions
 DELETE /api/push-subscriptions
@@ -84,6 +87,7 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - channel: in-app、email、push、Slack（既定は無効）
 - frequency: instant、hourly、daily、weekly
 - quiet hours: enabled、start、end、IANA time zone
+- reminder days（`reminderDays`）: 自分あての期限前通知・超過の再通知・未更新の督促・工数の督促の日数（下の [リマインドの日数](#リマインドの日数)）。PUT で `reminderDays` を省略すると保存済みの値を残し、空 object を送ると消します。項目を知らない古い client が保存しても消えないようにするためです
 
 in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
 
@@ -177,17 +181,43 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 
 EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
 
-同じ scan は次の段階も作ります。日数は schedule Lambda の環境変数で上書きでき、未設定なら括弧内の既定値を使います。
+同じ scan は次の段階も作ります。日数は [リマインドの日数](#リマインドの日数) の順で決まり、括弧内は既定値です。
 
 | event type | 宛先 | 条件 | 重複排除の単位 |
 | --- | --- | --- | --- |
-| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`NOTIFICATION_DUE_SOON_DAYS`、3）。配信が期限当日以降にずれた場合や、配信時点の残日数が scan 時より多い場合は捨てる | 期限・責任者・calendar の timezone |
-| `work-item.overdue-reminder` | 責任者 | 期限日から数えて interval 日ごと（`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、7）。初回の通知を受けた日ではなく期限日を起点に数えるため、超過から時間が経って初めて走査された item は、すでに過ぎた回の再通知を 1 回だけ受けます。初回の超過は従来どおり `work-item.overdue` で、超過中は毎回同じ key で試行するため、超過から時間が経って初めて走査された item にも一度だけ出る | 期限・責任者・何回目か |
-| `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（archive 済みの membership と責任者本人を除く） | 超過 n 日以上（`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、7）。Project 未割り当ての Work Item は対象外。manager ごとに別 event にし、配信時点の超過日数が scan 時より少なければ捨てる | 期限・Project・manager・calendar の timezone・再開時刻 |
-| `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`NOTIFICATION_STALE_STARTED_DAYS`、7）。n 日ごとに再通知。期限超過中は超過の再通知に任せて送らない。配送時に期限を過ぎていた場合も捨てる | 最終更新時刻・責任者・何回目か |
+| `work-item.due-soon` | 責任者 | 期限の 1〜n 日前（`dueSoonDays`、3）。配信が期限当日以降にずれた場合や、配信時点の残日数が scan 時より多い場合は捨てる | 期限・責任者・calendar の timezone |
+| `work-item.overdue-reminder` | 責任者 | 期限日から数えて interval 日ごと（`overdueReminderIntervalDays`、7）。初回の通知を受けた日ではなく期限日を起点に数えるため、超過から時間が経って初めて走査された item は、すでに過ぎた回の再通知を 1 回だけ受けます。初回の超過は従来どおり `work-item.overdue` で、超過中は毎回同じ key で試行するため、超過から時間が経って初めて走査された item にも一度だけ出る | 期限・責任者・何回目か |
+| `work-item.overdue-escalation` | 割り当て先 Project の現在の manager（archive 済みの membership と責任者本人を除く） | 超過 n 日以上（`overdueEscalationDays`、7。Team 設定だけで決まり、個人設定では変えられない）。Project 未割り当ての Work Item は対象外。manager ごとに別 event にし、配信時点の超過日数が scan 時より少なければ捨てる | 期限・Project・manager・calendar の timezone・再開時刻 |
+| `work-item.stale` | 責任者 | `started` のまま n 日更新なし（`staleStartedDays`、7）。n 日ごとに再通知。期限超過中は超過の再通知に任せて送らない。配送時に期限を過ぎていた場合も捨てる | 最終更新時刻・責任者・何回目か |
 
 期限前・再通知・escalation の概要文は「あと n 日」ではなく期限日そのものを書きます。quiet hours や digest で配信が翌日以降にずれても内容が古くならないためです。再通知は `work-item.overdue` と別の event type にしているため、Automation の `due` trigger（`overdue`）は初回だけ発火します。archived の Work Item はどの段階も作りません。projection は配送時に Work Item を強整合で読み直し、完了・archive・期限変更・責任者変更・更新済みの段階と、別 Project へ移った後の escalation を捨てます。escalation の宛先は schedule が notifications の application port（`ScheduledProjectManagerReader`）経由で読み、Project Directory の DynamoDB 実装は composition root で注入します。配送時点でも Project manager であることを確認します。schedule event は scan 時の残日数（`daysUntilDue`、超過時は負）を metadata に持ち、通知行にも保存します。projection と Slack 送信時の再認可は、Work Item の calendar での今日と比べて段階を再判定します。通知の保存 transaction は読み直した Work Item の `revision` を条件にするため、読み直しと保存の間に Work Item が更新されると stream の retry で再判定します。due-soon と escalation の重複排除 key には Work Item の calendar の timezone を含めます。timezone の変更で配信時に捨てた段階を、新しい calendar で条件を満たしたときに出し直せるようにするためです（timezone を変えた直後は同じ段階が再度届くことがあります）。期限当日の `work-item.due` は配信時点でも期限当日のとき、`work-item.overdue` と再通知は配信時点でも期限を過ぎているときだけ届けます。`due` と `overdue` の key は timezone を含まないため、timezone の変更で期限当日に戻って捨てた初回の超過通知は出し直さず、次の再通知に任せます。
 
 escalation は Work Item が完了・中止・archive で配信時に捨てられることがあります。Work Item を未完了に戻すか archive を解除すると、Work Item の `reopenedAt` を更新し、escalation の重複排除 key に含めます。そのため、再開後も同じ期限・Project・manager の条件を満たしていれば、次の scan で escalation を出し直します。再開した時点で超過日数が条件を満たしていれば、前に届いた escalation があっても manager にもう一度届きます。escalation の event と通知行は scan 時の `reopenedAt` を `workItemReopenedAt` として持ち、projection と Slack 送信時の再認可は現在の Work Item の `reopenedAt` と一致しない escalation を捨てます。そのため、再開前に作られて配信待ちだった escalation と、再開後の escalation が両方届くことはありません。
+
+### リマインドの日数
+
+期限前・再通知・escalation・未更新の督促・工数の督促の日数は、受け取る人ごとに次の順で決めます。
+
+1. 本人の通知設定（`reminderDays`）。escalation（`overdueEscalationDays`）は Project manager に届くため、本人は変えられません
+2. Work Item（工数の督促では工数）の Team の設定（`GET` / `PUT /api/teams/{teamId}/notification-reminders`）
+3. 既定値。schedule Lambda の環境変数 `NOTIFICATION_DUE_SOON_DAYS`、`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、`NOTIFICATION_STALE_STARTED_DAYS`、`NOTIFICATION_TIMESHEET_REMINDER_DAYS` で上書きでき、未設定なら 3 / 7 / 7 / 7 / 7 日です。Team 設定の API も同じ環境変数を読んで `defaults` として返すため、上書きするときは schedule と API の両方の Lambda に同じ値を設定します（今の CDK はどちらにも設定しません）
+
+日数は 1〜365 の整数です。Team の設定は Team を読める member なら誰でも読め（`canManage` で変更できるかを返します）、変更は Team manager かつ Workspace の業務データを書ける人だけができます。route の `teams.manage` と handler の `requireTeamPermission(..., 'manager')` の両方で確認し、body は認可の後に検証します。保存は `expectedRevision` を条件にした transaction で、変更前後の日数を `notification-reminders.updated` の audit event に同じ transaction で残します。Team の設定は NotificationsTable の `<workspaceId>#!team-reminder-settings` partition に Team ごとの行として保存します。member key は必ず `@` を含むので member の partition と衝突せず、`<workspaceId>#` で始まるので Workspace の削除・export の範囲に入ります。
+
+Team と本人の設定は schedule の 1 回の実行の中で Team・member ごとに 1 回だけ読みます。Team の行が壊れている場合は既定値に戻さず、schedule を失敗させて retry と alarm に任せます。
+
+日数を変えると、再通知と未更新の督促の「何回目か」の数え方が変わります。既定値以外の interval は重複排除 key に interval を含め、別の interval で送った回と混ざらないようにします。既定値の interval は key に含めないため、設定を導入する前に送った回と同じ key のままです。期限前通知は日数を変えても期限ごとに 1 回だけです。
+
+### 工数の督促
+
+`timesheet.submission-reminder` は、工数 entry が終わってから n 日（`timesheetReminderDays`、7）たっても `draft` または `rejected` のままの人に、Team ごとに 1 通届きます。未提出の entry が残る間は n 日ごとに届きます。
+
+- schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、UTC の `NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC` 時（既定 0 時、日本時間 9 時）の実行だけです。その回が失敗した日は送らず、翌日の実行で送ります
+- 対象は Work Item の scan で見つかった Team です。工数は必ず Team の Work Item に付くため、工数のある Team は漏れません。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
+- 重複排除 key は Workspace・Team・member・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
+- 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=YYYY-MM-DD`、週は UTC の月曜始まり）を開きます。title は持たず、概要は件数と最も古い日付です
+- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。読み直す手段がない projection では督促を届けません
+- 宛先の権限は Team scope の通知として確認します（Team の Project のどれかを読めること）
+- Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

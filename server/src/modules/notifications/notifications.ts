@@ -11,7 +11,9 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
+import type { PersonalNotificationReminderDays } from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
+import { normalizePersonalReminderDays, reminderDaysEqual } from './domain/reminder-days'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 export { NotificationError }
@@ -67,6 +69,8 @@ export type NotificationPreferences = {
   frequency: NotificationFrequency
   /** Delivery を避ける時間帯です。 */
   quietHours: NotificationQuietHours
+  /** The member's own reminder day overrides; omitted when they set none. */
+  reminderDays?: PersonalNotificationReminderDays
   /** 最終保存時刻です。未保存の default では省略します。 */
   updatedAt?: string
   /** Server-owned start of the current Slack opt-in period; omitted from HTTP preferences. */
@@ -83,6 +87,11 @@ export type UpdateNotificationPreferencesInput = {
   frequency: NotificationFrequency
   /** 保存する quiet hours です。 */
   quietHours: NotificationQuietHours
+  /**
+   * Replacement reminder day overrides. Omitted keeps the saved overrides, so a client that does
+   * not know the field cannot clear them; an empty object clears them.
+   */
+  reminderDays?: PersonalNotificationReminderDays
 }
 
 /** Inbox API が返す render-ready notification です。 */
@@ -587,19 +596,25 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const preferences = normalizeNotificationPreferencesInput(input.preferences)
     const now = normalizeDate(input.now ?? new Date(), 'Notification preference update time')
+    const current = preferences.version > 0 &&
+      (preferences.channels.slack || preferences.reminderDays === undefined)
+      ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
+          TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
+        }))).Item, preferences.channels.slack === true)
+      : undefined
     let slackEnabledAt: string | undefined
     if (preferences.channels.slack) {
-      const current = preferences.version > 0
-        ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
-            TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
-          }))).Item, true)
-        : undefined
       slackEnabledAt = current?.channels.slack ? current.slackEnabledAt : now.toISOString()
     }
+    // A client that does not send the field keeps the saved overrides of the version it read.
+    const reminderDays = preferences.reminderDays ??
+      (current?.version === preferences.version ? current.reminderDays : undefined)
+    const { reminderDays: _requestedReminderDays, ...preferenceFields } = preferences
     const next: NotificationPreferences = {
-      ...preferences,
+      ...preferenceFields,
       version: preferences.version + 1,
       updatedAt: now.toISOString(),
+      ...(reminderDays && Object.keys(reminderDays).length > 0 ? { reminderDays } : {}),
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
     }
 
@@ -845,6 +860,7 @@ export function parseStoredNotificationPreferences(
       channels: value.channels,
       frequency: value.frequency,
       quietHours: value.quietHours,
+      reminderDays: value.reminderDays,
     })
     if (value.slackEnabledAt !== undefined && !readTimestamp(value.slackEnabledAt)) throw new Error('Invalid Slack activation time.')
     const slackEnabledAt = normalized.channels.slack
@@ -1154,6 +1170,8 @@ function resolveNotificationState(row: Record<string, unknown>, now: Date): Noti
 type NotificationPreferenceFields = {
   /** Optimistic revision. */
   version: unknown
+  /** The member's own reminder day overrides; absent when not supplied. */
+  reminderDays?: unknown
   /** Channel values. */
   channels: unknown
   /** Delivery frequency. */
@@ -1200,6 +1218,9 @@ function normalizeNotificationPreferencesInput(
       ...(typeof channels.slack === 'boolean' ? { slack: channels.slack } : {}) },
     frequency: value.frequency,
     quietHours: { enabled: quietHours.enabled, start: quietHours.start, end: quietHours.end, timeZone: quietHours.timeZone },
+    ...(value.reminderDays === undefined
+      ? {}
+      : { reminderDays: normalizePersonalReminderDays(value.reminderDays) }),
   }
 }
 
@@ -1215,7 +1236,8 @@ function notificationPreferencesMatchUpdate(
     current.quietHours.enabled === expected.quietHours.enabled &&
     current.quietHours.start === expected.quietHours.start &&
     current.quietHours.end === expected.quietHours.end &&
-    current.quietHours.timeZone === expected.quietHours.timeZone
+    current.quietHours.timeZone === expected.quietHours.timeZone &&
+    (expected.reminderDays === undefined || reminderDaysEqual(current.reminderDays, expected.reminderDays))
 }
 
 function isInsideQuietHours(date: Date, quietHours: NotificationQuietHours) {

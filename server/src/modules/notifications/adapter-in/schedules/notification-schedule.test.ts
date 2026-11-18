@@ -1490,3 +1490,143 @@ test('notification schedule handler treats blank numeric environment values as u
     }
   }
 })
+
+describe('configurable reminder days and timesheet reminders', () => {
+  /** Reminder reader that returns fixed Team and per-member overrides. */
+  function createReminderReader(
+    team: Record<string, number> | undefined,
+    personal: Record<string, Record<string, number>> = {},
+  ) {
+    return {
+      readTeamReminderDays: async () => team,
+      readPersonalReminderDays: async (_workspaceId: string, memberKey: string) => personal[memberKey],
+    }
+  }
+
+  /** Returns the audit events the run stored. */
+  function readEvents(commands: Array<{ name: string; input: Record<string, unknown> }>) {
+    return commands
+      .filter(({ name }) => name === 'PutCommand')
+      .map(({ input }) => readPutItem(input))
+  }
+
+  test('uses the owner\'s own due-soon window before the Team window', async () => {
+    const items = [
+      createWorkItem({ issueId: 'owner-five-days', dueDate: '2026-07-17' }),
+      createWorkItem({ issueId: 'other-five-days', dueDate: '2026-07-17', assigneeUserId: 'Other@Example.com' }),
+      createWorkItem({ issueId: 'other-two-days', dueDate: '2026-07-14', assigneeUserId: 'Other@Example.com' }),
+      createWorkItem({ issueId: 'other-three-days', dueDate: '2026-07-15', assigneeUserId: 'Other@Example.com' }),
+    ]
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand' ? { Items: items } : {})
+
+    await runNotificationSchedule(createRunOptions(recording.client, {
+      reminderSettingsReader: createReminderReader(
+        { dueSoonDays: 2 },
+        { 'member@example.com': { dueSoonDays: 5 } },
+      ),
+    }))
+
+    expect(readEvents(recording.commands).map((event) => [event.entityId, event.eventType])).toEqual([
+      ['team/core-team/issue/owner-five-days', 'work-item.due-soon'],
+      ['team/core-team/issue/other-two-days', 'work-item.due-soon'],
+    ])
+  })
+
+  test('takes escalation days from the Team and keys a non-default overdue interval separately', async () => {
+    const directory = [
+      { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'platform' },
+      { directoryId: 'workspace-1', entryType: 'project-member', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+    ]
+    const run = async (reader?: ReturnType<typeof createReminderReader>) => {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+        ? { Items: [createWorkItem({ dueDate: '2026-07-08' })] }
+        : name === 'QueryCommand' ? { Items: directory } : {})
+      await runNotificationSchedule(createRunOptions(recording.client, {
+        projectManagerReader: createDynamoDbProjectManagerReader({
+          documentClient: recording.client,
+          tableName: 'ProjectDirectoryTable',
+        }),
+        ...(reader ? { reminderSettingsReader: reader } : {}),
+      }))
+      return readEvents(recording.commands)
+    }
+
+    // Four days overdue: the default 7-day escalation and reminder interval are not reached.
+    const defaults = await run()
+    expect(defaults.map((event) => event.eventType)).toEqual(['work-item.overdue'])
+    const configured = await run(createReminderReader(
+      { overdueEscalationDays: 3, overdueReminderIntervalDays: 2 },
+      // A member cannot change when their own work escalates.
+      { 'member@example.com': { overdueReminderIntervalDays: 4 } },
+    ))
+    expect(configured.map((event) => event.eventType)).toEqual([
+      'work-item.overdue',
+      'work-item.overdue-reminder',
+      'work-item.overdue-escalation',
+    ])
+    expect(configured[1]).toMatchObject({ metadata: { repetition: 1 } })
+
+    // The default interval keeps the key it had before intervals were configurable.
+    const later = async (reader?: ReturnType<typeof createReminderReader>) => {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+        ? { Items: [createWorkItem({ dueDate: '2026-07-05', assignedProjectId: undefined, directoryProjectId: undefined })] }
+        : {})
+      await runNotificationSchedule(createRunOptions(recording.client, reader ? { reminderSettingsReader: reader } : {}))
+      return readEvents(recording.commands).find((event) => event.eventType === 'work-item.overdue-reminder')
+    }
+    const unconfigured = await later()
+    const explicitDefault = await later(createReminderReader({ overdueReminderIntervalDays: 7 }))
+    const custom = await later(createReminderReader({ overdueReminderIntervalDays: 3 }))
+    expect(explicitDefault?.eventId).toBe(unconfigured?.eventId)
+    expect(custom?.eventId).toBeDefined()
+    expect(custom?.eventId).not.toBe(unconfigured?.eventId)
+  })
+
+  test('reminds each member with unsubmitted time once per reminder period at the configured hour', async () => {
+    const reads: Array<[string, string, string, string]> = []
+    const entries = [
+      { entryId: 'old-1', memberKey: 'member@example.com', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T02:00:00.000Z' },
+      { entryId: 'old-2', memberKey: 'member@example.com', startAt: '2026-07-02T00:00:00.000Z', endAt: '2026-07-02T02:00:00.000Z' },
+      { entryId: 'recent', memberKey: 'other@example.com', startAt: '2026-07-11T00:00:00.000Z', endAt: '2026-07-11T02:00:00.000Z' },
+    ]
+    const timesheetReader = {
+      async listUnsubmittedEntries(workspaceId: string, teamId: string, from: Date, to: Date) {
+        reads.push([workspaceId, teamId, from.toISOString(), to.toISOString()])
+        return entries
+      },
+    }
+    const run = async (now: string, timesheetReminderHourUtc = 0) => {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+        ? { Items: [createWorkItem({ statusCategory: 'completed', workflowStatusId: 'done' })] }
+        : {})
+      await runNotificationSchedule(createRunOptions(recording.client, {
+        now: new Date(now),
+        timesheetReader,
+        timesheetReminderHourUtc,
+      }))
+      return readEvents(recording.commands).filter((event) => event.eventType === 'timesheet.submission-reminder')
+    }
+
+    expect(await run('2026-07-12T09:00:00.000Z')).toEqual([])
+    expect(reads).toEqual([])
+    const [reminder, ...rest] = await run('2026-07-12T00:00:00.000Z')
+    expect(rest).toEqual([])
+    expect(reads).toEqual([['workspace-1', 'core-team', '2026-04-11T00:00:00.000Z', '2026-07-12T00:00:00.000Z']])
+    expect(reminder).toMatchObject({
+      entityId: 'team/core-team/timesheet',
+      summary: '2 time entries since 2026-07-01 have not been submitted.',
+      metadata: {
+        teamId: 'core-team',
+        deepLink: '/teams/core-team/timesheet?week=2026-06-29',
+        timeEntryIds: ['old-1', 'old-2'],
+        notificationCandidates: [{ memberKey: 'member@example.com', reason: 'timesheet' }],
+      },
+    })
+    const sameDay = await run('2026-07-12T09:00:00.000Z', 9)
+    const nextDay = await run('2026-07-13T00:00:00.000Z')
+    expect(sameDay[0]?.eventId).toBe(reminder?.eventId)
+    expect(nextDay[0]?.eventId).toBe(reminder?.eventId)
+    const nextPeriod = await run('2026-07-23T00:00:00.000Z')
+    expect(nextPeriod[0]?.eventId).not.toBe(reminder?.eventId)
+  })
+})

@@ -59,6 +59,7 @@ export function buildAuditProjectionWorker(
   input: AuditProjectionWorkerInput,
 ): AuditProjectionWorkerResources {
   const {
+    analyticsTable,
     auditEventsTable,
     collaborationTable,
     enterpriseIdentityTable,
@@ -106,6 +107,7 @@ export function buildAuditProjectionWorker(
         target: 'node22',
       },
       environment: {
+        ANALYTICS_TABLE_NAME: analyticsTable.tableName,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         // The connector projection runs only when the connectors module owns a queue.
         CONNECTOR_SYNC_ENABLED: connectorSyncQueue ? 'true' : 'false',
@@ -181,6 +183,13 @@ export function buildAuditProjectionWorker(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],
       resources: [planningTable.tableArn],
+    }),
+  );
+  // Timesheet reminders are dropped once their time entries are submitted.
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [analyticsTable.tableArn],
     }),
   );
   collaborationProjectionFunction.addToRolePolicy(
