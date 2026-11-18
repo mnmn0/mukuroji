@@ -3,13 +3,11 @@ import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
+  type TaskViewSortDirection,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type {
-  TaskViewGroupValue,
-  TaskViewSortDirection,
-} from '../../task-views/model/taskViewPresentation'
+import type { TaskViewGroupValue } from '../../task-views/model/taskViewPresentation'
 import type { TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
 import {
   resolveWorkItemAssignee,
