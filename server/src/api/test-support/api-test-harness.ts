@@ -1537,6 +1537,8 @@ function configureFakeProjectClients(
       acceptanceCriteria?: unknown
       /** Manager correction of the actual dates supplied to the adapter. */
       actualDateCorrection?: UpdateTeamIssueRequestBody['actualDateCorrection']
+      /** Instant that dates an actual-date transition, when the caller fixed it. */
+      actualDateTransitionAt?: string
       /** Remaining effort supplied to the adapter, when the update changes it. */
       remainingEffortMinutes?: unknown
       /** Manual progress percentage supplied to the adapter, when the update changes it. */
@@ -3008,6 +3010,7 @@ function configureFakeProjectClients(
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
           ...('acceptanceCriteria' in input ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
           ...(input.actualDateCorrection ? { actualDateCorrection: input.actualDateCorrection } : {}),
+          ...(input.actualDateTransitionAt ? { actualDateTransitionAt: input.actualDateTransitionAt } : {}),
           ...('remainingEffortMinutes' in input ? { remainingEffortMinutes: input.remainingEffortMinutes } : {}),
           ...('progressPercent' in input ? { progressPercent: input.progressPercent } : {}),
           authorizationConditionChecks: input.authorizationConditionChecks,

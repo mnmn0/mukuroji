@@ -3682,12 +3682,14 @@ test('keeps the actual dates in the undo snapshot of a Bulk status edit', async 
 
 test('restores the earlier completion date when a manager undoes a Bulk reopen', async () => {
   const corrections: unknown[] = []
+  const transitionInstants: unknown[] = []
   const calls = configureFakeProjectClients(true, {
     detailRevisions: { ['core-team\0onboarding-friction']: 2 },
     detailWorkflowStatusId: 'in-progress',
     detailActualStartDate: '2026-06-01',
     issueUpdateHook: (input) => {
       corrections.push(input.actualDateCorrection)
+      transitionInstants.push(input.actualDateTransitionAt)
     },
   })
 
@@ -3701,6 +3703,9 @@ test('restores the earlier completion date when a manager undoes a Bulk reopen',
   expect(await response.json()).toMatchObject({ items: [{ status: 'undone' }] })
   expect(calls.issueUpdates).toHaveLength(1)
   expect(corrections).toEqual([{ actualStartDate: '2026-06-01', actualEndDate: '2026-06-05' }])
+  // The adapter dates the transition with the same instant the prediction used.
+  expect(transitionInstants).toHaveLength(1)
+  expect(Number.isNaN(Date.parse(String(transitionInstants[0])))).toBe(false)
 })
 
 test('refuses a member Bulk undo that would replace the recorded completion date', async () => {

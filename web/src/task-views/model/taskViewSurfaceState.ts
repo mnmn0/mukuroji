@@ -899,14 +899,18 @@ function updateProjectSortOrder(
   sortOrder: TaskScreenViewState['sortOrder'],
 ): TaskViewDefinition['layout']['sort'] {
   const withoutDelay = sort.filter((rule) => rule.field !== 'completionDelayDays')
-  if (sortOrder === 'completion-delay-desc') {
-    return [
-      { direction: 'desc', field: 'completionDelayDays' },
-      ...withoutDelay.map((rule) => ({ ...rule })),
-    ]
-  }
-  return updateDueDateSort(withoutDelay, sortOrder === 'due-date-desc' ? 'desc' : 'asc')
+  const next: TaskViewDefinition['layout']['sort'] = sortOrder === 'completion-delay-desc'
+    ? [
+        { direction: 'desc', field: 'completionDelayDays' },
+        ...withoutDelay.map((rule) => ({ ...rule })),
+      ]
+    : updateDueDateSort(withoutDelay, sortOrder === 'due-date-desc' ? 'desc' : 'asc')
+  // A prepended rule pushes the lowest-priority rule past the saved-view limit.
+  return next.slice(0, TASK_VIEW_SORT_RULE_LIMIT)
 }
+
+/** Maximum number of sort rules a saved task view may store, matching the server. */
+const TASK_VIEW_SORT_RULE_LIMIT = 10
 
 /**
  * Updates the represented due-date rule without discarding secondary sort rules.

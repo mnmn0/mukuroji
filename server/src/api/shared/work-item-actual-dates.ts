@@ -64,6 +64,10 @@ function readCorrectionValue(value: unknown, field: string): string | null {
 /**
  * Requires the principal to manage the Work Item's assigned Project or its Team.
  *
+ * A manager role on another Project of the same Team is not enough for an assigned Work Item:
+ * only that Project's managers, a direct Team manager grant, or a system administrator may
+ * correct it. An unassigned Work Item belongs to the Team alone, so any Team manager may.
+ *
  * @param principal - Authenticated Workspace principal.
  * @param teamId - Team that owns the Work Item.
  * @param context - Team permission context already resolved for the update.
@@ -77,8 +81,17 @@ export async function requireWorkItemActualDateCorrectionPermission(
   context: TeamPermissionContext,
   assignedProjectId: string | undefined,
 ): Promise<void> {
-  if (assignedProjectId && canAccessAssignedProject(principal, context, assignedProjectId, 'manager')) {
+  if (principal.isSystemAdmin) return
+  if (!assignedProjectId) {
+    await requireTeamPermission(principal, teamId, 'manager')
     return
   }
-  await requireTeamPermission(principal, teamId, 'manager')
+  if (canAccessAssignedProject(principal, context, assignedProjectId, 'manager')) return
+  const teamContext = await requireTeamPermission(principal, teamId, 'manager')
+  if (teamContext.directTeamGrant) return
+  throw new ProjectDataError(
+    403,
+    'ProjectAccessDenied',
+    'Only a manager of the assigned Project or the Team can correct actual dates.',
+  )
 }

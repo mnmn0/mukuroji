@@ -1121,6 +1121,11 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   /** Team manager correction of the actual dates, authorized by the API handler. */
   actualDateCorrection?: WorkItemActualDateCorrection
   /**
+   * ISO instant that dates the status transition, set by an internal caller that predicted the
+   * resulting actual dates at that instant. Defaults to the update time.
+   */
+  actualDateTransitionAt?: string
+  /**
    * Agent Run claim, fence, and lease writes committed in the same transaction as the update.
    * A conditional failure in these items is reported as an Agent Run fence conflict.
    */
@@ -2976,7 +2981,10 @@ export class DynamoDbTeamIssuesClient {
       const actualDateUpdate = createWorkItemActualDateUpdate(
         beforeIssue,
         nextStatusCategory,
-        workItemScheduleInstantToLocalDate(updatedAt, schedule.calendarPolicy),
+        workItemScheduleInstantToLocalDate(
+          readActualDateTransitionAt(input.actualDateTransitionAt, updatedAt),
+          schedule.calendarPolicy,
+        ),
         input.actualDateCorrection,
       )
       for (const field of WORK_ITEM_ACTUAL_DATE_FIELDS) {
@@ -4369,6 +4377,22 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
   }
 
   return issue
+}
+
+/**
+ * Reads the instant that dates a status transition.
+ *
+ * @param value - Instant chosen by an internal caller, if any.
+ * @param updatedAt - Update time used when no caller chose an instant.
+ * @returns The instant to date the transition by.
+ * @throws ProjectDataError when the caller passed an invalid instant.
+ */
+function readActualDateTransitionAt(value: string | undefined, updatedAt: string): string {
+  if (value === undefined) return updatedAt
+  if (Number.isNaN(Date.parse(value))) {
+    throw new ProjectDataError(400, 'InvalidWorkItemActualDates', 'Actual date transition time is invalid.')
+  }
+  return value
 }
 
 /**
