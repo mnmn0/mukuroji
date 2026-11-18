@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import type {
   NotificationReminderDays,
@@ -8,6 +9,7 @@ import type { AuditTransactWriteItem } from '../../../audit'
 import { NotificationError } from '../../domain/notification-error'
 import { normalizeTeamReminderDays } from '../../domain/reminder-days'
 import type {
+  TeamReminderSettingsMutation,
   TeamReminderSettingsRecord,
   TeamReminderSettingsStore,
 } from '../../application/ports/reminder-settings-reader'
@@ -106,8 +108,12 @@ export function createTeamReminderSettingsRouter<
       await dependencies.requireTeamAccess(principal, teamId, 'manage')
       const body = await dependencies.readJson(context.req)
       const request = readUpdateRequest(body)
+      const mutation = readMutationIdentity(context, request)
       const store = dependencies.getStore()
       const before = await store.getTeamSettings(principal.directoryId, teamId)
+      if (isReplay(before, mutation)) {
+        return context.json(toResponse(teamId, before, dependencies.getDefaults(), true))
+      }
       if (before.revision !== request.expectedRevision) {
         throw new NotificationError(
           409,
@@ -115,20 +121,30 @@ export function createTeamReminderSettingsRouter<
           'Team reminder settings changed before this update was saved.',
         )
       }
-      const saved = await store.saveTeamSettings({
-        workspaceId: principal.directoryId,
-        teamId,
-        days: request.days,
-        expectedRevision: request.expectedRevision,
-        now: dependencies.now(),
-        auditPut: dependencies.createAuditPut(context, principal, {
+      let saved: TeamReminderSettingsRecord
+      try {
+        saved = await store.saveTeamSettings({
+          workspaceId: principal.directoryId,
           teamId,
-          before: before.days,
-          after: request.days,
-          beforeRevision: before.revision,
-          body,
-        }),
-      })
+          days: request.days,
+          expectedRevision: request.expectedRevision,
+          now: dependencies.now(),
+          auditPut: dependencies.createAuditPut(context, principal, {
+            teamId,
+            before: before.days,
+            after: request.days,
+            beforeRevision: before.revision,
+            body,
+          }),
+          ...(mutation ? { mutation } : {}),
+        })
+      } catch (error) {
+        // A concurrent retry of the same request may have committed first.
+        if (!(error instanceof NotificationError) || error.status !== 409 || !mutation) throw error
+        const current = await store.getTeamSettings(principal.directoryId, teamId)
+        if (!isReplay(current, mutation)) throw error
+        saved = current
+      }
       return context.json(toResponse(teamId, saved, dependencies.getDefaults(), true))
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -190,6 +206,47 @@ function readUpdateRequest(value: unknown) {
     expectedRevision,
     days: normalizeTeamReminderDays(Reflect.get(value, 'days')),
   }
+}
+
+/**
+ * Reads the request's idempotency identity.
+ *
+ * @param context - Request context.
+ * @param request - Validated update request.
+ * @returns The key and request fingerprint, or undefined when the client sent no key.
+ */
+function readMutationIdentity(
+  context: Context,
+  request: { expectedRevision: number; days: TeamNotificationReminderDays },
+): TeamReminderSettingsMutation | undefined {
+  const idempotencyKey = context.req.header('Idempotency-Key')?.trim()
+  if (!idempotencyKey) return undefined
+  const days = Object.entries(request.days).sort(([left], [right]) => left.localeCompare(right))
+  const requestFingerprint = createHash('sha256')
+    .update(JSON.stringify({ expectedRevision: request.expectedRevision, days }))
+    .digest('hex')
+  return { idempotencyKey, requestFingerprint }
+}
+
+/**
+ * Reports whether the stored revision was written by this same request, so a retry after a
+ * lost response gets the saved settings instead of a revision conflict.
+ *
+ * @param record - Stored settings.
+ * @param mutation - Identity of the incoming request.
+ * @returns Whether the request already succeeded.
+ * @throws NotificationError (409) when the key was used for a different body.
+ */
+function isReplay(record: TeamReminderSettingsRecord, mutation: TeamReminderSettingsMutation | undefined) {
+  if (!mutation || record.lastMutation?.idempotencyKey !== mutation.idempotencyKey) return false
+  if (record.lastMutation.requestFingerprint !== mutation.requestFingerprint) {
+    throw new NotificationError(
+      409,
+      'IdempotencyKeyReused',
+      'The idempotency key was already used for a different Team reminder update.',
+    )
+  }
+  return true
 }
 
 /**

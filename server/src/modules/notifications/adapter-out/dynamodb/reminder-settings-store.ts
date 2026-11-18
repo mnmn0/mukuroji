@@ -81,6 +81,7 @@ export class DynamoDbReminderSettingsStore
       days: input.days,
       revision: input.expectedRevision + 1,
       updatedAt: input.now.toISOString(),
+      ...(input.mutation ? { lastMutation: input.mutation } : {}),
     }
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -93,7 +94,15 @@ export class DynamoDbReminderSettingsStore
                 itemType: teamReminderItemType,
                 workspaceId: input.workspaceId,
                 teamId: input.teamId,
-                ...next,
+                days: next.days,
+                revision: next.revision,
+                updatedAt: next.updatedAt,
+                ...(input.mutation
+                  ? {
+                      lastIdempotencyKey: input.mutation.idempotencyKey,
+                      lastRequestFingerprint: input.mutation.requestFingerprint,
+                    }
+                  : {}),
               },
               ...(input.expectedRevision === 0
                 ? { ConditionExpression: 'attribute_not_exists(recipientKey)' }
@@ -190,7 +199,16 @@ function parseTeamReminderRow(value: Record<string, unknown> | undefined): TeamR
   const updatedAt = typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt))
     ? value.updatedAt
     : undefined
-  return { days, revision, ...(updatedAt ? { updatedAt } : {}) }
+  const lastMutation = typeof value.lastIdempotencyKey === 'string' &&
+    typeof value.lastRequestFingerprint === 'string'
+    ? { idempotencyKey: value.lastIdempotencyKey, requestFingerprint: value.lastRequestFingerprint }
+    : undefined
+  return {
+    days,
+    revision,
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(lastMutation ? { lastMutation } : {}),
+  }
 }
 
 /**

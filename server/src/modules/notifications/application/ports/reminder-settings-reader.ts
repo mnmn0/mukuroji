@@ -38,6 +38,16 @@ export type TeamReminderSettingsRecord = {
   revision: number
   /** When the overrides were last saved. */
   updatedAt?: string
+  /** Request that wrote this revision, so a retry after a lost response can be replayed. */
+  lastMutation?: TeamReminderSettingsMutation
+}
+
+/** Identity of one settings update request. */
+export type TeamReminderSettingsMutation = {
+  /** `Idempotency-Key` the client sent. */
+  idempotencyKey: string
+  /** Hash of the expected revision and overrides, so a reused key with a new body is detected. */
+  requestFingerprint: string
 }
 
 /** Input for replacing a Team's overrides. */
@@ -54,6 +64,8 @@ export type SaveTeamReminderSettingsInput = {
   now: Date
   /** Audit event put written in the same transaction, when auditing is configured. */
   auditPut?: AuditTransactWriteItem
+  /** Request identity stored with the revision, when the client sent an idempotency key. */
+  mutation?: TeamReminderSettingsMutation
 }
 
 /** Store of Team reminder overrides used by the settings API. */

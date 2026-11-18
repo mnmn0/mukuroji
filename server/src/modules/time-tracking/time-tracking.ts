@@ -1385,11 +1385,16 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     const to = input.to === undefined ? undefined : normalizeEntryBoundary(input.to)
     const hasDateRange = from !== undefined || to !== undefined
     do {
+      // DynamoDB allows one sort-key condition, so a closed range uses BETWEEN; its inclusive
+      // upper bound is trimmed by the `startAt >= to` check below.
       const keyConditionParts = hasDateRange
         ? [
             'teamId = :teamId',
-            ...(from ? ['startAt >= :queryFrom'] : []),
-            ...(to ? ['startAt < :queryTo'] : []),
+            ...(from && to
+              ? ['startAt BETWEEN :queryFrom AND :queryTo']
+              : from
+                ? ['startAt >= :queryFrom']
+                : ['startAt < :queryTo']),
           ]
         : ['workspaceId = :workspaceId', 'begins_with(recordKey, :prefix)']
       const expressionAttributeValues = hasDateRange

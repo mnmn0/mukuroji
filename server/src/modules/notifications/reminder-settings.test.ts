@@ -16,7 +16,6 @@ import {
 } from './application/work-item-reminders'
 import {
   evaluateTimesheetReminders,
-  utcWeekStartDate,
 } from './application/timesheet-reminders'
 import type { TeamReminderSettingsRecord } from './application/ports/reminder-settings-reader'
 
@@ -177,11 +176,13 @@ describe('Team reminder settings store', () => {
       days: {},
       expectedRevision: 1,
       now: new Date('2026-07-13T00:00:00.000Z'),
+      mutation: { idempotencyKey: 'key-2', requestFingerprint: 'fingerprint-2' },
     })
     expect(await store.getTeamSettings('workspace-1', 'core-team')).toEqual({
       days: {},
       revision: 2,
       updatedAt: '2026-07-13T00:00:00.000Z',
+      lastMutation: { idempotencyKey: 'key-2', requestFingerprint: 'fingerprint-2' },
     })
   })
 
@@ -258,8 +259,6 @@ describe('timesheet reminder evaluation', () => {
       reminderDays: 7,
       cycle: Math.floor(now.getTime() / (7 * 86_400_000)),
     }])
-    expect(utcWeekStartDate('2026-07-06T09:00:00.000Z')).toBe('2026-07-06')
-    expect(utcWeekStartDate('2026-07-12T23:00:00.000Z')).toBe('2026-07-06')
   })
 })
 
@@ -269,6 +268,7 @@ describe('Team reminder settings routes', () => {
     let record: TeamReminderSettingsRecord = { days: {}, revision: 0 }
     const accessChecks: string[] = []
     const audits: unknown[] = []
+    let saves = 0
     const router = createTeamReminderSettingsRouter({
       authenticate: async () => ({ directoryId: 'workspace-1' }),
       async requireTeamAccess(_principal, teamId, access) {
@@ -284,7 +284,13 @@ describe('Team reminder settings routes', () => {
           if (input.expectedRevision !== record.revision) {
             throw new NotificationError(409, 'NotificationReminderSettingsConflict', 'Conflict.')
           }
-          record = { days: input.days, revision: input.expectedRevision + 1, updatedAt: input.now.toISOString() }
+          saves += 1
+          record = {
+            days: input.days,
+            revision: input.expectedRevision + 1,
+            updatedAt: input.now.toISOString(),
+            ...(input.mutation ? { lastMutation: input.mutation } : {}),
+          }
           return record
         },
       }),
@@ -301,7 +307,7 @@ describe('Team reminder settings routes', () => {
       readJson: async (request) => await request.json().catch(() => undefined),
       now: () => new Date('2026-07-12T00:00:00.000Z'),
     })
-    return { router, accessChecks, audits }
+    return { router, accessChecks, audits, saveCount: () => saves }
   }
 
   const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
@@ -365,5 +371,35 @@ describe('Team reminder settings routes', () => {
       body: JSON.stringify({ expectedRevision: 0, days: {} }),
     })
     expect(stale.status).toBe(409)
+  })
+
+  test('replays a retried save after a lost response and rejects a reused key with another body', async () => {
+    const { router, audits, saveCount } = createRouter({ manager: true })
+    const retryHeaders = { ...headers, 'Idempotency-Key': 'save-1' }
+    const body = JSON.stringify({ expectedRevision: 0, days: { dueSoonDays: 2 } })
+    const first = await router.request('/api/teams/core/notification-reminders', { method: 'PUT', headers: retryHeaders, body })
+    expect(first.status).toBe(200)
+
+    const retried = await router.request('/api/teams/core/notification-reminders', { method: 'PUT', headers: retryHeaders, body })
+    expect(retried.status).toBe(200)
+    expect(await retried.json()).toMatchObject({ days: { dueSoonDays: 2 }, revision: 1 })
+    expect(saveCount()).toBe(1)
+    expect(audits).toHaveLength(1)
+
+    const reused = await router.request('/api/teams/core/notification-reminders', {
+      method: 'PUT',
+      headers: retryHeaders,
+      body: JSON.stringify({ expectedRevision: 0, days: { dueSoonDays: 3 } }),
+    })
+    expect(reused.status).toBe(409)
+    expect(await reused.json()).toEqual({ code: 'IdempotencyKeyReused' })
+
+    const otherKey = await router.request('/api/teams/core/notification-reminders', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'save-2' },
+      body,
+    })
+    expect(otherKey.status).toBe(409)
+    expect(await otherKey.json()).toEqual({ code: 'NotificationReminderSettingsConflict' })
   })
 })

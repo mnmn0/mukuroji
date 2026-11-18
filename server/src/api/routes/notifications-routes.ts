@@ -4,13 +4,8 @@ import {
 } from '../../modules/notifications/adapter-in/http/notification-router'
 import { createPushSubscriptionRouter } from '../../modules/notifications/adapter-in/http/push-subscription-router'
 import { createTeamReminderSettingsRouter } from '../../modules/notifications/adapter-in/http/team-reminder-settings-router'
-import {
-  DynamoDbReminderSettingsStore,
-  readReminderPolicyDefaultsFromEnvironment,
-} from '../../modules/notifications'
-import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
+import { readReminderPolicyDefaultsFromEnvironment } from '../../modules/notifications'
 import { createMutationAuditEventPut, getConfiguredAuditTableName } from '../../modules/audit/audit'
-import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import { NOTIFICATION_REMINDER_DAY_FIELDS } from '@mukuroji/contracts'
 import { createPushConfiguration } from '../../modules/notifications/domain/push-subscription'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
@@ -57,7 +52,7 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
         return false
       }
     },
-    getStore: getReminderSettingsStore,
+    getStore: () => workItemDependencies.teamReminderSettings,
     getDefaults: readReminderPolicyDefaultsFromEnvironment,
     createAuditPut(context, principal, input) {
       return createMutationAuditEventPut(
@@ -106,17 +101,3 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
   }))
 }
 
-let reminderSettingsStore: DynamoDbReminderSettingsStore | undefined
-
-/**
- * Returns the process-wide Team reminder settings store, creating it on first use.
- *
- * @returns Store bound to the configured NotificationsTable.
- */
-function getReminderSettingsStore() {
-  reminderSettingsStore ??= new DynamoDbReminderSettingsStore(
-    createDynamoDbDocumentClient(createDynamoDbClient()),
-    getConfiguredNotificationsTableName(),
-  )
-  return reminderSettingsStore
-}

@@ -202,7 +202,7 @@ escalation は Work Item が完了・中止・archive で配信時に捨てら�
 2. Work Item（工数の督促では工数）の Team の設定（`GET` / `PUT /api/teams/{teamId}/notification-reminders`）
 3. 既定値。schedule Lambda の環境変数 `NOTIFICATION_DUE_SOON_DAYS`、`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、`NOTIFICATION_STALE_STARTED_DAYS`、`NOTIFICATION_TIMESHEET_REMINDER_DAYS` で上書きでき、未設定なら 3 / 7 / 7 / 7 / 7 日です。Team 設定の API も同じ環境変数を読んで `defaults` として返すため、上書きするときは schedule と API の両方の Lambda に同じ値を設定します（今の CDK はどちらにも設定しません）
 
-日数は 1〜365 の整数です。Team の設定は Team を読める member なら誰でも読め（`canManage` で変更できるかを返します）、変更は Team manager かつ Workspace の業務データを書ける人だけができます。route の `teams.manage` と handler の `requireTeamPermission(..., 'manager')` の両方で確認し、body は認可の後に検証します。保存は `expectedRevision` を条件にした transaction で、変更前後の日数を `notification-reminders.updated` の audit event に同じ transaction で残します。Team の設定は NotificationsTable の `<workspaceId>#!team-reminder-settings` partition に Team ごとの行として保存します。member key は必ず `@` を含むので member の partition と衝突せず、`<workspaceId>#` で始まるので Workspace の削除・export の範囲に入ります。
+日数は 1〜365 の整数です。Team の設定は Team を読める member なら誰でも読め（`canManage` で変更できるかを返します）、変更は Team manager かつ Workspace の業務データを書ける人だけができます。route の `teams.manage` と handler の `requireTeamPermission(..., 'manager')` の両方で確認し、body は認可の後に検証します。保存は `expectedRevision` を条件にした transaction で、変更前後の日数を `notification-reminders.updated` の audit event に同じ transaction で残します。保存した行には `Idempotency-Key` と request の fingerprint も残し、応答が失われた後に同じ key・同じ body で再送されたときは revision の競合にせず保存済みの設定を返します。同じ key で別の body を送ると 409 `IdempotencyKeyReused` です。Team の設定は NotificationsTable の `<workspaceId>#!team-reminder-settings` partition に Team ごとの行として保存します。member key は必ず `@` を含むので member の partition と衝突せず、`<workspaceId>#` で始まるので Workspace の削除・export の範囲に入ります。
 
 Team と本人の設定は schedule の 1 回の実行の中で Team・member ごとに 1 回だけ読みます。Team の行が壊れている場合は既定値に戻さず、schedule を失敗させて retry と alarm に任せます。
 
@@ -215,7 +215,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、UTC の `NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC` 時（既定 0 時、日本時間 9 時）の実行だけです。その回が失敗した日は送らず、翌日の実行で送ります
 - 対象は Work Item の scan で見つかった Team です。工数は必ず Team の Work Item に付くため、工数のある Team は漏れません。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
 - 重複排除 key は Workspace・Team・member・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
-- 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=YYYY-MM-DD`、週は UTC の月曜始まり）を開きます。title は持たず、概要は件数と最も古い日付です
+- 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む月曜始まりの週に直します）を開きます。title は持たず、概要は件数と最も古い日付です
 - event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。読み直す手段がない projection では督促を届けません
 - 宛先の権限は Team scope の通知として確認します（Team の Project のどれかを読めること）
 - Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります

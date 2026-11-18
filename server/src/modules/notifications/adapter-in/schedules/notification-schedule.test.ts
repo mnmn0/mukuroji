@@ -1617,7 +1617,7 @@ describe('configurable reminder days and timesheet reminders', () => {
       summary: '2 time entries since 2026-07-01 have not been submitted.',
       metadata: {
         teamId: 'core-team',
-        deepLink: '/teams/core-team/timesheet?week=2026-06-29',
+        deepLink: '/teams/core-team/timesheet?week=2026-07-01T00%3A00%3A00.000Z',
         timeEntryIds: ['old-1', 'old-2'],
         notificationCandidates: [{ memberKey: 'member@example.com', reason: 'timesheet' }],
       },

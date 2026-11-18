@@ -1,12 +1,12 @@
 import { useCallback, useRef, useState } from 'react'
-import useSWR from 'swr'
 import type {
   TeamNotificationReminderDays,
   TeamNotificationReminderSettings,
 } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from '../api/errors'
-import { getTeamReminderSettings, updateTeamReminderSettings } from '../api/teamReminders'
+import { updateTeamReminderSettings } from '../api/teamReminders'
+import { useTeamReminderSettingsQuery } from '../queries/useTeamReminderSettingsQuery'
 
 /** State and actions of the Team reminder settings panel. */
 export type TeamReminderSettingsController = {
@@ -52,14 +52,7 @@ export function useTeamReminderSettings(
   const [isSaving, setIsSaving] = useState(false)
   const [saveResult, setSaveResult] = useState<TeamReminderSettingsController['saveResult']>()
   const [saveError, setSaveError] = useState<unknown>()
-  const key = accessToken && teamId && enabled
-    ? ['team-notification-reminders', accessToken, teamId] as const
-    : null
-  const { data, error, isLoading, mutate } = useSWR(
-    key,
-    ([, token, team]) => getTeamReminderSettings(token, team),
-    { revalidateOnFocus: false, shouldRetryOnError: false },
-  )
+  const { data, error, isLoading, mutate } = useTeamReminderSettingsQuery(accessToken, teamId, enabled)
 
   const save = useCallback(async (days: TeamNotificationReminderDays) => {
     if (!accessToken || !teamId || !data) return false
@@ -93,7 +86,7 @@ export function useTeamReminderSettings(
 
   return {
     ...(data ? { settings: data } : {}),
-    isLoading: Boolean(key) && isLoading,
+    isLoading,
     hasLoadError: Boolean(error),
     isUnavailable: error instanceof NotificationsApiError && (error.status === 403 || error.status === 404),
     isSaving,

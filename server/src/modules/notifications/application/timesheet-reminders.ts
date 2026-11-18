@@ -93,16 +93,3 @@ export async function evaluateTimesheetReminders(
   }
   return candidates
 }
-
-/**
- * Returns the Monday (UTC) of the week containing an instant, for the timesheet deep link.
- *
- * @param instant - ISO 8601 timestamp.
- * @returns `YYYY-MM-DD` of that week's Monday in UTC.
- */
-export function utcWeekStartDate(instant: string): string {
-  const date = new Date(Date.parse(instant))
-  const daysSinceMonday = (date.getUTCDay() + 6) % 7
-  date.setUTCDate(date.getUTCDate() - daysSinceMonday)
-  return date.toISOString().slice(0, 10)
-}

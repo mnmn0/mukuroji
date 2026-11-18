@@ -30,7 +30,6 @@ import type { ScheduledTimesheetReader } from '../../application/ports/timesheet
 import {
   TIMESHEET_REMINDER_LOOKBACK_DAYS,
   evaluateTimesheetReminders,
-  utcWeekStartDate,
   type TimesheetReminderCandidate,
 } from '../../application/timesheet-reminders'
 import {
@@ -1182,7 +1181,8 @@ function createTimesheetReminderAuditEvent(
       ...(requestId ? { requestId } : {}),
     },
   })
-  const search = new URLSearchParams({ week: utcWeekStartDate(candidate.oldestStartAt) })
+  // The browser resolves the instant to the week in the reader's own timezone.
+  const search = new URLSearchParams({ week: candidate.oldestStartAt })
   const oldestDate = candidate.oldestStartAt.slice(0, 10)
   return createAuditEvent({
     context,

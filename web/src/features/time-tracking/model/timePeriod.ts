@@ -45,6 +45,19 @@ function parseLocalDate(value: string): Date | undefined {
 }
 
 /**
+ * Parses an ISO 8601 instant with an explicit time and returns its local calendar day.
+ *
+ * @param value - Candidate instant such as `2026-07-06T09:00:00.000Z`.
+ * @returns Local midnight of that day, or undefined when the text is not an instant.
+ */
+function parseInstantLocalDate(value: string): Date | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return undefined
+  const instant = new Date(value)
+  if (!Number.isFinite(instant.getTime())) return undefined
+  return new Date(instant.getFullYear(), instant.getMonth(), instant.getDate())
+}
+
+/**
  * Returns the local date of an instant in the browser timezone.
  *
  * @param instant - ISO 8601 instant or Date.
@@ -159,12 +172,14 @@ export function resolveLocalInstant(original: string | undefined, date: string, 
 /**
  * Normalizes any local date to the Monday that starts its week.
  *
- * @param value - Local `YYYY-MM-DD` date; invalid text falls back to `today`.
+ * @param value - Local `YYYY-MM-DD` date, or an ISO 8601 instant (as in notification links) that is
+ *   placed in the browser timezone; invalid text falls back to `today`.
  * @param today - Current instant used for the fallback.
  * @returns Monday of the week as `YYYY-MM-DD`.
  */
 export function resolveWeekStart(value: string | null | undefined, today: Date = new Date()): string {
-  const date = (value ? parseLocalDate(value) : undefined) ?? new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const date = (value ? parseLocalDate(value) ?? parseInstantLocalDate(value) : undefined) ??
+    new Date(today.getFullYear(), today.getMonth(), today.getDate())
   const offsetFromMonday = (date.getDay() + 6) % 7
   date.setDate(date.getDate() - offsetFromMonday)
   return formatLocalDate(date)
