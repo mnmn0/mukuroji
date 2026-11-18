@@ -24,6 +24,7 @@ import {
 } from '../../commands/ui/WorkspaceCommandMenuContext'
 import { createDefaultDateRangeTaskSchedule } from '../model/taskSchedule'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
+import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
 import {
   collaborationWorkspaceMemberFixtures,
   issueCollaborationControllerFixture,
@@ -190,6 +191,11 @@ const onReadOnlySelectedIssueChange = fn()
 const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
+})
+const onDeclinedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
+  void task
+  void input
+  return CANCELLED_TEAM_ISSUE_UPDATE
 })
 const onDeniedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
@@ -1656,6 +1662,26 @@ export const DirectInlinePatch: Story = {
     const [task, patch] = onDirectPatchMutation.mock.calls[0] ?? []
     expect(task).toMatchObject({ id: 'wireframe', revision: 1, teamId: 'core-team' })
     expect(patch).toEqual({ workflowStatusId: 'review' })
+  },
+}
+
+/** A change the person declines, such as completing a parent with open children, is not reported as saved. */
+export const DirectInlinePatchDeclined: Story = {
+  args: {
+    onUpdateTask: onDeclinedDirectPatchMutation,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onDeclinedDirectPatchMutation.mockClear()
+
+    await userEvent.click(canvas.getByTestId('task-inline-status-wireframe'))
+    await userEvent.selectOptions(
+      canvas.getByTestId('task-inline-status-wireframe-input'),
+      'review',
+    )
+
+    await waitFor(() => expect(onDeclinedDirectPatchMutation).toHaveBeenCalledTimes(1))
+    await expect(canvas.queryByText('変更を保存しました。')).toBeNull()
   },
 }
 

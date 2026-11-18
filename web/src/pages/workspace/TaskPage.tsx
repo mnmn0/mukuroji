@@ -80,6 +80,10 @@ import {
   confirmParentCompletionInBrowser,
 } from '../../issues/mutations/confirmParentCompletion'
 import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
+import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
   issueCollaborationTargetSearchParams,
@@ -1445,11 +1449,11 @@ export function TaskPage() {
     )
   }
 
-  /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
+  /** Updates a visible Work Item with optimistic cache projection and conflict rollback; resolves cancelled when the person declines completing a parent. */
   const handleUpdateTask = async (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<CanonicalWorkItem> => {
+  ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     if (!accessToken) {
       throw new Error(t('tasks.action.updateError'))
     }
@@ -1499,7 +1503,7 @@ export function TaskPage() {
       accessToken,
       confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
     })) {
-      return latestKnownTask
+      return CANCELLED_TEAM_ISSUE_UPDATE
     }
     const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
     /** Returns whether a candidate is the same Team-local Work Item. */
