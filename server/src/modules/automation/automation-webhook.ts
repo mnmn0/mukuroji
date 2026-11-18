@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto'
 import { lookup as lookupHostname } from 'node:dns/promises'
 import type { ClientRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
-import { isIP } from 'node:net'
+import { isIP, type LookupFunction } from 'node:net'
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -238,9 +238,7 @@ export async function sendAutomationWebhookRequest(
             ...request.headers,
             'Content-Length': String(Buffer.byteLength(request.body)),
           },
-          lookup: (_hostname, _options, callback) => {
-            callback(null, resolvedAddress.address, resolvedAddress.family)
-          },
+          lookup: createPinnedAutomationWebhookLookup(resolvedAddress),
           method: 'POST',
         }, (response) => {
           const status = response.statusCode ?? 0
@@ -275,6 +273,28 @@ export async function sendAutomationWebhookRequest(
           ))
     })
   })
+}
+
+/**
+ * DNS 検証済み address だけを返す `net` 用 lookup を作ります。
+ *
+ * Node.js 20 以降は `autoSelectFamily` が既定で有効で、`net` は lookup を
+ * `{ all: true }` 付きで呼び、address の配列を期待します。単一 address 形式だけで
+ * 応答すると `ERR_INVALID_IP_ADDRESS` で接続前に失敗するため、両方の形式に応答します。
+ *
+ * @param resolvedAddress - SSRF policy で検証済みの接続先です。
+ * @returns 検証済み address に接続先を固定する lookup です。
+ */
+export function createPinnedAutomationWebhookLookup(
+  resolvedAddress: AutomationWebhookResolvedAddress,
+): LookupFunction {
+  return (_hostname, options, callback) => {
+    if (options?.all) {
+      callback(null, [{ address: resolvedAddress.address, family: resolvedAddress.family }])
+      return
+    }
+    callback(null, resolvedAddress.address, resolvedAddress.family)
+  }
 }
 
 async function resolveAutomationWebhookSecret(workspaceId: string, secretAlias: string) {

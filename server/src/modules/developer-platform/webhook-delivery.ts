@@ -104,6 +104,20 @@ export class UnsafeWebhookUrlError extends Error {
   }
 }
 
+/**
+ * Webhook hostname の名前解決そのものが失敗した場合の内部 error です。
+ *
+ * SERVFAIL や resolver の timeout は一時的なことがあるため、禁止 address への解決
+ * (終端) とは分け、配信時は retry の対象にします。
+ */
+class WebhookHostnameResolutionError extends Error {
+  /** Resolver 失敗を表す error を作成します。 */
+  constructor() {
+    super('Webhook hostname could not be resolved.')
+    this.name = 'WebhookHostnameResolutionError'
+  }
+}
+
 /** Webhook signature を timing-safe に検証し、古い payload replay を拒否します。 */
 export function verifyWebhookSignature(input: {
   /** Receiver が保持する signing secret です。 */
@@ -136,7 +150,14 @@ export async function assertSafeWebhookUrl(
   value: string,
   resolveAddresses: WebhookAddressResolver = resolveWebhookAddresses,
 ) {
-  return (await resolveSafeWebhookUrl(value, resolveAddresses)).url
+  try {
+    return (await resolveSafeWebhookUrl(value, resolveAddresses)).url
+  } catch (error) {
+    if (error instanceof WebhookHostnameResolutionError) {
+      throw new UnsafeWebhookUrlError(error.message)
+    }
+    throw error
+  }
 }
 
 async function resolveSafeWebhookUrl(
@@ -175,7 +196,7 @@ async function resolveSafeWebhookUrl(
   try {
     addresses = await resolveAddresses(hostname)
   } catch {
-    throw new UnsafeWebhookUrlError('Webhook hostname could not be resolved.')
+    throw new WebhookHostnameResolutionError()
   }
   if (
     addresses.length === 0 ||
@@ -195,10 +216,18 @@ export async function deliverWebhookRequest(
   input: WebhookRequestInput,
   dependencies: WebhookDeliveryDependencies = {},
 ): Promise<WebhookRequestResult> {
-  const resolved = await resolveSafeWebhookUrl(
-    input.url,
-    dependencies.resolveAddresses ?? resolveWebhookAddresses,
-  )
+  let resolved: Awaited<ReturnType<typeof resolveSafeWebhookUrl>>
+  try {
+    resolved = await resolveSafeWebhookUrl(
+      input.url,
+      dependencies.resolveAddresses ?? resolveWebhookAddresses,
+    )
+  } catch (error) {
+    if (error instanceof WebhookHostnameResolutionError) {
+      return { succeeded: false, retryable: true, error: error.message }
+    }
+    throw error
+  }
   const timestamp = input.timestamp ?? Math.floor(Date.now() / 1_000)
   const controller = new AbortController()
   const timeout = setTimeout(
