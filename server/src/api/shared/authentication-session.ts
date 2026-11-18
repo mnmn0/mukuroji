@@ -238,14 +238,21 @@ export function toProjectPrincipal(user: GetUserResponse, accessToken: string): 
  * Invited users keep their email as the username, and federated users carry a verified email, so
  * neither is affected.
  *
+ * A pool that signs in by email generates each username, and that username is the user's `sub`.
+ * There the username never equals the email, and Cognito already refuses an email another user
+ * holds, so the check leaves those users alone instead of locking out an invited user whose
+ * verification has not been recorded yet.
+ *
  * @param user - Cognito user.
- * @returns Whether the email is explicitly unverified and differs from the username.
+ * @returns Whether the email is explicitly unverified and differs from a chosen username.
  */
 function isSelfChangedEmail(user: GetUserResponse) {
   const email = readUserAttribute(user, 'email')?.trim().toLowerCase()
   if (!email) return false
   if (readUserAttribute(user, 'email_verified')?.trim().toLowerCase() !== 'false') return false
-  return email !== user.Username?.trim().toLowerCase()
+  const username = user.Username?.trim().toLowerCase()
+  if (username && username === readUserAttribute(user, 'sub')?.trim().toLowerCase()) return false
+  return email !== username
 }
 
 function getConfiguredWorkspaceDirectoryId() {

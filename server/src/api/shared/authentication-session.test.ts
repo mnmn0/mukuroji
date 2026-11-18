@@ -47,8 +47,19 @@ test('keeps a user whose verified email differs from the username', () => {
   expect(principal.userKey).toBe('owner@example.com')
 })
 
+test('keeps an unverified invited user in a pool that generates usernames', () => {
+  const principal = toProjectPrincipal(cognitoUser('7d1c2f3a-0000-4000-8000-000000000001', {
+    sub: '7d1c2f3a-0000-4000-8000-000000000001',
+    email: 'member@example.com',
+    email_verified: 'false',
+  }), accessToken)
+
+  expect(principal.userKey).toBe('member@example.com')
+})
+
 test('rejects a user who changed their own email to another address', () => {
   expect(() => toProjectPrincipal(cognitoUser('member@example.com', {
+    sub: '7d1c2f3a-0000-4000-8000-000000000002',
     email: 'owner@example.com',
     email_verified: 'false',
   }), accessToken)).toThrow(expect.objectContaining({

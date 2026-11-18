@@ -619,7 +619,8 @@ user pool は `AdminCreateUserConfig.AllowAdminCreateUserOnly=true`（self sign-
 この2点は準備 script、bootstrap validator、deploy 時の `ValidateCognitoClientContract` custom
 resource が検証し、満たさなければ失敗します。stack が作る user pool は最初から満たしています。
 多層防御として、API は `email_verified=false` かつ email が username と異なる user（自分で email を
-変えた user）を拒否します。
+変えた user）を拒否します。email でサインインする pool（username が Cognito の生成値 = `sub`）は
+Cognito が email の重複を拒否するため、この判定の対象外です。
 
 初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。
 Password/API client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。SSO client は
