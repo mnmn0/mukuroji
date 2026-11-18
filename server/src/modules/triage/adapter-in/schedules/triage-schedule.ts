@@ -14,7 +14,6 @@ import {
 import { TriageError } from '../../domain/triage-entry'
 import {
   createTriageScheduleTransactionItems,
-  createTriageWakeIndexRepairItem,
   decodeTriageEntryRow,
   DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
 } from '../../adapter-out/dynamodb/triage-transactions'
@@ -23,6 +22,7 @@ import {
   createTriageScheduleAuditTransactionItems,
   readTriageNotificationMemberKey,
 } from '../../adapter-out/dynamodb/triage-audit-events'
+import { repairTriageWakeIndex } from '../../adapter-out/dynamodb/triage-wake-index-repair'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Default sparse wake-index name. */
@@ -236,20 +236,14 @@ export async function runTriageSchedule(
         wakeShardCount,
       })
       if (contribution.transactItems.length === 0) {
-        const repair = createTriageWakeIndexRepairItem({
+        const repair = await repairTriageWakeIndex(options.documentClient, {
           tableName,
           entry,
           storedItem: read.Item,
           wakeShardCount,
         })
-        if (!repair) continue
-        try {
-          await options.documentClient.send(new TransactWriteCommand({ TransactItems: [repair] }))
-          result.repairedWakeIndexEntries += 1
-        } catch (error) {
-          if (!isConditionalConflict(error)) throw error
-          result.conflicts += 1
-        }
+        if (repair === 'repaired') result.repairedWakeIndexEntries += 1
+        if (repair === 'conflict') result.conflicts += 1
         continue
       }
       const escalationOwnerUserId = contribution.escalated

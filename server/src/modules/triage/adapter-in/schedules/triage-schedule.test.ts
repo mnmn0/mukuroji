@@ -692,23 +692,19 @@ describe('triage schedule adapter', () => {
         })
         const queries = harness.inputs.filter((input) => 'IndexName' in input)
         expect(queries).toHaveLength(8)
-        const writes = harness.inputs.filter((input) => 'TransactItems' in input)
+        expect(harness.calls).not.toContain('TransactWriteCommand')
+        const writes = harness.inputs.filter((input) => 'UpdateExpression' in input)
         expect(writes).toEqual([{
-          TransactItems: [{
-            Update: {
-              TableName: 'RequestIntakeTable',
-              Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' },
-              UpdateExpression:
-                'SET triageWakeShard = :wakeShard, triageNextWakeAt = :nextWakeAt',
-              ConditionExpression: '#revision = :expectedRevision',
-              ExpressionAttributeNames: { '#revision': 'revision' },
-              ExpressionAttributeValues: {
-                ':expectedRevision': 1,
-                ':wakeShard': storedItem.triageWakeShard,
-                ':nextWakeAt': '2026-08-10T00:00:00.000Z#triage-1',
-              },
-            },
-          }],
+          TableName: 'RequestIntakeTable',
+          Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' },
+          UpdateExpression: 'SET triageWakeShard = :wakeShard, triageNextWakeAt = :nextWakeAt',
+          ConditionExpression: '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: {
+            ':expectedRevision': 1,
+            ':wakeShard': storedItem.triageWakeShard,
+            ':nextWakeAt': '2026-08-10T00:00:00.000Z#triage-1',
+          },
         }])
       } finally {
         harness.restore()
@@ -728,7 +724,10 @@ describe('triage schedule adapter', () => {
           evaluatedCandidates: 1,
           repairedWakeIndexEntries: 0,
         })
-        expect(harness.calls).not.toContain('TransactWriteCommand')
+        expect(harness.calls).toEqual(expect.not.arrayContaining([
+          'TransactWriteCommand',
+          'UpdateCommand',
+        ]))
       } finally {
         harness.restore()
       }
@@ -739,9 +738,8 @@ describe('triage schedule adapter', () => {
         ...createStoredItem(createSnoozedPastSlaEntry()),
         triageNextWakeAt: '2026-08-09T00:05:00.000Z#triage-1',
       }
-      const conflict = new Error('Transaction cancelled.')
-      conflict.name = 'TransactionCanceledException'
-      Object.assign(conflict, { CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] })
+      const conflict = new Error('The conditional request failed.')
+      conflict.name = 'ConditionalCheckFailedException'
       const harness = createHarness((commandName, input) => {
         if (commandName === 'QueryCommand') return queryShardOf(storedItem, input)
         if (commandName === 'GetCommand') return { Item: storedItem }
