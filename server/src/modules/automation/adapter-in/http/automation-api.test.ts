@@ -3747,3 +3747,43 @@ test('lets a member undo a Bulk first start without correcting the actual dates'
   expect(calls.issueUpdates).toHaveLength(1)
   expect(corrections).toEqual([undefined])
 })
+
+test('predicts a Bulk undo completion date in the calendar of the restored schedule', async () => {
+  const withTimeZone = (timeZone: string) => {
+    const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+    return { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, timeZone } }
+  }
+  // These zones are 26 hours apart, so their local dates always differ.
+  const restoredSchedule = withTimeZone('Pacific/Kiritimati')
+  const todayInRestoredZone = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Pacific/Kiritimati',
+  }).format(new Date())
+  const corrections: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    role: 'member',
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailWorkflowStatusId: 'in-progress',
+    detailActualStartDate: '2026-06-01',
+    detailSchedule: withTimeZone('Etc/GMT+12'),
+    issueUpdateHook: (input) => {
+      corrections.push(input.actualDateCorrection)
+    },
+  })
+  const operation = createBulkStatusUndoOperation({
+    workflowStatusId: 'done',
+    schedule: restoredSchedule,
+    actualStartDate: '2026-06-01',
+    actualEndDate: todayInRestoredZone,
+  })
+  operation.action = {
+    type: 'edit',
+    patch: { workflowStatusId: 'in-progress', schedule: withTimeZone('Etc/GMT+12') },
+  }
+
+  const response = await requestBulkUndo(operation)
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ items: [{ status: 'undone' }] })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(corrections).toEqual([undefined])
+})
