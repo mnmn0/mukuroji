@@ -1083,6 +1083,53 @@ describe('public Agent Run service', () => {
     expect(store.state.runs.get(`${workspaceId}|core-team|${resumed.run.runId}`)).not.toHaveProperty('resumedFromRunId')
   })
 
+  test('links a resume to the newest run read strongly, not to a lagging history index', async () => {
+    const service = createCanonicalPublicAgentRunService()
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const older = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'paused', 'agent', new Date())
+    const newer = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'paused', 'agent', new Date())
+    store.seed(older)
+    store.seed(newer)
+    // The history index has not caught up with the newer run yet.
+    store.listWorkItemRuns = async () => ({ runs: [structuredClone(older)] })
+    /**
+     * Resumes the Work Item as another instance.
+     *
+     * @param key - Idempotency key.
+     * @returns The resume response.
+     */
+    const resume = (key: string) => runWithTestAppDependencies(() => service.resume(
+      credential, 'core-team', 'task-1',
+      { expectedRevision: 1, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'resume', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    // A run that starts and ends while the resume is in flight makes it conflict instead of linking an older run.
+    const commit = store.commit.bind(store)
+    const racing = finishAgentRun(createHeldRun('task-1', 'laptop-3'), 'paused', 'agent', new Date())
+    store.commit = async (items, fenceItemCount) => {
+      store.seed(racing)
+      store.commit = commit
+      return commit(items, fenceItemCount)
+    }
+    await expect(resume('raced')).rejects.toMatchObject({ category: 'conflict' })
+    const resumed = await resume('linked')
+    expect(resumed.resumedFromRun?.runId).toBe(racing.runId)
+    expect(await store.getLatestRunId(workspaceId, 'core-team', 'task-1')).toBe(resumed.run.runId)
+  })
+
   test('does not take over a run on a Work Item that is no longer started', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'unstarted' })
     store.state.settings.set(`${workspaceId}|core-team`, {

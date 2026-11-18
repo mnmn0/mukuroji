@@ -44,6 +44,8 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
   const fences: (AgentRunMutationFence | undefined)[] = []
   const runs = new Map<string, AgentRunRecord & { instanceId: string }>()
   let runSequence = 0
+  /** Resume responses by idempotency key, like the API receipts. */
+  const resumeReceipts = new Map<string, Awaited<ReturnType<AgentWorkItemApi['resumeRun']>>>()
   const startReceipts = new Map<string, { fingerprint: string; response: { run: AgentRunRecord; task: AgentTask } }>()
   /** Projects a stored run without the raw instance ID, as the server does. */
   const publicRun = ({ instanceId: _instanceId, ...run }: AgentRunRecord & { instanceId: string }): AgentRunRecord => structuredClone(run)
@@ -196,7 +198,10 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
      * @param input - Revision and identity of the caller.
      * @returns The new run and the run it resumes.
      */
-    async resumeRun(id, input) {
+    async resumeRun(id, input, key) {
+      // Like the API, a committed resume replays its receipt for the same key.
+      const receipt = resumeReceipts.get(key)
+      if (receipt) return receipt
       const current = records.get(id)
       if (!current || current.revision !== input.expectedRevision) throw new AgentTaskError('conflict', 'Changed')
       if (current.statusCategory !== 'started') throw new AgentTaskError('invalid_transition', 'Not started')
@@ -211,7 +216,9 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
         instanceId: input.instanceId,
       }
       runs.set(run.runId, run)
-      return { run: publicRun(run), ...(previous === undefined ? {} : { resumedFromRun: publicRun(previous) }) }
+      const response = { run: publicRun(run), ...(previous === undefined ? {} : { resumedFromRun: publicRun(previous) }) }
+      resumeReceipts.set(key, response)
+      return response
     },
     /**
      * Returns the newest run of a task.
@@ -290,6 +297,8 @@ describe('agent task lifecycle', () => {
     })
     const resumed = await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104')
     expect(resumed.resumedFromRun?.runId).toBe(started.run.runId)
+    // A retry after a lost response replays the committed resume instead of meeting its own run.
+    expect(await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104')).toEqual(resumed)
     expect(resumed.run).toMatchObject({ state: 'active', workItemId: 'paused' })
     expect(records.get('paused')?.workflowStatusId).toBe('coding')
     // The new run is this instance's run, so the task is in progress and a structured report reaches it.
@@ -310,8 +319,11 @@ describe('agent task lifecycle', () => {
   })
 
   test('does not offer started tasks whose newest run failed or that are outside the resumable statuses', async () => {
-    const rows = [task('failed', { priority: 'high' }), task('review', { priority: 'high' }), task('fresh', { priority: 'low' })]
-    const { service } = fixture(rows, {
+    const rows = [
+      task('failed', { priority: 'high' }), task('review', { priority: 'high' }), task('waiting', { priority: 'high' }),
+      task('fresh', { priority: 'low' }),
+    ]
+    const { service, records } = fixture(rows, {
       async agentSettings() {
         return {
           schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
@@ -324,8 +336,16 @@ describe('agent task lifecycle', () => {
     if (!('run' in failed) || !('run' in review)) throw new Error('start_task must return a run.')
     await service.finishRun(failed.run.runId, 'failed', '00000000-0000-4000-8000-000000000203')
     await service.finishRun(review.run.runId, 'paused', '00000000-0000-4000-8000-000000000204')
+    // A task paused on a dependency that is still open is not offered again until the dependency resolves.
+    const waiting = await service.transition('waiting', 1, 'coding', 'start', '00000000-0000-4000-8000-000000000205')
+    if (!('run' in waiting)) throw new Error('start_task must return a run.')
+    await service.finishRun(waiting.run.runId, 'paused', '00000000-0000-4000-8000-000000000206')
+    const paused = records.get('waiting')
+    if (!paused) throw new Error('Missing task.')
+    records.set('waiting', { ...paused, relationIds: ['blockedBy:missing'] })
     expect(await service.next({})).toMatchObject({
-      action: 'start', task: { id: 'fresh' }, skipped: [{ taskId: 'review', reason: 'not_resumable' }],
+      action: 'start', task: { id: 'fresh' }, blockedCount: 1,
+      skipped: [{ taskId: 'review', reason: 'not_resumable' }, { taskId: 'waiting', reason: 'blocked' }],
     })
     expect((await service.configuration()).agentSettings.resumableStatusIds).toEqual(['coding'])
   })

@@ -838,8 +838,14 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const now = new Date()
       const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
       if (claim) throw await createHolderConflict(principal, teamId, claim.runId, now)
-      // The run history is read again run by run, so the newest run's state is current.
-      const [previous] = (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs
+      // The newest run is read strongly, and the resume commits only while it is still the newest, so the
+      // link names the run that really came last. A Work Item whose runs all predate that record falls back
+      // to the history index, which is settled for runs that old.
+      const latestRunId = await store.getLatestRunId(principal.directoryId, teamId, workItemId)
+      const previous = latestRunId === undefined
+        ? (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs[0]
+        : await store.getRun(principal.directoryId, teamId, latestRunId)
+      if (latestRunId !== undefined && previous?.workItemId !== workItemId) throw createAgentRunIntegrityError()
       if (previous?.state === 'active') throw createAgentRunConflictError(describeHoldingRun(previous, now))
       const run = createActiveAgentRun({
         directoryId: principal.directoryId,
@@ -882,7 +888,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       )
       const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
         ?.prepare({ status: 201, body: response })
-      const startItems = store.createStartItems(run)
+      const startItems = store.createStartItems(run, { runId: latestRunId })
       try {
         await store.commit([
           ...startItems,
@@ -908,6 +914,9 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         requireResumable(principal, latest.detail.issue, detail.issue.revision, latestSettings.resumableStatusIds)
         if (latestSettings.revision !== settings.revision) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the resume.')
+        }
+        if (await store.getLatestRunId(principal.directoryId, teamId, workItemId) !== latestRunId) {
+          throw new AgentRunError('conflict', 'Another run started on the Work Item during the request. Reload the task and retry.')
         }
         throw error
       }

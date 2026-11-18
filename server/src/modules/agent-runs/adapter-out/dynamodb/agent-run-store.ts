@@ -215,6 +215,15 @@ export interface AgentRunStore {
    */
   getClaim(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunClaim | undefined>
   /**
+   * Strongly reads the ID of the newest run started on one Work Item. Every start, take over, and
+   * resume records it in the same transaction as the run, unlike the eventually consistent history index.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param workItemId - Work Item ID.
+   * @returns The run ID, or undefined when no run has been recorded since the record was introduced.
+   */
+  getLatestRunId(directoryId: string, teamId: string, workItemId: string): Promise<string | undefined>
+  /**
    * Strongly reads whether a person released, or another instance took over, a run of this member
    * and instance on the Work Item since the instance last started one there.
    * @param directoryId - Workspace ID.
@@ -280,12 +289,17 @@ export interface AgentRunStore {
    */
   listFinishedRuns(directoryId: string, teamId: string, cursor: string | undefined, limit: number): Promise<AgentRunPage>
   /**
-   * Builds the writes that create a run, claim its Work Item, and clear an earlier revocation of the
-   * same member and instance on it.
+   * Builds the writes that create a run, claim its Work Item, clear an earlier revocation of the
+   * same member and instance on it, and record the run as the Work Item's newest run.
    * @param run - New active run.
-   * @returns Run and claim puts that fail when either already exists, then the revocation delete.
+   * @param latest - When given, the newest run the caller read; the record must still name it, or be absent when undefined.
+   * @param latest.runId - Newest run ID the caller read, or undefined when it read none.
+   * @returns Run and claim puts that fail when either already exists, the revocation delete, then the newest-run put.
    */
-  createStartItems(run: StoredAgentRun): AgentRunTransactItem[]
+  createStartItems(run: StoredAgentRun, latest?: {
+    /** Newest run ID the caller read, or undefined when it read none. */
+    runId: string | undefined
+  }): AgentRunTransactItem[]
   /**
    * Builds the checks that fence a Work Item mutation with the caller's claim and run. The lease is
    * extended after the mutation commits, so an older mutation never overwrites a newer heartbeat.
@@ -428,6 +442,16 @@ function runRecordKey(runId: string): string {
  */
 function claimRecordKey(workItemId: string): string {
   return `agent-run-claim#${workItemId}`
+}
+
+/**
+ * Builds the key of the row that names a Work Item's newest run.
+ *
+ * @param workItemId - Work Item ID.
+ * @returns Sort key.
+ */
+function latestRunRecordKey(workItemId: string): string {
+  return `agent-run-latest#${workItemId}`
 }
 
 /**
@@ -961,6 +985,25 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
+  async getLatestRunId(directoryId: string, teamId: string, workItemId: string): Promise<string | undefined> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: latestRunRecordKey(workItemId) },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (item === undefined) return undefined
+    const runId = item.runId
+    if (
+      item.entityType !== 'agent-run-latest' || item.workItemId !== workItemId || item.workspaceId !== directoryId ||
+      typeof runId !== 'string' || !isAgentRunId(runId)
+    ) {
+      throw createAgentRunIntegrityError()
+    }
+    return runId
+  }
+
+  /** @inheritdoc */
   async isInstanceRevoked(directoryId: string, teamId: string, revocation: AgentRunRevocation): Promise<boolean> {
     const response = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
@@ -1463,8 +1506,20 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createStartItems(run: StoredAgentRun): AgentRunTransactItem[] {
+  createStartItems(run: StoredAgentRun, latest?: {
+    /** Newest run ID the caller read, or undefined when it read none. */
+    runId: string | undefined
+  }): AgentRunTransactItem[] {
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const latestCondition = latest === undefined
+      ? {}
+      : latest.runId === undefined
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: '#runId = :latestRunId',
+            ExpressionAttributeNames: { '#runId': 'runId' },
+            ExpressionAttributeValues: { ':latestRunId': latest.runId },
+          }
     return [
       {
         Put: {
@@ -1494,6 +1549,21 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
         Delete: {
           TableName: this.#tableName,
           Key: { directoryTeamId: partition, recordKey: revocationRecordKey(run) },
+        },
+      },
+      {
+        // The newest run is read strongly from here, so a resume links the run that really came last.
+        Put: {
+          TableName: this.#tableName,
+          Item: {
+            directoryTeamId: partition,
+            recordKey: latestRunRecordKey(run.workItemId),
+            entityType: 'agent-run-latest',
+            workspaceId: run.directoryId,
+            workItemId: run.workItemId,
+            runId: run.runId,
+          },
+          ...latestCondition,
         },
       },
     ]
@@ -1635,8 +1705,8 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       throw new TypeError('createTakeOverItems requires a superseded run and an active successor of another instance.')
     }
     const [closeUpdate, , revocationPut] = this.createCloseItems(superseded, superseded.instanceIdHash)
-    const [runPut, claimPut, revocationDelete] = this.createStartItems(successor)
-    if (!closeUpdate?.Update || !revocationPut || !runPut || !claimPut?.Put || !revocationDelete) {
+    const [runPut, claimPut, revocationDelete, latestPut] = this.createStartItems(successor)
+    if (!closeUpdate?.Update || !revocationPut || !runPut || !claimPut?.Put || !revocationDelete || !latestPut) {
       throw new TypeError('The close and start builders returned unexpected items.')
     }
     return [
@@ -1666,6 +1736,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       revocationPut,
       runPut,
       revocationDelete,
+      latestPut,
     ]
   }
 

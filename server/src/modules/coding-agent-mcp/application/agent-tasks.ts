@@ -492,6 +492,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         if (latest === undefined || latest.state !== 'finished' || !resumableOutcomes.has(latest.outcome ?? '')) continue
         // The server rejects a resume from any other status, so such tasks are never offered.
         if (!resumableStatusIds.has(task.workflowStatusId)) { skip(task.id, 'not_resumable'); continue }
+        // A task paused on an unfinished dependency waits for it like new work does.
+        dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
+        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
+        if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
         return { action: 'resume', task, resumedFromRun: latest, blockedCount, skipped, ...runSummary }
       }
       for (const task of tasks) {
@@ -648,19 +652,26 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before resuming it.')
       }
       // A stale revision is forwarded unchanged so the API can replay a successful receipt.
+      let own = false
       if (task.revision === expectedRevision) {
         if (task.statusCategory !== 'started') {
           throw new AgentTaskError('invalid_transition', 'Only a started task can be resumed. Use start_task for backlog or todo work.')
         }
-        const own = await claimedRun(id, true)
-        if (own) {
-          throw new AgentTaskError('already_running', 'This instance already holds an active run on this task. Continue it with that runId instead of resuming.')
-        }
-        if (await claimedRun(id, false)) {
+        // A resume does not change the revision, so a retry of one that committed meets its own run here.
+        own = (await claimedRun(id, true)) !== undefined
+        if (!own && await claimedRun(id, false)) {
           throw new AgentTaskError('agent_run_conflict', 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.')
         }
       }
-      return api.resumeRun(id, { expectedRevision, runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId }, key)
+      try {
+        // The API replays the receipt of a committed resume with the same key; a new resume meets the claim.
+        return await api.resumeRun(id, { expectedRevision, runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId }, key)
+      } catch (error) {
+        if (own && error instanceof AgentTaskError && error.code === 'agent_run_conflict') {
+          throw new AgentTaskError('already_running', 'This instance already holds an active run on this task. Continue it with that runId instead of resuming.')
+        }
+        throw error
+      }
     },
     /** Reads existing discussion without changing the task description or state. */
     async comments(id: string, cursor?: string, limit?: number) {

@@ -343,6 +343,24 @@ describe('DynamoDB Agent Run store', () => {
     expect(() => store.createTakeOverItems(finishAgentRun(createRun(), 'released', 'member-2', later), successor)).toThrow(TypeError)
   })
 
+  test('records the newest run with every start and reads it strongly', async () => {
+    const run = createRun()
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const latest = builder.createStartItems(run)[3]?.Put
+    expect(latest).toMatchObject({ Item: { entityType: 'agent-run-latest', workItemId: run.workItemId, runId: run.runId } })
+    expect(latest).not.toHaveProperty('ConditionExpression')
+    expect(builder.createStartItems(run, { runId: undefined })[3]?.Put?.ConditionExpression).toBe('attribute_not_exists(recordKey)')
+    expect(builder.createStartItems(run, { runId: 'run_00000000-0000-4000-8000-0000000000aa' })[3]?.Put).toMatchObject({
+      ConditionExpression: '#runId = :latestRunId', ExpressionAttributeValues: { ':latestRunId': 'run_00000000-0000-4000-8000-0000000000aa' },
+    })
+    const { client, commands } = createClient([{ Item: latest?.Item }, {}, { Item: { ...latest?.Item, runId: 'not-a-run' } }])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    expect(await reader.getLatestRunId('workspace-1', 'core', run.workItemId)).toBe(run.runId)
+    expect(commands[0]?.input).toMatchObject({ ConsistentRead: true })
+    expect(await reader.getLatestRunId('workspace-1', 'core', run.workItemId)).toBeUndefined()
+    await expect(reader.getLatestRunId('workspace-1', 'core', run.workItemId)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
   test('keeps the run a resume links to and fails closed on a malformed link', async () => {
     const resumed = { ...createRun(), resumedFromRunId: 'run_00000000-0000-4000-8000-0000000000aa' }
     const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(resumed)[0]?.Put?.Item

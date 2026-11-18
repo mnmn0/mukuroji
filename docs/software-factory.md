@@ -147,6 +147,7 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
 | --- | --- | --- | --- |
 | table | `directoryTeamId` | `agent-run#<runId>` | Run の正本 |
 | table | `directoryTeamId` | `agent-run-claim#<workItemId>` | Work Item ごとの `active` Run を 1 件に固定する claim row |
+| table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item で最後に始まった Run の `runId`。start、take over、resume の transaction で書き、resume が強整合で読む |
 | table | `directoryTeamId` | `agent-run-revoked#<workItemId>#<member と instance の hash>` | 人が解放した、または別 instance が引き継いだ Run の member と instance。fence が強整合で読む |
 | table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
@@ -734,10 +735,15 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   Work Item revision と設定 revision の ConditionCheck、新しい Run の `agent-run.resumed` audit event
   （`metadata.resumedFromRunId` に直前の Run）、idempotency receipt を 1 つの transaction で確定する。Work Item の status は変えないため、
   レビュー待ちなどから作業中へ戻す場合は agent が続けて `move_task` を呼ぶ。
-- 直前の Run は Work Item の Run 履歴の最新 1 件を強整合で読んで決め、その `runId` を新しい Run の
-  `resumedFromRunId` として保存する。最新 Run が `active` なら別 instance が作業中として
+- 直前の Run は `agent-run-latest#<workItemId>` row を強整合で読んで決め、その `runId` を新しい Run の
+  `resumedFromRunId` として保存する。resume の transaction はこの row がまだ同じ Run を指していることを条件に
+  新しい Run へ置き換えるため、読み取り後に別の Run が始まると `409` になる。結果整合の Run 履歴 index は、
+  この row がない（row の導入前に最後の Run が始まった）Work Item でだけ使う。最新 Run が `active` なら別 instance が作業中として
   `agent_run_conflict` を返す。Run が一度もない `started` Work Item（旧 MCP build や人の操作で
   開始されたもの）も明示的な resume はでき、その場合はリンクを持たない。
+- MCP の `resume_task` は、応答を失った再送が自分の claim に当たっても API に送り、同じ key の receipt を
+  再生する。別の key で同じ instance が再開しようとした場合だけ `already_running` を返す。`get_next_task` は
+  未解決の `blockedBy` がある Work Item を再開候補にせず、`skipped` に `blocked` として残す。
 - 競合: 読み取り後に別 instance が claim を取った場合は claim を読み直して `agent_run_conflict`、
   ConditionCheck で取り消された場合は Work Item と設定を読み直し、担当者の変更は `403`、`started`
   以外への移動は `invalid_transition`、`resumableStatusIds` の変更は `not_resumable`、revision や設定の
