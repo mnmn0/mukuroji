@@ -1130,6 +1130,58 @@ describe('public Agent Run service', () => {
     expect(await store.getLatestRunId(workspaceId, 'core-team', 'task-1')).toBe(resumed.run.runId)
   })
 
+  test('resumes only after the expected run, starts after it, and needs an active member at commit', async () => {
+    const service = createCanonicalPublicAgentRunService()
+    const { store, projectOptions } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const offered = finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'paused', 'agent', new Date())
+    // The run that came after the offered one started on a server whose clock is ahead of this one.
+    const ahead = new Date(Date.now() + 60_000).toISOString()
+    const later = finishAgentRun({ ...createHeldRun('task-1', 'laptop-3'), startedAt: ahead }, 'failed', 'agent', new Date())
+    store.seed(offered)
+    store.seed(later)
+    /**
+     * Resumes the Work Item as another instance.
+     *
+     * @param key - Idempotency key.
+     * @param expectedPreviousRunId - Run the agent expects to resume from.
+     * @returns The resume response.
+     */
+    const resume = (key: string, expectedPreviousRunId?: string) => runWithTestAppDependencies(() => service.resume(
+      credential, 'core-team', 'task-1',
+      {
+        expectedRevision: 1, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2'),
+        ...(expectedPreviousRunId === undefined ? {} : { expectedPreviousRunId }),
+      },
+      { requestId: 'resume', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    // An offer of the paused run does not resume after the failed run that came later.
+    await expect(resume('offered', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
+    // A member removed after authorization does not get a run.
+    projectOptions.deactivatedBeforeFenceMemberKeys = ['demo@example.com']
+    await expect(resume('removed', later.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('membership changed') })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
+    projectOptions.deactivatedBeforeFenceMemberKeys = []
+    const resumed = await resume('expected', later.runId)
+    expect(resumed.resumedFromRun?.runId).toBe(later.runId)
+    expect(Date.parse(resumed.run.startedAt)).toBeGreaterThan(Date.parse(ahead))
+    const history = await store.listWorkItemRuns(workspaceId, 'core-team', 'task-1', undefined, 3)
+    expect(history.runs.map((run) => run.runId)).toEqual([resumed.run.runId, later.runId, offered.runId])
+  })
+
   test('does not take over a run on a Work Item that is no longer started', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'unstarted' })
     store.state.settings.set(`${workspaceId}|core-team`, {

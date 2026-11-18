@@ -78,7 +78,10 @@ export type AgentRunStartInput = {
 }
 
 /** Input that resumes a started task without an active run for this agent instance. */
-export type AgentRunResumeInput = Omit<AgentRunStartInput, 'workflowStatusId'>
+export type AgentRunResumeInput = Omit<AgentRunStartInput, 'workflowStatusId'> & {
+  /** Run the agent expects to resume from; the API refuses the resume when a later run exists. */
+  expectedPreviousRunId?: string
+}
 
 /** Structured report fields sent for this instance's run; the instance ID is added by the adapter. */
 export type AgentRunReportInput = Omit<ReportAgentRunRequest, 'instanceId'>

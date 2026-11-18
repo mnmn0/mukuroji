@@ -164,6 +164,11 @@ export type ResumeAgentRunRequest = {
   agentName: string
   /** Opaque, stable identifier of the agent instance; the server stores only its hash. */
   instanceId: string
+  /**
+   * Run the agent expects to resume from, such as the `resumedFromRun` that next-task selection offered.
+   * The resume is refused with a conflict when the Work Item's newest run is another run.
+   */
+  expectedPreviousRunId?: string
 }
 
 /** Response of a successful resume. */

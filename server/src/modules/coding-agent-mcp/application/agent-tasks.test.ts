@@ -207,6 +207,9 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       if (current.statusCategory !== 'started') throw new AgentTaskError('invalid_transition', 'Not started')
       if ([...runs.values()].some((run) => run.workItemId === id && run.state === 'active')) throw new AgentTaskError('agent_run_conflict', 'Held')
       const previous = [...runs.values()].filter((run) => run.workItemId === id).at(-1)
+      if (input.expectedPreviousRunId !== undefined && previous?.runId !== input.expectedPreviousRunId) {
+        throw new AgentTaskError('conflict', 'Another run came after the expected one')
+      }
       runSequence += 1
       const run = {
         schemaVersion: 1 as const, runId: `run_00000000-0000-4000-8000-${String(runSequence).padStart(12, '0')}`,
@@ -295,10 +298,13 @@ describe('agent task lifecycle', () => {
     expect(await service.next({})).toMatchObject({
       action: 'resume', task: { id: 'paused' }, resumedFromRun: { runId: started.run.runId, outcome: 'paused' },
     })
-    const resumed = await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104')
+    // An offer names the run it was made for; a resume after another run is refused.
+    await expect(service.resume('paused', 2, '00000000-0000-4000-8000-000000000107', 'run_00000000-0000-4000-8000-000000000999'))
+      .rejects.toMatchObject({ code: 'conflict' })
+    const resumed = await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104', started.run.runId)
     expect(resumed.resumedFromRun?.runId).toBe(started.run.runId)
     // A retry after a lost response replays the committed resume instead of meeting its own run.
-    expect(await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104')).toEqual(resumed)
+    expect(await service.resume('paused', 2, '00000000-0000-4000-8000-000000000104', started.run.runId)).toEqual(resumed)
     expect(resumed.run).toMatchObject({ state: 'active', workItemId: 'paused' })
     expect(records.get('paused')?.workflowStatusId).toBe('coding')
     // The new run is this instance's run, so the task is in progress and a structured report reaches it.
@@ -362,6 +368,21 @@ describe('agent task lifecycle', () => {
     await expect(service.resume('held', 2, '00000000-0000-4000-8000-000000000302')).rejects.toMatchObject({ code: 'agent_run_conflict' })
     await expect(service.resume('todo', 1, '00000000-0000-4000-8000-000000000303')).rejects.toMatchObject({ code: 'invalid_transition' })
     await expect(service.resume('todo', 5, '00000000-0000-4000-8000-000000000304')).rejects.toMatchObject({ code: 'conflict' })
+  })
+
+  test('replays a committed resume after another instance holds the task, and keeps conflicts of other holders', async () => {
+    const { api, service } = fixture([task('paused')])
+    const other = createAgentTasks(api, { ...baseScope, instanceId: 'instance-b' })
+    const started = await service.transition('paused', 1, 'coding', 'start', '00000000-0000-4000-8000-000000000501')
+    if (!('run' in started)) throw new Error('start_task must return a run.')
+    await service.finishRun(started.run.runId, 'paused', '00000000-0000-4000-8000-000000000502')
+    const resumed = await service.resume('paused', 2, '00000000-0000-4000-8000-000000000503')
+    // The response was lost; meanwhile the run ended and another instance resumed the task.
+    await service.finishRun(resumed.run.runId, 'paused', '00000000-0000-4000-8000-000000000504')
+    await other.resume('paused', 2, '00000000-0000-4000-8000-000000000505')
+    expect(await service.resume('paused', 2, '00000000-0000-4000-8000-000000000503')).toEqual(resumed)
+    // A new resume meets the other instance's run and is not reported as this instance's own.
+    await expect(service.resume('paused', 2, '00000000-0000-4000-8000-000000000506')).rejects.toMatchObject({ code: 'agent_run_conflict' })
   })
 
   test('selects ready work across empty pages by priority, then due date, while skipping blockers', async () => {

@@ -455,6 +455,15 @@ function latestRunRecordKey(workItemId: string): string {
 }
 
 /**
+ * Sort key of a run in the Work Item history index: start time, then run ID.
+ * @param run - Run to place.
+ * @returns The sort key.
+ */
+function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): string {
+  return `${run.startedAt}#${run.runId}`
+}
+
+/**
  * Builds the sort key of an instance revocation. The member and instance are hashed together so
  * neither can contain the key separator.
  *
@@ -763,7 +772,7 @@ function serializeRun(run: StoredAgentRun): Record<string, unknown> {
     workspaceId: directoryId,
     ...fields,
     workItemRunKey: `${partition}#${run.workItemId}`,
-    workItemRunSortKey: `${run.startedAt}#${run.runId}`,
+    workItemRunSortKey: workItemRunSortKey(run),
     ...(run.state === 'active'
       ? { activeRunPartition: partition, activeRunSortKey: `${run.leaseExpiresAt}#${run.runId}` }
       : {}),
@@ -1156,7 +1165,11 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
     if (latestRunId === undefined || runs.some((run) => run.runId === latestRunId)) return this.#page(runs, response.LastEvaluatedKey)
     const latest = await this.getRun(directoryId, teamId, latestRunId)
     if (!latest || latest.workItemId !== workItemId) throw createAgentRunIntegrityError()
-    runs.unshift(latest)
+    // The run takes its place in the index order, newest start first, so the page and its cursor agree
+    // with the pages after it. A resume starts after the run it resumes, so the newest run comes first.
+    const latestSortKey = workItemRunSortKey(latest)
+    const position = runs.findIndex((run) => workItemRunSortKey(run) < latestSortKey)
+    runs.splice(position === -1 ? runs.length : position, 0, latest)
     if (runs.length <= readLimit(limit)) return this.#page(runs, response.LastEvaluatedKey)
     // The page keeps its size; the next page continues after the last run kept, so the one dropped here
     // is read there.
@@ -1167,7 +1180,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       directoryTeamId: createAgentRunPartition(directoryId, teamId),
       recordKey: runRecordKey(last.runId),
       workItemRunKey: key,
-      workItemRunSortKey: `${last.startedAt}#${last.runId}`,
+      workItemRunSortKey: workItemRunSortKey(last),
     })
   }
 

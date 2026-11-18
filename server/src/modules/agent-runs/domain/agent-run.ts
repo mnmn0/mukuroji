@@ -118,6 +118,8 @@ export type ValidatedAgentRunTakeOver = Omit<ValidatedAgentRunStart, 'expectedRe
 export type ValidatedAgentRunResume = ValidatedAgentRunTakeOver & {
   /** Work Item revision the agent read before deciding to resume. */
   expectedRevision: number
+  /** Run the agent expects to resume from; the resume is refused when the Work Item's newest run differs. */
+  expectedPreviousRunId?: string
 }
 
 /** Validated mutation fence, with the instance ID already hashed. */
@@ -306,14 +308,17 @@ export function readTakeOverAgentRunRequest(value: unknown): ValidatedAgentRunTa
  * Validates a resume request body.
  *
  * @param value - Untrusted JSON body.
- * @returns Revision, runtime, agent name, and the hash of the resuming instance.
+ * @returns Revision, runtime, agent name, the hash of the resuming instance, and the expected previous run.
  */
 export function readResumeAgentRunRequest(value: unknown): ValidatedAgentRunResume {
   if (!isRecord(value)) throw new AgentRunError('validation_failed', 'Agent Run resume body is required.')
-  assertKnownFields(value, ['expectedRevision', 'runtime', 'agentName', 'instanceId'], 'Agent Run resume')
+  assertKnownFields(value, ['expectedRevision', 'runtime', 'agentName', 'instanceId', 'expectedPreviousRunId'], 'Agent Run resume')
   return {
     expectedRevision: readRevision(value.expectedRevision, 'expectedRevision', false),
     ...readAgentIdentity(value),
+    ...(value.expectedPreviousRunId === undefined
+      ? {}
+      : { expectedPreviousRunId: readAgentRunId(value.expectedPreviousRunId, '/expectedPreviousRunId') }),
   }
 }
 

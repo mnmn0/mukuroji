@@ -23,6 +23,7 @@ import {
   isClaimHeldBy,
   toAgentRun,
   toAgentRunReport,
+  type AgentRunTransactItem,
   type StoredAgentRun,
   type StoredAgentRunReport,
 } from '../../modules/agent-runs'
@@ -34,7 +35,7 @@ import {
 } from '../../modules/collaboration'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
 import type { PublicAgentRunService } from '../../modules/developer-platform/public-api'
-import { ProjectDataError } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import { createTeamIssueDeepLink } from '../../modules/work-items'
 import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
@@ -47,7 +48,7 @@ import {
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
-import { workItemDependencies } from '../shared/app-dependencies'
+import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import {
   createCollaborationCommentAuthorizationConditionChecks,
   createTeamIssueAutomaticWatcherCandidates,
@@ -315,6 +316,40 @@ function requireResumable(
   if (issue.revision !== expectedRevision) {
     throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
   }
+}
+
+/**
+ * Chooses the start time of a resumed run: now, but always after the run it resumes, so that a clock
+ * behind that run's still lists the resumed run first in the history.
+ *
+ * @param previous - Run the new run resumes, if any.
+ * @returns Start time of the new run.
+ */
+function resumeStartTime(previous: StoredAgentRun | undefined): Date {
+  const now = Date.now()
+  if (previous === undefined) return new Date(now)
+  return new Date(Math.max(now, Date.parse(previous.startedAt) + 1))
+}
+
+/**
+ * Builds the commit-time check that the caller is still the same active member, so a removal or role
+ * change after authorization stops the resume.
+ *
+ * @param principal - Caller resolved for the resume.
+ * @returns The check, or undefined for a system administrator, who is not a member.
+ */
+async function createResumeMembershipCheck(principal: WorkspacePrincipal): Promise<AgentRunTransactItem | undefined> {
+  if (principal.isSystemAdmin) return undefined
+  const workspaceAccess = workspaceDependencies.workspaceAccess
+  if (!workspaceAccess.createActiveMemberConditionCheck) {
+    throw new AgentRunError('temporarily_unavailable', 'Membership checks are unavailable. Retry the resume.')
+  }
+  const check = await workspaceAccess.createActiveMemberConditionCheck(
+    principal.directoryId,
+    normalizeProjectMemberKey(principal.userKey),
+  )
+  if (!check) throw new AgentRunError('conflict', 'Your Workspace membership changed during the request. Retry the resume.')
+  return check
 }
 
 /** Concurrent reads per run listing page. */
@@ -835,9 +870,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const store = workItemDependencies.agentRuns
       const settings = await store.getSettings(principal.directoryId, teamId)
       requireResumable(principal, detail.issue, input.expectedRevision, settings.resumableStatusIds)
-      const now = new Date()
       const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
-      if (claim) throw await createHolderConflict(principal, teamId, claim.runId, now)
+      if (claim) throw await createHolderConflict(principal, teamId, claim.runId, new Date())
       // The newest run is read strongly, and the resume commits only while it is still the newest, so the
       // link names the run that really came last. A Work Item whose runs all predate that record falls back
       // to the history index, which is settled for runs that old.
@@ -846,7 +880,15 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ? (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs[0]
         : await store.getRun(principal.directoryId, teamId, latestRunId)
       if (latestRunId !== undefined && previous?.workItemId !== workItemId) throw createAgentRunIntegrityError()
-      if (previous?.state === 'active') throw createAgentRunConflictError(describeHoldingRun(previous, now))
+      if (previous?.state === 'active') throw createAgentRunConflictError(describeHoldingRun(previous, new Date()))
+      if (input.expectedPreviousRunId !== undefined && previous?.runId !== input.expectedPreviousRunId) {
+        // The agent chose to resume after a particular run, such as a paused one it was offered; a run that
+        // came after it may have ended in a way that needs a person, so the agent must look again.
+        throw new AgentRunError('conflict', 'Another run came after the run you expected to resume from. Reload the task and its runs before resuming.')
+      }
+      // The new run starts after the run it resumes, so the history, ordered by start time, lists it first.
+      const now = resumeStartTime(previous)
+      const membershipCheck = await createResumeMembershipCheck(principal)
       const run = createActiveAgentRun({
         directoryId: principal.directoryId,
         teamId,
@@ -895,6 +937,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           // The resume was authorized against this status, assignment, and these settings.
           createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
           store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          // The caller must still be an active member when the run is created.
+          ...(membershipCheck ? [membershipCheck] : []),
           ...(auditPut ? [auditPut] : []),
           ...(receipt ? [receipt.transactWriteItem] : []),
         ], 2)
@@ -907,8 +951,13 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           throw new AgentRunError('conflict', 'The Agent Run claim changed during the request. Reload the task and retry.')
         }
         if (error.category !== 'temporarily_unavailable') throw error
-        // The Work Item or settings guard failed: report what changed instead of a retryable failure.
-        const latest = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        // A guard failed: report what changed instead of a retryable failure. Access is resolved again
+        // first, so a member removed meanwhile gets the same answer as on a new request.
+        const current = await resolveWriter(credential, teamId)
+        if (membershipCheck && current.workspaceMember.version !== principal.workspaceMember.version) {
+          throw new AgentRunError('conflict', 'Your Workspace membership changed during the request. Retry the resume.')
+        }
+        const latest = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'member')
         const latestSettings = await store.getSettings(principal.directoryId, teamId)
         // A change of assignee, status, or revision is reported as such.
         requireResumable(principal, latest.detail.issue, detail.issue.revision, latestSettings.resumableStatusIds)

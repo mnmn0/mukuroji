@@ -422,7 +422,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | 終了。body は `outcome` と Run 開始時と同じ `instanceId`。 |
 | `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` | 停滞 Run の引き継ぎ。設定で許可時のみ。 |
-| `POST /v1/work-items/{workItemId}/agent-runs/resume?teamId=` | `active` Run のない `started` Work Item で新しい Run を始める。body は `expectedRevision`、`runtime`、`agentName`、`instanceId`。応答は新しい `run` と、あれば直前の Run `resumedFromRun`。Work Item の status は変えない。 |
+| `POST /v1/work-items/{workItemId}/agent-runs/resume?teamId=` | `active` Run のない `started` Work Item で新しい Run を始める。body は `expectedRevision`、`runtime`、`agentName`、`instanceId` と、任意の `expectedPreviousRunId`（直前の Run がこれと違えば `409`）。応答は新しい `run` と、あれば直前の Run `resumedFromRun`。Work Item の status は変えない。 |
 | `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` と `agentInstanceId` を追加。 |
 
 内部 API は Web 画面だけが使い、Public OpenAPI document には含めない。次を提供する。
@@ -732,7 +732,7 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
 - `POST /v1/work-items/{workItemId}/agent-runs/resume` は、credential の member が Work Item の
   assignee、Work Item が `started`、`resumableStatusIds` が空かその status を含み、`expectedRevision` が
   現在の revision と一致し、claim row がない場合だけ新しい `active` Run を作る。Run と claim の put、
-  Work Item revision と設定 revision の ConditionCheck、新しい Run の `agent-run.resumed` audit event
+  Work Item revision と設定 revision と呼び出した member（status と version）の ConditionCheck、新しい Run の `agent-run.resumed` audit event
   （`metadata.resumedFromRunId` に直前の Run）、idempotency receipt を 1 つの transaction で確定する。Work Item の status は変えないため、
   レビュー待ちなどから作業中へ戻す場合は agent が続けて `move_task` を呼ぶ。
 - 直前の Run は `agent-run-latest#<workItemId>` row を強整合で読んで決め、その `runId` を新しい Run の
@@ -741,8 +741,17 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   この row がない（row の導入前に最後の Run が始まった）Work Item でだけ使う。最新 Run が `active` なら別 instance が作業中として
   `agent_run_conflict` を返す。Run が一度もない `started` Work Item（旧 MCP build や人の操作で
   開始されたもの）も明示的な resume はでき、その場合はリンクを持たない。
-- MCP の `resume_task` は、応答を失った再送が自分の claim に当たっても API に送り、同じ key の receipt を
-  再生する。別の key で同じ instance が再開しようとした場合だけ `already_running` を返す。`get_next_task` は
+- `expectedPreviousRunId` を送ると、直前の Run がその Run でなければ `409` を返す。`get_next_task` が
+  `paused` の Run を見て再開候補を示した後に、別の Run が始まって `failed` などで終わった場合に、
+  人の判断が要る Run から自動で再開しないためである。指定しない resume（ユーザーが明示的に頼んだもの）は
+  従来どおり直前の Run が何で終わっていても再開できる。
+- 新しい Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。Run 履歴
+  index は `startedAt#runId` の降順なので、`agent-run-latest` row が指す Run と履歴の先頭が一致する。履歴の
+  1 ページ目で index にまだない最新 Run を補うときも、同じ順序の位置に入れて cursor と矛盾させない。
+- MCP の `resume_task` は claim の判定を API に任せる。応答を失った再送は、その後に別 instance が再開していても
+  同じ key の receipt を再生する。API が `agent_run_conflict` を返したときは claim を読み直し、自 instance が
+  持っている場合だけ `already_running` に変える。`get_next_task` の候補から再開するときは
+  `resumedFromRun.runId` を `previousRunId` に渡し、API の `expectedPreviousRunId` として送る。`get_next_task` は
   未解決の `blockedBy` がある Work Item を再開候補にせず、`skipped` に `blocked` として残す。
 - 競合: 読み取り後に別 instance が claim を取った場合は claim を読み直して `agent_run_conflict`、
   ConditionCheck で取り消された場合は Work Item と設定を読み直し、担当者の変更は `403`、`started`

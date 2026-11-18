@@ -2752,6 +2752,11 @@
             "minLength": 1,
             "type": "string"
           },
+          "expectedPreviousRunId": {
+            "description": "Run the agent expects to resume from, such as the resumedFromRun that next-task selection offered. The resume is refused with 409 when the Work Item's newest run is another run.",
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
           "expectedRevision": {
             "description": "Work Item revision the agent read before deciding to resume.",
             "minimum": 1,

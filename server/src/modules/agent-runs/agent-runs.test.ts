@@ -377,6 +377,10 @@ describe('DynamoDB Agent Run store', () => {
     expect(readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1' }))
       .toEqual({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceIdHash: hashAgentInstanceId('laptop-1') })
     expect(() => readResumeAgentRunRequest({ runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1' })).toThrow(AgentRunError)
+    expect(readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', expectedPreviousRunId: resumed.runId }))
+      .toMatchObject({ expectedPreviousRunId: resumed.runId })
+    expect(() => readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', expectedPreviousRunId: 'run-1' }))
+      .toThrow(AgentRunError)
     expect(() => readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', workflowStatusId: 'doing' }))
       .toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, resumableStatusIds: ['doing'] }))
@@ -446,6 +450,31 @@ describe('DynamoDB Agent Run store', () => {
     const second = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', first.nextCursor, 1)
     expect(commands[4]?.input).toMatchObject({ ExclusiveStartKey: { recordKey: `agent-run#${newer.runId}`, workItemRunSortKey: `${newer.startedAt}#${newer.runId}` } })
     expect(second.runs.map((run) => run.runId)).toEqual([older.runId])
+  })
+
+  test('keeps the history order when the newest-run row names a run that started earlier', async () => {
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const earlier = finishAgentRun(createRun(), 'paused', 'agent', now)
+    const later = finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000002', startedAt: '2026-10-22T01:00:00.000Z' }), 'paused', 'agent', now)
+    const [earlierPut, , , latestPut] = builder.createStartItems(earlier)
+    const [laterPut] = builder.createStartItems(later)
+    const earlierItem = earlierPut?.Put?.Item
+    const laterItem = laterPut?.Put?.Item
+    const latestItem = latestPut?.Put?.Item
+    if (!earlierItem || !laterItem || !latestItem) throw new Error('The start items need run and newest-run puts.')
+    // The index returns only the later run; the newest-run row names the run that started earlier.
+    const responses = () => [{ Items: [laterItem] }, { Item: laterItem }, { Item: latestItem }, { Item: earlierItem }]
+    const full = await new DynamoDbAgentRunStore(createClient(responses()).client, 'AgentRuns')
+      .listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 20)
+    expect(full.runs.map((run) => run.runId)).toEqual([later.runId, earlier.runId])
+    // A page of one keeps the index order, and its cursor continues with the earlier run instead of skipping the later one.
+    const { client, commands } = createClient([...responses(), { Items: [earlierItem] }, { Item: earlierItem }])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    const first = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 1)
+    expect(first.runs.map((run) => run.runId)).toEqual([later.runId])
+    const second = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', first.nextCursor, 1)
+    expect(commands[4]?.input).toMatchObject({ ExclusiveStartKey: { workItemRunSortKey: `${later.startedAt}#${later.runId}` } })
+    expect(second.runs.map((run) => run.runId)).toEqual([earlier.runId])
   })
 
   test('rate-limits explicit heartbeats and reports a finished run as not active', async () => {

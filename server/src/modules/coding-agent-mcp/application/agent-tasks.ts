@@ -640,35 +640,39 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     },
     /**
      * Resumes a started task that no run claims by starting a new run for this instance, linked to the
-     * task's newest earlier run. The server enforces the assignee, the resumable statuses, and the revision.
+     * task's newest earlier run. The server enforces the assignee, the resumable statuses, the revision,
+     * and the claim.
      *
      * @param id - Task ID.
      * @param expectedRevision - Revision read before deciding to resume.
      * @param key - Idempotency key of the resume.
+     * @param previousRunId - Run the agent expects to resume from, such as the one get_next_task offered.
      * @returns This instance's new run and the earlier run it resumes, if any.
      */
-    async resume(id: string, expectedRevision: number, key: string) {
+    async resume(id: string, expectedRevision: number, key: string, previousRunId?: string) {
       const task = await owned(id)
       if (expectedRevision > task.revision) {
         throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before resuming it.')
       }
       // A stale revision is forwarded unchanged so the API can replay a successful receipt.
-      let own = false
-      if (task.revision === expectedRevision) {
-        if (task.statusCategory !== 'started') {
-          throw new AgentTaskError('invalid_transition', 'Only a started task can be resumed. Use start_task for backlog or todo work.')
-        }
-        // A resume does not change the revision, so a retry of one that committed meets its own run here.
-        own = (await claimedRun(id, true)) !== undefined
-        if (!own && await claimedRun(id, false)) {
-          throw new AgentTaskError('agent_run_conflict', 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.')
-        }
+      if (task.revision === expectedRevision && task.statusCategory !== 'started') {
+        throw new AgentTaskError('invalid_transition', 'Only a started task can be resumed. Use start_task for backlog or todo work.')
       }
       try {
-        // The API replays the receipt of a committed resume with the same key; a new resume meets the claim.
-        return await api.resumeRun(id, { expectedRevision, runtime: scope.runtime, agentName: scope.agentName, instanceId: scope.instanceId }, key)
+        // The claim is left to the API: it replays the receipt of a committed resume with the same key,
+        // even when another run holds the task now, and refuses a new resume while any run holds it.
+        return await api.resumeRun(id, {
+          expectedRevision,
+          runtime: scope.runtime,
+          agentName: scope.agentName,
+          instanceId: scope.instanceId,
+          ...(previousRunId === undefined ? {} : { expectedPreviousRunId: previousRunId }),
+        }, key)
       } catch (error) {
-        if (own && error instanceof AgentTaskError && error.code === 'agent_run_conflict') {
+        if (!(error instanceof AgentTaskError) || error.code !== 'agent_run_conflict') throw error
+        // Only a claim this instance holds now becomes already_running; any other holder keeps the conflict.
+        const own = await claimedRun(id, true).catch(() => undefined)
+        if (own !== undefined) {
           throw new AgentTaskError('already_running', 'This instance already holds an active run on this task. Continue it with that runId instead of resuming.')
         }
         throw error
