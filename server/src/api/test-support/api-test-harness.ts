@@ -3367,17 +3367,6 @@ async function configureEnterpriseScimGuestRoleScenario(
       createdAt: now,
       updatedAt: now,
     }],
-    ['managed@example.com', {
-      id: 'managed@example.com',
-      memberKey: 'managed@example.com',
-      email: 'managed@example.com',
-      name: 'Managed User',
-      role: 'member',
-      status: 'active',
-      version: 1,
-      createdAt: now,
-      updatedAt: now,
-    }],
   ])
   const reconciledRoles: WorkspaceRole[] = []
   const reconcileAuditContexts: MutationAuditContext[] = []

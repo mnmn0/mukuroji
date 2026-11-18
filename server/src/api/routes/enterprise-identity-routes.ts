@@ -1378,9 +1378,7 @@ async function applyEnterpriseScimUserState(
   auditContext: MutationAuditContext,
   desiredGroupOverlays: readonly EnterpriseScimGroup[] = [],
 ) {
-  const memberKey = user.linkedMemberKey ??
-    user.emails[0]?.trim().toLowerCase() ??
-    user.userName.trim().toLowerCase()
+  const memberKey = resolveEnterpriseScimMemberKey(user)
   const existing = await workspaceDependencies.workspaceAccess.getMember(user.workspaceId, memberKey)
   if (user.active) {
     const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(user.workspaceId)
@@ -1457,6 +1455,71 @@ async function applyEnterpriseScimUserState(
     user.version,
     auditContext,
   )
+}
+
+/**
+ * Resolves the Workspace member key that SCIM desired state for a user is applied to.
+ *
+ * @param user - SCIM user desired state, stored or about to be stored.
+ * @returns The linked member key, or the normalized primary email or userName.
+ */
+function resolveEnterpriseScimMemberKey(
+  user: Pick<EnterpriseScimUserInput, 'linkedMemberKey' | 'emails' | 'userName'>,
+) {
+  return user.linkedMemberKey ??
+    user.emails[0]?.trim().toLowerCase() ??
+    user.userName.trim().toLowerCase()
+}
+
+/**
+ * Rejects SCIM user desired state that would be linked to a Workspace member this directory
+ * identity does not own, before the desired state is stored.
+ *
+ * @remarks
+ * Stored SCIM desired state marks its member as directory-managed. If it were stored first and
+ * the member update then failed, a SCIM credential could still take away the role of an owner or
+ * of a manually invited member by sending their email. A member key may only be linked when no
+ * member exists yet, or when the member was provisioned by this same SCIM user.
+ *
+ * @param snapshot - Enterprise Identity snapshot read for this request.
+ * @param user - SCIM user desired state about to be stored.
+ * @throws EnterpriseIdentityError 409 `EnterpriseProvisioningProtectedOwner` when the member is
+ *   a Workspace owner, and 409 `EnterpriseScimMemberNotDirectoryManaged` when the member is not
+ *   provisioned by this SCIM user.
+ */
+async function requireEnterpriseScimMemberLinkAllowed(
+  snapshot: EnterpriseIdentitySnapshot,
+  user: Pick<
+    EnterpriseScimUserInput,
+    'workspaceId' | 'userId' | 'identityProviderId' | 'externalId' | 'linkedMemberKey' |
+    'emails' | 'userName'
+  >,
+) {
+  const memberKey = resolveEnterpriseScimMemberKey(user)
+  const member = await workspaceDependencies.workspaceAccess.getMember(user.workspaceId, memberKey)
+  if (!member) return
+  if (member.role === 'owner') {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseProvisioningProtectedOwner',
+      'Directory provisioning cannot manage a Workspace owner.',
+    )
+  }
+  const scimUserId = user.userId ?? snapshot.scimUsers.find((candidate) =>
+    candidate.identityProviderId === user.identityProviderId &&
+    candidate.externalId === user.externalId
+  )?.userId
+  if (
+    scimUserId === undefined ||
+    member.provisioningSource !== 'directory' ||
+    member.externalIdentityId !== scimUserId
+  ) {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseScimMemberNotDirectoryManaged',
+      'This Workspace member is not managed by this directory user.',
+    )
+  }
 }
 
 async function requireEnterpriseScimDeprovisionAllowed(
@@ -3970,6 +4033,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         credential.identityProviderId,
         body,
       )
+      await requireEnterpriseScimMemberLinkAllowed(snapshot, input)
       if (!input.active && input.linkedMemberKey) {
         await requireEnterpriseScimDeprovisionAllowed(
           workspaceId,
@@ -4048,6 +4112,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         merged,
         existing,
       )
+      await requireEnterpriseScimMemberLinkAllowed(snapshot, input)
       if (!input.active && input.linkedMemberKey) {
         await requireEnterpriseScimDeprovisionAllowed(
           workspaceId,
@@ -4090,6 +4155,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         )
       }
       requireScimIfMatch(c, existing.version)
+      await requireEnterpriseScimMemberLinkAllowed(snapshot, existing)
       if (existing.linkedMemberKey) {
         await requireEnterpriseScimDeprovisionAllowed(
           workspaceId,

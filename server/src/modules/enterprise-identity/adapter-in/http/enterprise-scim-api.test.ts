@@ -553,20 +553,23 @@ test('uses provider-qualified SCIM authority and never grants failed desired sta
 
     const providerAResource = await providerAResponse.json()
     const snapshot = await identity.getSnapshot(workspaceId)
-    const providerBUser = snapshot.scimUsers.find((user) =>
-      user.identityProviderId === 'idp-b'
-    )
     expect(currentMember?.externalIdentityId).toBe(providerAResource.id)
-    expect(new Set(reconciledAuthorityIds)).toEqual(
-      new Set(snapshot.scimUsers.map((user) => user.userId)),
-    )
+    expect(reconciledAuthorityIds).toEqual([providerAResource.id])
+    expect(snapshot.scimUsers.map((user) => user.identityProviderId)).toEqual(['idp-a'])
     expect(snapshot.scimUsers.map((user) => user.userId)).not.toContain('shared-user')
-    expect(providerBUser).toMatchObject({
+
+    // Desired state stored before member links were checked stays unapplied and grants nothing.
+    const providerBUser = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-b',
       externalId: 'shared-user',
+      userName: 'b@example.com',
+      emails: ['shared-member@example.com'],
+      active: true,
       linkedMemberKey: 'shared-member@example.com',
-      appliedVersion: 0,
+      idempotencyKey: 'legacy-provider-b-user',
     })
-    if (!providerBUser) throw new Error('Expected provider B desired user state.')
+    expect(providerBUser.appliedVersion).toBe(0)
 
     const providerBGroup = await identity.upsertScimGroup({
       workspaceId,
@@ -597,6 +600,112 @@ test('uses provider-qualified SCIM authority and never grants failed desired sta
         [],
       ).compatibleGroupMappings,
     ).toEqual([])
+  })
+})
+
+test('keeps a SCIM credential from taking over members it does not provision', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  }, async () => {
+    const workspaceId = 'user#demo@example.com'
+    const scenario = await configureEnterpriseScimGuestRoleScenario(workspaceId)
+    const now = new Date().toISOString()
+    scenario.members.set('manual@example.com', {
+      id: 'manual@example.com',
+      memberKey: 'manual@example.com',
+      email: 'manual@example.com',
+      name: 'Manual Admin',
+      role: 'admin',
+      status: 'active',
+      provisioningSource: 'manual',
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const scimBaseUrl = `/api/scim/v2/${encodeURIComponent(workspaceId)}`
+    const scimHeaders = {
+      Authorization: `Bearer ${scenario.scimToken}`,
+      'Content-Type': 'application/scim+json',
+    }
+    const postUser = (
+      externalId: string,
+      email: string,
+      active: boolean,
+    ) => app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': `takeover-${externalId}` },
+      body: JSON.stringify({
+        externalId,
+        userName: `${externalId}@directory.example.com`,
+        emails: [{ value: email, primary: true }],
+        active,
+      }),
+    })
+
+    const ownerResponse = await postUser('owner-takeover', 'demo@example.com', true)
+    expect(ownerResponse.status).toBe(409)
+    expect((await ownerResponse.json()).detail)
+      .toBe('Directory provisioning cannot manage a Workspace owner.')
+    const manualActiveResponse = await postUser('manual-takeover', 'manual@example.com', true)
+    expect(manualActiveResponse.status).toBe(409)
+    const manualInactiveResponse = await postUser(
+      'manual-deprovision',
+      'manual@example.com',
+      false,
+    )
+    expect(manualInactiveResponse.status).toBe(409)
+    expect((await scenario.identity.getSnapshot(workspaceId)).scimUsers).toEqual([])
+    expect(scenario.reconciledRoles).toEqual([])
+    expect(scenario.members.get('manual@example.com')).toMatchObject({
+      role: 'admin',
+      status: 'active',
+      version: 1,
+    })
+
+    // A directory user cannot be repointed at another member by reusing its externalId.
+    const provisionedResponse = await postUser('directory-user', 'directory@example.com', true)
+    expect(provisionedResponse.status).toBe(201)
+    const repointResponse = await app.request(`${scimBaseUrl}/Users`, {
+      method: 'POST',
+      headers: { ...scimHeaders, 'Idempotency-Key': 'takeover-repoint' },
+      body: JSON.stringify({
+        externalId: 'directory-user',
+        userName: 'directory-user@directory.example.com',
+        emails: [{ value: 'demo@example.com', primary: true }],
+        active: true,
+      }),
+    })
+    expect(repointResponse.status).toBe(409)
+    expect((await scenario.identity.getSnapshot(workspaceId)).scimUsers)
+      .toMatchObject([{ linkedMemberKey: 'directory@example.com', version: 1 }])
+
+    // Desired state stored before this check never reached the owner, so it does not
+    // take the owner's Workspace role away.
+    await scenario.identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'idp-guest-role',
+      externalId: 'legacy-owner-takeover',
+      userName: 'legacy-owner-takeover@directory.example.com',
+      emails: ['demo@example.com'],
+      active: true,
+      linkedMemberKey: 'demo@example.com',
+      idempotencyKey: 'legacy-owner-takeover',
+    })
+    const ownerSecurityResponse = await app.request('/api/enterprise/security', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(ownerSecurityResponse.status).toBe(200)
+    expect(
+      resolveEnterpriseDirectoryPrincipal(
+        await scenario.identity.getSnapshot(workspaceId),
+        'demo@example.com',
+        [],
+      ),
+    ).toMatchObject({ directoryManaged: false, deprovisioned: false })
   })
 })
 
