@@ -82,11 +82,9 @@ import {
   readWorkItemExpectedRevision,
   WorkItemScheduleError,
   WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
-  type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
   type ConfirmWorkItemScheduleChangeCommand,
   type ProjectIssuesResponse,
-  type PublicUpdateTeamIssueRequestBody,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesResponse,
@@ -286,8 +284,8 @@ import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
   createWorkItemScheduleIdempotencyUserId,
   createWorkItemScheduleIdempotencyWorkspaceId,
-  rejectInternalWorkItemCreateFields,
-  rejectInternalWorkItemUpdateFields,
+  readPublicWorkItemCreateBody,
+  readPublicWorkItemUpdateBody,
 } from '../shared/work-item-schedule'
 import {
   projectAccessAllows,
@@ -4536,11 +4534,12 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'member')
-      const requestBody = await readJson<CreateTeamIssueRequestBody>(c.req)
-      if (!requestBody) {
+      const rawRequestBody = await readJson<unknown>(c.req)
+      if (!rawRequestBody) {
         throw new ProjectDataError(400, 'InvalidProjectWrite', 'Work Item body is required.')
       }
-      rejectInternalWorkItemCreateFields(requestBody)
+      // Built from public fields only; the raw body never reaches the adapter input.
+      const requestBody = readPublicWorkItemCreateBody(rawRequestBody)
       const body = normalizeTeamIssueInput(
         requestBody,
         context.team,
@@ -4969,8 +4968,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'member')
-      const input = await readJson<PublicUpdateTeamIssueRequestBody>(c.req) ?? {}
-      rejectInternalWorkItemUpdateFields(input)
+      // Built from public fields only; the raw body never reaches the adapter input.
+      const input = readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {})
       const body = normalizeTeamIssueInput(
         input,
         context.team,
