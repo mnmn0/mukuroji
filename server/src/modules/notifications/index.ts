@@ -32,6 +32,10 @@ export {
 export { slackDeliveryShard } from './domain/slack-delivery'
 /** Exposes the application workflow that delivers due Slack notifications. */
 export { deliverDueSlackNotifications } from './application/slack-delivery'
+/** Exposes the Project manager reader port used by overdue escalation. */
+export type { ScheduledProjectManagerReader } from './application/ports/project-manager-reader'
+/** Exposes the Project Directory adapter that resolves overdue escalation managers. */
+export { createDynamoDbProjectManagerReader } from './adapter-out/dynamodb/project-manager-reader'
 /** Exposes the recipient-scoped Incoming Webhook transport factory. */
 export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
 /** Exposes safe Slack delivery logs and backlog metrics. */

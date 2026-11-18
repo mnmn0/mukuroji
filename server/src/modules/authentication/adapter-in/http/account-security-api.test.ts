@@ -4,9 +4,10 @@ import { CognitoServiceError, type CognitoClient } from '../..'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { InMemoryEnterpriseSessionActivityClient } from '../../../enterprise-identity/enterprise-session-activity'
 import type { MutationAuditContext } from '../../../audit'
-import type {
-  WorkspaceAccessClient,
-  WorkspaceMemberCredentialAction,
+import {
+  WorkspaceAccessError,
+  type WorkspaceAccessClient,
+  type WorkspaceMemberCredentialAction,
 } from '../../../workspace-access'
 
 const {
@@ -16,6 +17,7 @@ const {
   getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
 
 afterEach(() => {
@@ -47,6 +49,9 @@ function overrideCognito(overrides: Partial<CognitoClient>) {
 function overrideWorkspaceAccess(overrides: Partial<WorkspaceAccessClient>) {
   setTestAppDependencies({
     workspaceAccess: {
+      // Spreading the store instance leaves out its class methods, so the credential reset
+      // gets an applying stage unless an earlier override, such as a progress tracker, set one.
+      markMemberCredentialActionApplying: async () => undefined,
       ...getTestAppDependencies().workspace.workspaceAccess,
       ...overrides,
     },
@@ -595,6 +600,72 @@ test('changes the password after checking the current one', async () => {
   expect(changes).toHaveLength(2)
 })
 
+test('refuses a password change once the email domain enforces SSO', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
+    configureFakeProjectClients(true)
+    const changes: string[] = []
+    overrideCognito({
+      async changePassword(accessToken) {
+        changes.push(accessToken)
+      },
+    })
+    const timestamp = new Date().toISOString()
+    const identity = new InMemoryEnterpriseIdentityClient()
+    // The password sign-in predates the domain's SSO enforcement, so its token is not an SSO one.
+    identity.discoverSso = async (email) => email.endsWith('@example.com')
+      ? {
+          provider: {
+            workspaceId,
+            providerId: 'idp-enforced',
+            kind: 'oidc',
+            displayName: 'Enterprise SSO',
+            cognitoProviderName: 'EnterpriseOidc',
+            status: 'active',
+            revision: 1,
+            issuer: 'https://idp.example.com',
+            clientId: 'enterprise-client',
+            authorizationEndpoint: 'https://idp.example.com/authorize',
+            tokenEndpoint: 'https://idp.example.com/token',
+            jwksUri: 'https://idp.example.com/jwks',
+            scopes: ['openid', 'email'],
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            lastTestedAt: timestamp,
+          },
+          domain: {
+            workspaceId,
+            domainId: 'example-com',
+            domain: 'example.com',
+            status: 'verified',
+            revision: 1,
+            verificationRecordName: '_mukuroji-challenge.example.com',
+            verifiedAt: timestamp,
+            enforceSso: true,
+            identityProviderId: 'idp-enforced',
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        }
+      : undefined
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    const response = await sendJson('/api/auth/password/change', {
+      currentPassword: 'Current123!',
+      newPassword: 'NewPassword123!',
+    }, 'test-token')
+
+    expect(response.status).toBe(409)
+    expect((await response.json()).code).toBe('PasswordManagedBySso')
+    expect(changes).toEqual([])
+  })
+})
+
 test('lists the MFA state of active members for administrators', async () => {
   configureFakeProjectClients(true)
   overrideCognito({
@@ -623,7 +694,36 @@ test('lists the MFA state of active members for administrators', async () => {
   })
 })
 
-test('records the administrator password reset before Cognito resets and signs the member out', async () => {
+test.each([
+  ['workspace:member', 403],
+  ['workspace:admin', 200],
+] as const)('lets only administrators list sign-in security under a %s role assignment', async (roleId, status) => {
+  configureFakeProjectClients(true)
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => ({
+    ...await readSnapshot(currentWorkspaceId),
+    // An assigned role replaces the legacy owner role, and members.read alone is not enough.
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'demo-workspace-role',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId,
+      scope: { workspaceId, kind: 'workspace' },
+      source: 'direct',
+    }],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+
+  const response = await app.request('/api/workspace/members/sign-in-security', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(status)
+})
+
+test('records the administrator password reset and signs the member out around the Cognito reset', async () => {
   configureFakeProjectClients(true)
   const events: string[] = []
   const recorded: Array<{
@@ -652,13 +752,37 @@ test('records the administrator password reset before Cognito resets and signs t
   const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
 
   expect(response.status).toBe(202)
-  expect(events).toEqual(['audit', 'reset:sato@example.com', 'sign-out:sato@example.com'])
+  expect(events).toEqual([
+    'audit',
+    'sign-out:sato@example.com',
+    'reset:sato@example.com',
+    'sign-out:sato@example.com',
+  ])
   expect(recorded[0]).toMatchObject({
     actor: 'demo@example.com',
     target: 'sato@example.com',
     action: 'password-reset-requested',
   })
   expect(recorded[0].auditContext?.workspaceId).toBe(workspaceId)
+})
+
+test('does not reset a password when the deployment cannot sign the member out first', async () => {
+  configureFakeProjectClients(true)
+  overrideCognito({
+    async adminResetUserPassword() {
+      throw new Error('The password must not be reset without signing the member out first.')
+    },
+    globallySignOutWorkspaceUser: undefined,
+  })
+  overrideWorkspaceAccess({
+    async recordMemberCredentialAction() {
+      throw new Error('Nothing must be recorded when the reset cannot run.')
+    },
+  })
+
+  const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
+
+  expect(response.status).toBe(503)
 })
 
 test('does not reset the password of a member who has not accepted the invitation', async () => {
@@ -668,6 +792,9 @@ test('does not reset the password of a member who has not accepted the invitatio
       return { ...createFakeCognitoProfile(userId), status: 'FORCE_CHANGE_PASSWORD' }
     },
     async adminResetUserPassword() {
+      throw new Error('Cognito must not be called for a pending invitation.')
+    },
+    async globallySignOutWorkspaceUser() {
       throw new Error('Cognito must not be called for a pending invitation.')
     },
   })
@@ -710,23 +837,58 @@ test('resets the authenticator of a member who lost it', async () => {
   expect(resets).toEqual(['sato@example.com'])
 })
 
+
+test('refuses an authenticator reset when the store cannot mark the change as started', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  overrideCognito({
+    async getUserProfile(userId) {
+      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+    },
+  })
+  trackCredentialActionProgress()
+  const { markMemberCredentialActionApplying: _omitted, ...withoutApplying } =
+    getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({ workspaceAccess: withoutApplying })
+
+  const response = await sendMfaResetWithKey()
+
+  expect(response.status).toBe(503)
+  expect(resets).toEqual([])
+})
 /**
  * Replaces the credential action store with one that keeps progress per idempotency key.
  *
  * @returns The progress of each idempotency key hash.
  */
 function trackCredentialActionProgress() {
-  const progress = new Map<string, 'recorded' | 'completed'>()
+  const progress = new Map<string, 'recorded' | 'applying' | 'completed'>()
   const keyOf = (auditContext?: MutationAuditContext) => auditContext?.idempotencyKeyHash ?? ''
   overrideWorkspaceAccess({
     async readMemberCredentialActionProgress(_workspaceId, _target, _action, auditContext) {
-      return progress.get(keyOf(auditContext)) ?? 'none'
+      const current = progress.get(keyOf(auditContext))
+      return current === 'applying' ? 'recorded' : current ?? 'none'
     },
     async recordMemberCredentialAction(_workspaceId, _actor, target, _action, auditContext) {
       const current = progress.get(keyOf(auditContext))
+      // Like the store once the lease ran out: an attempt that started changing Cognito is not
+      // repeated.
+      if (current === 'applying') {
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceCredentialActionExpired',
+          'The earlier request stopped before it finished.',
+        )
+      }
       if (!current) progress.set(keyOf(auditContext), 'recorded')
       const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
       return { member, alreadyRecorded: current !== undefined, completed: current === 'completed' }
+    },
+    async markMemberCredentialActionApplying(_workspaceId, _target, _action, auditContext) {
+      progress.set(keyOf(auditContext), 'applying')
     },
     async completeMemberCredentialAction(_workspaceId, _target, _action, auditContext) {
       progress.set(keyOf(auditContext), 'completed')
@@ -752,7 +914,7 @@ function sendMfaResetWithKey() {
   })
 }
 
-test('resumes an interrupted authenticator reset when the same request is retried', async () => {
+test('does not repeat an authenticator reset that stopped after it started changing Cognito', async () => {
   configureFakeProjectClients(true)
   let mfaEnrolled = true
   const resets: string[] = []
@@ -773,35 +935,82 @@ test('resumes an interrupted authenticator reset when the same request is retrie
   const progress = trackCredentialActionProgress()
 
   expect((await sendMfaResetWithKey()).status).toBe(500)
+  // The member registers a new app before the same request arrives again.
+  mfaEnrolled = true
   const retry = await sendMfaResetWithKey()
 
-  // The first attempt removed the app before failing; the retry resumes instead of reporting
-  // "not enrolled", and turning off an app that is already off changes nothing.
-  expect(retry.status).toBe(200)
-  expect(await retry.json()).toEqual({ reset: true })
-  expect(resets).toEqual(['sato@example.com', 'sato@example.com'])
-  expect([...progress.values()]).toEqual(['completed'])
+  // The first attempt may already have removed the app, so the retry asks the administrator to
+  // check the member instead of removing the new app.
+  expect(retry.status).toBe(409)
+  expect((await retry.json()).code).toBe('WorkspaceCredentialActionExpired')
+  expect(resets).toEqual(['sato@example.com'])
+  expect([...progress.values()]).toEqual(['applying'])
+})
+
+test('keeps an app registered after a reset whose completion mark failed', async () => {
+  configureFakeProjectClients(true)
+  const resets: string[] = []
+  let appRegistered = true
+  overrideCognito({
+    async getUserProfile(userId) {
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: appRegistered,
+        softwareTokenMfaConfigured: appRegistered,
+      }
+    },
+    async adminDisableSoftwareTokenMfa(userId) {
+      resets.push(userId)
+      appRegistered = false
+    },
+  })
+  trackCredentialActionProgress()
+  overrideWorkspaceAccess({
+    async completeMemberCredentialAction() {
+      throw new Error('DynamoDB is unavailable.')
+    },
+  })
+
+  expect((await sendMfaResetWithKey()).status).toBe(200)
+  expect(appRegistered).toBe(false)
+  // The member registers a new app, and the same request arrives again.
+  appRegistered = true
+  const replay = await sendMfaResetWithKey()
+
+  expect(replay.status).toBe(409)
+  expect((await replay.json()).code).toBe('WorkspaceCredentialActionExpired')
+  expect(resets).toEqual(['sato@example.com'])
+  expect(appRegistered).toBe(true)
 })
 
 test('does not remove an authenticator registered after a completed reset when the request is replayed', async () => {
   configureFakeProjectClients(true)
   const resets: string[] = []
+  let appRegistered = true
   overrideCognito({
     async getUserProfile(userId) {
-      return { ...createFakeCognitoProfile(userId), mfaConfigured: true, softwareTokenMfaConfigured: true }
+      return {
+        ...createFakeCognitoProfile(userId),
+        mfaConfigured: appRegistered,
+        softwareTokenMfaConfigured: appRegistered,
+      }
     },
     async adminDisableSoftwareTokenMfa(userId) {
       resets.push(userId)
+      appRegistered = false
     },
   })
   trackCredentialActionProgress()
 
   expect((await sendMfaResetWithKey()).status).toBe(200)
+  expect(appRegistered).toBe(false)
   // The member registers a new app, and the same request arrives again.
+  appRegistered = true
   const replay = await sendMfaResetWithKey()
 
   expect(replay.status).toBe(200)
   expect(resets).toEqual(['sato@example.com'])
+  expect(appRegistered).toBe(true)
 })
 
 test('does not report SMS-only MFA as an authenticator that an administrator can reset', async () => {
@@ -844,7 +1053,8 @@ test('previews how many active members must register an authenticator before MFA
     async getUserProfile(userId) {
       return {
         ...createFakeCognitoProfile(userId),
-        mfaConfigured: userId === 'demo@example.com',
+        // Sign-in lets a member with SMS MFA through without the authenticator setup.
+        mfaConfigured: userId === 'demo@example.com' || userId === 'suzuki@example.com',
         softwareTokenMfaConfigured: userId === 'demo@example.com',
       }
     },
@@ -859,7 +1069,7 @@ test('previews how many active members must register an authenticator before MFA
   expect(response.status).toBe(200)
   expect((await response.json()).impact.mfaImpact).toEqual({
     activeMemberCount: 4,
-    unenrolledMemberCount: 3,
+    unenrolledMemberCount: 2,
     unknownMemberCount: 0,
   })
 })

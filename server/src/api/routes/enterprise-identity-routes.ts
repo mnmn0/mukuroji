@@ -98,7 +98,8 @@ import {
   readJson,
   toAuthErrorResponse,
 } from '../shared/http'
-import { summarizeMfaEnrollment } from '../shared/member-sign-in-security'
+import { summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { createRequestMemberSignInSecurityPorts } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
 import {
   createWorkspaceMutationContext,
@@ -2664,7 +2665,8 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
    * Previews whether saving the IP allowlist would lock out the current caller.
    *
    * When the change makes MFA required, `mfaImpact` also returns how many active members have
-   * no authenticator app; they are asked to register one at their next sign-in.
+   * no MFA method at all; sign-in asks them to register an authenticator app. Members with SMS
+   * or email MFA are not counted, because sign-in lets them through.
    */
   routeApp.post('/api/enterprise/security/policy/preview', async (c) => {
     try {
@@ -2693,7 +2695,12 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
             ipAllowlist,
           ),
           ...(turnsMfaOn
-            ? { mfaImpact: await summarizeMfaEnrollment(principal.directoryId) }
+            ? {
+                mfaImpact: await summarizeMfaEnrollment(
+                  createRequestMemberSignInSecurityPorts(),
+                  principal.directoryId,
+                ),
+              }
             : {}),
         },
       })

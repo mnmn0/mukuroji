@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import {
   type DynamoDBDocumentClient,
+  GetCommand,
   ScanCommand,
   type ScanCommandInput,
   TransactWriteCommand,
@@ -708,6 +709,129 @@ describe('Workspace search backfill runner', () => {
       ExpressionAttributeValues: { ':sourceRevision': 2 },
     })
     expect(counters['project-directory']).toEqual({ scanned: 2, projected: 1, deleted: 0, skipped: 1 })
+  })
+
+  test('write run keeps the stored creator when it replaces a Project at the same revision', async () => {
+    const projectRow = (projectId: string) => ({
+      directoryId: 'workspace#mukuroji',
+      entryKey: `000010#000010#PROJECT#${projectId}`,
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId,
+      projectSortOrder: 10,
+      nameJa: projectId,
+      nameEn: projectId,
+      tone: 'blue',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      charter: { code: 'OPS-1', tags: [], repositoryUrls: [] },
+      charterRevision: 3,
+    })
+    const projected = mapProjectDirectoryItem(projectRow('refero'))
+    if (projected?.action !== 'put') throw new Error('Expected a Project search document.')
+    // The live projection of the creation recorded the creator, at the revision the scan read.
+    const storedReferoRow = createWorkspaceSearchDocument({
+      ...projected.document,
+      creatorUserId: 'sato@example.com',
+      createdAt: '2026-10-31T00:00:00.000Z',
+    })
+    const storedRows = new Map<string, Record<string, unknown>>([
+      [storedReferoRow.recordKey, storedReferoRow],
+    ])
+    const getInputs: unknown[] = []
+    const transactionInputs: TransactWriteCommandInput[] = []
+    let conflicts = 1
+    const documentClient = {
+      async send(command: unknown) {
+        if (command instanceof ScanCommand) {
+          return { Items: [projectRow('refero'), projectRow('new-project')], ScannedCount: 2 }
+        }
+        if (command instanceof GetCommand) {
+          getInputs.push(command.input)
+          const key = command.input.Key?.recordKey
+          return { Item: typeof key === 'string' ? storedRows.get(key) : undefined }
+        }
+        if (command instanceof TransactWriteCommand) {
+          transactionInputs.push(command.input)
+          if (conflicts > 0) {
+            conflicts -= 1
+            throw Object.assign(new Error('Transaction cancelled.'), {
+              name: 'TransactionCanceledException',
+              CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+            })
+          }
+          return {}
+        }
+        throw new Error('Unexpected DynamoDB command.')
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    const counters = await runBackfill(
+      documentClient,
+      [{ name: 'project-directory', tableName: 'SourceTable', mapItem: mapProjectDirectoryItem }],
+      'WorkspaceSearchTable',
+      { dryRun: false, help: false },
+    )
+
+    expect(getInputs[0]).toMatchObject({ ConsistentRead: true })
+    // A conflicting write re-reads the row and writes again, still keeping the creator.
+    expect(transactionInputs).toHaveLength(3)
+    for (const input of transactionInputs.slice(0, 2)) {
+      expect(input.TransactItems?.[0]?.Put).toMatchObject({
+        Item: {
+          creatorUserId: 'sato@example.com',
+          createdAt: '2026-11-01T00:00:00.000Z',
+          sourceRevision: 3,
+        },
+        ConditionExpression: '#projectionDigest = :projectionDigest',
+        ExpressionAttributeValues: { ':projectionDigest': storedReferoRow.projectionDigest },
+      })
+    }
+    const created = transactionInputs[2]?.TransactItems?.[0]?.Put
+    expect(created).toMatchObject({
+      Item: { projectId: 'new-project' },
+      ConditionExpression: 'attribute_not_exists(#recordKey)',
+    })
+    expect(created?.Item?.creatorUserId).toBeUndefined()
+    expect(counters['project-directory']).toEqual({ scanned: 2, projected: 2, deleted: 0, skipped: 0 })
+  })
+
+  test('write run keeps a stored Project projected from a newer revision without writing', async () => {
+    const row = {
+      directoryId: 'workspace#mukuroji',
+      entryKey: '000010#000010#PROJECT#refero',
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId: 'refero',
+      projectSortOrder: 10,
+      nameJa: 'Refero',
+      nameEn: 'Refero',
+      tone: 'blue',
+      charterRevision: 2,
+    }
+    const transactionInputs: TransactWriteCommandInput[] = []
+    const documentClient = {
+      async send(command: unknown) {
+        if (command instanceof ScanCommand) return { Items: [row], ScannedCount: 1 }
+        if (command instanceof GetCommand) return { Item: { sourceRevision: 3, creatorUserId: 'sato@example.com' } }
+        if (command instanceof TransactWriteCommand) {
+          transactionInputs.push(command.input)
+          return {}
+        }
+        throw new Error('Unexpected DynamoDB command.')
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    const counters = await runBackfill(
+      documentClient,
+      [{ name: 'project-directory', tableName: 'SourceTable', mapItem: mapProjectDirectoryItem }],
+      'WorkspaceSearchTable',
+      { dryRun: false, help: false },
+    )
+
+    expect(transactionInputs).toHaveLength(0)
+    expect(counters['project-directory']).toEqual({ scanned: 1, projected: 0, deleted: 0, skipped: 1 })
   })
 
   test('write run applies both put and delete projection operations', async () => {

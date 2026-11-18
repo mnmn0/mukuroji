@@ -1016,7 +1016,11 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
     [...messages.csvHeaders],
   ]
   for (const widget of normalized.widgets) {
-    const metricLabel = messages.metricLabels[widget.metric]
+    // Effort-weighted throughput and velocity count hours, not the metric's usual unit, so their label
+    // names the unit to keep them apart from count-weighted rows of the same metric.
+    const metricLabel = widget.definition.unit === ANALYTICS_METRIC_DEFINITIONS[widget.metric].unit
+      ? messages.metricLabels[widget.metric]
+      : `${messages.metricLabels[widget.metric]} (${messages.unitLabels[widget.definition.unit]})`
     rows.push([
       widget.widgetId,
       widget.metric,
@@ -2454,10 +2458,14 @@ function createForecast(
     fact.state.statusCategory !== 'completed' && fact.state.statusCategory !== 'canceled'
   )
   const remainingWorkItems = openFacts.length
-  const remainingEffortMinutes = openFacts.reduce(
-    (sum, fact) => sum + (deriveAnalyticsRemainingEffortMinutes(fact.state) ?? 0),
-    0,
-  )
+  let remainingEffortMinutes = 0
+  // Open Work Items with neither an estimate nor a recorded remaining effort count as zero; report them.
+  let unestimatedRemainingWorkItems = 0
+  for (const fact of openFacts) {
+    const minutes = deriveAnalyticsRemainingEffortMinutes(fact.state)
+    if (minutes === undefined) unestimatedRemainingWorkItems += 1
+    else remainingEffortMinutes += minutes
+  }
   const remainingEffortHours = roundMetric(effortHours(remainingEffortMinutes))
   const remainingAmount = effortWeighted ? remainingEffortMinutes : remainingWorkItems
   const dailyBuckets = createCalendarBuckets(
@@ -2499,6 +2507,7 @@ function createForecast(
   }
   return {
     ...(effortWeighted ? { weighting: 'effort' as const, remainingEffortHours } : {}),
+    ...(effortWeighted && unestimatedRemainingWorkItems > 0 ? { unestimatedRemainingWorkItems } : {}),
     remainingWorkItems,
     sampleSize: completionTimes.length,
     dailyThroughput,

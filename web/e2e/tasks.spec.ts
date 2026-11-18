@@ -5733,6 +5733,87 @@ test.describe('authenticated task page', () => {
     await expect(contributors).not.toContainText('メンバーかジョブロールのどちらかを選んでください。')
   })
 
+  test('Issue #335: 工数だけを保存しても Team Issue の未保存の入力と選択を保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        workItemTypes: [DEFAULT_WORK_ITEM_TYPE, { ...DEFAULT_WORK_ITEM_TYPE, id: 'compact', name: 'Compact' }],
+      },
+    })
+    const previewRevisions: number[] = []
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/work-item-type-preview$/u, async (route) => {
+      const body = route.request().postDataJSON() as { expectedRevision: number }
+      previewRevisions.push(body.expectedRevision)
+      await route.fulfill({
+        json: {
+          approvalCompletionTransitionConflict: false,
+          currentWorkflowStatusId: 'active',
+          currentWorkItemTypeId: DEFAULT_WORK_ITEM_TYPE.id,
+          expectedRevision: body.expectedRevision,
+          lostCustomFieldIds: [],
+          missingRequiredCustomFieldDefinitions: [],
+          missingRequiredCustomFieldIds: [],
+          requiresResolution: false,
+          targetInitialWorkflowStatusId: 'todo',
+          targetWorkItemTypeId: 'compact',
+        },
+      })
+    })
+    const effortPatches: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
+        effortPatches.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    const titleInput = detailPane.locator('input[name="title"]')
+    const projectSelect = detailPane.locator('select[name="assignedProjectId"]')
+    const typeSelect = detailPane.getByRole('combobox', { name: 'Work Item Type' })
+    await titleInput.fill('工数保存後も残るタイトル')
+    await projectSelect.selectOption('')
+    await typeSelect.selectOption('compact')
+    await expect.poll(() => previewRevisions).toEqual([1])
+
+    const effort = detailPane.getByTestId('work-item-effort-progress')
+    await effort.getByLabel('残工数（時間）').fill('3')
+    await effort.getByRole('button', { name: '工数と進捗を保存' }).click()
+    await expect.poll(() => effortPatches).toEqual([{ expectedRevision: 1, remainingEffortMinutes: 180 }])
+    await expect(effort).toContainText('3 時間')
+
+    // Saving only the effort keeps the other unsaved input and choices.
+    await expect(titleInput).toHaveValue('工数保存後も残るタイトル')
+    await expect(projectSelect).toHaveValue('')
+    await expect(typeSelect).toHaveValue('compact')
+    // The type change preview read before the effort save is stale, so saving reads it again at the new revision.
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await expect.poll(() => previewRevisions).toEqual([1, 2])
+  })
+
+  test('Issue #335: Project 詳細でも工数だけの保存で未保存の入力と選択を保持する', async ({ page }) => {
+    const patches: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
+        patches.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const titleInput = detailPane.locator('input[name="title"]')
+    const projectSelect = detailPane.locator('select[name="assignedProjectId"]')
+    await titleInput.fill('工数保存後も残る Project 詳細のタイトル')
+    await projectSelect.selectOption('')
+
+    const effort = detailPane.getByTestId('work-item-effort-progress')
+    await effort.getByLabel('残工数（時間）').fill('3')
+    await effort.getByRole('button', { name: '工数と進捗を保存' }).click()
+    await expect.poll(() => patches).toEqual([{ expectedRevision: 1, remainingEffortMinutes: 180 }])
+    await expect(effort).toContainText('3 時間')
+
+    await expect(titleInput).toHaveValue('工数保存後も残る Project 詳細のタイトル')
+    await expect(projectSelect).toHaveValue('')
+  })
+
   test('Issue #239: Team Issue の保存中は保存ボタンを無効にする', async ({ page }) => {
     let releaseUpdate: (() => void) | undefined
     const updateGate = new Promise<void>((resolve) => {
@@ -11705,6 +11786,37 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('status').filter({ hasText: '佐藤 花子 に確認コードを送りました。' })).toBeVisible()
     expect(passwordResets).toBe(1)
     await expect(page.getByTestId('workspace-member-demo-example-com').getByRole('button', { name: 'パスワード再設定を送る' })).toHaveCount(0)
+  })
+
+  test('Issue #427: メンバーの MFA をリセットするとボタンが消えても同じ行にフォーカスを戻す', async ({ page }) => {
+    let mfaEnrolled = true
+
+    await page.route('**/api/workspace/members/sign-in-security', async (route) => {
+      await route.fulfill({
+        json: {
+          members: [
+            { memberKey: 'demo@example.com', mfa: 'enrolled', passwordReset: 'available' },
+            { memberKey: 'sato@example.com', mfa: mfaEnrolled ? 'enrolled' : 'not-enrolled', passwordReset: 'available' },
+          ],
+        },
+      })
+    })
+    await page.route('**/api/workspace/members/sato%40example.com/mfa-reset', async (route) => {
+      expect(route.request().method()).toBe('POST')
+      mfaEnrolled = false
+      await route.fulfill({ json: { reset: true } })
+    })
+
+    await page.goto('/settings')
+
+    const member = page.getByTestId('workspace-member-sato-example-com')
+    await member.getByRole('button', { name: 'MFAをリセット' }).click()
+    const dialog = page.getByRole('dialog', { name: 'MFA をリセットしますか？' })
+    await dialog.getByRole('button', { name: 'MFAをリセット' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(member.getByRole('button', { name: 'MFAをリセット' })).toHaveCount(0)
+    // The reset button is gone, so focus stays in the same row instead of falling to the page.
+    await expect(member.locator(':focus')).toHaveCount(1)
   })
 
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {

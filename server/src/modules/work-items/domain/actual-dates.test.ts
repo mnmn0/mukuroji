@@ -66,9 +66,11 @@ describe('correctWorkItemActualDates', () => {
       .toEqual({})
   })
 
-  test('rejects invalid, future, and inconsistent dates', () => {
+  test('rejects invalid, out-of-range, future, and inconsistent dates', () => {
     const invalid = [
       [{ actualStartDate: '2026-11-31' }, 'completed'],
+      // Before the supported canonical date range, which the Gantt timeline cannot render.
+      [{ actualStartDate: '0026-11-02' }, 'completed'],
       [{ actualStartDate: '2026-11-17' }, 'completed'],
       [{ actualEndDate: '2026-11-03' }, 'started'],
       [{ actualStartDate: null }, 'completed'],

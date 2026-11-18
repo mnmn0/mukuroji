@@ -1,5 +1,5 @@
-import { describe, expect, spyOn, test } from 'bun:test'
-import { DynamoDBDocumentClient, GetCommand, PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
+import { describe, expect, setSystemTime, spyOn, test } from 'bun:test'
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import type { ApprovalNotificationSource } from '../../../files'
@@ -27,7 +27,9 @@ import {
   hasCurrentSystemAdminMembership,
   hasEligibleEnterpriseNotificationAccess,
   hasEligibleProjectAccess,
+  isCurrentEscalationManager,
   mergeDeletedObjectTags,
+  notifiesWorkItemChangeWatchers,
   overlayCurrentWorkItemNotificationScope,
   parseAuditProjectionEvent,
   projectCuratedContextSearchEvent,
@@ -147,6 +149,261 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('fans Work Item changes out to the owner, creator, and item watchers but not the actor', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    const watcherQueries: string[] = []
+    const directory = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      ...['owner', 'creator', 'watcher', 'actor', 'lead', 'former'].map((name) => ({
+        entryType: 'project-member', projectId: 'platform', memberKey: `${name}@example.com`,
+        role: name === 'lead' ? 'manager' : 'member',
+      })),
+    ]
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send')
+      .mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        const table = command.input.TableName
+        if (table === 'WORK_ITEMS_TABLE_NAME') {
+          return { Item: createRealtimeWorkItem({
+            assigneeUserId: 'owner@example.com',
+            dueDate: '2026-07-05',
+            schedule: createDefaultDueDateWorkItemSchedule('2026-07-05'),
+          }), $metadata: {} }
+        }
+        if (table === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') {
+          const entityKey = String(command.input.ExpressionAttributeValues?.[':entityKey'])
+          watcherQueries.push(entityKey)
+          return { Items: ['watcher', 'actor', 'owner'].map((name) => ({
+            entityKey, recordKey: `WATCHER#${name}@example.com`, entryType: 'watcher', state: 'subscribed', memberKey: `${name}@example.com`,
+          })), $metadata: {} }
+        }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') return { Items: directory, $metadata: {} }
+      }
+      if (command instanceof TransactWriteCommand) {
+        for (const item of command.input.TransactItems ?? []) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    const record = (eventId: string, eventType: string, metadata: Record<string, unknown>) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: eventType }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'work-item' }, entityId: { S: 'team/core/issue/example' },
+        occurredAt: { S: '2026-07-12T12:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: Object.fromEntries(Object.entries(metadata).map(([key, value]) => [key, Array.isArray(value)
+          ? { L: value.map((candidate: Record<string, string>) => ({ M: { memberKey: { S: candidate.memberKey }, reason: { S: candidate.reason } } })) }
+          : { S: String(value) }])) },
+      } },
+    })
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+    }
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [
+        record('completed', 'work-item.updated', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', issueId: 'example', projectId: 'platform',
+          notificationCandidates: [
+            { memberKey: 'owner@example.com', reason: 'status-change' },
+            { memberKey: 'creator@example.com', reason: 'creator' },
+          ],
+        }),
+        record('title-only', 'work-item.updated', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', issueId: 'example', projectId: 'platform',
+        }),
+        record('escalation', 'work-item.overdue-escalation', {
+          actorMemberKey: 'system', teamId: 'core', issueId: 'example', projectId: 'platform', dueDate: '2026-07-05',
+          notificationCandidates: [
+            { memberKey: 'lead@example.com', reason: 'escalation' },
+            { memberKey: 'former@example.com', reason: 'escalation' },
+          ],
+        }),
+      ] }, dependencies)).toEqual({ batchItemFailures: [] })
+
+      expect(watcherQueries).toEqual(['workspace-1#work-item#team/core/issue/example'])
+      expect(notifications.filter((item) => item.eventId === 'completed').map((item) => [item.recipientMemberKey, item.reasons]).sort())
+        .toEqual([
+          ['creator@example.com', ['creator']],
+          ['owner@example.com', ['status-change', 'watcher']],
+          ['watcher@example.com', ['watcher']],
+        ])
+      expect(notifications.some((item) => item.eventId === 'title-only')).toBe(false)
+      expect(notifications.filter((item) => item.eventId === 'escalation').map((item) => item.recipientMemberKey))
+        .toEqual(['lead@example.com'])
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+  test('limits Work Item change watcher fan-out to notifiable changes on the item scope', () => {
+    const event = createProjectionEvent({
+      eventType: 'work-item.updated',
+      projectId: 'platform',
+      notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'status-change' }],
+    })
+
+    expect(notifiesWorkItemChangeWatchers(event)).toBe(true)
+    expect(notifiesWorkItemChangeWatchers({ ...event, notificationCandidates: [] })).toBe(false)
+    expect(notifiesWorkItemChangeWatchers({ ...event, eventType: 'work-item.created' })).toBe(false)
+    expect(createSubscribedWatcherScopes(event)).toEqual([
+      { entityKey: 'workspace-1#work-item#team/core/issue/example', reason: 'watcher' },
+    ])
+  })
+
+  test('revalidates due-soon, repeated overdue, stale, and escalation stages against the current row', () => {
+    const scope = {
+      checked: true,
+      exists: true,
+      projectId: 'platform',
+      assigneeMemberKey: 'owner@example.com',
+      dueDate: '2026-07-15',
+      statusCategory: 'started',
+      updatedAt: '2026-07-01T09:00:00.000Z',
+    }
+    const dueSoon = createProjectionEvent({
+      eventType: 'work-item.due-soon',
+      dueDate: '2026-07-15',
+      notificationCandidates: [{ memberKey: 'Owner@Example.com', reason: 'due-soon' }],
+    })
+    const reminder = createProjectionEvent({
+      eventType: 'work-item.overdue-reminder',
+      dueDate: '2026-07-15',
+      notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'overdue' }],
+    })
+    const stale = createProjectionEvent({
+      eventType: 'work-item.stale',
+      workItemUpdatedAt: '2026-07-01T09:00:00.000Z',
+      notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'stale' }],
+    })
+    const escalation = createProjectionEvent({
+      eventType: 'work-item.overdue-escalation',
+      dueDate: '2026-07-15',
+      projectId: 'platform',
+      notificationCandidates: [
+        { memberKey: 'lead@example.com', reason: 'escalation' },
+        { memberKey: 'owner@example.com', reason: 'escalation' },
+      ],
+    })
+
+    expect(refreshScheduledNotificationEvent(dueSoon, scope)?.notificationCandidates)
+      .toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
+    expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, dueDate: '2026-07-16' })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, localDate: '2026-07-14' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
+    // Delivered once the due date arrived: the due / overdue stages cover it instead.
+    expect(refreshScheduledNotificationEvent(dueSoon, { ...scope, localDate: '2026-07-15' })).toBeUndefined()
+    // Scanned 3 days out: still valid closer to the date, not when today is further out than that.
+    const scannedDueSoon = { ...dueSoon, daysUntilDue: 3 }
+    expect(refreshScheduledNotificationEvent(scannedDueSoon, { ...scope, localDate: '2026-07-13' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due-soon' }])
+    expect(refreshScheduledNotificationEvent(scannedDueSoon, { ...scope, localDate: '2026-07-11' }))
+      .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(reminder, scope)?.notificationCandidates)
+      .toEqual([{ memberKey: 'owner@example.com', reason: 'overdue' }])
+    expect(refreshScheduledNotificationEvent(reminder, { ...scope, assigneeMemberKey: 'new@example.com' }))
+      .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(reminder, { ...scope, localDate: '2026-07-16' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'overdue' }])
+    // A calendar change moved today back to the due date: the item is not overdue any more.
+    expect(refreshScheduledNotificationEvent(reminder, { ...scope, localDate: '2026-07-15' }))
+      .toBeUndefined()
+    const due = createProjectionEvent({
+      eventType: 'work-item.due',
+      dueDate: '2026-07-15',
+      notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'due' }],
+    })
+    expect(refreshScheduledNotificationEvent(due, { ...scope, localDate: '2026-07-15' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'due' }])
+    // Held past the due date (for example by quiet hours) or delivered before it: wrong stage.
+    expect(refreshScheduledNotificationEvent(due, { ...scope, localDate: '2026-07-16' })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(due, { ...scope, localDate: '2026-07-14' })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(stale, scope)?.notificationCandidates)
+      .toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, updatedAt: '2026-07-01T18:00:00+09:00' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, updatedAt: '2026-07-10T00:00:00.000Z' }))
+      .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, statusCategory: 'unstarted' }))
+      .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, localDate: '2026-07-15' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'owner@example.com', reason: 'stale' }])
+    // Delivered after the due date passed: the overdue reminder covers it instead.
+    expect(refreshScheduledNotificationEvent(stale, { ...scope, localDate: '2026-07-16' }))
+      .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(escalation, scope)?.notificationCandidates)
+      .toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
+    expect(refreshScheduledNotificationEvent(escalation, { ...scope, statusCategory: 'completed' }))
+      .toBeUndefined()
+    expect(refreshScheduledNotificationEvent(escalation, { ...scope, projectId: undefined }))
+      .toBeUndefined()
+    // Scanned 7 days overdue: valid while at least that overdue in the item's calendar.
+    const scannedEscalation = { ...escalation, daysUntilDue: -7 }
+    expect(refreshScheduledNotificationEvent(scannedEscalation, { ...scope, localDate: '2026-07-22' })
+      ?.notificationCandidates).toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
+    expect(refreshScheduledNotificationEvent(scannedEscalation, { ...scope, localDate: '2026-07-21' }))
+      .toBeUndefined()
+    // Reopened since the scan: the next scan keys a fresh escalation, so the old one is dropped.
+    expect(refreshScheduledNotificationEvent(escalation, { ...scope, reopenedAt: '2026-07-18T09:00:00.000Z' }))
+      .toBeUndefined()
+    const reopenedEscalation = { ...escalation, workItemReopenedAt: '2026-07-18T09:00:00.000Z' }
+    expect(refreshScheduledNotificationEvent(reopenedEscalation, {
+      ...scope,
+      reopenedAt: '2026-07-18T18:00:00+09:00',
+    })?.notificationCandidates).toEqual([{ memberKey: 'lead@example.com', reason: 'escalation' }])
+    expect(refreshScheduledNotificationEvent(reopenedEscalation, {
+      ...scope,
+      reopenedAt: '2026-07-19T09:00:00.000Z',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(reopenedEscalation, scope)).toBeUndefined()
+    // Moved to another Project: a fresh escalation is keyed for it, so the old one is dropped.
+    expect(refreshScheduledNotificationEvent(
+      { ...escalation, projectId: 'other' },
+      { ...scope, projectId: 'other' },
+      'platform',
+    )).toBeUndefined()
+    for (const scheduled of [dueSoon, reminder, stale, escalation]) {
+      expect(refreshScheduledNotificationEvent(scheduled, { ...scope, archived: true })).toBeUndefined()
+    }
+
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'project-member', projectId: 'platform', memberKey: 'Lead@Example.com', role: 'manager' },
+      { entryType: 'project-member', projectId: 'platform', memberKey: 'viewer@example.com', role: 'viewer' },
+      {
+        entryType: 'project-member',
+        projectId: 'platform',
+        memberKey: 'former@example.com',
+        role: 'manager',
+        archivedAt: '2026-07-01T00:00:00.000Z',
+      },
+    ]
+    expect(isCurrentEscalationManager(escalation, 'lead@example.com', directory)).toBe(true)
+    expect(isCurrentEscalationManager(escalation, 'former@example.com', directory)).toBe(false)
+    expect(isCurrentEscalationManager(escalation, 'viewer@example.com', directory)).toBe(false)
+    expect(isCurrentEscalationManager({ ...escalation, projectId: 'other' }, 'lead@example.com', directory))
+      .toBe(false)
+    expect(isCurrentEscalationManager(dueSoon, 'viewer@example.com', [])).toBe(true)
+  })
+
   test('retries corrupt projection preferences without receipts and recovers after repair', async () => {
     const keys = ['PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME']
     const previous = keys.map((key) => process.env[key])
@@ -349,6 +606,50 @@ describe('collaboration projection pure helpers', () => {
       event.notificationCandidates = [{ memberKey, reason: 'assignment' }, { memberKey, reason: 'mention' }]
       expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
     } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('re-evaluates scanned due-soon and escalation stages in the current schedule time zone at delivery', async () => {
+    const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const schedule = createDefaultDueDateWorkItemSchedule('2026-07-15')
+    const current = createRealtimeWorkItem({ dueDate: '2026-07-15', schedule })
+    const withTimeZone = (timeZone: string) => {
+      current.schedule = { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, timeZone } }
+    }
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    cache.directories.set('workspace-1', Promise.resolve([
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+    ]))
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      return { Item: command.input.TableName === 'WORK_ITEMS_TABLE_NAME' ? current
+        : { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    // Shaped as the Slack worker rebuilds it from the queued notification row.
+    const dueSoon = createProjectionEvent({
+      eventType: 'work-item.due-soon', teamId: 'core', projectId: 'platform', issueId: 'example',
+      dueDate: '2026-07-15', daysUntilDue: 3,
+      notificationCandidates: [{ memberKey, reason: 'due-soon' }],
+    })
+    try {
+      // 2026-07-12T03:00Z is 07-12 in Tokyo (3 days out) but still 07-11 in Los Angeles (4 days out).
+      setSystemTime(new Date('2026-07-12T03:00:00.000Z'))
+      withTimeZone('Asia/Tokyo')
+      expect(await authorizeNotificationDelivery(dueSoon, memberKey, identity, cache)).toBe(true)
+      withTimeZone('America/Los_Angeles')
+      expect(await authorizeNotificationDelivery(dueSoon, memberKey, identity, cache)).toBe(false)
+    } finally {
+      setSystemTime()
       send.mockRestore()
       groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
@@ -932,6 +1233,35 @@ describe('collaboration projection pure helpers', () => {
         ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
       },
     })
+  })
+
+  test('pins scheduled Work Item notification writes to the revision they were revalidated against', () => {
+    const scheduled = createProjectionEvent({
+      eventType: 'work-item.overdue-reminder',
+      teamId: 'core',
+      issueId: 'example',
+    })
+    const scope = { checked: true, exists: true, revision: 7 }
+
+    expect(createCuratedContextSearchParentCondition('team-issues', scheduled, scope)).toEqual({
+      ConditionCheck: {
+        TableName: 'team-issues',
+        Key: {
+          directoryTeamId: 'workspace-1#team#core',
+          issueId: 'example',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId) AND #revision = :revision',
+        ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId', '#revision': 'revision' },
+        ExpressionAttributeValues: { ':revision': 7 },
+      },
+    })
+    // Other events keep the scope-only fence.
+    expect(createCuratedContextSearchParentCondition(
+      'team-issues',
+      { ...scheduled, eventType: 'work-item.updated' },
+      scope,
+    )?.ConditionCheck.ConditionExpression).not.toContain('#revision')
   })
 
   test('projects context Search once before the projection receipt completes the event', async () => {
@@ -1653,6 +1983,28 @@ describe('collaboration projection pure helpers', () => {
       ...event,
       metadata: { dueDate: '2026/07/12' },
     })?.dueDate).toBeUndefined()
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026-07-12', daysUntilDue: -7 },
+    })?.daysUntilDue).toBe(-7)
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026-07-12' },
+    })?.daysUntilDue).toBeUndefined()
+    for (const daysUntilDue of ['3', 1.5, null]) {
+      expect(() => parseAuditProjectionEvent({
+        ...event,
+        metadata: { dueDate: '2026-07-12', daysUntilDue },
+      })).toThrow('daysUntilDue is invalid')
+    }
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { workItemReopenedAt: '2026-07-10T18:00:00+09:00' },
+    })?.workItemReopenedAt).toBe('2026-07-10T09:00:00.000Z')
+    for (const workItemReopenedAt of ['yesterday', 1, null]) {
+      expect(() => parseAuditProjectionEvent({ ...event, metadata: { workItemReopenedAt } }))
+        .toThrow('workItemReopenedAt is invalid')
+    }
   })
 
   test('tolerates legacy events without collaboration metadata', () => {

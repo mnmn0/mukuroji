@@ -719,43 +719,50 @@ describe('agent task lifecycle', () => {
     })
   })
 
-  test('writes the estimate into the read schedule and passes remaining effort and progress through', async () => {
+  test('sends the estimate on its own and passes remaining effort and progress through', async () => {
     const sent: unknown[] = []
-    const stored = task('one', {
-      schedule: {
-        mode: 'due-date', dueDate: '2026-09-10', plannedEffortMinutes: 120,
-        calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: [] },
-      },
-    })
-    const { service } = fixture([stored], {
+    const { service } = fixture([task('one')], {
       async update(_id, input) { sent.push(input); return task('one', { revision: 2 }) },
     })
     await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 }, 'effort')
     await service.update('one', { expectedRevision: 1, plannedEffortMinutes: null }, 'clear')
+    // The server writes the estimate into the stored schedule, so no schedule is sent.
     expect(sent).toEqual([
-      {
-        expectedRevision: 1, remainingEffortMinutes: 300, progressPercent: 40,
-        schedule: { ...stored.schedule, plannedEffortMinutes: 480 },
-      },
-      {
-        expectedRevision: 1,
-        schedule: { mode: 'due-date', dueDate: '2026-09-10', calendarPolicy: stored.schedule.calendarPolicy },
-      },
+      { expectedRevision: 1, plannedEffortMinutes: 480, remainingEffortMinutes: 300, progressPercent: 40 },
+      { expectedRevision: 1, plannedEffortMinutes: null },
     ])
   })
 
-  test('lets an estimate retry reach the server receipt after the first write advanced the revision', async () => {
+  test('resends the same estimate body after a restart even when the dates moved', async () => {
     const sent: unknown[] = []
     const schedule = {
       mode: 'due-date' as const, dueDate: '2026-09-10',
       calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday' as const], holidays: [] },
     }
-    // The first write succeeded, so the stored task already carries the estimate at revision 2.
-    const { service } = fixture([task('one', { revision: 2, schedule: { ...schedule, plannedEffortMinutes: 480 } })], {
-      async update(_id, input) { sent.push(input); return task('one', { revision: 2 }) },
-    })
-    await service.update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')
-    expect(sent).toEqual([{ expectedRevision: 1, schedule: { ...schedule, plannedEffortMinutes: 480 } }])
+    /**
+     * Starts a fresh process whose first update response is lost when asked.
+     *
+     * @param stored - Task the process reads.
+     * @param loseResponse - Whether the update commits without a response.
+     * @returns The service of the new process.
+     */
+    const start = (stored: AgentTask, loseResponse: boolean) => fixture([stored], {
+      async get() { return structuredClone(stored) },
+      async update(_id, input) {
+        sent.push(input)
+        if (loseResponse) throw new AgentTaskError('network_error', 'The response was lost.')
+        return task('one', { revision: 3 })
+      },
+    }).service
+    await expect(start(task('one', { schedule }), true)
+      .update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')).rejects.toThrow()
+    // A person moves the due date, then the agent retries from a restarted process.
+    const moved = task('one', { revision: 3, schedule: { ...schedule, dueDate: '2026-09-20', plannedEffortMinutes: 480 } })
+    await start(moved, false).update('one', { expectedRevision: 1, plannedEffortMinutes: 480 }, 'effort')
+    expect(sent).toEqual([
+      { expectedRevision: 1, plannedEffortMinutes: 480 },
+      { expectedRevision: 1, plannedEffortMinutes: 480 },
+    ])
   })
 
   test('replays stale metadata updates and forwards comment scope to the canonical API', async () => {

@@ -310,6 +310,34 @@ describe('public Agent Run service', () => {
     expect(await read()).toEqual(current)
   })
 
+  test('writes an estimate sent on its own into the stored schedule at the latest revision', async () => {
+    const { projectOptions } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    // Opting in makes each update raise the stored revision, so stale writes are real conflicts.
+    projectOptions.detailRevisions = {}
+    const workItems = createCanonicalPublicWorkItemService()
+    /**
+     * Sends an estimate-only update for the fixture task.
+     *
+     * @param plannedEffortMinutes - Estimate in minutes, or null to clear it.
+     * @param key - Idempotency key.
+     * @param expectedRevision - Revision the caller read.
+     * @returns The updated Work Item.
+     */
+    const update = (plannedEffortMinutes: number | null, key: string, expectedRevision: number) =>
+      runWithTestAppDependencies(() => workItems.update(
+        credential, 'core-team', 'task-1', { expectedRevision, plannedEffortMinutes },
+        { requestId: key, idempotencyKey: key }, undefined,
+      ))
+    const before = await runWithTestAppDependencies(() => workItems.get(credential, 'core-team', 'task-1'))
+    const { plannedEffortMinutes: _estimate, ...placement } = before.schedule
+    // Only the estimate changes; the stored placement is kept.
+    expect((await update(480, 'estimate', before.revision)).schedule).toEqual({ ...placement, plannedEffortMinutes: 480 })
+    // The estimate is written into the schedule the server read, so a stale request is a conflict.
+    await expect(update(600, 'estimate-stale', before.revision))
+      .rejects.toMatchObject({ status: 409, code: 'WorkItemRevisionConflict' })
+    expect((await update(null, 'estimate-clear', before.revision + 1)).schedule).toEqual(placement)
+  })
+
   test('does not let another member reuse the holder instance ID to pass the fence', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const foreign = { ...createHeldRun('task-1', 'laptop-1'), assigneeUserId: 'sato@example.com' }

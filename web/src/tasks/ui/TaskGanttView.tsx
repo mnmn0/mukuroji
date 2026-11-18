@@ -863,12 +863,16 @@ export function TaskGanttView({
                         />
                       ) : null}
                       <button
-                        aria-label={canEditSchedule && !isBusy
+                        aria-label={`${canEditSchedule && !isBusy
                           ? t('tasks.schedule.moveA11y').replace(
                               '{task}',
                               resolveWorkItemTitle(row.task),
                             )
-                          : `${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
+                          : `${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}${
+                          progressPercent === undefined
+                            ? ''
+                            : `, ${t('workItems.effort.progress')} ${progressPercent}%`
+                        }`}
                         className="flex h-full w-full items-center px-2 text-left focus:outline-none focus:ring-2 focus:ring-[var(--workbench-primary)]"
                         data-task-action="open"
                         data-task-open-variant="bar"

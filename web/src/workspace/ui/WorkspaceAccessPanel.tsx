@@ -9,7 +9,6 @@ import {
   type RefObject,
 } from 'react'
 import { useSWRConfig } from 'swr'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -33,7 +32,15 @@ import {
 } from '../api'
 import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
-import { useWorkspaceMemberCredentialReset } from '../mutations/useWorkspaceMemberCredentialReset'
+import {
+  shouldCloseCredentialResetDialog,
+  useWorkspaceMemberCredentialReset,
+} from '../mutations/useWorkspaceMemberCredentialReset'
+import {
+  createWorkspaceAccessMutationSession,
+  getCredentialResetRunner,
+} from '../mutations/workspaceAccessMutationSession'
+import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -268,10 +275,10 @@ export function WorkspaceAccessPanelContainer({
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { mutate: mutateCache } = useSWRConfig()
-  const mutationSession = useMemo(() => ({
-    accessToken,
-    requestRunner: createMutationRequestRunner(),
-  }), [accessToken])
+  const mutationSession = useMemo(
+    () => createWorkspaceAccessMutationSession(accessToken),
+    [accessToken],
+  )
   const mutationRequestRunner = mutationSession.requestRunner
   const {
     data: access,
@@ -288,9 +295,16 @@ export function WorkspaceAccessPanelContainer({
     access?.capabilities.canManageMembers === true,
   )
 
+  const administratorKey = access?.currentMember.memberKey
+  const credentialResetRunner = useMemo(
+    () => administratorKey === undefined
+      ? createMutationRequestRunner()
+      : getCredentialResetRunner(administratorKey),
+    [administratorKey],
+  )
   const resetMemberCredential = useWorkspaceMemberCredentialReset({
     accessToken: mutationSession.accessToken,
-    requestRunner: mutationRequestRunner,
+    requestRunner: credentialResetRunner,
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
@@ -504,6 +518,15 @@ export function WorkspaceAccessPanel({
     setOperationErrorMessage(originalErrorMessage)
   }
 
+  /**
+   * Returns focus to another control of the member's row, because the reload after an
+   * authenticator reset removes the reset button that opened the dialog.
+   */
+  const moveReturnFocusOffResetButton = () => {
+    actionReturnFocusRef.current = findRowFocusFallback(actionReturnFocusRef.current) ??
+      actionReturnFocusRef.current
+  }
+
   const confirmAction = async () => {
     if (!action || isActionBusy) {
       return
@@ -515,6 +538,7 @@ export function WorkspaceAccessPanel({
     if (action.kind === 'member-credential') {
       try {
         await onResetMemberCredential?.(action.member.memberKey, action.action)
+        if (action.action === 'mfa-reset') moveReturnFocusOffResetButton()
         setAction(undefined)
         setNoticeMessage(
           t(action.action === 'password-reset'
@@ -523,6 +547,12 @@ export function WorkspaceAccessPanel({
             .replace('{name}', action.member.name?.trim() || action.member.email),
         )
       } catch (error) {
+        // The dialog closes on an expired reset, so the error shows in the panel instead.
+        if (shouldCloseCredentialResetDialog(error)) {
+          // The reload that follows may remove the reset button, as after a completed reset.
+          if (action.action === 'mfa-reset') moveReturnFocusOffResetButton()
+          setAction(undefined)
+        }
         setOperationErrorMessage(resolveMemberCredentialErrorMessage(error, t))
       } finally {
         setIsActionBusy(false)
@@ -1110,6 +1140,59 @@ function AccessStatusBadge({
   )
 }
 
+/** Controls that can take focus inside a member row. */
+const rowFocusableSelector = 'button:not([disabled]), a[href], select:not([disabled]), input:not([disabled])'
+
+/**
+ * Finds another control in the member row of a control, for when an action removes that control.
+ *
+ * @param control - Control that opened the dialog.
+ * @returns The first other focusable control of the row, or undefined.
+ */
+function findRowFocusFallback(control: HTMLElement | null) {
+  const row = control?.closest<HTMLElement>('tr')
+  return Array.from(row?.querySelectorAll<HTMLElement>(rowFocusableSelector) ?? [])
+    .find((candidate) => candidate !== control)
+}
+
+/**
+ * Reads the control a dialog returns focus to when it closes.
+ *
+ * The confirmed action can change it after the dialog opened, so it is read on close.
+ *
+ * @param returnFocusRef - Ref of the control.
+ * @returns The control, or null.
+ */
+function readReturnFocusTarget(returnFocusRef: RefObject<HTMLElement | null>) {
+  return returnFocusRef.current
+}
+
+/**
+ * Returns focus to the control that opened a dialog, or to its row when the control is gone.
+ *
+ * @param returnFocusElement - Control that opened the dialog.
+ * @param fallbackContainer - Row of that control, read when the dialog opened.
+ */
+function restoreDialogFocus(
+  returnFocusElement: HTMLElement | null | undefined,
+  fallbackContainer: HTMLElement | null | undefined,
+) {
+  if (returnFocusElement?.isConnected) {
+    returnFocusElement.focus()
+    return
+  }
+  if (!fallbackContainer?.isConnected) {
+    return
+  }
+  const fallback = fallbackContainer.querySelector<HTMLElement>(rowFocusableSelector)
+  if (fallback) {
+    fallback.focus()
+    return
+  }
+  fallbackContainer.tabIndex = -1
+  fallbackContainer.focus()
+}
+
 function WorkspaceAccessConfirmationDialog({
   confirmLabel,
   description,
@@ -1129,10 +1212,15 @@ function WorkspaceAccessConfirmationDialog({
 
   useEffect(() => {
     const returnFocusElement = returnFocusRef.current
+    // An action can remove its own button, such as resetting MFA, so the row is the fallback.
+    const fallbackContainer = returnFocusElement?.closest<HTMLElement>('tr')
     dialogRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
 
     return () => {
-      window.requestAnimationFrame(() => returnFocusElement?.isConnected && returnFocusElement.focus())
+      // The confirmed action may point the ref at another control of the row, such as after an
+      // MFA reset whose button the next reload removes, so the ref is read again on close.
+      const focusTarget = readReturnFocusTarget(returnFocusRef) ?? returnFocusElement
+      window.requestAnimationFrame(() => restoreDialogFocus(focusTarget, fallbackContainer))
     }
   }, [returnFocusRef])
 

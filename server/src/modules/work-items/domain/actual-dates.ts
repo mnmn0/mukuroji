@@ -1,5 +1,6 @@
 import {
   applyWorkItemStatusTransitionToActualDates,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
   type WorkItemActualDates,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
@@ -90,13 +91,16 @@ export function isOptionalWorkItemActualDate(value: unknown): value is string | 
 }
 
 /**
- * Checks a real `YYYY-MM-DD` calendar date.
+ * Checks a real `YYYY-MM-DD` calendar date inside the supported canonical date range.
  *
  * @param value - Candidate date.
- * @returns True when the value round-trips through UTC calendar arithmetic.
+ * @returns True when the year is at least `WORK_ITEM_SCHEDULE_MIN_YEAR` and the value round-trips
+ *   through UTC calendar arithmetic.
  */
 function isCalendarDate(value: unknown): value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  // Schedules and the Gantt timeline reject earlier years, so actual dates use the same range.
+  if (Number(value.slice(0, 4)) < WORK_ITEM_SCHEDULE_MIN_YEAR) return false
   const time = Date.parse(`${value}T00:00:00.000Z`)
   return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value
 }

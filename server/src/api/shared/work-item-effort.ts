@@ -57,6 +57,25 @@ export function changesWorkItemSchedulePlacement(next: unknown, current: unknown
 }
 
 /**
+ * Writes an estimate into a stored schedule, keeping its placement.
+ *
+ * The Public API accepts `plannedEffortMinutes` on its own so that a client changing only the
+ * estimate sends a body that does not depend on the dates it read; a retry under the same
+ * idempotency key then stays the same request even if a person moved the dates in between.
+ *
+ * @param schedule - Stored schedule.
+ * @param plannedEffortMinutes - New estimate in minutes, or null to clear it.
+ * @returns The schedule with the estimate replaced.
+ */
+export function withWorkItemPlannedEffort<T extends { plannedEffortMinutes?: number }>(
+  schedule: T,
+  plannedEffortMinutes: number | null,
+): Omit<T, 'plannedEffortMinutes'> & { plannedEffortMinutes?: number } {
+  const { plannedEffortMinutes: _previous, ...placement } = schedule
+  return plannedEffortMinutes === null ? placement : { ...placement, plannedEffortMinutes }
+}
+
+/**
  * Copies a schedule-shaped value without its planned effort.
  *
  * @param schedule - Schedule-shaped value.
@@ -112,6 +131,7 @@ export async function listTeamWorkItemEffort(
     const response = await teamIssues.getTeamIssues(directoryId, teamId, {
       limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
       includeArchived: options.includeArchived === true,
+      consistentRead: true,
       limitEvaluatedRows: true,
       ...(startAfterIssueId ? { startAfterIssueId } : {}),
     })

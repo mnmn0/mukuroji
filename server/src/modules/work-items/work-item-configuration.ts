@@ -1515,17 +1515,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     const previousParentWorkItemId = normalized.currentParent?.workItemId ?? null
     const parentWorkItemId = normalized.nextParent?.workItemId ?? null
     // Setting a parent is declarative: when the child already has exactly the requested parent,
-    // including on a retry after a lost response, report success without writing.
+    // including on a retry after a lost response, report success without writing. The revision is
+    // read again so the response never pairs the stored parent with a revision older than it.
     if (
       storedParents.length === (parentWorkItemId ? 1 : 0) &&
       (storedParents[0]?.targetWorkItemId ?? null) === parentWorkItemId
     ) {
       if (normalized.hierarchyRank !== undefined) {
         // The rank was chosen among the siblings the caller saw, so it needs their graph revision.
+        // The rank write is fenced on that revision, so no second read is needed.
         assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
         await this.writeHierarchyRank(workspaceId, teamId, child, normalized.hierarchyRank, graph.revision)
+        return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
       }
-      return { previousParentWorkItemId, parentWorkItemId, graphRevision: graph.revision }
+      const after = await this.getRelationGraphRevision(workspaceId, teamId)
+      assertStableGraphRevision(graph.revision, after)
+      return { previousParentWorkItemId, parentWorkItemId, graphRevision: after }
     }
     assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
     if (

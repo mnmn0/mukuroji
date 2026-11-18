@@ -274,6 +274,12 @@ const enterpriseRoutePermissionRules = [
     permission: 'documents.manage',
     alternativePermissions: ['documents.write'],
   },
+  // Sign-in security of every member is for administrators, unlike the rest of the roster.
+  {
+    method: 'GET',
+    pathPattern: '/api/workspace/members/sign-in-security',
+    permission: 'members.manage',
+  },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
   { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },

@@ -5,7 +5,10 @@ const {
   resetTestApp,
   withTestEnvironment,
 } = createApiTestHarness()
-import { DynamoDbTeamIssuesClient } from './work-item-client'
+import {
+  createWorkItemNotificationCandidates,
+  DynamoDbTeamIssuesClient,
+} from './work-item-client'
 import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
 import {
   createMutationAuditContext,
@@ -2312,6 +2315,8 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
   })
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
+  // Only leaving a closed state marks a reopen.
+  expect(JSON.stringify(transactItems)).not.toContain('reopenedAt')
   expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
     Update: {
       ExpressionAttributeValues: {
@@ -2404,6 +2409,13 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
 
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
+  const firstItem = Array.isArray(transactItems) ? transactItems[0] : undefined
+  const reopenUpdate = isUnknownRecord(firstItem) && isUnknownRecord(firstItem.Update)
+    ? structuredClone(firstItem.Update) as {
+        UpdateExpression?: string
+        ExpressionAttributeValues?: Record<string, unknown>
+      }
+    : undefined
   expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
     Update: {
       ExpressionAttributeNames: expect.objectContaining({
@@ -2415,6 +2427,10 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
       ),
     },
   })
+  // Reopening restarts overdue escalation, which is keyed by this time.
+  expect(reopenUpdate?.UpdateExpression).toContain('#reopenedAt = :reopenedAt')
+  expect(reopenUpdate?.ExpressionAttributeValues?.[':reopenedAt'])
+    .toBe(reopenUpdate?.ExpressionAttributeValues?.[':updatedAt'])
   expect(Array.isArray(transactItems)
     ? transactItems.find((item) => {
         if (!isUnknownRecord(item) || !isUnknownRecord(item.Put)) return false
@@ -3967,12 +3983,40 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
       notificationCandidates: [
         { memberKey: 'after@example.com', reason: 'assignment' },
         { memberKey: 'after@example.com', reason: 'status-change' },
+        { memberKey: 'demo@example.com', reason: 'creator' },
       ],
     },
   })
   expect(auditItem?.changes).toEqual(expect.arrayContaining([
     { field: 'workItemTypeId', before: 'default', after: 'incident' },
   ]))
+})
+
+test('Work Item change candidates add the creator only for notifiable changes', () => {
+  const before = {
+    assigneeUserId: 'owner@example.com',
+    workflowStatusId: 'todo',
+    schedule: createDueDateSchedule('2026-07-20'),
+    creatorMemberKey: 'creator@example.com',
+  }
+
+  expect(createWorkItemNotificationCandidates(before, { ...before })).toEqual([])
+  expect(createWorkItemNotificationCandidates(before, {
+    ...before,
+    workflowStatusId: 'done',
+  })).toEqual([
+    { memberKey: 'owner@example.com', reason: 'status-change' },
+    { memberKey: 'creator@example.com', reason: 'creator' },
+  ])
+  expect(createWorkItemNotificationCandidates(before, {
+    ...before,
+    schedule: createDueDateSchedule('2026-07-21'),
+    archivedAt: '2026-07-13T00:00:00.000Z',
+  })).toEqual([
+    { memberKey: 'owner@example.com', reason: 'schedule-change' },
+    { memberKey: 'owner@example.com', reason: 'archive-change' },
+    { memberKey: 'creator@example.com', reason: 'creator' },
+  ])
 })
 
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {

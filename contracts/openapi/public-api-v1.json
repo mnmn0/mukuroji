@@ -2945,6 +2945,15 @@
             "minimum": 1,
             "type": "integer"
           },
+          "plannedEffortMinutes": {
+            "description": "Replaces only the estimate (`schedule.plannedEffortMinutes`) in minutes; null clears it. The server writes it into the stored schedule, so a retry with the same body replays even if the dates changed. Requires the latest revision and cannot be combined with `schedule`.",
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "priority": {
             "enum": [
               "high",

@@ -46,6 +46,7 @@ Canonical row は次の field を持つ。
 | `progressPercent` | no | 手入力の進捗率（0〜100 の整数）。未記録なら属性を持たない。 |
 | `dueDate` | yes | `schedule` から導出する projection。`unscheduled` では空文字、それ以外は `YYYY-MM-DD`。 |
 | `dueDateUpdatedAt` | no | 導出済み `dueDate` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
+| `reopenedAt` | no | 完了・中止・archive の状態から未完了に戻った最後の UTC ISO 8601 timestamp。期限超過の escalation 通知の重複排除 key に入り、再開後に Project manager へ出し直すために使う。API response には含めない。 |
 | `sortOrder` | yes | Team/project list の安定表示順。 |
 | `createdAt` / `updatedAt` | yes | UTC ISO 8601 timestamp。 |
 

@@ -1111,11 +1111,19 @@ describe('Analytics metric engine', () => {
     const open = estimated('effort-open', 600, {
       statusCategory: 'started', workflowStatusId: 'status-started', remainingEffortMinutes: 360,
     })
+    // Neither an estimate nor a remaining effort: counted as zero and reported.
+    const openUnestimated = estimated('effort-open-unestimated', undefined, {
+      statusCategory: 'started', workflowStatusId: 'status-started',
+    })
+    // An explicit zero remaining effort is known, so it is not reported.
+    const openFinished = estimated('effort-open-finished', 60, {
+      statusCategory: 'started', workflowStatusId: 'status-started', remainingEffortMinutes: 0,
+    })
     const completion = (item: CanonicalWorkItem, at: string) => createAuditEvent(
       `${item.id}-complete`, item, at, [{ field: 'statusCategory', before: 'started', after: 'completed' }],
     )
     const input = {
-      workItems: [first, second, unestimated, open],
+      workItems: [first, second, unestimated, open, openUnestimated, openFinished],
       events: [
         completion(first, '2026-03-02T12:00:00.000Z'),
         completion(second, '2026-03-03T12:00:00.000Z'),
@@ -1136,13 +1144,20 @@ describe('Analytics metric engine', () => {
 
     const counted = snapshotFor('count')
     expect(counted.widgets.map((widget) => widget.value)).toEqual([3, 3])
-    expect(counted.forecast.remainingWorkItems).toBe(1)
+    expect(counted.forecast.remainingWorkItems).toBe(3)
     expect(counted.forecast.weighting).toBeUndefined()
+    expect(counted.forecast.unestimatedRemainingWorkItems).toBeUndefined()
 
     const weighted = snapshotFor('effort')
     expect(weighted.widgets.map((widget) => [widget.value, widget.definition.unit])).toEqual([[6, 'hours'], [6, 'hours-per-week']])
     expect(weighted.widgets[0]?.warnings).toContain('1 completed Work Item(s) had no estimate and counted as zero effort.')
-    expect(weighted.forecast).toMatchObject({ weighting: 'effort', remainingWorkItems: 1, remainingEffortHours: 6 })
+    expect(weighted.forecast).toMatchObject({
+      weighting: 'effort', remainingWorkItems: 3, remainingEffortHours: 6, unestimatedRemainingWorkItems: 1,
+    })
+    // Exports name the unit of effort-weighted rows so they cannot be mistaken for item counts.
+    expect(createAnalyticsCsv(weighted)).toContain('throughput,Throughput (hours),6')
+    expect(createAnalyticsCsv(weighted)).toContain('velocity,Velocity (hours/week),6')
+    expect(createAnalyticsCsv(counted)).toContain('throughput,Throughput,3')
     // Six hours completed over seven days, so six remaining hours take at least the next completing days.
     expect(weighted.forecast.dailyThroughput).toBe(0.857)
     expect(weighted.forecast.p95).not.toBeNull()
