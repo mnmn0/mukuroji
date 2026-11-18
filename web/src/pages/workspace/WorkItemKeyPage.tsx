@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { Navigate, useParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
-import { readWorkItemKeyInput } from '../../issues/model/workItemKeys'
+import { readWorkItemKeyInput } from '../../work-items/model/workItemKeys'
 import { useWorkItemKeyLocation } from '../../issues/queries/useWorkItemKeyLocation'
 import { WorkItemKeyStatus, type WorkItemKeyLookupStatus } from '../../issues/ui/WorkItemKeyStatus'
 import { createTranslator } from '../../shared/i18n/i18n'
