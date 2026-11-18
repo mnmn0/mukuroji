@@ -1536,7 +1536,7 @@ test('creates reciprocal relation edges with endpoint and graph guards in one tr
       TableName: 'work-items-table',
       Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'child' },
       ConditionExpression: expect.stringContaining('#revision = :revision'),
-      UpdateExpression: 'SET #relationIds = :relationIds',
+      UpdateExpression: 'SET #relationIds = :relationIds REMOVE #hierarchyRank',
       ExpressionAttributeValues: { ':relationIds': ['parent:parent'], ':revision': 1 },
     }),
   })
@@ -1653,6 +1653,19 @@ test('derives sorted relation projections without child rows for create and dele
     [['parent:new-target', 'related:existing-z'], ['parent:existing-a']],
   ])
   expect(store.graph()).toMatchObject({ revision: 3, edgeCount: 8 })
+  // The child that gained a parent drops its old sibling rank; a non-hierarchy relation keeps it.
+  const updateExpressions = store.transactions.map((transaction) =>
+    (transaction.TransactItems as Array<Record<string, Record<string, unknown>>>)
+      .map((item) => item.Update)
+      .filter((update) => update?.TableName === 'work-items-table')
+      .map((update) => [(update?.Key as Record<string, unknown> | undefined)?.issueId, update?.UpdateExpression]))
+  expect(updateExpressions).toEqual([
+    [['source', 'SET #relationIds = :relationIds REMOVE #hierarchyRank']],
+    [
+      ['source', 'SET #relationIds = :relationIds'],
+      ['target', 'SET #relationIds = :relationIds'],
+    ],
+  ])
 })
 
 test('clears the child sibling rank when its parent link is deleted from either side', async () => {
@@ -1661,14 +1674,15 @@ test('clears the child sibling rank when its parent link is deleted from either 
   store.seedRelation('phase', 'other-task', 'child')
   store.seedGraph(1, 4)
   const client = store.createClient()
-  /** Reads each Work Item endpoint's update expression, or `check` for a condition-only endpoint. */
+  /** Pairs each Work Item endpoint's key with its update expression, or `check` for a condition-only endpoint. */
   const endpointExpressions = (index: number) =>
     ((store.transactions[index]?.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>)
-      .filter((item) =>
-        item.Update?.TableName === 'work-items-table' ||
-        item.ConditionCheck?.TableName === 'work-items-table'
-      )
-      .map((item) => item.Update?.UpdateExpression ?? 'check')
+      .map((item) => item.Update ?? item.ConditionCheck)
+      .filter((operation) => operation?.TableName === 'work-items-table')
+      .map((operation) => [
+        (operation?.Key as Record<string, unknown> | undefined)?.issueId,
+        operation?.UpdateExpression ?? 'check',
+      ])
 
   await client.deleteRelation('workspace-1', 'core-team', {
     sourceWorkItemId: 'task',
@@ -1687,8 +1701,14 @@ test('clears the child sibling rank when its parent link is deleted from either 
     targetExpectedRevision: 4,
   })
 
-  expect(endpointExpressions(0)).toEqual(['SET #relationIds = :relationIds REMOVE #hierarchyRank', 'check'])
-  expect(endpointExpressions(1)).toEqual(['check', 'SET #relationIds = :relationIds REMOVE #hierarchyRank'])
+  expect(endpointExpressions(0)).toEqual([
+    ['task', 'SET #relationIds = :relationIds REMOVE #hierarchyRank'],
+    ['phase', 'check'],
+  ])
+  expect(endpointExpressions(1)).toEqual([
+    ['phase', 'check'],
+    ['other-task', 'SET #relationIds = :relationIds REMOVE #hierarchyRank'],
+  ])
 })
 
 test('validates canonical derived relation IDs as bounded unique sorted keys', () => {
@@ -1952,20 +1972,31 @@ test('stores the sibling order rank with a parent change and reorders under the 
   })).rejects.toMatchObject({ code: 'InvalidWorkItemHierarchyRank', status: 400 })
 })
 
-test('reports a reorder canceled by a concurrent write as retryable while the graph revision is unchanged', async () => {
-  const store = createInMemoryRelationStore({ cancelTransactions: true })
-  store.seedRelation('task', 'phase-a', 'parent')
-  store.seedGraph(5, 2)
-  const client = store.createClient()
-
-  await expect(client.replaceParent('workspace-1', 'core-team', {
+test('classifies a canceled reorder by its cancellation reasons', async () => {
+  const reorder = {
     child: { workItemId: 'task', expectedRevision: 3 },
     currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
     nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
     expectedGraphRevision: 5,
     hierarchyRank: 'm',
-  })).rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
-  expect(store.graph()).toMatchObject({ revision: 5 })
+  }
+  /** Creates a client whose reorder transaction is canceled with the given reasons. */
+  const createCanceledClient = (cancellationReasons: readonly string[]) => {
+    const store = createInMemoryRelationStore({ cancelTransactions: true, cancellationReasons })
+    store.seedRelation('task', 'phase-a', 'parent')
+    store.seedGraph(5, 2)
+    return store.createClient()
+  }
+
+  // A concurrent write on an unchanged graph can be retried.
+  await expect(createCanceledClient(['None', 'TransactionConflict']).replaceParent('workspace-1', 'core-team', reorder))
+    .rejects.toMatchObject({ code: 'WorkItemRelationUnavailable', status: 503 })
+  // A stale child is a conflict even though the graph did not move.
+  await expect(createCanceledClient(['ConditionalCheckFailed', 'None']).replaceParent('workspace-1', 'core-team', reorder))
+    .rejects.toMatchObject({ code: 'WorkItemRelationGraphConflict', status: 409 })
+  // A deterministic failure is not reported as a concurrent write.
+  await expect(createCanceledClient(['ValidationError', 'None']).replaceParent('workspace-1', 'core-team', reorder))
+    .rejects.not.toMatchObject({ code: 'WorkItemRelationUnavailable' })
 })
 
 test('returns success without writing when a lost-response retry finds the requested parent', async () => {
@@ -2216,12 +2247,17 @@ type InMemoryRelationStore = {
 /**
  * Creates an in-memory configuration table that understands relation key prefixes.
  *
- * @param options - Set `cancelTransactions` to make every TransactWrite fail as canceled.
+ * @param options - Set `cancelTransactions` to make every TransactWrite fail as canceled, with
+ *   `cancellationReasons` as the per-item reason codes when given.
  *
  * @returns The fake store and its counters.
  */
 function createInMemoryRelationStore(
-  options: { cancelTransactions?: boolean; afterQuery?: (prefix: string) => void } = {},
+  options: {
+    cancelTransactions?: boolean
+    cancellationReasons?: readonly string[]
+    afterQuery?: (prefix: string) => void
+  } = {},
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
   const rows = new Map<string, Record<string, unknown>>()
@@ -2311,7 +2347,12 @@ function createInMemoryRelationStore(
             return { Items: items }
           }
           if (command.constructor.name === 'TransactWriteCommand' && options.cancelTransactions) {
-            throw { name: 'TransactionCanceledException' }
+            throw {
+              name: 'TransactionCanceledException',
+              ...(options.cancellationReasons
+                ? { CancellationReasons: options.cancellationReasons.map((Code) => ({ Code })) }
+                : {}),
+            }
           }
           if (command.constructor.name === 'TransactWriteCommand') {
             store.maxRowsReadPerOperation = Math.max(store.maxRowsReadPerOperation, rowsSinceTransaction)

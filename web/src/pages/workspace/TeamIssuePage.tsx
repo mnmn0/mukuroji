@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { useSWRConfig } from 'swr'
 import {
   useBlocker,
   useLocation,
@@ -80,7 +81,10 @@ import {
   replaceWorkItemParent,
 } from '../../work-items/api'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
-import { useTeamWorkItemHierarchy } from '../../work-items/queries/useTeamWorkItemHierarchy'
+import {
+  createTeamWorkItemHierarchyKey,
+  useTeamWorkItemHierarchy,
+} from '../../work-items/queries/useTeamWorkItemHierarchy'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import {
   readSelectedRelationGraphRevision,
@@ -149,6 +153,7 @@ export function TeamIssuePage() {
   const params = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const { mutate: mutateSWR } = useSWRConfig()
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -738,6 +743,11 @@ export function TeamIssuePage() {
     if (!accessToken || !hierarchy || !currentIssue || !canMutateTeamIssue(currentIssue)) {
       throw new TeamIssuesApiError(403, t('taskViews.action.unavailable'), 'TeamTaskActionAccessDenied')
     }
+    // Fixed now, so the moved Team's hierarchy is refreshed even if the person switches Team
+    // before the save returns.
+    const movedHierarchyKey = createTeamWorkItemHierarchyKey(accessToken, teamId)
+    /** Revalidates the hierarchy of the Team the move was saved in. */
+    const refreshMovedHierarchy = () => mutateSWR(movedHierarchyKey)
     try {
       await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:hierarchy:move:${teamId}:${issueId}`,
@@ -756,12 +766,12 @@ export function TeamIssuePage() {
       ))
     } catch (error) {
       if (isWorkItemRelationGraphConflict(error)) {
-        await mutateHierarchy()
+        await refreshMovedHierarchy()
         throw new Error(t('issues.error.conflict'), { cause: error })
       }
       throw error
     }
-    await Promise.all([mutateHierarchy(), mutateIssues(), mutateIssueDetail()])
+    await Promise.all([refreshMovedHierarchy(), mutateIssues(), mutateIssueDetail()])
   }
 
   const handleDeleteRelation = async (issueId: string, relation: WorkItemRelation) => {
@@ -924,7 +934,9 @@ export function TeamIssuePage() {
       issueErrorMessage={issueErrorMessage}
       issueOutline={isOutlineShown
         ? {
-            ...(hierarchy ? { nodes: hierarchy.nodes } : {}),
+            ...(hierarchy
+              ? { nodes: hierarchy.nodes }
+              : { isLoading: !hierarchyError && isHierarchyValidating }),
             ...(hierarchyError
               ? {
                   errorMessage: t('issues.outline.unavailable'),

@@ -86,6 +86,10 @@ import {
   formatShowMoreLabel,
   TASK_TABLE_RENDER_STEP,
 } from '../model/taskListRendering'
+import {
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 
 /** Resolves a localized task-table message. */
 type TaskTableTranslator = (key: MessageKey) => string
@@ -175,7 +179,7 @@ export type TaskTableViewProps = {
   /** Opens the create-task form when task creation is available. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates a row through the common Work Item action. */
-  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
   /** Selects a task for the detail pane. */
   onSelectTask: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for one rendered row. */
@@ -221,7 +225,7 @@ type TaskTableRowProps = {
   /** Opens the create panel with the row's Work Item context. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates the row through the common Work Item action. */
-  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
   /** Updates the row's bulk-selection state. */
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   /** Work item rendered by the row. */
@@ -338,6 +342,10 @@ export function TaskTableView({
     )
     const failedCount = invalidCount + (updates.length - writableUpdates.length) +
       results.filter((result) => result.status === 'rejected').length
+    // Rows the person declined to change are neither saved nor failed.
+    const cancelledCount = results.filter((result) =>
+      result.status === 'fulfilled' && isCancelledTeamIssueUpdate(result.value)
+    ).length
 
     if (failedCount > 0) {
       setTableAction({
@@ -347,9 +355,17 @@ export function TaskTableView({
       return
     }
 
+    const savedCount = updates.length - cancelledCount
+    const cancelledMessage = cancelledCount > 0
+      ? t('tasks.action.cancelledCount').replace('{count}', String(cancelledCount))
+      : undefined
     setTableAction({
       kind: 'success',
-      message: successMessage.replace('{count}', String(updates.length)),
+      message: savedCount > 0
+        ? [successMessage.replace('{count}', String(savedCount)), cancelledMessage]
+          .filter((part) => part !== undefined)
+          .join(' ')
+        : cancelledMessage ?? successMessage.replace('{count}', '0'),
     })
   }
 
@@ -814,7 +830,7 @@ function TaskTableRow({
       ]
   const canEditTask = Boolean(onUpdateTask && (canMutateTask?.(task) ?? true))
   /** Sends one row edit only when its exact Work Item scope is writable. */
-  const updateTask = async (candidate: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem> => {
+  const updateTask = async (candidate: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     if (!canEditTask || !onUpdateTask) return candidate
     return onUpdateTask(candidate, input)
   }

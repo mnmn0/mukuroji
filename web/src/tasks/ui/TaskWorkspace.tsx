@@ -82,6 +82,7 @@ import { TaskGanttView } from './TaskGanttView'
 import { TaskPermissionsView } from './TaskPermissionsView'
 import { TaskTableView } from './TaskTableView'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
+import type { CancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 
 const priorityFilterOptions: readonly PriorityFilter[] = ['all', ...taskPriorities]
 
@@ -237,7 +238,7 @@ export type TaskWorkspaceProps = {
   /** Changes the bulk selection state of visible tasks. */
   onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
   /** Updates a task through the shared Work Item mutation. */
-  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
   /** Starts a canonical schedule action and returns its exact preview controller. */
   onRequestScheduleChange?: (
     task: CanonicalWorkItem,

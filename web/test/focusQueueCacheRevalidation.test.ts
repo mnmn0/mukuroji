@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   isFocusAffectedCacheKey,
+  isFocusMutationConflict,
+  isFocusOpenChildrenRefusal,
   revalidateFocusCachesOnConflict,
   type FocusCacheRevalidationScope,
 } from '../src/features/focus-queue/mutations/focusCacheRevalidation'
@@ -93,7 +95,20 @@ describe('Focus cache revalidation', () => {
       new FocusQueueApiError(500, 'Focus failure'),
       revalidate,
     )
+    // Refreshing does not reopen a completion refused for open children.
+    await revalidateFocusCachesOnConflict(
+      new TeamIssuesApiError(409, 'Open children', 'WorkItemOpenChildren'),
+      revalidate,
+    )
 
     expect(revalidationCount).toBe(2)
+  })
+
+  test('tells an open-children refusal apart from a stale snapshot', () => {
+    const refusal = new TeamIssuesApiError(409, 'Open children', 'WorkItemOpenChildren')
+
+    expect(isFocusOpenChildrenRefusal(refusal)).toBe(true)
+    expect(isFocusMutationConflict(refusal)).toBe(false)
+    expect(isFocusMutationConflict(new TeamIssuesApiError(409, 'Stale', 'WorkItemRevisionConflict'))).toBe(true)
   })
 })

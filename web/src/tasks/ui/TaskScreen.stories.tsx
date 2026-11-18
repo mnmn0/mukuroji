@@ -192,11 +192,9 @@ const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTe
   void input
   return createStoryUpdatedTask(task)
 })
-const onDeclinedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
-  void task
-  void input
-  return CANCELLED_TEAM_ISSUE_UPDATE
-})
+const onDeclinedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) =>
+  // Status changes stand in for a completion the person declines; other edits are saved.
+  input.workflowStatusId === undefined ? createStoryUpdatedTask(task) : CANCELLED_TEAM_ISSUE_UPDATE)
 const onDeniedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
@@ -1674,14 +1672,28 @@ export const DirectInlinePatchDeclined: Story = {
     const canvas = within(canvasElement)
     onDeclinedDirectPatchMutation.mockClear()
 
+    // A saved edit first, so the declined one can be checked to leave its message and Undo alone.
+    await userEvent.click(canvas.getByTestId('task-inline-title-wireframe'))
+    const titleInput = canvas.getByTestId('task-inline-title-wireframe-input')
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, '保存したタイトル')
+    await userEvent.tab()
+    const feedback = await canvas.findByTestId('task-action-feedback')
+    await expect(feedback).toHaveTextContent('変更を保存しました。')
+    await expect(within(feedback).getByRole('button', { name: '元に戻す' })).toBeEnabled()
+
     await userEvent.click(canvas.getByTestId('task-inline-status-wireframe'))
     await userEvent.selectOptions(
       canvas.getByTestId('task-inline-status-wireframe-input'),
       'review',
     )
 
-    await waitFor(() => expect(onDeclinedDirectPatchMutation).toHaveBeenCalledTimes(1))
-    await expect(canvas.queryByText('変更を保存しました。')).toBeNull()
+    // The editor closes only after the screen has handled the declined outcome.
+    await canvas.findByTestId('task-inline-status-wireframe')
+    await expect(onDeclinedDirectPatchMutation).toHaveBeenCalledTimes(2)
+    const feedbackAfterDecline = canvas.getByTestId('task-action-feedback')
+    await expect(feedbackAfterDecline).toHaveTextContent('変更を保存しました。')
+    await expect(within(feedbackAfterDecline).getByRole('button', { name: '元に戻す' })).toBeEnabled()
   },
 }
 

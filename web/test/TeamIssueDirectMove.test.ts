@@ -162,8 +162,8 @@ describe('Team Issue direct Move action', () => {
       [issue],
       teamWorkItemConfigurationFixture,
       async () => {
-        throw new Error('open children', {
-          cause: new TeamIssuesApiError(409, 'open children', 'WorkItemOpenChildren'),
+        throw new Error('Route message', {
+          cause: new TeamIssuesApiError(409, 'API body', 'WorkItemOpenChildren'),
         })
       },
       messages,

@@ -31,6 +31,7 @@ export const workItemsMessages = {
   'tasks.action.paste': 'Pasted {count} rows.',
   'tasks.action.fill': 'Filled {count} tasks.',
   'tasks.action.partial': '{count} tasks could not be saved.',
+  'tasks.action.cancelledCount': '{count} tasks were left unchanged.',
   'tasks.schedule.title': 'Schedule',
   'tasks.schedule.mode': 'Schedule mode',
   'tasks.schedule.unscheduled': 'Unscheduled',

@@ -62,6 +62,7 @@ export const issuesMessages = {
   'issues.outline.unavailable': '階層を読み込めませんでした。一覧は階層なしで表示しています。',
   'issues.outline.retry': '階層を再読み込み',
   'issues.outline.retrying': '階層を読み込み中…',
+  'issues.outline.loading': '階層を読み込み中…',
   'issues.outline.rollup.summary': '子 Work Item の集計',
   'issues.outline.rollup.closed': '完了 {closed}/{total}',
   'issues.outline.rollup.estimate': '見積 {hours} 時間',

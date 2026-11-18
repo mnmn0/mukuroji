@@ -1425,6 +1425,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           expectedRevision: normalized.sourceExpectedRevision,
           assignedProjectId: normalized.sourceAssignedProjectId,
           relationIds: sourceRelationIds,
+          // A child that gains a parent starts from the default order there, as with replaceParent.
+          ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
         },
         {
           workItemId: normalized.targetWorkItemId,
@@ -1731,10 +1733,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           'The Work Item changed. Reload and try again.',
         )
       }
-      if (isNamedError(error, 'TransactionCanceledException')) {
-        // Another write to the graph row in flight cancels this one without a failed condition.
+      if (isTransactionCancellationReason(error, 'TransactionConflict')) {
+        // Another write to the same rows in flight cancels this one without a failed condition.
         // A revision that moved meanwhile is a conflict; otherwise the reorder can be retried.
-        const after = await this.getRelationGraphRevision(workspaceId, teamId)
+        let after: number
+        try {
+          after = await this.getRelationGraphRevision(workspaceId, teamId)
+        } catch (readError) {
+          throw toPersistenceError(readError)
+        }
         if (after !== graph.revision) {
           throw new WorkItemConfigurationError(
             409,
@@ -3897,6 +3904,21 @@ function isConfigurationConditionalTransactionCancellation(error: unknown) {
   const reasonCodes = reasons.slice(0, 2).map((reason) => isRecord(reason) ? reason.Code : undefined)
   return reasonCodes.includes('ConditionalCheckFailed') &&
     reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
+}
+
+/**
+ * Returns whether a DynamoDB transaction cancellation lists a reason code for any item.
+ *
+ * @param error - Unknown error thrown by a TransactWrite.
+ * @param code - Cancellation reason code, such as `TransactionConflict`.
+ * @returns Whether any item of the canceled transaction carries the code.
+ */
+function isTransactionCancellationReason(error: unknown, code: string) {
+  if (!isNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  return Array.isArray(reasons) && reasons.some((reason) => isRecord(reason) && reason.Code === code)
 }
 
 /** Returns whether a DynamoDB transaction cancellation identifies a conditional failure at an index. */

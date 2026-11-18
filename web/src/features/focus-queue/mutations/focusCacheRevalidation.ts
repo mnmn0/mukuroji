@@ -96,6 +96,9 @@ export async function revalidateFocusCachesOnConflict(
 /**
  * Returns whether a Focus action failed because its optimistic snapshot was stale.
  *
+ * A Team refusing to complete a parent with open children is also a 409, but a refresh does not
+ * change it, so it is not counted as stale.
+ *
  * @param error - Unknown transport or application failure.
  * @returns Whether the failure is a typed HTTP 409 from Focus or Work Items.
  */
@@ -103,5 +106,15 @@ export function isFocusMutationConflict(error: unknown): boolean {
   return (
     error instanceof FocusQueueApiError ||
     error instanceof TeamIssuesApiError
-  ) && error.status === 409
+  ) && error.status === 409 && !isFocusOpenChildrenRefusal(error)
+}
+
+/**
+ * Returns whether the Team refused to complete a parent because its children are still open.
+ *
+ * @param error - Unknown transport or application failure.
+ * @returns Whether the failure carries the `WorkItemOpenChildren` code.
+ */
+export function isFocusOpenChildrenRefusal(error: unknown): boolean {
+  return error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren'
 }

@@ -46,6 +46,7 @@ import type { FileArtifactsController } from '../../files/mutations/useFileArtif
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
   isCancelledTeamIssueUpdate,
   type CancelledTeamIssueUpdate,
 } from '../../issues/model/teamIssueUpdateOutcome'
@@ -1909,8 +1910,8 @@ export function TaskScreen({
       return { applied: true, task }
     }
 
-    setTaskAction(undefined)
-
+    // The previous message stays until the outcome is known, so a declined patch keeps it and the
+    // Undo/Redo controls it carries.
     try {
       const outcome = await onUpdateTask(task, input)
       if (isCancelledTeamIssueUpdate(outcome)) return { applied: false, task }
@@ -2127,10 +2128,8 @@ export function TaskScreen({
 
     try {
       const result = await performTaskUpdate(taskUndo.task, currentUndo.inversePatch)
-      if (!result.applied) {
-        setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
-        return
-      }
+      // Declined: the undo stays available and the earlier message is left as it was.
+      if (!result.applied) return
       setTaskRedo({
         forwardPatch: taskUndo.forwardPatch,
         task: result.task,
@@ -2170,10 +2169,8 @@ export function TaskScreen({
 
     try {
       const result = await performTaskUpdate(taskRedo.task, taskRedo.forwardPatch)
-      if (!result.applied) {
-        setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
-        return
-      }
+      // Declined: the redo stays available and the earlier message is left as it was.
+      if (!result.applied) return
       setTaskUndo(createTaskUndoState(taskRedo.task, taskRedo.forwardPatch, result.task))
       setTaskRedo(undefined)
       setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
@@ -3059,12 +3056,13 @@ export function TaskScreen({
    *
    * @param task - Revision-bound Work Item selected by the direct mutation control.
    * @param input - Complete atomic patch emitted by that control.
-   * @returns Persisted task, or the original snapshot after an explicit preview cancellation.
+   * @returns Persisted task, or the cancelled outcome after the person declined a preview or
+   *   confirmation.
    */
   const handleUpdateTask = useCallback(async (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<CanonicalWorkItem> => {
+  ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     const target = {
       expectedRevision: task.revision,
       teamId: task.teamId,
@@ -3086,7 +3084,7 @@ export function TaskScreen({
       const mutationError = directTaskActionErrorsRef.current.get(request)
       if (mutationError !== undefined) throw mutationError
       if (execution.status === 'executed' && execution.result.status === 'cancelled') {
-        return task
+        return CANCELLED_TEAM_ISSUE_UPDATE
       }
       const message = resolveTaskActionExecutionFailureMessage(
         execution,
@@ -4100,6 +4098,9 @@ function resolveTaskMutationErrorMessage(
     }
     if (error.code === 'WorkItemRevisionConflict') {
       return t('tasks.action.conflict')
+    }
+    if (error.code === 'WorkItemOpenChildren') {
+      return t('issues.error.openChildren')
     }
     if (error.status === 403) {
       return t('tasks.action.permission')

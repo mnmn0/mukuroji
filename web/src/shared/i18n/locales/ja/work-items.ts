@@ -31,6 +31,7 @@ export const workItemsMessages = {
   'tasks.action.paste': '{count}行を貼り付けました。',
   'tasks.action.fill': '{count}件に入力内容を反映しました。',
   'tasks.action.partial': '{count}件の保存に失敗しました。',
+  'tasks.action.cancelledCount': '{count}件は変更しませんでした。',
   'tasks.schedule.title': 'スケジュール',
   'tasks.schedule.mode': 'スケジュール種別',
   'tasks.schedule.unscheduled': '未計画',

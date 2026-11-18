@@ -30,6 +30,7 @@ import {
 import {
   isFocusAffectedCacheKey,
   isFocusMutationConflict,
+  isFocusOpenChildrenRefusal,
   revalidateFocusCachesOnConflict,
   type FocusCacheRevalidationScope,
 } from './focusCacheRevalidation'
@@ -61,7 +62,7 @@ export type FocusQueueSnoozeFeedback = {
 }
 
 /** Error category shown after a failed non-policy queue action. */
-export type FocusQueueMutationError = 'conflict' | 'failure'
+export type FocusQueueMutationError = 'conflict' | 'openChildren' | 'failure'
 
 /** Inputs required by the route-scoped Focus mutation controller. */
 export type UseFocusQueueActionsOptions = {
@@ -187,7 +188,9 @@ export function useFocusQueueActions({
       )
       setFailedAction({
         action,
-        kind: isFocusMutationConflict(error) ? 'conflict' : 'failure',
+        kind: isFocusOpenChildrenRefusal(error)
+          ? 'openChildren'
+          : isFocusMutationConflict(error) ? 'conflict' : 'failure',
       })
       throw error
     } finally {

@@ -467,6 +467,11 @@ export function TeamIssueScreen({
   const [collapsedOutlineIds, setCollapsedOutlineIds] = useState(
     () => readCollapsedWorkItemOutlineIds(teamId),
   )
+  // Latest collapsed rows, read when a move finishes so collapses made while it saved are kept.
+  const collapsedOutlineIdsRef = useRef(collapsedOutlineIds)
+  useEffect(() => {
+    collapsedOutlineIdsRef.current = collapsedOutlineIds
+  }, [collapsedOutlineIds])
   const [outlineStatusMessage, setOutlineStatusMessage] = useState<string>()
   const outlineMovePendingRef = useRef(false)
   const issueViewPanelRef = useRef<HTMLDivElement>(null)
@@ -533,12 +538,20 @@ export function TeamIssueScreen({
       hierarchyRank: plan.hierarchyRank,
     }).then(() => {
       // Indenting under a collapsed row would hide the moved row, so the new parent opens.
-      if (plan.parentWorkItemId !== null && collapsedOutlineIds.has(plan.parentWorkItemId)) {
-        toggleOutlineCollapsed(plan.parentWorkItemId)
+      const latestCollapsedIds = collapsedOutlineIdsRef.current
+      if (plan.parentWorkItemId !== null && latestCollapsedIds.has(plan.parentWorkItemId)) {
+        const next = new Set(latestCollapsedIds)
+        next.delete(plan.parentWorkItemId)
+        writeCollapsedWorkItemOutlineIds(teamId, next)
+        collapsedOutlineIdsRef.current = next
+        setCollapsedOutlineIds(next)
       }
       setOutlineStatusMessage(t('issues.outline.moved').replace('{title}', resolveIssueTitle(issue, t)))
-      // Moving the row in the DOM drops focus; return it so repeated moves keep working.
+      // Moving the row in the DOM drops focus; return it so repeated moves keep working. Focus
+      // the person moved elsewhere while the move saved stays where it is.
       globalThis.requestAnimationFrame(() => {
+        const activeElement = document.activeElement
+        if (activeElement !== null && activeElement !== document.body) return
         document.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
       })
     }, (error: unknown) => {
@@ -548,7 +561,7 @@ export function TeamIssueScreen({
     }).finally(() => {
       outlineMovePendingRef.current = false
     })
-  }, [collapsedOutlineIds, outlineNodes, saveOutlineMove, t, toggleOutlineCollapsed])
+  }, [outlineNodes, saveOutlineMove, t, teamId])
   const visibleIssueKeys = useMemo(
     () => visibleIssueActionTargets.map((target) =>
       createTaskViewItemKey(target.teamId, target.workItemId)
@@ -1464,6 +1477,15 @@ export function TeamIssueScreen({
                     role="alert"
                   >
                     {taskActionErrorMessage}
+                  </p>
+                ) : null}
+                {isOutlineRequested && issueOutline?.isLoading && !hasOutlineError ? (
+                  <p
+                    className="mt-5 text-sm font-semibold text-[var(--workbench-muted)]"
+                    data-testid="team-issue-outline-loading"
+                    role="status"
+                  >
+                    {t('issues.outline.loading')}
                   </p>
                 ) : null}
                 {hasOutlineError && issueOutline?.errorMessage ? (

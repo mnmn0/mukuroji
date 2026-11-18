@@ -93,10 +93,21 @@ export type TeamIssueHierarchyPlacement = {
 
 /** Team Work Item hierarchy the table shows as an outline. */
 export type TeamIssueOutlineSource = {
-  /** Hierarchy nodes in outline order; absent while loading or after a failed read. */
+  /**
+   * Hierarchy nodes in outline order; absent until the first read succeeds.
+   *
+   * A failed re-read keeps the nodes read before it, so they can come with `errorMessage`.
+   */
   nodes?: readonly TeamWorkItemHierarchyNode[]
-  /** Message shown instead of the outline when the hierarchy could not be read. */
+  /**
+   * Message shown above the table when the hierarchy could not be read.
+   *
+   * With `nodes` the outline stays and the message explains it may be out of date; without them
+   * the table is shown flat.
+   */
   errorMessage?: string
+  /** Whether the first read is in flight with no hierarchy yet; the table is shown flat meanwhile. */
+  isLoading?: boolean
   /** Reads the hierarchy again after a failed read. */
   onRetry?: () => void
   /** Whether a retried read is in flight; the retry button ignores clicks meanwhile. */

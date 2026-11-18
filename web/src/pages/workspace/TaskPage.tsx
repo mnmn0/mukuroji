@@ -1591,6 +1591,8 @@ export function TaskPage() {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
         await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      } else if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('issues.error.openChildren')])
       } else {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.action.updateError')])
       }

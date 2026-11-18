@@ -523,9 +523,12 @@ export const HierarchyOutline: Story = {
   },
 }
 
+/** Props of the story harness that fails and retries the hierarchy read. */
 type OutlineRetryHarnessProps = {
-  /** Team Issue screen inputs; the harness owns the outline source. */
+  /** Team Issue screen inputs; the harness replaces `issueOutline` with its own source. */
   teamIssueScreenProps: ComponentProps<typeof TeamIssueScreen>
+  /** Called each time the screen asks for a retry, so the story can count them. */
+  onRetry: () => void
 }
 
 /**
@@ -534,7 +537,7 @@ type OutlineRetryHarnessProps = {
  * A retry resolves on its own with the same nodes, unless a later failure asked the next retry
  * to wait for the finish button.
  */
-function OutlineRetryHarness({ teamIssueScreenProps }: OutlineRetryHarnessProps) {
+function OutlineRetryHarness({ teamIssueScreenProps, onRetry }: OutlineRetryHarnessProps) {
   const [hasError, setHasError] = useState(true)
   const [isRetrying, setIsRetrying] = useState(false)
   const holdNextRetryRef = useRef(false)
@@ -569,6 +572,7 @@ function OutlineRetryHarness({ teamIssueScreenProps }: OutlineRetryHarnessProps)
                 errorMessage: '階層を読み込めませんでした。',
                 isRetrying,
                 onRetry: () => {
+                  onRetry()
                   setIsRetrying(true)
                   if (!holdNextRetryRef.current) window.setTimeout(finishRetry, 20)
                 },
@@ -580,6 +584,9 @@ function OutlineRetryHarness({ teamIssueScreenProps }: OutlineRetryHarnessProps)
   )
 }
 
+/** Counts the retries the outline asks for. */
+const onOutlineRetry = fn()
+
 /** A retry that returns the same hierarchy hands focus to the view, unless the person moved on. */
 export const HierarchyOutlineRetryFocus: Story = {
   args: {
@@ -587,9 +594,10 @@ export const HierarchyOutlineRetryFocus: Story = {
     selectedIssueId: undefined,
     taskViewPresentation: HierarchyOutline.args?.taskViewPresentation,
   },
-  render: (args) => <OutlineRetryHarness teamIssueScreenProps={args} />,
+  render: (args) => <OutlineRetryHarness onRetry={onOutlineRetry} teamIssueScreenProps={args} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    onOutlineRetry.mockClear()
     const viewPanel = canvas.getByRole('region', { name: 'テーブル' })
 
     canvas.getByRole('button', { name: '階層を再読み込み' }).focus()
@@ -603,6 +611,9 @@ export const HierarchyOutlineRetryFocus: Story = {
     await userEvent.keyboard('{Enter}')
     await expect(retry).toHaveAttribute('aria-disabled', 'true')
     await expect(retry).toHaveTextContent('階層を読み込み中…')
+    // A second press while the read runs does not start another one.
+    await userEvent.keyboard('{Enter}')
+    await expect(onOutlineRetry).toHaveBeenCalledTimes(2)
     const finish = canvas.getByTestId('finish-outline-retry')
     await userEvent.click(finish)
     await waitFor(() => expect(canvas.queryByTestId('team-issue-outline-unavailable')).not.toBeInTheDocument())
