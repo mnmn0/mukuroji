@@ -464,8 +464,16 @@ export function TeamIssueScreen({
       taskViewDefinition,
     ],
   )
-  const [collapsedOutlineIds, setCollapsedOutlineIds] = useState(
-    () => readCollapsedWorkItemOutlineIds(teamId),
+  // Collapsed rows belong to one Team: the screen stays mounted when the person switches Team,
+  // so rows saved for the previous Team are dropped and the new Team's saved rows are read.
+  const [collapsedOutlineState, setCollapsedOutlineState] = useState(
+    () => ({ teamId, ids: readCollapsedWorkItemOutlineIds(teamId) }),
+  )
+  const collapsedOutlineIds = useMemo(
+    () => collapsedOutlineState.teamId === teamId
+      ? collapsedOutlineState.ids
+      : readCollapsedWorkItemOutlineIds(teamId),
+    [collapsedOutlineState, teamId],
   )
   // Latest collapsed rows, read when a move finishes so collapses made while it saved are kept.
   const collapsedOutlineIdsRef = useRef(collapsedOutlineIds)
@@ -498,12 +506,15 @@ export function TeamIssueScreen({
     [collapsedOutlineIds, outlineNodes, visibleIssues],
   )
   const hasOutlineError = Boolean(isOutlineRequested && issueOutline?.errorMessage)
-  // Whether the outline is on screen now. A move that finishes after the outline gave way to the
-  // flat table, such as while the hierarchy reloads, leaves focus alone instead of moving it to
-  // the flat row with the same ID.
-  const isOutlineShownRef = useRef(false)
+  // Whether the outline is on screen, and how many times it has been hidden. A move that
+  // finishes after the outline gave way to the flat table, such as while the hierarchy reloads,
+  // leaves focus alone instead of moving it to the flat row with the same ID. That holds even if
+  // the outline came back meanwhile, because the rows were rebuilt.
+  const outlineShownRef = useRef({ shown: false, hiddenCount: 0 })
   useEffect(() => {
-    isOutlineShownRef.current = outlineRows !== undefined
+    const shown = outlineRows !== undefined
+    if (outlineShownRef.current.shown && !shown) outlineShownRef.current.hiddenCount += 1
+    outlineShownRef.current.shown = shown
   }, [outlineRows])
   useEffect(() => {
     // Waits for the error to clear rather than for new rows: a retry that returns the same
@@ -535,7 +546,7 @@ export function TeamIssueScreen({
     const next = new Set(collapsedOutlineIds)
     if (!next.delete(issueId)) next.add(issueId)
     writeCollapsedWorkItemOutlineIds(teamId, next)
-    setCollapsedOutlineIds(next)
+    setCollapsedOutlineState({ teamId, ids: next })
   }, [collapsedOutlineIds, teamId])
 
   const saveOutlineMove = issueOutline?.onMove
@@ -552,6 +563,7 @@ export function TeamIssueScreen({
     // Kept from the start of the move: if the view is rebuilt while the move saves, such as by
     // a reload, focus is not handed to a row in the new view the person did not move from.
     const viewPanel = issueViewPanelRef.current
+    const outlineHiddenCountAtStart = outlineShownRef.current.hiddenCount
     saveOutlineMove(issue.id, {
       parentWorkItemId: plan.parentWorkItemId,
       hierarchyRank: plan.hierarchyRank,
@@ -566,7 +578,7 @@ export function TeamIssueScreen({
         next.delete(plan.parentWorkItemId)
         writeCollapsedWorkItemOutlineIds(teamId, next)
         collapsedOutlineIdsRef.current = next
-        setCollapsedOutlineIds(next)
+        setCollapsedOutlineState({ teamId, ids: next })
       }
       setOutlineStatusMessage(t('issues.outline.moved').replace('{title}', resolveIssueTitle(issue, t)))
       // Moving the row in the DOM drops focus; return it so repeated moves keep working. Focus
@@ -577,7 +589,8 @@ export function TeamIssueScreen({
         // Only the view that started the move is searched, so a row with the same ID in another
         // Team's view never takes focus.
         if (!viewPanel?.isConnected || shownTeamIdRef.current !== teamId) return
-        if (!isOutlineShownRef.current) return
+        const outlineShown = outlineShownRef.current
+        if (!outlineShown.shown || outlineShown.hiddenCount !== outlineHiddenCountAtStart) return
         viewPanel.querySelector<HTMLElement>(`[data-testid="issue-row-${CSS.escape(issue.id)}"]`)?.focus()
       })
     }, (error: unknown) => {

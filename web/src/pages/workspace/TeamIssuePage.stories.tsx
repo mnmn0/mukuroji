@@ -623,6 +623,134 @@ export const HierarchyOutlineRetryFocus: Story = {
   },
 }
 
+/** Ends the outline move held by {@link OutlineReshowHarness}. */
+const heldOutlineMove: { settle?: () => void } = {}
+
+/** Props of the story harness that hides and shows the outline while a move saves. */
+type OutlineReshowHarnessProps = {
+  /** Team Issue screen inputs; the harness owns `issueOutline` and the outline setting. */
+  teamIssueScreenProps: ComponentProps<typeof TeamIssueScreen>
+}
+
+/**
+ * Holds each outline move open and lets the story turn the outline off and on meanwhile.
+ *
+ * The move resolves only when the story calls `heldOutlineMove.settle`.
+ */
+function OutlineReshowHarness({ teamIssueScreenProps }: OutlineReshowHarnessProps) {
+  const [showOutline, setShowOutline] = useState(true)
+  const presentation = teamIssueScreenProps.taskViewPresentation
+  return (
+    <>
+      <button data-testid="toggle-outline" onClick={() => setShowOutline((shown) => !shown)} type="button">
+        Toggle outline
+      </button>
+      <TeamIssueScreen
+        {...teamIssueScreenProps}
+        issueOutline={{
+          nodes: outlineNodes,
+          onMove: () => new Promise<void>((resolve) => {
+            heldOutlineMove.settle = resolve
+          }),
+        }}
+        taskViewPresentation={presentation
+          ? { ...presentation, display: { ...presentation.display, showOutline } }
+          : presentation}
+      />
+    </>
+  )
+}
+
+/**
+ * A move that finishes after the outline was turned off and on again leaves focus alone, since
+ * the row it started from was rebuilt.
+ */
+export const HierarchyOutlineMoveAfterReshow: Story = {
+  args: {
+    issues: configuredIssues.slice(0, 3),
+    selectedIssueId: undefined,
+    taskViewPresentation: HierarchyOutline.args?.taskViewPresentation,
+  },
+  beforeEach: HierarchyOutline.beforeEach,
+  render: (args) => <OutlineReshowHarness teamIssueScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    canvas.getByTestId('issue-row-release-readiness').focus()
+    await userEvent.keyboard('{Alt>}{Shift>}{ArrowRight}{/Shift}{/Alt}')
+    await waitFor(() => expect(heldOutlineMove.settle).toBeDefined())
+
+    const toggle = canvas.getByTestId('toggle-outline')
+    await userEvent.click(toggle)
+    await expect(canvas.queryByTestId('issue-row-wbs-release-readiness')).not.toBeInTheDocument()
+    await userEvent.click(toggle)
+    await expect(canvas.getByTestId('issue-row-wbs-release-readiness')).toBeInTheDocument()
+    // Leave focus on the page, where a finished move would otherwise reclaim it for the row.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+
+    heldOutlineMove.settle?.()
+    heldOutlineMove.settle = undefined
+    await waitFor(() => expect(canvas.getByTestId('team-issue-outline-status')).toHaveTextContent('移動しました'))
+    await new Promise((resolve) => globalThis.requestAnimationFrame(resolve))
+    await expect(canvas.getByTestId('issue-row-release-readiness')).not.toHaveFocus()
+    await expect(document.activeElement).toBe(document.body)
+  },
+}
+
+/** Props of the story harness that switches Team without remounting the screen. */
+type OutlineTeamSwitchHarnessProps = {
+  /** Team Issue screen inputs; the harness owns `teamId`. */
+  teamIssueScreenProps: ComponentProps<typeof TeamIssueScreen>
+}
+
+/** Switches the screen between two Teams the way route navigation reuses it. */
+function OutlineTeamSwitchHarness({ teamIssueScreenProps }: OutlineTeamSwitchHarnessProps) {
+  const [teamId, setTeamId] = useState('core-team')
+  return (
+    <>
+      <button
+        data-testid="switch-team"
+        onClick={() => setTeamId((current) => current === 'core-team' ? 'growth-team' : 'core-team')}
+        type="button"
+      >
+        Switch Team
+      </button>
+      <TeamIssueScreen {...teamIssueScreenProps} teamId={teamId} />
+    </>
+  )
+}
+
+/** Each Team keeps its own collapsed rows when the person switches Team on the same screen. */
+export const HierarchyOutlineCollapseFollowsTeam: Story = {
+  args: {
+    issueOutline: HierarchyOutline.args?.issueOutline,
+    issues: configuredIssues.slice(0, 3),
+    selectedIssueId: undefined,
+    taskViewPresentation: HierarchyOutline.args?.taskViewPresentation,
+  },
+  beforeEach: () => {
+    try {
+      window.localStorage.removeItem('mukuroji.workItemOutline.collapsed.core-team')
+      window.localStorage.removeItem('mukuroji.workItemOutline.collapsed.growth-team')
+    } catch {
+      // Storage may be unavailable; both Teams then start expanded anyway.
+    }
+  },
+  render: (args) => <OutlineTeamSwitchHarness teamIssueScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const childId = configuredIssues[1].id
+    await userEvent.click(canvas.getByTestId('issue-outline-toggle-onboarding-friction'))
+    await expect(canvas.queryByTestId(`issue-row-${childId}`)).not.toBeInTheDocument()
+
+    await userEvent.click(canvas.getByTestId('switch-team'))
+    await expect(canvas.getByTestId(`issue-row-${childId}`)).toBeInTheDocument()
+    await expect(window.localStorage.getItem('mukuroji.workItemOutline.collapsed.growth-team')).toBeNull()
+
+    await userEvent.click(canvas.getByTestId('switch-team'))
+    await expect(canvas.queryByTestId(`issue-row-${childId}`)).not.toBeInTheDocument()
+  },
+}
+
 /** Team Work Items that carry keys, with a description that names other Work Items by key. */
 const keyedIssues = configuredIssues.map((issue, index) => ({
   ...issue,
