@@ -28,8 +28,13 @@ assignment の和集合と `workspace.read` だけで評価する（`includeWork
   評価する。和集合にはしない。
 - この規則で起きる降格・昇格を防ぐため、自分自身、owner、owner 以外が操作する admin、guest への
   guest 不可 role、owner 以外による管理系 permission を含む role の付与を API が拒否する。解除にも
-  同じ制限をかける。Direct assignment を持つ member を owner / admin に変える操作も拒否し、guest に
-  なった member の direct assignment は guest 可の role だけを評価する。
+  同じ制限をかける。最後の assignment を外すと legacy role と Project membership が戻るので、owner 相当
+  以外の caller は、戻る権限（member の Workspace role と Project manager の permission）をすべて持つ
+  場合だけ最後の1件を外せる。この判定は削除と同じ条件付き書き込みの中で行う。Direct assignment を
+  持つ member を owner / admin に変える操作も拒否し、guest になった member の direct assignment は
+  guest 可の role だけを評価する。
+- 監査 event の public metadata では member を Workspace Audit の member 仮名（`memberId`）で示し、
+  member key や email を残さない。
 - Built-in role に `workspace:portfolio-viewer`（全 Team・Project の読み取り）と
   `workspace:auditor`（`audit.read`）を加える。Guest には割り当てられず、assignment 後に guest へ
   変わった member では評価時に無視する。
@@ -51,4 +56,7 @@ assignment の和集合と `workspace.read` だけで評価する（`includeWork
 - PMO role を付けた Project manager は、その Project も読み取りだけになる。編集が要る Project には
   Project scope の role を追加で割り当てる。利用者ガイドに明記した。
 - System administrator の画面からの付与・解除は未対応のまま残る（Issue #429 に記録）。
+- 昇格の拒否と割り当ての作成は別 table の書き込みで、同時に起きると両方が成功し得る。結果は
+  owner / admin の権限が割り当てた role に狭まる方向だけで、権限は広がらない。owner が割り当てを
+  外せば戻る。両 table をまたぐ条件付き書き込みは別の変更として扱う（Issue #429 に記録）。
 - 更新した文書: `docs/enterprise-identity.md`、`docs/guide/admin.md`。

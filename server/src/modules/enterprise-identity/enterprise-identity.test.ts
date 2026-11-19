@@ -3344,3 +3344,22 @@ test('names the member of a role assignment audit event only by its Workspace Au
     }
   }
 })
+
+test('treats the same Project role under two owning Teams as separate assignments', async () => {
+  const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  const assignmentIn = (assignmentId: string, parentTeamId: string) => ({
+    workspaceId,
+    assignmentId,
+    principalKind: 'member',
+    principalId: 'reviewer@example.com',
+    roleId: 'project:viewer',
+    scope: { workspaceId, kind: 'project', targetId: 'shared-project', parentTeamId },
+    source: 'direct',
+  } satisfies EnterpriseRoleAssignment)
+
+  await client.putMemberRoleAssignment(assignmentIn('assignment-core', 'core-team'))
+  await expect(client.putMemberRoleAssignment(assignmentIn('assignment-design', 'design-team')))
+    .resolves.toMatchObject({ assignmentId: 'assignment-design' })
+  await expect(client.putMemberRoleAssignment(assignmentIn('assignment-core-again', 'core-team')))
+    .rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentDuplicate' })
+})

@@ -58,6 +58,7 @@ import {
 import type {
   EnterpriseIdentityApplicationCapability,
   EnterpriseIdentityReadCapability,
+  EnterpriseMemberRoleAssignmentDeleteOptions,
 } from './application/ports/enterprise-identity-capabilities'
 import {
   ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER,
@@ -997,7 +998,8 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
         candidate.principalId === assignment.principalId &&
         candidate.roleId === assignment.roleId &&
         candidate.scope.kind === assignment.scope.kind &&
-        candidate.scope.targetId === assignment.scope.targetId
+        candidate.scope.targetId === assignment.scope.targetId &&
+        candidate.scope.parentTeamId === assignment.scope.parentTeamId
       )) {
         throw new EnterpriseIdentityError(
           409,
@@ -1015,13 +1017,17 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
    *
    * @remarks
    * The caller passes the assignment it read so the audit event names the member, role, and
-   * scope. The assignment is removed only while the stored copy still matches it.
+   * scope. The assignment is removed only while the stored copy still matches it. With
+   * `requireRemainingAssignment`, the removal is refused when it would leave the member with no
+   * direct assignment, checked against the same state that the write is conditioned on.
    * @param assignment - Direct member assignment the caller read.
    * @param auditContext - Audit context of the request.
+   * @param options - Conditions checked with the removal.
    */
   async deleteMemberRoleAssignment(
     assignment: EnterpriseRoleAssignment,
     auditContext?: MutationAuditContext,
+    options: EnterpriseMemberRoleAssignmentDeleteOptions = {},
   ) {
     await this.mutate(assignment.workspaceId, {
       context: auditContext,
@@ -1043,6 +1049,21 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           404,
           'EnterpriseRoleAssignmentNotFound',
           'Role assignment was not found.',
+        )
+      }
+      if (
+        options.requireRemainingAssignment &&
+        !state.roleAssignments.some((candidate) =>
+          candidate.assignmentId !== assignment.assignmentId &&
+          candidate.principalKind === 'member' &&
+          candidate.source === 'direct' &&
+          candidate.principalId === assignment.principalId
+        )
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentRestoreDenied',
+          'Removing the last role assignment would give the member permissions that exceed yours.',
         )
       }
       state.roleAssignments = state.roleAssignments.filter((candidate) =>

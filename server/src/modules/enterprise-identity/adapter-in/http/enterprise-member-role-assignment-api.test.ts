@@ -349,3 +349,53 @@ test('lets an auditor read the audit log but not export it or read Projects', as
     expect(project.status).toBe(403)
   })
 })
+
+test('refuses to remove a member\'s last assignment for a caller below their Workspace role', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, { workspaceRole: 'member' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:member-desk',
+      name: 'Member desk',
+      permissions: ['workspace.read', 'members.read', 'members.manage'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-11-19T00:00:00.000Z',
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    })
+    await assignToFixtureMember(identity, 'custom:member-desk')
+    const satoAssignment = {
+      workspaceId,
+      assignmentId: 'assignment-sato-viewer',
+      principalKind: 'member' as const,
+      principalId: 'sato@example.com',
+      roleId: 'workspace:portfolio-viewer' as const,
+      scope: { workspaceId, kind: 'workspace' as const },
+      source: 'direct' as const,
+    }
+    await identity.putMemberRoleAssignment(satoAssignment)
+
+    const lastRemoval = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments/assignment-sato-viewer',
+      'DELETE',
+    )
+    expect(lastRemoval.status).toBe(403)
+    expect(await lastRemoval.json()).toMatchObject({ code: 'EnterpriseRoleAssignmentRestoreDenied' })
+
+    await identity.putMemberRoleAssignment({
+      ...satoAssignment,
+      assignmentId: 'assignment-sato-auditor',
+      roleId: 'workspace:auditor',
+    })
+    const keptOne = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments/assignment-sato-viewer',
+      'DELETE',
+    )
+    expect(keptOne.status).toBe(204)
+    expect((await identity.getSnapshot(workspaceId)).roleAssignments
+      .filter((assignment) => assignment.principalId === 'sato@example.com')
+      .map((assignment) => assignment.roleId)).toEqual(['workspace:auditor'])
+  })
+})

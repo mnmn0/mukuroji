@@ -196,11 +196,13 @@ export interface EnterpriseAuthorizationAdministrationCapability {
    *
    * @param assignment - Direct member assignment read by the caller.
    * @param auditContext - Optional immutable audit context.
+   * @param options - Whether the member must keep another direct assignment afterwards.
    * @returns A promise that resolves after removal.
    */
   deleteMemberRoleAssignment(
     assignment: EnterpriseRoleAssignment,
     auditContext?: MutationAuditContext,
+    options?: EnterpriseMemberRoleAssignmentDeleteOptions,
   ): Promise<void>
 }
 
@@ -774,4 +776,13 @@ export function createEnterpriseIdentityCapabilities(
       deactivateBreakGlass: client.deactivateBreakGlass.bind(client),
     }),
   })
+}
+
+/** Conditions checked atomically when a direct member assignment is removed. */
+export type EnterpriseMemberRoleAssignmentDeleteOptions = {
+  /**
+   * Requires the member to keep another direct assignment, so the removal cannot hand back the
+   * member's Workspace role and Project memberships.
+   */
+  requireRemainingAssignment?: boolean
 }

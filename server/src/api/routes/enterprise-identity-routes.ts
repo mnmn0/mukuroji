@@ -1113,6 +1113,34 @@ function requireEnterpriseAdministrativeRoleCaller(
 }
 
 /**
+ * Returns whether the caller may give a member back the access of their Workspace role.
+ *
+ * @remarks
+ * Removing a member's last direct assignment restores their Workspace role and every legacy
+ * Project membership. The caller must hold that access itself, the same ceiling as granting a
+ * role. Project memberships are bounded by the Project manager role, as their exact roles are
+ * not read here.
+ * @param principal - Caller of the assignment route.
+ * @param snapshot - Enterprise identity snapshot with the custom roles.
+ * @param workspaceRole - Workspace role of the member whose assignment is removed.
+ * @returns Whether the caller is owner-level or holds every permission that would come back.
+ */
+function canRestoreEnterpriseLegacyAccess(
+  principal: EnterpriseSecurityPrincipal,
+  snapshot: EnterpriseIdentitySnapshot,
+  workspaceRole: 'owner' | 'admin' | 'member' | 'guest',
+): boolean {
+  if (isEnterpriseOwnerLevelCaller(principal)) return true
+  const restoredPermissions = [
+    ...resolveEnterpriseRolePermissions(snapshot.customRoles, `workspace:${workspaceRole}`),
+    ...resolveEnterpriseRolePermissions(snapshot.customRoles, 'project:manager'),
+  ]
+  return restoredPermissions.every((permission) =>
+    principal.enterprisePermissions.includes(permission)
+  )
+}
+
+/**
  * Resolves the scope of a direct member assignment, qualifying a Project with its Team.
  *
  * @param workspaceId - Workspace of the assignment.
@@ -3770,6 +3798,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
       await workspaceDependencies.enterpriseIdentity.authorization.deleteMemberRoleAssignment(
         assignment,
         createWorkspaceMutationContext(c, principal, body),
+        {
+          requireRemainingAssignment: target !== undefined &&
+            !canRestoreEnterpriseLegacyAccess(principal, snapshot, target.role),
+        },
       )
       return c.body(null, 204)
     } catch (error) {

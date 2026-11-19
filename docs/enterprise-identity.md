@@ -279,7 +279,11 @@ Project membership を使わず、assignment の和集合（と `workspace.read`
   `members.manage`、`identity.manage`、`security.manage`、`service-accounts.manage`、`audit.export`
   のいずれかを含む role（admin の任命と同じく owner だけが行える）
 
-解除しても同じ制限を適用します（最後の assignment を外すと legacy role に戻るため）。
+解除しても同じ制限を適用します（最後の assignment を外すと legacy role に戻るため）。さらに、
+caller が owner、system administrator、break-glass のいずれでもない場合は、戻る権限（member の
+Workspace role と Project manager role の permission）をすべて持つときだけ、member の最後の direct
+assignment を外せます。持たない場合は `403 EnterpriseRoleAssignmentRestoreDenied` です。この判定は
+削除と同じ revision 条件付きの書き込みの中で行います。
 Direct assignment を持つ member を owner / admin に変える `PATCH /api/workspace/members/:memberKey` は
 `409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。Guest になった member の direct assignment は、
 評価時に guest 可の role（`workspace:guest`、`project:viewer`、`guestAssignable` の custom role）だけを
