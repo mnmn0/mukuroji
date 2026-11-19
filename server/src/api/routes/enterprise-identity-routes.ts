@@ -50,8 +50,12 @@ import {
   assertEnterpriseCognitoProviderBinding,
   assertEnterpriseIdentityProviderReady,
   canAssignEnterpriseRole,
+  deactivateEnterpriseScimUserDesiredState,
   ipMatchesCidr,
   resolveEnterpriseRolePermissions,
+  resolveEnterpriseScimMemberKey,
+  saveEnterpriseScimUserDesiredState,
+  type EnterpriseScimUserDesiredStateDependencies,
 } from '../../modules/enterprise-identity'
 import {
   createDefaultEnterpriseSecurityPolicy,
@@ -1458,67 +1462,14 @@ async function applyEnterpriseScimUserState(
 }
 
 /**
- * Resolves the Workspace member key that SCIM desired state for a user is applied to.
+ * Builds the ports for storing SCIM user desired state from the request dependencies.
  *
- * @param user - SCIM user desired state, stored or about to be stored.
- * @returns The linked member key, or the normalized primary email or userName.
+ * @returns Directory store and Workspace member reader for SCIM user desired state.
  */
-function resolveEnterpriseScimMemberKey(
-  user: Pick<EnterpriseScimUserInput, 'linkedMemberKey' | 'emails' | 'userName'>,
-) {
-  return user.linkedMemberKey ??
-    user.emails[0]?.trim().toLowerCase() ??
-    user.userName.trim().toLowerCase()
-}
-
-/**
- * Rejects SCIM user desired state that would be linked to a Workspace member this directory
- * identity does not own, before the desired state is stored.
- *
- * @remarks
- * Stored SCIM desired state marks its member as directory-managed. If it were stored first and
- * the member update then failed, a SCIM credential could still take away the role of an owner or
- * of a manually invited member by sending their email. A member key may only be linked when no
- * member exists yet, or when the member was provisioned by this same SCIM user.
- *
- * @param snapshot - Enterprise Identity snapshot read for this request.
- * @param user - SCIM user desired state about to be stored.
- * @throws EnterpriseIdentityError 409 `EnterpriseProvisioningProtectedOwner` when the member is
- *   a Workspace owner, and 409 `EnterpriseScimMemberNotDirectoryManaged` when the member is not
- *   provisioned by this SCIM user.
- */
-async function requireEnterpriseScimMemberLinkAllowed(
-  snapshot: EnterpriseIdentitySnapshot,
-  user: Pick<
-    EnterpriseScimUserInput,
-    'workspaceId' | 'userId' | 'identityProviderId' | 'externalId' | 'linkedMemberKey' |
-    'emails' | 'userName'
-  >,
-) {
-  const memberKey = resolveEnterpriseScimMemberKey(user)
-  const member = await workspaceDependencies.workspaceAccess.getMember(user.workspaceId, memberKey)
-  if (!member) return
-  if (member.role === 'owner') {
-    throw new EnterpriseIdentityError(
-      409,
-      'EnterpriseProvisioningProtectedOwner',
-      'Directory provisioning cannot manage a Workspace owner.',
-    )
-  }
-  const scimUserId = user.userId ?? snapshot.scimUsers.find((candidate) =>
-    candidate.identityProviderId === user.identityProviderId &&
-    candidate.externalId === user.externalId
-  )?.userId
-  if (
-    scimUserId === undefined ||
-    member.provisioningSource !== 'directory' ||
-    member.externalIdentityId !== scimUserId
-  ) {
-    throw new EnterpriseIdentityError(
-      409,
-      'EnterpriseScimMemberNotDirectoryManaged',
-      'This Workspace member is not managed by this directory user.',
-    )
+function createEnterpriseScimUserDesiredStateDependencies(): EnterpriseScimUserDesiredStateDependencies {
+  return {
+    scimDirectory: workspaceDependencies.enterpriseIdentity.scimDirectory,
+    workspaceAccess: workspaceDependencies.workspaceAccess,
   }
 }
 
@@ -4033,7 +3984,6 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         credential.identityProviderId,
         body,
       )
-      await requireEnterpriseScimMemberLinkAllowed(snapshot, input)
       if (!input.active && input.linkedMemberKey) {
         await requireEnterpriseScimDeprovisionAllowed(
           workspaceId,
@@ -4041,7 +3991,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
+      const user = await saveEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
         input,
         createEnterpriseScimMutationContext(
           c,
@@ -4112,7 +4064,6 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         merged,
         existing,
       )
-      await requireEnterpriseScimMemberLinkAllowed(snapshot, input)
       if (!input.active && input.linkedMemberKey) {
         await requireEnterpriseScimDeprovisionAllowed(
           workspaceId,
@@ -4120,7 +4071,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
+      const user = await saveEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
         input,
         createEnterpriseScimMutationContext(
           c,
@@ -4155,7 +4108,6 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         )
       }
       requireScimIfMatch(c, existing.version)
-      await requireEnterpriseScimMemberLinkAllowed(snapshot, existing)
       if (existing.linkedMemberKey) {
         await requireEnterpriseScimDeprovisionAllowed(
           workspaceId,
@@ -4163,10 +4115,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.deactivateScimUser(
-        workspaceId,
-        credential.identityProviderId,
-        userId,
+      const user = await deactivateEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
+        existing,
         readScimIdempotencyKey(c, `delete-user:${userId}`),
         createEnterpriseScimMutationContext(
           c,
