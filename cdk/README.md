@@ -877,6 +877,28 @@ Web を build して upload し、CloudFront を invalidate します。content 
 VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
 
+`web:deploy` は commit していない変更があると止まります。build には `git rev-parse HEAD` の commit SHA を
+埋め込み、Help 画面の「稼働中の Web build」に表示します。利用者から問題の報告を受けたら、この SHA で
+どの release かを確認します。
+
+#### Web の release を戻す
+
+各 deploy は `assets/` 以外の file（`index.html`、`sw.js`、manifest など）を bucket の
+`releases/<commit SHA>/` にも残します。`assets/` は消さないため、残した release を bucket の直下へ
+copy し直せば、再 build せずに前の release へ戻せます。
+
+```sh
+# 残っている release を新しい順に表示する
+AWS_REGION=ap-northeast-1 bun run web:rollback
+# 指定した commit の release に戻す（Help 画面に出る 40 文字の SHA）
+AWS_REGION=ap-northeast-1 bun run web:rollback -- <commit SHA>
+```
+
+`scripts/rollback-web.sh` は `releases/<commit SHA>/` を bucket の直下へ copy し、直下にだけある file を
+削除してから CloudFront を invalidate します。戻した後に `WebUrl` の Help 画面で SHA が切り替わったことを
+確認します。この仕組みより前に deploy した release は残っていないため戻せません。`releases/` と
+`assets/` は今は自動で削除しないので、古い release の整理は別途行います。
+
 ## Workspace partition migration
 
 `WorkspaceDirectoryId` を変える操作は application deploy ではなく data migration です。CDK bootstrap は既存 task / issue / activity を新 partition へコピーしません。
