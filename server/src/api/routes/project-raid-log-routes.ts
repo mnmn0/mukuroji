@@ -41,15 +41,14 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readLogRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
-      const context = await requireTeamPermission(principal, teamId, 'viewer')
-      requireProjectAccess(principal, context, projectId, 'viewer')
+      await requireProjectRead(principal, teamId, projectId)
       const log = await readProjectRaidLogUseCase(
         workItemDependencies.projectRaidLogs,
         { workspaceId: principal.directoryId, teamId, projectId },
       )
       return c.json({
         ...log,
-        viewer: { canEdit: canEditProjectRaidLog(principal, context, teamId, projectId) },
+        viewer: { canEdit: await canEditProjectRaidLog(principal, teamId, projectId) },
       } satisfies ProjectRaidLogResponse)
     } catch (error) {
       return toProjectRaidLogErrorResponse(c, error)
@@ -64,8 +63,10 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readLogRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      const context = await requireTeamPermission(principal, teamId, 'viewer')
-      requireProjectAccess(principal, context, projectId, 'member')
+      await requireProjectRead(principal, teamId, projectId)
+      if (!await canEditProjectRaidLog(principal, teamId, projectId)) {
+        throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
+      }
       const body = await readJson<unknown>(c.req)
       const auditContext = createApiMutationContext(c, principal, body)
       const response = await createProjectRaidEntryUseCase(
@@ -96,8 +97,10 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       if (!entryId) throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Entry ID is required.')
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      const context = await requireTeamPermission(principal, teamId, 'viewer')
-      requireProjectAccess(principal, context, projectId, 'member')
+      await requireProjectRead(principal, teamId, projectId)
+      if (!await canEditProjectRaidLog(principal, teamId, projectId)) {
+        throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
+      }
       const body = await readJson<unknown>(c.req)
       const auditContext = createApiMutationContext(c, principal, body)
       const response = await updateProjectRaidEntryUseCase(
@@ -136,28 +139,20 @@ function readLogRoute(c: Context) {
 }
 
 /**
- * Requires the Project to belong to the Team and the principal to hold a role on it.
+ * Requires the Project to belong to the Team and the principal to see it.
  *
  * A Project outside the Team and a Project the principal may not see both answer 404, so the
  * response does not reveal which Projects exist.
  *
  * @param principal - Authenticated principal.
- * @param context - Team permission context.
+ * @param teamId - Team that owns the Project.
  * @param projectId - Project ID.
- * @param minimumRole - Role the action needs.
  */
-function requireProjectAccess(
-  principal: WorkspacePrincipal,
-  context: TeamPermissionContext,
-  projectId: string,
-  minimumRole: 'viewer' | 'member',
-) {
+async function requireProjectRead(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  const context = await requireTeamPermission(principal, teamId, 'viewer')
   const inTeam = context.team.projects.some((project) => project.id === projectId)
   if (!inTeam || !canAccessAssignedProject(principal, context, projectId, 'viewer')) {
     throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
-  }
-  if (minimumRole === 'member' && !canAccessAssignedProject(principal, context, projectId, 'member')) {
-    throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
   }
 }
 
@@ -203,30 +198,34 @@ function createUpdateReceipt(entryId: string, actorId: string, idempotencyKeyHas
 }
 
 /**
- * Tells whether the principal may change a Project log, with the same rules the change
- * endpoints apply: a writable Workspace session, member access to the Project, and, for an
- * Enterprise principal, `projects.write` on the Project.
+ * Tells whether the principal may change a Project log: a writable Workspace session, member
+ * access to the Project resolved at the Team write level (so a Team-wide grant such as an
+ * Enterprise Team member keeps its effective role), and, for an Enterprise principal,
+ * `projects.write` on the Project.
  *
  * @param principal - Authenticated principal.
- * @param context - Team permission context.
  * @param teamId - Team that owns the Project.
  * @param projectId - Project ID.
- * @returns Whether the add and edit controls should be offered.
+ * @returns Whether the principal may add and edit entries.
  */
-function canEditProjectRaidLog(
-  principal: WorkspacePrincipal,
-  context: TeamPermissionContext,
-  teamId: string,
-  projectId: string,
-) {
-  return canWorkspaceBusinessWrite(principal) &&
-    canAccessAssignedProject(principal, context, projectId, 'member') &&
-    (principal.enterprisePermissions === undefined || hasEnterprisePermissionAtResource(principal, 'projects.write', {
-      workspaceId: principal.directoryId,
-      kind: 'project',
-      targetId: projectId,
-      parentTeamId: teamId,
-    }))
+async function canEditProjectRaidLog(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  if (!canWorkspaceBusinessWrite(principal)) return false
+  if (principal.enterprisePermissions !== undefined && !hasEnterprisePermissionAtResource(principal, 'projects.write', {
+    workspaceId: principal.directoryId,
+    kind: 'project',
+    targetId: projectId,
+    parentTeamId: teamId,
+  })) {
+    return false
+  }
+  let context: TeamPermissionContext
+  try {
+    context = await requireTeamPermission(principal, teamId, 'member')
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
+  }
+  return canAccessAssignedProject(principal, context, projectId, 'member')
 }
 
 /**
