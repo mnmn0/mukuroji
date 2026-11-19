@@ -100,3 +100,45 @@ test('初回パスワードのポリシー違反は同じ画面で再入力を�
   await expect(page.getByText('通常ログインから処理を再開できます')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: '新しいパスワードを設定' })).toBeVisible()
 })
+
+test('初回パスワードの試行上限は待ってから再試行するよう案内する', async ({ page }) => {
+  await page.route('**/api/auth/sso/discovery?*', async (route) => {
+    await route.fulfill({
+      json: {
+        loginMode: 'password-or-sso',
+        ssoRequired: false,
+      },
+    })
+  })
+  await page.route('**/api/auth/login', async (route) => {
+    await route.fulfill({
+      json: {
+        challenge: 'NEW_PASSWORD_REQUIRED',
+        email: 'invited@example.com',
+        session: 'cognito-challenge-session',
+      },
+    })
+  })
+  await page.route('**/api/auth/challenge/new-password', async (route) => {
+    await route.fulfill({
+      status: 429,
+      headers: { 'Retry-After': '300' },
+      json: {
+        code: 'AuthenticationChallengeRateLimited',
+        message: 'Too many verification attempts. Try again later.',
+      },
+    })
+  })
+
+  await page.goto('/')
+  await page.getByLabel('メールアドレス').fill('invited@example.com')
+  await page.getByRole('button', { name: '続行', exact: true }).click()
+  await page.getByLabel('パスワード', { exact: true }).fill('Temporary123!')
+  await page.getByRole('button', { name: 'ログイン', exact: true }).click()
+  await page.getByLabel('新しいパスワード', { exact: true }).fill('NewPassword123!')
+  await page.getByLabel('新しいパスワード（確認）').fill('NewPassword123!')
+  await page.getByRole('button', { name: 'パスワードを設定して続行' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('確認の試行回数が上限に達しました')
+  await expect(page.getByText('通常ログインから処理を再開できます')).toHaveCount(0)
+})

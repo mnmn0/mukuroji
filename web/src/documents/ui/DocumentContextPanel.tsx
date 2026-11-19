@@ -37,7 +37,14 @@ import {
   trapModalFocus,
 } from './modalFocus'
 import { createDocumentOperationId } from '../model/document'
-import { createCanonicalWorkItemId } from '../model/relations'
+import { createDocumentRelationTargetKey } from '../model/linkTargets'
+import {
+  DocumentRelationTargetLabel,
+  DocumentRelationTargetPicker,
+} from './DocumentLinkPicker'
+
+/** Number of outbound links rendered before "Show more". */
+const DOCUMENT_RELATION_PAGE_SIZE = 20
 
 /** A tab rendered by the Document context panel. */
 export type { DocumentContextTab } from '../model/contextTabs'
@@ -159,6 +166,10 @@ export type DocumentContextPanelProps = {
    * Outbound relation を削除する callback です。
    */
   onDeleteRelation?: (relationId: string) => Promise<void>
+  /**
+   * Link 先の検索と title 表示に使う Workspace API token です。
+   */
+  linkAccessToken?: string
 }
 
 /**
@@ -178,6 +189,7 @@ export function DocumentContextPanel({
   hasMoreVersions = false,
   isLoading = false,
   isOpen = true,
+  linkAccessToken,
   locale = 'en',
   modal = true,
   onClose,
@@ -395,7 +407,9 @@ export function DocumentContextPanel({
         ) : null}
         {!isLoading && resolvedActiveTab === 'backlinks' ? (
           <BacklinksPanel
+            accessToken={linkAccessToken}
             backlinks={backlinks}
+            locale={locale}
             hasMore={hasMoreBacklinks}
             relations={document.relations}
             t={t}
@@ -873,59 +887,56 @@ function renderCommentBody(comment: DocumentComment) {
 }
 
 function BacklinksPanel({
+  accessToken,
   backlinks,
   hasMore,
   onDeleteRelation,
   onLoadMore,
   onNavigate,
+  locale,
   onUpsertRelation,
   relations,
   t,
 }: {
+  accessToken?: string
   backlinks: DocumentBacklink[]
   hasMore: boolean
   onDeleteRelation?: (relationId: string) => Promise<void>
   onLoadMore?: () => Promise<void>
   onNavigate?: (path: string) => void
+  locale: Locale
   onUpsertRelation?: (relation: DocumentRelation) => Promise<void>
   relations: DocumentRelation[]
   t: (key: MessageKey) => string
 }) {
-  const [targetKind, setTargetKind] =
-    useState<DocumentRelation['target']['kind']>('work-item')
-  const [teamId, setTeamId] = useState('')
-  const [targetId, setTargetId] = useState('')
-  const [isSaving, setIsSaving] = useState(false)
+  const [visibleRelationCount, setVisibleRelationCount] =
+    useState(DOCUMENT_RELATION_PAGE_SIZE)
   const [deletingRelationId, setDeletingRelationId] = useState<string>()
+  const linkedTargetKeys = useMemo(
+    () =>
+      new Set(
+        relations
+          .filter(({ source }) => source.kind === 'document')
+          .map(({ target }) => createDocumentRelationTargetKey(target)),
+      ),
+    [relations],
+  )
+  const visibleRelations = relations.slice(0, visibleRelationCount)
 
-  const createRelation = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const normalizedTargetId =
-      targetKind === 'work-item'
-        ? createCanonicalWorkItemId(teamId, targetId)
-        : targetId.trim() || undefined
-    if (!normalizedTargetId || !onUpsertRelation || isSaving) return
-
-    const target: DocumentRelation['target'] =
-      targetKind === 'work-item'
-        ? { kind: targetKind, workItemId: normalizedTargetId }
-        : targetKind === 'project'
-          ? { kind: targetKind, projectId: normalizedTargetId }
-          : { goalId: normalizedTargetId, kind: targetKind }
-    setIsSaving(true)
-    try {
-      await onUpsertRelation({
-        createdAt: new Date().toISOString(),
-        createdByUserId: 'current-user',
-        id: createDocumentOperationId(),
-        source: { kind: 'document' },
-        target,
-      })
-      setTeamId('')
-      setTargetId('')
-    } finally {
-      setIsSaving(false)
-    }
+  /**
+   * Saves a Document-level relation to the target chosen in the picker.
+   *
+   * @param target - Relation target chosen by the editor.
+   */
+  const createRelation = async (target: DocumentRelation['target']) => {
+    if (!onUpsertRelation) return
+    await onUpsertRelation({
+      createdAt: new Date().toISOString(),
+      createdByUserId: 'current-user',
+      id: createDocumentOperationId(),
+      source: { kind: 'document' },
+      target,
+    })
   }
 
   const deleteRelation = async (relationId: string) => {
@@ -944,83 +955,18 @@ function BacklinksPanel({
         {t('documents.backlinks.description')}
       </p>
       {onUpsertRelation ? (
-        <form
-          className="grid gap-2 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3"
-          onSubmit={createRelation}
-        >
-          <div className="grid grid-cols-[110px_minmax(0,1fr)] gap-2">
-            <select
-              aria-label={t('documents.backlinks.targetType')}
-              className="workbench-input h-10 px-2 text-xs"
-              onChange={(event) =>
-                setTargetKind(
-                  event.target.value === 'project'
-                    ? 'project'
-                    : event.target.value === 'goal'
-                      ? 'goal'
-                      : 'work-item',
-                )
-              }
-              value={targetKind}
-            >
-              {(['work-item', 'project', 'goal'] as const).map((kind) => (
-                <option key={kind} value={kind}>
-                  {t(`documents.backlinks.${kind}`)}
-                </option>
-              ))}
-            </select>
-            <div className="grid gap-2">
-              {targetKind === 'work-item' ? (
-                <input
-                  aria-label={t('documents.backlinks.teamId')}
-                  className="workbench-input h-10 px-3 text-xs"
-                  onChange={(event) => setTeamId(event.target.value)}
-                  placeholder={t('documents.backlinks.teamId')}
-                  value={teamId}
-                />
-              ) : null}
-              <input
-                aria-label={
-                  targetKind === 'work-item'
-                    ? t('documents.backlinks.issueId')
-                    : t('documents.backlinks.targetId')
-                }
-                className="workbench-input h-10 px-3 text-xs"
-                onChange={(event) => setTargetId(event.target.value)}
-                placeholder={
-                  targetKind === 'work-item'
-                    ? t('documents.backlinks.issueId')
-                    : t('documents.backlinks.targetId')
-                }
-                value={targetId}
-              />
-            </div>
-          </div>
-          {targetKind === 'work-item' ? (
-            <p className="m-0 text-[11px] font-medium leading-5 text-[var(--workbench-muted)]">
-              {t('documents.backlinks.workItemHint')}
-            </p>
-          ) : null}
-          <button
-            className="workbench-button-primary min-h-9 px-3 disabled:opacity-50"
-            disabled={
-              isSaving ||
-              (targetKind === 'work-item'
-                ? createCanonicalWorkItemId(teamId, targetId) ===
-                  undefined
-                : !targetId.trim())
-            }
-            type="submit"
-          >
-            {t('documents.backlinks.add')}
-          </button>
-        </form>
+        <DocumentRelationTargetPicker
+          accessToken={accessToken}
+          linkedTargetKeys={linkedTargetKeys}
+          onSelect={createRelation}
+          t={t}
+        />
       ) : null}
       <strong className="mt-2 text-xs uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
         {t('documents.backlinks.outbound')}
       </strong>
       {relations.length > 0 ? (
-        relations.map((relation) => {
+        visibleRelations.map((relation) => {
           const targetPath =
             createRelationTargetPath(relation)
           return (
@@ -1031,14 +977,12 @@ function BacklinksPanel({
             <span className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-primary-text)]">
               {backlinkGlyphs[relation.target.kind]}
             </span>
-            <span className="min-w-0 flex-1">
-              <strong className="block truncate text-sm text-[var(--workbench-text)]">
-                {readRelationTargetId(relation)}
-              </strong>
-              <span className="text-xs text-[var(--workbench-muted)]">
-                {t(`documents.backlinks.${relation.target.kind}`)}
-              </span>
-            </span>
+            <DocumentRelationTargetLabel
+              accessToken={accessToken}
+              locale={locale}
+              target={relation.target}
+              t={t}
+            />
             {onNavigate ? (
               <button
                 className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
@@ -1068,6 +1012,19 @@ function BacklinksPanel({
           title={t('documents.backlinks.outboundEmpty')}
         />
       )}
+      {relations.length > visibleRelationCount ? (
+        <button
+          className="workbench-button-secondary min-h-9 px-3 text-xs"
+          onClick={() =>
+            setVisibleRelationCount(
+              (count) => count + DOCUMENT_RELATION_PAGE_SIZE,
+            )
+          }
+          type="button"
+        >
+          {t('documents.links.showMore')} ({visibleRelationCount}/{relations.length})
+        </button>
+      ) : null}
       <strong className="mt-3 text-xs uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
         {t('documents.backlinks.inbound')}
       </strong>
@@ -1371,16 +1328,6 @@ const backlinkGlyphs: Record<
   goal: '◎',
   project: '▦',
   'work-item': '✓',
-}
-
-function readRelationTargetId(relation: DocumentRelation) {
-  if (relation.target.kind === 'work-item') {
-    return relation.target.workItemId
-  }
-  if (relation.target.kind === 'project') {
-    return relation.target.projectId
-  }
-  return relation.target.goalId
 }
 
 function createRelationTargetPath(

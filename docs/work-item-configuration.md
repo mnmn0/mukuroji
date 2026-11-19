@@ -71,7 +71,7 @@ CDK custom resource は Workspace / Team default row を強制 seed しない。
 
 ### Configuration optimistic concurrency
 
-Configuration mutation は `expectedRevision` を必須にする。新規 row の作成は `attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)`、更新は `revision = expectedRevision` を condition に含め、成功時だけ revision を増やす。監査 event の共通 transaction 化は audit 基盤を拡張する後続変更で扱い、この schema の CAS を迂回しない。
+Configuration mutation は `expectedRevision` を必須にする。新規 row の作成は `attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)`、更新は `revision = expectedRevision` を condition に含め、成功時だけ revision を増やす。Configuration の保存は `work-item-configuration.created` / `work-item-configuration.updated` の audit event を同じ transaction で記録し、この schema の CAS を迂回しない。
 
 管理 mutation は scope ごとの期限付き `CONFIG_WRITE_LOCK` を先に条件付き取得し、Work Items base table を Team partition ごとに強整合 read して既存 Work Item との参照整合性を検証する。Work Item value/status mutation は、lock が存在しないか期限切れであることと、validation に使った configuration revision を同じ transaction の `ConditionCheck` で固定する。Configuration row の CAS Put と有効な lock の Delete は同じ transaction で確定し、lock 期限後や別 writer に引き継がれた validation result は保存しない。Validation 後に管理者が definition を変更した場合は Work Item を保存せず、最新 configuration と Work Item を再取得する。Team が Workspace default を継承している場合は、Team row と Team lock が transaction 中も存在しないこと、Workspace row revision、Workspace lock の4条件を guard する。
 
@@ -221,7 +221,7 @@ Mutation 前に graph revision を読み、その後 endpoint の近傍と循環
 4. Source relation projection の `attribute_not_exists` 付き Put。
 5. Reciprocal relation projection の `attribute_not_exists` 付き Put。
 
-削除も source / target の残存 relation から作った `relationIds` を両 Work Item row に保存し、両 projection の存在を条件に同じ transaction で削除して graph revision を更新する。Relation mutation は Work Item 本体の業務 state update ではないため、Work Item の `revision` と `updatedAt` は変更しない。どちらか一方だけ存在する状態を正常な削除として隠さず、repair が必要な corruption として fail-closed にする。Relation 監査の同一 transaction 化は audit 基盤を拡張する後続変更で扱う。
+削除も source / target の残存 relation から作った `relationIds` を両 Work Item row に保存し、両 projection の存在を条件に同じ transaction で削除して graph revision を更新する。Relation mutation は Work Item 本体の業務 state update ではないため、Work Item の `revision` と `updatedAt` は変更しない。どちらか一方だけ存在する状態を正常な削除として隠さず、repair が必要な corruption として fail-closed にする。Relation の追加・削除と親の付け替えは、両端の Work Item に対する audit event を同じ transaction で記録する（[`event-audit.md`](./event-audit.md) の「Work Item relation の event」）。
 
 Relation mutation commit 後の Workspace search 更新は、source / target の canonical Work Item と現在の Relation Graph を強整合 read してから実行する。Approval 完了による Work Item 更新も同様に現在 row と relation を再取得する。再取得または search upsert が失敗しても、すでに確定した primary mutation の成功 response は失敗に変えない。
 

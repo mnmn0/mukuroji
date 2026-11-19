@@ -3,6 +3,7 @@ import {
   getAuthSession,
   hasStoredAuthSession,
   readStoredAuthSession,
+  resetAuthSessionTabAccount,
   saveAuthSession,
   type AuthSession,
 } from '../src/auth/session'
@@ -92,6 +93,7 @@ function refreshed(accessToken: string) {
 }
 
 beforeEach(() => {
+  resetAuthSessionTabAccount()
   const storage = new MemoryStorage()
   Reflect.set(globalThis, 'window', { localStorage: storage, sessionStorage: new MemoryStorage() })
   requests = []

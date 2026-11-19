@@ -4,6 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-s
 import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
+  toWorkspaceLocalDate,
 } from '@mukuroji/contracts'
 import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
 import { createMutationAuditContext } from '../../../audit/audit'
@@ -114,7 +115,8 @@ function readUpdate(transaction: TransactWriteCommand['input'] | undefined) {
 }
 
 /** Today's local date under the default UTC calendar policy. */
-const today = () => new Date().toISOString().slice(0, 10)
+// The default calendar policy uses the Workspace time zone, so "today" is its local date.
+const today = () => toWorkspaceLocalDate(new Date())
 
 test('records the actual start when work starts and audits it', async () => {
   const { client, transactions } = createClient(storedIssue())

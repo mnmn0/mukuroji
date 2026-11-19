@@ -1,84 +1,12 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
-import type { Customer, CustomerDetail } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { customerDetailFixture, customerFixture } from '../fixtures'
 import { CustomerDirectoryView } from './CustomerDirectoryView'
+import type { CustomerEditingProps } from './CustomerEditors'
 
-const customer: Customer = {
-  schemaVersion: 1,
-  id: 'customer-1',
-  workspaceId: 'workspace-1',
-  name: 'Acme Industries',
-  domain: 'acme.example',
-  tier: 'strategic',
-  size: 'enterprise',
-  status: 'active',
-  health: 'watch',
-  businessValue: 86,
-  contactCount: 1,
-  requestCount: 2,
-  openRequestCount: 1,
-  revision: 1,
-  createdAt: '2026-08-01T00:00:00.000Z',
-  updatedAt: '2026-08-20T00:00:00.000Z',
-}
-
-const detail: CustomerDetail = {
-  customer,
-  contacts: [{
-    id: 'contact-1',
-    workspaceId: 'workspace-1',
-    customerId: customer.id,
-    name: 'Mina Example',
-    email: 'mina@acme.example',
-    role: 'Product lead',
-    primary: true,
-    status: 'active',
-    revision: 1,
-    createdAt: customer.createdAt,
-    updatedAt: customer.updatedAt,
-  }],
-    requests: [{
-    schemaVersion: 1,
-    id: 'request-1',
-    workspaceId: 'workspace-1',
-    customerId: customer.id,
-    contactId: 'contact-1',
-    source: { kind: 'portal', canNotify: true },
-    originalMessage: 'Please add an export format for the quarterly review.',
-    receivedAt: '2026-08-18T00:00:00.000Z',
-    importance: 'high',
-    status: 'in-progress',
-      workItemLinks: [{
-      teamId: 'team-1',
-      workItemId: 'work-item-1',
-      projectId: 'project-1',
-      linkedAt: customer.updatedAt,
-        linkedBy: 'mina@example.com',
-      }],
-      projectLinks: [{
-        projectId: 'project-1',
-        linkedAt: customer.updatedAt,
-        linkedBy: 'mina@example.com',
-      }],
-    revision: 1,
-    createdAt: customer.updatedAt,
-    updatedAt: customer.updatedAt,
-  }],
-  workItems: [{
-    teamId: 'team-1',
-    workItemId: 'work-item-1',
-    projectId: 'project-1',
-    requestCount: 1,
-    requestStates: ['in-progress'],
-    lifecycle: 'in-progress',
-  }],
-  projects: [{
-    projectId: 'project-1',
-    requestCount: 1,
-    requestStates: ['in-progress'],
-  }],
-}
+const customer = customerFixture
+const detail = customerDetailFixture
 
 const meta = {
   title: 'Customers/CustomerDirectoryView',
@@ -149,5 +77,55 @@ export const Restricted: Story = {
     canManageCustomerViews: false,
     canViewSensitiveData: false,
     search: '',
+  },
+}
+
+/** Editing operations that resolve immediately so the forms can be exercised in Storybook. */
+const storyEditing: CustomerEditingProps = {
+  isSaving: false,
+  projects: [{ id: 'project-1', name: 'Quarterly review' }, { id: 'project-2', name: 'Data export' }],
+  onCreateCustomer: async () => true,
+  onUpdateCustomer: async () => true,
+  onCreateContact: async () => true,
+  onUpdateContact: async () => true,
+  onDeleteContact: async () => true,
+  onCreateRequest: async () => true,
+  onUpdateRequest: async () => true,
+  onLinkWorkItem: async () => true,
+  onUnlinkWorkItem: async () => true,
+  onLinkProject: async () => true,
+  onUnlinkProject: async () => true,
+}
+
+/** A member who may change Customers sees add, edit, delete, and link controls. */
+export const Editable: Story = {
+  args: { editing: storyEditing },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Edit Acme Industries' }))
+    const form = canvas.getByRole('form', { name: 'Edit customer' })
+    await expect(within(form).getByRole('textbox', { name: 'Name' })).toHaveValue('Acme Industries')
+    await userEvent.clear(within(form).getByRole('textbox', { name: 'Name' }))
+    await userEvent.click(within(form).getByRole('button', { name: 'Save' }))
+    await expect(within(form).getByRole('alert')).toHaveTextContent('Enter a name')
+    await userEvent.click(within(form).getByRole('button', { name: 'Cancel' }))
+    await expect(canvas.getByRole('button', { name: 'Unlink Project Quarterly review' })).toBeVisible()
+  },
+}
+
+/** The add-customer form opens beside the directory. */
+export const CreateCustomer: Story = {
+  args: { detail: undefined, editing: storyEditing },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Add customer' }))
+    await expect(canvas.getByRole('form', { name: 'Add customer' })).toBeVisible()
+  },
+}
+
+/** A failed change is announced above the Customer detail. */
+export const EditingError: Story = {
+  args: {
+    editing: { ...storyEditing, errorMessage: createTranslator('en')('customers.edit.error.conflict') },
   },
 }

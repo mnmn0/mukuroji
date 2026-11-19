@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { taskViewStoryConfigurationsByTeam, taskViewStoryTasks } from '../src/tasks/ui/TaskView.stories.fixtures'
@@ -10,6 +10,7 @@ import {
 import {
   createTaskCalendarMonthWindow,
   createTaskGanttWindow,
+  getCurrentTaskDate,
   getCurrentTaskMonth,
   isTaskScheduleInWindow,
   listTaskScheduleWindowDates,
@@ -21,6 +22,10 @@ import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 const t = createTranslator('ja')
 
 describe('task schedule window', () => {
+  afterEach(() => {
+    setSystemTime()
+  })
+
   test('creates month and Gantt windows across year boundaries', () => {
     expect(getCurrentTaskMonth(new Date(2026, 10, 15))).toBe('2026-11')
     expect(shiftTaskMonth('2026-12', 1)).toBe('2027-01')
@@ -35,6 +40,35 @@ describe('task schedule window', () => {
       '2027-01-02',
     ])
     expect(() => shiftTaskMonth('2026-13', 1)).toThrow(RangeError)
+  })
+
+  test('reads today and the current month in the Workspace time zone', () => {
+    // 15:00 UTC is midnight in Japan, so the Workspace date moves one day before UTC does.
+    expect(getCurrentTaskDate(new Date('2026-11-17T14:59:00.000Z'))).toBe('2026-11-17')
+    expect(getCurrentTaskDate(new Date('2026-11-17T15:00:00.000Z'))).toBe('2026-11-18')
+    expect(getCurrentTaskMonth(new Date('2026-11-30T15:30:00.000Z'))).toBe('2026-12')
+  })
+
+  test('centers the Calendar and Gantt on the Workspace today when no task has dates', () => {
+    // 2026-11-17T16:00Z is 2026-11-18 01:00 in Japan, while the UTC date is still 2026-11-17.
+    setSystemTime(new Date('2026-11-17T16:00:00.000Z'))
+    const tasks = taskViewStoryTasks.slice(0, 1).map((task) => ({
+      ...task,
+      schedule: createDefaultUnscheduledTaskSchedule(),
+    }))
+
+    const calendarHtml = renderToStaticMarkup(
+      <TaskCalendarView configurationsByTeam={taskViewStoryConfigurationsByTeam} t={t} tasks={tasks} />,
+    )
+    expect(calendarHtml).toContain('data-testid="task-calendar-day-2026-11-15"')
+    expect(calendarHtml).toContain('data-testid="task-calendar-day-2026-11-21"')
+    expect(calendarHtml).not.toContain('data-testid="task-calendar-day-2026-11-14"')
+
+    const ganttHtml = renderToStaticMarkup(
+      <TaskGanttView configurationsByTeam={taskViewStoryConfigurationsByTeam} t={t} tasks={tasks} />,
+    )
+    expect(ganttHtml).toContain('aria-label="2026-11-18"')
+    expect(ganttHtml).not.toContain('aria-label="2026-11-17"')
   })
 
   test('matches the server overlap rule for each schedule mode', () => {

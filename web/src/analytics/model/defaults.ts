@@ -19,6 +19,8 @@ const metricLabelKeys: Readonly<Record<AnalyticsMetricKey, MessageKey>> = {
   'scope-change': 'analytics.metric.scopeChange',
   velocity: 'analytics.metric.velocity',
   sla: 'analytics.metric.sla',
+  'remaining-scope': 'analytics.metric.remainingScope',
+  'cumulative-flow': 'analytics.metric.cumulativeFlow',
 }
 
 /**

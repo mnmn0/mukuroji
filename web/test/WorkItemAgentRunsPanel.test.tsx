@@ -71,6 +71,9 @@ describe('WorkItemAgentRunsPanel', () => {
     expect(html).toContain('Earlier runs')
     expect(html).toContain('Paused')
     expect(html).toContain('Released')
+    // The active run resumed the paused one, and only that run carries the badge.
+    expect(html.match(/data-testid="agent-run-resumed"/g)).toHaveLength(1)
+    expect(html).toContain(`>${labels.resumed}<`)
     expect(html).not.toContain(labels.historyTruncated)
     const truncated = renderToStaticMarkup(
       <WorkItemAgentRunsPanel formatDateTime={(value) => value} hasMore labels={labels} runs={agentRunFixtures} />,
@@ -148,9 +151,13 @@ describe('Agent Run API', () => {
       requests.push(String(input))
       return Response.json({ items: agentRunFixtures, hasMore: false })
     }
-    expect((await listWorkItemAgentRuns('token', 'core', 'task/1')).items).toHaveLength(3)
+    const listed = await listWorkItemAgentRuns('token', 'core', 'task/1')
+    expect(listed.items).toHaveLength(3)
+    expect(listed.items[0]?.resumedFromRunId).toBe('run_00000000-0000-4000-8000-000000000002')
     expect(requests[0]).toBe('/api/teams/core/work-items/task%2F1/agent-runs')
     globalThis.fetch = async () => Response.json({ items: [{ ...agentRunFixtures[0], runtime: 'unknown' }], hasMore: false })
+    await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => Response.json({ items: [{ ...agentRunFixtures[0], resumedFromRunId: '' }], hasMore: false })
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
     globalThis.fetch = async () => Response.json({ items: agentRunFixtures })
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })

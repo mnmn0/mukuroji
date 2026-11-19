@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
+import { configureStatefulResourceGuards } from '../aspects/stateful-resource-guards';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
 import {
@@ -306,6 +307,7 @@ export class MukurojiStack extends cdk.Stack {
     configureAlarmRouting(this, {
       notificationTopicArns: parameters.alarmNotificationTopicArns,
     });
+    configureStatefulResourceGuards(this);
     buildBootstrapResources(this, {
       dataStores,
       parameters,

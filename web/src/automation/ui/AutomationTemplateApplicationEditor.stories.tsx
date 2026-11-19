@@ -3,6 +3,8 @@ import { AutomationTemplateApplicationEditor } from './AutomationManagementPanel
 import {
   projectAutomationTemplateFixture,
   projectTemplateApplicationFixture,
+  projectWbsAutomationTemplateFixture,
+  projectWbsTemplateApplicationFixture,
   workflowAutomationTemplateFixture,
   workflowTemplateApplicationFixture,
 } from '../fixtures'
@@ -33,6 +35,26 @@ type Story = StoryObj<typeof meta>
 
 /** Immutable version と作成済み Project ID を含む成功 receipt です。 */
 export const ProjectSucceeded: Story = {}
+
+/** WBS 付き template の適用前の form で、開始日の入力と作る Work Item 数を表示します。 */
+export const ProjectWithWbs: Story = {
+  args: {
+    initialApplication: undefined,
+    template: projectWbsAutomationTemplateFixture,
+    onApply: async () => projectWbsTemplateApplicationFixture,
+    onRefresh: async () => projectWbsTemplateApplicationFixture,
+  },
+}
+
+/** WBS の Work Item 数を含む Project の成功 receipt です。 */
+export const ProjectWithWbsSucceeded: Story = {
+  args: {
+    initialApplication: projectWbsTemplateApplicationFixture,
+    template: projectWbsAutomationTemplateFixture,
+    onApply: async () => projectWbsTemplateApplicationFixture,
+    onRefresh: async () => projectWbsTemplateApplicationFixture,
+  },
+}
 
 /** 継承 Team target と optimistic revision を表示する Workflow receipt です。 */
 export const WorkflowSucceeded: Story = {

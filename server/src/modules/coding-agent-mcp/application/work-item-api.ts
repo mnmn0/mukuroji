@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicWorkItemActualDates, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -75,6 +75,12 @@ export type AgentRunStartInput = {
   agentName: string
   /** Stable instance identifier of this process. */
   instanceId: string
+}
+
+/** Input that resumes a started task without an active run for this agent instance. */
+export type AgentRunResumeInput = Omit<AgentRunStartInput, 'workflowStatusId'> & {
+  /** Run the agent expects to resume from; the API refuses the resume when a later run exists. */
+  expectedPreviousRunId?: string
 }
 
 /** Structured report fields sent for this instance's run; the instance ID is added by the adapter. */
@@ -198,6 +204,26 @@ export interface AgentWorkItemApi {
     supersededRun: AgentRunRecord
   }>
   /**
+   * Starts a new run on a started task that no run claims, linked to the task's newest earlier run.
+   * The task status does not change.
+   * @param id - Task identifier within the configured Team.
+   * @param input - Revision read before deciding to resume, and the identity of this process.
+   * @param key - Idempotency key reused for uncertain retries.
+   * @returns This instance's new run and the earlier run it resumes, if any.
+   */
+  resumeRun(id: string, input: AgentRunResumeInput, key: string): Promise<{
+    /** New run of this instance. */
+    run: AgentRunRecord
+    /** Newest earlier run of the task, which the new run resumes. */
+    resumedFromRun?: AgentRunRecord
+  }>
+  /**
+   * Reads the newest run of a task, active or finished.
+   * @param id - Task identifier within the configured Team.
+   * @returns The newest run, or undefined when the task never had one.
+   */
+  latestRun(id: string): Promise<AgentRunRecord | undefined>
+  /**
    * Saves a structured report and its comment for this instance's run.
    * @param runId - Run identifier.
    * @param instanceId - Instance identifier that started the run.
@@ -247,6 +273,12 @@ export interface AgentWorkItemApi {
    */
   effort(id: string): Promise<AgentTaskEffort | undefined>
   /**
+   * Reads the actual start and end dates of a task.
+   * @param id - Task ID.
+   * @returns The recorded dates with the revision they were read at, or undefined when the server predates the endpoint.
+   */
+  actualDates(id: string): Promise<AgentTaskActualDates | undefined>
+  /**
    * Reads the short immutable key of a task, such as `ABC-123`.
    * @param id - Task ID.
    * @returns The key and the creation time of the Work Item it belongs to (the key is absent when
@@ -279,6 +311,12 @@ export type AgentTaskKey = {
 export type AgentTaskEffort = Pick<
   PublicWorkItemEffort,
   'revision' | 'plannedEffortMinutes' | 'remainingEffortMinutes' | 'progressPercent'
+>
+
+/** Actual start and end dates of a task, as get_task shows them. */
+export type AgentTaskActualDates = Pick<
+  PublicWorkItemActualDates,
+  'revision' | 'actualStartDate' | 'actualEndDate'
 >
 
 /** Safe, transport-independent error that may be returned to the MCP client. */

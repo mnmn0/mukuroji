@@ -172,3 +172,28 @@ export function applyWorkItemStatusTransitionToActualDates(
   }
   return next
 }
+
+/**
+ * Actual start and end dates of one Work Item, returned by
+ * `GET /api/v1/work-items/{workItemId}/actual-dates`; the closed public Work Item schema omits them.
+ */
+export type PublicWorkItemActualDates = {
+  /** Response schema version. */
+  schemaVersion: 1
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item the dates belong to. */
+  workItemId: string
+  /** Work Item revision the dates were read at. */
+  revision: number
+  /**
+   * Local `YYYY-MM-DD` date, in the schedule calendar timezone, when the Work Item first entered
+   * the `started` or `completed` category; absent until work starts.
+   */
+  actualStartDate?: string
+  /**
+   * Local `YYYY-MM-DD` date of the latest effective completion; present only while the Work Item is
+   * completed.
+   */
+  actualEndDate?: string
+}

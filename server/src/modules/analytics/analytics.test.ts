@@ -462,6 +462,8 @@ describe('Analytics metric engine', () => {
       'scope-change': 1,
       velocity: 1,
       sla: 100,
+      'remaining-scope': 1,
+      'cumulative-flow': 2,
     })
     expect(snapshot.generatedAt).toBe(period.to)
     expect(snapshot.queryHash).toHaveLength(64)
@@ -638,6 +640,163 @@ describe('Analytics metric engine', () => {
     })
     expect(losAngeles.widgets[0]?.value).toBe(0)
     expect(tokyo.widgets[0]?.value).toBe(1)
+  })
+
+  test('charts daily remaining scope, burnup scope, and cumulative flow from rewound state', () => {
+    const done = createWorkItem('done', {
+      createdAt: '2025-12-31T00:00:00.000Z',
+      updatedAt: '2026-01-02T12:00:00.000Z',
+    })
+    const added = createWorkItem('added', {
+      createdAt: '2026-01-02T06:00:00.000Z',
+      updatedAt: '2026-01-02T06:00:00.000Z',
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+    })
+    const canceled = createWorkItem('canceled', {
+      createdAt: '2025-12-31T00:00:00.000Z',
+      updatedAt: '2026-01-03T12:00:00.000Z',
+      statusCategory: 'canceled',
+      workflowStatusId: 'status-canceled',
+    })
+    const outside = createWorkItem('outside', {
+      createdAt: '2025-12-31T00:00:00.000Z',
+      statusCategory: 'unstarted',
+      workflowStatusId: 'status-unstarted',
+    })
+    const events = [
+      createAuditEvent('done-complete', done, '2026-01-02T12:00:00.000Z', [
+        { field: 'statusCategory', before: 'unstarted', after: 'completed' },
+      ]),
+      createAuditEvent('cancel', canceled, '2026-01-03T12:00:00.000Z', [
+        { field: 'statusCategory', before: 'backlog', after: 'canceled' },
+      ]),
+    ]
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [done, added, canceled, outside],
+      events,
+      query: createQuery([
+        {
+          id: 'burndown',
+          title: 'Burndown',
+          type: 'chart',
+          metric: 'remaining-scope',
+          visualization: 'burndown',
+          groupBy: { dimension: 'day' },
+        },
+        {
+          id: 'cfd',
+          title: 'CFD',
+          type: 'chart',
+          metric: 'cumulative-flow',
+          visualization: 'area',
+          groupBy: { dimension: 'day' },
+        },
+      ], {
+        filter: {
+          period: {
+            from: '2026-01-01T00:00:00.000Z',
+            to: '2026-01-03T23:59:59.999Z',
+          },
+          workItems: [
+            { teamId: 'core', workItemId: 'canceled' },
+            { teamId: 'core', workItemId: 'added' },
+            { teamId: 'core', workItemId: 'done' },
+            { teamId: 'core', workItemId: 'done' },
+          ],
+        },
+        asOf: '2026-01-03T23:59:59.999Z',
+      }),
+    })
+
+    expect(snapshot.filter.workItems).toEqual([
+      { teamId: 'core', workItemId: 'added' },
+      { teamId: 'core', workItemId: 'canceled' },
+      { teamId: 'core', workItemId: 'done' },
+    ])
+    const burndown = snapshot.widgets[0]
+    expect(burndown?.value).toBe(1)
+    expect(burndown?.series.map((point) => point.value)).toEqual([2, 2, 1])
+    expect(burndown?.series.map((point) => point.segments)).toEqual([
+      [{ key: 'scope', value: 2 }, { key: 'completed', value: 0 }],
+      [{ key: 'scope', value: 3 }, { key: 'completed', value: 1 }],
+      [{ key: 'scope', value: 2 }, { key: 'completed', value: 1 }],
+    ])
+    const cfd = snapshot.widgets[1]
+    expect(cfd?.value).toBe(3)
+    expect(cfd?.series.map((point) =>
+      Object.fromEntries((point.segments ?? []).map((segment) => [segment.key, segment.value]))
+    )).toEqual([
+      { completed: 0, started: 0, unstarted: 1, backlog: 1, canceled: 0 },
+      { completed: 1, started: 1, unstarted: 0, backlog: 1, canceled: 0 },
+      { completed: 1, started: 1, unstarted: 0, backlog: 0, canceled: 1 },
+    ])
+  })
+
+  test('weights remaining scope by remaining effort and keeps existing metric series unchanged', () => {
+    const estimated = createWorkItem('estimated', {
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+      schedule: { ...createDefaultDueDateWorkItemSchedule('2026-01-10'), plannedEffortMinutes: 240 },
+      remainingEffortMinutes: 90,
+    })
+    const unestimated = createWorkItem('unestimated', {
+      statusCategory: 'unstarted',
+      workflowStatusId: 'status-unstarted',
+    })
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [estimated, unestimated],
+      events: [],
+      query: createQuery([
+        {
+          id: 'effort',
+          title: 'Effort',
+          type: 'metric',
+          metric: 'remaining-scope',
+          weighting: 'effort',
+        },
+        {
+          id: 'wip',
+          title: 'WIP',
+          type: 'chart',
+          metric: 'wip',
+        },
+        {
+          id: 'burnup',
+          title: 'Burnup',
+          type: 'chart',
+          metric: 'remaining-scope',
+          visualization: 'burnup',
+          weighting: 'effort',
+        },
+      ]),
+    })
+    expect(snapshot.widgets[2]?.series.at(-1)?.segments).toEqual([
+      { key: 'scope', value: 4 },
+      { key: 'completed', value: 0 },
+    ])
+    expect(snapshot.widgets[0]?.value).toBe(1.5)
+    expect(snapshot.widgets[0]?.definition.unit).toBe('hours')
+    expect(snapshot.widgets[0]?.warnings).toEqual([
+      '1 remaining Work Item(s) had no estimate and counted as zero effort.',
+    ])
+    expect(snapshot.widgets[1]?.series.every((point) => point.segments === undefined)).toBe(true)
+    expect(() => normalizeAnalyticsQueryInput(createQuery([{
+      id: 'wip',
+      title: 'WIP',
+      type: 'metric',
+      metric: 'wip',
+      weighting: 'effort',
+    }]))).toThrow(AnalyticsError)
+    expect(() => normalizeAnalyticsQueryInput(createQuery([], {
+      filter: {
+        period,
+        workItems: Array.from({ length: 501 }, (_, index) => ({
+          teamId: 'core',
+          workItemId: `item-${index}`,
+        })),
+      },
+    }))).toThrow(AnalyticsError)
   })
 
   test('produces bounded ordered forecast percentiles without NaN', () => {
@@ -1165,7 +1324,7 @@ describe('Analytics metric engine', () => {
     expect(() => createTestAnalyticsSnapshot({
       ...input,
       query: createQuery([{ id: 'wip', title: 'WIP', type: 'metric', metric: 'wip', weighting: 'effort' }]),
-    })).toThrow('Only throughput and velocity widgets can be weighted by effort.')
+    })).toThrow('Only throughput, velocity, and remaining scope widgets can be weighted by effort.')
   })
 
   test('simulates effort in whole minutes so rounding the reported hours cannot add a day', () => {
@@ -1538,6 +1697,8 @@ describe('Analytics export', () => {
         'scope-change',
         'velocity',
         'sla',
+        'remaining-scope',
+        'cumulative-flow',
       ] as const).map((metric) => ({
         id: metric,
         title: metric,
@@ -1589,6 +1750,8 @@ describe('Analytics export', () => {
       'スコープ変更',
       'ベロシティ',
       'SLA達成率',
+      'Remaining scope',
+      'Cumulative flow',
       '件',
       '時間',
       '件/週',

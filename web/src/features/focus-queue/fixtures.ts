@@ -9,6 +9,7 @@ import {
   type FocusSignal,
   type FocusSignalResolutionCondition,
   type FocusSignalType,
+  type FocusUpdateDeadline,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -111,6 +112,9 @@ export const focusQueueResponseFixture = {
       dueSoonDays: 3,
       nowScoreThreshold: 12,
       slaHours: 24,
+      slaEnabled: true,
+      slaAnchor: 'planned-start',
+      slaWorkItemTypeIds: [],
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -140,6 +144,9 @@ export const focusQueueResponseFixture = {
       dueSoonDays: 2,
       nowScoreThreshold: 12,
       slaHours: 24,
+      slaEnabled: true,
+      slaAnchor: 'planned-start',
+      slaWorkItemTypeIds: [],
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -157,6 +164,9 @@ export const focusQueueResponseFixture = {
       dueSoonDays: 2,
       nowScoreThreshold: 12,
       slaHours: 24,
+      slaEnabled: true,
+      slaAnchor: 'planned-start',
+      slaWorkItemTypeIds: [],
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -328,3 +338,30 @@ function getFixtureResolutionCondition(
     case 'cycle': return 'cycle-changed'
   }
 }
+
+/** Health update deadlines covering overdue, due-soon, untitled, and long-title states. */
+export const focusUpdateDeadlinesFixture = [
+  {
+    id: 'update-due:initiative:launch:2026-08-09T09%3A00%3A00.000Z',
+    target: { type: 'initiative', entityId: 'launch' },
+    title: 'Enterprise launch readiness across sales, support, and the regional partner network',
+    state: 'overdue',
+    dueAt: '2026-08-09T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=initiative&entityId=launch',
+  },
+  {
+    id: 'update-due:project:core-team:refero:2026-08-10T09%3A00%3A00.000Z',
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    title: 'Refero',
+    state: 'due-soon',
+    dueAt: '2026-08-10T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero',
+  },
+  {
+    id: 'update-due:project:design-team:brand-refresh:2026-08-11T09%3A00%3A00.000Z',
+    target: { type: 'project', teamId: 'design-team', projectId: 'brand-refresh' },
+    state: 'due-soon',
+    dueAt: '2026-08-11T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=project&teamId=design-team&projectId=brand-refresh',
+  },
+] satisfies FocusUpdateDeadline[]

@@ -1,0 +1,52 @@
+name: 不具合
+description: 期待どおりに動かない、データが壊れる、などの不具合を報告する
+title: "[P2][Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        タイトルは `[P0][Bug]`〜`[P3][Bug]` で始め、起きている事象を一文で書いてください。
+        権限の回避・tenant 越境・情報漏えいなど**脆弱性に当たるもの**は、公開 Issue にせず
+        [SECURITY.md](https://github.com/mnmn0/mukuroji/blob/main/SECURITY.md) の非公開窓口から報告してください。
+        実データ・個人情報・token・secret は貼らないでください。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きていて、本来はどうなるべきか
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 発生条件・再現手順
+      description: 番号付きで。再現しない・コードを読んで見つけた場合はそう書いてください
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: 該当箇所
+      description: 分かる範囲で、確認した commit SHA と `path:line` を挙げてください
+      placeholder: |
+        `abc1234` 時点
+        - `server/src/modules/.../file.ts:10-20` — ...
+  - type: input
+    id: environment
+    attributes:
+      label: 環境
+      description: ローカル（Floci）/ AWS の環境名、ブラウザ、commit SHA など
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影響
+      description: 影響を受ける利用者・データ、回避策の有無
+  - type: textarea
+    id: fix
+    attributes:
+      label: 修正案
+      description: 方針の案があれば

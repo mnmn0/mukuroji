@@ -34,6 +34,7 @@ function synthesizeDefaultStack(
       // The feature flags cdk.json sets for every synthesis.
       '@aws-cdk/aws-iam:minimizePolicies': true,
       '@aws-cdk/aws-lambda:createNewPoliciesWithAddToRolePolicy': false,
+      '@aws-cdk/aws-lambda:useCdkManagedLogGroup': true,
       '@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy': true,
       ...context,
     },

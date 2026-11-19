@@ -142,6 +142,23 @@ export const automationMessages = {
   'automation.template.project.tone.purple': 'Purple',
   'automation.template.project.tone.green': 'Green',
   'automation.template.project.tone.yellow': 'Yellow',
+  'automation.template.project.workItems': 'WBS',
+  'automation.template.project.workItemsPlaceholder':
+    'Requirements | 0 | 5\n  Interviews | 0 | 2\nDesign | 5 | 10',
+  'automation.template.project.workItemsHint':
+    'One Work Item per line: title | start (working days from the project start) | duration (working days). Indent a child two spaces under its parent. Up to 50 items and 4 levels.',
+  'automation.template.project.workItemsError.format':
+    'Line {line}: write it as "title | start | duration".',
+  'automation.template.project.workItemsError.indent':
+    'Line {line}: indent with two spaces, at most one level deeper than the line above.',
+  'automation.template.project.workItemsError.title':
+    'Line {line}: enter a title of 256 characters or fewer.',
+  'automation.template.project.workItemsError.days':
+    'Line {line}: start must be 0 or more and duration 1 or more, up to 3650 working days.',
+  'automation.template.project.workItemsError.limit':
+    'Line {line}: a template can hold at most 50 Work Items.',
+  'automation.template.project.workItemsError.depth':
+    'Line {line}: the WBS can be at most 4 levels deep.',
   'automation.template.apply': 'Apply',
   'automation.template.application.title': 'Apply template',
   'automation.template.application.projectDescription':
@@ -149,6 +166,10 @@ export const automationMessages = {
   'automation.template.application.workflowDescription':
     'Replace only the workflow in the selected scope. Existing custom fields are preserved.',
   'automation.template.application.target': 'Target',
+  'automation.template.application.startDate': 'Project start date',
+  'automation.template.application.workItemsNotice':
+    '{count} Work Items from the WBS are also created and assigned to you, dated in working days from the start date.',
+  'automation.template.application.workItemsResult': 'Created {count} Work Items from the WBS.',
   'automation.template.application.workspace': 'Workspace default',
   'automation.template.application.team': 'Team: {team}',
   'automation.template.application.revision': 'revision {revision}',

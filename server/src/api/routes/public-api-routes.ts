@@ -60,6 +60,7 @@ import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
 } from '../../modules/developer-platform/application/ports'
+import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import {
   createAgentRunDeletionFences,
   createAgentRunMutationFenceExtension,
@@ -461,7 +462,16 @@ function resolvePersonalCredentialEligibility(
   return 'eligible'
 }
 
-async function resolveStableWorkItemAuthorization<T>(
+/**
+ * Authorizes a Work Item mutation between two reads of the Planning authorization revision, retrying
+ * when access changed in between, and captures the snapshot the commit fences.
+ *
+ * @param workspaceId - Workspace of the credential.
+ * @param resolvePrincipal - Resolves the caller.
+ * @param authorize - Checks the caller's access and returns what the mutation needs.
+ * @returns The principal, the authorized value, and the authorization snapshot.
+ */
+export async function resolveStableWorkItemAuthorization<T>(
   workspaceId: string,
   resolvePrincipal: () => Promise<WorkspacePrincipal>,
   authorize: (principal: WorkspacePrincipal) => Promise<T>,
@@ -1272,6 +1282,32 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     /**
+     * Reads the actual start and end dates of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The schema version, Team ID, Work Item ID, the Work Item revision the dates were read
+     * at, and each date that is recorded.
+     */
+    async getActualDates(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        ...(issue.actualStartDate === undefined ? {} : { actualStartDate: issue.actualStartDate }),
+        ...(issue.actualEndDate === undefined ? {} : { actualEndDate: issue.actualEndDate }),
+      }
+    },
+
+    /**
      * Reads the key of a Work Item the credential can view.
      *
      * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -1509,7 +1545,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         '/api/v1/work-items',
         createPublicApiWorkItemCreateIdentity(
           credential.workspaceId,
-          credential.credentialId,
+          readCredentialPrincipalKey(credential),
           context,
           teamId,
           workItemInput,

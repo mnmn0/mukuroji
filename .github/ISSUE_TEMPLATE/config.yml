@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 脆弱性の報告
+    url: https://github.com/mnmn0/mukuroji/security/advisories/new
+    about: 脆弱性は公開 Issue にせず、Private vulnerability reporting から非公開で報告してください（SECURITY.md）。
+  - name: 利用者ガイド
+    url: https://github.com/mnmn0/mukuroji/blob/main/docs/guide/README.md
+    about: 使い方の質問は、まず利用者ガイドを確認してください。

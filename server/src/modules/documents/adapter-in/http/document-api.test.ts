@@ -17,6 +17,7 @@ import {
   type DocumentApiDependencies,
 } from './document-api'
 import {
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
   DocumentError,
   type DocumentHttpApplication,
@@ -864,6 +865,97 @@ test('rejects an oversized backlink batch before source reads', async () => {
 
   expect(response.status).toBe(413)
   expect(calls).toBe(0)
+})
+
+test('defers backlink batch targets beyond the read budget to pending', async () => {
+  const calls: string[] = []
+  const app = createTestApp(createDocumentClient({
+    async listBacklinks(input) {
+      calls.push(input.targetId)
+      return { backlinks: [] }
+    },
+  }))
+  const targets = Array.from(
+    { length: 200 },
+    (_, index) => ({
+      targetType: 'work-item',
+      targetId: `team/team-a/issue/issue-${index}`,
+    }),
+  )
+
+  const response = await app.request(
+    '/api/document-backlinks/batch',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ targets }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    pending: Array<{ targetId: string }>
+  }
+  expect(calls.length).toBeGreaterThan(0)
+  expect(calls.length).toBeLessThan(targets.length)
+  expect(
+    [...calls, ...body.pending.map(({ targetId }) => targetId)],
+  ).toEqual(targets.map(({ targetId }) => targetId))
+})
+
+test('rejects a Whiteboard create that adds more links than one change can index', async () => {
+  let targetValidationCalls = 0
+  let createCalls = 0
+  const app = createTestApp(
+    createDocumentClient({
+      async create() {
+        createCalls += 1
+        throw new Error('must not be called')
+      },
+    }),
+    {
+      async validateRelationTargets() {
+        targetValidationCalls += 1
+      },
+    },
+  )
+
+  const response = await app.request('/api/documents', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      kind: 'whiteboard',
+      scope: { type: 'workspace' },
+      title: 'Large planning board',
+      whiteboard: {
+        objects: Array.from(
+          { length: DOCUMENT_MAX_BACKLINK_CHANGE_COUNT + 1 },
+          (_, index) => ({
+            id: `object-${index}`,
+            type: 'work-item',
+            workItemId: `team/team-a/issue/issue-${index}`,
+            bounds: { x: index * 10, y: 0, width: 100, height: 100 },
+            zIndex: index,
+          }),
+        ),
+        connectors: [],
+        frames: [],
+      },
+    }),
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'DocumentBacklinkChangeLimitExceeded',
+  })
+  expect(targetValidationCalls).toBe(0)
+  expect(createCalls).toBe(0)
 })
 
 test('validates relation targets before applying document operations', async () => {
