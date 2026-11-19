@@ -1,11 +1,14 @@
 import { Hono, type Context } from 'hono'
-import type {
-  TimeEntry,
-  TimeEntryStatus,
-  TimeTrackingGroupBy,
+import {
+  TIME_ENTRY_CATEGORIES,
+  type TimeEntry,
+  type TimeEntryCategory,
+  type TimeEntryStatus,
+  type TimeTrackingGroupBy,
 } from '@mukuroji/contracts'
 import {
   TimeTrackingError,
+  type CreateTimeEntryInput,
   type TimeTrackingReportInput,
   type TimeTrackingService,
 } from '../../time-tracking'
@@ -75,8 +78,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         workItemId,
         userId: principal.userKey,
         ...(canonicalProjectId ? { projectId: canonicalProjectId } : {}),
-        startAt: readRequiredString(body.startAt, 'Start time'),
-        endAt: readRequiredString(body.endAt, 'End time'),
+        ...readCreateInterval(body),
+        ...(body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
         billable: readRequiredBoolean(body.billable, 'Billable'),
         currency: readOptionalString(body.currency) ?? 'USD',
@@ -158,6 +161,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
         ...(body.workItemId === undefined ? {} : { workItemId: readRequiredString(body.workItemId, 'Work Item ID') }),
         projectId: nextProjectId ?? null,
+        ...(body.category === null ? { category: null } : body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(body.description === null ? { description: null } : body.description === undefined ? {} : { description: readRequiredString(body.description, 'Description') }),
         ...(body.billable === undefined ? {} : { billable: readRequiredBoolean(body.billable, 'Billable') }),
         ...(body.currency === undefined ? {} : { currency: readRequiredString(body.currency, 'Currency') }),
@@ -481,10 +485,7 @@ function readReportInput(
   } catch {
     throw new TimeTrackingError(400, 'InvalidTimeZone', 'timeZone must be a valid IANA timezone identifier.')
   }
-  const groupBy: string = context.req.query('groupBy') ?? 'day'
-  if (groupBy !== 'day' && groupBy !== 'week' && groupBy !== 'user' && groupBy !== 'project' && groupBy !== 'work-item') {
-    throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, or work-item.')
-  }
+  const groupBy = readGroupBy(context.req.query('groupBy') ?? 'day')
   const budgetScope = context.req.query('budgetScope')
   if (budgetScope !== undefined && budgetScope !== 'team' && budgetScope !== 'project') {
     throw new TimeTrackingError(400, 'InvalidBudgetScope', 'budgetScope must be team or project.')
@@ -502,7 +503,7 @@ function readReportInput(
     from,
     to,
     timeZone,
-    groupBy: readGroupBy(groupBy),
+    groupBy,
     includeCosts,
     ...(budgetScope ? { budgetScope } : {}),
     ...(budgetScopeId ? { budgetScopeId } : {}),
@@ -634,6 +635,42 @@ function readStatus(value: string | undefined): TimeEntryStatus {
 
 /** Converts a validated group-by query into its contract union. */
 function readGroupBy(value: string): TimeTrackingGroupBy {
-  if (value === 'day' || value === 'week' || value === 'user' || value === 'project' || value === 'work-item') return value
-  throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, or work-item.')
+  if (value === 'day' || value === 'week' || value === 'user' || value === 'project' || value === 'work-item' || value === 'category') return value
+  throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, work-item, or category.')
+}
+
+/**
+ * Reads the interval of a create request: `startAt` and `endAt`, or `date` and `minutes`.
+ *
+ * A `date` and `minutes` request may name the IANA `timeZone` of its date and defaults to UTC.
+ *
+ * @param body - Parsed JSON request body.
+ * @returns Either the interval times or the date-and-minutes input for the service to resolve.
+ */
+function readCreateInterval(body: Record<string, unknown>): Pick<CreateTimeEntryInput, 'startAt' | 'endAt' | 'duration'> {
+  if (body.date === undefined && body.minutes === undefined) {
+    return {
+      startAt: readRequiredString(body.startAt, 'Start time'),
+      endAt: readRequiredString(body.endAt, 'End time'),
+    }
+  }
+  if (body.startAt !== undefined || body.endAt !== undefined) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'Send either startAt and endAt, or date and minutes, not both.')
+  }
+  return {
+    duration: {
+      date: readRequiredString(body.date, 'Work date'),
+      minutes: readRequiredNumber(body.minutes, 'Minutes'),
+      timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
+    },
+  }
+}
+
+/** Reads a work category from a request body. */
+function readCategory(value: unknown): TimeEntryCategory {
+  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  if (category === undefined) {
+    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
+  }
+  return category
 }

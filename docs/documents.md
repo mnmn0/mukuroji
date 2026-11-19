@@ -155,3 +155,20 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 同じ canonical ID を使います。Whiteboard は canvas を広く保つため toolbar を floating control
 にし、public share 画面では編集 control を表示しません。Mention 通知の deep link は対象 thread
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
+
+### 同梱テンプレートと宿題の Work Item 化
+
+Documents home の「同梱テンプレート」から、議事録・設計書・振り返り（KPT）のページを作れます。
+テンプレートは Web に同梱しており、Workspace ごとの保存や初期化は不要です。作成時に今日の日付、
+選んだ Project の名前、入力した参加者をタイトルと本文に差し込み、Project を選んだ場合はその
+Project scope にページを作ります。
+
+編集中の checklist 項目には「Work Item にする」が出ます。Project・担当者・期限（任意）を選ぶと
+Work Item を作り、その checklist block を起点にした Work Item relation を
+`checklist-item:<blockId>:<itemId>` の ID で保存します。作成済みの項目には「Work Item を開く」が
+出て、Work Item 側の関連ドキュメントからは元のページへ戻れます。Work Item の作成後にリンクだけが
+失敗した場合は、同じ画面で再実行するとリンクだけをやり直します。Team に backlog 区分の status があれば、
+Work Item はクイック作成と同じく backlog に仮保存するので、必須カスタムフィールドは後から入力できます。
+リンク済みの項目は編集権限のない閲覧者にも「Work Item を開く」として表示します。
+ダイアログを開いている間に別の編集で同じ項目がリンクされた場合は、そのリンクを置き換えずに作成を止めます。
+
