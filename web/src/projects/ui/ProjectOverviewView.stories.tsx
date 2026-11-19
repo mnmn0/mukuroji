@@ -44,7 +44,7 @@ const meta = {
     t: createTranslator('ja'),
     team: coreTeam,
     updateTarget: findProjectOverviewUpdateTarget(planningSnapshotFixture.updateTargets, 'core-team', 'refero'),
-    workItemSummary: summarizeProjectOverviewWorkItems(referoTaskFixtures, new Date('2026-06-10T00:00:00.000Z')),
+    workItemSummary: summarizeProjectOverviewWorkItems(referoTaskFixtures, 'core-team', new Date('2026-06-10T00:00:00.000Z')),
   },
   decorators: [(Story) => (
     <MemoryRouter>

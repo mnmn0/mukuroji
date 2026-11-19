@@ -87,7 +87,7 @@ function renderOverview(props: Partial<ProjectOverviewViewProps> = {}) {
         schedule={selectProjectOverviewSchedule(planningSnapshotFixture.entities, 'core-team', 'refero')}
         t={createTranslator('en')}
         team={coreTeam}
-        workItemSummary={summarizeProjectOverviewWorkItems(referoTaskFixtures, referenceDate)}
+        workItemSummary={summarizeProjectOverviewWorkItems(referoTaskFixtures, 'core-team', referenceDate)}
         {...props}
       />
     </MemoryRouter>,
@@ -96,7 +96,7 @@ function renderOverview(props: Partial<ProjectOverviewViewProps> = {}) {
 
 describe('Project overview model', () => {
   test('counts progress and attention over the Project Work Items', () => {
-    const summary = summarizeProjectOverviewWorkItems(referoTaskFixtures, referenceDate)
+    const summary = summarizeProjectOverviewWorkItems(referoTaskFixtures, 'core-team', referenceDate)
 
     expect(summary.totalCount).toBe(referoTaskFixtures.length)
     expect(summary.openCount + summary.doneCount).toBeLessThanOrEqual(summary.totalCount)
@@ -104,7 +104,19 @@ describe('Project overview model', () => {
     expect(summary.completionRate).toBe(
       Math.round((summary.doneCount / summary.totalCount) * 100),
     )
-    expect(summarizeProjectOverviewWorkItems([], referenceDate).completionRate).toBe(0)
+    expect(summarizeProjectOverviewWorkItems([], 'core-team', referenceDate).completionRate).toBe(0)
+  })
+
+  test('counts only the Work Items of the overview Team when Teams share a Project ID', () => {
+    const otherTeamWorkItems = referoTaskFixtures.map((workItem) => ({ ...workItem, teamId: 'design-team' }))
+    const summary = summarizeProjectOverviewWorkItems(
+      [...referoTaskFixtures, ...otherTeamWorkItems],
+      'core-team',
+      referenceDate,
+    )
+
+    expect(summary).toEqual(summarizeProjectOverviewWorkItems(referoTaskFixtures, 'core-team', referenceDate))
+    expect(summarizeProjectOverviewWorkItems(otherTeamWorkItems, 'core-team', referenceDate).totalCount).toBe(0)
   })
 
   test('keeps only live schedule entities of the Team-qualified Project, nearest end first', () => {

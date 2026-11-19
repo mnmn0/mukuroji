@@ -86,14 +86,20 @@ export type ProjectOverviewMembers = {
 /**
  * Counts the Project's Work Items for the overview progress and attention widgets.
  *
- * @param workItems - Readable Work Items assigned to the Project.
+ * Two Teams can use the same Project ID, and the Project list returns both Teams' Work
+ * Items, so only the Work Items of the overview's Team are counted.
+ *
+ * @param projectWorkItems - Readable Work Items assigned to the Project.
+ * @param teamId - Team that owns the Project shown by the overview.
  * @param referenceDate - Instant that decides whether a due date has passed.
  * @returns Progress and attention counts.
  */
 export function summarizeProjectOverviewWorkItems(
-  workItems: readonly CanonicalWorkItem[],
+  projectWorkItems: readonly CanonicalWorkItem[],
+  teamId: string,
   referenceDate: Date,
 ): ProjectOverviewWorkItemSummary {
+  const workItems = projectWorkItems.filter((workItem) => workItem.teamId === teamId)
   let openCount = 0
   let inProgressCount = 0
   let doneCount = 0

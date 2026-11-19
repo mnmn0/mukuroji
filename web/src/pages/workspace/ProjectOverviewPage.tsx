@@ -40,10 +40,12 @@ export function ProjectOverviewPage() {
   const canRead = workspace.canLoadWorkspaceData && Boolean(team && project)
   const workItems = useProjectIssues(workspace.accessToken, projectId, canRead)
   const planning = usePlanningSnapshot(workspace.accessToken, canRead)
-  const members = useProjectMembers(workspace.accessToken, projectId, canRead)
+  const members = useProjectMembers(workspace.accessToken, projectId, canRead, team?.id)
   const workItemSummary = useMemo(
-    () => workItems.data ? summarizeProjectOverviewWorkItems(workItems.data, new Date()) : undefined,
-    [workItems.data],
+    () => workItems.data && team
+      ? summarizeProjectOverviewWorkItems(workItems.data, team.id, new Date())
+      : undefined,
+    [team, workItems.data],
   )
   const workItemsError: ProjectOverviewWorkItemsError | undefined = workItems.error
     ? workItems.error instanceof TeamIssuesApiError && workItems.error.code === 'WorkItemListLimitExceeded'
