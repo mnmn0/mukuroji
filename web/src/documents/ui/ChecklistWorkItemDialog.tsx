@@ -165,7 +165,7 @@ export function ChecklistWorkItemDialog({
       <section
         aria-labelledby={`${fieldId}-title`}
         aria-modal="true"
-        className="w-full max-w-[520px] rounded-xl border border-[var(--workbench-border)] bg-surface p-6 shadow-[0_28px_90px_rgba(23,32,29,0.3)]"
+        className="max-h-[calc(100svh-48px)] w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--workbench-border)] bg-surface p-6 shadow-[0_28px_90px_rgba(23,32,29,0.3)]"
         onKeyDown={(event) => {
           if (event.key === 'Escape' && !isSubmitting) onClose()
           trapModalFocus(event, dialogRef.current)
