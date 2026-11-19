@@ -57,7 +57,7 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
-      requireProjectAccess(principal, context, teamId, projectId, 'manager')
+      await requireProjectManager(principal, context, teamId, projectId)
       const response = await captureProjectScheduleBaselineUseCase(
         createBaselineDependencies(principal.directoryId, teamId),
         { workspaceId: principal.directoryId, teamId, projectId },
@@ -175,15 +175,49 @@ function requireProjectAccess(
   context: TeamPermissionContext,
   teamId: string,
   projectId: string,
-  minimumRole: 'viewer' | 'manager',
+  minimumRole: 'viewer',
 ) {
   const inTeam = context.team.id === teamId && context.team.projects.some((project) => project.id === projectId)
-  if (!inTeam || !canAccessTeamProject(principal, context, teamId, projectId, 'viewer')) {
+  if (!inTeam || !canAccessTeamProject(principal, context, teamId, projectId, minimumRole)) {
     throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
   }
-  if (minimumRole === 'manager' && !canAccessTeamProject(principal, context, teamId, projectId, 'manager')) {
-    throw new ProjectDataError(403, 'ScheduleBaselineForbidden', 'Only a Project manager can capture a schedule baseline.')
+}
+
+/**
+ * Requires the principal to manage the Project in this Team.
+ *
+ * The route reads the Team context at viewer level, and a direct Team grant then reports every
+ * Project role as viewer, which would hide a manager. The roles are read again at manager
+ * level before refusing.
+ *
+ * @param principal - Authenticated principal.
+ * @param context - Team permission context read at viewer level.
+ * @param teamId - Requested Team.
+ * @param projectId - Project ID.
+ */
+async function requireProjectManager(
+  principal: Parameters<typeof canAccessAssignedProject>[0],
+  context: TeamPermissionContext,
+  teamId: string,
+  projectId: string,
+) {
+  requireProjectAccess(principal, context, teamId, projectId, 'viewer')
+  if (canAccessTeamProject(principal, context, teamId, projectId, 'manager')) return
+  const forbidden = new ProjectDataError(
+    403,
+    'ScheduleBaselineForbidden',
+    'Only a Project manager can capture a schedule baseline.',
+  )
+  let managerContext: TeamPermissionContext
+  try {
+    managerContext = await requireTeamPermission(principal, teamId, 'manager')
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) throw forbidden
+    throw error
   }
+  if (managerContext.directTeamGrant) return
+  if (canAccessTeamProject(principal, managerContext, teamId, projectId, 'manager')) return
+  throw forbidden
 }
 
 /**
