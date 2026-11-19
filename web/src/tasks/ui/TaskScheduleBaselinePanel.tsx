@@ -72,6 +72,9 @@ export function TaskScheduleBaselinePanel({
       onCapture={() => {
         void capture()
       }}
+      onRetry={() => {
+        void query.mutate()
+      }}
       state={
         query.data
           ? { status: 'ready', baseline: query.data.baseline }
@@ -110,6 +113,8 @@ export type TaskScheduleBaselineViewProps = {
   disabled: boolean
   /** Saves a new Project baseline. */
   onCapture: () => void
+  /** Reads the existing baseline again without saving a new one. */
+  onRetry: () => void
   /** Translator for labels. */
   t: (key: MessageKey) => string
 }
@@ -127,6 +132,7 @@ export function TaskScheduleBaselineView({
   captureFailed,
   disabled,
   onCapture,
+  onRetry,
   t,
 }: TaskScheduleBaselineViewProps) {
   const baseline = state.status === 'ready' ? state.baseline : null
@@ -146,7 +152,12 @@ export function TaskScheduleBaselineView({
     >
       <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('tasks.detail.scheduleBaseline')}</h3>
       {state.status === 'error' ? (
-        <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineLoadError')}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineLoadError')}</p>
+          <button className="workbench-button-secondary min-h-[44px] px-3" onClick={onRetry} type="button">
+            {t('tasks.detail.baselineRetry')}
+          </button>
+        </div>
       ) : null}
       {state.status === 'ready' && !baseline ? (
         <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineNone')}</p>

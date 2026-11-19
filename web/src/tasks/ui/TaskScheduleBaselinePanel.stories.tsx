@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type { CanonicalWorkItem } from '@mukuroji/contracts'
-import { expect, fn, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TaskScheduleBaselineView } from './TaskScheduleBaselinePanel'
 import { taskViewStoryTasks } from './TaskView.stories.fixtures'
@@ -28,6 +28,7 @@ const meta = {
     captureFailed: false,
     disabled: false,
     onCapture: fn(),
+    onRetry: fn(),
     state: {
       status: 'ready',
       baseline: {
@@ -85,9 +86,12 @@ export const Loading: Story = {
 /** Reading or saving the baseline failed. */
 export const Failed: Story = {
   args: { canCapture: true, captureFailed: true, state: { status: 'error' } },
-  play: async ({ canvasElement }) => {
+  play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByText(t('tasks.detail.baselineLoadError'))).toBeInTheDocument()
     await expect(canvas.getByRole('alert')).toHaveTextContent(t('tasks.detail.baselineCaptureError'))
+    await userEvent.click(canvas.getByRole('button', { name: t('tasks.detail.baselineRetry') }))
+    await expect(args.onRetry).toHaveBeenCalled()
+    await expect(args.onCapture).not.toHaveBeenCalled()
   },
 }
