@@ -102,6 +102,12 @@ test('derives one stable event ID per occurrence and recipient', () => {
   expect(otherRecipient.eventId).not.toBe(first.eventId)
 })
 
+test('accepts the longest report ID allowed by the report contract', () => {
+  const longReportId = `r${'x'.repeat(127)}`
+
+  expect(() => createAnalyticsDeliveryAuditEvent(createDelivery({ id: longReportId }), 30)).not.toThrow()
+})
+
 test('writes the event conditionally and treats a duplicate retry as delivered', async () => {
   const commands: PutCommand[] = []
   let duplicate = false

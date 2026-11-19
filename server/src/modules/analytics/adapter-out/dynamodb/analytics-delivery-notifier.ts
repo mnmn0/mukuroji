@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { PutCommand } from '@aws-sdk/lib-dynamodb'
 import {
   calculateAuditExpiresAt,
@@ -88,8 +89,11 @@ export function createAnalyticsDeliveryAuditEvent(
       kind: 'system',
       displayName: 'Mukuroji analytics schedule',
     },
-    // The occurrence key already binds the schedule time, report definition, and recipient.
-    idempotencyKey: `analytics-delivery-notification-v1:${report.id}:${receipt.occurrenceKey}`,
+    // The occurrence key binds the schedule time, report definition, and recipient. Hashing keeps
+    // the key within the audit limit for the longest report IDs.
+    idempotencyKey: `analytics-delivery-notification-v1:${createHash('sha256')
+      .update(`${report.id}\0${receipt.occurrenceKey}`)
+      .digest('hex')}`,
     occurredAt: deliveredAt,
     request: {
       method: 'SCHEDULE',
