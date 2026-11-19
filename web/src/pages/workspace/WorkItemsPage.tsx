@@ -16,7 +16,10 @@ import { CrossProjectWorkItemList } from '../../features/cross-project-work-item
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
+import {
+  WorkspaceConfigurationLoadNotice,
+  WorkspaceTaskLoadNotice,
+} from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -69,9 +72,10 @@ export function WorkItemsPage() {
     () => createCrossProjectWorkItemJobRoleOptions(
       workItems.tasks,
       workItems.configurationsByTeam,
-      state.contributorJobRoleId,
+      workspace.teams,
+      state.contributorJobRole,
     ),
-    [state.contributorJobRoleId, workItems.configurationsByTeam, workItems.tasks],
+    [state.contributorJobRole, workItems.configurationsByTeam, workItems.tasks, workspace.teams],
   )
   const changeState = useCallback((next: CrossProjectWorkItemListState) => {
     setSearchParams(createCrossProjectWorkItemListSearchParams(next), { replace: true })
@@ -88,13 +92,24 @@ export function WorkItemsPage() {
   return (
     // The list shows its own loading state, so changing a filter keeps the toolbar mounted.
     <WorkspaceRouteContent
-      sessionErrors={[workItems.workItemsError, workItems.configurationsError, workspaceAccess.error]}
+      sessionErrors={[
+        workItems.workItemsError,
+        workItems.configurationsError,
+        ...workItems.configurationErrors,
+        workspaceAccess.error,
+      ]}
     >
       <div className="grid gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <WorkspaceTaskLoadNotice
           error={workItems.workItemsError}
           failedProjectCount={workItems.failedProjectCount}
           t={t}
+        />
+        <WorkspaceConfigurationLoadNotice
+          failedTeamCount={workItems.configurationFailedTeamIds.length}
+          onRetry={() => void workItems.mutateConfigurations()}
+          t={t}
+          testId="work-items-configuration-error"
         />
         <CrossProjectWorkItemList
           configurationsByTeam={workItems.configurationsByTeam}

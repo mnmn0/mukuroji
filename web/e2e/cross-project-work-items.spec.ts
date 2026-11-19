@@ -103,7 +103,7 @@ test('Issue #381: lists Work Items across Projects, filters by contributor, and 
   await expect(page).toHaveURL(/project=core-team%3Arefero/)
   expect(listQueries.at(-1)?.get('teamId')).toBe('core-team')
 
-  await list.getByLabel('Job role').selectOption('designer')
+  await list.getByLabel('Job role').selectOption({ label: 'Designer (コアチーム)' })
   await expect(groups).toHaveCount(1)
   await expect(groups.first().getByRole('button', { name: /Roadmap with my contribution/ })).toBeVisible()
   await expect(groups.first()).toContainText('demo@example.com (Designer)')
@@ -111,7 +111,7 @@ test('Issue #381: lists Work Items across Projects, filters by contributor, and 
   // Reloading the URL restores the same view.
   await page.reload()
   await expect(page.getByTestId('cross-project-work-item-group')).toHaveCount(1)
-  await expect(page.getByLabel('Job role')).toHaveValue('designer')
+  await expect(page.getByLabel('Job role')).toHaveValue('core-team:designer')
 
   await page.getByLabel('Job role').selectOption('')
   await page.getByLabel('I own or contribute').click()
@@ -133,4 +133,17 @@ test('Issue #381: a failed Work Item read shows the load notice instead of an em
   await expect(page.getByTestId('workspace-task-partial-error')).toBeVisible()
   await expect(page.getByTestId('cross-project-work-items-count')).toHaveCount(0)
   await expect(page.getByText('No Work Items match these filters.')).toHaveCount(0)
+})
+
+test('Issue #381: a failed Team configuration read shows the configuration notice with retry', async ({ page }) => {
+  await mockWorkspace(page)
+  await page.route('**/api/teams/design-team/work-item-configuration', (route) =>
+    route.fulfill({ status: 500, json: { message: 'Unavailable' } }))
+
+  await page.goto('/work-items')
+
+  await expect(page.getByTestId('cross-project-work-item-group')).toHaveCount(3)
+  const notice = page.getByTestId('work-items-configuration-error')
+  await expect(notice).toBeVisible()
+  await expect(notice.getByRole('button')).toBeVisible()
 })

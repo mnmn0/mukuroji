@@ -76,7 +76,7 @@ describe('cross-Project Work Item list state', () => {
       openOnly: false,
       mine: true,
       contributorMemberId: 'me@example.com',
-      contributorJobRoleId: 'designer',
+      contributorJobRole: { teamId: 'core:x', jobRoleId: 'design/er' },
       grouping: 'assignee',
     }
     const params = createCrossProjectWorkItemListSearchParams(state)
@@ -137,8 +137,14 @@ describe('filterCrossProjectWorkItems', () => {
   test('filters by owner or contributor, contributor member, and job role', () => {
     expect(ids({ mine: true })).toEqual(['a1', 'a2'])
     expect(ids({ contributorMemberId: 'me@example.com' })).toEqual(['a2'])
-    expect(ids({ contributorJobRoleId: 'qa' })).toEqual(['o1'])
-    expect(ids({ contributorMemberId: 'me@example.com', contributorJobRoleId: 'qa' })).toEqual([])
+    expect(ids({ contributorJobRole: { teamId: 'ops', jobRoleId: 'qa' } })).toEqual(['o1'])
+    expect(ids({ contributorMemberId: 'me@example.com', contributorJobRole: { teamId: 'ops', jobRoleId: 'qa' } })).toEqual([])
+  })
+
+  test('matches a job role only within its own Team', () => {
+    expect(ids({ contributorJobRole: { teamId: 'core', jobRoleId: 'designer' } })).toEqual(['a2'])
+    expect(ids({ contributorJobRole: { teamId: 'ops', jobRoleId: 'designer' } })).toEqual([])
+    expect(ids({ contributorJobRole: { teamId: 'core', jobRoleId: 'qa' } })).toEqual([])
   })
 })
 
@@ -184,21 +190,28 @@ describe('filter options', () => {
     ])
   })
 
-  test('lists configured job roles and roles used by Work Items', () => {
-    const configuration: ResolvedWorkItemConfiguration = {
+  test('keeps job roles with the same ID in different Teams apart', () => {
+    const configurationFor = (teamId: string, name: string): ResolvedWorkItemConfiguration => ({
       configuration: {
         scopeType: 'team',
-        scopeId: 'core',
+        scopeId: teamId,
         schemaVersion: taskViewStorySelectedTask.workflowSchemaVersion,
         revision: 1,
         workflow: { id: 'default', name: 'Default', statuses: [], transitions: [] },
         customFields: [],
-        jobRoles: [{ id: 'designer', name: 'Designer' }],
+        jobRoles: [{ id: 'designer', name }],
       },
-    }
-    expect(createCrossProjectWorkItemJobRoleOptions(workItems, { core: configuration })).toEqual([
-      { id: 'designer', label: 'Designer' },
-      { id: 'qa', label: 'qa' },
+    })
+    expect(createCrossProjectWorkItemJobRoleOptions(
+      workItems,
+      { core: configurationFor('core', 'Designer'), ops: configurationFor('ops', 'UX designer') },
+      teams,
+      { teamId: 'gone', jobRoleId: 'old' },
+    ).map((option) => [option.key, option.name, option.teamName])).toEqual([
+      ['core:designer', 'Designer', 'Core'],
+      ['gone:old', 'old', 'gone'],
+      ['ops:qa', 'qa', 'Ops'],
+      ['ops:designer', 'UX designer', 'Ops'],
     ])
   })
 })

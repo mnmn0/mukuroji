@@ -25,8 +25,12 @@ export type CrossProjectWorkItemListState = {
   mine: boolean
   /** Workspace member key that must appear as a contributor, when set. */
   contributorMemberId?: string
-  /** Job role ID that must appear on a contributor assignment, when set. */
-  contributorJobRoleId?: string
+  /**
+   * Team-qualified job role that must appear on a contributor assignment, when set.
+   *
+   * Job role IDs are unique only within one Team configuration, so the role carries its Team.
+   */
+  contributorJobRole?: CrossProjectWorkItemJobRoleRef
   /** Row grouping of the table. */
   grouping: CrossProjectWorkItemGrouping
 }
@@ -39,6 +43,24 @@ export type CrossProjectWorkItemProjectRef = {
   projectId: string
 }
 
+/** Team-qualified job role reference. */
+export type CrossProjectWorkItemJobRoleRef = {
+  /** Team whose Work Item configuration defines the role. */
+  teamId: string
+  /** Job role ID within that Team configuration. */
+  jobRoleId: string
+}
+
+/** One selectable job role in the list filter. */
+export type CrossProjectWorkItemJobRoleOption = CrossProjectWorkItemJobRoleRef & {
+  /** Stable key used by the URL and by form controls. */
+  key: string
+  /** Job role name; falls back to the ID when no configuration defines it. */
+  name: string
+  /** Display name of the Team that defines the role. */
+  teamName: string
+}
+
 /** One selectable Project in the list filter. */
 export type CrossProjectWorkItemProjectOption = CrossProjectWorkItemProjectRef & {
   /** Stable key used by the URL and by form controls. */
@@ -49,9 +71,9 @@ export type CrossProjectWorkItemProjectOption = CrossProjectWorkItemProjectRef &
   teamName: string
 }
 
-/** One selectable contributor member or job role in the list filter. */
+/** One selectable contributor member in the list filter. */
 export type CrossProjectWorkItemFilterOption = {
-  /** Member key or job role ID. */
+  /** Workspace member key. */
   id: string
   /** Display label; falls back to the ID when no name is known. */
   label: string
@@ -81,8 +103,8 @@ const queryParameter = {
   group: 'group',
 } as const
 
-/** Separator between the encoded Team and Project IDs of one `project` query value. */
-const projectRefSeparator = ':'
+/** Separator between the encoded Team ID and the Team-local ID of one query value. */
+const teamScopedIdSeparator = ':'
 
 /** Default state used when the URL carries no list parameters. */
 export const defaultCrossProjectWorkItemListState: CrossProjectWorkItemListState = {
@@ -101,24 +123,43 @@ export const defaultCrossProjectWorkItemListState: CrossProjectWorkItemListState
  * @returns Key used in the URL and in form controls.
  */
 export function createCrossProjectWorkItemProjectKey(ref: CrossProjectWorkItemProjectRef) {
-  return `${encodeURIComponent(ref.teamId)}${projectRefSeparator}${encodeURIComponent(ref.projectId)}`
+  return createTeamScopedKey(ref.teamId, ref.projectId)
 }
 
 /**
- * Parses one Project key created by {@link createCrossProjectWorkItemProjectKey}.
+ * Creates the stable key of a Team-qualified job role reference.
+ *
+ * @param ref - Team-qualified job role reference.
+ * @returns Key used in the URL and in form controls.
+ */
+export function createCrossProjectWorkItemJobRoleKey(ref: CrossProjectWorkItemJobRoleRef) {
+  return createTeamScopedKey(ref.teamId, ref.jobRoleId)
+}
+
+/**
+ * Joins a Team ID and a Team-local ID, URI-encoding both so a separator inside an ID is kept.
+ *
+ * @param teamId - Owning Team ID.
+ * @param localId - ID that is unique only within the Team.
+ * @returns The combined key.
+ */
+function createTeamScopedKey(teamId: string, localId: string) {
+  return `${encodeURIComponent(teamId)}${teamScopedIdSeparator}${encodeURIComponent(localId)}`
+}
+
+/**
+ * Splits a key created by {@link createTeamScopedKey}.
  *
  * @param value - Raw key from the URL.
- * @returns The Project reference, or undefined for a malformed key.
+ * @returns The Team ID and Team-local ID, or undefined for a malformed key.
  */
-function parseCrossProjectWorkItemProjectKey(
-  value: string,
-): CrossProjectWorkItemProjectRef | undefined {
-  const separatorIndex = value.indexOf(projectRefSeparator)
+function parseTeamScopedKey(value: string): [teamId: string, localId: string] | undefined {
+  const separatorIndex = value.indexOf(teamScopedIdSeparator)
   if (separatorIndex <= 0 || separatorIndex === value.length - 1) return undefined
   try {
     const teamId = decodeURIComponent(value.slice(0, separatorIndex))
-    const projectId = decodeURIComponent(value.slice(separatorIndex + 1))
-    return teamId && projectId ? { teamId, projectId } : undefined
+    const localId = decodeURIComponent(value.slice(separatorIndex + 1))
+    return teamId && localId ? [teamId, localId] : undefined
   } catch {
     return undefined
   }
@@ -135,17 +176,19 @@ export function parseCrossProjectWorkItemListState(
 ): CrossProjectWorkItemListState {
   const projectsByKey = new Map<string, CrossProjectWorkItemProjectRef>()
   for (const value of searchParams.getAll(queryParameter.project)) {
-    const ref = parseCrossProjectWorkItemProjectKey(value)
-    if (ref) projectsByKey.set(createCrossProjectWorkItemProjectKey(ref), ref)
+    const parts = parseTeamScopedKey(value)
+    if (!parts) continue
+    const ref = { teamId: parts[0], projectId: parts[1] }
+    projectsByKey.set(createCrossProjectWorkItemProjectKey(ref), ref)
   }
   const contributorMemberId = searchParams.get(queryParameter.member)?.trim()
-  const contributorJobRoleId = searchParams.get(queryParameter.role)?.trim()
+  const roleParts = parseTeamScopedKey(searchParams.get(queryParameter.role) ?? '')
   return {
     projects: [...projectsByKey.values()],
     openOnly: searchParams.get(queryParameter.status) !== 'all',
     mine: searchParams.get(queryParameter.mine) === '1',
     ...(contributorMemberId ? { contributorMemberId } : {}),
-    ...(contributorJobRoleId ? { contributorJobRoleId } : {}),
+    ...(roleParts ? { contributorJobRole: { teamId: roleParts[0], jobRoleId: roleParts[1] } } : {}),
     grouping: searchParams.get(queryParameter.group) === 'assignee' ? 'assignee' : 'project',
   }
 }
@@ -166,7 +209,9 @@ export function createCrossProjectWorkItemListSearchParams(
   if (!state.openOnly) searchParams.set(queryParameter.status, 'all')
   if (state.mine) searchParams.set(queryParameter.mine, '1')
   if (state.contributorMemberId) searchParams.set(queryParameter.member, state.contributorMemberId)
-  if (state.contributorJobRoleId) searchParams.set(queryParameter.role, state.contributorJobRoleId)
+  if (state.contributorJobRole) {
+    searchParams.set(queryParameter.role, createCrossProjectWorkItemJobRoleKey(state.contributorJobRole))
+  }
   if (state.grouping !== 'project') searchParams.set(queryParameter.group, state.grouping)
   return searchParams
 }
@@ -228,9 +273,11 @@ export function filterCrossProjectWorkItems(
     ) {
       return false
     }
+    const role = state.contributorJobRole
     if (
-      state.contributorJobRoleId &&
-      !assignments.some((assignment) => assignment.jobRoleId === state.contributorJobRoleId)
+      role &&
+      (workItem.teamId !== role.teamId ||
+        !assignments.some((assignment) => assignment.jobRoleId === role.jobRoleId))
     ) {
       return false
     }
@@ -286,37 +333,41 @@ export function createCrossProjectWorkItemMemberOptions(
 }
 
 /**
- * Lists the job roles defined by the loaded Team configurations or used by the Work Items.
+ * Lists the job roles of the loaded Team configurations, and roles the Work Items use, per Team.
+ *
+ * A role ID is unique only within its Team configuration, so every option keeps its Team.
  *
  * @param workItems - Work Items the viewer can read.
  * @param configurationsByTeam - Resolved Team configurations keyed by Team ID.
- * @param selectedJobRoleId - Role kept in the list even when nothing loaded defines it.
- * @returns Job role options ordered by label.
+ * @param teams - Workspace directory used for Team names.
+ * @param selectedJobRole - Role kept in the list even when nothing loaded defines it.
+ * @returns Job role options ordered by name and then Team name.
  */
 export function createCrossProjectWorkItemJobRoleOptions(
   workItems: readonly CanonicalWorkItem[],
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
-  selectedJobRoleId?: string,
-): CrossProjectWorkItemFilterOption[] {
-  const labels = new Map<string, string>()
-  for (const resolved of Object.values(configurationsByTeam)) {
-    for (const role of resolved.configuration.jobRoles ?? []) {
-      if (!labels.has(role.id)) labels.set(role.id, role.name)
-    }
+  teams: readonly ProjectDirectoryTeam[],
+  selectedJobRole?: CrossProjectWorkItemJobRoleRef,
+): CrossProjectWorkItemJobRoleOption[] {
+  const options = new Map<string, CrossProjectWorkItemJobRoleOption>()
+  const add = (teamId: string, jobRoleId: string, name: string) => {
+    const key = createCrossProjectWorkItemJobRoleKey({ teamId, jobRoleId })
+    if (options.has(key)) return
+    const teamName = teams.find((team) => team.id === teamId)?.name ?? teamId
+    options.set(key, { key, teamId, jobRoleId, name, teamName })
+  }
+  for (const [teamId, resolved] of Object.entries(configurationsByTeam)) {
+    for (const role of resolved.configuration.jobRoles ?? []) add(teamId, role.id, role.name)
   }
   for (const workItem of workItems) {
     for (const assignment of workItem.contributorAssignments ?? []) {
-      if (assignment.jobRoleId && !labels.has(assignment.jobRoleId)) {
-        labels.set(assignment.jobRoleId, assignment.jobRoleId)
-      }
+      if (assignment.jobRoleId) add(workItem.teamId, assignment.jobRoleId, assignment.jobRoleId)
     }
   }
-  if (selectedJobRoleId && !labels.has(selectedJobRoleId)) {
-    labels.set(selectedJobRoleId, selectedJobRoleId)
-  }
-  return [...labels]
-    .map(([id, label]) => ({ id, label }))
-    .sort((left, right) => left.label.localeCompare(right.label))
+  if (selectedJobRole) add(selectedJobRole.teamId, selectedJobRole.jobRoleId, selectedJobRole.jobRoleId)
+  return [...options.values()].sort((left, right) =>
+    left.name.localeCompare(right.name) || left.teamName.localeCompare(right.teamName),
+  )
 }
 
 /**

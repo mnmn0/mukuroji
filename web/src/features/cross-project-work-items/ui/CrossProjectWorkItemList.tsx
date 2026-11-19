@@ -6,8 +6,10 @@ import {
   resolveWorkItemWorkflowStatusLabel,
 } from '../../../work-items/model/workItemDisplay'
 import {
+  createCrossProjectWorkItemJobRoleKey,
   createCrossProjectWorkItemProjectKey,
   type CrossProjectWorkItemFilterOption,
+  type CrossProjectWorkItemJobRoleOption,
   type CrossProjectWorkItemGroup,
   type CrossProjectWorkItemListState,
   type CrossProjectWorkItemProjectOption,
@@ -24,8 +26,8 @@ export type CrossProjectWorkItemListProps = {
   projectOptions: CrossProjectWorkItemProjectOption[]
   /** Members who appear as contributors on the readable Work Items. */
   memberOptions: CrossProjectWorkItemFilterOption[]
-  /** Job roles that contributors can be planned against. */
-  jobRoleOptions: CrossProjectWorkItemFilterOption[]
+  /** Team-qualified job roles that contributors can be planned against. */
+  jobRoleOptions: CrossProjectWorkItemJobRoleOption[]
   /** Grouped, filtered Work Items. */
   groups: CrossProjectWorkItemGroup[]
   /** Number of Work Items across every group. */
@@ -75,7 +77,7 @@ export function CrossProjectWorkItemList({
 }: CrossProjectWorkItemListProps) {
   const [copyLinkStatus, setCopyLinkStatus] = useState<CopyLinkStatus>('idle')
   const selectedProjectKeys = new Set(state.projects.map(createCrossProjectWorkItemProjectKey))
-  const roleLabels = new Map(jobRoleOptions.map((option) => [option.id, option.label]))
+  const roleNames = new Map(jobRoleOptions.map((option) => [option.key, option.name]))
   const update = (patch: Partial<CrossProjectWorkItemListState>) => {
     setCopyLinkStatus('idle')
     onChangeState({ ...state, ...patch })
@@ -144,12 +146,19 @@ export function CrossProjectWorkItemList({
           {t('workItems.crossProject.jobRole')}
           <select
             className="workbench-input min-h-9 px-2 text-sm"
-            onChange={(event) => update({ contributorJobRoleId: event.target.value || undefined })}
-            value={state.contributorJobRoleId ?? ''}
+            onChange={(event) => {
+              const option = jobRoleOptions.find((candidate) => candidate.key === event.target.value)
+              update({
+                contributorJobRole: option
+                  ? { teamId: option.teamId, jobRoleId: option.jobRoleId }
+                  : undefined,
+              })
+            }}
+            value={state.contributorJobRole ? createCrossProjectWorkItemJobRoleKey(state.contributorJobRole) : ''}
           >
             <option value="">{t('workItems.crossProject.any')}</option>
             {jobRoleOptions.map((option) => (
-              <option key={option.id} value={option.id}>{option.label}</option>
+              <option key={option.key} value={option.key}>{option.name} ({option.teamName})</option>
             ))}
           </select>
         </label>
@@ -266,7 +275,7 @@ export function CrossProjectWorkItemList({
                       {workItem.assigneeUserId ? resolveWorkItemAssignee(workItem) : '-'}
                     </td>
                     <td className="px-4 py-2 max-[760px]:hidden">
-                      {formatContributors(workItem, memberLabels, roleLabels)}
+                      {formatContributors(workItem, memberLabels, roleNames)}
                     </td>
                     <td className="px-4 py-2 max-[760px]:hidden">{workItem.dueDate || '-'}</td>
                   </tr>
@@ -285,20 +294,23 @@ export function CrossProjectWorkItemList({
  *
  * @param workItem - Work Item whose contributors to show.
  * @param memberLabels - Member display labels keyed by member key.
- * @param roleLabels - Job role names keyed by role ID.
+ * @param roleNames - Job role names keyed by Team-qualified role key.
  * @returns Comma-separated contributor labels, or `-` when there are none.
  */
 function formatContributors(
   workItem: CanonicalWorkItem,
   memberLabels: ReadonlyMap<string, string>,
-  roleLabels: ReadonlyMap<string, string>,
+  roleNames: ReadonlyMap<string, string>,
 ) {
   const labels = (workItem.contributorAssignments ?? []).map((assignment) => {
     const member = assignment.memberUserId
       ? memberLabels.get(assignment.memberUserId) ?? assignment.memberUserId
       : undefined
     const role = assignment.jobRoleId
-      ? roleLabels.get(assignment.jobRoleId) ?? assignment.jobRoleId
+      ? roleNames.get(createCrossProjectWorkItemJobRoleKey({
+        teamId: workItem.teamId,
+        jobRoleId: assignment.jobRoleId,
+      })) ?? assignment.jobRoleId
       : undefined
     return member && role ? `${member} (${role})` : member ?? role ?? ''
   }).filter(Boolean)
