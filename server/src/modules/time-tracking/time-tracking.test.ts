@@ -1,8 +1,38 @@
 import { describe, expect, test } from 'bun:test'
 import {
   InMemoryTimeTrackingRepository,
+  TimeTrackingError,
   TimeTrackingService,
+  type TimeTrackingIdempotencyPort,
 } from './time-tracking'
+
+/**
+ * Creates an in-memory idempotency receipt store that replays a completed key
+ * with the same fingerprint and rejects the key with any other fingerprint.
+ */
+function createIdempotencyStore(): TimeTrackingIdempotencyPort {
+  const receipts = new Map<string, { fingerprint: string; response?: unknown }>()
+  return {
+    async reserveIdempotency(request) {
+      const key = `${request.credentialId}\0${request.idempotencyKey}`
+      const receipt = receipts.get(key)
+      if (!receipt) {
+        receipts.set(key, { fingerprint: request.requestFingerprint })
+        return { status: 'reserved', reservationId: key }
+      }
+      if (receipt.fingerprint !== request.requestFingerprint) {
+        throw new TimeTrackingError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+      }
+      return receipt.response === undefined ? { status: 'in-progress' } : { status: 'replay', response: receipt.response }
+    },
+    async completeIdempotency(request) {
+      receipts.set(request.reservationId, { fingerprint: request.requestFingerprint, response: request.response })
+    },
+    async releaseIdempotency(request) {
+      receipts.delete(request.reservationId)
+    },
+  }
+}
 
 /** Creates an isolated service fixture with deterministic IDs and clock values. */
 function createFixture() {
@@ -377,5 +407,41 @@ describe('TimeTrackingService', () => {
       userId: 'member-1',
     })
     expect(await service.getActiveTimer('workspace-1', 'member-1')).toBeUndefined()
+  })
+
+  test('replays an entry update whose derived authorization changed between retries', async () => {
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-02T12:00:00.000Z'),
+      createId: (() => {
+        let id = 0
+        return () => `id-${++id}`
+      })(),
+      idempotency: createIdempotencyStore(),
+    })
+    const entry = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T10:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      source: 'manual',
+    }, false)
+    const update = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      expectedRevision: entry.revision,
+      workItemId: 'work-item-2',
+      projectId: 'project-2',
+      idempotencyKey: 'move-1',
+    }
+    const first = await service.updateEntry({ ...update, canManageRates: false, authorizedRevision: entry.revision })
+    const retry = await service.updateEntry({ ...update, canManageRates: true, authorizedRevision: first.revision })
+    expect(retry).toEqual(first)
   })
 })
