@@ -1360,7 +1360,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
           directoryId: 'user#demo@example.com',
           entryKey: '000010#000000#TEAM#core-team',
         },
-        UpdateExpression: 'SET archivedAt = :archivedAt',
+        UpdateExpression: 'SET archivedAt = :archivedAt ADD lifecycleRevision :one',
         ConditionExpression:
           'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
       },
@@ -1385,7 +1385,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
           directoryId: 'user#demo@example.com',
           entryKey: '000010#000010#PROJECT#refero',
         },
-        UpdateExpression: 'SET archivedAt = :archivedAt',
+        UpdateExpression: 'SET archivedAt = :archivedAt ADD lifecycleRevision :one',
         ConditionExpression:
           'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
       },

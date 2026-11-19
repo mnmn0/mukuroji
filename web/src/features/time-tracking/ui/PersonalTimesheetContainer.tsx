@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import type { WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { createWeekPeriod } from '../model/timePeriod'
@@ -18,8 +19,10 @@ export type PersonalTimesheetContainerProps = {
   teamId: string
   /** Signed-in member key, so a manager reads only their own entries. */
   memberKey?: string
-  /** Monday of the week as `YYYY-MM-DD`. */
+  /** First day of the week as `YYYY-MM-DD`. */
   weekStart: string
+  /** Day Workspace weeks start on, 0 (Sunday) to 6; Monday when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
   /** Display locale. */
   locale: Locale
   /** Work Items of the Team the member may record time against. */
@@ -46,12 +49,13 @@ export function PersonalTimesheetContainer({
   onMoveWeek,
   teamId,
   weekStart,
+  weekStartDay,
   workItemOptions,
   workItemTitles,
 }: PersonalTimesheetContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
-  const week = useMemo(() => createWeekPeriod(weekStart), [weekStart])
+  const week = useMemo(() => createWeekPeriod(weekStart, weekStartDay), [weekStart, weekStartDay])
   const today = useLocalToday()
   const entries = useTimeEntries(accessToken, teamId, week, memberKey ? { userId: memberKey } : {})
   const rejectionReasons = useRejectionReasons(accessToken, entries.data?.entries ?? [])

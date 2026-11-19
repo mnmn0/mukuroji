@@ -194,6 +194,7 @@ export function TeamIssueScreen({
   isRelationsLoading = false,
   locale,
   onAddRelation,
+  onArchiveIssue,
   onCreateIssue,
   onCreateScheduleDependency,
   onDeleteRelation,
@@ -1734,6 +1735,7 @@ export function TeamIssueScreen({
                 onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
                 onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
                 onDuplicateIssue={onCreateIssue ? handleDuplicateIssue : undefined}
+                onArchiveIssue={canMutateSelectedIssue ? onArchiveIssue : undefined}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,

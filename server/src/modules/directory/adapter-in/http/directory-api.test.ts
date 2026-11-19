@@ -20,6 +20,14 @@ import type {
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import type {
+  WorkspaceSearchClient,
+  WorkspaceSearchDocument,
+  WorkspaceSearchProjectionWriteOptions,
+} from '../../../workspace-search/workspace-search'
+import {
+  createWorkspaceSearchDocument,
+} from '../../../workspace-search/workspace-search'
 import {
   afterEach,
   expect,
@@ -484,6 +492,146 @@ test('archives a team in the authenticated user scoped directory', async () => {
   expect(calls.teamArchives).toEqual([
     { directoryId: 'user#demo@example.com', expectedPlanningRevision: 0, teamId: 'core-team' },
   ])
+})
+
+/**
+ * Installs a search store fake that applies the same revision fences as the DynamoDB store.
+ *
+ * @param hooks - Run before the first upsert or delete is applied, to model a request that
+ *   commits while that write is in flight.
+ * @returns The stored source revision of each document (`null` when it has none).
+ */
+function installRevisionedSearch(hooks: {
+  beforeFirstUpsert?: () => Promise<void>
+  beforeFirstDelete?: () => Promise<void>
+} = {}) {
+  const documents = new Map<string, number | null>()
+  let upserts = 0
+  let deletes = 0
+  setTestAppDependencies({
+    workspaceSearch: {
+      async upsertDocument(
+        document: Parameters<WorkspaceSearchClient['upsertDocument']>[0],
+        options?: WorkspaceSearchProjectionWriteOptions,
+      ) {
+        upserts += 1
+        if (upserts === 1) await hooks.beforeFirstUpsert?.()
+        const stored = documents.get(document.entityId)
+        const revision = options?.sourceRevision
+        const stale = revision === undefined
+          ? options?.unrevisioned === true && typeof stored === 'number'
+          : typeof stored === 'number' && stored > revision
+        if (!stale) documents.set(document.entityId, revision ?? null)
+        return createWorkspaceSearchDocument(document)
+      },
+      async deleteDocument(
+        _workspaceId: string,
+        _entityType: WorkspaceSearchDocument['entityType'],
+        entityId: string,
+        options?: WorkspaceSearchProjectionWriteOptions,
+      ) {
+        deletes += 1
+        if (deletes === 1) await hooks.beforeFirstDelete?.()
+        const stored = documents.get(entityId)
+        const fence = options?.sourceRevision
+        if (fence !== undefined && typeof stored === 'number' && stored > fence) return false
+        return documents.delete(entityId)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  return documents
+}
+
+/**
+ * Sends one administrator PATCH request.
+ *
+ * @param path - Route to call.
+ * @returns The response status.
+ */
+async function patchAsAdministrator(path: string) {
+  const response = await app.request(path, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}` },
+  })
+  return response.status
+}
+
+test('does not let a delayed Team creation projection undo a renamed search document', async () => {
+  configureFakeProjectClients(true)
+  const documents = installRevisionedSearch()
+  // A rename committed and projected revision 1 before the creation's projection landed.
+  documents.set('team/new-team', 1)
+
+  const response = await app.request('/api/teams', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: '新規チーム' }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(documents.get('team/new-team')).toBe(1)
+})
+
+test('removes an archived Team from search', async () => {
+  configureFakeProjectClients(true)
+  const documents = installRevisionedSearch()
+  documents.set('team/core-team', null)
+
+  expect(await patchAsAdministrator('/api/teams/core-team/archive')).toBe(200)
+  expect(documents.has('team/core-team')).toBe(false)
+})
+
+test('keeps a Team restored while its archive was removing the search document', async () => {
+  configureFakeProjectClients(true)
+  const documents = installRevisionedSearch({
+    beforeFirstDelete: async () => {
+      expect(await patchAsAdministrator('/api/teams/core-team/restore')).toBe(200)
+    },
+  })
+  documents.set('team/core-team', null)
+
+  expect(await patchAsAdministrator('/api/teams/core-team/archive')).toBe(200)
+  // The restore projected revision 2; the archive's delete was fenced at revision 1.
+  expect(documents.get('team/core-team')).toBe(2)
+})
+
+test('removes a Team document that a rename projected after the archive removed it', async () => {
+  configureFakeProjectClients(true)
+  const documents = installRevisionedSearch({
+    // The rename read the active Team; the archive commits before the rename's write lands.
+    beforeFirstUpsert: async () => {
+      expect(await patchAsAdministrator('/api/teams/core-team/archive')).toBe(200)
+    },
+  })
+  documents.set('team/core-team', null)
+
+  const response = await app.request('/api/teams/core-team', {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ nameJa: 'リネーム', nameEn: 'Renamed' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(documents.has('team/core-team')).toBe(false)
+})
+
+test('keeps a Project restored while its archive was removing the search document', async () => {
+  configureFakeProjectClients(true)
+  const documents = installRevisionedSearch({
+    beforeFirstDelete: async () => {
+      expect(await patchAsAdministrator('/api/teams/core-team/projects/refero/restore')).toBe(200)
+    },
+  })
+  documents.set('team/core-team/project/refero', null)
+
+  expect(await patchAsAdministrator('/api/teams/core-team/projects/refero/archive')).toBe(200)
+  expect(documents.get('team/core-team/project/refero')).toBe(2)
 })
 
 test('rejects archiving a Team referenced by an active Planning entity', async () => {

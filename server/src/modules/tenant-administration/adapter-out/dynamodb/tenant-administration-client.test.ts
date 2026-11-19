@@ -147,6 +147,27 @@ describe('DynamoDbTenantAdministrationClient', () => {
     })
   })
 
+  test('reads only the profile for calendar settings and reports a missing profile as absent', async () => {
+    const items = createAggregateItems()
+    items.delete('GOVERNANCE')
+    items.set('PROFILE', { ...items.get('PROFILE'), calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 } })
+    const handler = (command: CapturedCommand) => {
+      const recordKey = readRecordKey(command)
+      const value = recordKey ? items.get(recordKey) : undefined
+      return value && recordKey ? { Item: createStateItem(recordKey, value) } : {}
+    }
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient(handler),
+      () => '2026-08-02T00:00:00.000Z',
+    )
+
+    // A missing governance record does not hide the stored calendar settings.
+    expect((await client.getProfile('workspace-1'))?.calendar).toEqual({ fiscalYearStartMonth: 4, weekStartDay: 0 })
+    items.delete('PROFILE')
+    expect(await client.getProfile('workspace-1')).toBeUndefined()
+  })
+
   test('fails closed when a stored profile omits its lifecycle status', async () => {
     const items = createAggregateItems()
     const profile = items.get('PROFILE')

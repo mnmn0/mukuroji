@@ -57,7 +57,8 @@ describe('Agent settings response validation', () => {
       projectBriefs: {},
     }
     // A server older than Triage filing omits the flags, which read as off.
-    expect(readAgentSettings(defaults)).toEqual({ ...defaults, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
+    // A server older than resuming omits the list too, which reads as any started status.
+    expect(readAgentSettings(defaults)).toEqual({ ...defaults, resumableStatusIds: [], fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
     expect(readAgentSettings({ ...defaults, fileFailedRunsToTriage: 'yes' })).toBeUndefined()
   })
 
@@ -73,6 +74,8 @@ describe('Agent settings response validation', () => {
       { ...agentSettingsFixture, allowTakeoverAfterLeaseExpiry: 'true' },
       { ...agentSettingsFixture, readyStatusIds: ['ready', ''] },
       { ...agentSettingsFixture, readyStatusIds: 'ready' },
+      { ...agentSettingsFixture, resumableStatusIds: ['active', ''] },
+      { ...agentSettingsFixture, resumableStatusIds: null },
       { ...agentSettingsFixture, requireAcceptanceCriteria: undefined },
       { ...agentSettingsFixture, acceptanceCriteriaFieldId: '' },
       { ...agentSettingsFixture, brief: 42 },

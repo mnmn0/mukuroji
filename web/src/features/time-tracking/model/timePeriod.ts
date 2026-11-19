@@ -1,10 +1,15 @@
-/** One Monday-based local week shown by the timesheet. */
+import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  type WorkspaceWeekStartDay,
+} from '@mukuroji/contracts'
+
+/** One local week shown by the timesheet, starting on the Workspace week start day. */
 export type TimeWeekPeriod = {
-  /** Local dates of the week, Monday first, as `YYYY-MM-DD`. */
+  /** Local dates of the week, week start day first, as `YYYY-MM-DD`. */
   days: string[]
-  /** Inclusive start (Monday 00:00 local) as an ISO 8601 instant. */
+  /** Inclusive start (week start day 00:00 local) as an ISO 8601 instant. */
   from: string
-  /** Exclusive end (next Monday 00:00 local) as an ISO 8601 instant. */
+  /** Exclusive end (next week start day 00:00 local) as an ISO 8601 instant. */
   to: string
 }
 
@@ -157,47 +162,61 @@ export function resolveLocalInstant(original: string | undefined, date: string, 
 }
 
 /**
- * Normalizes any local date to the Monday that starts its week.
+ * Normalizes any local date to the day that starts its week.
  *
  * @param value - Local `YYYY-MM-DD` date; invalid text falls back to `today`.
  * @param today - Current instant used for the fallback.
- * @returns Monday of the week as `YYYY-MM-DD`.
+ * @param weekStartDay - Day weeks start on, 0 (Sunday) to 6; Monday when omitted.
+ * @returns First day of the week as `YYYY-MM-DD`.
  */
-export function resolveWeekStart(value: string | null | undefined, today: Date = new Date()): string {
+export function resolveWeekStart(
+  value: string | null | undefined,
+  today: Date = new Date(),
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+): string {
   const date = (value ? parseLocalDate(value) : undefined) ?? new Date(today.getFullYear(), today.getMonth(), today.getDate())
-  const offsetFromMonday = (date.getDay() + 6) % 7
-  date.setDate(date.getDate() - offsetFromMonday)
+  const offsetFromWeekStart = (date.getDay() - weekStartDay + 7) % 7
+  date.setDate(date.getDate() - offsetFromWeekStart)
   return formatLocalDate(date)
 }
 
 /**
  * Moves a week start by whole weeks.
  *
- * @param weekStart - Monday as `YYYY-MM-DD`.
+ * @param weekStart - First day of a week as `YYYY-MM-DD`.
  * @param weeks - Number of weeks to move; negative moves back.
- * @returns Monday of the target week.
+ * @param weekStartDay - Day weeks start on, 0 (Sunday) to 6; Monday when omitted.
+ * @returns First day of the target week.
  */
-export function shiftWeek(weekStart: string, weeks: number): string {
+export function shiftWeek(
+  weekStart: string,
+  weeks: number,
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+): string {
   const date = parseLocalDate(weekStart) ?? new Date()
   date.setDate(date.getDate() + weeks * 7)
-  return resolveWeekStart(formatLocalDate(date))
+  return resolveWeekStart(formatLocalDate(date), undefined, weekStartDay)
 }
 
 /**
  * Creates the seven local days and the instant range of a week.
  *
- * @param weekStart - Monday as `YYYY-MM-DD`.
+ * @param weekStart - Any day of the week as `YYYY-MM-DD`.
+ * @param weekStartDay - Day weeks start on, 0 (Sunday) to 6; Monday when omitted.
  * @returns Week days and range.
  */
-export function createWeekPeriod(weekStart: string): TimeWeekPeriod {
-  const monday = parseLocalDate(resolveWeekStart(weekStart)) ?? new Date()
+export function createWeekPeriod(
+  weekStart: string,
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+): TimeWeekPeriod {
+  const first = parseLocalDate(resolveWeekStart(weekStart, undefined, weekStartDay)) ?? new Date()
   const days: string[] = []
-  const cursor = new Date(monday)
+  const cursor = new Date(first)
   for (let index = 0; index < 7; index += 1) {
     days.push(formatLocalDate(cursor))
     cursor.setDate(cursor.getDate() + 1)
   }
-  return { days, from: monday.toISOString(), to: cursor.toISOString() }
+  return { days, from: first.toISOString(), to: cursor.toISOString() }
 }
 
 /**

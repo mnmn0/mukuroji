@@ -56,6 +56,7 @@ function createTenantAdministrationFake(
       return snapshot
     },
     async getSnapshot() { return unavailable() },
+    async getProfile() { return unavailable() },
     async updateProfile() { return unavailable() },
     async updateGovernance() { return unavailable() },
     async requestExport() { return unavailable() },

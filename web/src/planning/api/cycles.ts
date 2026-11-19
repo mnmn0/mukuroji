@@ -1,5 +1,13 @@
-import type { CycleRolloverInput, PlanningMutationResponse } from '@mukuroji/contracts'
+import type {
+  CreateNextCycleInput,
+  CreateNextCycleResponse,
+  CycleRolloverInput,
+  CycleWorkItemsInput,
+  PlanningMutationResponse,
+  PlanningSnapshot,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
@@ -29,6 +37,66 @@ export function rolloverPlanningCycle(
     input,
     mutationContext,
   )
+}
+
+/**
+ * Cadence に従って次の Cycle を作ります。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param cycleId - 元の Cycle ID です。
+ * @param input - 読み込み時点の revision です。
+ * @param mutationContext - retry 間で共有する mutation request context です。
+ * @returns 作成した Cycle の ID と snapshot です。
+ */
+export async function createNextPlanningCycle(
+  accessToken: string,
+  cycleId: string,
+  input: CreateNextCycleInput,
+  mutationContext: MutationRequestContext,
+): Promise<CreateNextCycleResponse> {
+  const response = await requestMutation<unknown>(
+    `${planningApiBaseUrl}/planning/cycles/${encodeURIComponent(cycleId)}/next`,
+    accessToken,
+    'POST',
+    input,
+    mutationContext,
+  )
+  const planning = isRecord(response) ? readPlanningSnapshot(response.planning) : undefined
+  if (!isRecord(response) || !planning || typeof response.cycleId !== 'string' || !response.cycleId) {
+    // The Cycle may have been created, so a malformed success is reported as a server failure.
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage, 'InvalidPlanningCycleNextResponse')
+  }
+  return { cycleId: response.cycleId, planning }
+}
+
+/**
+ * 複数の Work Item を1回で Cycle に入れる、または Cycle から外します。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param cycleId - 対象の Cycle ID です。
+ * @param input - 操作、Work Item、revision です。
+ * @param mutationContext - retry 間で共有する mutation request context です。
+ * @returns 更新後の snapshot です。
+ */
+export async function setPlanningCycleWorkItems(
+  accessToken: string,
+  cycleId: string,
+  input: CycleWorkItemsInput,
+  mutationContext: MutationRequestContext,
+): Promise<PlanningSnapshot> {
+  const response = await requestMutation<unknown>(
+    `${planningApiBaseUrl}/planning/cycles/${encodeURIComponent(cycleId)}/work-items`,
+    accessToken,
+    'POST',
+    input,
+    mutationContext,
+  )
+  const planning = readPlanningSnapshot(response)
+  if (!planning) {
+    // The change may have been committed, so a malformed success is reported as a server failure.
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage, 'InvalidPlanningCycleWorkItemsResponse')
+  }
+  return planning
 }
 
 function requestMutation<T>(
@@ -91,4 +159,14 @@ async function readJson<T>(response: Response): Promise<T> {
   } catch {
     return {} as T
   }
+}
+
+/**
+ * Checks that a response body is a plain object.
+ *
+ * @param value - Parsed response body.
+ * @returns Whether the value is a non-null object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

@@ -17,6 +17,7 @@ import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerProjectCharterRoutes } from './routes/project-charter-routes'
 import { registerProjectRaidLogRoutes } from './routes/project-raid-log-routes'
+import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
 import { registerCollectionsRoutes } from './routes/collections-routes'
@@ -170,6 +171,7 @@ registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerProjectCharterRoutes(routeApp)
 registerProjectRaidLogRoutes(routeApp)
+registerDirectoryAdministrationRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
 registerCollectionsRoutes(routeApp)

@@ -1,3 +1,5 @@
+import type { WorkspaceCalendarSettings } from './workspace-calendar'
+
 /**
  * Tenant administration contract schema version.
  */
@@ -30,6 +32,8 @@ export type TenantProfile = {
   locale: TenantLocale
   /** Defaults applied to newly created tenant resources. */
   defaultPolicy: TenantDefaultPolicy
+  /** Fiscal year and week settings; absent until an administrator chooses them. */
+  calendar?: WorkspaceCalendarSettings
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -228,6 +232,8 @@ export type UpdateTenantProfileInput = {
   locale: TenantLocale
   /** Defaults applied to newly created tenant resources. */
   defaultPolicy: TenantDefaultPolicy
+  /** Fiscal year and week settings; omitted keeps the stored settings. */
+  calendar?: WorkspaceCalendarSettings
   /** Revision read before editing the profile. */
   expectedRevision: number
 }

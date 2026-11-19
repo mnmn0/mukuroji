@@ -12,6 +12,8 @@ export interface DataStoreBuilderInput {
    * secret is created only when the optional connectors module supplies it.
    */
   readonly connectorRuntimeConfiguration: cdk.CfnParameter | undefined;
+  /** HMAC key for enterprise identity credentials, read by trusted workers. */
+  readonly enterpriseIdentityTokenHashSecret: cdk.CfnParameter;
   /** Stable Workspace audit pseudonym key shared by every audit writer. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
 }
@@ -72,6 +74,11 @@ export type DataStoreResources = {
    * lifecycle workers, and restore validation. Its value never rotates.
    */
   readonly workspaceAuditPseudonymSecret: secretsmanager.Secret;
+  /**
+   * Enterprise identity credential HMAC key for workers. Workers receive its
+   * ARN, never the value, so the key stays out of their Lambda configuration.
+   */
+  readonly enterpriseIdentityTokenHashKeySecret: secretsmanager.Secret;
   /** Work Item collaboration records table. */
   readonly collaborationTable: dynamodb.Table;
   /** Workspace search documents, views, and preferences table. */
@@ -453,6 +460,20 @@ export function buildDataStores(
     },
   );
 
+  // The construct ID differs from the parameter's: both live in the stack scope.
+  const enterpriseIdentityTokenHashKeySecret = new secretsmanager.Secret(
+    stack,
+    'EnterpriseIdentityTokenHashKeySecret',
+    {
+      description:
+        'Enterprise identity credential HMAC key read by trusted workers at cold start.',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      secretStringValue: cdk.SecretValue.cfnParameter(
+        input.enterpriseIdentityTokenHashSecret,
+      ),
+    },
+  );
+
   const collaborationTable = new dynamodb.Table(stack, 'WorkItemCollaborationTable', {
     partitionKey: { name: 'entityKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -515,6 +536,16 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  // Finished runs by Team and finish time, failed runs in their own partition. Only the finish
+  // writes the keys, and the projection keeps what the Factory board needs to find Work Items.
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'FinishedRunIndex',
+    partitionKey: { name: 'finishedRunPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'finishedRunSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.INCLUDE,
+    nonKeyAttributes: ['runId', 'workItemId', 'outcome', 'finishedAt'],
+  });
+
   // Teams that file runs to Triage and failed runs waiting to be filed; both partitions stay small.
   agentRunsTable.addGlobalSecondaryIndex({
     indexName: 'AgentRunTriageIndex',
@@ -535,6 +566,14 @@ export function buildDataStores(
     indexName: 'SlackDeliveryIndex',
     partitionKey: { name: 'slackQueueShard', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'slackNextAttemptAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
+  // Sparse: only notifications queued while an Email sender is configured carry these keys.
+  notificationsTable.addGlobalSecondaryIndex({
+    indexName: 'EmailDeliveryIndex',
+    partitionKey: { name: 'emailQueueShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'emailNextAttemptAt', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
@@ -599,6 +638,7 @@ export function buildDataStores(
     documentsTable,
     documentPublicShareTokenSecret,
     workspaceAuditPseudonymSecret,
+    enterpriseIdentityTokenHashKeySecret,
     collaborationTable,
     workspaceSearchTable,
     notificationsTable,
