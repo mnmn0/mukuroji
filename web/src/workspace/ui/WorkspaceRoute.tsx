@@ -243,6 +243,11 @@ const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.myTasks.title',
   descriptionKey: 'workspace.myTasks.description',
 }
+const projectOverviewRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'projects.overview.eyebrow',
+  titleKey: 'projects.overview.title',
+  descriptionKey: 'projects.overview.description',
+}
 const emptySessionErrors: readonly unknown[] = []
 
 /**
@@ -839,6 +844,18 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...projectIssuesRouteMetadata,
       activeProjectId: decodeWorkspaceRouteParameter(projectIssuesMatch.params.projectId),
+      activeProjectTeamId: teamId ?? null,
+    }
+  }
+
+  const projectOverviewMatch = matchPath('/projects/:projectId/overview', pathname)
+
+  if (projectOverviewMatch?.params.projectId) {
+    const teamId = new URLSearchParams(search).get('teamId')
+
+    return {
+      ...projectOverviewRouteMetadata,
+      activeProjectId: decodeWorkspaceRouteParameter(projectOverviewMatch.params.projectId),
       activeProjectTeamId: teamId ?? null,
     }
   }

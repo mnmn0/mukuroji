@@ -312,6 +312,18 @@ export function createProjectIssuesPath(
 }
 
 /**
+ * Creates the URL of one Team-qualified Project overview.
+ *
+ * @param projectId - Project identifier.
+ * @param teamId - Team that owns the Project.
+ * @returns Same-origin Project overview path.
+ */
+export function createProjectOverviewPath(projectId: string, teamId: string) {
+  const searchParams = new URLSearchParams({ teamId })
+  return `/projects/${encodeURIComponent(projectId)}/overview?${searchParams.toString()}`
+}
+
+/**
  * チーム所有 Issue 画面 URL を生成します。
  *
  * @param teamId - Issue を所有する Team ID です。
