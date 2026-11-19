@@ -247,6 +247,31 @@ function quickAccessRawItem(
 }
 
 /**
+ * Creates a valid low-level member display preference sidecar row.
+ *
+ * @param overrides - Exact attributes that should replace valid defaults.
+ * @returns One raw DynamoDB item suitable for the normalization boundary.
+ */
+function memberPreferencesRawItem(
+  overrides: Readonly<Record<string, AttributeValue>> = {},
+): Record<string, AttributeValue> {
+  return {
+    directoryId: {
+      S: 'MEMBER_PREFERENCES#workspace%231#demo%40example.com',
+    },
+    entryKey: { S: 'PREFERENCE' },
+    entryType: { S: 'member-preferences' },
+    locale: { S: 'en' },
+    memberKey: { S: 'demo@example.com' },
+    revision: { N: '2' },
+    timeZone: { S: 'Asia/Tokyo' },
+    updatedAt: { S: CHECKED_AT },
+    workspaceId: { S: 'workspace#1' },
+    ...overrides,
+  }
+}
+
+/**
  * Creates a valid low-level Project code reservation row.
  *
  * @param overrides - Exact attributes that should replace valid defaults.
@@ -441,6 +466,42 @@ describe('cross-domain normalized page reader boundary', () => {
             new CrossDomainIntegrityNormalizedPageReaderFailure(
               'AWS_RESPONSE_INVALID',
             ),
+          )
+      } finally {
+        reader.close()
+      }
+    }
+  })
+
+  test('accepts a canonical member preference sidecar row as auxiliary data', async () => {
+    const fixture = new FixtureRawReader({ pages: [rawItemPage(memberPreferencesRawItem())] })
+    const reader = createCrossDomainIntegrityNormalizedPageReader(readerConfiguration())
+    installFixtureRawReader(reader, fixture)
+    try {
+      await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+        .resolves.toMatchObject({ items: [], retainedUnitCount: 0 })
+    } finally {
+      reader.close()
+    }
+  })
+
+  test('fails closed on malformed member preference sidecar rows', async () => {
+    const malformedRows = [
+      memberPreferencesRawItem({ directoryId: { S: 'workspace#1' } }),
+      memberPreferencesRawItem({ entryKey: { S: 'OTHER' } }),
+      memberPreferencesRawItem({ revision: { N: '0' } }),
+      memberPreferencesRawItem({ locale: { S: 'fr' } }),
+      memberPreferencesRawItem({ timeZone: { S: 'Not/AZone' } }),
+    ]
+
+    for (const row of malformedRows) {
+      const fixture = new FixtureRawReader({ pages: [rawItemPage(row)] })
+      const reader = createCrossDomainIntegrityNormalizedPageReader(readerConfiguration())
+      installFixtureRawReader(reader, fixture)
+      try {
+        await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+          .rejects.toEqual(
+            new CrossDomainIntegrityNormalizedPageReaderFailure('AWS_RESPONSE_INVALID'),
           )
       } finally {
         reader.close()

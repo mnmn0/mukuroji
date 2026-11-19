@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { TenantAdministrationError } from '../../modules/tenant-administration'
 import { CognitoServiceError } from '../../modules/authentication'
+import { ProjectDataError, readUpdateMemberPreferencesInput } from '../../modules/directory'
 import { type MutationAuditContext } from '../../modules/audit/audit'
 import {
   WorkspaceAccessError,
@@ -25,6 +26,7 @@ import {
   createWorkspaceMutationContext,
   requireWorkspaceAdministration,
   requireWorkspaceMemberHasNoManagedProjects,
+  toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
@@ -331,6 +333,64 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
       }
 
       return toWorkspaceAccessErrorResponse(c, error)
+    }
+  })
+
+  /** Returns the authenticated member's own display preferences. */
+  routeApp.get('/api/me/preferences', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      c.header('Cache-Control', 'private, no-store')
+      return c.json(await workspaceDependencies.projectDirectory.getMemberPreferences(
+        principal.directoryId,
+        principal.userKey,
+        true,
+      ))
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toAuthErrorResponse(c, error)
+      }
+
+      return toProjectDataErrorResponse(c, error)
+    }
+  })
+
+  /** Replaces the authenticated member's own complete display preferences. */
+  routeApp.put('/api/me/preferences', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const input = readUpdateMemberPreferencesInput(await readJson<unknown>(c.req))
+      if (!input) {
+        throw new ProjectDataError(
+          400,
+          'InvalidMemberPreferencesInput',
+          'Member preferences input is invalid.',
+        )
+      }
+
+      return c.json(await workspaceDependencies.projectDirectory.replaceMemberPreferences(
+        principal.directoryId,
+        principal.userKey,
+        input,
+      ))
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toAuthErrorResponse(c, error)
+      }
+
+      return toProjectDataErrorResponse(c, error)
     }
   })
 

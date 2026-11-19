@@ -616,6 +616,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/ai-assistance/preferences/me',
     permission: 'workspace.read',
   },
+  // A member's own display preferences change no shared Workspace data.
+  {
+    method: '*',
+    pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
   // Push availability and the caller's own device registration change no shared Workspace data.
   {
     method: 'GET',

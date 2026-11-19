@@ -46,6 +46,7 @@ CDK は table を `PAY_PER_REQUEST`、PITR enabled、`Retain` で作成する。
 | `jobRoles` | no | Contributor を計画するジョブロールの配列。最大 100 件。各要素は stable `id`、表示名 `name`、任意の `archived` を持つ。 |
 | `progressMode` | no | Work Item の進捗率の求め方。`status-category`（省略時）、`remaining-effort`、`manual`。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress)。 |
 | `parentCompletionPolicy` | no | 未完了の子がある親を完了にするときの扱い。`warn`（省略時）または `reject`。詳細は [親の完了ポリシー](#親の完了ポリシー)。 |
+| `completionGate` | no | Work Item を完了にする前に満たす条件（完了 Gate）。省略時は条件なし。詳細は [完了 Gate](#完了-gate)。 |
 | `updatedAt` | no | 永続化済み configuration の最終更新を表す UTC ISO 8601 timestamp。built-in default では省略する。 |
 
 未知の `schemaVersion`、不正 revision、scope key と payload の不一致を黙って読み飛ばさない。API は stable error を返し、管理 mutation と Work Item mutation を停止する。
@@ -206,6 +207,26 @@ Configuration の `parentCompletionPolicy` は、完了でもキャンセルで�
 | `reject` | Work Item が completed category の status に移るとき、server が直接の子を読み、archive されていない未完了の子があれば `409 WorkItemOpenChildren` で拒否する。判定には呼び出し元が読めない子も含めるので、応答に件数は入れない。拒否の条件は Web・Public API・MCP・自動化のどの経路でも同じだが、応答の形は経路で異なる。Team の API は `409` と `code: "WorkItemOpenChildren"` を返し、Public API は共通の error 形式に写すので `409` と `code: "conflict"`、`retryable: false` を返す（message は同じ）。承認で完了する場合は、承認を決定して status を変えるときに確認する。承認の依頼は status を変えないので、子が残っていても依頼できる。 |
 
 子は relation graph の `child` row から読み、各子の詳細を 16 件ずつ読む。数えるのは直接の子だけで、孫は数えない。読んだ graph revision と各子の revision を親の更新 transaction の条件に入れるので、確認の後に子が付いたり子が再開されたりすると更新は `409` で失敗する（子の revision の条件は、同じ更新で送る他の configuration 条件（configuration guard、Type 変更の relation と承認の条件など）と合わせて 70 件に収まるときだけ入れる。収まらないときは graph revision だけを条件にし、子の再開は検出しない）。ポリシーの変更は他の configuration と同じく監査に残る。
+
+### 完了 Gate
+
+Configuration の `completionGate` は、Work Item が completed category の status に移る前に満たす条件を Team ごとに決める。条件ごとに `off`（省略時）、`warn`、`required` を選ぶ。`completionGate` を持たない、またはすべて `off` の Team では従来どおり何も検証せず、承認も読まない。
+
+| 条件（policy の key） | 満たす状態 |
+| --- | --- |
+| `acceptance-criteria`（`acceptanceCriteria`） | 受け入れ条件がすべて `satisfied`。受け入れ条件が無い Work Item は満たす。同じ更新で送る `acceptanceCriteria` / `acceptanceCriteriaMarks` を反映した後の状態で判定する。 |
+| `no-pending-approvals`（`noPendingApprovals`） | Work Item の承認に判断待ち（pending）と変更要求（changes requested）が無い。 |
+| `human-approval`（`humanApproval`） | Work Item の承認が 1 件以上承認済み。承認者の role の指定はまだ無い。 |
+
+`required` の条件が満たされないとき、server は completed category への遷移を拒否する。判定は Web の更新、Public API と MCP の `complete_task`、自動化の移動 action と一括操作、承認の決定による完了のどの経路でも同じで、応答の形だけが経路で異なる。
+
+- Team の API は `409` と `code: "WorkItemCompletionGateNotSatisfied"`、`unmetConditions`（条件、`requirement`、`reason`、`message` の配列）を返す（`WorkItemCompletionGateErrorResponse`）。
+- Public API は共通の error 形式に写し、`409`、`code: "conflict"`、`retryable: false` と、満たされない条件ごとに `errors[]` の `code: "gate_not_satisfied"` を返す。`message` は条件名で始まる。`ApiProblem.code` の enum は広げない。
+- 承認の決定で完了する場合は、決定中の承認を承認済みとして数えて判定する。満たされなければ決定ごと拒否し、Work Item の更新と同じ `409 WorkItemCompletionGateNotSatisfied` と `unmetConditions` を返す。
+
+承認の件数を読めなかったとき、承認の条件は `reason: "unavailable"` として満たされない扱いにする（fail-closed）。`warn` の条件は判定しても server は拒否しない（Web の表示は未実装）。受け入れ条件は Work Item の row にあり、更新の revision 条件で固定される。判定する更新の `expectedRevision` が判定した revision と違えば `409 WorkItemRevisionConflict` を返す。承認の条件が `required` で満たされたときは、判定した承認の件数（file proofing table の `APPROVAL_SUMMARY` row）を更新の transaction の条件に入れる。判定の後に承認が作られたり決定されたりすると、更新は `409` で失敗する。承認の決定で完了する場合は同じ row を決定の transaction が更新するので、別の条件ではなく、その更新に判定時の件数を条件として付ける。設定の変更は他の configuration と同じく監査に残る。
+
+CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、Web の設定画面と達成状況の表示、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
 
 ### Reciprocal transaction と graph CAS
 

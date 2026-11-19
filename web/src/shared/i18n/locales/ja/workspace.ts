@@ -475,7 +475,7 @@ export const workspaceMessages = {
   'workspace.settings.install.badge.unsupported': 'この端末では通知の許可を確認できなかったため、アプリのアイコンに未読数が表示されない場合があります。',
   'workspace.settings.displayTitle': '表示設定',
   'workspace.settings.displayDescription':
-    'このブラウザで使う文字サイズ、配色、表示言語を調整します。',
+    '文字サイズ、配色、表示言語、タイムゾーンを調整します。設定はアカウントに保存され、別の端末でも引き継がれます。',
   'workspace.settings.fontSizeTitle': 'フォントサイズ',
   'workspace.settings.fontSizeDescription':
     'タスク一覧、サイドバー、設定画面などアプリ全体の文字サイズに反映されます。',
@@ -492,7 +492,14 @@ export const workspaceMessages = {
   'workspace.settings.profileDescription':
     '現在のセッションで使用しているアカウントです。',
   'workspace.settings.languageDescription':
-    '画面で使用する表示言語を選択します。変更はこのブラウザに保存されます。',
+    '画面で使用する表示言語を選択します。変更はアカウントに保存され、どの端末でも使われます。',
+  'workspace.settings.preferencesSaveFailed':
+    '表示設定をアカウントに保存できませんでした。保存できるまでは、この端末だけに反映されます。',
+  'workspace.settings.preferencesSaveRetry': '再試行',
+  'workspace.settings.timeZoneTitle': 'タイムゾーン',
+  'workspace.settings.timeZoneDescription':
+    'アカウントに保存するタイムゾーンを選択します。「ブラウザの設定」のままにすると、この端末の設定に従います。',
+  'workspace.settings.timeZoneBrowser': 'ブラウザの設定',
   'workspace.settings.notificationTitle': '通知設定',
   'workspace.settings.notificationDescription':
     '受信箱とSlackへの通知、配信頻度、通知しない時間帯を設定します。',

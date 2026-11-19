@@ -46,6 +46,7 @@ import {
 } from '../../modules/collaboration/collaboration'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import {
+  WorkItemCompletionGateError,
   WorkItemConfigurationError,
   getWorkItemTypeCustomFieldDefinitions,
   previewWorkItemTypeChange,
@@ -961,6 +962,8 @@ export async function updateCanonicalPublicWorkItem(
     detail.issue,
     body,
     resolvedConfiguration,
+    // Marks bypass the normalized body, so the completion Gate reads them from the request.
+    'acceptanceCriteriaMarks' in input ? { acceptanceCriteriaMarks: input.acceptanceCriteriaMarks } : {},
   )
   if ('assigneeUserId' in configuredBody) {
     await requireActiveWorkspaceAssignee(
@@ -3128,6 +3131,20 @@ function mapPublicApiAdapterError(error: unknown) {
       error.status >= 500 ? 'temporarily_unavailable' : 'validation_failed',
       error.message,
       error.status >= 500,
+    )
+  }
+  if (error instanceof WorkItemCompletionGateError) {
+    // `ApiProblem.code` stays `conflict`; each unmet Gate condition is one `gate_not_satisfied` entry.
+    return new PublicApiServiceError(
+      409,
+      'conflict',
+      error.message,
+      false,
+      error.unmetConditions.map((condition) => ({
+        pointer: '',
+        code: 'gate_not_satisfied',
+        message: `${condition.condition}: ${condition.message}`,
+      })),
     )
   }
   if (
