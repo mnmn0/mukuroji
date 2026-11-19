@@ -21,6 +21,7 @@ export const timeTrackingMessages = {
   'timeTracking.status.locked': 'Locked',
   'timeTracking.error.offline': 'You are offline, so this was not saved. Repeat the action once you are back online; it will not be recorded twice.',
   'timeTracking.error.conflict': 'Someone else changed this first, so the latest state was loaded. Check it and try again.',
+  'timeTracking.error.closed': 'This month has been closed, so its time cannot be changed. Ask a manager to reopen the month.',
   'timeTracking.error.forbidden': 'You do not have permission to do this.',
   'timeTracking.error.invalid': 'This could not be accepted. Check the times and the task.',
   'timeTracking.error.failed': 'Time could not be saved. Try again later.',

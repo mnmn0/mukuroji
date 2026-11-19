@@ -208,6 +208,7 @@ describe('time tracking model', () => {
   test('keeps the idempotency key only for failures that may have been applied', () => {
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(0, 'offline', 'NetworkUnavailable'))).toBe('offline')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'conflict', 'TimeEntryRevisionConflict'))).toBe('conflict')
+    expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'closed', 'TimePeriodClosed'))).toBe('closed')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(403, 'denied'))).toBe('forbidden')
     expect(shouldRetainTimeTrackingMutation(new TimeTrackingApiError(0, 'offline'))).toBe(true)
     expect(shouldRetainTimeTrackingMutation(new TimeTrackingApiError(503, 'unavailable'))).toBe(true)
