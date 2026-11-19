@@ -46,6 +46,8 @@ import {
   createFocusPolicyRevisionConditionCheck,
   createFocusQueue,
   createFocusWorkItemStateKey as createFocusWorkItemKey,
+  isFocusSlaAnchor,
+  normalizeFocusSlaWorkItemTypeIds,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
@@ -93,6 +95,7 @@ import {
 import {
   createApiMutationContext,
   getEffectiveProjectAccessList,
+  readLegacyProjectScopeAccesses,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -225,6 +228,9 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     'dueSoonDays',
     'cycleDueSoonDays',
     'slaHours',
+    'slaEnabled',
+    'slaAnchor',
+    'slaWorkItemTypeIds',
     'nowScoreThreshold',
   ])
   const weights = overrides.weights === undefined
@@ -251,6 +257,13 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     24 * 365,
     true,
   )
+  if (overrides.slaEnabled !== undefined && typeof overrides.slaEnabled !== 'boolean') {
+    throw invalidFocusInput('slaEnabled must be a boolean.')
+  }
+  if (overrides.slaAnchor !== undefined && !isFocusSlaAnchor(overrides.slaAnchor)) {
+    throw invalidFocusInput('slaAnchor must be created, planned-start, or started.')
+  }
+  const slaWorkItemTypeIds = readOptionalFocusSlaWorkItemTypeIds(overrides.slaWorkItemTypeIds)
   const nowScoreThreshold = readOptionalFocusPolicyNumber(
     overrides.nowScoreThreshold,
     'nowScoreThreshold',
@@ -263,7 +276,25 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     ...(dueSoonDays === undefined ? {} : { dueSoonDays }),
     ...(cycleDueSoonDays === undefined ? {} : { cycleDueSoonDays }),
     ...(slaHours === undefined ? {} : { slaHours }),
+    ...(overrides.slaEnabled === undefined ? {} : { slaEnabled: overrides.slaEnabled }),
+    ...(overrides.slaAnchor === undefined ? {} : { slaAnchor: overrides.slaAnchor }),
+    ...(slaWorkItemTypeIds === undefined ? {} : { slaWorkItemTypeIds }),
     ...(nowScoreThreshold === undefined ? {} : { nowScoreThreshold }),
+  }
+}
+
+/**
+ * Parses the optional list of Work Item Types that receive the SLA signal.
+ *
+ * @param value - Unknown Type ID list.
+ * @returns Sorted, deduplicated Type IDs, or undefined when omitted.
+ */
+function readOptionalFocusSlaWorkItemTypeIds(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined
+  try {
+    return normalizeFocusSlaWorkItemTypeIds(value)
+  } catch (error) {
+    throw invalidFocusInput(error instanceof Error ? error.message : 'slaWorkItemTypeIds is invalid.')
   }
 }
 
@@ -1471,14 +1502,24 @@ async function readFocusQueue(
     accessibleWorkItems,
   )
   const accessibleTeamIdsPromise = readFocusAccessibleTeamIds(principal)
+  const projectTitlesPromise = readFocusProjectTitlesByKey(principal)
   const planningWorkItems = createFocusPlanningWorkItemState(accessibleWorkItems)
-  const planningPromise = workItemDependencies.planning
-    .get(principal.directoryId, planningWorkItems)
-    .then((planning) => filterFocusPlanningSnapshotForPrincipal(
+  const legacyUpdateTargetScopePromise = readFocusLegacyUpdateTargetScope(principal)
+  const planningPromise = Promise.all([
+    workItemDependencies.planning.get(principal.directoryId, planningWorkItems),
+    legacyUpdateTargetScopePromise,
+  ]).then(([snapshot, legacyUpdateTargetScope]) => {
+    const planning = filterFocusPlanningSnapshotForPrincipal(
       principal,
-      planning,
+      snapshot,
       accessibleWorkItems,
-    ))
+      legacyUpdateTargetScope,
+    )
+    return {
+      planning,
+      initiativeTitlesById: readFocusInitiativeTitlesById(snapshot, planning),
+    }
+  })
   const relationGraphsPromise = readFocusRelationGraphs(
     principal.directoryId,
     accessibleWorkItems,
@@ -1501,13 +1542,14 @@ async function readFocusQueue(
   })
   const [
     workItems,
-    planning,
+    { planning, initiativeTitlesById },
     relationGraphs,
     reviewerApprovals,
     notifications,
     workItemPermissions,
     editableTeamPolicyIds,
     state,
+    projectTitlesByKey,
   ] =
     await Promise.all([
       workItemsPromise,
@@ -1518,12 +1560,15 @@ async function readFocusQueue(
       workItemPermissionsPromise,
       editableTeamPolicyIdsPromise,
       statePromise,
+      projectTitlesPromise,
     ])
   const baseInput: CreateFocusQueueInput = {
     now,
     viewerMemberKey: principal.userKey,
     workItems,
     planning,
+    projectTitlesByKey,
+    initiativeTitlesById,
     relationGraphs,
     reviewerApprovals,
     notifications,
@@ -1712,12 +1757,14 @@ async function hydrateFocusApprovalSummaries(
  * @param principal - Current authenticated Workspace principal.
  * @param snapshot - Complete Planning snapshot loaded from the canonical store.
  * @param workItems - Current ACL-filtered canonical Work Items.
+ * @param legacyUpdateTargetScope - Project ACL scope for legacy principals, used for update targets.
  * @returns A detached Planning snapshot safe to use as Focus signal input.
  */
 function filterFocusPlanningSnapshotForPrincipal(
   principal: WorkspacePrincipal,
   snapshot: PlanningSnapshot,
   workItems: readonly CanonicalWorkItem[],
+  legacyUpdateTargetScope?: FocusLegacyUpdateTargetScope,
 ): PlanningSnapshot {
   if (principal.isSystemAdmin) return snapshot
   const canonicalWorkItemsByKey = new Map(workItems.map((workItem) => [
@@ -1793,9 +1840,35 @@ function filterFocusPlanningSnapshotForPrincipal(
   const criticalEntityIds = snapshot.criticalPath.entityIds.filter((entityId) =>
     entityIds.has(entityId)
   )
+  const updateTargets = snapshot.updateTargets.filter((summary) => {
+    const target = summary.target
+    if (principal.enterpriseAuthorizationEvaluation !== undefined) {
+      return target.type === 'project'
+        ? canReadPlanningResource(target.teamId, target.projectId)
+        : entityIds.has(target.entityId)
+    }
+    // Legacy principals: Project ACLs authorize update targets, as in the Planning API, so a
+    // readable Project without active Work Items still shows its deadline.
+    if (legacyUpdateTargetScope === undefined) return false
+    if (target.type === 'project') {
+      return legacyUpdateTargetScope.projectKeys.has(
+        createFocusWorkItemKey(target.teamId, target.projectId),
+      )
+    }
+    const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
+    if (entity === undefined) return false
+    if (entity.projectId !== undefined) {
+      return entity.teamId !== undefined && legacyUpdateTargetScope.projectKeys.has(
+        createFocusWorkItemKey(entity.teamId, entity.projectId),
+      )
+    }
+    if (entity.teamId !== undefined) return legacyUpdateTargetScope.teamIds.has(entity.teamId)
+    return legacyUpdateTargetScope.workspaceReadable
+  })
   return {
     ...snapshot,
     entities: scopedEntities,
+    updateTargets,
     dependencies,
     workItemDependencies,
     workItemLinks,
@@ -1816,6 +1889,94 @@ function filterFocusPlanningSnapshotForPrincipal(
       workItemLinks,
     ),
   }
+}
+
+/**
+ * Reads Initiative titles for the update targets that passed the Planning read filter.
+ *
+ * The filtered entity list only keeps Initiatives evidenced by readable Work Items for legacy
+ * principals, so authorized Initiative update targets take their titles from the full snapshot.
+ *
+ * @param snapshot - Complete Planning snapshot loaded from the canonical store.
+ * @param planning - Planning snapshot already filtered for the principal.
+ * @returns Titles keyed by Planning entity ID, limited to authorized Initiative update targets.
+ */
+function readFocusInitiativeTitlesById(
+  snapshot: PlanningSnapshot,
+  planning: PlanningSnapshot,
+): Map<string, string> {
+  const initiativeIds = new Set(planning.updateTargets.flatMap((summary) =>
+    summary.target.type === 'initiative' ? [summary.target.entityId] : []
+  ))
+  return new Map(snapshot.entities.flatMap((entity): [string, string][] =>
+    initiativeIds.has(entity.id) ? [[entity.id, entity.title]] : []
+  ))
+}
+
+/** Planning read scope of a legacy principal, taken from its Project ACLs. */
+type FocusLegacyUpdateTargetScope = {
+  /** Readable Projects keyed by `teamId`, a NUL separator, and Project ID. */
+  projectKeys: ReadonlySet<string>
+  /** Teams in which the principal can read at least one Project. */
+  teamIds: ReadonlySet<string>
+  /** Whether Workspace-scoped Planning content is readable. */
+  workspaceReadable: boolean
+}
+
+/**
+ * Reads the Project ACL scope that authorizes health update targets for a legacy principal.
+ *
+ * Mirrors the legacy branch of the Planning API snapshot filter. Enterprise principals and system
+ * administrators do not need it and get undefined.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns The legacy scope, or undefined when another authorization path applies.
+ */
+async function readFocusLegacyUpdateTargetScope(
+  principal: WorkspacePrincipal,
+): Promise<FocusLegacyUpdateTargetScope | undefined> {
+  if (principal.isSystemAdmin || principal.enterpriseAuthorizationEvaluation !== undefined) {
+    return undefined
+  }
+  if (principal.enterpriseLegacyProjectAccessSuppressed === true) {
+    return { projectKeys: new Set(), teamIds: new Set(), workspaceReadable: false }
+  }
+  const accesses = (principal.legacyProjectScopeAccesses ??
+    await readLegacyProjectScopeAccesses(principal))
+    .filter((access) => access.teamId !== undefined && projectAccessAllows(access, 'viewer'))
+  return {
+    projectKeys: new Set(accesses.flatMap((access) =>
+      access.teamId === undefined ? [] : [createFocusWorkItemKey(access.teamId, access.projectId)]
+    )),
+    teamIds: new Set(accesses.flatMap((access) =>
+      access.teamId === undefined ? [] : [access.teamId]
+    )),
+    workspaceReadable: principal.workspaceRole !== 'guest',
+  }
+}
+
+/**
+ * Reads Project titles used to label health update deadlines.
+ *
+ * Titles are only attached to update targets that already passed the Planning read filter, so the
+ * map itself may contain Projects the principal cannot read.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Project titles keyed by Team-qualified Project identity.
+ */
+async function readFocusProjectTitlesByKey(
+  principal: WorkspacePrincipal,
+): Promise<Map<string, string>> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  return new Map(directory.teams.flatMap((team) =>
+    team.projects.map((project): [string, string] => [
+      createFocusWorkItemKey(team.id, project.id),
+      project.name,
+    ])
+  ))
 }
 
 /**

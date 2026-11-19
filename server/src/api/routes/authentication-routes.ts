@@ -221,7 +221,7 @@ function toSupportedMfaChallenge(response: InitiateAuthResponse, email: string) 
   }
 }
 
-/** MFA code verifications allowed per client address and email in one window. */
+/** MFA code and new-password challenge attempts allowed per client address and email in one window. */
 const authenticationChallengeAttemptLimit = { attempts: 10, windowSeconds: 5 * 60 }
 
 async function acquireNewPasswordChallengeInvitationLock(c: Context, email: string) {
@@ -247,10 +247,11 @@ async function acquireNewPasswordChallengeInvitationLock(c: Context, email: stri
     return { auditContext }
   }
 
+  // The caller has not proven the challenge session yet, so the lock must not write audit events
+  // in the invitee's name. Only the reconcile after Cognito accepts the session is audited.
   const invitation = await workspaceDependencies.workspaceAccess.acquireInvitationAcceptanceLock(
     workspaceUser.directoryId,
     email,
-    auditContext,
   )
 
   return {
@@ -275,11 +276,34 @@ async function releaseNewPasswordChallengeInvitationLock(
       state.directoryId,
       state.invitation.id,
       state.invitation.version,
-      state.auditContext,
     )
   } catch (error) {
     console.error('Failed to release Workspace invitation acceptance lock:', error)
   }
+}
+
+/**
+ * Invitation states that the lock can reject before Cognito checks the challenge session.
+ *
+ * They answer like a rejected session so an unauthenticated caller cannot tell an invited,
+ * revoked, or in-progress address apart from any other one.
+ */
+const NEW_PASSWORD_CHALLENGE_HIDDEN_INVITATION_ERRORS = new Set([
+  'WorkspaceInvitationNotAcceptable',
+  'WorkspaceInvitationAcceptanceInProgress',
+  'WorkspaceInvitationNotFound',
+  'WorkspaceVersionConflict',
+])
+
+/**
+ * Tells whether a lock failure should be hidden behind the rejected-session response.
+ *
+ * @param error - Error thrown while taking the invitation acceptance lock.
+ * @returns `true` when the error only reveals the invitation's state.
+ */
+function isHiddenNewPasswordChallengeInvitationError(error: unknown) {
+  return error instanceof WorkspaceAccessError &&
+    NEW_PASSWORD_CHALLENGE_HIDDEN_INVITATION_ERRORS.has(error.code)
 }
 
 function toNewPasswordChallengeErrorResponse(c: Context, error: unknown) {
@@ -414,12 +438,17 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
    * Cognito が password 更新に成功した後の Workspace membership reconcile は通常 login と
    * 同じ処理を通ります。DynamoDB 更新だけが失敗した場合も、新 password で login し直すと
    * reconcile を再実行できます。
+   *
+   * この時点の caller は未認証なので、招待の acceptance lock は送信元と email ごとの試行制限の
+   * 後ろで取り、監査 event を書きません。取り消し済み・受諾処理中などで lock を取れない招待は、
+   * Cognito が session を拒否したときと同じ 401 を返し、address の状態を区別させません。
    */
   routeApp.post('/api/auth/challenge/new-password', async (c) => {
     const body = await readJson<CompleteNewPasswordChallengeRequestBody>(c.req)
     const email = typeof body?.email === 'string' ? body.email.trim() : ''
     const session = typeof body?.session === 'string' ? body.session.trim() : ''
     const newPassword = typeof body?.newPassword === 'string' ? body.newPassword : ''
+    const attemptEmail = email.toLowerCase()
 
     if (!email || !session || !newPassword) {
       return c.json({ message: 'Email, session, and new password are required.' }, 400)
@@ -441,7 +470,32 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
           ssoStartPath: '/api/auth/sso/start' as const,
         }, 409)
       }
-      const acceptanceState = await acquireNewPasswordChallengeInvitationLock(c, email)
+      const rateLimit = await consumeAuthenticationAttempt(
+        c,
+        'new-password-challenge',
+        attemptEmail,
+        authenticationChallengeAttemptLimit,
+      )
+      if (!rateLimit.allowed) {
+        c.header('Retry-After', String(rateLimit.retryAfterSeconds))
+        return c.json({
+          code: 'AuthenticationChallengeRateLimited',
+          message: 'Too many verification attempts. Try again later.',
+        }, 429)
+      }
+
+      let acceptanceState: Awaited<ReturnType<typeof acquireNewPasswordChallengeInvitationLock>>
+      try {
+        acceptanceState = await acquireNewPasswordChallengeInvitationLock(c, email)
+      } catch (error) {
+        if (isHiddenNewPasswordChallengeInvitationError(error)) {
+          return toAuthErrorResponse(
+            c,
+            new CognitoServiceError(400, 'NotAuthorizedException', 'Invalid session for the user.'),
+          )
+        }
+        throw error
+      }
 
       try {
         const response = await authenticationDependencies.cognito.respondToNewPasswordChallenge(email, newPassword, session)
