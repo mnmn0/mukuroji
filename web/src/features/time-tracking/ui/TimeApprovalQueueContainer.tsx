@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import type { WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { createWeekPeriod, resolveBrowserTimeZone } from '../model/timePeriod'
@@ -14,8 +15,10 @@ export type TimeApprovalQueueContainerProps = {
   accessToken: string | undefined
   /** Team whose entries are reviewed. */
   teamId: string
-  /** Monday of the week as `YYYY-MM-DD`. */
+  /** First day of the week as `YYYY-MM-DD`. */
   weekStart: string
+  /** Day Workspace weeks start on, 0 (Sunday) to 6; Monday when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
   /** Display locale. */
   locale: Locale
   /** Member display names keyed by member key. */
@@ -42,11 +45,12 @@ export function TimeApprovalQueueContainer({
   onMoveWeek,
   teamId,
   weekStart,
+  weekStartDay,
   workItemTitles,
 }: TimeApprovalQueueContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
-  const week = useMemo(() => createWeekPeriod(weekStart), [weekStart])
+  const week = useMemo(() => createWeekPeriod(weekStart, weekStartDay), [weekStart, weekStartDay])
   const timeZone = resolveBrowserTimeZone()
   const timesheet = useTeamTimesheet(accessToken, teamId, { ...week, timeZone })
   const canManage = timesheet.data ? !timesheet.data.costsRedacted : undefined

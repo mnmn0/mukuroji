@@ -193,6 +193,7 @@ IP allowlist は CIDR を1行に1つ書きます。空にすると制限なし�
 **設定** → **テナント管理**（owner / admin のみ）。詳細は [`docs/tenant-administration.md`](../tenant-administration.md)。
 
 - 「テナント profile」: owner、region、locale、招待時にロールを省略したときの「既定 member role」。
+  「会計年度の開始月」と「週の開始曜日」もここで決めます。週の開始曜日は工数のタイムシート・承認・週報の週に使われます。決めていなければ 1 月始まり・月曜始まりです。
 - 「データ governance」: 監査ログの保持日数（30日以上）と legal hold。
 - 「Export と閉鎖」: テナント全体の export（成果物は30日で失効）と、テナントの閉鎖
   （`CLOSE` と入力して開始。中断・再開・検証ができます）。

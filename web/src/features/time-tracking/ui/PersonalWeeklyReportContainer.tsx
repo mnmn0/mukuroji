@@ -1,4 +1,4 @@
-import type { CanonicalWorkItem } from '@mukuroji/contracts'
+import type { CanonicalWorkItem, WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
@@ -19,8 +19,10 @@ export type PersonalWeeklyReportContainerProps = {
   teamId: string
   /** Signed-in member key; the report reads only this member's entries. */
   memberKey: string | undefined
-  /** Monday of the week as `YYYY-MM-DD`. */
+  /** First day of the week as `YYYY-MM-DD`. */
   weekStart: string
+  /** Day Workspace weeks start on, 0 (Sunday) to 6; Monday when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
   /** Display locale. */
   locale: Locale
   /** Team Work Items the member owns or contributes to, as filtered by the server. */
@@ -61,12 +63,13 @@ export function PersonalWeeklyReportContainer({
   onRetryWorkItems,
   teamId,
   weekStart,
+  weekStartDay,
   workItemTitles,
   workItems,
 }: PersonalWeeklyReportContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
-  const week = useMemo(() => createWeekPeriod(weekStart), [weekStart])
+  const week = useMemo(() => createWeekPeriod(weekStart, weekStartDay), [weekStart, weekStartDay])
   const today = useLocalToday()
   // Without the member key a manager would read the whole Team's entries, so nothing is read.
   const entries = useTimeEntries(accessToken, teamId, week, memberKey ? { userId: memberKey } : {}, memberKey !== undefined)

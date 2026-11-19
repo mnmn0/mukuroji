@@ -9,10 +9,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(491)
-  expect(new Set(inventory).size).toBe(487)
+  expect(inventory).toHaveLength(492)
+  expect(new Set(inventory).size).toBe(488)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
+  expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).not.toContain('GET /api/dashboard/summary')
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
@@ -99,6 +100,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '2dc8ac1ecd4c56f1dbcd37e256aaa6d70f750a5b439fa8419977f92fadc35ca6',
+    'b294c8bec3eba952f56e74f7d12bf80dfc63f59868c681091203904743fb7e3c',
   )
 })
