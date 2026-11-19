@@ -2311,6 +2311,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
       credentialId: token.id,
       subjectUserId: token.subjectUserId,
       oauthAppId: token.oauthAppId,
+      principalId: `oauth-app:${token.oauthAppId}`,
       scopes: [...token.scopes],
       expiresAt: token.expiresAt,
     } satisfies AuthenticatedDeveloperCredential
