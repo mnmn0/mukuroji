@@ -111,6 +111,25 @@ test('answers 404 for a Project outside the Team', async () => {
   expect(await response.json()).toMatchObject({ code: 'ProjectNotFound' })
 })
 
+test('answers 404 for a Team Project the reader holds no role on', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'other-project', name: 'Other', tone: 'green' },
+    ],
+    projectAccesses: [{ projectId: 'other-project', role: 'manager', teamId: 'core-team' }],
+  })
+  for (const method of ['GET', 'POST']) {
+    const response = await request(
+      '/api/teams/core-team/projects/refero/schedule-baseline',
+      method,
+    )
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ code: 'ProjectNotFound' })
+  }
+})
+
 test('answers 409 with its code when a capture conflicts', async () => {
   configureFakeProjectClients(true)
   const base = await readBaseIssue()
