@@ -58,17 +58,17 @@ export function buildEnterpriseIdentityWorkers(
     auditEventsTable,
     documentsTable,
     enterpriseIdentityTable,
+    enterpriseIdentityTokenHashKeySecret,
     planningTable,
     projectDirectoryTable,
     tenantAdministrationTable,
     workspaceAccessTable,
+    workspaceAuditPseudonymSecret,
   } = input.dataStores;
   const {
     auditRetentionDays,
     cognitoUserPoolArn,
     cognitoUserPoolId,
-    enterpriseIdentityTokenHashSecret,
-    workspaceAuditPseudonymKey,
   } = input.parameters;
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
 
@@ -112,10 +112,11 @@ export function buildEnterpriseIdentityWorkers(
         COGNITO_USER_POOL_ID: cognitoUserPoolId,
         DOCUMENTS_TABLE_NAME: documentsTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
-        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
-          enterpriseIdentityTokenHashSecret.valueAsString,
-        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
-          workspaceAuditPseudonymKey.valueAsString,
+        // Secret ARNs only: the worker reads both values at cold start.
+        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
+          enterpriseIdentityTokenHashKeySecret.secretArn,
+        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY_SECRET_ARN:
+          workspaceAuditPseudonymSecret.secretArn,
         PLANNING_TABLE_NAME: planningTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         TENANT_ADMINISTRATION_TABLE_NAME:
@@ -129,6 +130,8 @@ export function buildEnterpriseIdentityWorkers(
     enterpriseScimGroupJobFunction,
     'enterprise-scim-group-job',
   );
+  enterpriseIdentityTokenHashKeySecret.grantRead(enterpriseScimGroupJobFunction);
+  workspaceAuditPseudonymSecret.grantRead(enterpriseScimGroupJobFunction);
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:BatchWriteItem',

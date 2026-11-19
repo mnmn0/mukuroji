@@ -6,6 +6,9 @@ import { createRestoreDrillCleanupWorkflowName } from './subsystems/restore-dril
 const secretPaths = [
   'ConnectorRuntimeSecret/Resource',
   'DocumentPublicShareTokenSecret/Resource',
+  'EnterpriseIdentityTokenHashKeySecret/Resource',
+  'RequestEmailWebhookKeySecret/Resource',
+  'RequestTokenHashKeySecret/Resource',
 ] as const;
 const deadLetterQueuePaths = [
   'AiAssistanceObservabilityDlq/Resource',

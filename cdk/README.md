@@ -214,7 +214,7 @@ templateとdeployed configurationの両方で照合します。
 - `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
 - `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`
 - `ConnectorRuntimeSecretArn`, `ConnectorSyncQueueUrl`, `ConnectorSyncDlqUrl`, `ConnectorPollDlqUrl`（`mukuroji:connectors` 有効時のみ）
-- `TenantOperationFunctionName`, `TenantOperationDlqUrl`（テナント操作の開始と監査ログ保持の処理）
+- `TenantOperationFunctionName`, `TenantOperationDlqUrl`（テナント操作の開始と監査ログ保持の一括処理。新しい監査 event 1 件ごとの保持期間の反映は audit projection が行います）
 - `TenantExportCapabilityFunctionName` など 6 つの `Tenant*CapabilityFunctionName`（`mukuroji:tenantLifecycle` 有効時のみ）
 - `WorkspaceDirectoryId`
 
@@ -955,7 +955,10 @@ Schedule deliveryは現在のrecipient認可を確認できない場合に送信
 副作用を持ちません。SESや外部email providerの権限はAnalytics Lambdaへ付与しません。Emailを
 追加する場合はtransactional outboxまたはdelivery state machine、provider adapter、secret、
 bounce/retry運用を別変更として導入してください。またAnalyticsのために`AuditEventsTable` streamへ
-3つ目のdirect event source mappingを追加しません。
+3つ目のdirect event source mappingを追加しません。DynamoDB Streams は shard あたり 2 reader までを
+推奨しており、`AuditEventsTable` の reader は `CollaborationProjectionFunction` と
+`AutomationEventFunction` の 2 つです。テナントの監査ログ保持期間の反映のように、監査 event に反応する
+処理を足すときは audit projection の fan-out に加えます。
 
 Deploy前後に次を確認します。
 

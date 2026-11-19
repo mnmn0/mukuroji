@@ -345,7 +345,17 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(serializedPolicies).toContain('ProjectDirectoryTable');
   expect(serializedPolicies).toContain('EnterpriseScimGroupJobDlq');
   expect(serializedPolicies).not.toContain('dynamodb:Scan');
-  expect(serializedPolicies).not.toContain('secretsmanager:');
+  // The worker reads exactly its two keys by ARN (#494).
+  const secretStatements = roleStatements
+    .filter((statement) => JSON.stringify(statement.Action).includes('secretsmanager:'));
+  expect(secretStatements).toEqual([{
+    Action: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
+    Effect: 'Allow',
+    Resource: [
+      { Ref: 'EnterpriseIdentityTokenHashKeySecretB442F5F9' },
+      { Ref: WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID },
+    ],
+  }]);
 
   const apiFunction = resources.ApiFunctionCE271BD4;
   expect(apiFunction.Properties.Timeout).toBe(20);
@@ -908,11 +918,12 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
       S3Key: Match.stringLikeRegexp('\\.zip$'),
     },
     Description:
-      'Projects audit outbox events into collaboration, Webhook, and connector deliveries.',
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Environment: {
       Variables: Match.objectLike({
+        AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         COLLABORATION_TABLE_NAME: {
           Ref: 'WorkItemCollaborationTableFDECF217',
         },
@@ -985,7 +996,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
   });
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     AlarmDescription:
-      'Detects audit projection records that exhausted collaboration, Webhook, or connector stream retries.',
+      'Detects audit projection records that exhausted collaboration, Webhook, connector, or tenant retention stream retries.',
     ComparisonOperator: 'GreaterThanOrEqualToThreshold',
     DatapointsToAlarm: 1,
     Dimensions: [{
@@ -1101,13 +1112,25 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     ).Properties?.EventSourceArn;
     return JSON.stringify(eventSourceArn).includes('AuditEventsTable0723963E');
   }) as Array<{ Properties: { FunctionName: { Ref: string } } }>;
-  expect(auditStreamMappings).toHaveLength(3);
+  // DynamoDB Streams supports two readers per shard (#491).
+  expect(auditStreamMappings).toHaveLength(2);
   expect(auditStreamMappings.map(({ Properties }) => Properties.FunctionName.Ref).sort())
     .toEqual([
       'AutomationEventFunction5E8CB543',
       'CollaborationProjectionFunction1AAC5764',
-      'TenantOperationFunction9BEB780E',
     ]);
+  for (const functionId of [
+    'AutomationEventFunction5E8CB543',
+    'CollaborationProjectionFunction1AAC5764',
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'IteratorAge',
+      Namespace: 'AWS/Lambda',
+      Dimensions: [{ Name: 'FunctionName', Value: { Ref: functionId } }],
+      Statistic: 'Maximum',
+      Threshold: 900000,
+    });
+  }
 });
 
 test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
@@ -1367,7 +1390,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain('sqs:SendMessage');
   const projectionFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
-      'Projects audit outbox events into collaboration, Webhook, and connector deliveries.'
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.'
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
   const deliveryFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
@@ -1573,7 +1596,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   }
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
-      'Projects audit outbox events into collaboration, Webhook, and connector deliveries.',
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
     Handler: 'index.handler',
     Environment: {
       Variables: Match.objectLike({
@@ -2305,21 +2328,16 @@ test('tenant retention worker can query and reconcile only tenant and audit stor
       FilterCriteria?: { Filters?: Array<{ Pattern?: string }> };
     };
   }>;
-  expect(mappings).toHaveLength(2);
+  // Per-event audit retention runs in the audit projection fan-out, so this
+  // worker reads only the tenant administration stream (#491).
+  expect(mappings).toHaveLength(1);
   const tenantMapping = mappings.find((mapping) =>
     JSON.stringify(mapping.Properties?.EventSourceArn)
       .includes('TenantAdministrationTable621D59EB')
   );
-  const auditMapping = mappings.find((mapping) =>
-    JSON.stringify(mapping.Properties?.EventSourceArn)
-      .includes('AuditEventsTable0723963E')
-  );
   expect(tenantMapping).toBeDefined();
-  expect(auditMapping).toBeDefined();
   expect(JSON.stringify(tenantMapping?.Properties?.FilterCriteria))
     .toContain('\\\"eventName\\\":[\\\"INSERT\\\",\\\"MODIFY\\\"]');
-  expect(JSON.stringify(auditMapping?.Properties?.FilterCriteria))
-    .toContain('\\\"eventName\\\":[\\\"INSERT\\\"]');
   const operationPattern = tenantMapping?.Properties?.FilterCriteria?.Filters
     ?.map(({ Pattern }) => Pattern ?? '')
     .find((pattern) => pattern.includes('operation'));
@@ -2554,6 +2572,11 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
   }
 
   const lambdaResource = resources[functionLogicalId];
+  const lambdaEnvironment = JSON.stringify(
+    lambdaResource.Properties.Environment.Variables,
+  );
+  expect(lambdaEnvironment).not.toContain('"Ref":"RequestEmailWebhookSecret"');
+  expect(lambdaEnvironment).not.toContain('"Ref":"RequestTokenHashSecret"');
   expect(lambdaResource).toEqual(expect.objectContaining({
     Type: 'AWS::Lambda::Function',
     Properties: expect.objectContaining({
@@ -2564,9 +2587,14 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
       Timeout: 30,
       Environment: expect.objectContaining({
         Variables: expect.objectContaining({
-          REQUEST_EMAIL_WEBHOOK_SECRET: { Ref: 'RequestEmailWebhookSecret' },
+          // Secret ARNs only; NoEcho values stay out of the configuration (#494).
+          REQUEST_EMAIL_WEBHOOK_SECRET_SECRET_ARN: {
+            Ref: 'RequestEmailWebhookKeySecretCA8DB054',
+          },
           REQUEST_INTAKE_TABLE_NAME: expect.anything(),
-          REQUEST_TOKEN_HASH_SECRET: { Ref: 'RequestTokenHashSecret' },
+          REQUEST_TOKEN_HASH_SECRET_SECRET_ARN: {
+            Ref: 'RequestTokenHashKeySecretCABB3465',
+          },
           TENANT_ADMINISTRATION_TABLE_NAME: {
             Ref: 'TenantAdministrationTable621D59EB',
           },
@@ -3056,4 +3084,68 @@ test('agent run triage files failed and stalled runs through a narrow scheduled 
     }),
   ]));
   expect(JSON.stringify(statements)).not.toContain('dynamodb:Scan');
+});
+
+test('no Lambda environment references a NoEcho parameter (#494)', () => {
+  const document = synthesizedTemplate.toJSON() as {
+    Parameters: Record<string, { NoEcho?: boolean }>;
+    Resources: Record<string, {
+      Type?: string;
+      Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+    }>;
+  };
+  const noEchoParameters = Object.entries(document.Parameters)
+    .filter(([, parameter]) => parameter.NoEcho === true)
+    .map(([logicalId]) => logicalId);
+  expect(noEchoParameters).toEqual(expect.arrayContaining([
+    'EnterpriseIdentityTokenHashSecret',
+    'RequestEmailWebhookSecret',
+    'RequestTokenHashSecret',
+    'WorkspaceAuditPseudonymKey',
+  ]));
+
+  const leaks = Object.entries(document.Resources)
+    .filter(([, resource]) => resource.Type === 'AWS::Lambda::Function')
+    .flatMap(([logicalId, resource]) => {
+      const environment = JSON.stringify(
+        resource.Properties?.Environment?.Variables ?? {},
+      );
+      return noEchoParameters
+        .filter((parameter) => environment.includes(JSON.stringify({ Ref: parameter })))
+        .map((parameter) => `${logicalId}:${parameter}`);
+    });
+  expect(leaks).toEqual([]);
+
+  // Each former reader gets the ARN of a secret that holds the value instead.
+  const expectations: Array<[string, Record<string, string>]> = [
+    ['ConnectorSyncFunction', {
+      ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
+        'EnterpriseIdentityTokenHashKeySecretB442F5F9',
+    }],
+    ['WorkItemImportFunction', {
+      ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
+        'EnterpriseIdentityTokenHashKeySecretB442F5F9',
+    }],
+    ['EnterpriseScimGroupJobFunction', {
+      ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
+        'EnterpriseIdentityTokenHashKeySecretB442F5F9',
+      MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY_SECRET_ARN:
+        WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
+    }],
+  ];
+  for (const [functionPrefix, variables] of expectations) {
+    const entry = Object.entries(document.Resources).find(([logicalId, resource]) =>
+      resource.Type === 'AWS::Lambda::Function' &&
+      logicalId.startsWith(functionPrefix));
+    expect(entry).toBeDefined();
+    const environment = entry?.[1].Properties?.Environment?.Variables ?? {};
+    for (const [name, secretLogicalId] of Object.entries(variables)) {
+      expect(environment[name]).toEqual({ Ref: secretLogicalId });
+    }
+  }
+  const tokenHashSecret = document.Resources.EnterpriseIdentityTokenHashKeySecretB442F5F9 as {
+    Properties?: { SecretString?: unknown };
+  };
+  expect(tokenHashSecret.Properties?.SecretString)
+    .toEqual({ Ref: 'EnterpriseIdentityTokenHashSecret' });
 });

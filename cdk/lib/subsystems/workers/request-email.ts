@@ -5,6 +5,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaDestinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
@@ -55,6 +56,24 @@ export function buildRequestEmailWorker(
     throw new Error('Request email ingestion requires the RequestEmailWebhookSecret parameter.');
   }
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
+  // NoEcho parameter values go into Secrets Manager, never into the Lambda
+  // configuration; the worker reads them by ARN at cold start.
+  const requestEmailWebhookKeySecret = new secretsmanager.Secret(
+    scope,
+    'RequestEmailWebhookKeySecret',
+    {
+      description: 'Request email envelope signing key read by the ingestion worker.',
+      secretStringValue: cdk.SecretValue.cfnParameter(requestEmailWebhookSecret),
+    },
+  );
+  const requestTokenHashKeySecret = new secretsmanager.Secret(
+    scope,
+    'RequestTokenHashKeySecret',
+    {
+      description: 'Request capability token HMAC key read by the ingestion worker.',
+      secretStringValue: cdk.SecretValue.cfnParameter(requestTokenHashSecret),
+    },
+  );
 
   const requestEmailIngestionDlq = new sqs.Queue(scope, 'RequestEmailIngestionDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
@@ -84,14 +103,17 @@ export function buildRequestEmailWorker(
         target: 'node22',
       },
       environment: {
-        REQUEST_EMAIL_WEBHOOK_SECRET: requestEmailWebhookSecret.valueAsString,
+        REQUEST_EMAIL_WEBHOOK_SECRET_SECRET_ARN:
+          requestEmailWebhookKeySecret.secretArn,
         REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
-        REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
+        REQUEST_TOKEN_HASH_SECRET_SECRET_ARN: requestTokenHashKeySecret.secretArn,
         TENANT_ADMINISTRATION_TABLE_NAME:
           tenantAdministrationTable.tableName,
       },
     },
   );
+  requestEmailWebhookKeySecret.grantRead(requestEmailIngestionFunction);
+  requestTokenHashKeySecret.grantRead(requestEmailIngestionFunction);
   bindRuntimeControls(
     input.runtimeControls,
     requestEmailIngestionFunction,

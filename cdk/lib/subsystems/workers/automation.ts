@@ -144,6 +144,19 @@ export function buildAutomationWorkers(
     }),
   );
   auditEventsTable.grantStreamRead(automationEventFunction);
+  new cloudwatch.Alarm(scope, 'AutomationEventIteratorAgeAlarm', {
+    alarmDescription:
+      'Detects automation audit stream lag of fifteen minutes or more.',
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: automationEventFunction.metric('IteratorAge', {
+      period: cdk.Duration.minutes(5),
+      statistic: 'Maximum',
+    }),
+    threshold: cdk.Duration.minutes(15).toMilliseconds(),
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
   automationTable.grants.readWriteData(automationEventFunction);
   collaborationTable.grants.readWriteData(automationEventFunction);
   customersTable.grants.readWriteData(automationEventFunction);

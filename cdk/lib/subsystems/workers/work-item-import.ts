@@ -49,6 +49,7 @@ export function buildWorkItemImportWorker(
     auditEventsTable,
     developerPlatformTable,
     enterpriseIdentityTable,
+    enterpriseIdentityTokenHashKeySecret,
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
@@ -63,7 +64,6 @@ export function buildWorkItemImportWorker(
     auditRetentionDays,
     cognitoUserPoolArn,
     cognitoUserPoolId,
-    enterpriseIdentityTokenHashSecret,
     systemAdminGroups,
   } = input.parameters;
   const { workItemImportDlq, workItemImportQueue } = input.workerChannels;
@@ -103,8 +103,8 @@ export function buildWorkItemImportWorker(
         COGNITO_USER_POOL_ID: cognitoUserPoolId,
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
-        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
-          enterpriseIdentityTokenHashSecret.valueAsString,
+        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
+          enterpriseIdentityTokenHashKeySecret.secretArn,
         MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -134,6 +134,7 @@ export function buildWorkItemImportWorker(
     }),
   );
   workItemImportQueue.grants.consumeMessages(workItemImportFunction);
+  enterpriseIdentityTokenHashKeySecret.grantRead(workItemImportFunction);
   developerPlatformTable.grants.readWriteData(workItemImportFunction);
   workItemsTable.grants.readWriteData(workItemImportFunction);
   teamIssueEventsTable.grants.readWriteData(workItemImportFunction);

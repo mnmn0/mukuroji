@@ -78,6 +78,7 @@ export function buildConnectorWorkers(
     developerPlatformKey,
     developerPlatformTable,
     enterpriseIdentityTable,
+    enterpriseIdentityTokenHashKeySecret,
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
@@ -91,7 +92,6 @@ export function buildConnectorWorkers(
     auditRetentionDays,
     cognitoUserPoolArn,
     cognitoUserPoolId,
-    enterpriseIdentityTokenHashSecret,
     systemAdminGroups,
   } = input.parameters;
   const { connectorChannels } = input.workerChannels;
@@ -151,8 +151,8 @@ export function buildConnectorWorkers(
         DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
-        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET:
-          enterpriseIdentityTokenHashSecret.valueAsString,
+        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
+          enterpriseIdentityTokenHashKeySecret.secretArn,
         MUKUROJI_RUNTIME_ROLE: 'connector-queue-worker',
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -181,6 +181,7 @@ export function buildConnectorWorkers(
   connectorSyncQueue.grants.consumeMessages(connectorSyncFunction);
   connectorSyncQueue.grants.sendMessages(connectorSyncFunction);
   connectorRuntimeSecret.grantRead(connectorSyncFunction);
+  enterpriseIdentityTokenHashKeySecret.grantRead(connectorSyncFunction);
   developerPlatformTable.grants.readWriteData(connectorSyncFunction);
   workItemsTable.grants.readWriteData(connectorSyncFunction);
   teamIssueEventsTable.grants.readWriteData(connectorSyncFunction);
