@@ -133,7 +133,13 @@ export type IssueOAuthTokenRequest = {
    * Lets the caller apply a per-client limit that callers without the secret cannot use up.
    * Throwing rejects the request without issuing a token.
    */
-  admitVerifiedClient?: () => Promise<void>
+  admitVerifiedClient?: (client: VerifiedOAuthClient) => Promise<void>
+}
+
+/** OAuth app whose client secret the token endpoint has verified. */
+export type VerifiedOAuthClient = {
+  /** Internal identifier of the verified OAuth app. */
+  oauthAppId: string
 }
 
 /** OAuth token endpoint result. */

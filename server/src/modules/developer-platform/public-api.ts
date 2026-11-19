@@ -958,10 +958,11 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       ...(input.scopes.length > 0 ? { scopes: input.scopes } : {}),
       // The client bucket counts only callers that proved the secret, so knowing the public
       // client_id is not enough to lock the client out. Wrong secrets count against the IP bucket.
-      admitVerifiedClient: () => enforceOAuthTokenRateLimit(
+      // It is keyed on the verified app's internal ID, so nothing from the request body is hashed.
+      admitVerifiedClient: (client) => enforceOAuthTokenRateLimit(
         c,
         dependencies,
-        `client:${digestRateLimitSubject(input.clientId)}`,
+        `client:${client.oauthAppId}`,
         OAUTH_TOKEN_CLIENT_RATE_LIMIT,
       ),
     })

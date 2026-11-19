@@ -2089,7 +2089,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
         'OAuth app does not allow the client_credentials grant.',
       )
     }
-    await request.admitVerifiedClient?.()
+    await request.admitVerifiedClient?.({ oauthAppId: oauthApp.id })
     const scopes = request.scopes === undefined
       ? [...oauthApp.scopes]
       : readScopes(request.scopes)
