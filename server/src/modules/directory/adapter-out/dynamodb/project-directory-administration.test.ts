@@ -163,10 +163,13 @@ test('renames a Team in place without changing its key or ID', async () => {
       Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
       UpdateExpression: 'SET nameJa = :nameJa, nameEn = :nameEn',
       ConditionExpression:
-        '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+        '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt) ' +
+        'AND #nameJa = :readNameJa AND #nameEn = :readNameEn',
       ExpressionAttributeValues: {
         ':entryType': 'team',
         ':teamId': 'alpha',
+        ':readNameJa': 'alpha 日本語',
+        ':readNameEn': 'alpha English',
         ':nameJa': '新しい名前',
         ':nameEn': 'New name',
       },
@@ -208,6 +211,16 @@ test('renames a Project and keeps its color unless a new one is given', async ()
     nameEn: 'live English',
     tone: 'purple',
   })).resolves.toMatchObject({ tone: 'purple' })
+  // A rename that omits the color only commits while the color it read is still stored.
+  expect(transactions()[0]).toEqual([{
+    Update: expect.objectContaining({
+      ConditionExpression: expect.stringContaining('#tone = :readTone'),
+      ExpressionAttributeValues: expect.objectContaining({
+        ':readTone': 'green',
+        ':tone': 'green',
+      }),
+    }),
+  }])
   await expect(client.renameProject(directoryId, 'alpha', 'live', {
     nameJa: 'x',
     tone: 'red',

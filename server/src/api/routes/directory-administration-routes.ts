@@ -73,18 +73,7 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         teamId,
         createApiMutationContext(c, principal, { teamId }),
       )
-      const team = (await workspaceDependencies.projectDirectory.getDirectoryAdministration(
-        principal.directoryId,
-      )).teams.find((candidate) => candidate.id === teamId)
-      if (team) {
-        await projectTeamSearchDocument(
-          principal.directoryId,
-          teamId,
-          team.nameJa,
-          team.nameEn,
-          'team restore',
-        )
-      }
+      await projectRestoredTeamSearchDocument(principal.directoryId, teamId)
       return response
     })
   })
@@ -215,6 +204,26 @@ async function projectTeamSearchDocument(
     // The Team row does not record its creator, so the creator projected at creation is kept.
     { preserveCreator: true },
   )
+}
+
+/**
+ * Re-projects a restored Team's search document. The restore is already committed, so a failed
+ * read of the Team's names is logged instead of failing the request.
+ *
+ * @param workspaceId - Workspace that owns the Team.
+ * @param teamId - Restored Team identifier.
+ */
+async function projectRestoredTeamSearchDocument(workspaceId: string, teamId: string) {
+  try {
+    const team = (await workspaceDependencies.projectDirectory.getDirectoryAdministration(
+      workspaceId,
+    )).teams.find((candidate) => candidate.id === teamId)
+    if (team) {
+      await projectTeamSearchDocument(workspaceId, teamId, team.nameJa, team.nameEn, 'team restore')
+    }
+  } catch (error) {
+    console.error('Workspace search projection failed after team restore.', error)
+  }
 }
 
 /**

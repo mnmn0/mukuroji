@@ -1,6 +1,21 @@
 import useSWR from 'swr'
 import { getDirectoryAdministration } from '../api/directoryAdministration'
 
+/** First element of the administration query key. */
+const directoryAdministrationKeyPrefix = 'directory-administration'
+
+/**
+ * Tells whether an SWR key belongs to the directory administration query.
+ *
+ * Sidebar mutations that create or archive Teams and Projects revalidate matching keys with it.
+ *
+ * @param key - SWR cache key.
+ * @returns Whether the key is a directory administration key.
+ */
+export function isDirectoryAdministrationKey(key: unknown): boolean {
+  return Array.isArray(key) && key[0] === directoryAdministrationKeyPrefix
+}
+
 /**
  * Loads every Team and Project, archived ones included, for the administration panel.
  *
@@ -9,7 +24,7 @@ import { getDirectoryAdministration } from '../api/directoryAdministration'
  */
 export function useDirectoryAdministration(accessToken: string) {
   return useSWR(
-    ['directory-administration', accessToken] as const,
+    [directoryAdministrationKeyPrefix, accessToken] as const,
     ([, token]) => getDirectoryAdministration(token),
     { shouldRetryOnError: false },
   )

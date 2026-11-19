@@ -2518,7 +2518,8 @@ export class DynamoDbProjectDirectoryClient {
       return response
     }
 
-    const condition = createActiveTeamRowCondition(teamId)
+    // The names read above must still be stored, so a stale rename cannot overwrite a newer one.
+    const condition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
     await this.sendDirectoryAdministrationTransaction([
       {
         Update: {
@@ -2583,7 +2584,12 @@ export class DynamoDbProjectDirectoryClient {
       return response
     }
 
-    const condition = createActiveProjectRowCondition(teamId, projectId)
+    // The names and color read above must still be stored, so a stale rename cannot overwrite a
+    // concurrent change, such as restoring an old color the request did not mention.
+    const condition = withReadNamesCondition(
+      createActiveProjectRowCondition(teamId, projectId),
+      project,
+    )
     await this.sendDirectoryAdministrationTransaction([
       {
         Update: {
@@ -4876,6 +4882,38 @@ type DirectoryRowCondition = {
   ExpressionAttributeNames: Record<string, string>
   /** Attribute values used by the condition. */
   ExpressionAttributeValues: Record<string, unknown>
+}
+
+/**
+ * Extends a row condition so the names, and a Project's color, still hold the values read.
+ *
+ * @param condition - Active-row condition.
+ * @param row - Row as read before the rename.
+ * @returns The condition with compare-and-swap clauses added.
+ */
+function withReadNamesCondition(
+  condition: DirectoryRowCondition,
+  row: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem,
+): DirectoryRowCondition {
+  const clauses = ['#nameJa = :readNameJa', '#nameEn = :readNameEn']
+  const names: Record<string, string> = { '#nameJa': 'nameJa', '#nameEn': 'nameEn' }
+  const values: Record<string, unknown> = { ':readNameJa': row.nameJa, ':readNameEn': row.nameEn }
+
+  if (row.entryType === 'project') {
+    names['#tone'] = 'tone'
+    if (row.tone === undefined) {
+      clauses.push('attribute_not_exists(#tone)')
+    } else {
+      clauses.push('#tone = :readTone')
+      values[':readTone'] = row.tone
+    }
+  }
+
+  return {
+    ConditionExpression: [condition.ConditionExpression, ...clauses].join(' AND '),
+    ExpressionAttributeNames: { ...condition.ExpressionAttributeNames, ...names },
+    ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ...values },
+  }
 }
 
 /**

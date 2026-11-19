@@ -1,3 +1,4 @@
+import { useSWRConfig } from 'swr'
 import {
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
   type AiAssistanceTask,
@@ -72,6 +73,7 @@ import {
   type ProjectQuickAccessFeedback,
   type ResolvedProjectQuickAccessItem,
 } from '../../projects/model/projectQuickAccess'
+import { isDirectoryAdministrationKey } from '../../projects/queries/useDirectoryAdministration'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { useProjectQuickAccess } from '../../projects/queries/useProjectQuickAccess'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
@@ -269,6 +271,7 @@ export function WorkspaceRouteProvider() {
     isLoading: isCurrentUserLoading,
     mutate: mutateCurrentUser,
   } = useCurrentUser(accessToken)
+  const { mutate: mutateDirectoryAdministration } = useSWRConfig()
   const {
     data: teams = emptyProjectDirectory,
     error: projectDirectoryError,
@@ -663,10 +666,14 @@ export function WorkspaceRouteProvider() {
       JSON.stringify(input),
       (context) => createProjectDirectoryTeam(accessToken, input, context),
     ))
-    await mutateProjectDirectory()
+    await Promise.all([
+      mutateProjectDirectory(),
+      mutateDirectoryAdministration(isDirectoryAdministrationKey),
+    ])
   }, [
     accessToken,
     guardEnterpriseSession,
+    mutateDirectoryAdministration,
     mutateProjectDirectory,
     mutationRequestRunner,
   ])
@@ -690,10 +697,14 @@ export function WorkspaceRouteProvider() {
         context,
       ),
     ))
-    await mutateProjectDirectory()
+    await Promise.all([
+      mutateProjectDirectory(),
+      mutateDirectoryAdministration(isDirectoryAdministrationKey),
+    ])
   }, [
     accessToken,
     guardEnterpriseSession,
+    mutateDirectoryAdministration,
     mutateProjectDirectory,
     mutationRequestRunner,
   ])
@@ -712,6 +723,7 @@ export function WorkspaceRouteProvider() {
     await Promise.all([
       mutateProjectDirectory(),
       mutateProjectQuickAccess(),
+      mutateDirectoryAdministration(isDirectoryAdministrationKey),
     ])
 
     if (activeTeamMatch?.params.teamId === teamId) {
@@ -721,6 +733,7 @@ export function WorkspaceRouteProvider() {
     accessToken,
     activeTeamMatch?.params.teamId,
     guardEnterpriseSession,
+    mutateDirectoryAdministration,
     mutateProjectDirectory,
     mutateProjectQuickAccess,
     mutationRequestRunner,
@@ -749,10 +762,12 @@ export function WorkspaceRouteProvider() {
     await Promise.all([
       mutateProjectDirectory(),
       mutateProjectQuickAccess(),
+      mutateDirectoryAdministration(isDirectoryAdministrationKey),
     ])
   }, [
     accessToken,
     guardEnterpriseSession,
+    mutateDirectoryAdministration,
     mutateProjectDirectory,
     mutateProjectQuickAccess,
     mutationRequestRunner,
