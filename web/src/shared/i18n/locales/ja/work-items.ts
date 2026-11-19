@@ -361,6 +361,8 @@ export const workItemsMessages = {
   'tasks.detail.baselineCapturedAt': '保存 {date}',
   'tasks.detail.baselineNone': 'この Project のベースラインはまだ保存されていません。',
   'tasks.detail.baselineNotIncluded': 'この Work Item は保存済みのベースラインに含まれていません。',
+  'tasks.detail.baselineLoading': 'ベースラインを読み込み中です…',
+  'tasks.detail.baselineCapturing': 'ベースラインを保存しています…',
   'tasks.detail.baselineLoadError': 'ベースラインを読み込めませんでした。',
   'tasks.detail.baselineRetry': 'ベースラインを取得し直す',
   'tasks.detail.baselineCapture': 'Project のベースラインを保存',

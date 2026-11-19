@@ -135,12 +135,25 @@ test('answers 409 with its code when a capture conflicts', async () => {
   expect(await response.json()).toMatchObject({ code: 'ScheduleBaselineConflict' })
 })
 
-test('refuses a capture by a reader without Project access', async () => {
+test('refuses a capture by a reader without Team access with 403', async () => {
   configureFakeProjectClients(false)
   const base = await readBaseIssue()
   const response = await request(
     `/api/teams/core-team/projects/${base.assignedProjectId ?? 'missing'}/schedule-baseline`,
     'POST',
   )
-  expect([403, 404]).toContain(response.status)
+  // Without any access to the Team, the Team check refuses before the Project is looked up.
+  expect(response.status).toBe(403)
+  expect(await response.json()).toEqual({ message: 'Project access is denied.' })
+})
+
+test('refuses a capture by a Project viewer with 403', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const base = await readBaseIssue()
+  const response = await request(
+    `/api/teams/core-team/projects/${base.assignedProjectId ?? 'missing'}/schedule-baseline`,
+    'POST',
+  )
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'ScheduleBaselineForbidden' })
 })

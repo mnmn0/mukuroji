@@ -68,5 +68,14 @@ describe('schedule baseline', () => {
       ...valid,
       baseline: { ...valid.baseline, entries: [{ workItemId: 'a', endDate: 'soon' }] },
     })).toBeUndefined()
+    for (const endDate of ['2026-02-30', '2026-13-01']) {
+      expect(parseProjectScheduleBaselineResponse({
+        ...valid,
+        baseline: { ...valid.baseline, entries: [{ workItemId: 'a', endDate }] },
+      })).toBeUndefined()
+    }
+    for (const capturedAt of ['broken', '2026-11-19', '2026-02-30T00:00:00.000Z', '2026-11-19T00:00:00Z']) {
+      expect(parseProjectScheduleBaselineResponse({ ...valid, baseline: { ...valid.baseline, capturedAt } })).toBeUndefined()
+    }
   })
 })

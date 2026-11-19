@@ -361,6 +361,8 @@ export const workItemsMessages = {
   'tasks.detail.baselineCapturedAt': 'Saved {date}',
   'tasks.detail.baselineNone': 'No baseline has been saved for this Project yet.',
   'tasks.detail.baselineNotIncluded': 'This Work Item is not in the saved baseline.',
+  'tasks.detail.baselineLoading': 'Loading the baseline…',
+  'tasks.detail.baselineCapturing': 'Saving the baseline…',
   'tasks.detail.baselineLoadError': 'The baseline could not be loaded.',
   'tasks.detail.baselineRetry': 'Fetch baseline again',
   'tasks.detail.baselineCapture': 'Save Project baseline',

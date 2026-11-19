@@ -26,6 +26,7 @@ const meta = {
   args: {
     canCapture: false,
     captureFailed: false,
+    capturing: false,
     disabled: false,
     onCapture: fn(),
     onRetry: fn(),
@@ -80,6 +81,17 @@ export const Loading: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('button', { name: t('tasks.detail.baselineCapture') })).toBeDisabled()
+    await expect(canvas.getByRole('status')).toHaveTextContent(t('tasks.detail.baselineLoading'))
+  },
+}
+
+/** A new baseline is being saved. */
+export const Capturing: Story = {
+  args: { canCapture: true, capturing: true, disabled: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: t('tasks.detail.baselineCapture') })).toBeDisabled()
+    await expect(canvas.getByRole('status')).toHaveTextContent(t('tasks.detail.baselineCapturing'))
   },
 }
 

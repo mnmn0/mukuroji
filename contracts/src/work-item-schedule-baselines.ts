@@ -116,7 +116,7 @@ export function parseProjectScheduleBaselineResponse(
     typeof revision !== 'number' ||
     !Number.isSafeInteger(revision) ||
     revision < 1 ||
-    typeof capturedAt !== 'string' ||
+    !isProjectScheduleBaselineCapturedAt(capturedAt) ||
     !Array.isArray(entries) ||
     entries.length > PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES
   ) {
@@ -153,13 +153,28 @@ export function parseProjectScheduleBaselineEntry(
 }
 
 /**
- * Reports whether a value is a `YYYY-MM-DD` date string.
+ * Reports whether a value is a baseline capture time: a UTC ISO timestamp as
+ * `Date.prototype.toISOString` writes it.
  *
  * @param value - Candidate value.
- * @returns Whether the value is a date string.
+ * @returns Whether the value is a real capture timestamp.
+ */
+export function isProjectScheduleBaselineCapturedAt(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false
+  const time = Date.parse(value)
+  return Number.isFinite(time) && new Date(time).toISOString() === value
+}
+
+/**
+ * Reports whether a value is a real `YYYY-MM-DD` calendar date.
+ *
+ * @param value - Candidate value.
+ * @returns Whether the value is a date string naming a day that exists.
  */
 function isCalendarDate(value: unknown): value is string {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(value)
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const time = Date.parse(`${value}T00:00:00.000Z`)
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value
 }
 
 /**

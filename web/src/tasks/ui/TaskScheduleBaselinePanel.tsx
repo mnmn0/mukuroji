@@ -68,6 +68,7 @@ export function TaskScheduleBaselinePanel({
     <TaskScheduleBaselineView
       canCapture={canCapture}
       captureFailed={failedScope === scope}
+      capturing={isCapturing}
       disabled={disabled || isCapturing}
       onCapture={() => {
         void capture()
@@ -109,6 +110,8 @@ export type TaskScheduleBaselineViewProps = {
   canCapture: boolean
   /** Whether the last save for this Project failed. */
   captureFailed: boolean
+  /** Whether a save for this Project is running. */
+  capturing: boolean
   /** Disables the save button. */
   disabled: boolean
   /** Saves a new Project baseline. */
@@ -130,6 +133,7 @@ export function TaskScheduleBaselineView({
   state,
   canCapture,
   captureFailed,
+  capturing,
   disabled,
   onCapture,
   onRetry,
@@ -151,6 +155,9 @@ export function TaskScheduleBaselineView({
       data-testid="task-detail-schedule-baseline"
     >
       <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('tasks.detail.scheduleBaseline')}</h3>
+      {state.status === 'loading' ? (
+        <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('tasks.detail.baselineLoading')}</p>
+      ) : null}
       {state.status === 'error' ? (
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineLoadError')}</p>
@@ -196,6 +203,9 @@ export function TaskScheduleBaselineView({
           >
             {t('tasks.detail.baselineCapture')}
           </button>
+          {capturing ? (
+            <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('tasks.detail.baselineCapturing')}</p>
+          ) : null}
           {captureFailed ? (
             <p className="text-sm text-fg-red-700" role="alert">{t('tasks.detail.baselineCaptureError')}</p>
           ) : null}

@@ -61,3 +61,30 @@ test('reports throttled cancellations as retryable instead of a conflict', async
 test('reports other cancellations as a storage failure', async () => {
   expect(await captureWith(cancellation(['ValidationError', 'None']))).toMatchObject({ status: 502 })
 })
+
+test('rejects a stored row whose capture time or dates are not real', async () => {
+  const row = {
+    workspaceId: 'w',
+    recordKey: 'PROJECT_SCHEDULE_BASELINE#t#p',
+    entryType: 'project-schedule-baseline',
+    schemaVersion: 1,
+    revision: 1,
+    capturedAt: '2026-11-19T00:00:00.000Z',
+    entries: [{ workItemId: 'a', endDate: '2026-12-05' }],
+  }
+  /**
+   * Reads a store whose only row is the given item.
+   *
+   * @param item - Stored row.
+   * @returns The read result or the rejection.
+   */
+  const readRow = async (item: Record<string, unknown>) => {
+    const client = Object.assign(Object.create(null), { async send() { return { Item: item } } })
+    return new DynamoDbProjectScheduleBaselineStore('planning', client)
+      .get('w', 't', 'p')
+      .catch((error: unknown) => error)
+  }
+  expect(await readRow(row)).toMatchObject({ revision: 1 })
+  expect(await readRow({ ...row, capturedAt: 'broken' })).toMatchObject({ status: 502 })
+  expect(await readRow({ ...row, entries: [{ workItemId: 'a', endDate: '2026-02-30' }] })).toMatchObject({ status: 502 })
+})

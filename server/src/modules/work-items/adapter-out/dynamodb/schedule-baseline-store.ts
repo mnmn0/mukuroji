@@ -5,6 +5,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  isProjectScheduleBaselineCapturedAt,
   parseProjectScheduleBaselineEntry,
   PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES,
   type ProjectScheduleBaseline,
@@ -201,8 +202,9 @@ function parseStoredBaseline(row: Record<string, unknown>, workspaceId: string, 
     typeof revision !== 'number' ||
     !Number.isSafeInteger(revision) ||
     revision < 1 ||
-    typeof capturedAt !== 'string' ||
-    !Array.isArray(entries)
+    !isProjectScheduleBaselineCapturedAt(capturedAt) ||
+    !Array.isArray(entries) ||
+    entries.length > PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES
   ) {
     throw corruptBaseline()
   }
