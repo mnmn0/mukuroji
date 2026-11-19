@@ -4,6 +4,7 @@ import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@a
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import type { ApprovalNotificationSource } from '../../../files'
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../../notifications/notifications'
+import { createAnalyticsDeliveryAuditEvent } from '../../../analytics/adapter-out/dynamodb/analytics-delivery-notifier'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -550,6 +551,67 @@ describe('collaboration projection pure helpers', () => {
     } finally {
       send.mockRestore()
       errors.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('projects a scheduled Analytics delivery to its recipient and re-checks Team access for external delivery', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const delivery = (visibility: 'shared' | 'team') => parseAuditProjectionEvent({ ...createAnalyticsDeliveryAuditEvent({
+      report: {
+        schemaVersion: 1, id: 'weekly-report', workspaceId: 'workspace-1', name: 'Weekly portfolio', visibility,
+        ...(visibility === 'team' ? { teamId: 'core' } : {}), ownerMemberKey: 'owner@example.com', timeZone: 'UTC',
+        revision: 1, filter: { period: { from: '2026-07-01T00:00:00.000Z', to: '2026-07-31T23:59:59.999Z' } },
+        widgets: [], createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+      },
+      snapshotId: 'snapshot-1',
+      receipt: { workspaceId: 'workspace-1', reportId: 'weekly-report', occurrenceKey: 'occurrence', reportRevision: 1,
+        format: 'csv', snapshotId: 'snapshot-1', recipientMemberKeys: [memberKey], createdAt: '2026-07-12T12:00:00.000Z' },
+      recipientMemberKey: memberKey,
+      deliveredAt: '2026-07-12T12:00:00.000Z',
+    }, 30) })
+    const shared = delivery('shared')
+    const team = delivery('team')
+    if (!shared || !team) throw new Error('Analytics delivery events must parse.')
+    // The system actor never removes the recipient, and the row keeps the report link and title.
+    const [candidate] = groupNotificationCandidates(shared)
+    expect(candidate).toEqual({ memberKey, reasons: ['report-recipient'] })
+    if (!candidate) throw new Error('Analytics delivery must have one candidate.')
+    expect(createNotificationProjectionItem(shared, candidate, createNotificationProjectionDeliveryState(
+      `${shared.workspaceId}#${memberKey}`, shared.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES,
+    ))).toMatchObject({
+      eventType: 'analytics.report.delivered',
+      entityId: 'weekly-report',
+      title: 'Weekly portfolio',
+      deepLink: '/reports?v=1&report=weekly-report&snapshot=snapshot-1',
+    })
+    expect(team.teamId).toBe('core')
+
+    let role = 'member'
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role, status: 'active' }, $metadata: {},
+    }))
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    cache.directories.set('workspace-1', Promise.resolve([{ entryType: 'team', teamId: 'core' }]))
+    try {
+      expect(await authorizeNotificationDelivery(shared, memberKey, identity, cache)).toBe(true)
+      // A Team report goes out only while the recipient can still read that Team.
+      expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(false)
+      cache.directories.set('workspace-1', Promise.resolve([
+        { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+      ]))
+      expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
+      role = 'guest'
+      expect(await authorizeNotificationDelivery(shared, memberKey, identity, cache)).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
     }
   })

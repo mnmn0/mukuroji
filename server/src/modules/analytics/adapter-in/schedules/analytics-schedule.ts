@@ -201,6 +201,30 @@ export type AnalyticsScheduleArtifactRenderer = (
   input: AnalyticsScheduleArtifactInput,
 ) => Promise<void>
 
+/** One recipient-scoped scheduled delivery that the recipient is told about. */
+export type AnalyticsDeliveryNotification = {
+  /** Current report revision that produced the delivery. */
+  report: AnalyticsReport
+  /** Immutable snapshot rendered under the recipient's current ACL. */
+  snapshotId: string
+  /** Deterministic receipt that completes this recipient's occurrence. */
+  receipt: AnalyticsDeliveryReceipt
+  /** Recipient who passed the current ACL check for this occurrence. */
+  recipientMemberKey: string
+  /** Wall-clock time of the schedule invocation that delivered the snapshot. */
+  deliveredAt: string
+}
+
+/**
+ * Tells one authorized recipient that a scheduled snapshot is ready.
+ *
+ * @remarks Implementations must be idempotent per receipt occurrence key, because a retry after a
+ * crash before the receipt commit calls it again for the same recipient and occurrence.
+ */
+export type AnalyticsDeliveryNotifier = (
+  notification: AnalyticsDeliveryNotification,
+) => Promise<void>
+
 /** Server-side feature gate required by the trusted Analytics schedule worker. */
 export interface AnalyticsFeatureEntitlementPort {
   /** Returns whether Analytics execution is currently enabled for a Workspace. */
@@ -217,6 +241,8 @@ export type AnalyticsScheduleDependencies = {
   render: AnalyticsScheduleRenderer
   /** Durable write 前に artifact を検証する注入可能な純粋 renderer です。 */
   renderArtifact: AnalyticsScheduleArtifactRenderer
+  /** Idempotent recipient notification written after the snapshot and before the receipt. */
+  notifyDelivery: AnalyticsDeliveryNotifier
 }
 
 /** 一つの due report を処理した結果です。 */
@@ -473,6 +499,15 @@ export async function processDueAnalyticsReport(
     await dependencies.renderArtifact({ snapshotRecord, receipt })
     await dependencies.repository.putSnapshot(snapshotRecord)
     result.snapshotsStored += 1
+    // The receipt is the completion checkpoint, so the notification is written before it: a
+    // crash in between retries this recipient and the idempotent notifier deduplicates it.
+    await dependencies.notifyDelivery({
+      report: current,
+      snapshotId: snapshotRecord.id,
+      receipt,
+      recipientMemberKey,
+      deliveredAt: now.toISOString(),
+    })
     try {
       const receiptResult = await dependencies.repository.putDeliveryReceipt(receipt)
       if (receiptResult.created) {

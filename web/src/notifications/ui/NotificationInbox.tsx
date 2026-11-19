@@ -9,6 +9,9 @@ import {
 } from '../model/presentation'
 import type { NotificationInboxController } from '../mutations/useNotifications'
 
+/** Event type of a scheduled Analytics report delivery to one recipient. */
+const analyticsReportDeliveredEventType = 'analytics.report.delivered'
+
 const notificationFilters = ['all', 'unread', 'read', 'archived', 'snoozed'] as const satisfies readonly NotificationFilter[]
 const snoozeOptions = ['one-hour', 'tomorrow', 'next-week'] as const satisfies readonly NotificationSnoozeOption[]
 
@@ -243,7 +246,7 @@ function NotificationRow({
   const isPending = controller.pendingNotificationId === notification.id
   const eventLabel = formatNotificationEventType(notification.eventType, t)
   const title = notification.title?.trim() || eventLabel
-  const summary = notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
+  const summary = resolveNotificationSummary(notification, eventLabel, t)
 
   useEffect(() => {
     if (!selected) return
@@ -438,6 +441,10 @@ function formatNotificationEventType(eventType: string, t: (key: MessageKey) => 
 function resolveNotificationEventKey(eventType: string): MessageKey {
   const normalizedEventType = eventType.toLowerCase()
 
+  if (normalizedEventType === analyticsReportDeliveredEventType) {
+    return 'workspace.inbox.event.reportDelivered'
+  }
+
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'
   }
@@ -526,8 +533,30 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   if (normalizedReason === 'stale') {
     return t('workspace.inbox.reason.stale')
   }
+  if (normalizedReason === 'report-recipient') {
+    return t('workspace.inbox.reason.reportRecipient')
+  }
 
   return t('workspace.inbox.reason.watch')
+}
+
+/**
+ * Resolves the row summary, localizing the fixed text of scheduled report deliveries.
+ *
+ * @param notification - Notification shown in the row.
+ * @param eventLabel - Localized event label used by the fallback summary.
+ * @param t - Message translator for the current locale.
+ * @returns The summary text shown under the title.
+ */
+function resolveNotificationSummary(
+  notification: InboxNotification,
+  eventLabel: string,
+  t: (key: MessageKey) => string,
+) {
+  if (notification.eventType === analyticsReportDeliveredEventType) {
+    return t('workspace.inbox.summary.reportDelivered')
+  }
+  return notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 }
 
 function createNotificationFallbackSummary(
