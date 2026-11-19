@@ -837,6 +837,44 @@ demo data が必要な環境では無効にせずに使い続けるか、demo da
 
 local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
 
+#### 既存環境から demo data を取り除く
+
+demo data を投入した環境を、owner だけの空の Workspace に戻すには `demo-data:remove` を使います。
+上の一覧の row（demo member・Team・Project・Work Item と、owner の demo Project manager row）だけを
+key で特定して削除し、Workspace metadata・owner・email alias は残します。stack の demo data 設定は
+先に無効（既定）にしておきます。有効のままだと、`SeedWorkspaceDemoMembers` が更新される deploy で
+demo member が作り直されます。
+
+```sh
+export WORKSPACE_ACCESS_TABLE_NAME=...   # WorkspaceAccessTableName output
+export PROJECT_DIRECTORY_TABLE_NAME=...  # ProjectDirectoryTableName output
+export WORK_ITEMS_TABLE_NAME=...         # WorkItemsTableName output
+export MUKUROJI_WORKSPACE_DIRECTORY_ID=... # WorkspaceDirectoryId parameter
+export INITIAL_OWNER_EMAIL=...           # InitialOwnerEmail parameter
+export AWS_REGION=...                    # stack の region（既定値なし）
+
+bun run demo-data:remove          # 削除する row を表示するだけ
+bun run demo-data:remove --apply  # 1 つの transaction ですべて削除する
+```
+
+実 data を壊さないよう、次のどれかがあると何も削除せずに終了し（exit code 1）、該当 row を表示します。
+
+- demo Team・Project に、demo seed 以外の row がある（人が作った Work Item、追加した Project や Project member、
+  demo Project に割り当てた他 Team の Work Item など）
+- demo Work Item が編集されている（`revision` が 1 でない）
+- demo member の role が `owner` になっている
+- demo row の key に別の種類の row がある
+
+その場合は、画面から demo Team・Project を archive するか、表示された row を先に整理してから再実行します。
+削除は条件付きの 1 つの transaction なので、確認した demo row が確認後に変わると全体が失敗し、何も削除されません。
+ただし確認後に demo Team・Project へ新しく追加された row は検出できないので、利用者の操作がない時間に実行します。
+再実行しても、取り除き済みの row は「already gone」として数えるだけです。
+
+この script が見るのは上の 3 table だけです。demo の Work Item に付いたコメント・添付・時間記録や、
+検索 index に backfill 済みの demo の文書は削除しません。demo Team 以外の Work Item の担当者が demo member でも
+検出しません。demo data を使い込んだ環境では archive を使います。
+local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` と `AWS_REGION` を付けて同じように実行できます。
+
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
 ### 3. Bootstrap と API を検証する

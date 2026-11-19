@@ -1,7 +1,7 @@
 import type { TimeTrackingTranslator } from './timeTrackingText'
 
 /** View of the Team time tracking page. */
-export type TimeTrackingView = 'timesheet' | 'approvals' | 'report'
+export type TimeTrackingView = 'timesheet' | 'weekly-report' | 'approvals' | 'report'
 
 /** Props of the time tracking view switcher. */
 export type TimeTrackingViewTabsProps = {
@@ -16,7 +16,8 @@ export type TimeTrackingViewTabsProps = {
 }
 
 /**
- * Switches between the member's timesheet, the manager's approval queue, and the Team report.
+ * Switches between the member's timesheet and weekly report, the manager's approval queue, and the
+ * Team report.
  *
  * @param props - Selected view and navigation.
  * @returns View links.
@@ -24,6 +25,7 @@ export type TimeTrackingViewTabsProps = {
 export function TimeTrackingViewTabs({ getHref, onSelect, t, view }: TimeTrackingViewTabsProps) {
   const views: { id: TimeTrackingView; label: string }[] = [
     { id: 'timesheet', label: t('timeTracking.view.timesheet') },
+    { id: 'weekly-report', label: t('timeTracking.view.weeklyReport') },
     { id: 'approvals', label: t('timeTracking.view.approvals') },
     { id: 'report', label: t('timeTracking.view.report') },
   ]

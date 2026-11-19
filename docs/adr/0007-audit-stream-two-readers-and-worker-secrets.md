@@ -1,4 +1,4 @@
-# 0006. AuditEvents stream の reader を 2 つに保ち、worker の secret を Secrets Manager から読む
+# 0007. AuditEvents stream の reader を 2 つに保ち、worker の secret を Secrets Manager から読む
 
 - 状態: 提案
 - 日付: 2026-11-19
