@@ -8,8 +8,10 @@ import {
   type BulkOperation,
   type ApprovalRequest,
   type CustomFieldValue,
+  type MemberPreferences,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
+  type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
   type WorkItemAcceptanceCriterion,
@@ -1634,6 +1636,7 @@ function configureFakeProjectClients(
   const workspaceRole = options.workspaceRole ?? 'owner'
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
+  let memberPreferences: MemberPreferences = { revision: 0 }
   let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
@@ -1793,6 +1796,11 @@ function configureFakeProjectClients(
     projectQuickAccessReplacements: [] as Array<{
       directoryId: string
       input: UpdateProjectQuickAccessPreferencesInput
+      memberKey: string
+    }>,
+    memberPreferencesReplacements: [] as Array<{
+      directoryId: string
+      input: UpdateMemberPreferencesInput
       memberKey: string
     }>,
     userLists: [] as Array<{
@@ -2280,6 +2288,21 @@ function configureFakeProjectClients(
           revision: detachedInput.revision + 1,
         }
         return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
+      },
+      async getMemberPreferences() {
+        return { ...memberPreferences }
+      },
+      async replaceMemberPreferences(directoryId, memberKey, input) {
+        calls.memberPreferencesReplacements.push({ directoryId, input: { ...input }, memberKey })
+        if (input.revision !== memberPreferences.revision) {
+          throw new ProjectDataError(
+            409,
+            'MemberPreferencesConflict',
+            'Member preferences changed before this update was saved.',
+          )
+        }
+        memberPreferences = { ...input, revision: input.revision + 1 }
+        return { ...memberPreferences }
       },
       async getProjectAccess(directoryId, projectId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId })

@@ -38,6 +38,12 @@ import {
   isProjectQuickAccessItems,
 } from '../../domain/project-quick-access'
 import {
+  isMemberPreferencesRevision,
+  memberPreferenceValuesEqual,
+  readMemberPreferenceValues,
+  readUpdateMemberPreferencesInput,
+} from '../../domain/member-preferences'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -60,6 +66,8 @@ import {
   PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type DirectoryAdministrationResponse,
+  type MemberPreferences,
+  type MemberPreferenceValues,
   type ProjectCharter,
   type ProjectCharterState,
   type ProjectCharterSummary,
@@ -72,6 +80,7 @@ import {
   type ReorderDirectoryTeamsInput,
   type RestoreDirectoryProjectResponse,
   type RestoreDirectoryTeamResponse,
+  type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
 import {
@@ -353,6 +362,24 @@ type ProjectQuickAccessPreferencesItem = {
   workspaceId: string
   /** Projects in the viewer's stable preferred order. */
   items: ProjectQuickAccessItem[]
+  /** Compare-and-swap revision. */
+  revision: number
+  /** ISO 8601 timestamp of the latest successful replacement. */
+  updatedAt: string
+}
+
+/** Member-owned display preferences stored beside the canonical directory rows. */
+type MemberPreferencesItem = MemberPreferenceValues & {
+  /** Synthetic member-specific partition key. */
+  directoryId: string
+  /** Member preference sort key. */
+  entryKey: string
+  /** Sidecar row discriminator. */
+  entryType: 'member-preferences'
+  /** Authenticated member key that owns these preferences. */
+  memberKey: string
+  /** Workspace the member belongs to. */
+  workspaceId: string
   /** Compare-and-swap revision. */
   revision: number
   /** ISO 8601 timestamp of the latest successful replacement. */
@@ -731,6 +758,32 @@ export type ProjectDirectoryClient = {
     memberKey: string,
     input: UpdateProjectQuickAccessPreferencesInput,
   ): Promise<ProjectQuickAccessPreferences>
+  /**
+   * Reads the authenticated member's display preferences.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key that owns the preferences.
+   * @param consistentRead - Whether DynamoDB must return the latest committed value.
+   * @returns The stored preferences or the revision-zero default.
+   */
+  getMemberPreferences(
+    directoryId: string,
+    memberKey: string,
+    consistentRead?: boolean,
+  ): Promise<MemberPreferences>
+  /**
+   * Replaces the authenticated member's complete display preferences.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key that owns the preferences.
+   * @param input - Complete next preferences and their expected revision.
+   * @returns The committed preferences with their incremented revision.
+   */
+  replaceMemberPreferences(
+    directoryId: string,
+    memberKey: string,
+    input: UpdateMemberPreferencesInput,
+  ): Promise<MemberPreferences>
   /**
    * active project と指定 member の role を 1 directory read で取得します。
    */
@@ -1395,6 +1448,141 @@ export class DynamoDbProjectDirectoryClient {
         )
       }
 
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads one member's display preferences.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key.
+   * @param consistentRead - Whether DynamoDB must return the latest committed value.
+   * @returns The stored preferences or the revision-zero default.
+   */
+  async getMemberPreferences(
+    directoryId: string,
+    memberKey: string,
+    consistentRead = false,
+  ): Promise<MemberPreferences> {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: consistentRead,
+        Key: {
+          directoryId: createMemberPreferencesDirectoryId(directoryId, memberKey),
+          entryKey: memberPreferencesEntryKey,
+        },
+      }))
+
+      if (response.Item === undefined) {
+        return { revision: 0 }
+      }
+
+      const preferences = readMemberPreferencesItem(response.Item, directoryId, memberKey)
+      if (!preferences) {
+        throw new ProjectDataError(
+          503,
+          'InvalidMemberPreferences',
+          'Member preferences are missing or invalid.',
+        )
+      }
+
+      return preferences
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Replaces one member's complete display preferences with compare-and-swap protection.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key.
+   * @param input - Complete next preferences and their expected revision.
+   * @returns The committed preferences with their incremented revision.
+   */
+  async replaceMemberPreferences(
+    directoryId: string,
+    memberKey: string,
+    input: UpdateMemberPreferencesInput,
+  ): Promise<MemberPreferences> {
+    const validated = readUpdateMemberPreferencesInput(input)
+    if (!validated) {
+      throw new ProjectDataError(
+        400,
+        'InvalidMemberPreferencesInput',
+        'Member preferences input is invalid.',
+      )
+    }
+    const nextItem: MemberPreferencesItem = {
+      ...toMemberPreferenceValues(validated),
+      directoryId: createMemberPreferencesDirectoryId(directoryId, memberKey),
+      entryKey: memberPreferencesEntryKey,
+      entryType: 'member-preferences',
+      memberKey,
+      revision: validated.revision + 1,
+      updatedAt: new Date().toISOString(),
+      workspaceId: directoryId,
+    }
+    const isFirstSave = validated.revision === 0
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: nextItem,
+              ConditionExpression: isFirstSave
+                ? 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)'
+                : '#revision = :expectedRevision AND #entryType = :entryType AND #workspaceId = :workspaceId AND #memberKey = :memberKey',
+              ExpressionAttributeNames: isFirstSave
+                ? undefined
+                : {
+                    '#entryType': 'entryType',
+                    '#memberKey': 'memberKey',
+                    '#revision': 'revision',
+                    '#workspaceId': 'workspaceId',
+                  },
+              ExpressionAttributeValues: isFirstSave
+                ? undefined
+                : {
+                    ':entryType': 'member-preferences',
+                    ':expectedRevision': validated.revision,
+                    ':memberKey': memberKey,
+                    ':workspaceId': directoryId,
+                  },
+            },
+          },
+        ],
+      }))
+      return { ...toMemberPreferenceValues(nextItem), revision: nextItem.revision }
+    } catch (error) {
+      if (hasTransactionConditionalFailure(error)) {
+        const current = await this.getMemberPreferences(directoryId, memberKey, true)
+
+        if (
+          current.revision === nextItem.revision &&
+          memberPreferenceValuesEqual(current, nextItem)
+        ) {
+          return current
+        }
+
+        throw new ProjectDataError(
+          409,
+          'MemberPreferencesConflict',
+          'Member preferences changed before this update was saved.',
+        )
+      }
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -4422,6 +4610,65 @@ function createProjectQuickAccessDirectoryId(workspaceId: string, memberKey: str
 }
 
 const projectQuickAccessEntryKey = 'PREFERENCE'
+
+/**
+ * Creates the synthetic partition key that holds one member's display preferences.
+ *
+ * @param workspaceId - Workspace directory ID.
+ * @param memberKey - Member key that owns the preferences.
+ * @returns The member preference partition key.
+ */
+function createMemberPreferencesDirectoryId(workspaceId: string, memberKey: string) {
+  return `MEMBER_PREFERENCES#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}`
+}
+
+/** Sort key of the single member preference row. */
+const memberPreferencesEntryKey = 'PREFERENCE'
+
+/**
+ * Validates a stored member preference row and copies it into the public contract.
+ *
+ * @param value - Candidate DynamoDB value.
+ * @param directoryId - Expected Workspace directory ID.
+ * @param memberKey - Expected preference owner.
+ * @returns The detached preferences, or undefined when the row is invalid.
+ */
+function readMemberPreferencesItem(
+  value: unknown,
+  directoryId: string,
+  memberKey: string,
+): MemberPreferences | undefined {
+  if (
+    !isRecord(value) ||
+    value.directoryId !== createMemberPreferencesDirectoryId(directoryId, memberKey) ||
+    value.workspaceId !== directoryId ||
+    value.memberKey !== memberKey ||
+    value.entryType !== 'member-preferences' ||
+    value.entryKey !== memberPreferencesEntryKey ||
+    !isMemberPreferencesRevision(value.revision) ||
+    value.revision === 0 ||
+    typeof value.updatedAt !== 'string'
+  ) {
+    return undefined
+  }
+  const values = readMemberPreferenceValues(value)
+  return values ? { ...values, revision: value.revision } : undefined
+}
+
+/**
+ * Copies only the preference fields, leaving out storage and revision attributes.
+ *
+ * @param value - Validated preferences or a stored row.
+ * @returns The preference fields that hold a value.
+ */
+function toMemberPreferenceValues(value: MemberPreferenceValues): MemberPreferenceValues {
+  return {
+    ...(value.locale ? { locale: value.locale } : {}),
+    ...(value.timeZone ? { timeZone: value.timeZone } : {}),
+    ...(value.theme ? { theme: value.theme } : {}),
+    ...(value.fontSize ? { fontSize: value.fontSize } : {}),
+  }
+}
 
 /**
  * Validates a stored quick-access sidecar row.

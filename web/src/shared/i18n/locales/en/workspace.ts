@@ -475,7 +475,7 @@ export const workspaceMessages = {
   'workspace.settings.install.badge.unsupported': 'This device could not ask for notification permission, so the app icon may not show the unread count.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':
-    'Adjust text size, theme, and display language for this browser.',
+    'Adjust text size, theme, display language, and time zone. Your choices follow you to every device.',
   'workspace.settings.fontSizeTitle': 'Font size',
   'workspace.settings.fontSizeDescription':
     'Applies to task lists, the sidebar, settings, and the rest of the app.',
@@ -492,7 +492,14 @@ export const workspaceMessages = {
   'workspace.settings.profileDescription':
     'The account used by the current session.',
   'workspace.settings.languageDescription':
-    'Choose the display language for this browser. Your preference is saved locally.',
+    'Choose the display language. Your choice is saved to your account and used on every device.',
+  'workspace.settings.preferencesSaveFailed':
+    'Your display settings could not be saved to your account. They apply on this device only until saved.',
+  'workspace.settings.preferencesSaveRetry': 'Try again',
+  'workspace.settings.timeZoneTitle': 'Time zone',
+  'workspace.settings.timeZoneDescription':
+    'Choose the time zone saved to your account. Leave it on the browser setting to follow this device.',
+  'workspace.settings.timeZoneBrowser': 'Browser setting',
   'workspace.settings.notificationTitle': 'Notifications',
   'workspace.settings.notificationDescription':
     'Choose Inbox and Slack delivery, notification frequency, and quiet hours.',

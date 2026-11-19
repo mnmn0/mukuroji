@@ -1,4 +1,4 @@
-# 0007. Team と Project の表示順を sort key から切り離し、名称変更で ID を変えない
+# 0008. Team と Project の表示順を sort key から切り離し、名称変更で ID を変えない
 
 - 状態: 提案
 - 日付: 2026-11-19
