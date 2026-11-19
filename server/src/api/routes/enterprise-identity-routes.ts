@@ -3420,6 +3420,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           'Preview and confirm the custom role assignment impact before saving.',
         )
       }
+      // Editing a role must not grant what assigning it to a member directly would be refused.
       const role = await workspaceDependencies.enterpriseIdentity.authorization.putCustomRole({
         ...existing,
         name: readEnterpriseText(body?.name, 'Role name'),
@@ -3428,7 +3429,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         guestAssignable,
         revision: existing.revision + 1,
         updatedAt: new Date().toISOString(),
-      }, createWorkspaceMutationContext(c, principal, body))
+      }, createWorkspaceMutationContext(c, principal, body), isEnterpriseOwnerLevelCaller(principal)
+        ? {}
+        : { forbiddenMemberAssignmentPermissions: [...enterpriseAdministrativePermissionIds] })
       return c.json({
         role: toEnterpriseRoleView(
           role,
@@ -3750,6 +3753,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         scopeType === 'workspace' ? undefined : readEnterpriseText(body?.scopeId, 'Scope ID'),
         typeof body?.scopeParentId === 'string' ? body.scopeParentId.trim() : undefined,
       )
+      // The role is re-checked in the stored state, so a concurrent role edit cannot slip through.
       const assignment = await workspaceDependencies.enterpriseIdentity.authorization
         .putMemberRoleAssignment({
           workspaceId: principal.directoryId,
@@ -3763,7 +3767,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           roleId,
           scope,
           source: 'direct',
-        }, createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey))
+        }, createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey),
+        isEnterpriseOwnerLevelCaller(principal)
+          ? {}
+          : { forbiddenPermissions: [...enterpriseAdministrativePermissionIds] })
       return c.json({ assignment: toEnterpriseMemberRoleAssignmentView(assignment) }, 201)
     } catch (error) {
       return toEnterpriseIdentityBoundaryErrorResponse(c, error)

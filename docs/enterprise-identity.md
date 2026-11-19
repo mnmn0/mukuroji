@@ -287,6 +287,9 @@ caller が owner、system administrator、break-glass のいずれでもない�
 Workspace role と Project manager role の permission）をすべて持つときだけ、member の最後の direct
 assignment を外せます。持たない場合は `403 EnterpriseRoleAssignmentRestoreDenied` です。この判定は
 削除と同じ revision 条件付きの書き込みの中で行います。
+同じ理由で、owner 相当以外の caller は、member に direct assignment されている custom role に管理系
+permission を足せません（`403 EnterpriseRoleAssignmentAdminProtected`）。割り当て時の管理系 role の判定も、
+書き込む state の role 定義で再確認します。
 Direct assignment を持つ member を owner / admin に変える `PATCH /api/workspace/members/:memberKey` は
 `409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。Guest になった member の direct assignment は、
 評価時に guest 可の role（`workspace:guest`、`project:viewer`、`guestAssignable` の custom role）だけを

@@ -19,6 +19,7 @@ import type {
   EnterpriseSecurityPolicy,
   EnterpriseServiceAccount,
   EnterpriseVerifiedDomain,
+  EnterprisePermissionId,
 } from '@mukuroji/contracts'
 import type { MutationAuditContext } from '../../../audit'
 import type {
@@ -133,11 +134,13 @@ export interface EnterpriseAuthorizationAdministrationCapability {
    *
    * @param role - Validated custom role.
    * @param auditContext - Optional immutable audit context.
+   * @param options - Conditions checked with the update.
    * @returns The persisted role.
    */
   putCustomRole(
     role: EnterpriseCustomRole,
     auditContext?: MutationAuditContext,
+    options?: EnterpriseCustomRoleUpdateOptions,
   ): Promise<EnterpriseCustomRole>
   /**
    * Deletes an unused custom role.
@@ -185,11 +188,13 @@ export interface EnterpriseAuthorizationAdministrationCapability {
    *
    * @param assignment - Validated direct member assignment.
    * @param auditContext - Optional immutable audit context.
+   * @param options - Conditions checked with the assignment.
    * @returns The persisted assignment.
    */
   putMemberRoleAssignment(
     assignment: EnterpriseRoleAssignment,
     auditContext?: MutationAuditContext,
+    options?: EnterpriseMemberRoleAssignmentCreateOptions,
   ): Promise<EnterpriseRoleAssignment>
   /**
    * Removes a direct member role assignment.
@@ -785,4 +790,19 @@ export type EnterpriseMemberRoleAssignmentDeleteOptions = {
    * member's Workspace role and Project memberships.
    */
   requireRemainingAssignment?: boolean
+}
+
+/** Conditions checked atomically when a direct member assignment is created. */
+export type EnterpriseMemberRoleAssignmentCreateOptions = {
+  /** Permissions that the assigned role must not hold, read from the state being written. */
+  forbiddenPermissions?: readonly EnterprisePermissionId[]
+}
+
+/** Conditions checked atomically when a custom role is saved. */
+export type EnterpriseCustomRoleUpdateOptions = {
+  /**
+   * Permissions that the role must not gain while a direct member assignment references it, so
+   * editing a role cannot grant what assigning it directly would be refused.
+   */
+  forbiddenMemberAssignmentPermissions?: readonly EnterprisePermissionId[]
 }

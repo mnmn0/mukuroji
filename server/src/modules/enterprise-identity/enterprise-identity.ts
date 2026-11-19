@@ -58,6 +58,8 @@ import {
 import type {
   EnterpriseIdentityApplicationCapability,
   EnterpriseIdentityReadCapability,
+  EnterpriseCustomRoleUpdateOptions,
+  EnterpriseMemberRoleAssignmentCreateOptions,
   EnterpriseMemberRoleAssignmentDeleteOptions,
 } from './application/ports/enterprise-identity-capabilities'
 import {
@@ -746,8 +748,19 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
     })
   }
 
-  /** Custom role を安全に upsert します。 */
-  async putCustomRole(role: EnterpriseCustomRole, auditContext?: MutationAuditContext) {
+  /**
+   * Custom role を安全に upsert します。
+   *
+   * @param role - Validated custom role.
+   * @param auditContext - Audit context of the request.
+   * @param options - Permissions the role must not gain while a direct member assignment uses it.
+   * @returns The persisted role.
+   */
+  async putCustomRole(
+    role: EnterpriseCustomRole,
+    auditContext?: MutationAuditContext,
+    options: EnterpriseCustomRoleUpdateOptions = {},
+  ) {
     if (!role.roleId.startsWith('custom:') || role.permissions.length === 0) {
       throw new EnterpriseIdentityError(
         400,
@@ -781,6 +794,22 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           409,
           'EnterpriseCustomRoleNameConflict',
           'Custom role name must be unique in the Workspace.',
+        )
+      }
+      if (
+        role.permissions.some((permission) =>
+          options.forbiddenMemberAssignmentPermissions?.includes(permission)
+        ) &&
+        state.roleAssignments.some((assignment) =>
+          assignment.roleId === role.roleId &&
+          assignment.principalKind === 'member' &&
+          assignment.source === 'direct'
+        )
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentAdminProtected',
+          'Only an owner can add administrative permissions to a role assigned to members.',
         )
       }
       const normalizedRole = {
@@ -950,11 +979,13 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
    * the same role at the same scope twice is rejected so a retry cannot hide a duplicate.
    * @param assignment - Direct member assignment to store.
    * @param auditContext - Audit context of the request.
+   * @param options - Permissions the assigned role must not hold in the state being written.
    * @returns The stored assignment.
    */
   async putMemberRoleAssignment(
     assignment: EnterpriseRoleAssignment,
     auditContext?: MutationAuditContext,
+    options: EnterpriseMemberRoleAssignmentCreateOptions = {},
   ) {
     if (assignment.principalKind !== 'member' || assignment.source !== 'direct') {
       throw new EnterpriseIdentityError(
@@ -978,6 +1009,16 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           400,
           'EnterpriseRoleNotFound',
           'Role assignment references an unknown role.',
+        )
+      }
+      if (
+        resolveEnterpriseRolePermissions(state.customRoles, assignment.roleId)
+          .some((permission) => options.forbiddenPermissions?.includes(permission))
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentAdminProtected',
+          'Only an owner can assign or remove a role with administrative permissions.',
         )
       }
       const existing = state.roleAssignments.find((candidate) =>

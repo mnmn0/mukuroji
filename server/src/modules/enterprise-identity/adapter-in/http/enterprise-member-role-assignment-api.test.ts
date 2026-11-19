@@ -429,3 +429,59 @@ test('hides member assignments from a caller who may read security settings but 
     expect(body.members).toEqual([])
   })
 })
+
+test('stops an admin from adding administrative permissions to a role assigned to a member', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, { workspaceRole: 'admin' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const deskRole = {
+      workspaceId,
+      roleId: 'custom:desk' as const,
+      name: 'Desk',
+      permissions: ['workspace.read' as const, 'members.read' as const],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-11-19T00:00:00.000Z',
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    }
+    await identity.putCustomRole(deskRole)
+    const assigned = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      { memberKey: 'sato@example.com', roleId: 'custom:desk' },
+    )
+    expect(assigned.status).toBe(201)
+
+    const permissionIds = ['workspace.read', 'members.read', 'members.manage']
+    const impact = await sendAssignmentRequest(
+      '/api/enterprise/security/roles/custom%3Adesk/impact',
+      'POST',
+      { expectedVersion: 1, permissionIds },
+    )
+    const { impact: { confirmationToken } } = await impact.json() as {
+      impact: { confirmationToken: string }
+    }
+    const escalated = await sendAssignmentRequest(
+      '/api/enterprise/security/roles/custom%3Adesk',
+      'PUT',
+      { expectedVersion: 1, name: 'Desk', permissionIds, impactConfirmationToken: confirmationToken },
+    )
+    expect(escalated.status).toBe(403)
+    expect(await escalated.json()).toMatchObject({ code: 'EnterpriseRoleAssignmentAdminProtected' })
+    expect((await identity.getSnapshot(workspaceId)).customRoles[0]?.permissions)
+      .not.toContain('members.manage')
+
+    // A role edited after the caller read it is checked again when the assignment is written.
+    await expect(identity.putMemberRoleAssignment({
+      workspaceId,
+      assignmentId: 'assignment-suzuki',
+      principalKind: 'member',
+      principalId: 'suzuki@example.com',
+      roleId: 'workspace:admin',
+      scope: { workspaceId, kind: 'workspace' },
+      source: 'direct',
+    }, undefined, { forbiddenPermissions: ['members.manage'] }))
+      .rejects.toMatchObject({ status: 403, code: 'EnterpriseRoleAssignmentAdminProtected' })
+  })
+})
