@@ -12,6 +12,9 @@ import {
   findCognitoPasswordClientContractViolations,
 } from './cognito-client-contract'
 
+/** Commands the fake Cognito client accepts. */
+type ContractCommand = DescribeUserPoolCommand | DescribeUserPoolClientCommand
+
 /**
  * Creates a fake Cognito client that answers DescribeUserPool and DescribeUserPoolClient.
  *
@@ -19,27 +22,35 @@ import {
  * @returns Fake client and the commands it received.
  */
 function createClient(input: {
+  /** WriteAttributes returned for the app client. */
   readonly writeAttributes?: string[]
+  /** AllowAdminCreateUserOnly returned for the user pool. */
   readonly allowAdminCreateUserOnly?: boolean
-}): { readonly client: CognitoClientContractClient, readonly commands: unknown[] } {
-  const commands: unknown[] = []
-  const send = async (command: unknown) => {
+}): {
+  /** Fake Cognito client. */
+  readonly client: CognitoClientContractClient
+  /** Commands the fake received, in order. */
+  readonly commands: ContractCommand[]
+} {
+  const commands: ContractCommand[] = []
+  function send(command: DescribeUserPoolCommand): Promise<DescribeUserPoolCommandOutput>
+  function send(command: DescribeUserPoolClientCommand): Promise<DescribeUserPoolClientCommandOutput>
+  async function send(
+    command: ContractCommand,
+  ): Promise<DescribeUserPoolCommandOutput | DescribeUserPoolClientCommandOutput> {
     commands.push(command)
     if (command instanceof DescribeUserPoolCommand) {
       return {
         $metadata: {},
         UserPool: { AdminCreateUserConfig: { AllowAdminCreateUserOnly: input.allowAdminCreateUserOnly } },
-      } satisfies DescribeUserPoolCommandOutput
+      }
     }
-    if (command instanceof DescribeUserPoolClientCommand) {
-      return {
-        $metadata: {},
-        UserPoolClient: { WriteAttributes: input.writeAttributes },
-      } satisfies DescribeUserPoolClientCommandOutput
+    return {
+      $metadata: {},
+      UserPoolClient: { WriteAttributes: input.writeAttributes },
     }
-    throw new Error('unexpected command')
   }
-  return { client: { send } as CognitoClientContractClient, commands }
+  return { client: { send }, commands }
 }
 
 const createEvent: CognitoClientContractEvent = {
@@ -93,8 +104,10 @@ test('passes the deploy when the pool and client hold the contract', async () =>
     PhysicalResourceId: 'mukuroji-cognito-client-contract-v1',
   })
   expect(commands).toHaveLength(2)
-  const clientCommand = commands.find((command) => command instanceof DescribeUserPoolClientCommand)
-  expect((clientCommand as DescribeUserPoolClientCommand).input).toEqual({
+  const clientCommand = commands.find(
+    (command): command is DescribeUserPoolClientCommand => command instanceof DescribeUserPoolClientCommand,
+  )
+  expect(clientCommand?.input).toEqual({
     UserPoolId: 'ap-northeast-1_Example1',
     ClientId: 'client123',
   })

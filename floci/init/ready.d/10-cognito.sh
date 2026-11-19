@@ -229,6 +229,56 @@ if [ "$CLIENT_ID" = "None" ] || [ -z "$CLIENT_ID" ]; then
     --output text)"
 fi
 
+# Reconcile on every ready run so a pool or client persisted before the contract
+# existed also admits only admin-created users and lets users write only their name.
+if ! pool_update_error="$(aws_local cognito-idp update-user-pool \
+  --user-pool-id "$POOL_ID" \
+  --admin-create-user-config AllowAdminCreateUserOnly=true \
+  --policies 'PasswordPolicy={MinimumLength=8,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=true}' \
+  2>&1 >/dev/null)"; then
+  case "$pool_update_error" in
+    *UnsupportedOperation* | *UnknownOperationException* | *"not supported"*)
+      echo "Floci does not expose UpdateUserPool; validating the existing user pool contract." >&2
+      ;;
+    *)
+      echo "$pool_update_error" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if ! client_update_error="$(aws_local cognito-idp update-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$CLIENT_ID" \
+  --client-name "$CLIENT_NAME" \
+  --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH \
+  --write-attributes name \
+  2>&1 >/dev/null)"; then
+  case "$client_update_error" in
+    *UnsupportedOperation* | *UnknownOperationException* | *"not supported"*)
+      echo "Floci does not expose UpdateUserPoolClient; validating the existing password client contract." >&2
+      ;;
+    *)
+      echo "$client_update_error" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+CLIENT_WRITE_ATTRIBUTES="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$CLIENT_ID" \
+  --query UserPoolClient.WriteAttributes \
+  --output text)"
+POOL_ADMIN_CREATE_ONLY="$(aws_local cognito-idp describe-user-pool \
+  --user-pool-id "$POOL_ID" \
+  --query UserPool.AdminCreateUserConfig.AllowAdminCreateUserOnly \
+  --output text)"
+if [ "$CLIENT_WRITE_ATTRIBUTES" != "name" ] || [ "$POOL_ADMIN_CREATE_ONLY" != "True" ]; then
+  echo "Local Cognito pool must admit only admin-created users and its password client must write only name. Recreate the local data with: docker compose down --volumes && bun run floci:up" >&2
+  exit 1
+fi
+
 if [ -n "$ENTERPRISE_IDP_NAME" ]; then
   if ! aws_local cognito-idp describe-identity-provider \
     --user-pool-id "$POOL_ID" \

@@ -398,7 +398,12 @@ function buildCognitoClientContractCheck(
   scope: cdk.Stack,
   input: BootstrapResourcesInput,
 ): cdk.CustomResource {
-  const { cognitoUserPoolArn, cognitoUserPoolClientId, cognitoUserPoolId } = input.parameters;
+  const {
+    applicationCommitSha,
+    cognitoUserPoolArn,
+    cognitoUserPoolClientId,
+    cognitoUserPoolId,
+  } = input.parameters;
   const logGroup = new logs.LogGroup(scope, 'CognitoClientContractLogGroup', {
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     retention: logs.RetentionDays.THREE_MONTHS,
@@ -442,6 +447,10 @@ function buildCognitoClientContractCheck(
       UserPoolId: cognitoUserPoolId,
       ClientId: cognitoUserPoolClientId,
       ContractVersion: 'v1',
+      // An existing pool's client can be loosened between deploys without changing its ID.
+      // Every deploy ships a new commit, so this property makes CloudFormation run the check
+      // again on each deploy instead of only when the pool or client ID changes.
+      ApplicationRevision: applicationCommitSha.valueAsString,
     },
     resourceType: 'Custom::CognitoClientContract',
     serviceToken: provider.serviceToken,
