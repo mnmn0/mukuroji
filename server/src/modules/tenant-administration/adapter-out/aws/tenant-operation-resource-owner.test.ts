@@ -7,6 +7,11 @@ import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { TenantOperation } from '@mukuroji/contracts'
 import {
+  createAuditEvent,
+  createMutationAuditContext,
+  toAuditEventView,
+} from '../../../audit'
+import {
   TENANT_OPERATION_EXECUTION_JOB_VERSION,
   type TenantOperationExecutionJob,
 } from '../../application/tenant-operation-resource-owner'
@@ -871,6 +876,130 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
+  test('exports audit events only through the public audit event view', async () => {
+    const auditEvent = createAuditEvent({
+      context: createMutationAuditContext({
+        workspaceId: 'workspace-1',
+        actor: { id: 'member-1', kind: 'user' },
+        idempotencyKey: 'audit-export-redaction',
+        request: { method: 'POST', path: '/api/projects', body: { name: 'Visible' } },
+        source: {
+          kind: 'api',
+          route: '/api/projects',
+          ipAddress: '198.51.100.23',
+          userAgent: 'SecretAgent/1.0',
+        },
+      }),
+      eventType: 'project.created',
+      entity: { type: 'project', id: 'project-1' },
+      summary: 'Visible audit summary',
+      expiresAt: 1_900_000_000,
+    })
+    const storedRow = {
+      ...auditEvent,
+      directoryId: 'workspace-1',
+      actorKey: 'workspace-1#user#member-1',
+    }
+    const dynamoRequests: unknown[] = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          dynamoRequests.push(readJsonRequestBody(request))
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify({
+                Items: [
+                  toDynamoAttributeMap(storedRow),
+                  toDynamoAttributeMap({ directoryId: 'workspace-1', eventId: 'malformed-1', ipAddress: '203.0.113.9' }),
+                ],
+              })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const exportBodies: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          exportBodies.push(readTextRequestBody(request))
+          return {
+            response: {
+              body: new Uint8Array(),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation('workspace-1'),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      step: 'snapshot',
+      cursor: {
+        targetIndex: 11,
+        phase: 'snapshot',
+        processedCount: 0,
+      },
+    }
+
+    try {
+      await owner.execute(job, operation)
+
+      expect(dynamoRequests[0]).toMatchObject({ TableName: 'audit-events' })
+      expect(exportBodies).toHaveLength(1)
+      const records = exportBodies[0]!.trim().split('\n').map((line) => JSON.parse(line))
+      expect(records).toEqual([
+        { resource: 'audit-events', record: JSON.parse(JSON.stringify(toAuditEventView(auditEvent))) },
+        { resource: 'audit-events', record: { eventId: 'malformed-1', unreadable: true } },
+      ])
+      for (const hidden of [
+        '198.51.100.23',
+        'SecretAgent/1.0',
+        '203.0.113.9',
+        auditEvent.requestFingerprint,
+        'actorKey',
+      ]) {
+        expect(exportBodies[0]).not.toContain(hidden)
+      }
+      expect(exportBodies[0]).toContain('Visible audit summary')
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
   test('exports regular, Request Intake, and Work Item import objects', async () => {
     const workspaceId = 'workspace/one'
     const requestWorkspaceDigest = createHash('sha256')
@@ -1545,3 +1674,33 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 })
+
+/**
+ * Encodes a plain value as a DynamoDB JSON attribute value for fake low-level responses.
+ *
+ * @param value - Plain JSON-compatible value.
+ * @returns The DynamoDB attribute value.
+ */
+function toDynamoAttributeValue(value: unknown): unknown {
+  if (value === null || value === undefined) return { NULL: true }
+  if (typeof value === 'string') return { S: value }
+  if (typeof value === 'number') return { N: String(value) }
+  if (typeof value === 'boolean') return { BOOL: value }
+  if (Array.isArray(value)) return { L: value.map(toDynamoAttributeValue) }
+  if (isRecord(value)) return { M: toDynamoAttributeMap(value) }
+  throw new TypeError('Unsupported DynamoDB test value.')
+}
+
+/**
+ * Encodes a plain record as a DynamoDB JSON item for fake low-level responses.
+ *
+ * @param record - Plain JSON-compatible record.
+ * @returns The DynamoDB item.
+ */
+function toDynamoAttributeMap(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([key, entry]) => [key, toDynamoAttributeValue(entry)]),
+  )
+}

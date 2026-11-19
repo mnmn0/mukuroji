@@ -432,6 +432,26 @@ test('passes execution status into persistence pagination and rejects unknown st
   expect(queries).toHaveLength(1)
 })
 
+test('rejects guests from Workspace-wide Automation reads before reading any definition', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'guest' })
+  setTestAppDependencies({
+    executions: createAutomationExecutionPort({
+      listExecutions: unexpectedAutomationPortCall,
+    }),
+  })
+
+  for (const path of [
+    '/api/automation/rules',
+    '/api/automation/templates',
+    '/api/recurring-work',
+    '/api/automation/executions',
+  ]) {
+    const response = await app.request(path, { headers: { Authorization: 'Bearer test-token' } })
+    expect({ path, status: response.status }).toEqual({ path, status: 403 })
+    expect(await response.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
+  }
+})
+
 test('preserves FileProofingError status and code in Automation API responses', async () => {
   configureFakeProjectClients(true)
   setTestAppDependencies({

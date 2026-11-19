@@ -96,6 +96,8 @@ test('initializes tenant state from authoritative Workspace owner', async () => 
     requireAdministration() {
       administrationChecks += 1
     },
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -148,6 +150,8 @@ test('returns a closing tenant snapshot without requiring an active owner', asyn
       return { directoryId: 'workspace-1', userKey: 'admin-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client: createClient(snapshot, ensureCalls),
     tenantExportDownload: {
       async createDownload() {
@@ -202,6 +206,8 @@ test('creates export operations without exposing the trusted advance boundary', 
       return { directoryId: 'workspace-1', userKey: 'owner-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -257,11 +263,16 @@ test('returns short-lived download locations for a completed export', async () =
     ...createOperation(),
     status: 'completed',
   })
+  const recordedDownloads: Array<{ operationId: string, fileCount: number }> = []
   const router = createTenantAdministrationRouter({
     async authenticate() {
       return { directoryId: 'workspace-1', userKey: 'owner-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload(_context, _principal, operation, download) {
+      recordedDownloads.push({ operationId: operation.operationId, fileCount: download.files.length })
+    },
     client,
     tenantExportDownload: {
       async createDownload(operation) {
@@ -292,6 +303,7 @@ test('returns short-lived download locations for a completed export', async () =
   )
 
   expect(response.status).toBe(200)
+  expect(recordedDownloads).toEqual([{ operationId: 'operation-1', fileCount: 1 }])
   expect(await response.json()).toEqual({
     download: {
       expiresAt: '2026-08-02T00:05:00.000Z',
@@ -334,6 +346,8 @@ test('refuses lifecycle requests when the export and closure workers are not dep
       return { directoryId: 'workspace-1', userKey: 'admin-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -382,4 +396,125 @@ test('refuses lifecycle requests when the export and closure workers are not dep
   expect(administration.status).toBe(200)
   const operation = await router.request('/api/tenant/operations/operation-1', { headers })
   expect(operation.status).toBe(200)
+})
+
+test('refuses tenant export requests and downloads without audit export authority', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  let exportRequests = 0
+  let downloads = 0
+  let recordedDownloads = 0
+  client.requestExport = async () => {
+    exportRequests += 1
+    return createOperation()
+  }
+  client.getOperation = async () => ({
+    ...createOperation(),
+    status: 'completed',
+  })
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'admin-1' }
+    },
+    requireAdministration() {},
+    requireAuditDataExport() {
+      throw new TenantAdministrationError(403, 'AuditExportPermissionRequired', 'Audit export is required.')
+    },
+    async recordExportDownload() {
+      recordedDownloads += 1
+    },
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        downloads += 1
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      if (error instanceof TenantAdministrationError) {
+        return Response.json({ code: error.code }, { status: error.status })
+      }
+      return Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+
+  const exportResponse = await router.request('/api/tenant/exports', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ format: 'jsonl' }),
+  })
+  const downloadResponse = await router.request(
+    '/api/tenant/operations/operation-1/download',
+    { headers: { Authorization: 'Bearer token-1' } },
+  )
+
+  expect(exportResponse.status).toBe(403)
+  expect(downloadResponse.status).toBe(403)
+  expect({ exportRequests, downloads, recordedDownloads }).toEqual({
+    exportRequests: 0,
+    downloads: 0,
+    recordedDownloads: 0,
+  })
+})
+
+test('refuses download links when their issuance cannot be audited', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getOperation = async () => ({
+    ...createOperation(),
+    status: 'completed',
+  })
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'owner-1' }
+    },
+    requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {
+      throw new TenantAdministrationError(503, 'TenantAuditUnavailable', 'Audit is unavailable.')
+    },
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        return {
+          expiresAt: '2026-08-02T00:05:00.000Z',
+          files: [{ name: 'manifest.json', url: 'https://signed.example/export' }],
+        }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      if (error instanceof TenantAdministrationError) {
+        return Response.json({ code: error.code }, { status: error.status })
+      }
+      return Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+
+  const response = await router.request(
+    '/api/tenant/operations/operation-1/download',
+    { headers: { Authorization: 'Bearer token-1' } },
+  )
+
+  expect(response.status).toBe(503)
+  expect(JSON.stringify(await response.json())).not.toContain('signed.example')
 })

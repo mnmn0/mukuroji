@@ -46,7 +46,7 @@ import {
   type TenantOperationResourceOwnerResult,
 } from '../../application/tenant-operation-resource-owner'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
-import { createAuditExportWorkspacePrefix } from '../../../audit'
+import { createAuditExportWorkspacePrefix, toAuditEventView } from '../../../audit'
 
 const RESOURCE_PAGE_SIZE = 20
 
@@ -377,7 +377,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         ],
       ),
       exactTarget('project-directory', this.config.projectDirectoryTableName, 'directoryId', 'entryKey'),
-      exactTarget('audit-events', this.config.auditEventsTableName, 'directoryId', 'eventId'),
+      exactTarget(AUDIT_EVENTS_EXPORT_TARGET_ID, this.config.auditEventsTableName, 'directoryId', 'eventId'),
       exactTarget('workspace-access', this.config.workspaceAccessTableName, 'workspaceId', 'recordKey'),
       attributeTarget('enterprise-identity', this.config.enterpriseIdentityTableName, 'scopeKey', 'recordKey', [
         workspaceSelector('workspaceId', 'equals'),
@@ -698,7 +698,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       )
       const body = serializeExportPage(
         target.id,
-        page.items,
+        target.id === AUDIT_EVENTS_EXPORT_TARGET_ID
+          ? page.items.map(toAuditEventExportRecord)
+          : page.items,
         operation.exportFormat ?? 'jsonl',
       )
       if (page.items.length > 0) {
@@ -1843,6 +1845,31 @@ function normalizeItems(
   values: Record<string, unknown>[] | undefined,
 ): Record<string, unknown>[] {
   return (values ?? []).filter(isRecord)
+}
+
+/** Export target ID of the immutable audit event table. */
+const AUDIT_EVENTS_EXPORT_TARGET_ID = 'audit-events'
+
+/**
+ * Projects one stored audit event row onto the public audit event view.
+ *
+ * The stored row also holds the caller IP address and User-Agent, the request fingerprint, the
+ * idempotency key digest, and index keys, which the audit API and audit export never return. A
+ * tenant export must not reveal more of the audit log than those do. A row that is not a valid
+ * audit event keeps only its event ID.
+ *
+ * @param item - Stored audit event row.
+ * @returns The exported audit event record.
+ */
+function toAuditEventExportRecord(item: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return toAuditEventView(item)
+  } catch {
+    return {
+      ...(typeof item.eventId === 'string' ? { eventId: item.eventId } : {}),
+      unreadable: true,
+    }
+  }
 }
 
 /** Serializes one tenant export page while redacting credential-bearing fields. */

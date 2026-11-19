@@ -179,7 +179,20 @@ export async function auditRejectedEnterpriseSecurityMutation(
       actorKind = 'service'
     } else {
       if (!token) return
+      // GetUser accepts any token Cognito issued in this region, so the token must first be
+      // bound to the configured pool and clients, and its holder must still be an active member
+      // of the Workspace it names. Otherwise an outsider could append audit events to it.
+      try {
+        validateConfiguredCognitoAccessToken(token)
+      } catch {
+        return
+      }
       const principal = toProjectPrincipal(await authenticationDependencies.cognito.getUser(token), token)
+      const member = await workspaceDependencies.workspaceAccess.getActiveMember(
+        principal.directoryId,
+        principal.userKey,
+      )
+      if (!member) return
       workspaceId = principal.directoryId
       actorId = principal.actorId
     }
