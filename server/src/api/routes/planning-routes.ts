@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  CYCLE_WORK_ITEMS_BATCH_LIMIT,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type ConfigurePlanningUpdateCadenceInput,
@@ -8,7 +9,10 @@ import {
   type CreateWorkItemScheduleDependencyInput,
   type CreatePlanningEntityInput,
   type ScheduleDependencyConstraint,
+  type CreateNextCycleInput,
+  type CreateNextCycleResponse,
   type CycleRolloverInput,
+  type CycleWorkItemsInput,
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type PlanningEntity,
@@ -4522,6 +4526,101 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         teamId,
         workItemId,
         input,
+        workItemState,
+      )
+      return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** Cadence に従って次の Cycle を作ります。 */
+  routeApp.post('/api/planning/cycles/:cycleId/next', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const input = await readPlanningJson<CreateNextCycleInput>(c.req)
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
+      const response = await workItemDependencies.planning.createNextCycle(
+        principal.directoryId,
+        cycleId,
+        input,
+        workItemState,
+      )
+      return c.json({
+        cycleId: response.cycleId,
+        planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+      } satisfies CreateNextCycleResponse, 201)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** 複数の Work Item を1回で Cycle に入れる、または Cycle から外します。 */
+  routeApp.post('/api/planning/cycles/:cycleId/work-items', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const input = await readPlanningJson<CycleWorkItemsInput>(c.req)
+      const references: unknown = input.workItems
+      if (
+        !Array.isArray(references) ||
+        references.length === 0 ||
+        references.length > CYCLE_WORK_ITEMS_BATCH_LIMIT
+      ) {
+        throw new PlanningError(
+          400,
+          'PlanningCycleWorkItemsInvalid',
+          `Choose 1 to ${CYCLE_WORK_ITEMS_BATCH_LIMIT} Work Items.`,
+        )
+      }
+      const items = references.map((reference: unknown) => {
+        const candidate = (typeof reference === 'object' && reference !== null
+          ? reference
+          : {}) as Record<string, unknown>
+        return {
+          teamId: readPlanningIdentifier(candidate.teamId, 'Team ID'),
+          workItemId: readPlanningIdentifier(candidate.workItemId, 'Work Item ID'),
+        }
+      })
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'member', true)
+      const currentCycleIds = new Set<string>()
+      await Promise.all(items.map(async ({ teamId, workItemId }) => {
+        await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        const current = await workItemDependencies.planning.getWorkItemLinkForAuthorization(
+          principal.directoryId,
+          teamId,
+          workItemId,
+        )
+        if (current?.cycleId !== undefined && current.cycleId !== cycleId) {
+          currentCycleIds.add(current.cycleId)
+        }
+      }))
+      await Promise.all([...currentCycleIds].map((currentCycleId) =>
+        requirePlanningEntityPermission(principal, snapshot.entities, currentCycleId, 'member', true)
+      ))
+      const response = await workItemDependencies.planning.setCycleWorkItems(
+        principal.directoryId,
+        cycleId,
+        { ...input, workItems: items },
         workItemState,
       )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))

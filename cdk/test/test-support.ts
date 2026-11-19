@@ -208,7 +208,7 @@ export const COGNITO_USER_POOL_CLIENT_ID_VALUE = {
 
 /** Description of the Lambda that runs every periodic job. */
 export const SCHEDULED_JOBS_FUNCTION_DESCRIPTION =
-  'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, and notification jobs.';
+  'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, notification, and Cycle jobs.';
 
 /**
  * Finds the logical ID of the Lambda that runs every periodic job.

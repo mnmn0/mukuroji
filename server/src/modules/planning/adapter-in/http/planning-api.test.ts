@@ -32,6 +32,7 @@ import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 import type {
   EnterpriseCustomRole,
   EnterpriseRoleAssignment,
+  CreateNextCycleResponse,
   PlanningMutationResponse,
   PlanningSnapshot,
   PlanningUpdateTarget,
@@ -2944,4 +2945,90 @@ test('returns revision conflicts and reproducibly rolls incomplete Work Items fo
   expect(body.planning.workItemLinks[0]?.cycleId).toBe('cycle-target')
   expect(body.planning.entities.find((entity) => entity.id === 'cycle-source')?.status)
     .toBe('completed')
+})
+
+test('creates the next Cycle and adds Work Items to a Cycle in bulk', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  setTestAppDependencies({ planning: new InMemoryPlanningClient() })
+
+  const source = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    {
+      ...createCyclePlanningInput('cycle-source', 0),
+      automation: { createNext: true, rolloverAtEnd: true },
+    },
+  )
+  expect(source.status).toBe(201)
+
+  const next = await planningApiRequest('/api/planning/cycles/cycle-source/next', 'POST', {
+    expectedRevision: 1,
+  })
+  expect(next.status).toBe(201)
+  const nextBody = await next.json() as CreateNextCycleResponse
+  const created = nextBody.planning.entities.find((entity) => entity.id === nextBody.cycleId)
+  expect(created).toMatchObject({
+    type: 'cycle',
+    baseline: { startDate: '2026-07-15', endDate: '2026-07-28' },
+    automation: { createNext: true, rolloverAtEnd: true },
+  })
+
+  const tooMany = await planningApiRequest(
+    `/api/planning/cycles/${nextBody.cycleId}/work-items`,
+    'POST',
+    {
+      action: 'add',
+      workItems: Array.from({ length: 50 }, (_, index) => ({
+        teamId: 'core-team',
+        workItemId: `item-${index}`,
+      })),
+      expectedRevision: 2,
+    },
+  )
+  expect(tooMany.status).toBe(400)
+
+  const added = await planningApiRequest(
+    `/api/planning/cycles/${nextBody.cycleId}/work-items`,
+    'POST',
+    {
+      action: 'add',
+      workItems: [{ teamId: 'core-team', workItemId: 'onboarding-friction' }],
+      expectedRevision: 2,
+    },
+  )
+  expect(added.status).toBe(200)
+  const addedBody = await added.json() as PlanningSnapshot
+  expect(addedBody.workItemLinks).toEqual([
+    expect.objectContaining({ workItemId: 'onboarding-friction', cycleId: nextBody.cycleId }),
+  ])
+
+  const removed = await planningApiRequest(
+    `/api/planning/cycles/${nextBody.cycleId}/work-items`,
+    'POST',
+    {
+      action: 'remove',
+      workItems: [{ teamId: 'core-team', workItemId: 'onboarding-friction' }],
+      expectedRevision: 3,
+    },
+  )
+  expect(removed.status).toBe(200)
+  expect((await removed.json() as PlanningSnapshot).workItemLinks).toEqual([])
+})
+
+test('requires Cycle manager permission to create the next Cycle', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({ planning })
+  const source = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-source', 0),
+  )
+  expect(source.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const denied = await planningApiRequest('/api/planning/cycles/cycle-source/next', 'POST', {
+    expectedRevision: 1,
+  })
+  expect(denied.status).toBe(403)
 })

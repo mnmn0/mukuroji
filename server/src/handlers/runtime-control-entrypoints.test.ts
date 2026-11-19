@@ -42,6 +42,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'automation-schedule',
   },
   {
+    filename: 'cycle-schedule-handler.ts',
+    exportName: 'handler',
+    surface: 'automation-schedule',
+  },
+  {
     filename: 'connector-handler.ts',
     exportName: 'queueHandler',
     surface: 'connector-sync',
