@@ -269,7 +269,8 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `AiAssistanceObservabilityDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | `DDBStreamBatchInfo` のstream ARN、shard、start/end sequence、arrival window。SQS bodyにrow locatorや`NewImage`は含まれない |
 | `CollaborationProjectionDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit stream record の directory/event ID、correlation、actor/entity/target |
 | `AutomationEventDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit outbox stream record の directory/event ID と automation rule/execution locator |
-| `ScheduledJobsDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Async destination envelope の invocation time と error message の失敗 job 名（Automation、Triage、Agent Run triage、Slack、analytics、notification）。各 job の locator はその job のログで確認 |
+| `ScheduledJobsDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Async destination envelope の invocation time と error message の失敗 job 名（Automation、Triage、Agent Run triage、Slack、Email、analytics、notification）。各 job の locator はその job のログで確認 |
+| `SlackNotificationBacklogAlarm` / `EmailNotificationBacklogAlarm` | `Mukuroji/Notifications` `OldestDueAgeSeconds`（`Channel: Slack` / `Email`）`>= 900` が1分 period で3回連続 | SEV3 | `SlackNotificationFailed` / `EmailNotificationFailed` ログの `shard`・`dueAt`・`reference`・`code`。Email では SES の送信上限と sandbox 状態も確認（[`docs/notifications.md`](notifications.md#email-配信)） |
 | `ScheduledJobsDestinationFailureAlarm` | `DestinationDeliveryFailures Sum >= 1` / 5分 | SEV1 | Lambda invocation/time/error。DLQ delivery 自体が失敗したため message が存在すると仮定しない |
 | `ConnectorSyncDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Queue body の installation/job/operation ID。Credential/body は記録しない |
 | `ConnectorPollDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | EventBridge または Lambda destination envelope、installation/poll locator |
