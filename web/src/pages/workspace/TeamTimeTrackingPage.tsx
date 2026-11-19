@@ -118,7 +118,7 @@ export function TeamTimeTrackingPage() {
   if (!teamId) return null
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={(candidate) => candidate === 'report'

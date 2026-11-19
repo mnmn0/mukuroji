@@ -92,8 +92,12 @@ export function useTenantAdministrationMutations({
         expectedRevision: profile.revision,
       }, context),
     )
-    // Timesheets read the week start through their own query, so they must see the saved value.
-    if (saved) await mutateGlobal(isWorkspaceCalendarSettingsKey).catch(() => undefined)
+    // Timesheets read the week start through their own query, which may not be mounted now, so
+    // the saved value is written into every cached entry instead of only revalidating mounted ones.
+    if (saved && profile.calendar) {
+      await mutateGlobal(isWorkspaceCalendarSettingsKey, profile.calendar, { revalidate: false })
+        .catch(() => undefined)
+    }
     return saved
   }
 

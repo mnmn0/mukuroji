@@ -40,6 +40,9 @@ function createClient(
     async getSnapshot() {
       return snapshot
     },
+    async getProfile() {
+      return snapshot.profile
+    },
     async updateProfile() {
       return snapshot.profile
     },
@@ -437,13 +440,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     '2026-08-02T00:00:00.000Z',
   )
   const client = createClient(snapshot, [])
-  client.getSnapshot = async () => {
-    throw new TenantAdministrationError(
-      404,
-      'TenantAdministrationNotInitialized',
-      'Tenant administration state is not initialized.',
-    )
-  }
+  client.getProfile = async () => undefined
   const ensureCalls: Array<[string, string]> = []
   client.ensureSnapshot = async (workspaceId, ownerMemberKey) => {
     ensureCalls.push([workspaceId, ownerMemberKey])
@@ -458,9 +455,9 @@ test('lets any member read the Workspace calendar settings, with defaults before
   // Reading must not initialize tenant state on a member's behalf.
   expect(ensureCalls).toEqual([])
 
-  client.getSnapshot = async () => ({
-    ...snapshot,
-    profile: { ...snapshot.profile, calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 } },
+  client.getProfile = async () => ({
+    ...snapshot.profile,
+    calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 },
   })
   const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
     headers: { Authorization: 'Bearer token-1' },
@@ -469,6 +466,15 @@ test('lets any member read the Workspace calendar settings, with defaults before
 
   const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
   expect(unauthenticated.status).toBe(401)
+
+  // A failed read, such as an incomplete tenant record, must not be reported as the defaults.
+  client.getProfile = async () => {
+    throw new TenantAdministrationError(503, 'TenantAdministrationUnavailable', 'Tenant state is unavailable.')
+  }
+  const failed = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(failed.status).toBe(503)
 })
 
 test('keeps calendar settings changes behind administration and validates them', async () => {

@@ -217,6 +217,16 @@ export class DynamoDbTenantAdministrationClient implements
   }
 
   /** Reads the tenant aggregate with strongly consistent record reads. */
+  /**
+   * Reads the tenant profile record alone.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @returns The stored profile, or undefined when the tenant has no profile yet.
+   */
+  async getProfile(workspaceId: string): Promise<TenantProfile | undefined> {
+    return await this.readOptionalRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile)
+  }
+
   async getSnapshot(workspaceId: string): Promise<TenantAdministrationSnapshot> {
     const [profile, governance] = await Promise.all([
       this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
