@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import type { DocumentNode } from '@mukuroji/contracts'
-import { exportDocumentSubtreeMarkdown } from '../src/documents/api'
+import {
+  DocumentSubtreeExportLimitError,
+  exportDocumentSubtreeMarkdown,
+} from '../src/documents/queries/documentSubtreeExport'
 import {
   editableDocumentCapabilities,
   readOnlyDocumentCapabilities,
@@ -158,5 +161,27 @@ describe('exportDocumentSubtreeMarkdown', () => {
     expect(requested.filter((path) => path.includes('/export'))).toEqual([
       '/api/documents/p1/export?format=markdown',
     ])
+  })
+  test('rejects instead of returning an incomplete export', async () => {
+    globalThis.fetch = (async () =>
+      Response.json({ nextCursor: 'more', nodes: [] })) as typeof fetch
+    await expect(
+      exportDocumentSubtreeMarkdown('token', {
+        id: 'root',
+        scope: { type: 'workspace' },
+        title: 'Root',
+      }),
+    ).rejects.toBeInstanceOf(DocumentSubtreeExportLimitError)
+  })
+
+  test('rejects a root that is not in the active tree', async () => {
+    globalThis.fetch = (async () => Response.json({ nodes: [] })) as typeof fetch
+    await expect(
+      exportDocumentSubtreeMarkdown('token', {
+        id: 'archived',
+        scope: { type: 'workspace' },
+        title: 'Archived',
+      }),
+    ).rejects.toBeInstanceOf(DocumentSubtreeExportLimitError)
   })
 })

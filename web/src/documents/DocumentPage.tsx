@@ -55,7 +55,6 @@ import {
   deleteDocumentPresence,
   deleteDocumentShare,
   exportDocument,
-  exportDocumentSubtreeMarkdown,
   favoriteDocument,
   getDocument,
   getDocumentCollection,
@@ -109,6 +108,7 @@ import {
   DocumentReadOnlyContent,
 } from './ui/DocumentEditor'
 import { DocumentHome } from './ui/DocumentHome'
+import { exportDocumentSubtreeMarkdown } from './queries/documentSubtreeExport'
 import {
   DocumentShareDialog,
   type CreateDocumentShareDraftInput,
@@ -1752,6 +1752,7 @@ export function DocumentScreen({
           onExportSubtree={
             selectedDocument &&
             selectedDocument.kind !== 'whiteboard' &&
+            !selectedDocument.archivedAt &&
             actions.exportDocumentSubtree
               ? async () => {
                   await runGuardedAction(() =>
