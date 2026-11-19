@@ -1,6 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import type { ProjectDirectoryTeam } from '../../projects/api'
-import { useActiveProjectMembers } from '../../projects/queries/useProjectMembers'
+import {
+  isActiveProjectAssignmentCandidate,
+  type ProjectDirectoryProject,
+  type ProjectDirectoryTeam,
+} from '../../projects/api'
+import { useTeamProjectMembers } from '../../projects/queries/useProjectMembers'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ChecklistWorkItemInput } from '../model/checklistWorkItems'
 import { focusFirstModalElement, trapModalFocus } from './modalFocus'
@@ -40,6 +44,8 @@ type ProjectOption = {
   teamId: string
   /** Project ID. */
   projectId: string
+  /** Project entry used for the Team-qualified member lookup. */
+  project: ProjectDirectoryProject
   /** Label combining Team and Project names. */
   label: string
 }
@@ -64,6 +70,7 @@ export function ChecklistWorkItemDialog({
   const projectOptions: ProjectOption[] = teams.flatMap((team) =>
     team.projects.map((project) => ({
       label: `${team.name} / ${project.name}`,
+      project,
       projectId: project.id,
       teamId: team.id,
     })),
@@ -86,11 +93,16 @@ export function ChecklistWorkItemDialog({
     error: memberError,
     isLoading: isMembersLoading,
     mutate: reloadMembers,
-  } = useActiveProjectMembers(
+  } = useTeamProjectMembers(
     accessToken,
-    selectedOption ? [selectedOption.projectId] : [],
+    selectedOption?.teamId,
+    selectedOption ? [selectedOption.project] : [],
   )
-  const members = memberResult?.members ?? []
+  // The same Project ID can exist in several Teams, so members are read
+  // through the selected Team to offer owners from the right Project.
+  const members = (memberResult?.members ?? [])
+    .map((access) => access.member)
+    .filter(isActiveProjectAssignmentCandidate)
   // The aggregate query resolves with per-Project errors instead of
   // rejecting, so both shapes mean the assignee list could not be read.
   const hasMemberLoadError =
