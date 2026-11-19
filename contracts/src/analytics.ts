@@ -11,6 +11,8 @@ export type AnalyticsMetricKey =
   | 'scope-change'
   | 'velocity'
   | 'sla'
+  | 'remaining-scope'
+  | 'cumulative-flow'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -73,7 +75,30 @@ export type AnalyticsFilter = {
   customFields?: AnalyticsCustomFieldFilter[]
   /** `asOf` 時点で archive 済みの Work Item を含めるかどうかです。 */
   includeArchived?: boolean
+  /**
+   * 対象 Work Item の許可一覧です。Cycle など Work Item 集合で範囲を決める chart に使います。
+   * 最大 500 件で、省略時は他の filter に一致する全 Work Item を扱います。
+   */
+  workItems?: AnalyticsWorkItemReference[]
 }
+
+/** Analytics filter が対象にする一つの Work Item です。 */
+export type AnalyticsWorkItemReference = {
+  /** Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Team 内の Work Item ID です。 */
+  workItemId: string
+}
+
+/**
+ * Chart widget の可視化方法です。
+ *
+ * - `line` / `bar`: series の value を描きます。
+ * - `area`: series point の `segments` を積み上げ面で描きます（cumulative flow）。
+ * - `burndown`: 残量の value と、開始時の残量から期間末に 0 へ向かう ideal line を描きます。
+ * - `burnup`: series point の `segments` にある total scope と completed を描きます。
+ */
+export type AnalyticsVisualization = 'line' | 'bar' | 'area' | 'burndown' | 'burnup'
 
 /** Widget result を分割する dimension です。 */
 export type AnalyticsGroupBy =
@@ -97,7 +122,7 @@ export type AnalyticsWidget = {
   /** Widget の表示形式です。 */
   type: 'metric' | 'chart' | 'table'
   /** Chart widget の可視化方法です。 */
-  visualization?: 'line' | 'bar'
+  visualization?: AnalyticsVisualization
   /** Builder grid 上の widget size です。 */
   size?: 'small' | 'medium' | 'large'
   /** Widget の表示名です。 */
@@ -108,7 +133,7 @@ export type AnalyticsWidget = {
   groupBy?: AnalyticsGroupBy
   /** SLA metric の達成判定に使う lead time 上限です。 */
   slaTargetHours?: number
-  /** Throughput と velocity の重み付けです。省略時は `count` です。 */
+  /** Throughput、velocity、remaining scope の重み付けです。省略時は `count` です。 */
   weighting?: AnalyticsWeighting
 }
 
@@ -256,6 +281,19 @@ export type AnalyticsSeriesPoint = {
   value: number | null
   /** Value の根拠となった sample 数です。 */
   sampleSize: number
+  /**
+   * Bucket 末時点の内訳です。`cumulative-flow` では status category ごとの件数、
+   * `remaining-scope` では burnup 用の `scope`（total scope）と `completed` を返します。
+   */
+  segments?: AnalyticsSeriesSegment[]
+}
+
+/** Series point の一つの内訳です。 */
+export type AnalyticsSeriesSegment = {
+  /** Stable segment key です。 */
+  key: string
+  /** Segment の値です。 */
+  value: number
 }
 
 /** Dimension ごとに分割した metric value です。 */

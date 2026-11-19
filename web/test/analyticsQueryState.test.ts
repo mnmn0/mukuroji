@@ -102,6 +102,36 @@ describe('Analytics report URL state', () => {
     expect(restored.filter.statusCategories).toEqual([])
   })
 
+  test('round-trips Work Item allowlists, including an explicit empty list', () => {
+    const period = { from: '2026-07-01T00:00:00.000Z', to: '2026-07-31T23:59:59.999Z' }
+    const listed = serializeAnalyticsRouteState({
+      builder: false,
+      filter: {
+        period,
+        workItems: [
+          { teamId: 'team-b', workItemId: 'item-2' },
+          { teamId: 'team-a', workItemId: 'item-1' },
+          { teamId: 'team-a', workItemId: 'item-1' },
+        ],
+      },
+      timezone: 'UTC',
+    })
+    expect(listed.getAll('workItem')).toHaveLength(2)
+    expect(parseAnalyticsRouteState(listed).filter.workItems).toEqual([
+      { teamId: 'team-a', workItemId: 'item-1' },
+      { teamId: 'team-b', workItemId: 'item-2' },
+    ])
+
+    const empty = serializeAnalyticsRouteState({
+      builder: false,
+      filter: { period, workItems: [] },
+      timezone: 'UTC',
+    })
+    expect(empty.getAll('workItem')).toEqual([''])
+    expect(parseAnalyticsRouteState(empty).filter.workItems).toEqual([])
+    expect(parseAnalyticsRouteState(new URLSearchParams('v=1')).filter.workItems).toBeUndefined()
+  })
+
   test('uses the local current day for a positive-offset timezone near UTC midnight', () => {
     const filter = createDefaultAnalyticsFilter(
       new Date('2026-07-18T15:30:00.000Z'),
