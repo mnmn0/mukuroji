@@ -2339,19 +2339,50 @@ describe('Factory board route', () => {
     expect(JSON.stringify(body)).not.toContain('task-hidden')
   })
 
+  test('reads recent and failed runs from the finished-run index however many older runs the Team has', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-done', statusCategory: 'completed' },
+      { id: 'task-old-failure', statusCategory: 'started' },
+    ])
+    for (let index = 0; index < 5_000; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'completed', 'agent', new Date(now - 49 * hourMs)))
+    }
+    store.seed(finishAgentRun(createRunAt('task-done', new Date(now - 2 * hourMs)), 'completed', 'agent', new Date(now - hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-old-failure', new Date(now - 100 * hourMs)), 'failed', 'agent', new Date(now - 99 * hourMs)))
+    store.listFinishedRuns = async () => {
+      throw new Error('The board must not scan the finished runs.')
+    }
+    const listFinishedRunsByTime = store.listFinishedRunsByTime.bind(store)
+    const reads: { group: string; since: string | undefined }[] = []
+    store.listFinishedRunsByTime = async (directoryId, teamId, group, since, cursor, limit) => {
+      reads.push({ group, since })
+      return listFinishedRunsByTime(directoryId, teamId, group, since, cursor, limit)
+    }
+    const { body, lanes } = await readBoard()
+    expect(lanes).toEqual({ 'task-done': 'completed', 'task-old-failure': 'failed' })
+    expect(body.finishedRunsHasMore).toBe(false)
+    // Only the completed-lane window is read from the other finished runs; failures are read without a time limit.
+    expect(reads).toHaveLength(2)
+    expect(reads.find((read) => read.group === 'failed')?.since).toBeUndefined()
+    const since = reads.find((read) => read.group === 'other')?.since
+    const windowMs = since === undefined ? Number.NaN : now - Date.parse(since)
+    expect(windowMs).toBeGreaterThan(23 * hourMs)
+    expect(windowMs).toBeLessThanOrEqual(24 * hourMs)
+  })
+
   test('bounds the finished runs and Work Items it evaluates and says so', async () => {
     const now = Date.now()
     const workItems: BoardWorkItem[] = Array.from({ length: 400 }, (_, index) => ({ id: `task-${index}`, statusCategory: 'unstarted' }))
     const { store, pageReads } = configureBoard(workItems)
     for (let index = 0; index < 600; index += 1) {
-      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'completed', 'agent', new Date(now - 49 * hourMs)))
+      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
     }
-    const listFinishedRuns = store.listFinishedRuns.bind(store)
+    const listFinishedRunsByTime = store.listFinishedRunsByTime.bind(store)
     const finishedLimits: number[] = []
-    store.listFinishedRuns = async (directoryId, teamId, cursor, limit) => {
-      finishedLimits.push(limit)
-      // The fake page never continues on its own, so the board must stop at its own bound.
-      return listFinishedRuns(directoryId, teamId, cursor, limit)
+    store.listFinishedRunsByTime = async (directoryId, teamId, group, since, cursor, limit) => {
+      if (group === 'failed') finishedLimits.push(limit)
+      return listFinishedRunsByTime(directoryId, teamId, group, since, cursor, limit)
     }
     const { body } = await readBoard()
     expect(body).toMatchObject({ items: [], finishedRunsHasMore: true, startedWorkItemsHasMore: false })
@@ -2502,7 +2533,7 @@ describe('Factory board route', () => {
 
     resetTestApp()
     const second = configureBoard([{ id: 'task-1', statusCategory: 'started' }])
-    second.store.listFinishedRuns = async () => {
+    second.store.listFinishedRunsByTime = async () => {
       throw createAgentRunIntegrityError()
     }
     const corrupt = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })

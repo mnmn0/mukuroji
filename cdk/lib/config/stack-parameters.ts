@@ -137,6 +137,8 @@ export interface StackParameters {
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Web Push VAPID public key; empty disables push subscriptions. */
   readonly webPushVapidPublicKey: cdk.CfnParameter;
+  /** Verified SES sender address for notification Email; empty disables Email delivery. */
+  readonly notificationEmailSender: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks, declared only with the request email module. */
   readonly requestEmailWebhookSecret: cdk.CfnParameter | undefined;
   /** Secret used to hash public request and reply tokens. */
@@ -559,6 +561,16 @@ export function buildStackParameters(
     description:
       'VAPID application server public key browsers use to subscribe to Web Push. Empty disables push subscriptions.',
   });
+  const notificationEmailSender = new cdk.CfnParameter(stack, 'NotificationEmailSender', {
+    type: 'String',
+    default: '',
+    minLength: 0,
+    maxLength: 254,
+    allowedPattern: '^(?:|[^\\s@,;<>"]+@[^\\s@,;<>"]+\\.[^\\s@,;<>"]+)$',
+    constraintDescription: 'NotificationEmailSender must be empty or one email address.',
+    description:
+      'SES-verified sender address for notification Email. Empty disables Email delivery; the preference stays stored.',
+  });
   const requestEmailWebhookSecret = options.requestEmailEnabled === true
     ? new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
       type: 'String',
@@ -811,6 +823,7 @@ export function buildStackParameters(
     aiBedrockDestinationModelArnsConfigured,
     requestRateLimitPerHour,
     webPushVapidPublicKey,
+    notificationEmailSender,
     requestEmailWebhookSecret,
     requestTokenHashSecret,
     edgeOriginSecret,

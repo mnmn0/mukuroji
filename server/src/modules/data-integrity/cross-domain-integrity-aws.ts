@@ -35,7 +35,9 @@ import {
   validateWorkItemConfiguration,
 } from '../work-items'
 import {
+  isMemberPreferencesRevision,
   isProjectQuickAccessItems,
+  readMemberPreferenceValues,
   normalizeProjectCode,
 } from '../directory'
 import {
@@ -93,6 +95,7 @@ const tableScanOrder: readonly CrossDomainIntegrityTableTarget[] = [
 
 const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'email-alias',
+  'member-preferences',
   'planning-meta',
   'project-code',
   'project-member',
@@ -1164,6 +1167,19 @@ function validateProjectDirectoryAuxiliaryRow(
       revision > PROJECT_QUICK_ACCESS_MAX_REVISION ||
       !isProjectQuickAccessItems(items) ||
       directoryId !== `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
+      entryKey !== 'PREFERENCE'
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'member-preferences') {
+    const workspaceId = requireText(row.workspaceId)
+    const memberKey = requireText(row.memberKey)
+    requireCanonicalTimestamp(row.updatedAt)
+    if (
+      !isMemberPreferencesRevision(row.revision) ||
+      row.revision === 0 ||
+      readMemberPreferenceValues(row) === undefined ||
+      directoryId !== `MEMBER_PREFERENCES#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
       entryKey !== 'PREFERENCE'
     ) normalizationFailure()
     return

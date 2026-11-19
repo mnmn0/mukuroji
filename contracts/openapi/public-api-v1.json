@@ -3083,6 +3083,7 @@
             "type": "string"
           },
           "workflowStatusId": {
+            "description": "Target workflow status. Moving into a `completed` category status is checked against the Team's completion Gate; while a required condition is unmet the request fails with `409 conflict` and one `errors[]` entry per unmet condition, each with `code: gate_not_satisfied` and a message that starts with the condition (`acceptance-criteria`, `no-pending-approvals`, or `human-approval`). Marks sent with `acceptanceCriteriaMarks` in the same request count.",
             "type": "string"
           }
         },

@@ -4,6 +4,14 @@ import {
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
+import {
+  createWorkerSecretEnvironmentHydrator,
+} from '../app/composition/worker-secret-environment'
+
+/** Only the synchronization worker receives the credential hash key. */
+const hydrateSyncSecrets = createWorkerSecretEnvironmentHydrator([
+  'ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET',
+])
 
 let connectorEventHandlers:
   | ReturnType<typeof createProductionConnectorEventHandlers>
@@ -26,10 +34,11 @@ function getConnectorEventHandlers() {
  * @param args - Connector queue handler arguments.
  * @returns The Connector queue partial-batch response.
  */
-function processConnectorQueue(...args: Parameters<
+async function processConnectorQueue(...args: Parameters<
   ReturnType<typeof createProductionConnectorEventHandlers>['queueHandler']
 >) {
-  return getConnectorEventHandlers().queueHandler(...args)
+  await hydrateSyncSecrets()
+  return await getConnectorEventHandlers().queueHandler(...args)
 }
 
 /**
