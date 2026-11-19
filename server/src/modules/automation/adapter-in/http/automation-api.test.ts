@@ -2588,7 +2588,7 @@ test('recovers a Project template application from atomic receipt success withou
   expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
 })
 
-test('applies a Project template WBS as Work Items with parent links, resumes after a link conflict, and completes the receipt last', async () => {
+test('applies a Project template WBS as Work Items with parent links, resumes after a link conflict without undoing edits, and completes the receipt last', async () => {
   const now = '2026-07-16T00:00:00.000Z'
   const template: AutomationTemplate = {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -2610,6 +2610,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
           children: [{ title: 'ヒアリング', startOffsetWorkingDays: 1, durationWorkingDays: 2 }],
         },
         { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+        { title: '保守', startOffsetWorkingDays: 8, durationWorkingDays: 1 },
       ],
     },
     createdAt: now,
@@ -2635,10 +2636,12 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   const createdInputs: Array<Record<string, unknown>> = []
   const placementInputs: Array<Record<string, unknown>> = []
   let placementAttempts = 0
+  let movedByUser = false
   const currentRanks = new Map([
     ['application_project_wbs_wbs_0', 'm'],
     ['application_project_wbs_wbs_1', 'q'],
     ['application_project_wbs_wbs_2', 'k'],
+    ['application_project_wbs_wbs_3', 'n'],
   ])
   configureFakeProjectClients(true, {
     teamProjects: [{ id: application.id, name: '標準プロジェクト', tone: 'green' }],
@@ -2677,6 +2680,19 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       },
     }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelationGraph() {
+        return {
+          relations: movedByUser
+            ? [{
+                sourceWorkItemId: 'application_project_wbs_wbs_3',
+                targetWorkItemId: 'outside-parent',
+                type: 'parent' as const,
+                createdAt: now,
+              }]
+            : [],
+          graphRevision: 0,
+        }
+      },
       async replaceParent(_workspaceId, _teamId, input) {
         placementAttempts += 1
         if (placementAttempts === 1) {
@@ -2716,7 +2732,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       async saveTemplateApplication(candidate, expectedRevision) {
         expect(expectedRevision).toBe(application.revision)
         if (candidate.status === 'succeeded') {
-          expect(createdIssues.size).toBe(3)
+          expect(createdIssues.size).toBe(4)
           expect(placementInputs).toHaveLength(3)
         }
         application = structuredClone(candidate)
@@ -2741,21 +2757,22 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   expect(conflicted.status).toBe(409)
   expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplateWorkItemLinkConflict' })
   expect(application.status).toBe('pending')
-  expect(createdIssues.size).toBe(3)
+  expect(createdIssues.size).toBe(4)
   const edited = createdIssues.get('application_project_wbs_wbs_0')
   if (!edited) throw new Error('The first attempt must create the top-level Work Item.')
   createdIssues.set(edited.id, { ...edited, title: '要件定義（編集済み）', revision: edited.revision + 1 })
+  movedByUser = true
 
   const response = await request()
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({
     status: 'succeeded',
-    result: { kind: 'project', projectId: application.id, workItemCount: 3 },
+    result: { kind: 'project', projectId: application.id, workItemCount: 4 },
   })
   expect(projectInputs).toHaveLength(2)
   expect(projectInputs[0]).not.toHaveProperty('workItems')
   expect(completionMutationCounts).toEqual([0, 0])
-  expect(createdIssues.size).toBe(3)
+  expect(createdIssues.size).toBe(4)
   expect(createdInputs.slice(0, 3).map((input) => ({
     id: input.idempotencyResourceId,
     title: input.title,
@@ -2781,7 +2798,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       schedule: { startDate: '2026-12-14', endDate: '2026-12-16', durationDays: 3 },
     },
   ])
-  expect(createdInputs).toHaveLength(3)
+  expect(createdInputs).toHaveLength(4)
   const topLevelStart = 'k'
   expect(placementInputs).toEqual([
     {
