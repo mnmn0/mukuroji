@@ -633,6 +633,7 @@ export function PlanningPage() {
           canUpdateWorkItemLink={(workItem) =>
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
           createScopeTeams={manageableCreateScopeTeams}
+          directoryTeams={teams}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}

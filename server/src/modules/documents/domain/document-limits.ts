@@ -51,8 +51,26 @@ export const DOCUMENT_VERSION_RETENTION_DAYS = 180
 /** Retention period for operation idempotency receipts. */
 export const DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS = 30
 
-/** Maximum number of transactionally indexed backlinks per document. */
-export const DOCUMENT_MAX_BACKLINK_COUNT = 14
+/**
+ * Maximum number of relations and Whiteboard Work Item objects per document.
+ *
+ * Backlink rows are written in the same DynamoDB transaction as the Document
+ * change that adds or removes them, so this total is bounded by item size and
+ * relation-target validation cost rather than by the transaction size.
+ */
+export const DOCUMENT_MAX_BACKLINK_COUNT = 500
+
+/**
+ * Maximum number of backlink additions and removals in one Document mutation.
+ *
+ * Each changed Work Item link writes a backlink row and a target fence row in
+ * the Document transaction, so this keeps every mutation within DynamoDB's
+ * 100-action transaction limit together with the Document, search, version,
+ * receipt, and authorization-guard actions. 28 changes use at most 56
+ * backlink actions, the same headroom as replacing every link under the
+ * former 14-link document limit.
+ */
+export const DOCUMENT_MAX_BACKLINK_CHANGE_COUNT = 28
 
 /** Maximum text length accepted by document content validators. */
 export const DOCUMENT_MAX_TEXT_LENGTH = 50_000
@@ -65,3 +83,17 @@ export const DOCUMENT_MAX_TABLE_COLUMNS = 50
 
 /** Maximum number of table rows. */
 export const DOCUMENT_MAX_TABLE_ROWS = 200
+
+/**
+ * Maximum number of links owned by one block or Whiteboard object.
+ *
+ * Deleting a block or object also removes the links it owns, and one operation
+ * batch can delete up to {@link DOCUMENT_MAX_OPERATION_COUNT} elements. A Work
+ * Item card's own card link counts toward its object's total. Keeping each
+ * element at this many links keeps a full batch of deletions within
+ * {@link DOCUMENT_MAX_BACKLINK_CHANGE_COUNT}, so an ordinary delete never fails
+ * for having too many links to remove.
+ */
+export const DOCUMENT_MAX_ELEMENT_LINK_COUNT = Math.floor(
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT / DOCUMENT_MAX_OPERATION_COUNT,
+)

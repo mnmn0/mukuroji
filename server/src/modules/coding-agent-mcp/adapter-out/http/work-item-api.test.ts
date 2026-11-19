@@ -180,6 +180,31 @@ test('reads effort from its endpoint and treats an older server as having none',
   await expect(api.effort('invalid')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
+test('reads actual dates from their endpoint and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/actual-dates':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 5, actualStartDate: '2026-09-01', actualEndDate: '2026-09-04' })
+      case '/api/v1/work-items/unstarted/actual-dates':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'unstarted', revision: 1 })
+      case '/api/v1/work-items/other/actual-dates':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', revision: 5 })
+      case '/api/v1/work-items/invalid/actual-dates':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'invalid', revision: 5, actualStartDate: '2026-02-30' })
+      default:
+        return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.actualDates('task')).toEqual({ revision: 5, actualStartDate: '2026-09-01', actualEndDate: '2026-09-04' })
+  expect(paths[0]).toBe('/api/v1/work-items/task/actual-dates?teamId=team')
+  expect(await api.actualDates('unstarted')).toEqual({ revision: 1 })
+  expect(await api.actualDates('legacy')).toBeUndefined()
+  await expect(api.actualDates('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.actualDates('invalid')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
 const validRun = {
   schemaVersion: 1, runId: 'run_00000000-0000-4000-8000-000000000001', teamId: 'team', workItemId: 'task',
   assigneeUserId: 'agent', runtime: 'codex', agentName: 'Codex', state: 'active', startRevision: 2, leaseMinutes: 30,

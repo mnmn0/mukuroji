@@ -25,6 +25,7 @@ import {
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { isFocusSlaAnchor, normalizeFocusSlaWorkItemTypeIds } from './focus-sla-policy'
 
 /** Durable recipient-specific snooze state for one Focus Work Item. */
 export type FocusSnoozeRecord = {
@@ -865,7 +866,32 @@ function normalizePolicyOverrides(value: unknown): FocusPolicyOverrides {
     ...readOptionalPolicyNumber(value, 'dueSoonDays', 0, 365),
     ...readOptionalPolicyNumber(value, 'cycleDueSoonDays', 0, 365),
     ...readOptionalPolicyNumber(value, 'slaHours', 1, 24 * 365),
+    ...readOptionalSlaPolicyFields(value),
     ...readOptionalPolicyNumber(value, 'nowScoreThreshold', 0, 100_000),
+  }
+}
+
+/**
+ * Normalizes the optional SLA scope fields of one stored policy layer.
+ *
+ * @param value - Stored or requested policy overrides.
+ * @returns Only the SLA scope fields that are present.
+ */
+function readOptionalSlaPolicyFields(
+  value: Record<string, unknown>,
+): Pick<FocusPolicyOverrides, 'slaEnabled' | 'slaAnchor' | 'slaWorkItemTypeIds'> {
+  if (value.slaEnabled !== undefined && typeof value.slaEnabled !== 'boolean') {
+    throw new TypeError('Focus policy slaEnabled must be a boolean.')
+  }
+  if (value.slaAnchor !== undefined && !isFocusSlaAnchor(value.slaAnchor)) {
+    throw new TypeError('Focus policy slaAnchor is not supported.')
+  }
+  return {
+    ...(value.slaEnabled === undefined ? {} : { slaEnabled: value.slaEnabled }),
+    ...(value.slaAnchor === undefined ? {} : { slaAnchor: value.slaAnchor }),
+    ...(value.slaWorkItemTypeIds === undefined
+      ? {}
+      : { slaWorkItemTypeIds: normalizeFocusSlaWorkItemTypeIds(value.slaWorkItemTypeIds) }),
   }
 }
 
