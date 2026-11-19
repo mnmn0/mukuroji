@@ -153,6 +153,21 @@ export const IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 2 * 60
 /** Maximum conditional-write retries for one idempotency reservation. */
 const IDEMPOTENCY_RESERVATION_MAX_RETRIES = 3
 
+/** Conditional-write attempts for one API key revocation before it reports a conflict. */
+const API_KEY_REVOKE_MAX_ATTEMPTS = 3
+
+/** Minimum gap between two last-used writes of the same credential. */
+const CREDENTIAL_LAST_USED_WRITE_INTERVAL_MS = 60 * 1_000
+
+/** Returns whether a credential use at `now` should update the stored last-used time. */
+function shouldRecordCredentialUse(lastUsedAt: string | undefined, now: Date) {
+  if (!lastUsedAt) return true
+  const previous = Date.parse(lastUsedAt)
+  return !Number.isFinite(previous) ||
+    now.getTime() - previous >= CREDENTIAL_LAST_USED_WRITE_INTERVAL_MS ||
+    now.getTime() < previous
+}
+
 /** Webhook delivery log と index locator を保持する期間です。 */
 export const WEBHOOK_DELIVERY_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
@@ -870,6 +885,16 @@ abstract class DeveloperPlatformStorageKernel {
     expectedAppVersion: number,
     tokenRecord: DeveloperPlatformRecord,
     authRecord: DeveloperPlatformRecord,
+  ): Promise<boolean>
+
+  /**
+   * Records credential use without changing the row version, so frequent use never
+   * makes version-conditioned revocation or rotation fail. Only updates the row while
+   * it still holds the same secret digest. Returns false when the row changed.
+   */
+  protected abstract touchCredentialLastUsedAt(
+    record: DeveloperPlatformRecord,
+    lastUsedAt: string,
   ): Promise<boolean>
 
   /** Credential domain row と対応 auth row を原子的に削除します。 */
@@ -1647,8 +1672,25 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return result
   }
 
-  /** API key を revoke します。 */
+  /**
+   * API key を revoke します。
+   *
+   * A concurrent admin write (for example a rotation) can move the row version between
+   * the read and the write, so the revocation re-reads and retries a few times instead
+   * of failing on the first conflict.
+   */
   async revokeApiKey(request: RevokeApiKeyRequest) {
+    for (let attempt = 1; ; attempt += 1) {
+      const revoked = await this.tryRevokeApiKey(request)
+      if (revoked) return revoked
+      if (attempt >= API_KEY_REVOKE_MAX_ATTEMPTS) throw persistenceConflict()
+    }
+  }
+
+  /** Revokes the API key once; returns undefined when the row changed concurrently. */
+  private async tryRevokeApiKey(
+    request: RevokeApiKeyRequest,
+  ): Promise<ApiKeySummary | undefined> {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
     const apiKeyId = readIdentifier(request.apiKeyId, 'API key ID')
     const record = await this.requireRecord(
@@ -1675,7 +1717,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
           undefined,
           authRecord ? createCredentialAuthDelete(authRecord) : undefined,
         )
-        if (!saved) throw persistenceConflict()
+        if (!saved) return undefined
       }
       return clone(current)
     }
@@ -1706,7 +1748,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       summary: 'API key was revoked.',
       actorId: request.actorUserId,
     }))
-    if (!saved) throw persistenceConflict()
+    if (!saved) return undefined
     return clone(apiKey)
   }
 
@@ -1847,13 +1889,10 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       throw unauthorized('ApiKeyRevoked', 'API key has been revoked.')
     }
     assertRequiredScopes(current.scopes, request.requiredScopes)
-    const lastUsedAt = now.toISOString()
-    const apiKey: ApiKeySummary = { ...current, lastUsedAt }
-    await this.putRecord({
-      ...record,
-      value: apiKey,
-      version: record.version + 1,
-    }, { expectedVersion: record.version })
+    if (shouldRecordCredentialUse(current.lastUsedAt, now)) {
+      // Best effort: a lost race only skips one last-used update.
+      await this.touchCredentialLastUsedAt(record, now.toISOString())
+    }
     return {
       kind: 'api-key',
       workspaceId: record.workspaceId,
@@ -2207,11 +2246,9 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
       throw unauthorized('OAuthAppRevoked', 'OAuth app has been revoked.')
     }
     assertRequiredScopes(token.scopes, request.requiredScopes)
-    await this.putRecord({
-      ...record,
-      value: { ...token, lastUsedAt: now.toISOString() } satisfies StoredOAuthTokenValue,
-      version: record.version + 1,
-    }, { expectedVersion: record.version })
+    if (shouldRecordCredentialUse(token.lastUsedAt, now)) {
+      await this.touchCredentialLastUsedAt(record, now.toISOString())
+    }
     return {
       kind: 'oauth-token',
       workspaceId: record.workspaceId,
@@ -5228,6 +5265,24 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
   }
 
   /** Credential domain row と auth row を同じ memory commit で削除します。 */
+  protected async touchCredentialLastUsedAt(
+    record: DeveloperPlatformRecord,
+    lastUsedAt: string,
+  ) {
+    const key = createMemoryKey(record.workspaceId, record.recordKey)
+    const current = this.records.get(key)
+    if (
+      !current ||
+      current.entryType !== record.entryType ||
+      !current.secretDigest ||
+      current.secretDigest !== record.secretDigest ||
+      typeof current.value !== 'object' ||
+      current.value === null
+    ) return false
+    this.records.set(key, { ...current, value: { ...current.value, lastUsedAt } })
+    return true
+  }
+
   protected async deleteCredentialRecord(
     record: DeveloperPlatformRecord,
     authRecord?: DeveloperPlatformRecord,
@@ -6369,6 +6424,41 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
   }
 
   /** Credential domain/auth rows を一 transaction で削除します。 */
+  protected async touchCredentialLastUsedAt(
+    record: DeveloperPlatformRecord,
+    lastUsedAt: string,
+  ) {
+    if (!record.secretDigest) return false
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: record.workspaceId,
+          recordKey: record.recordKey,
+        },
+        UpdateExpression: 'SET #value.#lastUsedAt = :lastUsedAt',
+        ConditionExpression:
+          'attribute_exists(recordKey) AND #entryType = :entryType AND ' +
+          '#secretDigest = :secretDigest',
+        ExpressionAttributeNames: {
+          '#value': 'value',
+          '#lastUsedAt': 'lastUsedAt',
+          '#entryType': 'entryType',
+          '#secretDigest': 'secretDigest',
+        },
+        ExpressionAttributeValues: {
+          ':lastUsedAt': lastUsedAt,
+          ':entryType': record.entryType,
+          ':secretDigest': record.secretDigest,
+        },
+      }))
+      return true
+    } catch (error) {
+      if (isNamedError(error, 'ConditionalCheckFailedException')) return false
+      throw toPersistenceError(error)
+    }
+  }
+
   protected async deleteCredentialRecord(
     record: DeveloperPlatformRecord,
     authRecord?: DeveloperPlatformRecord,

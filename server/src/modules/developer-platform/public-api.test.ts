@@ -324,6 +324,73 @@ describe('public API router', () => {
     expect((await router.request(path)).status).toBe(401)
   })
 
+  test('keys rate limits and idempotency on the OAuth app instead of each access token', async () => {
+    let creates = 0
+    const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
+      async addComment(credential, _teamId, _id, body) {
+        creates += 1
+        return { id: `comment-${creates}`, actorUserId: credential.subjectUserId, body, createdAt: NOW.toISOString() }
+      },
+    }) })
+    const app = await platform.createOAuthApp({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Retrying integration',
+        grantTypes: ['client_credentials'],
+        scopes: ['work-items:read', 'work-items:write'],
+      },
+    })
+    const issueToken = () => platform.issueOAuthToken({
+      clientId: app.oauthApp.clientId,
+      clientSecret: app.clientSecret,
+    })
+    const first = await issueToken()
+    const second = await issueToken()
+    expect(second.accessToken).not.toBe(first.accessToken)
+    const path = '/v1/work-items/work-item-1/comments?teamId=team-1&assignedProjectId=project-1&assigneeUserId=user-1'
+    const send = (accessToken: string) => router.request(path, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'oauth-retry-key',
+      },
+      body: JSON.stringify({ body: 'Tests pass.' }),
+    })
+
+    const created = await send(first.accessToken)
+    expect(created.status).toBe(201)
+    expect(created.headers.get('RateLimit-Remaining')).toBe('119')
+    // A retry with a newly issued token replays instead of creating a second comment.
+    const retried = await send(second.accessToken)
+    expect(retried.status).toBe(201)
+    expect(retried.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(creates).toBe(1)
+    // Both tokens draw from one rate-limit bucket.
+    expect(retried.headers.get('RateLimit-Remaining')).toBe('118')
+
+    // Another OAuth app keeps its own bucket and idempotency scope.
+    const otherApp = await platform.createOAuthApp({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Other integration',
+        grantTypes: ['client_credentials'],
+        scopes: ['work-items:read', 'work-items:write'],
+      },
+    })
+    const otherToken = await platform.issueOAuthToken({
+      clientId: otherApp.oauthApp.clientId,
+      clientSecret: otherApp.clientSecret,
+    })
+    const other = await send(otherToken.accessToken)
+    expect(other.status).toBe(201)
+    expect(other.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(other.headers.get('RateLimit-Remaining')).toBe('119')
+    expect(creates).toBe(2)
+  })
+
   test('preserves empty comment page continuations and binds cursors to Team, Project, task, credential, and limit', async () => {
     const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
       async listComments(_credential, _team, _id, continuation, _limit, project) {

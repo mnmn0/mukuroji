@@ -50,6 +50,22 @@ class LaggingLookupDeveloperPlatformClient extends InMemoryDeveloperPlatformStor
   }
 }
 
+/** Memory client whose credential writes fail as if another writer won the CAS. */
+class ConflictingCredentialWriteClient extends InMemoryDeveloperPlatformStorage {
+  /** Number of credential writes that still fail before writes go through. */
+  remainingConflicts = 0
+
+  protected override async putCredentialRecord(
+    ...args: Parameters<InMemoryDeveloperPlatformStorage['putCredentialRecord']>
+  ) {
+    if (this.remainingConflicts > 0) {
+      this.remainingConflicts -= 1
+      return false
+    }
+    return super.putCredentialRecord(...args)
+  }
+}
+
 function createProblem(detail: string): ApiProblem {
   return {
     type: 'https://mukuroji.example/problems/provider',
@@ -193,6 +209,32 @@ function createMemoryDocumentClient(conditionalPutFailures = 0) {
               }
             : {}),
         }
+      }
+      if (
+        commandName === 'UpdateCommand' &&
+        input.UpdateExpression === 'SET #value.#lastUsedAt = :lastUsedAt'
+      ) {
+        const key = input.Key as { workspaceId: string; recordKey: string }
+        const mapKey = `${key.workspaceId}\0${key.recordKey}`
+        const current = items.get(mapKey)
+        const values = input.ExpressionAttributeValues as Record<string, unknown>
+        if (
+          !current ||
+          current.entryType !== values[':entryType'] ||
+          current.secretDigest !== values[':secretDigest']
+        ) {
+          const error = new Error('condition failed')
+          error.name = 'ConditionalCheckFailedException'
+          throw error
+        }
+        items.set(mapKey, {
+          ...current,
+          value: {
+            ...(current.value as Record<string, unknown>),
+            lastUsedAt: values[':lastUsedAt'],
+          },
+        })
+        return {}
       }
       if (commandName === 'DeleteCommand') {
         const key = input.Key as { workspaceId: string; recordKey: string }
@@ -583,6 +625,78 @@ describe('developer credential lifecycle', () => {
       .find((row) => row.recordKey === `APIKEY#${expiring.apiKey.id}`)
     expect(expiredRow).not.toHaveProperty('lookupKey')
     expect(expiredRow).not.toHaveProperty('secretDigest')
+  })
+
+  test('records API key use without moving the row version that revocation relies on', async () => {
+    const { client, clock } = createClient()
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Busy integration', scopes: ['work-items:read'] },
+    })
+    const readApiKeyRow = () => {
+      const row = readStoredRows(client)
+        .find((candidate) => candidate.recordKey === `APIKEY#${created.apiKey.id}`)
+      if (!row) throw new Error('API key row was not stored.')
+      return row
+    }
+    const versionBeforeUse = readApiKeyRow().version
+
+    await client.authenticateApiKey({ credential: created.secret })
+    expect(readApiKeyRow().version).toBe(versionBeforeUse)
+    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
+      .toBe(START.toISOString())
+
+    // Uses inside the write interval do not write the row again.
+    clock.advanceSeconds(30)
+    await client.authenticateApiKey({ credential: created.secret })
+    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
+      .toBe(START.toISOString())
+    clock.advanceSeconds(31)
+    await client.authenticateApiKey({ credential: created.secret })
+    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
+      .toBe(new Date(START.getTime() + 61_000).toISOString())
+    expect(readApiKeyRow().version).toBe(versionBeforeUse)
+
+    const revoked = await client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: created.apiKey.id,
+    })
+    expect(revoked.status).toBe('revoked')
+    await expect(client.authenticateApiKey({ credential: created.secret }))
+      .rejects.toMatchObject({ status: 401 })
+  })
+
+  test('retries API key revocation after a concurrent credential write', async () => {
+    const clock = createClock()
+    const client = new ConflictingCredentialWriteClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
+      clock.now,
+    )
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Leaked key', scopes: ['work-items:read'] },
+    })
+
+    client.remainingConflicts = 2
+    await expect(client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: created.apiKey.id,
+    })).resolves.toMatchObject({ status: 'revoked' })
+    await expect(client.authenticateApiKey({ credential: created.secret }))
+      .rejects.toMatchObject({ status: 401 })
+
+    const other = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Contended key', scopes: ['work-items:read'] },
+    })
+    client.remainingConflicts = 3
+    await expect(client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: other.apiKey.id,
+    })).rejects.toMatchObject({ status: 409 })
   })
 
   test('issues digest-only OAuth client_credentials tokens with scoped auth and app revoke', async () => {
