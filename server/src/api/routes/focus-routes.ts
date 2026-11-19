@@ -1508,12 +1508,18 @@ async function readFocusQueue(
   const planningPromise = Promise.all([
     workItemDependencies.planning.get(principal.directoryId, planningWorkItems),
     legacyUpdateTargetScopePromise,
-  ]).then(([planning, legacyUpdateTargetScope]) => filterFocusPlanningSnapshotForPrincipal(
-    principal,
-    planning,
-    accessibleWorkItems,
-    legacyUpdateTargetScope,
-  ))
+  ]).then(([snapshot, legacyUpdateTargetScope]) => {
+    const planning = filterFocusPlanningSnapshotForPrincipal(
+      principal,
+      snapshot,
+      accessibleWorkItems,
+      legacyUpdateTargetScope,
+    )
+    return {
+      planning,
+      initiativeTitlesById: readFocusInitiativeTitlesById(snapshot, planning),
+    }
+  })
   const relationGraphsPromise = readFocusRelationGraphs(
     principal.directoryId,
     accessibleWorkItems,
@@ -1536,7 +1542,7 @@ async function readFocusQueue(
   })
   const [
     workItems,
-    planning,
+    { planning, initiativeTitlesById },
     relationGraphs,
     reviewerApprovals,
     notifications,
@@ -1562,6 +1568,7 @@ async function readFocusQueue(
     workItems,
     planning,
     projectTitlesByKey,
+    initiativeTitlesById,
     relationGraphs,
     reviewerApprovals,
     notifications,
@@ -1882,6 +1889,28 @@ function filterFocusPlanningSnapshotForPrincipal(
       workItemLinks,
     ),
   }
+}
+
+/**
+ * Reads Initiative titles for the update targets that passed the Planning read filter.
+ *
+ * The filtered entity list only keeps Initiatives evidenced by readable Work Items for legacy
+ * principals, so authorized Initiative update targets take their titles from the full snapshot.
+ *
+ * @param snapshot - Complete Planning snapshot loaded from the canonical store.
+ * @param planning - Planning snapshot already filtered for the principal.
+ * @returns Titles keyed by Planning entity ID, limited to authorized Initiative update targets.
+ */
+function readFocusInitiativeTitlesById(
+  snapshot: PlanningSnapshot,
+  planning: PlanningSnapshot,
+): Map<string, string> {
+  const initiativeIds = new Set(planning.updateTargets.flatMap((summary) =>
+    summary.target.type === 'initiative' ? [summary.target.entityId] : []
+  ))
+  return new Map(snapshot.entities.flatMap((entity): [string, string][] =>
+    initiativeIds.has(entity.id) ? [[entity.id, entity.title]] : []
+  ))
 }
 
 /** Planning read scope of a legacy principal, taken from its Project ACLs. */

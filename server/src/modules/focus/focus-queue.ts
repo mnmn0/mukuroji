@@ -119,6 +119,11 @@ export type CreateFocusQueueInput = {
    */
   projectTitlesByKey?: ReadonlyMap<string, string>
   /**
+   * Initiative titles keyed by Planning entity ID for update targets that passed the Planning read
+   * filter. Labels health update deadlines whose Initiative is not in the filtered entity list.
+   */
+  initiativeTitlesById?: ReadonlyMap<string, string>
+  /**
    * Optional authoritative semantic relation graphs with source occurrence evidence.
    * Relation-only blockers are omitted when this evidence is unavailable.
    */
@@ -381,6 +386,7 @@ export function createFocusQueue(input: CreateFocusQueueInput): FocusQueueRespon
       viewerMemberKey,
       now,
       input.projectTitlesByKey,
+      input.initiativeTitlesById,
     ),
     effectivePolicies,
     teamPolicies,
@@ -1624,6 +1630,7 @@ function readLocalDateStart(date: string, workItem: CanonicalWorkItem): Date | u
  * @param viewerMemberKey - Normalized current viewer member key.
  * @param now - Evaluation instant.
  * @param projectTitlesByKey - Readable Project titles keyed by Team-qualified Project identity.
+ * @param initiativeTitlesById - Authorized Initiative titles keyed by Planning entity ID.
  * @returns Overdue deadlines first, then the remaining deadlines in due order.
  */
 function createFocusUpdateDeadlines(
@@ -1631,6 +1638,7 @@ function createFocusUpdateDeadlines(
   viewerMemberKey: string,
   now: Date,
   projectTitlesByKey: ReadonlyMap<string, string> | undefined,
+  initiativeTitlesById: ReadonlyMap<string, string> | undefined,
 ): FocusUpdateDeadline[] {
   const entityTitles = new Map(planning.entities.map((entity) => [entity.id, entity.title]))
   return planning.updateTargets.flatMap((summary): FocusUpdateDeadline[] => {
@@ -1656,7 +1664,7 @@ function createFocusUpdateDeadlines(
       : new URLSearchParams({ targetType: 'initiative', entityId: target.entityId })
     const title = target.type === 'project'
       ? projectTitlesByKey?.get(createWorkItemKey(target.teamId, target.projectId))
-      : entityTitles.get(target.entityId)
+      : entityTitles.get(target.entityId) ?? initiativeTitlesById?.get(target.entityId)
     const targetIdentity = target.type === 'project'
       ? `project:${encodeURIComponent(target.teamId)}:${encodeURIComponent(target.projectId)}`
       : `initiative:${encodeURIComponent(target.entityId)}`

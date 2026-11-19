@@ -796,9 +796,30 @@ test('lists health update deadlines the viewer owns in Projects readable by ACL'
   })
   const planning = new InMemoryPlanningClient()
   const emptyWorkItems: PlanningWorkItemState = { workItems: [] }
+  // A Workspace-scoped Initiative is readable without Work Item evidence and keeps its title.
+  const hierarchy = [
+    { id: 'workspace-portfolio', type: 'portfolio' },
+    { id: 'workspace-roadmap', type: 'roadmap', parentId: 'workspace-portfolio' },
+    { id: 'workspace-initiative', type: 'initiative', parentId: 'workspace-roadmap' },
+  ] as const
+  for (const [index, entity] of hierarchy.entries()) {
+    await planning.create('user#demo@example.com', {
+      ...entity,
+      title: entity.id === 'workspace-initiative' ? 'Workspace initiative' : entity.id,
+      ownerMemberKey: 'owner@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'none',
+      progressMode: 'automatic',
+      baseline: { startDate: '2020-01-01', endDate: '2020-01-31' },
+      forecast: { startDate: '2020-01-01', endDate: '2020-01-31' },
+      expectedRevision: index,
+    }, emptyWorkItems)
+  }
   const targets: PlanningUpdateTarget[] = [
     { type: 'project', teamId: 'core-team', projectId: 'refero' },
     { type: 'project', teamId: 'hidden-team', projectId: 'hidden-project' },
+    { type: 'initiative', entityId: 'workspace-initiative' },
   ]
   for (const [index, target] of targets.entries()) {
     await planning.configureUpdateCadence('user#demo@example.com', {
@@ -810,7 +831,7 @@ test('lists health update deadlines the viewer owns in Projects readable by ACL'
         nextDueAt: '2020-01-06T09:00:00.000Z',
         reminderHoursBefore: 24,
       },
-      expectedRevision: index,
+      expectedRevision: hierarchy.length + index,
     }, emptyWorkItems)
   }
   setTestAppDependencies({ planning })
@@ -824,6 +845,13 @@ test('lists health update deadlines the viewer owns in Projects readable by ACL'
     isRecord(section) && Array.isArray(section.items) && section.items.length === 0
   )).toBeTrue()
   expect(body.updateDeadlines).toEqual([{
+    id: 'update-due:initiative:workspace-initiative:2020-01-06T09%3A00%3A00.000Z',
+    target: { type: 'initiative', entityId: 'workspace-initiative' },
+    title: 'Workspace initiative',
+    state: 'overdue',
+    dueAt: '2020-01-06T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=initiative&entityId=workspace-initiative',
+  }, {
     id: 'update-due:project:core-team:refero:2020-01-06T09%3A00%3A00.000Z',
     target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
     title: expect.any(String),
