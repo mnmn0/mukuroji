@@ -1670,6 +1670,8 @@ function configureFakeProjectClients(
     projectLifecycleTransitions,
     cognitoIdentityProviderDescriptions: [] as string[],
     cognitoSsoAppClientDescriptions: [] as string[],
+    /** App clients named by locally verified access token reads (enterprise SSO tokens). */
+    verifiedAccessTokenReads: [] as string[],
     directoryReads: [] as Array<{
       directoryId: string
       locale: string
@@ -2025,6 +2027,11 @@ function configureFakeProjectClients(
               : []),
           ],
         }
+      },
+      async getUserFromVerifiedAccessToken(accessToken, clientId) {
+        calls.verifiedAccessTokenReads.push(clientId)
+        const token = verifyFakeAccessToken(accessToken, clientId)
+        return { ...await this.getUser(accessToken), token }
       },
       async listUsers(input) {
         calls.userLists.push(input)
@@ -3600,6 +3607,45 @@ function createWorkspaceBootstrapItems() {
       username: 'owner-cognito-id',
     },
   ]
+}
+
+/**
+ * Stands in for JWKS verification of a fake access token from {@link createAccessToken}.
+ *
+ * A token whose signature segment is `invalid-signature`, that names another app client, that is
+ * not an access token or that has expired is rejected like a real verification failure.
+ *
+ * @param accessToken - Fake access token.
+ * @param clientId - App client the token must have been issued to.
+ * @returns The claims a real verification would return.
+ */
+function verifyFakeAccessToken(accessToken: string, clientId: string) {
+  const [, encodedPayload = '', signature] = accessToken.split('.')
+  let claims: Record<string, unknown> = {}
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'))
+    if (typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded)) {
+      claims = Object.fromEntries(Object.entries(decoded))
+    }
+  } catch {
+    claims = {}
+  }
+  const expiresAt = typeof claims.exp === 'number' ? claims.exp : Math.floor(Date.now() / 1_000) + 3_600
+  if (
+    signature === 'invalid-signature' ||
+    claims.client_id !== clientId ||
+    claims.token_use !== 'access' ||
+    expiresAt <= Math.floor(Date.now() / 1_000)
+  ) {
+    throw new CognitoServiceError(401, 'NotAuthorizedException', 'Access token is invalid.')
+  }
+  return {
+    sub: typeof claims.sub === 'string' ? claims.sub : 'demo-sub',
+    username: typeof claims.username === 'string' ? claims.username : 'demo@example.com',
+    clientId,
+    expiresAt,
+    ...(typeof claims.origin_jti === 'string' ? { originJti: claims.origin_jti } : {}),
+  }
 }
 
 function createAccessToken(groups: string[] = [], claims: Record<string, unknown> = {}) {

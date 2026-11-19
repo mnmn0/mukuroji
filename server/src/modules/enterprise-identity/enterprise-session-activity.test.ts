@@ -279,3 +279,35 @@ test('reports a DynamoDB failure while continuing a session as unavailable', asy
     status: 503,
   })
 })
+
+test('remembers a signed-out sign-in per Workspace until its tokens expire', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const dynamo = createDynamoSessionActivityClient(rows)
+  const memory = new InMemoryEnterpriseSessionActivityClient()
+
+  for (const client of [dynamo, memory]) {
+    expect(await client.isSignInRevoked('workspace-a', 'origin-1')).toBe(false)
+    await client.revokeSignIn({ workspaceId: 'workspace-a', signInId: 'origin-1', expiresAt: 1_800 })
+    expect(await client.isSignInRevoked('workspace-a', 'origin-1')).toBe(true)
+    expect(await client.isSignInRevoked('workspace-a', 'origin-2')).toBe(false)
+    expect(await client.isSignInRevoked('workspace-b', 'origin-1')).toBe(false)
+    await expect(client.revokeSignIn({ workspaceId: 'workspace-a', signInId: ' ', expiresAt: 1_800 }))
+      .rejects.toMatchObject({ code: 'EnterpriseSessionDenied' })
+  }
+  // The record carries the table TTL attribute, so DynamoDB removes it after the tokens expire.
+  expect([...rows.values()]).toEqual([{
+    connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-1',
+    itemType: 'http-sign-in-revocation',
+    workspaceId: 'workspace-a',
+    expiresAt: 1_800,
+  }])
+})
+
+test('reports a DynamoDB failure of the sign-out record as unavailable', async () => {
+  const client = createDynamoSessionActivityClient(new Map(), new Error('DynamoDB is down'))
+
+  await expect(client.revokeSignIn({ workspaceId: 'workspace-a', signInId: 'origin-1', expiresAt: 1_800 }))
+    .rejects.toMatchObject({ status: 503, code: 'EnterpriseSessionActivityUnavailable' })
+  await expect(client.isSignInRevoked('workspace-a', 'origin-1'))
+    .rejects.toMatchObject({ status: 503, code: 'EnterpriseSessionActivityUnavailable' })
+})

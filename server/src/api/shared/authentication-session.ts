@@ -10,10 +10,10 @@ import {
 import { ProjectDataError } from '../../modules/directory'
 import { type MutationAuditContext } from '../../modules/audit/audit'
 import {
-  authenticationDependencies,
   requireAppDependencies,
   workspaceDependencies,
 } from './app-dependencies'
+import { readCognitoAccessTokenUser } from './cognito-access-token-user'
 import { projectDirectoryIdPrefix } from './constants'
 import {
   type CognitoAccessTokenClaims,
@@ -74,7 +74,7 @@ export async function createAuthenticationResponse(
     }
   }
 
-  const user = loadedUser ?? await authenticationDependencies.cognito.getUser(tokens.AccessToken)
+  const user = loadedUser ?? await readCognitoAccessTokenUser(tokens.AccessToken)
   const userKey = readUserAttribute(user, 'email') ?? user.Username
 
   if (userKey?.trim()) {

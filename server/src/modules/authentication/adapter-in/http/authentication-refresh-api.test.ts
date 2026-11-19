@@ -305,6 +305,9 @@ test('rejects a refresh request without a refresh token', async () => {
 
 test('revokes the refresh token on sign-out', async () => {
   await withTestEnvironment({ COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client' }, async () => {
+    configureFakeProjectClients(true)
+    const activity = new InMemoryEnterpriseSessionActivityClient()
+    setTestAppDependencies({ enterpriseSessionActivity: activity })
     const cognito = configureRefreshingCognito('unused')
 
     const passwordSignOut = await app.request('/api/auth/logout', {
@@ -339,5 +342,53 @@ test('revokes the refresh token on sign-out', async () => {
       { refreshToken: 'password-refresh' },
       { refreshToken: 'sso-refresh', clientId: 'mukuroji-sso-client' },
     ])
+    // Cognito revocation does not reach locally verified SSO tokens, so the API remembers it.
+    expect(await activity.isSignInRevoked('user#demo@example.com', 'origin-1')).toBe(true)
+  })
+})
+
+test('refuses every access token of a signed-out SSO sign-in', async () => {
+  await withTestEnvironment({ COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client' }, async () => {
+    configureFakeProjectClients(true)
+    const activity = new InMemoryEnterpriseSessionActivityClient()
+    setTestAppDependencies({ enterpriseSessionActivity: activity })
+    const ssoClaims = {
+      ...signInClaims,
+      client_id: 'mukuroji-sso-client',
+      auth_time: Math.floor(Date.now() / 1_000) - 60,
+    }
+    const firstAccessToken = createAccessToken([], { ...ssoClaims, jti: 'access-1' })
+    const refreshedAccessToken = createAccessToken([], { ...ssoClaims, jti: 'access-2' })
+    for (const token of [firstAccessToken, refreshedAccessToken]) {
+      await activity.recordAuthenticationAssurance({
+        workspaceId: 'user#demo@example.com',
+        sessionId: sessionIdOf(token),
+        authenticationMethods: ['mukuroji:enterprise-sso-provider-sha256:attested'],
+        authenticatedAt: ssoClaims.auth_time,
+        expiresAt: ssoClaims.auth_time + 3_600,
+      })
+    }
+    configureRefreshingCognito('unused')
+    const readAccount = (token: string) => app.request('/api/auth/account-security', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+
+    expect((await readAccount(firstAccessToken)).status).not.toBe(401)
+
+    const signOut = await app.request('/api/auth/logout', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${refreshedAccessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refreshToken: 'sso-refresh' }),
+    })
+    expect(signOut.status).toBe(204)
+
+    for (const token of [firstAccessToken, refreshedAccessToken]) {
+      const response = await readAccount(token)
+      expect(response.status).toBe(401)
+      expect(await response.json()).toMatchObject({ code: 'EnterpriseSsoSessionRequired' })
+    }
   })
 })

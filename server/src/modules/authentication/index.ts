@@ -19,6 +19,7 @@ export {
   type CognitoUsersResponse,
   type EnterpriseCognitoSsoAppClientBinding,
   type GetUserResponse,
+  type VerifiedAccessTokenUser,
   type InitiateAuthResponse,
   type ListCognitoUsersInput,
   type SoftwareTokenAssociation,

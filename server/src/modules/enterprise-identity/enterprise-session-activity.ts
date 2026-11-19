@@ -57,6 +57,18 @@ export type EnterpriseSessionContinuationInput = {
 }
 
 /**
+ * Sign-out of every access token of one Cognito sign-in.
+ */
+export type EnterpriseSignInRevocationInput = {
+  /** Workspace ごとに分離された session scope です。 */
+  workspaceId: string
+  /** Cognito `origin_jti`, shared by every access token refreshed from one sign-in. */
+  signInId: string
+  /** Epoch seconds after which no access token of the sign-in is valid anymore. */
+  expiresAt: number
+}
+
+/**
  * Session activity store の最小契約です。
  */
 export interface EnterpriseSessionActivityClient {
@@ -76,6 +88,22 @@ export interface EnterpriseSessionActivityClient {
    * @returns 引き継いだ record があれば true、更新前の record がなければ false です。
    */
   continueSession?(input: EnterpriseSessionContinuationInput): Promise<boolean>
+  /**
+   * Records that a sign-in was signed out, so its access tokens are refused until they expire.
+   *
+   * @remarks
+   * Access tokens that the API verifies locally (enterprise SSO) are not checked against
+   * Cognito revocation, so sign-out also has to be remembered here.
+   */
+  revokeSignIn?(input: EnterpriseSignInRevocationInput): Promise<void>
+  /**
+   * Checks whether a sign-in was signed out.
+   *
+   * @param workspaceId - Workspace that scopes the sign-in.
+   * @param signInId - Cognito `origin_jti` of the sign-in.
+   * @returns Whether access tokens of the sign-in must be refused.
+   */
+  isSignInRevoked?(workspaceId: string, signInId: string): Promise<boolean>
 }
 
 /**
@@ -268,6 +296,49 @@ implements EnterpriseSessionActivityClient {
       )
     }
   }
+
+  /** Records that a sign-in was signed out until its access tokens expire. */
+  async revokeSignIn(input: EnterpriseSignInRevocationInput) {
+    validateSignInRevocationInput(input)
+    try {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: {
+          connectionId: createSignInRevocationKey(input.workspaceId, input.signInId),
+          itemType: 'http-sign-in-revocation',
+          workspaceId: input.workspaceId,
+          expiresAt: input.expiresAt,
+        },
+      }))
+    } catch (error) {
+      throw new EnterpriseSessionActivityError(
+        503,
+        'EnterpriseSessionActivityUnavailable',
+        'Sign-out could not be recorded.',
+        { cause: error },
+      )
+    }
+  }
+
+  /** Checks whether a sign-in was signed out. */
+  async isSignInRevoked(workspaceId: string, signInId: string) {
+    const connectionId = createSignInRevocationKey(workspaceId, signInId)
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { connectionId },
+        ConsistentRead: true,
+      }))
+      return response.Item?.workspaceId === workspaceId
+    } catch (error) {
+      throw new EnterpriseSessionActivityError(
+        503,
+        'EnterpriseSessionActivityUnavailable',
+        'Sign-out state could not be verified.',
+        { cause: error },
+      )
+    }
+  }
 }
 
 /**
@@ -282,6 +353,8 @@ implements EnterpriseSessionActivityClient {
     /** Server-verified authentication method 一覧です。 */
     authenticationMethods: string[]
   }>()
+  /** Signed-out sign-ins by Workspace and `origin_jti`. */
+  private readonly revokedSignIns = new Set<string>()
 
   /** Idle timeout を検査し、許可された request の activity を記録します。 */
   async validateAndTouch(input: EnterpriseSessionActivityInput) {
@@ -339,6 +412,17 @@ implements EnterpriseSessionActivityClient {
       })
     }
     return true
+  }
+
+  /** Records that a sign-in was signed out. */
+  async revokeSignIn(input: EnterpriseSignInRevocationInput) {
+    validateSignInRevocationInput(input)
+    this.revokedSignIns.add(createSignInRevocationKey(input.workspaceId, input.signInId))
+  }
+
+  /** Checks whether a sign-in was signed out. */
+  async isSignInRevoked(workspaceId: string, signInId: string) {
+    return this.revokedSignIns.has(createSignInRevocationKey(workspaceId, signInId))
   }
 }
 
@@ -417,6 +501,37 @@ function validateContinuationInput(input: EnterpriseSessionContinuationInput) {
       'Session continuation context is invalid.',
     )
   }
+}
+
+/**
+ * Validates a sign-out record before any store access.
+ *
+ * @param input - Sign-out from the logout route.
+ */
+function validateSignInRevocationInput(input: EnterpriseSignInRevocationInput) {
+  requireText(input.workspaceId, 'Workspace ID')
+  requireText(input.signInId, 'Sign-in ID')
+  if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt < 1) {
+    throw new EnterpriseSessionActivityError(
+      403,
+      'EnterpriseSessionDenied',
+      'Sign-out context is invalid.',
+    )
+  }
+}
+
+/**
+ * Builds the store key of a signed-out sign-in.
+ *
+ * @param workspaceId - Workspace that scopes the sign-in.
+ * @param signInId - Cognito `origin_jti` of the sign-in.
+ * @returns The store key.
+ */
+function createSignInRevocationKey(workspaceId: string, signInId: string) {
+  return `HTTP_SIGN_IN_REVOKED#${requireText(workspaceId, 'Workspace ID')}#${requireText(
+    signInId,
+    'Sign-in ID',
+  )}`
 }
 
 function readAuthenticationMethods(value: unknown, fallback: string[]) {

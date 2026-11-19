@@ -111,6 +111,9 @@ test('requires server-attested SSO for a user in an enforced domain', async () =
         async validateAndTouch(input) {
           return [...input.authenticationMethods]
         },
+        async isSignInRevoked() {
+          return false
+        },
       },
     })
     const mainAccessToken = createAccessToken([], {
@@ -168,6 +171,107 @@ test('requires server-attested SSO for a user in an enforced domain', async () =
     })
     expect(calls.cognitoIdentityProviderDescriptions).toEqual(['EnterpriseOidc'])
     expect(calls.cognitoSsoAppClientDescriptions).toEqual(['mukuroji-sso-client'])
+  })
+})
+
+test('accepts an SSO token only for an attested sign-in of its SSO domain, even where SSO is optional', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
+  }, async () => {
+    const calls = configureFakeProjectClients(true)
+    const workspaceId = 'user#demo@example.com'
+    const providerId = 'idp-optional'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId,
+      kind: 'oidc' as const,
+      displayName: 'Enterprise SSO',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active' as const,
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    const domain = {
+      workspaceId,
+      domainId: 'example-com',
+      domain: 'example.com',
+      status: 'verified' as const,
+      revision: 1,
+      verificationRecordName: '_mukuroji-challenge.example.com',
+      verifiedAt: now,
+      enforceSso: false,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await identity.putVerifiedDomain(domain)
+    const ssoAuthenticationMethod =
+      `mukuroji:enterprise-sso-provider-sha256:${
+        createHash('sha256').update(`${providerId}\0${1}`).digest('hex')
+      }`
+    let verifiedAuthenticationMethods: string[] = []
+    setTestAppDependencies({
+      enterpriseIdentity: identity,
+      enterpriseSessionActivity: {
+        async getAuthenticationMethods() {
+          return [...verifiedAuthenticationMethods]
+        },
+        async recordAuthenticationAssurance() {
+          return undefined
+        },
+        async validateAndTouch(input) {
+          return [...input.authenticationMethods]
+        },
+        async isSignInRevoked() {
+          return false
+        },
+      },
+    })
+    const ssoAccessToken = createAccessToken([], {
+      client_id: 'mukuroji-sso-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+    })
+    const requestCurrentUser = (accessToken: string) => app.request('/api/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+
+    // A token straight from Cognito /oauth2/token never went through the exchange (#514).
+    const unattested = await requestCurrentUser(ssoAccessToken)
+    expect(unattested.status).toBe(401)
+    expect(await unattested.json()).toMatchObject({ code: 'EnterpriseSsoSessionRequired' })
+
+    verifiedAuthenticationMethods = [ssoAuthenticationMethod]
+    // The member's domain is not bound to any SSO provider.
+    const unboundDomain = await requestCurrentUser(ssoAccessToken)
+    expect(unboundDomain.status).toBe(403)
+    expect(await unboundDomain.json()).toMatchObject({ code: 'EnterpriseSsoSessionRequired' })
+
+    await identity.putVerifiedDomain({ ...domain, revision: 2, identityProviderId: providerId })
+    const attested = await requestCurrentUser(ssoAccessToken)
+    expect(attested.status).toBe(200)
+
+    const forgedSignature = await requestCurrentUser(
+      `${ssoAccessToken.split('.').slice(0, 2).join('.')}.invalid-signature`,
+    )
+    expect(forgedSignature.status).toBe(401)
+    expect(calls.verifiedAccessTokenReads.length).toBeGreaterThan(0)
+    expect(new Set(calls.verifiedAccessTokenReads)).toEqual(new Set(['mukuroji-sso-client']))
   })
 })
 

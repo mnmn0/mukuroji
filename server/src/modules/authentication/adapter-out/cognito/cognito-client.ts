@@ -11,6 +11,11 @@ import type {
 import {
   resolveCognitoMfaResponseKey,
 } from '../../domain/mfa-challenge'
+import {
+  CognitoAccessTokenVerificationError,
+  getCognitoAccessTokenVerifier,
+  type VerifiedCognitoAccessToken,
+} from './cognito-access-token-verifier'
 import type {
   CognitoMfaChallengeName,
 } from '../../domain/mfa-challenge'
@@ -165,6 +170,14 @@ export type GetUserResponse = {
    * MFA methods the user has enabled (for example `SOFTWARE_TOKEN_MFA`).
    */
   UserMFASettingList?: string[]
+}
+
+/**
+ * Cognito user read for an access token verified with the user pool signing keys.
+ */
+export type VerifiedAccessTokenUser = GetUserResponse & {
+  /** Claims of the verified access token. */
+  token: VerifiedCognitoAccessToken
 }
 
 /**
@@ -523,6 +536,24 @@ export type CognitoClient = {
    * access token から Cognito ユーザー情報を取得します。
    */
   getUser(accessToken: string): Promise<GetUserResponse>
+  /**
+   * Reads the user behind an access token that Cognito `GetUser` cannot accept.
+   *
+   * @remarks
+   * Enterprise SSO access tokens lack the `aws.cognito.signin.user.admin` scope that `GetUser`
+   * requires. This verifies the token signature with the user pool JWKS together with its
+   * issuer, app client, `token_use` and expiry, then reads the user with `AdminGetUser`. It does
+   * not see Cognito-side token revocation, so the caller must also check a server-side session.
+   *
+   * @param accessToken - Access token to verify.
+   * @param clientId - App client the token must have been issued to.
+   * @returns The user, verified token claims included; throws a 401 error for an invalid token or
+   *   a disabled user.
+   */
+  getUserFromVerifiedAccessToken?(
+    accessToken: string,
+    clientId: string,
+  ): Promise<VerifiedAccessTokenUser>
   /**
    * refresh token で access token と ID token を更新します（REFRESH_TOKEN_AUTH）。
    *
@@ -1136,6 +1167,32 @@ export class AwsCognitoClient implements CognitoClient {
       }
     } catch (error) {
       throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Verifies an access token with the user pool JWKS and reads its user with AdminGetUser.
+   *
+   * @param accessToken - Access token to verify.
+   * @param clientId - App client the token must have been issued to.
+   * @returns The user and the verified token claims.
+   */
+  async getUserFromVerifiedAccessToken(accessToken: string, clientId: string) {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const token = await verifyCognitoAccessToken(
+      accessToken,
+      getEnv('COGNITO_ISSUER')?.trim() || createAwsCognitoIssuer(userPoolId),
+      clientId,
+    )
+
+    try {
+      const response = await this.client.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: token.username,
+      }))
+      return toVerifiedAccessTokenUser(response, token)
+    } catch (error) {
+      throw toVerifiedAccessTokenUserError(error)
     }
   }
 
@@ -1976,6 +2033,32 @@ export class FlociCognitoClient implements CognitoClient {
     })
   }
 
+  /**
+   * Verifies an access token with the emulator's JWKS and reads its user with AdminGetUser.
+   *
+   * @param accessToken - Access token to verify.
+   * @param clientId - App client the token must have been issued to.
+   * @returns The user and the verified token claims.
+   */
+  async getUserFromVerifiedAccessToken(accessToken: string, clientId: string) {
+    const userPoolId = await this.resolveUserPoolId()
+    const token = await verifyCognitoAccessToken(
+      accessToken,
+      getEnv('COGNITO_ISSUER')?.trim() || `${this.endpoint}/${userPoolId}`,
+      clientId,
+    )
+
+    try {
+      const response = await this.request<CognitoUserRecord>('AdminGetUser', {
+        UserPoolId: userPoolId,
+        Username: token.username,
+      })
+      return toVerifiedAccessTokenUser(response, token)
+    } catch (error) {
+      throw toVerifiedAccessTokenUserError(error)
+    }
+  }
+
   /** Floci の User Pool に実在する federation provider 設定を返します。 */
   async describeEnterpriseIdentityProvider(providerName: string) {
     const response = await this.request<{
@@ -2673,6 +2756,74 @@ export class CognitoServiceError extends Error {
     this.status = status
     this.code = code
   }
+}
+
+/**
+ * Verifies a Cognito access token and maps verification failures to Cognito errors.
+ *
+ * @param accessToken - Access token to verify.
+ * @param issuer - Issuer URL of the trusted user pool.
+ * @param clientId - App client the token must have been issued to.
+ * @returns The verified claims.
+ */
+async function verifyCognitoAccessToken(accessToken: string, issuer: string, clientId: string) {
+  try {
+    return await getCognitoAccessTokenVerifier(issuer).verify(accessToken, { issuer, clientId })
+  } catch (error) {
+    if (error instanceof CognitoAccessTokenVerificationError) {
+      throw new CognitoServiceError(error.status, error.code, error.message)
+    }
+    throw error
+  }
+}
+
+/**
+ * Builds the issuer URL of an AWS Cognito user pool.
+ *
+ * @param userPoolId - User pool ID, prefixed with its region.
+ * @returns The issuer URL.
+ */
+function createAwsCognitoIssuer(userPoolId: string) {
+  const poolRegion = userPoolId.split('_')[0] || getAwsRegion()
+  const domainSuffix = poolRegion.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'
+  return `https://cognito-idp.${poolRegion}.${domainSuffix}/${userPoolId}`
+}
+
+/**
+ * Converts the AdminGetUser record of a verified access token into its user.
+ *
+ * @param user - AdminGetUser response.
+ * @param token - Verified claims of the access token.
+ * @returns The user; throws a 401 error when the user is disabled or is another identity.
+ */
+function toVerifiedAccessTokenUser(
+  user: CognitoUserRecord,
+  token: VerifiedCognitoAccessToken,
+): VerifiedAccessTokenUser {
+  const sub = readCognitoUserAttribute(user, 'sub')?.trim()
+  if (user.Enabled === false || (sub && sub !== token.sub)) {
+    throw new CognitoServiceError(401, 'NotAuthorizedException', 'Access token is invalid.')
+  }
+  return {
+    Username: user.Username,
+    UserAttributes: user.UserAttributes ?? user.Attributes,
+    PreferredMfaSetting: user.PreferredMfaSetting,
+    UserMFASettingList: user.UserMFASettingList,
+    token,
+  }
+}
+
+/**
+ * Maps a failed AdminGetUser for a verified access token to a Cognito error.
+ *
+ * @param error - Failure from AdminGetUser.
+ * @returns A 401 error for a deleted user, otherwise the normalized Cognito error.
+ */
+function toVerifiedAccessTokenUserError(error: unknown) {
+  const failure = toCognitoSdkError(error)
+  return failure.code === 'UserNotFoundException'
+    ? new CognitoServiceError(401, 'NotAuthorizedException', 'Access token is invalid.')
+    : failure
 }
 
 /**

@@ -37,6 +37,10 @@ import {
 } from './app-dependencies'
 import { toProjectPrincipal } from './authentication-session'
 import {
+  readCognitoAccessTokenUser,
+  requireEnterpriseSsoSessionAttestation,
+} from './cognito-access-token-user'
+import {
   assertEnterpriseRuntimeCognitoProviders,
   type CognitoAccessTokenClaims,
   createEnterpriseAuthenticationSessionId,
@@ -669,7 +673,12 @@ export async function authenticateWorkspacePrincipal(
     return principal
   }
   validateConfiguredCognitoAccessToken(accessToken)
-  const principal = toProjectPrincipal(user ?? await authenticationDependencies.cognito.getUser(accessToken), accessToken)
+  const principal = toProjectPrincipal(user ?? await readCognitoAccessTokenUser(accessToken), accessToken)
+  // An SSO token is only usable after /api/auth/sso/exchange attested it (#514).
+  const ssoSessionAuthenticationMethods = await requireEnterpriseSsoSessionAttestation(
+    accessToken,
+    principal.directoryId,
+  )
   if (typeof authenticationDependencies.cognito.isSystemAdmin === 'function') {
     principal.isSystemAdmin = await authenticationDependencies.cognito.isSystemAdmin(principal.userKey)
   }
@@ -694,7 +703,10 @@ export async function authenticateWorkspacePrincipal(
   )
   const principalKind = breakGlassActivation ? 'break-glass' : 'member'
   let verifiedAuthenticationMethods: string[] | undefined
-  if (!options.breakGlassCandidate && principalKind !== 'break-glass' && isEnterpriseSsoConfigured()) {
+  if (
+    ssoSessionAuthenticationMethods ||
+    (!options.breakGlassCandidate && principalKind !== 'break-glass' && isEnterpriseSsoConfigured())
+  ) {
     try {
       await assertEnterpriseRuntimeCognitoProviders(
         snapshot,
@@ -714,18 +726,28 @@ export async function authenticateWorkspacePrincipal(
     }
 
     const memberDomain = normalizeEnterpriseEmailDomain(workspaceMember.email)
+    // An SSO session is checked against its domain's provider even when SSO is optional there,
+    // so a provider change or a member outside the SSO domains ends the session (#514).
     const enforcedSsoDomains = snapshot.domains.filter((domain) =>
       domain.status === 'verified' &&
-      domain.enforceSso &&
+      (domain.enforceSso || ssoSessionAuthenticationMethods !== undefined) &&
       domain.domain === memberDomain
     )
+    if (ssoSessionAuthenticationMethods && enforcedSsoDomains.length === 0) {
+      throw new WorkspaceAccessError(
+        403,
+        'EnterpriseSsoSessionRequired',
+        'Single sign-on is required for this Workspace account.',
+      )
+    }
     if (enforcedSsoDomains.length > 0) {
       const ssoClient = requireEnterpriseCognitoSsoAppClientConfiguration()
       const accessTokenClaims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
-      verifiedAuthenticationMethods = await getVerifiedEnterpriseAuthenticationMethods(
-        principal.directoryId,
-        authenticationSessionId,
-      )
+      verifiedAuthenticationMethods = ssoSessionAuthenticationMethods ??
+        await getVerifiedEnterpriseAuthenticationMethods(
+          principal.directoryId,
+          authenticationSessionId,
+        )
       if (
         accessTokenClaims?.client_id !== ssoClient.clientId ||
         enforcedSsoDomains.some((domain) => {
