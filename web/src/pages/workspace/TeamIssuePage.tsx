@@ -436,7 +436,7 @@ export function TeamIssuePage() {
       fields: taskViewFields,
       // Effort values sort but do not group, because they have no shared buckets.
       sortFields: taskViewSortFields,
-      layoutModes: ['table', 'board'],
+      layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -470,9 +470,12 @@ export function TeamIssuePage() {
   ])
   const canCreateTeamIssue = canCreateUnassignedIssue || createIssueProjects.length > 0
   const taskViewState = taskViewDefinitionToTeamState(taskViewController.effectiveDefinition)
-  const isOutlineShown = taskViewState.viewMode === 'table' &&
-    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false) &&
-    !taskViewController.effectiveDefinition.layout.group
+  // The table nests rows only without grouping; the Gantt chart nests them within each group.
+  const isOutlineShown =
+    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false) && (
+      taskViewState.viewMode === 'gantt' ||
+      (taskViewState.viewMode === 'table' && !taskViewController.effectiveDefinition.layout.group)
+    )
   const {
     data: hierarchy,
     error: hierarchyError,
@@ -879,7 +882,7 @@ export function TeamIssuePage() {
       )}
       supportsColumnLayoutMetadata={taskViewState.viewMode === 'table'}
       supportsEmptyGroups={taskViewState.viewMode === 'board'}
-      supportsOutline={taskViewState.viewMode === 'table'}
+      supportsOutline={taskViewState.viewMode === 'table' || taskViewState.viewMode === 'gantt'}
       t={t}
       teams={taskViewTeams}
       views={taskViewOptions}

@@ -1229,7 +1229,7 @@ test('previews moving a due-date Work Item without mutating it', async () => {
         mode: 'due-date',
         dueDate: '2026-06-18',
         calendarPolicy: {
-          timeZone: 'UTC',
+          timeZone: 'Asia/Tokyo',
           workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
           holidays: [],
         },
@@ -1238,7 +1238,7 @@ test('previews moving a due-date Work Item without mutating it', async () => {
         mode: 'due-date',
         dueDate: '2026-06-24',
         calendarPolicy: {
-          timeZone: 'UTC',
+          timeZone: 'Asia/Tokyo',
           workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
           holidays: [],
         },

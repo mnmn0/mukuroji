@@ -93,7 +93,16 @@ import {
   WorkspaceConfigurationLoadNotice,
   WorkspaceTaskLoadNotice,
 } from '../../workspace/ui/WorkspaceDataNotices'
-import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
+import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
+import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
+import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
+import { createMyTasksGanttGrouping } from '../../workspace/model/myTaskGrouping'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
+import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
+import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
+import type { TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -137,6 +146,7 @@ export function MyTasksPage() {
     createTaskViewSelectionState,
   )
   const [taskActionErrorMessage, setTaskActionErrorMessage] = useState<string>()
+  const [myTasksCalendarMonth, setMyTasksCalendarMonth] = useState(() => getCurrentTaskMonth())
   const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
     MyTaskActionContextMenuState
   >()
@@ -218,7 +228,7 @@ export function MyTasksPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
-      layoutModes: ['board'],
+      layoutModes: ['board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -252,13 +262,76 @@ export function MyTasksPage() {
     ),
     [myTasks, taskViewController.effectiveDefinition],
   )
+  const myTasksLayoutMode = taskViewController.effectiveDefinition.layout.mode
+  const myTasksViewMode: MyTasksViewMode =
+    myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar' ? myTasksLayoutMode : 'board'
+  const isMyTasksOutlineShown = myTasksViewMode === 'gantt' &&
+    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false)
+  const myTasksOutlineTeamIds = useMemo(
+    // Every loaded Team, not only the filtered ones, so changing a filter keeps the cached read.
+    () => isMyTasksOutlineShown ? myTasks.map((task) => task.teamId) : [],
+    [isMyTasksOutlineShown, myTasks],
+  )
+  const {
+    data: myTasksHierarchies,
+    error: myTasksHierarchiesError,
+    isLoading: isMyTasksHierarchiesLoading,
+    isValidating: isMyTasksHierarchiesValidating,
+    mutate: mutateMyTasksHierarchies,
+  } = useTeamWorkItemHierarchies(
+    workspace.accessToken,
+    myTasksOutlineTeamIds,
+    workspace.canLoadWorkspaceData && isMyTasksOutlineShown,
+  )
+  const [collapsedMyTasksOutlineKeys, toggleMyTasksOutlineKey] =
+    useCollapsedWorkItemOutlineKeys('my-tasks')
+  const myTasksGanttOutline = useMemo<TaskGanttOutline | undefined>(
+    () => isMyTasksOutlineShown && myTasksHierarchies
+      ? {
+          hierarchies: myTasksHierarchies.nodesByTeam,
+          collapsedKeys: collapsedMyTasksOutlineKeys,
+          onToggleCollapsed: (task) => toggleMyTasksOutlineKey(createWorkItemOutlineKey(task.teamId, task.id)),
+        }
+      : undefined,
+    [collapsedMyTasksOutlineKeys, isMyTasksOutlineShown, myTasksHierarchies, toggleMyTasksOutlineKey],
+  )
+  // In the Gantt chart, keyboard moves and selection follow its rows: its groups and outline
+  // order, without the rows under a collapsed parent. The calendar keeps only the cards of the
+  // shown month and the unscheduled bucket.
+  const myTasksGanttGroupBy = taskViewController.effectiveDefinition.layout.group?.field
+  const myTasksGanttGroupDirection = taskViewController.effectiveDefinition.layout.group?.direction
+  const navigableMyTasks = useMemo(() => {
+    if (myTasksViewMode === 'calendar') return listTaskCalendarMonthTasks(visibleMyTasks, myTasksCalendarMonth)
+    if (myTasksViewMode !== 'gantt') return visibleMyTasks
+    const group = createMyTasksGanttGrouping(
+      myTasksGanttGroupBy,
+      myTasksGanttGroupDirection,
+      workItems.configurationsByTeam,
+      workspace.teams,
+      t,
+    )
+    return listTaskGanttRowTasks(visibleMyTasks, {
+      ...(myTasksGanttOutline ? { outline: myTasksGanttOutline } : {}),
+      ...(group ? { group } : {}),
+    })
+  }, [
+    myTasksCalendarMonth,
+    myTasksGanttGroupBy,
+    myTasksGanttGroupDirection,
+    myTasksGanttOutline,
+    myTasksViewMode,
+    t,
+    visibleMyTasks,
+    workItems.configurationsByTeam,
+    workspace.teams,
+  ])
   const visibleMyTaskActionTargets = useMemo(
-    () => visibleMyTasks.map((task) => ({
+    () => navigableMyTasks.map((task) => ({
       expectedRevision: task.revision,
       teamId: task.teamId,
       workItemId: task.id,
     })),
-    [visibleMyTasks],
+    [navigableMyTasks],
   )
   const visibleMyTaskKeys = useMemo(
     () => visibleMyTaskActionTargets.map((target) =>
@@ -431,6 +504,9 @@ export function MyTasksPage() {
   }), [executeMyTaskMoveAction, executeMyTaskOpenAction])
   const myTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
     move: (context) => {
+      // The Gantt chart and the calendar are read-only and have no status control to move a
+      // Work Item with.
+      if (myTasksViewMode !== 'board') return denyTaskAction(myTaskActionDisabledReasons.unavailable)
       const targets = resolveTaskSurfaceActionTargets(context)
       if (targets.length === 0) return allowTaskAction()
       if (targets.length !== 1) {
@@ -451,6 +527,7 @@ export function MyTasksPage() {
   }), [
     myTaskActionDisabledReasons.singleSelectionRequired,
     myTaskActionDisabledReasons.unavailable,
+    myTasksViewMode,
     canMoveMyTaskStatus,
     resolveMyTaskActionTarget,
   ])
@@ -814,7 +891,8 @@ export function MyTasksPage() {
       onUpdate={taskViewController.updateActiveView}
       selectedView={selectedTaskView}
       settings={taskViewPresentation}
-      supportsEmptyGroups
+      supportsEmptyGroups={myTasksViewMode === 'board'}
+      supportsOutline={myTasksViewMode === 'gantt'}
       t={t}
       teams={taskViewTeams}
       views={taskViewOptions}
@@ -827,6 +905,8 @@ export function MyTasksPage() {
         workItems.workItemsError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
+        myTasksHierarchiesError,
+        ...(myTasksHierarchies ? [...myTasksHierarchies.errorsByTeam.values()] : []),
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
@@ -883,6 +963,27 @@ export function MyTasksPage() {
           taskMoveErrorMessage={statusMutation.errorMessage}
           taskViewToolbar={taskViewToolbar}
           presentation={taskViewPresentation}
+          viewMode={myTasksViewMode}
+          onViewModeChange={(mode) => {
+            const definition = taskViewController.effectiveDefinition
+            taskViewController.setEffectiveDefinition({
+              ...definition,
+              layout: { ...definition.layout, mode },
+            })
+          }}
+          ganttOutline={myTasksGanttOutline}
+          calendarMonth={myTasksCalendarMonth}
+          onCalendarMonthChange={setMyTasksCalendarMonth}
+          outlineNotice={isMyTasksOutlineShown ? (
+            <WorkItemOutlineNotice
+              failedTeamCount={myTasksHierarchies?.errorsByTeam.size ?? (myTasksHierarchiesError ? 1 : 0)}
+              isLoading={isMyTasksHierarchiesLoading}
+              isRetrying={isMyTasksHierarchiesValidating}
+              onRetry={() => void mutateMyTasksHierarchies()}
+              t={t}
+              testId="my-tasks-outline"
+            />
+          ) : undefined}
           tasks={visibleMyTasks}
           teams={workspace.teams}
           contributorTaskKeys={contributorTaskKeys}

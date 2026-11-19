@@ -42,7 +42,6 @@ import {
   createResizeTaskScheduleOperation,
   createTaskTimelineDateRange,
   formatTaskScheduleRange,
-  resolveTaskSchedule,
   resolveTaskScheduleEndDate,
   resolveTaskSchedulePrimaryDate,
   resolveTaskScheduleStartDate,
@@ -62,10 +61,19 @@ import {
 import { TaskGanttPeriodNavigation } from './TaskScheduleWindowToolbar'
 import {
   createTaskGanttWindow,
+  getCurrentTaskDate,
   listTaskScheduleWindowDates,
   type TaskScheduleWindow,
 } from '../model/taskScheduleWindow'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
+import {
+  createTaskGanttRows,
+  type TaskGanttGrouping,
+  type TaskGanttOutlineSource,
+  type TaskGanttRow,
+  type TaskGanttTaskRow,
+} from '../model/taskGanttRows'
+import { ChevronIcon } from '../../shared/ui/icons'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
 import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRendering'
@@ -74,6 +82,14 @@ import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workIte
 const GANTT_DAY_WIDTH = 42
 const GANTT_TABLE_WIDTH = 360
 const GANTT_ROW_HEIGHT = 124
+/** Height of a group heading row. */
+const GANTT_GROUP_ROW_HEIGHT = 40
+/** Vertical offset of a parent's summary bar, above the 36px planned bar placed at 28px. */
+const GANTT_SUMMARY_BAR_TOP = 10
+/** Indentation per outline level in the task column. */
+const GANTT_OUTLINE_INDENT = 14
+/** Deepest indentation, so deep outlines keep room for the title in the fixed task column. */
+const GANTT_OUTLINE_MAX_INDENT_LEVELS = 6
 /** Vertical offset of the actual bar, just below the 36px planned bar placed at 28px. */
 const GANTT_ACTUAL_BAR_TOP = 70
 const GANTT_BAR_CENTER_OFFSET = 46
@@ -105,11 +121,12 @@ type TaskScheduleCreateContext = TaskCreateContext & {
 }
 
 /** A task paired with the canonical schedule rendered in its Gantt row. */
-type GanttTaskRow = {
-  /** Work Item rendered in the row. */
-  task: CanonicalWorkItem
-  /** Canonical schedule rendered for the task. */
-  schedule: WorkItemSchedule
+type GanttTaskRow = TaskGanttTaskRow
+
+/** Outline shown by the Gantt chart: hierarchy, collapsed rows, and the collapse toggle. */
+export type TaskGanttOutline = TaskGanttOutlineSource & {
+  /** Shows or hides the rows nested under a Work Item. */
+  onToggleCollapsed: (task: CanonicalWorkItem) => void
 }
 
 /** One bounded Gantt column that may aggregate several calendar dates. */
@@ -217,6 +234,13 @@ export type TaskGanttViewProps = {
   windowStartMonth?: string
   /** Moves the period to start at another month. Shown as navigation with `windowStartMonth`. */
   onWindowStartMonthChange?: (month: string) => void
+  /**
+   * Hierarchy shown as an outline: rows follow the WBS order with WBS numbers, parents get a
+   * summary bar over their descendants' dates, and parents can be collapsed.
+   */
+  outline?: TaskGanttOutline
+  /** Groups the rows, such as by Project, under heading rows. */
+  group?: TaskGanttGrouping
 }
 
 /** Props for the Gantt schedule-preview dialog. */
@@ -247,6 +271,7 @@ export function TaskGanttView({
   canManageScheduleDependencyEndpoint,
   configuration,
   configurationsByTeam,
+  group,
   onCreateTaskOpen,
   onCreateScheduleDependency,
   onDeleteScheduleDependency,
@@ -254,6 +279,7 @@ export function TaskGanttView({
   onSelectTask,
   onUpdateScheduleDependency,
   onWindowStartMonthChange,
+  outline,
   planningSnapshot,
   projectId,
   t,
@@ -285,7 +311,18 @@ export function TaskGanttView({
         .map((item) => ({ id: item.id, teamId: item.teamId })),
     ]
   }, [allProjectTasks, planningSnapshot, projectId, tasks, timelineWindow])
-  const rows = useMemo(() => createGanttRows(tasks), [tasks])
+  const outlineHierarchies = outline?.hierarchies
+  const outlineCollapsedKeys = outline?.collapsedKeys
+  const displayRows = useMemo(() => createTaskGanttRows(tasks, {
+    ...(outlineHierarchies && outlineCollapsedKeys
+      ? { outline: { hierarchies: outlineHierarchies, collapsedKeys: outlineCollapsedKeys } }
+      : {}),
+    ...(group ? { group } : {}),
+  }), [group, outlineCollapsedKeys, outlineHierarchies, tasks])
+  const rows = useMemo(
+    () => displayRows.filter((row): row is GanttTaskRow => row.kind === 'task'),
+    [displayRows],
+  )
   const dependencySummaries = useMemo(
     () => createWorkItemDependencySummaries(planningSnapshot),
     [planningSnapshot],
@@ -317,10 +354,14 @@ export function TaskGanttView({
               ...(row.successor ? [row.successor.schedule] : []),
             ]),
           ],
-          // Actual work outside the planned horizon still widens the automatic timeline.
+          // Actual work and summary bars outside the planned horizon still widen the timeline.
           rows.flatMap((row) => {
             const range = resolveGanttActualDateRange(row.task, row.schedule)
-            return range ? [range.startDate, range.endDate] : []
+            const rollup = row.outline?.node?.rollup
+            return [
+              ...(range ? [range.startDate, range.endDate] : []),
+              ...(rollup?.startDate && rollup.endDate ? [rollup.startDate, rollup.endDate] : []),
+            ]
           }),
         ),
     [dependencyRows, rows, timelineWindow],
@@ -330,15 +371,18 @@ export function TaskGanttView({
     renderedItems: renderedRows,
     hiddenCount: hiddenRowCount,
     showMore: showMoreRows,
-  } = useIncrementalRender(rows, TASK_TABLE_RENDER_STEP)
+  } = useIncrementalRender(displayRows, TASK_TABLE_RENDER_STEP)
+  const renderedRowTops = useMemo(() => createGanttRowTops(renderedRows), [renderedRows])
+  const renderedRowsHeight = renderedRowTops.at(-1) ?? 0
   const dependencyLayout = useMemo(
     () => createGanttDependencyLayout(
       dependencyRows,
       renderedRows,
+      renderedRowTops,
       timelineColumns,
       projectTaskKeys,
     ),
-    [dependencyRows, projectTaskKeys, renderedRows, timelineColumns],
+    [dependencyRows, projectTaskKeys, renderedRowTops, renderedRows, timelineColumns],
   )
   const [dragChange, setDragChange] = useState<GanttDragChange>()
   const dragChangeRef = useRef<GanttDragChange | undefined>(undefined)
@@ -699,7 +743,44 @@ export function TaskGanttView({
               </div>
             ) : null}
           {renderedRows.map((row) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  className="grid min-w-max border-b border-tone-d8dde5 bg-tone-f8fafb"
+                  data-testid={`task-gantt-group-${row.key}`}
+                  key={`group:${row.key}`}
+                  role="row"
+                  style={{
+                    gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px`,
+                    height: `${GANTT_GROUP_ROW_HEIGHT}px`,
+                  }}
+                >
+                  <div
+                    className="sticky left-0 z-10 flex items-center gap-2 border-r border-tone-d8dde5 bg-tone-f8fafb px-4 text-sm font-bold text-[var(--workbench-text)]"
+                    role="rowheader"
+                  >
+                    <span className="truncate">{row.label}</span>
+                    <span className="font-medium text-[var(--workbench-muted)]">({row.count})</span>
+                  </div>
+                  <div aria-hidden="true" role="gridcell" />
+                </div>
+              )
+            }
             const taskKey = createTaskKey(row.task)
+            const outlinePlacement = row.outline
+            const outlineIndent = outlinePlacement
+              ? Math.min(outlinePlacement.depth, GANTT_OUTLINE_MAX_INDENT_LEVELS) * GANTT_OUTLINE_INDENT
+              : 0
+            const summaryRollup = outlinePlacement?.node?.rollup
+            const summaryBar = summaryRollup?.startDate && summaryRollup.endDate
+              ? createGanttDateRangeBar(summaryRollup.startDate, summaryRollup.endDate, timelineColumns)
+              : undefined
+            const summaryBarLabel = summaryRollup?.startDate && summaryRollup.endDate
+              ? t('tasks.gantt.summaryBar')
+                  .replace('{start}', summaryRollup.startDate)
+                  .replace('{end}', summaryRollup.endDate)
+              : undefined
+            const taskTitle = resolveWorkItemTitle(row.task)
             const isBusy = busyTaskKey === taskKey
             const bar = createGanttBar(row.schedule, timelineColumns)
             const actualBar = createGanttActualBar(row.task, row.schedule, timelineColumns)
@@ -723,9 +804,41 @@ export function TaskGanttView({
                   height: `${GANTT_ROW_HEIGHT}px`,
                 }}
               >
-                <div className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-y-auto border-r border-tone-d8dde5 bg-surface px-4 py-3" role="gridcell">
+                <div
+                  className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-y-auto border-r border-tone-d8dde5 bg-surface px-4 py-3"
+                  role="gridcell"
+                  style={outlinePlacement ? { paddingInlineStart: `${16 + outlineIndent}px` } : undefined}
+                >
                   <div className="flex min-w-0 items-start justify-between gap-3">
-                    <div className="min-w-0">
+                    {outlinePlacement ? (
+                      outlinePlacement.hasChildren ? (
+                        <button
+                          aria-expanded={!outlinePlacement.collapsed}
+                          aria-label={`${t(outlinePlacement.collapsed ? 'issues.outline.expand' : 'issues.outline.collapse')}: ${taskTitle}`}
+                          className="-my-1 grid h-7 w-6 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)]"
+                          data-testid={`task-gantt-outline-toggle-${row.task.id}`}
+                          onClick={() => outline?.onToggleCollapsed(row.task)}
+                          type="button"
+                        >
+                          <ChevronIcon className={`h-4 w-4 fill-none stroke-current stroke-2 transition-transform ${outlinePlacement.collapsed ? '-rotate-90' : ''}`} />
+                        </button>
+                      ) : <span aria-hidden="true" className="w-6 flex-none" />
+                    ) : null}
+                    <div className="min-w-0 flex-1">
+                      {outlinePlacement ? (
+                        <span className="sr-only">
+                          {`${t('issues.outline.level').replace('{level}', String(outlinePlacement.depth + 1))} `}
+                        </span>
+                      ) : null}
+                      {outlinePlacement?.node ? (
+                        <p
+                          className="font-mono text-xs font-semibold tabular-nums text-[var(--workbench-muted)]"
+                          data-testid={`task-gantt-wbs-${row.task.id}`}
+                        >
+                          <span className="sr-only">{`${t('issues.outline.wbs')} `}</span>
+                          {outlinePlacement.node.wbsNumber}
+                        </p>
+                      ) : null}
                       {onSelectTask ? (
                         <button
                           className="block max-w-full truncate text-left text-sm font-semibold text-fg-1c1d1f hover:text-[var(--workbench-primary-text)]"
@@ -846,6 +959,22 @@ export function TaskGanttView({
                     backgroundImage: `repeating-linear-gradient(to right, transparent 0, transparent ${GANTT_DAY_WIDTH - 1}px, var(--workbench-gantt-grid) ${GANTT_DAY_WIDTH - 1}px, var(--workbench-gantt-grid) ${GANTT_DAY_WIDTH}px)`,
                   }}
                 >
+                  {summaryBar && summaryBarLabel ? (
+                    // The summary bar spans the descendants' earliest start to latest end, above
+                    // the parent's own planned bar.
+                    <div
+                      aria-label={summaryBarLabel}
+                      className="absolute z-[2] h-2 rounded-sm bg-[var(--workbench-gantt-link)]"
+                      data-testid={`task-gantt-summary-${row.task.id}`}
+                      role="img"
+                      style={{
+                        left: `${summaryBar.left}px`,
+                        top: `${GANTT_SUMMARY_BAR_TOP}px`,
+                        width: `${summaryBar.width}px`,
+                      }}
+                      title={summaryBarLabel}
+                    />
+                  ) : null}
                   {bar ? (
                     <div
                       className={`absolute top-7 z-[2] h-9 overflow-visible text-xs font-bold shadow-sm ${resolveGanttBarClass(row.schedule.mode)}`}
@@ -970,7 +1099,7 @@ export function TaskGanttView({
               aria-hidden="true"
               className="pointer-events-none absolute top-0 z-[1] overflow-visible"
               data-testid="task-gantt-connector-overlay"
-              height={dependencyLayout.externalLaneHeight + renderedRows.length * GANTT_ROW_HEIGHT}
+              height={dependencyLayout.externalLaneHeight + renderedRowsHeight}
               style={{ left: `${GANTT_TABLE_WIDTH}px` }}
               width={timelineColumns.length * GANTT_DAY_WIDTH}
             >
@@ -1230,19 +1359,17 @@ function GanttSchedulePreview({
 }
 
 /**
- * Resolves and schedule-sorts the task rows without mutating the source array.
+ * Calculates where each rendered row starts, below any external lane.
  *
- * @param tasks - Work Items shown in the Gantt view.
- * @returns Rows ordered by primary schedule date and stable task identity.
+ * @param rows - Rendered rows in display order.
+ * @returns The top offset of each row, followed by the total height of all rows.
  */
-function createGanttRows(tasks: readonly CanonicalWorkItem[]): GanttTaskRow[] {
-  return tasks
-    .map((task) => ({ schedule: resolveTaskSchedule(task), task }))
-    .toSorted((left, right) => {
-      const leftDate = resolveTaskSchedulePrimaryDate(left.schedule) ?? '9999-12-31'
-      const rightDate = resolveTaskSchedulePrimaryDate(right.schedule) ?? '9999-12-31'
-      return leftDate.localeCompare(rightDate) || createTaskKey(left.task).localeCompare(createTaskKey(right.task))
-    })
+function createGanttRowTops(rows: readonly TaskGanttRow[]): number[] {
+  const tops = [0]
+  for (const row of rows) {
+    tops.push((tops.at(-1) ?? 0) + (row.kind === 'group' ? GANTT_GROUP_ROW_HEIGHT : GANTT_ROW_HEIGHT))
+  }
+  return tops
 }
 
 /**
@@ -1259,7 +1386,7 @@ function createGanttTimelineColumns(
   schedules: readonly WorkItemSchedule[],
   actualDates: readonly string[] = [],
 ): GanttTimelineColumn[] {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getCurrentTaskDate()
   // Without planned dates the range starts from the first actual date instead of today.
   const range = extendGanttTimelineDateRange(
     createTaskTimelineDateRange(schedules, actualDates[0] ?? today),
@@ -1323,22 +1450,26 @@ function createGanttWindowColumns(window: TaskScheduleWindow): GanttTimelineColu
  * Builds deterministic connector geometry for local bars and one-sided cross-Project edges.
  *
  * @param dependencies - Dependency rows touching at least one local task.
- * @param rows - Local Gantt task rows in their rendered order.
+ * @param rows - Rendered Gantt rows in display order, including group headings.
+ * @param rowTops - Top offset of each rendered row.
  * @param columns - Current bounded timeline columns.
  * @param projectTaskKeys - Unfiltered task identities that belong to the current Project.
  * @returns Overlay paths, external stubs, and the lane height required above local rows.
  */
 function createGanttDependencyLayout(
   dependencies: readonly WorkItemDependencyRow[],
-  rows: readonly GanttTaskRow[],
+  rows: readonly TaskGanttRow[],
+  rowTops: readonly number[],
   columns: readonly GanttTimelineColumn[],
   projectTaskKeys: ReadonlySet<string>,
 ): GanttDependencyLayout {
   const chartWidth = Math.max(GANTT_DAY_WIDTH, columns.length * GANTT_DAY_WIDTH)
-  const localRowsByKey = new Map(rows.map((row, rowIndex) => [
-    createWorkItemDependencyEndpointKey({ teamId: row.task.teamId, workItemId: row.task.id }),
-    { bar: createGanttBar(row.schedule, columns), rowIndex },
-  ]))
+  const localRowsByKey = new Map(rows.flatMap((row, rowIndex) => row.kind === 'task'
+    ? [[
+        createWorkItemDependencyEndpointKey({ teamId: row.task.teamId, workItemId: row.task.id }),
+        { bar: createGanttBar(row.schedule, columns), top: rowTops[rowIndex] ?? 0 },
+      ] as const]
+    : []))
   const externalDependencies = dependencies.filter((row) => {
     const predecessorKey = createWorkItemDependencyEndpointKey(row.dependency.predecessor)
     const successorKey = createWorkItemDependencyEndpointKey(row.dependency.successor)
@@ -1404,10 +1535,10 @@ function createGanttDependencyLayout(
       ? undefined
       : externalIndex * GANTT_EXTERNAL_STUB_HEIGHT + GANTT_EXTERNAL_STUB_HEIGHT / 2
     const predecessorY = localPredecessor
-      ? externalLaneHeight + localPredecessor.rowIndex * GANTT_ROW_HEIGHT + GANTT_BAR_CENTER_OFFSET
+      ? externalLaneHeight + localPredecessor.top + GANTT_BAR_CENTER_OFFSET
       : externalY
     const successorY = localSuccessor
-      ? externalLaneHeight + localSuccessor.rowIndex * GANTT_ROW_HEIGHT + GANTT_BAR_CENTER_OFFSET
+      ? externalLaneHeight + localSuccessor.top + GANTT_BAR_CENTER_OFFSET
       : externalY
     if (predecessorY === undefined || successorY === undefined) continue
 

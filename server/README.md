@@ -222,7 +222,6 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 
 - `POST /api/auth/login`, `GET /api/auth/me`, `GET /api/auth/sso/discovery`,
   `POST /api/auth/sso/start`, `POST /api/auth/sso/exchange`
-- `GET /api/dashboard/summary`
 - `/api/analytics/query`, `/api/analytics/evidence`, `/api/analytics/export`
 - `/api/analytics/reports`, `/api/analytics/reports/{reportId}/snapshots`
 - `POST /api/teams`, `GET /api/teams/projects`
@@ -245,7 +244,6 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
 
-- `MUKUROJI_DASHBOARD_TABLE=mukuroji-dashboard-local`
 - `PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local`
 - `COLLABORATION_TABLE_NAME=mukuroji-collaboration-local`
 - `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）

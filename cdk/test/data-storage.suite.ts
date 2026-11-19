@@ -463,6 +463,7 @@ test('planning data uses retained storage with a sparse update schedule due inde
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
       ],
       BillingMode: 'PAY_PER_REQUEST',
+      DeletionProtectionEnabled: true,
       GlobalSecondaryIndexes: [{
         IndexName: 'UpdateScheduleDueIndex',
         KeySchema: [
@@ -498,6 +499,7 @@ test('developer platform uses a retained TTL table with a lookup GSI', () => {
         { AttributeName: 'lookupSortKey', AttributeType: 'S' },
       ],
       BillingMode: 'PAY_PER_REQUEST',
+      DeletionProtectionEnabled: true,
       GlobalSecondaryIndexes: [{
         IndexName: 'LookupKeyIndex',
         KeySchema: [
