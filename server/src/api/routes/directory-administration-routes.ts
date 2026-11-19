@@ -47,7 +47,7 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
     return await handleDirectoryAdministration(c, async (principal) => {
       const teamId = readRouteIdentifier(c, 'teamId')
       const body = await readJson<unknown>(c.req)
-      const response = await workspaceDependencies.projectDirectory.renameTeam(
+      const renamed = await workspaceDependencies.projectDirectory.renameTeam(
         principal.directoryId,
         teamId,
         body,
@@ -56,11 +56,12 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       await projectTeamSearchDocument(
         principal.directoryId,
         teamId,
-        response.nameJa,
-        response.nameEn,
+        renamed.response.nameJa,
+        renamed.response.nameEn,
+        renamed.nameRevision,
         'team rename',
       )
-      return response
+      return renamed.response
     })
   })
 
@@ -68,13 +69,20 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
   routeApp.patch('/api/teams/:teamId/restore', async (c) => {
     return await handleDirectoryAdministration(c, async (principal) => {
       const teamId = readRouteIdentifier(c, 'teamId')
-      const response = await workspaceDependencies.projectDirectory.restoreTeam(
+      const restored = await workspaceDependencies.projectDirectory.restoreTeam(
         principal.directoryId,
         teamId,
         createApiMutationContext(c, principal, { teamId }),
       )
-      await projectRestoredTeamSearchDocument(principal.directoryId, teamId)
-      return response
+      await projectTeamSearchDocument(
+        principal.directoryId,
+        teamId,
+        restored.nameJa,
+        restored.nameEn,
+        restored.nameRevision,
+        'team restore',
+      )
+      return restored.response
     })
   })
 
@@ -180,10 +188,14 @@ function readRouteIdentifier(c: Context, name: 'teamId' | 'projectId') {
 /**
  * Re-projects a Team search document after its names became visible or changed.
  *
+ * The rename count fences the write, so a delayed projection of an older name cannot replace the
+ * document of a newer rename. A never-renamed Team leaves a renamed document alone.
+ *
  * @param workspaceId - Workspace that owns the Team.
  * @param teamId - Team identifier.
  * @param nameJa - Japanese display name.
  * @param nameEn - English display name.
+ * @param nameRevision - Rename count stored with these names.
  * @param operation - Operation label used when logging a projection failure.
  */
 async function projectTeamSearchDocument(
@@ -191,39 +203,24 @@ async function projectTeamSearchDocument(
   teamId: string,
   nameJa: string,
   nameEn: string,
+  nameRevision: number,
   operation: string,
 ) {
+  const sourceRevision = nameRevision > 0 ? nameRevision : undefined
   await projectWorkspaceSearchDocumentBestEffort(
     () => createTeamWorkspaceSearchDocument({
       workspaceId,
       teamId,
       title: nameJa,
       ...(nameEn === nameJa ? {} : { subtitle: nameEn }),
+      ...(sourceRevision === undefined ? {} : { sourceRevision }),
     }),
     operation,
     // The Team row does not record its creator, so the creator projected at creation is kept.
-    { preserveCreator: true },
+    sourceRevision === undefined
+      ? { preserveCreator: true, unrevisioned: true }
+      : { preserveCreator: true, sourceRevision },
   )
-}
-
-/**
- * Re-projects a restored Team's search document. The restore is already committed, so a failed
- * read of the Team's names is logged instead of failing the request.
- *
- * @param workspaceId - Workspace that owns the Team.
- * @param teamId - Restored Team identifier.
- */
-async function projectRestoredTeamSearchDocument(workspaceId: string, teamId: string) {
-  try {
-    const team = (await workspaceDependencies.projectDirectory.getDirectoryAdministration(
-      workspaceId,
-    )).teams.find((candidate) => candidate.id === teamId)
-    if (team) {
-      await projectTeamSearchDocument(workspaceId, teamId, team.nameJa, team.nameEn, 'team restore')
-    }
-  } catch (error) {
-    console.error('Workspace search projection failed after team restore.', error)
-  }
 }
 
 /**

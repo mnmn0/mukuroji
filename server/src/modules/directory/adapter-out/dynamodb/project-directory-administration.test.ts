@@ -199,29 +199,51 @@ test('lists archived Teams and Projects with both names for administration', asy
 })
 
 test('renames a Team in place without changing its key or ID', async () => {
-  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10),
+    createTeamRow('beta', 20, { nameRevision: 3 }),
+  ])
 
   await expect(client.renameTeam(directoryId, 'alpha', {
     nameJa: ' 新しい名前 ',
     nameEn: 'New name',
-  })).resolves.toEqual({ teamId: 'alpha', nameJa: '新しい名前', nameEn: 'New name' })
-  expect(transactions()).toEqual([[{
-    Update: expect.objectContaining({
-      Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
-      UpdateExpression: 'SET nameJa = :nameJa, nameEn = :nameEn',
-      ConditionExpression:
-        '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt) ' +
-        'AND #nameJa = :readNameJa AND #nameEn = :readNameEn',
-      ExpressionAttributeValues: {
-        ':entryType': 'team',
-        ':teamId': 'alpha',
-        ':readNameJa': 'alpha 日本語',
-        ':readNameEn': 'alpha English',
-        ':nameJa': '新しい名前',
-        ':nameEn': 'New name',
-      },
-    }),
-  }]])
+  })).resolves.toEqual({
+    response: { teamId: 'alpha', nameJa: '新しい名前', nameEn: 'New name' },
+    nameRevision: 1,
+  })
+  await expect(client.renameTeam(directoryId, 'beta', { nameJa: '次' }))
+    .resolves.toMatchObject({ nameRevision: 4 })
+  expect(transactions()).toEqual([
+    [{
+      Update: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+        UpdateExpression:
+          'SET nameJa = :nameJa, nameEn = :nameEn, #nameRevision = :nameRevision',
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt) ' +
+          'AND #nameJa = :readNameJa AND #nameEn = :readNameEn ' +
+          'AND attribute_not_exists(#nameRevision)',
+        ExpressionAttributeValues: {
+          ':entryType': 'team',
+          ':teamId': 'alpha',
+          ':readNameJa': 'alpha 日本語',
+          ':readNameEn': 'alpha English',
+          ':nameJa': '新しい名前',
+          ':nameEn': 'New name',
+          ':nameRevision': 1,
+        },
+      }),
+    }],
+    [{
+      Update: expect.objectContaining({
+        ConditionExpression: expect.stringContaining('#nameRevision = :readNameRevision'),
+        ExpressionAttributeValues: expect.objectContaining({
+          ':readNameRevision': 3,
+          ':nameRevision': 4,
+        }),
+      }),
+    }],
+  ])
 })
 
 test('rejects renaming an archived Team, an empty name, and a name over 500 characters', async () => {
@@ -258,16 +280,24 @@ test('renames a Project and keeps its color unless a new one is given', async ()
     nameEn: 'live English',
     tone: 'purple',
   })).resolves.toMatchObject({ tone: 'purple' })
-  // A rename that omits the color only commits while the color it read is still stored.
-  expect(transactions()[0]).toEqual([{
-    Update: expect.objectContaining({
-      ConditionExpression: expect.stringContaining('#tone = :readTone'),
-      ExpressionAttributeValues: expect.objectContaining({
-        ':readTone': 'green',
-        ':tone': 'green',
+  // A rename that omits the color only commits while the color it read is still stored, and
+  // only while the Team is still active.
+  expect(transactions()[0]).toEqual([
+    {
+      Update: expect.objectContaining({
+        ConditionExpression: expect.stringContaining('#tone = :readTone'),
+        ExpressionAttributeValues: expect.objectContaining({
+          ':readTone': 'green',
+          ':tone': 'green',
+        }),
       }),
-    }),
-  }])
+    },
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+      }),
+    },
+  ])
   await expect(client.renameProject(directoryId, 'alpha', 'live', {
     nameJa: 'x',
     tone: 'red',
@@ -281,7 +311,12 @@ test('restores an archived Team and reports a Team that is not archived', async 
     createTeamRow('beta', 20),
   ])
 
-  await expect(client.restoreTeam(directoryId, 'alpha')).resolves.toEqual({ teamId: 'alpha' })
+  await expect(client.restoreTeam(directoryId, 'alpha')).resolves.toEqual({
+    response: { teamId: 'alpha' },
+    nameJa: 'alpha 日本語',
+    nameEn: 'alpha English',
+    nameRevision: 0,
+  })
   await expect(client.restoreTeam(directoryId, 'beta'))
     .rejects.toMatchObject({ status: 409, code: 'TeamNotArchived' })
   await expect(client.restoreTeam(directoryId, 'missing'))

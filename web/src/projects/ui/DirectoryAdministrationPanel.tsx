@@ -1,31 +1,19 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { useSWRConfig } from 'swr'
 import {
   DIRECTORY_PROJECT_TONES,
   isDirectoryProjectTone,
   type DirectoryAdministrationTeam,
   type DirectoryProjectTone,
 } from '@mukuroji/contracts'
-import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
-import {
-  renameDirectoryProject,
-  renameDirectoryTeam,
-  reorderDirectoryProjects,
-  reorderDirectoryTeams,
-  restoreDirectoryProject,
-  restoreDirectoryTeam,
-} from '../api/directoryAdministration'
-import { ProjectDirectoryApiError } from '../api/errors'
 import {
   listActiveDirectoryTeams,
   listArchivedDirectoryEntries,
   moveDirectoryId,
   type DirectoryMoveDirection,
 } from '../model/directoryAdministration'
-import { useDirectoryAdministration } from '../queries/useDirectoryAdministration'
-import { isProjectDirectoryKey } from '../queries/useProjectDirectory'
+import { useDirectoryAdministrationActions } from '../mutations/useDirectoryAdministrationActions'
 
 /** Props of the directory administration container. */
 type DirectoryAdministrationPanelContainerProps = {
@@ -46,32 +34,8 @@ export function DirectoryAdministrationPanelContainer({
   locale,
 }: DirectoryAdministrationPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const { mutate: mutateGlobal } = useSWRConfig()
-  const query = useDirectoryAdministration(accessToken)
-  const [pendingKey, setPendingKey] = useState<string>()
-  const [errorMessage, setErrorMessage] = useState<string>()
-
-  /** Runs one mutation, then refreshes this panel and the sidebar directory. */
-  const runAction = async (key: string, action: () => Promise<void>) => {
-    if (pendingKey) return false
-    setPendingKey(key)
-    setErrorMessage(undefined)
-    try {
-      await action()
-      await Promise.all([query.mutate(), mutateGlobal(isProjectDirectoryKey)])
-      return true
-    } catch (error) {
-      setErrorMessage(
-        error instanceof ProjectDirectoryApiError && error.status === 409
-          ? t('projects.administration.error.conflict')
-          : t('projects.administration.error.action'),
-      )
-      await query.mutate()
-      return false
-    } finally {
-      setPendingKey(undefined)
-    }
-  }
+  const actions = useDirectoryAdministrationActions(accessToken)
+  const { query } = actions
 
   if (query.isLoading) {
     return (
@@ -101,40 +65,16 @@ export function DirectoryAdministrationPanelContainer({
 
   return (
     <DirectoryAdministrationPanel
-      errorMessage={errorMessage}
-      pendingKey={pendingKey}
+      errorMessage={actions.errorMessageKey ? t(actions.errorMessageKey) : undefined}
+      pendingKey={actions.pendingKey}
       t={t}
       teams={query.data}
-      onMoveProject={(teamId, projectIds) => runAction(
-        `project-order:${teamId}`,
-        () => reorderDirectoryProjects(accessToken, teamId, projectIds, createMutationRequestContext()),
-      )}
-      onMoveTeam={(teamIds) => runAction(
-        'team-order',
-        () => reorderDirectoryTeams(accessToken, teamIds, createMutationRequestContext()),
-      )}
-      onRenameProject={(teamId, projectId, input) => runAction(
-        `project:${teamId}:${projectId}`,
-        () => renameDirectoryProject(
-          accessToken,
-          teamId,
-          projectId,
-          input,
-          createMutationRequestContext(),
-        ),
-      )}
-      onRenameTeam={(teamId, input) => runAction(
-        `team:${teamId}`,
-        () => renameDirectoryTeam(accessToken, teamId, input, createMutationRequestContext()),
-      )}
-      onRestoreProject={(teamId, projectId) => runAction(
-        `project:${teamId}:${projectId}`,
-        () => restoreDirectoryProject(accessToken, teamId, projectId, createMutationRequestContext()),
-      )}
-      onRestoreTeam={(teamId) => runAction(
-        `team:${teamId}`,
-        () => restoreDirectoryTeam(accessToken, teamId, createMutationRequestContext()),
-      )}
+      onMoveProject={actions.reorderProjects}
+      onMoveTeam={actions.reorderTeams}
+      onRenameProject={actions.renameProject}
+      onRenameTeam={actions.renameTeam}
+      onRestoreProject={actions.restoreProject}
+      onRestoreTeam={actions.restoreTeam}
     />
   )
 }

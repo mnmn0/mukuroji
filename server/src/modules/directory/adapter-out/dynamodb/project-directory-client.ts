@@ -195,6 +195,11 @@ type ProjectDirectoryTeamItem = {
    */
   displayOrder?: number
   /**
+   * Counts renames, so a delayed search projection of an older name cannot replace a newer one.
+   * Rows without it were never renamed.
+   */
+  nameRevision?: number
+  /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
   archivedAt?: string
@@ -448,6 +453,26 @@ export type CreateTeamResponse = {
    * 作成したチーム行です。
    */
   team: ProjectDirectoryTeamResponse
+}
+
+/** Result of a Team rename. */
+export type RenamedDirectoryTeam = {
+  /** Response body returned to the caller. */
+  response: RenameDirectoryTeamResponse
+  /** Stored rename count, used to fence the Team's search projection. */
+  nameRevision: number
+}
+
+/** Result of a Team restore. */
+export type RestoredDirectoryTeam = {
+  /** Response body returned to the caller. */
+  response: RestoreDirectoryTeamResponse
+  /** Stored Japanese display name. */
+  nameJa: string
+  /** Stored English display name. */
+  nameEn: string
+  /** Stored rename count, used to fence the Team's search projection. */
+  nameRevision: number
 }
 
 /**
@@ -812,14 +837,14 @@ export type ProjectDirectoryClient = {
    * @param teamId - Team to rename.
    * @param input - Untrusted request body with the new names.
    * @param auditContext - Audit context of the mutation.
-   * @returns The Team identifier and its stored names.
+   * @returns The response body and the Team's rename count.
    */
   renameTeam(
     directoryId: string,
     teamId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
-  ): Promise<RenameDirectoryTeamResponse>
+  ): Promise<RenamedDirectoryTeam>
   /**
    * Renames an active Project or changes its color without changing its ID.
    *
@@ -843,13 +868,13 @@ export type ProjectDirectoryClient = {
    * @param directoryId - Workspace directory identifier.
    * @param teamId - Archived Team to restore.
    * @param auditContext - Audit context of the mutation.
-   * @returns The restored Team identifier.
+   * @returns The response body and the Team's names and rename count.
    */
   restoreTeam(
     directoryId: string,
     teamId: string,
     auditContext?: MutationAuditContext,
-  ): Promise<RestoreDirectoryTeamResponse>
+  ): Promise<RestoredDirectoryTeam>
   /**
    * Restores an archived Project of an active Team.
    *
@@ -2501,7 +2526,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
-  ): Promise<RenameDirectoryTeamResponse> {
+  ): Promise<RenamedDirectoryTeam> {
     await this.ensureLocalAuditTable()
     const names = readDirectoryDisplayNames(input)
     const items = await this.readValidDirectoryItems(directoryId, true)
@@ -2513,24 +2538,45 @@ export class DynamoDbProjectDirectoryClient {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
     }
 
-    const response = { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
+    const readNameRevision = team.nameRevision ?? 0
     if (team.nameJa === names.nameJa && team.nameEn === names.nameEn) {
-      return response
+      return {
+        response: { teamId, nameJa: names.nameJa, nameEn: names.nameEn },
+        nameRevision: readNameRevision,
+      }
     }
 
-    // The names read above must still be stored, so a stale rename cannot overwrite a newer one.
-    const condition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
+    // The names and rename count read above must still be stored, so a stale rename cannot
+    // overwrite a newer one.
+    const nameRevision = readNameRevision + 1
+    const readCondition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
+    const condition: DirectoryRowCondition = {
+      ConditionExpression: `${readCondition.ConditionExpression} AND ${
+        team.nameRevision === undefined
+          ? 'attribute_not_exists(#nameRevision)'
+          : '#nameRevision = :readNameRevision'
+      }`,
+      ExpressionAttributeNames: {
+        ...readCondition.ExpressionAttributeNames,
+        '#nameRevision': 'nameRevision',
+      },
+      ExpressionAttributeValues: {
+        ...readCondition.ExpressionAttributeValues,
+        ...(team.nameRevision === undefined ? {} : { ':readNameRevision': team.nameRevision }),
+      },
+    }
     await this.sendDirectoryAdministrationTransaction([
       {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: team.entryKey },
-          UpdateExpression: 'SET nameJa = :nameJa, nameEn = :nameEn',
+          UpdateExpression: 'SET nameJa = :nameJa, nameEn = :nameEn, #nameRevision = :nameRevision',
           ...condition,
           ExpressionAttributeValues: {
             ...condition.ExpressionAttributeValues,
             ':nameJa': names.nameJa,
             ':nameEn': names.nameEn,
+            ':nameRevision': nameRevision,
           },
         },
       },
@@ -2545,7 +2591,7 @@ export class DynamoDbProjectDirectoryClient {
       }),
     ])
 
-    return response
+    return { response: { teamId, nameJa: names.nameJa, nameEn: names.nameEn }, nameRevision }
   }
 
   /**
@@ -2605,6 +2651,14 @@ export class DynamoDbProjectDirectoryClient {
           },
         },
       },
+      // The Team must still be active when the rename commits, not only when it was read.
+      {
+        ConditionCheck: this.createActiveTeamConditionCheck(
+          directoryId,
+          this.requireDirectoryTeam(items, teamId).entryKey,
+          teamId,
+        ),
+      },
       ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'project.renamed',
@@ -2636,7 +2690,7 @@ export class DynamoDbProjectDirectoryClient {
     directoryId: string,
     teamId: string,
     auditContext?: MutationAuditContext,
-  ): Promise<RestoreDirectoryTeamResponse> {
+  ): Promise<RestoredDirectoryTeam> {
     await this.ensureLocalAuditTable()
     const items = await this.readValidDirectoryItems(directoryId, true)
     const team = items.find((item): item is ProjectDirectoryTeamItem =>
@@ -2692,7 +2746,12 @@ export class DynamoDbProjectDirectoryClient {
       ...planningItems,
     ])
 
-    return { teamId }
+    return {
+      response: { teamId },
+      nameJa: team.nameJa,
+      nameEn: team.nameEn,
+      nameRevision: team.nameRevision ?? 0,
+    }
   }
 
   /**
@@ -4804,7 +4863,11 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
   }
 
   if (value.entryType === 'team') {
-    return value.expanded === undefined || typeof value.expanded === 'boolean'
+    return (
+      (value.expanded === undefined || typeof value.expanded === 'boolean') &&
+      (value.nameRevision === undefined ||
+        (Number.isSafeInteger(value.nameRevision) && Number(value.nameRevision) >= 0))
+    )
   }
 
   return (

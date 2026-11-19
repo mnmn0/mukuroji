@@ -24,8 +24,13 @@ key を変えると、key を前提にした transaction の条件、data integr
   有効であることを条件に 1 transaction で更新する。一覧が現在の有効な row と一致しないときは
   409 を返す。
 - 名称変更は `nameJa` / `nameEn`（Project は `tone` も）だけを更新し、ID・sort key・URL は変えない。
-- 復元は `archivedAt` を消すだけにする。アーカイブ中も Project member、Work Item、Planning の
+  読んだ名前（と色）がまだ保存されていることを条件にし、遅れた名称変更が新しい変更を上書きしないようにする。
+  Team row には名称変更の回数 `nameRevision`（任意の整数）を持たせ、Team の検索 document の
+  `sourceRevision` に使う。遅れて届いた古い名前の投影が、新しい名前の document を置き換えない。
+- 復元は `archivedAt` を消す。アーカイブ中も Project member、Work Item、Planning の
   参照は残っているので、復元すると元に戻る。Project の復元は Team が有効なことを条件にする。
+  アーカイブで一緒にアーカイブされた Planning の更新対象も、同じ transaction で使える状態に戻し
+  （Planning の revision を上げる）、cadence は消す。
 - 変更はすべて `project.renamed` / `project.restored` / `project.reordered` として audit に記録する。
 
 ## 検討した選択肢
@@ -43,6 +48,6 @@ key を変えると、key を前提にした transaction の条件、data integr
 - 新しい Team / Project は作成時の位置（既存の最大値 + 10）を使い、並び替えはその範囲内の位置を
   割り当て直すだけなので、あとから作った row は末尾に並ぶ。
 - 位置を割り当て直す前提として、1 回の並び替えで扱える row は transaction の上限から 90 件までとする。
-- アーカイブ時に止めた Planning の更新スケジュールと Webhook の Team / Project grant は、復元しても
-  自動では戻らない。必要になったら別に扱う。
+- アーカイブ時に止めた Planning の更新スケジュール（cadence）と Webhook の Team / Project grant は、
+  復元しても自動では戻らない。更新対象は使える状態に戻るので、cadence は設定し直せる。
 - 利用者ガイドは `docs/guide/admin.md` を更新した。

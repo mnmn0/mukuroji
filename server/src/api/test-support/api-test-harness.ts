@@ -2449,7 +2449,7 @@ function configureFakeProjectClients(
       async renameTeam(directoryId, teamId, input) {
         calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
 
-        return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
+        return { response: { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }, nameRevision: 1 }
       },
       async renameProject(directoryId, teamId, projectId, input) {
         calls.directoryAdministration.push({
@@ -2465,7 +2465,7 @@ function configureFakeProjectClients(
       async restoreTeam(directoryId, teamId) {
         calls.directoryAdministration.push({ method: 'restoreTeam', directoryId, teamId })
 
-        return { teamId }
+        return { response: { teamId }, nameJa: 'リネーム', nameEn: 'Renamed', nameRevision: 0 }
       },
       async restoreProject(directoryId, teamId, projectId) {
         calls.directoryAdministration.push({

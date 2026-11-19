@@ -70,7 +70,6 @@ test('renames, restores, and reorders Teams and Projects through the directory c
     'renameTeam',
     'renameProject',
     'restoreTeam',
-    'get',
     'restoreProject',
     'reorderTeams',
     'reorderProjects',
