@@ -86,6 +86,13 @@ if [ "$agent_run_triage_index_count" = 0 ]; then
     --attribute-definitions AttributeName=triageIndexPartition,AttributeType=S AttributeName=triageIndexSortKey,AttributeType=S \
     --global-secondary-index-updates '[{"Create":{"IndexName":"AgentRunTriageIndex","KeySchema":[{"AttributeName":"triageIndexPartition","KeyType":"HASH"},{"AttributeName":"triageIndexSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"INCLUDE","NonKeyAttributes":["workspaceId","teamId","runId"]}}}]' >/dev/null
 fi
+agent_run_finished_index_count="$(aws_local dynamodb describe-table --table-name mukuroji-agent-runs-local \
+  --query 'length(Table.GlobalSecondaryIndexes[?IndexName==`FinishedRunIndex`])' --output text)"
+if [ "$agent_run_finished_index_count" = 0 ]; then
+  aws_local dynamodb update-table --table-name mukuroji-agent-runs-local \
+    --attribute-definitions AttributeName=finishedRunPartition,AttributeType=S AttributeName=finishedRunSortKey,AttributeType=S \
+    --global-secondary-index-updates '[{"Create":{"IndexName":"FinishedRunIndex","KeySchema":[{"AttributeName":"finishedRunPartition","KeyType":"HASH"},{"AttributeName":"finishedRunSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"INCLUDE","NonKeyAttributes":["runId","workItemId","outcome","finishedAt"]}}}]' >/dev/null
+fi
 for bucket in mukuroji-files-local mukuroji-work-item-import-local; do
   if ! aws_local s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
     aws_local s3api create-bucket --bucket "$bucket" >/dev/null

@@ -1442,6 +1442,32 @@ export function analyticsFilterIncludesWorkItem(
   return keys.has(workItemKey(teamId, workItemId))
 }
 
+/**
+ * Selects the Work Items whose audit history can change an Analytics result for a period.
+ *
+ * Every canonical Work Item mutation writes its audit event in the same transaction and sets
+ * `updatedAt` to the event time. A Work Item last updated before the period start therefore has
+ * no completion, `started` transition, or Project scope change inside the period, and its state at
+ * every evaluation point from the period start through `asOf` equals its current canonical row.
+ * The engine gives the same metric values for it with or without its history, so callers only
+ * need to read the entity timelines of the returned Work Items.
+ *
+ * @param workItems - Canonical Work Items that passed the current ACL.
+ * @param periodFrom - Normalized ISO start of the query period.
+ * @returns The Work Items updated at or after the period start, or all of them when either
+ * instant cannot be parsed.
+ */
+export function selectAnalyticsWorkItemsRequiringHistory<
+  T extends Pick<CanonicalWorkItem, 'updatedAt'>,
+>(workItems: readonly T[], periodFrom: string): T[] {
+  const historyFrom = Date.parse(periodFrom)
+  if (!Number.isFinite(historyFrom)) return [...workItems]
+  return workItems.filter((workItem) => {
+    const updatedAt = Date.parse(workItem.updatedAt)
+    return !Number.isFinite(updatedAt) || updatedAt >= historyFrom
+  })
+}
+
 /** Work Item key sets of filter allowlists, so per-bucket filtering stays a set lookup. */
 const analyticsFilterWorkItemKeyCache = new WeakMap<readonly AnalyticsWorkItemReference[], Set<string>>()
 
