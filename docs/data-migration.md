@@ -15,6 +15,7 @@
 | `server/src/modules/data-migration/domain/` | migration 定義・checkpoint・counter・failure code の純粋な契約 |
 | `server/src/modules/data-migration/application/` | bounded・再開可能な runner と、読み取り専用の verifier |
 | `server/src/modules/data-migration/adapter-out/dynamodb/` | parallel scan segment で読む row store と、checkpoint table の store |
+| `server/src/app/composition/data-migration.ts` | DynamoDB adapter と実行者（STS）の解決を組み立てる composition root |
 | `server/scripts/migrations/registry.ts` | CLI から実行できる migration の一覧 |
 | `server/scripts/migrations/run-data-migration.ts` | operator 向け CLI（`bun run data:migrate`） |
 

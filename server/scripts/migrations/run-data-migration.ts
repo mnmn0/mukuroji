@@ -1,19 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts'
 import {
-  createDynamoDbClient,
-  createDynamoDbDocumentClient,
-  shouldBootstrapLocalDynamoDb,
-} from '../../src/infrastructure/aws/dynamodb-client'
-import { loadServerConfig } from '../../src/infrastructure/config/server-config'
+  createProductionDataMigrationStores,
+  resolveProductionDataMigrationOperator,
+} from '../../src/app/composition/data-migration'
 import {
   assertValidDataMigrationRegistry,
-  createDynamoDbDataMigrationCheckpointStore,
-  createDynamoDbDataMigrationRowStore,
   DATA_MIGRATION_MAX_PAGE_SIZE,
   DATA_MIGRATION_MAX_SEGMENTS,
   DataMigrationFailure,
-  ensureLocalDataMigrationCheckpointTable,
   runDataMigration,
   verifyDataMigration,
   type DataMigrationCheckpointStore,
@@ -165,34 +159,11 @@ const USAGE = [
   'Exit status: 0 completed or pass, 1 failed, 2 usage error, 3 paused or incomplete.',
 ].join('\n')
 
-/** Default dependencies bound to the server configuration. */
+/** Default dependencies bound to the server configuration through the composition root. */
 const defaultDependencies: DataMigrationCliDependencies = {
   registry: dataMigrationRegistry,
-  createStores: async ({ tableName, checkpointTableName, segments }) => {
-    const config = loadServerConfig()
-    const dynamoDbClient = createDynamoDbClient(config)
-    const documentClient = createDynamoDbDocumentClient(dynamoDbClient)
-    if (shouldBootstrapLocalDynamoDb(config)) {
-      await ensureLocalDataMigrationCheckpointTable(dynamoDbClient, checkpointTableName)
-    }
-    return {
-      rowStore: createDynamoDbDataMigrationRowStore({ documentClient, tableName, totalSegments: segments }),
-      checkpointStore: createDynamoDbDataMigrationCheckpointStore({ documentClient, tableName: checkpointTableName }),
-    }
-  },
-  resolveOperator: async () => {
-    const config = loadServerConfig()
-    if (shouldBootstrapLocalDynamoDb(config)) return 'local-emulator'
-    let arn: string | undefined
-    try {
-      const identity = await new STSClient({ region: config.awsRegion }).send(new GetCallerIdentityCommand({}))
-      arn = identity.Arn
-    } catch (error: unknown) {
-      throw new DataMigrationFailure('RUN_LOG_FAILED', error)
-    }
-    if (arn === undefined || arn.length === 0) throw new DataMigrationFailure('RUN_LOG_FAILED')
-    return arn
-  },
+  createStores: createProductionDataMigrationStores,
+  resolveOperator: resolveProductionDataMigrationOperator,
   clock: {
     now: () => Date.now(),
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
