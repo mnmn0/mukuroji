@@ -22,6 +22,7 @@ import {
   createTriageScheduleAuditTransactionItems,
   readTriageNotificationMemberKey,
 } from '../../adapter-out/dynamodb/triage-audit-events'
+import { repairTriageWakeIndex } from '../../adapter-out/dynamodb/triage-wake-index-repair'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Default sparse wake-index name. */
@@ -70,6 +71,8 @@ export type TriageScheduleResult = {
   escalatedEntries: number
   /** Number of entries newly redacted by retention policy. */
   redactedEntries: number
+  /** Number of unchanged entries whose stale wake-index position was rewritten. */
+  repairedWakeIndexEntries: number
   /** Number of revision races safely skipped. */
   conflicts: number
 }
@@ -178,6 +181,7 @@ export async function runTriageSchedule(
     breachedEntries: 0,
     escalatedEntries: 0,
     redactedEntries: 0,
+    repairedWakeIndexEntries: 0,
     conflicts: 0,
   }
 
@@ -231,7 +235,17 @@ export async function runTriageSchedule(
         now,
         wakeShardCount,
       })
-      if (contribution.transactItems.length === 0) continue
+      if (contribution.transactItems.length === 0) {
+        const repair = await repairTriageWakeIndex(options.documentClient, {
+          tableName,
+          entry,
+          storedItem: read.Item,
+          wakeShardCount,
+        })
+        if (repair === 'repaired') result.repairedWakeIndexEntries += 1
+        if (repair === 'conflict') result.conflicts += 1
+        continue
+      }
       const escalationOwnerUserId = contribution.escalated
         ? await readEscalationOwnerUserId(options.documentClient, tableName, entry)
         : undefined

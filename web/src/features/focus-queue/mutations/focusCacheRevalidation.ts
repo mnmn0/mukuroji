@@ -24,6 +24,9 @@ const teamListCacheScopes: ReadonlySet<string> = new Set([
   'team-issues',
 ])
 
+/** SWR scope of a Team's Work Item hierarchy read. */
+const teamHierarchyCacheScope = 'team-work-item-hierarchy'
+
 const workItemDetailCacheScopes: ReadonlySet<string> = new Set([
   'project-issue-detail',
   'team-issue-detail',
@@ -74,6 +77,30 @@ export function isFocusAffectedCacheKey(
 }
 
 /**
+ * Returns whether one loaded SWR cache key is a Team hierarchy affected by a Focus mutation.
+ *
+ * Hierarchy roll-ups total the status, estimate, and dates of the Team's Work Items, so they
+ * change with them. These keys are handled apart from {@link isFocusAffectedCacheKey}: each one
+ * is read again explicitly, because a plain revalidation does nothing once the outline that read
+ * it closed, and its pre-mutation totals would come back the next time the outline opens.
+ *
+ * @param key - Unknown SWR cache key supplied by the global mutator.
+ * @param scope - Team, Project, and Planning projections affected by the mutation.
+ * @returns Whether the key is an affected hierarchy entry, typed as its scope, access token, and
+ *   Team ID.
+ */
+export function isFocusAffectedHierarchyCacheKey(
+  key: unknown,
+  scope: FocusCacheRevalidationScope,
+): key is readonly [typeof teamHierarchyCacheScope, string, string] {
+  return Array.isArray(key) &&
+    key[0] === teamHierarchyCacheScope &&
+    typeof key[1] === 'string' &&
+    typeof key[2] === 'string' &&
+    scope.workItems.some((item) => item.teamId === key[2])
+}
+
+/**
  * Immediately refreshes authoritative caches after an optimistic concurrency conflict.
  *
  * Cache refresh remains best effort so the original 409 error stays available to the
@@ -94,6 +121,9 @@ export async function revalidateFocusCachesOnConflict(
 /**
  * Returns whether a Focus action failed because its optimistic snapshot was stale.
  *
+ * A Team refusing to complete a parent with open children is also a 409, but a refresh does not
+ * change it, so it is not counted as stale.
+ *
  * @param error - Unknown transport or application failure.
  * @returns Whether the failure is a typed HTTP 409 from Focus or Work Items.
  */
@@ -101,5 +131,15 @@ export function isFocusMutationConflict(error: unknown): boolean {
   return (
     error instanceof FocusQueueApiError ||
     error instanceof TeamIssuesApiError
-  ) && error.status === 409
+  ) && error.status === 409 && !isFocusOpenChildrenRefusal(error)
+}
+
+/**
+ * Returns whether the Team refused to complete a parent because its children are still open.
+ *
+ * @param error - Unknown transport or application failure.
+ * @returns Whether the failure carries the `WorkItemOpenChildren` code.
+ */
+export function isFocusOpenChildrenRefusal(error: unknown): boolean {
+  return error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren'
 }

@@ -17,6 +17,8 @@ const {
   app,
   configureFakeProjectClients,
   createAccessToken,
+  createFakeWorkItemConfigurationClient,
+  createTeamIssuesFake,
   resetTestApp,
   setTestAppDependencies,
   withTestEnvironment,
@@ -143,6 +145,41 @@ test('uses Team teams.read access for a Work Item route', async () => {
   })
 })
 
+test('requires work-items.read for the Team Work Item hierarchy, like the Team list', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const teamsOnly = await configureEnterpriseTeamAccess(['teams.read'])
+    const deniedList = await app.request('/api/teams/core-team/issues', {
+      headers: { Authorization: teamsOnly },
+    })
+    const deniedHierarchy = await app.request('/api/teams/core-team/work-item-hierarchy', {
+      headers: { Authorization: teamsOnly },
+    })
+
+    expect(deniedList.status).toBe(403)
+    expect(deniedHierarchy.status).toBe(403)
+
+    const workItems = await configureEnterpriseTeamAccess(['teams.read', 'work-items.read'])
+    setTestAppDependencies({
+      teamIssues: createTeamIssuesFake({
+        async getTeamHierarchyEntries() {
+          return []
+        },
+      }),
+      workItemConfigurations: createFakeWorkItemConfigurationClient({
+        async getRelationGraphRevision() {
+          return 1
+        },
+      }),
+    })
+    const hierarchy = await app.request('/api/teams/core-team/work-item-hierarchy', {
+      headers: { Authorization: workItems },
+    })
+
+    expect(hierarchy.status).toBe(200)
+    expect(await hierarchy.json()).toMatchObject({ teamId: 'core-team', nodes: [] })
+  })
+})
+
 test('uses Team teams.write access for time-entry creation', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     const authorization = await configureEnterpriseTeamAccess([
@@ -172,6 +209,37 @@ test('uses Team teams.write access for time-entry creation', async () => {
         workItemId: 'onboarding-friction',
         userId: 'demo@example.com',
       },
+    })
+  })
+})
+
+test('treats Team teams.manage access as managing every Project for time entry costs', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess([
+      'teams.read',
+      'teams.write',
+      'teams.manage',
+    ])
+
+    const response = await app.request('/api/teams/core-team/time-entries', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workItemId: 'onboarding-friction',
+        startAt: '2026-08-10T09:00:00.000Z',
+        endAt: '2026-08-10T10:00:00.000Z',
+        billable: true,
+        currency: 'USD',
+        hourlyRateMinor: 4_000,
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({
+      entry: { projectId: 'refero', hourlyRateMinor: 4_000, actualCostMinor: 4_000 },
     })
   })
 })
