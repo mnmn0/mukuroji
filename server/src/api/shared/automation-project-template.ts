@@ -114,8 +114,9 @@ export function requireProjectTemplateStartDate(startDate: string | undefined): 
 /**
  * Checks that every template Work Item can be created in the Team before anything is written.
  *
- * The check uses the Team's current Work Item configuration, so a required custom field or an
- * unusable default type fails the application before the Project exists.
+ * The check uses the Team's current Work Item configuration, so a required custom field, an
+ * unusable default type, or a type that cannot be a child of its parent's type fails the
+ * application before the Project exists.
  *
  * @param principal - Workspace administrator applying the template.
  * @param teamId - Team that receives the Project.
@@ -132,13 +133,22 @@ export async function preflightProjectTemplateWorkItems(
     teamId,
   )
   await requireActiveWorkspaceAssignee(principal.directoryId, principal.userKey)
+  const typeIds: unknown[] = []
   for (const workItem of workItems) {
-    await prepareConfiguredCreateWorkItem(
+    const configured = await prepareConfiguredCreateWorkItem(
       principal.directoryId,
       teamId,
       normalizeTeamIssueInput(createTemplateWorkItemBody(principal, workItem), team),
       configuration,
     )
+    typeIds.push(configured.workItemTypeId)
+    if (workItem.parentIndex !== undefined) {
+      assertWorkItemChildTypeAllowed(
+        configuration.configuration,
+        typeIds[workItem.parentIndex],
+        configured.workItemTypeId,
+      )
+    }
   }
 }
 

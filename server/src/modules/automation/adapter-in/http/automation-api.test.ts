@@ -72,6 +72,7 @@ import type {
 import {
   AUTOMATION_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
+  DEFAULT_WORK_ITEM_TYPE,
 } from '@mukuroji/contracts'
 import {
   afterEach,
@@ -2780,7 +2781,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   ])
 })
 
-test('rejects a Project template WBS application without a start date before creating anything', async () => {
+test('rejects a Project template WBS without a start date or with a denied child type before creating anything', async () => {
   const now = '2026-07-16T00:00:00.000Z'
   const template: AutomationTemplate = {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -2859,6 +2860,55 @@ test('rejects a Project template WBS application without a start date before cre
 
   expect(response.status).toBe(400)
   expect(await response.json()).toMatchObject({ code: 'AutomationProjectTemplateStartDateRequired' })
+  expect(projectCreates).toBe(0)
+  expect(application.status).toBe('failed')
+
+  // A start date is present, but the Team's Work Item Type cannot be its own child.
+  template.payload = {
+    nameJa: '標準プロジェクト',
+    workItems: [{
+      title: '要件定義',
+      startOffsetWorkingDays: 0,
+      durationWorkingDays: 5,
+      children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+    }],
+  }
+  application = {
+    ...application,
+    id: 'application_project_wbs_child_type',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-07' },
+    status: 'pending',
+    revision: 1,
+    errorCode: undefined,
+    errorMessage: undefined,
+  }
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(_workspaceId, teamId) {
+        return {
+          configuration: {
+            ...createTestWorkItemConfiguration('team', teamId),
+            workItemTypes: [{ ...DEFAULT_WORK_ITEM_TYPE, allowedChildTypeIds: [] }],
+          },
+          inheritedFrom: 'default',
+        }
+      },
+    }),
+  })
+  const childTypeResponse = await app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-project-wbs-child-type',
+      },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-07' } }),
+    },
+  )
+  expect(childTypeResponse.status).toBe(409)
+  expect(await childTypeResponse.json()).toMatchObject({ code: 'WorkItemChildTypeDenied' })
   expect(projectCreates).toBe(0)
   expect(application.status).toBe('failed')
 })
