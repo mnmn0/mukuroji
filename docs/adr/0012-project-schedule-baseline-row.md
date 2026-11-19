@@ -1,4 +1,4 @@
-# 0011. Project の schedule baseline を Planning table の 1 行に保存する
+# 0012. Project の schedule baseline を Planning table の 1 行に保存する
 
 - 状態: 提案
 - 日付: 2026-11-20

@@ -288,7 +288,7 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 
 - Web の Team 画面と、Project のテーブル・ボードは一覧全体を cursor で読み切る。1 一覧 10,000 件を超えると読み込めない。Project の期限カレンダーとガントは表示期間と期限なしの Work Item だけを読む（期限なしが 10,000 件を超えると読み込めない）。
 - 期間で絞る読み取りも、DynamoDB では並び順 GSI を評価予算つきで読み、期間外の row を評価後に除く。範囲用の GSI は未追加。
-- Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
+- Planning publish の canonical 読み取りは集約読み取りと同じ最大 100 Team・全体 10,000 件、Task view の relation 解決は最大 100 Team（1 request の強整合 point read は 2,000 回まで）。Planning の snapshot と mutation は今も閲覧できる Work Item を全件読む（#459）。
 - Work Item 作成は Team partition 全件を読まない。ID は key から決め、`sortOrder` は並び順 GSI の最大値を 1 件だけ読んで 10 足す。GSI は結果整合なので、ほぼ同時の作成で同じ `sortOrder` になることがある（一覧は ID で順序を決める）。
 
 ## 階層（WBS）と roll-up

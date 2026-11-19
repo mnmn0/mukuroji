@@ -708,6 +708,27 @@ const enterpriseRoutePermissionRules = [
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
 
 /**
+ * Returns whether a request starts, advances, or downloads a tenant lifecycle operation.
+ *
+ * These routes are guarded by `workspace.manage`, which is not a privileged permission, yet they
+ * export the whole tenant, including its audit log, or irreversibly close it. They therefore get
+ * the same MFA and recent-authentication policy as audit export and member administration.
+ *
+ * @param context - Hono request context.
+ * @returns True when the request is a privileged tenant lifecycle request.
+ */
+function isPrivilegedTenantLifecycleRequest(context: Context): boolean {
+  const method = context.req.method
+  const path = context.req.path
+  if (method === 'GET') {
+    return /^\/api\/tenant\/operations\/[^/]+\/download$/u.test(path)
+  }
+  return path === '/api/tenant/exports' ||
+    path === '/api/tenant/closures' ||
+    /^\/api\/tenant\/operations\/[^/]+\/(?:pause|resume|verify)$/u.test(path)
+}
+
+/**
  * Authenticates an access token and resolves the Workspace principal with its enterprise authorization.
  *
  * @param accessToken - Bearer access token from the request.
@@ -971,7 +992,7 @@ export async function authenticateWorkspacePrincipal(
       now: nowSeconds,
       authenticationMethods,
       clientIp: resolveEnterpriseClientIp(context),
-      privileged: [
+      privileged: isPrivilegedTenantLifecycleRequest(context) || [
         requestAccess.grantedRoutePermission,
         ...(requiredPermissions ?? []),
       ].some((permission) =>

@@ -151,6 +151,7 @@ import {
   requireTeamConfigurationAdministration,
   requireTeamPermission,
   requireWorkspaceAdministration,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
@@ -188,13 +189,28 @@ async function readAutomationJson(c: Context) {
   return value
 }
 
+/**
+ * Authenticates an Automation request and enforces the minimum Workspace access for it.
+ *
+ * Automation rules, templates, recurring Work, and execution history describe the whole
+ * Workspace, so even read access excludes guests. Callers that mutate data add their own
+ * stricter check.
+ *
+ * @param c - Hono request context carrying the bearer token.
+ * @param manage - Whether the route requires Workspace administration.
+ * @returns The authenticated Workspace principal.
+ */
 async function authenticateAutomationPrincipal(c: Context, manage = false) {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) {
     throw new AutomationError('unauthenticated', 'AutomationAuthenticationRequired', 'Bearer token is required.')
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-  if (manage) requireWorkspaceAdministration(principal)
+  if (manage) {
+    requireWorkspaceAdministration(principal)
+  } else {
+    requireWorkspaceBusinessRead(principal)
+  }
   return principal
 }
 
