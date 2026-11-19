@@ -504,8 +504,9 @@ export function MyTasksPage() {
   }), [executeMyTaskMoveAction, executeMyTaskOpenAction])
   const myTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
     move: (context) => {
-      // The Gantt chart is read-only and has no status control to move a Work Item with.
-      if (myTasksViewMode === 'gantt') return denyTaskAction(myTaskActionDisabledReasons.unavailable)
+      // The Gantt chart and the calendar are read-only and have no status control to move a
+      // Work Item with.
+      if (myTasksViewMode !== 'board') return denyTaskAction(myTaskActionDisabledReasons.unavailable)
       const targets = resolveTaskSurfaceActionTargets(context)
       if (targets.length === 0) return allowTaskAction()
       if (targets.length !== 1) {
