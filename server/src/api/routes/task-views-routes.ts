@@ -34,7 +34,7 @@ import {
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import {
   WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY,
-  WORK_ITEMS_TEAM_READ_LIMIT,
+  WORK_ITEMS_AGGREGATE_TEAM_LIMIT,
 } from '../shared/constants'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
@@ -51,8 +51,13 @@ import {
 } from '../shared/search-access'
 import { isRecord } from '../shared/value-guards'
 
-/** One task-view request may strongly inspect at most one full 20-Team relation filter. */
-const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
+/**
+ * Maximum strongly consistent relation-target reads in one task-view request.
+ *
+ * The budget stays fixed while the Team scope follows the aggregate read limit, so a wider
+ * Team scope resolves fewer relation targets instead of issuing more point reads.
+ */
+const TASK_VIEW_RELATION_TARGET_READ_LIMIT = 2_000
 
 /**
  * Enriches current task-view authorization with active configuration references.
@@ -219,11 +224,11 @@ async function resolveReadableTaskViewRelationIds(
     if (prefix && taskViewWorkItemRelationPrefixes.has(prefix)) {
       if (!targetId) continue
       scopedTeamIds ??= resolveTaskViewRelationScopeTeamIds(input.scope, context)
-      if (scopedTeamIds.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+      if (scopedTeamIds.length > WORK_ITEMS_AGGREGATE_TEAM_LIMIT) {
         throw new WorkspaceSearchError(
           413,
           'TaskViewRelationResolutionLimitExceeded',
-          `Task view relation resolution spans more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams.`,
+          `Task view relation resolution spans more than ${WORK_ITEMS_AGGREGATE_TEAM_LIMIT} Teams.`,
         )
       }
       const candidateTeamIds = scopedTeamIds

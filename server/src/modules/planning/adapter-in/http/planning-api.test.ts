@@ -1149,6 +1149,55 @@ test('bounds Project publish canonical reads to the selected Team and Project', 
   expect(new Set(calls.issueReads.map((read) => read.teamId))).toEqual(new Set(['core-team']))
 })
 
+test('publishes a Workspace-scoped Initiative update across 50 Teams', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'owner',
+    additionalTeams: Array.from({ length: 49 }, (_, index) => ({
+      id: `wide-team-${index}`,
+      name: `Wide Team ${index}`,
+      projects: [{
+        id: `wide-project-${index}`,
+        name: `Wide Project ${index}`,
+        tone: 'purple' as const,
+      }],
+    })),
+  })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, 'wide-initiative')
+  setTestAppDependencies({ planning })
+  const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'wide-initiative' }
+  const configured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  })
+  expect(configured.status).toBe(200)
+
+  const published = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'wide-initiative-update',
+    health: 'on-track',
+    risk: 'none',
+    summary: 'Every Team is on track.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 4,
+  })
+
+  expect(published.status).toBe(201)
+  expect(new Set(calls.issueReads.map((read) => read.teamId)).size).toBe(50)
+})
+
 test('keeps filtered Planning history within the requested limit while advancing the cursor', async () => {
   const oldScope = {
     teamId: 'other-team',
