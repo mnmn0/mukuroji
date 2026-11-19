@@ -786,7 +786,7 @@ describe('automation management create idempotency', () => {
         schedule: {
           calendarPolicy: {
             holidays: [],
-            timeZone: 'UTC',
+            timeZone: 'Asia/Tokyo',
             workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
           },
           mode: 'unscheduled',

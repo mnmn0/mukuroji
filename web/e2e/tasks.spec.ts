@@ -8,6 +8,7 @@ import {
   FOCUS_SCHEMA_VERSION,
   matchesScopedWorkItemScheduleFilter,
   PLANNING_SCHEMA_VERSION,
+  toWorkspaceLocalDate,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type AnalyticsExportInput,
@@ -14214,7 +14215,7 @@ test('未認証の場合はログイン画面へ戻す', async ({ page }) => {
  * @returns Summary totals and one bucket per Team and Project.
  */
 function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
-  const today = new Date().toISOString().slice(0, 10)
+  const now = new Date()
   const buckets = new Map<string, {
     teamId: string
     projectId?: string
@@ -14245,7 +14246,8 @@ function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
     buckets.set(key, bucket)
     const open = workItem.statusCategory !== 'completed' && workItem.statusCategory !== 'canceled'
     const highPriority = open && workItem.priority === 'high'
-    const overdue = open && workItem.dueDate < today
+    // Like the server, "today" is the local date of each item's calendar time zone.
+    const overdue = open && workItem.dueDate < toWorkspaceLocalDate(now, workItem.schedule.calendarPolicy.timeZone)
     bucket.total += 1
     if (workItem.statusCategory === 'completed') bucket.completed += 1
     if (workItem.workflowStatusId === 'review') bucket.inReview += 1
