@@ -38,6 +38,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
+  createWorkspaceMemberAuditEntityId,
+  WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV,
   type MutationAuditContext,
 } from '../audit'
 import type {
@@ -487,6 +489,18 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
   ): Promise<void>
   /** Domain claim の global uniqueness pointer を読みます。 */
   protected abstract findDomainWorkspace(domain: string): Promise<string | undefined>
+
+  /**
+   * Creates the Workspace Audit pseudonym that names a member in audit metadata.
+   *
+   * @param workspaceId - Workspace that owns the member.
+   * @param memberId - Private member key.
+   * @returns The pseudonym, or undefined when this client records no audit events.
+   */
+  protected abstract createMemberAuditPseudonym(
+    workspaceId: string,
+    memberId: string,
+  ): string | undefined
   /** Inject された wall clock の現在時刻を返します。 */
   protected currentTime() {
     return this.clock()
@@ -953,7 +967,10 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
       eventType: 'role-assignment.created',
       action: 'created',
       entityId: assignment.assignmentId,
-      metadata: toRoleAssignmentAuditMetadata(assignment),
+      metadata: toRoleAssignmentAuditMetadata(
+        assignment,
+        this.createMemberAuditPseudonym(assignment.workspaceId, assignment.principalId),
+      ),
     }, (state) => {
       if (!roleExists(state, assignment.roleId)) {
         throw new EnterpriseIdentityError(
@@ -1011,7 +1028,10 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
       eventType: 'role-assignment.deleted',
       action: 'deleted',
       entityId: assignment.assignmentId,
-      metadata: toRoleAssignmentAuditMetadata(assignment),
+      metadata: toRoleAssignmentAuditMetadata(
+        assignment,
+        this.createMemberAuditPseudonym(assignment.workspaceId, assignment.principalId),
+      ),
     }, (state) => {
       const stored = state.roleAssignments.find((candidate) =>
         candidate.assignmentId === assignment.assignmentId &&
@@ -3039,6 +3059,15 @@ export class InMemoryEnterpriseIdentityClient extends EnterpriseIdentityService 
   protected async findDomainWorkspace(domain: string) {
     return this.domainOwners.get(domain)
   }
+
+  /**
+   * Returns no pseudonym because the memory client records no audit events.
+   *
+   * @returns Always undefined.
+   */
+  protected createMemberAuditPseudonym() {
+    return undefined
+  }
 }
 
 /**
@@ -3049,6 +3078,8 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
   private readonly tableName: string
   /** Immutable audit event table 名です。 */
   private readonly auditTableName?: string
+  /** Workspace Audit pseudonym key, read from the environment when the client is built. */
+  private readonly auditPseudonymKey?: string
   /** DynamoDB document client です。 */
   private readonly documentClient: DynamoDBDocumentClient
   /** Immutable generation staging と atomic checkpoint adapter です。 */
@@ -3082,6 +3113,38 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     this.documentClient = documentClient
     this.generationCommitter = composedAdapters.generationCommitter
     this.auditTableName = auditTableName?.trim() || undefined
+    this.auditPseudonymKey =
+      loadServerConfig().environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV] || undefined
+  }
+
+  /**
+   * Creates the Workspace Audit member pseudonym, failing closed while audit is on.
+   *
+   * @param workspaceId - Workspace that owns the member.
+   * @param memberId - Private member key.
+   * @returns The pseudonym, or undefined when no audit table is configured.
+   * @throws EnterpriseIdentityError when audit is on and the pseudonym key is missing or invalid.
+   */
+  protected createMemberAuditPseudonym(workspaceId: string, memberId: string) {
+    if (!this.auditTableName) return undefined
+    if (!this.auditPseudonymKey) {
+      throw new EnterpriseIdentityError(
+        500,
+        'EnterpriseAuditPseudonymKeyMissing',
+        'Workspace audit pseudonym key is required.',
+      )
+    }
+    try {
+      return createWorkspaceMemberAuditEntityId(workspaceId, memberId, this.auditPseudonymKey)
+    } catch (error) {
+      throw new EnterpriseIdentityError(
+        500,
+        'EnterpriseAuditPseudonymKeyInvalid',
+        'Workspace audit pseudonym key is invalid.',
+        false,
+        { cause: error },
+      )
+    }
   }
 
   /** CONTROL と bounded generation chain を強整合読みします。 */
@@ -6162,12 +6225,19 @@ function isSameRoleAssignment(
 /**
  * Builds the public audit metadata that names who received which role where.
  *
+ * @remarks
+ * The member appears only as its Workspace Audit pseudonym, the same ID that member lifecycle
+ * events use, so the audit log never stores the member key or email address.
  * @param assignment - Direct member assignment.
- * @returns Audit metadata with the member, role, and scope.
+ * @param memberId - Workspace Audit pseudonym of the member, absent when audit is disabled.
+ * @returns Audit metadata with the member pseudonym, role, and scope.
  */
-function toRoleAssignmentAuditMetadata(assignment: EnterpriseRoleAssignment) {
+function toRoleAssignmentAuditMetadata(
+  assignment: EnterpriseRoleAssignment,
+  memberId: string | undefined,
+) {
   return {
-    memberKey: assignment.principalId,
+    ...(memberId ? { memberId } : {}),
     roleId: assignment.roleId,
     scopeKind: assignment.scope.kind,
     ...(assignment.scope.kind === 'team' && assignment.scope.targetId

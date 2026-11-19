@@ -306,6 +306,8 @@ export const securityMessages = {
     'Give a role to one member. A member with at least one assignment gets only the assigned roles, instead of their Workspace role and Project memberships. Owners and yourself cannot receive assignments, and only an owner can change an admin\'s assignments or roles with administrative permissions.',
   'security.access.member': 'Member',
   'security.access.selectMember': 'Select a member',
+  'security.access.owningTeam': 'Owning Team',
+  'security.access.selectOwningTeam': 'Select the owning Team',
   'security.access.addMemberAssignment': 'Add assignment',
   'security.access.column.member': 'Member',
   'security.access.memberAssignmentsEmpty': 'No member role assignments yet.',

@@ -434,8 +434,10 @@ audit event を作ります。現行 event type は次の値です。
 - `identity-provider.updated`, `identity-domain.updated`,
   `identity-domain.enforcement-updated`, `security-policy.updated`
 - `custom-role.updated|deleted`, `directory-group-mapping.updated|deleted`
-- `role-assignment.created|deleted`（public metadata に `memberKey`、`roleId`、`scopeKind`、
-  Team / Project scope では `teamId`、`projectId`）
+- `role-assignment.created|deleted`（public metadata に `memberId`、`roleId`、`scopeKind`、
+  Team / Project scope では `teamId`、`projectId`。`memberId` は member lifecycle event と同じ
+  Workspace Audit の仮名で、member key や email は残さない。audit table があるのに
+  `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` がない場合、割り当ての変更は 500 で失敗する）
 - `scim-credential.issued|rotated|revoked`,
   `scim-user.reconciled|deactivated|applied`, `scim-group.reconciled|deactivated|applied`
 - `provisioning.previewed|reconciled|succeeded|failed|retried`

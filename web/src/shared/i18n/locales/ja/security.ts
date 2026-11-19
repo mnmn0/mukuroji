@@ -303,6 +303,8 @@ export const securityMessages = {
     'メンバー個人にロールを付けます。割り当てを1件でも持つメンバーは、Workspaceロールと Project メンバーとしての権限ではなく、割り当てたロールだけで権限が決まります。owner と自分自身には割り当てられず、admin への割り当てと管理系の権限を含むロールは owner だけが変更できます。',
   'security.access.member': 'メンバー',
   'security.access.selectMember': 'メンバーを選択',
+  'security.access.owningTeam': '所有する Team',
+  'security.access.selectOwningTeam': 'Team を選択',
   'security.access.addMemberAssignment': '割り当てを追加',
   'security.access.column.member': 'メンバー',
   'security.access.memberAssignmentsEmpty': '個人へのロール割り当てはまだありません。',

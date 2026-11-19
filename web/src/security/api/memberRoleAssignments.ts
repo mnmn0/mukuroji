@@ -50,6 +50,8 @@ export type CreateEnterpriseMemberRoleAssignmentInput = {
   scopeType: EnterpriseMemberRoleAssignmentScope
   /** Team or Project ID; the Workspace scope ignores it. */
   scopeId: string
+  /** Team that owns the Project, required when the Project belongs to several Teams. */
+  scopeParentId?: string
 }
 
 const enterpriseSecurityApiBaseUrl = resolveApiBaseUrl('enterpriseIdentity')

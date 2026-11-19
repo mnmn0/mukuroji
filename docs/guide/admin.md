@@ -193,7 +193,9 @@ IP allowlist は CIDR を1行に1つ書きます。空にすると制限なし�
 
 「マッピング・ロール」タブの「メンバーへのロール割り当て」で、メンバー・適用範囲（Workspace / Team /
 Project）・ロールを選んで **割り当てを追加** します。SCIM や IdP の group がなくても使えます。
+複数の Team に属する Project を選んだときは、どの Team の Project として割り当てるかも選びます。
 割り当てと解除は監査ログに `role-assignment.created` / `role-assignment.deleted` として残ります。
+監査ログではメンバーをメールアドレスではなく、メンバーごとの仮名の ID で示します。
 
 - **全Project閲覧**: 全 Team・全 Project を、Project のメンバーでなくても閲覧できます。編集はできません。
   PMO や経営層向けです。

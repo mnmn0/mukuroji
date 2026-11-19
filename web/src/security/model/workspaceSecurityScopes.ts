@@ -10,6 +10,8 @@ export type WorkspaceSecurityScopeOption = {
   name: string
   /** Resource level represented by the option. */
   type: 'workspace' | 'team' | 'project'
+  /** Teams that own a Project option; a shared Project lists every owning Team. */
+  parentIds?: string[]
 }
 
 /**
@@ -25,16 +27,20 @@ export function createWorkspaceSecurityScopeOptions(
 ): WorkspaceSecurityScopeOption[] {
   const projects = new Map<
     string,
-    { id: string; name: string; teamName: string }
+    { id: string; name: string; teamName: string; teamIds: string[] }
   >()
 
   for (const team of teams) {
     for (const project of team.projects) {
-      if (!projects.has(project.id)) {
+      const existing = projects.get(project.id)
+      if (existing) {
+        existing.teamIds.push(team.id)
+      } else {
         projects.set(project.id, {
           id: project.id,
           name: project.name,
           teamName: team.name,
+          teamIds: [team.id],
         })
       }
     }
@@ -55,6 +61,7 @@ export function createWorkspaceSecurityScopeOptions(
       id: project.id,
       name: `${project.name} · ${project.teamName}`,
       type: 'project',
+      parentIds: project.teamIds,
     })),
   ]
 }

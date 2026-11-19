@@ -50,6 +50,7 @@ export function SecurityMemberRoleAssignments({
   const [memberKey, setMemberKey] = useState('')
   const [scopeValue, setScopeValue] = useState('')
   const [roleId, setRoleId] = useState('')
+  const [parentTeamId, setParentTeamId] = useState('')
   const selectedMember = assignableMembers.find(
     (member) => member.memberKey === memberKey,
   )
@@ -69,6 +70,20 @@ export function SecurityMemberRoleAssignments({
   const selectedRoleId = availableRoles.some((role) => role.id === roleId)
     ? roleId
     : ''
+  // A Project shared by several Teams needs the owning Team that the assignment applies under.
+  const owningTeams =
+    selectedScope?.type === 'project' && (selectedScope.parentIds?.length ?? 0) > 1
+      ? (selectedScope.parentIds ?? []).map((teamId) => ({
+          id: teamId,
+          name:
+            scopeOptions.find(
+              (scope) => scope.type === 'team' && scope.id === teamId,
+            )?.name ?? teamId,
+        }))
+      : []
+  const selectedParentTeamId = owningTeams.some((team) => team.id === parentTeamId)
+    ? parentTeamId
+    : ''
 
   /** Sends the selected member, scope, and role to the create API. */
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -78,6 +93,7 @@ export function SecurityMemberRoleAssignments({
       !selectedMember ||
       !selectedScope ||
       !selectedRoleId ||
+      (owningTeams.length > 0 && !selectedParentTeamId) ||
       isBusy
     ) {
       return
@@ -89,6 +105,7 @@ export function SecurityMemberRoleAssignments({
         roleId: selectedRoleId,
         scopeId: selectedScope.id,
         scopeType: selectedScope.type,
+        ...(selectedParentTeamId ? { scopeParentId: selectedParentTeamId } : {}),
       })
       setRoleId('')
     } catch {
@@ -137,7 +154,7 @@ export function SecurityMemberRoleAssignments({
       />
       {canManage ? (
         <form
-          className="grid grid-cols-[minmax(200px,1fr)_minmax(200px,1fr)_minmax(180px,0.8fr)_auto] items-end gap-3 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-4 max-[1240px]:grid-cols-2 max-[640px]:grid-cols-1"
+          className={`grid ${owningTeams.length > 0 ? 'grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_minmax(160px,0.8fr)_minmax(160px,0.8fr)_auto]' : 'grid-cols-[minmax(200px,1fr)_minmax(200px,1fr)_minmax(180px,0.8fr)_auto]'} items-end gap-3 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-4 max-[1240px]:grid-cols-2 max-[640px]:grid-cols-1`}
           data-testid="security-member-assignment-form"
           onSubmit={(event) => void handleSubmit(event)}
         >
@@ -177,6 +194,7 @@ export function SecurityMemberRoleAssignments({
               onChange={(event) => {
                 setScopeValue(event.target.value)
                 setRoleId('')
+                setParentTeamId('')
               }}
             >
               {scopeOptions.map((scope) => (
@@ -189,6 +207,27 @@ export function SecurityMemberRoleAssignments({
               ))}
             </select>
           </label>
+          {owningTeams.length > 0 ? (
+            <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('security.access.owningTeam')}
+              <select
+                className="workbench-input min-h-10 px-3"
+                disabled={isBusy}
+                required
+                value={selectedParentTeamId}
+                onChange={(event) => setParentTeamId(event.target.value)}
+              >
+                <option disabled value="">
+                  {t('security.access.selectOwningTeam')}
+                </option>
+                {owningTeams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('security.access.role')}
             <select
@@ -210,7 +249,13 @@ export function SecurityMemberRoleAssignments({
           </label>
           <button
             className="workbench-button-primary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-55"
-            disabled={isBusy || !selectedMember || !selectedScope || !selectedRoleId}
+            disabled={
+              isBusy ||
+              !selectedMember ||
+              !selectedScope ||
+              !selectedRoleId ||
+              (owningTeams.length > 0 && !selectedParentTeamId)
+            }
             type="submit"
           >
             {t('security.access.addMemberAssignment')}

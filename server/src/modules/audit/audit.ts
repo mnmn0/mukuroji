@@ -1592,6 +1592,7 @@ const publicAuditMetadataFields = new Set([
   'filtersDigest',
   'fromPart',
   'kind',
+  'memberId',
   'memberKey',
   'partCount',
   'projectId',

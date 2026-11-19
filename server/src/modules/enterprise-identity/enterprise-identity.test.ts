@@ -8,7 +8,10 @@ import type {
   EnterpriseRoutePermissionRule,
   EnterpriseSecurityPolicy,
 } from '@mukuroji/contracts'
-import { createMutationAuditContext } from '../audit/audit'
+import {
+  createMutationAuditContext,
+  createWorkspaceMemberAuditEntityId,
+} from '../audit/audit'
 import {
   DynamoDbEnterpriseIdentityClient,
   DynamoDbEnterpriseIdentityMaintenanceClient,
@@ -3279,4 +3282,65 @@ test('keeps pending inactive SCIM desired state provisioned until it is applied'
       directoryManaged: true,
       deprovisioned: true,
     })
+})
+
+test('names the member of a role assignment audit event only by its Workspace Audit pseudonym', async () => {
+  const pseudonymKey = '0123456789abcdef'.repeat(4)
+  const previousKey = process.env.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY
+  const assignment = {
+    workspaceId,
+    assignmentId: 'role-assignment_pmo',
+    principalKind: 'member',
+    principalId: 'pmo@example.com',
+    roleId: 'workspace:portfolio-viewer',
+    scope: { workspaceId, kind: 'workspace' },
+    source: 'direct',
+  } satisfies EnterpriseRoleAssignment
+  const auditContext = createMutationAuditContext({
+    workspaceId,
+    actor: { id: 'administrator-1', kind: 'user' },
+    idempotencyKey: 'role-assignment-request',
+    request: {
+      method: 'POST',
+      path: '/api/enterprise/security/role-assignments',
+      body: {},
+    },
+    source: { kind: 'api' },
+    occurredAt: now.toISOString(),
+  })
+  try {
+    delete process.env.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY
+    const withoutKey = new DynamoDbEnterpriseIdentityClient(
+      'enterprise-identity',
+      tokenSecret,
+      createDynamoHarness().documentClient as never,
+      'audit-events',
+      () => now,
+    )
+    await expect(withoutKey.putMemberRoleAssignment(assignment, auditContext))
+      .rejects.toMatchObject({ status: 500, code: 'EnterpriseAuditPseudonymKeyMissing' })
+
+    process.env.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY = pseudonymKey
+    const harness = createDynamoHarness()
+    const client = new DynamoDbEnterpriseIdentityClient(
+      'enterprise-identity',
+      tokenSecret,
+      harness.documentClient as never,
+      'audit-events',
+      () => now,
+    )
+    await client.putMemberRoleAssignment(assignment, auditContext)
+
+    const written = JSON.stringify(harness.transactions)
+    expect(written).not.toContain('pmo@example.com')
+    expect(written).toContain(
+      createWorkspaceMemberAuditEntityId(workspaceId, 'pmo@example.com', pseudonymKey),
+    )
+  } finally {
+    if (previousKey === undefined) {
+      delete process.env.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY
+    } else {
+      process.env.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY = previousKey
+    }
+  }
 })
