@@ -46,6 +46,7 @@ CDK は table を `PAY_PER_REQUEST`、PITR enabled、`Retain` で作成する。
 | `jobRoles` | no | Contributor を計画するジョブロールの配列。最大 100 件。各要素は stable `id`、表示名 `name`、任意の `archived` を持つ。 |
 | `progressMode` | no | Work Item の進捗率の求め方。`status-category`（省略時）、`remaining-effort`、`manual`。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress)。 |
 | `parentCompletionPolicy` | no | 未完了の子がある親を完了にするときの扱い。`warn`（省略時）または `reject`。詳細は [親の完了ポリシー](#親の完了ポリシー)。 |
+| `completionGate` | no | Work Item を完了にする前に満たす条件（完了 Gate）。省略時は条件なし。詳細は [完了 Gate](#完了-gate)。 |
 | `updatedAt` | no | 永続化済み configuration の最終更新を表す UTC ISO 8601 timestamp。built-in default では省略する。 |
 
 未知の `schemaVersion`、不正 revision、scope key と payload の不一致を黙って読み飛ばさない。API は stable error を返し、管理 mutation と Work Item mutation を停止する。
@@ -71,7 +72,7 @@ CDK custom resource は Workspace / Team default row を強制 seed しない。
 
 ### Configuration optimistic concurrency
 
-Configuration mutation は `expectedRevision` を必須にする。新規 row の作成は `attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)`、更新は `revision = expectedRevision` を condition に含め、成功時だけ revision を増やす。監査 event の共通 transaction 化は audit 基盤を拡張する後続変更で扱い、この schema の CAS を迂回しない。
+Configuration mutation は `expectedRevision` を必須にする。新規 row の作成は `attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)`、更新は `revision = expectedRevision` を condition に含め、成功時だけ revision を増やす。Configuration の保存は `work-item-configuration.created` / `work-item-configuration.updated` の audit event を同じ transaction で記録し、この schema の CAS を迂回しない。
 
 管理 mutation は scope ごとの期限付き `CONFIG_WRITE_LOCK` を先に条件付き取得し、Work Items base table を Team partition ごとに強整合 read して既存 Work Item との参照整合性を検証する。Work Item value/status mutation は、lock が存在しないか期限切れであることと、validation に使った configuration revision を同じ transaction の `ConditionCheck` で固定する。Configuration row の CAS Put と有効な lock の Delete は同じ transaction で確定し、lock 期限後や別 writer に引き継がれた validation result は保存しない。Validation 後に管理者が definition を変更した場合は Work Item を保存せず、最新 configuration と Work Item を再取得する。Team が Workspace default を継承している場合は、Team row と Team lock が transaction 中も存在しないこと、Workspace row revision、Workspace lock の4条件を guard する。
 
@@ -207,6 +208,26 @@ Configuration の `parentCompletionPolicy` は、完了でもキャンセルで�
 
 子は relation graph の `child` row から読み、各子の詳細を 16 件ずつ読む。数えるのは直接の子だけで、孫は数えない。読んだ graph revision と各子の revision を親の更新 transaction の条件に入れるので、確認の後に子が付いたり子が再開されたりすると更新は `409` で失敗する（子の revision の条件は、同じ更新で送る他の configuration 条件（configuration guard、Type 変更の relation と承認の条件など）と合わせて 70 件に収まるときだけ入れる。収まらないときは graph revision だけを条件にし、子の再開は検出しない）。ポリシーの変更は他の configuration と同じく監査に残る。
 
+### 完了 Gate
+
+Configuration の `completionGate` は、Work Item が completed category の status に移る前に満たす条件を Team ごとに決める。条件ごとに `off`（省略時）、`warn`、`required` を選ぶ。`completionGate` を持たない、またはすべて `off` の Team では従来どおり何も検証せず、承認も読まない。
+
+| 条件（policy の key） | 満たす状態 |
+| --- | --- |
+| `acceptance-criteria`（`acceptanceCriteria`） | 受け入れ条件がすべて `satisfied`。受け入れ条件が無い Work Item は満たす。同じ更新で送る `acceptanceCriteria` / `acceptanceCriteriaMarks` を反映した後の状態で判定する。 |
+| `no-pending-approvals`（`noPendingApprovals`） | Work Item の承認に判断待ち（pending）と変更要求（changes requested）が無い。 |
+| `human-approval`（`humanApproval`） | Work Item の承認が 1 件以上承認済み。承認者の role の指定はまだ無い。 |
+
+`required` の条件が満たされないとき、server は completed category への遷移を拒否する。判定は Web の更新、Public API と MCP の `complete_task`、自動化の移動 action と一括操作、承認の決定による完了のどの経路でも同じで、応答の形だけが経路で異なる。
+
+- Team の API は `409` と `code: "WorkItemCompletionGateNotSatisfied"`、`unmetConditions`（条件、`requirement`、`reason`、`message` の配列）を返す（`WorkItemCompletionGateErrorResponse`）。
+- Public API は共通の error 形式に写し、`409`、`code: "conflict"`、`retryable: false` と、満たされない条件ごとに `errors[]` の `code: "gate_not_satisfied"` を返す。`message` は条件名で始まる。`ApiProblem.code` の enum は広げない。
+- 承認の決定で完了する場合は、決定中の承認を承認済みとして数えて判定する。満たされなければ決定ごと拒否し、Work Item の更新と同じ `409 WorkItemCompletionGateNotSatisfied` と `unmetConditions` を返す。
+
+承認の件数を読めなかったとき、承認の条件は `reason: "unavailable"` として満たされない扱いにする（fail-closed）。`warn` の条件は判定しても server は拒否しない（Web の表示は未実装）。受け入れ条件は Work Item の row にあり、更新の revision 条件で固定される。判定する更新の `expectedRevision` が判定した revision と違えば `409 WorkItemRevisionConflict` を返す。承認の条件が `required` で満たされたときは、判定した承認の件数（file proofing table の `APPROVAL_SUMMARY` row）を更新の transaction の条件に入れる。判定の後に承認が作られたり決定されたりすると、更新は `409` で失敗する。承認の決定で完了する場合は同じ row を決定の transaction が更新するので、別の条件ではなく、その更新に判定時の件数を条件として付ける。設定の変更は他の configuration と同じく監査に残る。
+
+CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、Web の設定画面と達成状況の表示、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
+
 ### Reciprocal transaction と graph CAS
 
 Team scope の `RELATION_GRAPH` row は `schemaVersion=1`、単調増加 `revision`、Team の directed relation row 数 `edgeCount` を持つ。Row が無い graph は revision `0` と解釈する。Relation list response は `graphRevision` を返し、作成/削除 input は `expectedGraphRevision` を必須にする。
@@ -221,7 +242,7 @@ Mutation 前に graph revision を読み、その後 endpoint の近傍と循環
 4. Source relation projection の `attribute_not_exists` 付き Put。
 5. Reciprocal relation projection の `attribute_not_exists` 付き Put。
 
-削除も source / target の残存 relation から作った `relationIds` を両 Work Item row に保存し、両 projection の存在を条件に同じ transaction で削除して graph revision を更新する。Relation mutation は Work Item 本体の業務 state update ではないため、Work Item の `revision` と `updatedAt` は変更しない。どちらか一方だけ存在する状態を正常な削除として隠さず、repair が必要な corruption として fail-closed にする。Relation 監査の同一 transaction 化は audit 基盤を拡張する後続変更で扱う。
+削除も source / target の残存 relation から作った `relationIds` を両 Work Item row に保存し、両 projection の存在を条件に同じ transaction で削除して graph revision を更新する。Relation mutation は Work Item 本体の業務 state update ではないため、Work Item の `revision` と `updatedAt` は変更しない。どちらか一方だけ存在する状態を正常な削除として隠さず、repair が必要な corruption として fail-closed にする。Relation の追加・削除と親の付け替えは、両端の Work Item に対する audit event を同じ transaction で記録する（[`event-audit.md`](./event-audit.md) の「Work Item relation の event」）。
 
 Relation mutation commit 後の Workspace search 更新は、source / target の canonical Work Item と現在の Relation Graph を強整合 read してから実行する。Approval 完了による Work Item 更新も同様に現在 row と relation を再取得する。再取得または search upsert が失敗しても、すでに確定した primary mutation の成功 response は失敗に変えない。
 

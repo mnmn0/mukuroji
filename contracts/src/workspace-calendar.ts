@@ -67,3 +67,58 @@ function readWorkspaceDatePart(
   if (!value) throw new RangeError(`Workspace calendar date is missing its ${type}.`)
   return value
 }
+
+/** Day a Workspace week starts on, as `Date#getDay()` numbers it: 0 is Sunday, 1 is Monday. */
+export type WorkspaceWeekStartDay = 0 | 1 | 2 | 3 | 4 | 5 | 6
+
+/** Workspace-wide calendar settings that decide fiscal years and weeks. */
+export type WorkspaceCalendarSettings = {
+  /** First month of the fiscal year, from 1 (January) to 12 (December). */
+  fiscalYearStartMonth: number
+  /** Day each Workspace week starts on. */
+  weekStartDay: WorkspaceWeekStartDay
+}
+
+/**
+ * Calendar settings of a Workspace that has not chosen its own.
+ *
+ * They keep the behavior from before the settings existed: calendar-year fiscal years and
+ * Monday-based weeks, as the timesheet and capacity planning already use.
+ */
+export const DEFAULT_WORKSPACE_CALENDAR_SETTINGS: WorkspaceCalendarSettings = {
+  fiscalYearStartMonth: 1,
+  weekStartDay: 1,
+}
+
+/**
+ * Narrows an untrusted value to a week start day.
+ *
+ * @param value - Untrusted candidate.
+ * @returns Whether the value is an integer from 0 (Sunday) to 6 (Saturday).
+ */
+export function isWorkspaceWeekStartDay(value: unknown): value is WorkspaceWeekStartDay {
+  return value === 0 || value === 1 || value === 2 || value === 3 ||
+    value === 4 || value === 5 || value === 6
+}
+
+/**
+ * Reads untrusted Workspace calendar settings.
+ *
+ * @param value - Untrusted candidate, such as a request body field or a stored record.
+ * @returns Settings built from the value, or undefined when any field is missing or invalid.
+ */
+export function readWorkspaceCalendarSettings(value: unknown): WorkspaceCalendarSettings | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const fiscalYearStartMonth: unknown = Reflect.get(value, 'fiscalYearStartMonth')
+  const weekStartDay: unknown = Reflect.get(value, 'weekStartDay')
+  if (
+    typeof fiscalYearStartMonth !== 'number' ||
+    !Number.isInteger(fiscalYearStartMonth) ||
+    fiscalYearStartMonth < 1 ||
+    fiscalYearStartMonth > 12 ||
+    !isWorkspaceWeekStartDay(weekStartDay)
+  ) {
+    return undefined
+  }
+  return { fiscalYearStartMonth, weekStartDay }
+}

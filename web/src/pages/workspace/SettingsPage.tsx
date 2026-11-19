@@ -7,6 +7,7 @@ import { AccountSecurityPanelContainer } from '../../features/account-security/u
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
+import { DirectoryAdministrationPanelContainer } from '../../projects/ui/DirectoryAdministrationPanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
 import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
@@ -100,6 +101,12 @@ export function SettingsPage() {
                   locale={workspace.locale}
                 />
               ) : null}
+              {workspace.canManageWorkspaceConfiguration ? (
+                <DirectoryAdministrationPanelContainer
+                  accessToken={workspace.accessToken}
+                  locale={workspace.locale}
+                />
+              ) : null}
               <DeveloperPlatformSettingsPanelContainer
                 accessToken={workspace.accessToken}
                 initialSection={developerPlatformInitialSection}
@@ -131,6 +138,7 @@ export function SettingsPage() {
           ) : undefined}
           fontSizePreference={workspace.fontSizePreference}
           themePreference={workspace.themePreference}
+          timeZone={workspace.timeZone}
           locale={workspace.locale}
           notificationSettingsSection={workspace.accessToken ? (
             <NotificationSettingsPanelContainer
@@ -143,6 +151,9 @@ export function SettingsPage() {
           onFontSizePreferenceChange={workspace.onFontSizePreferenceChange}
           onThemePreferenceChange={workspace.onThemePreferenceChange}
           onLocaleChange={workspace.onLocaleChange}
+          onTimeZoneChange={workspace.onTimeZoneChange}
+          isPreferencesSaveFailed={workspace.isMemberPreferencesSaveFailed}
+          onRetryPreferencesSave={workspace.onRetryMemberPreferencesSave}
           t={t}
           userLabel={workspace.userLabel}
         />

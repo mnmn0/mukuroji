@@ -94,6 +94,8 @@ function isPlanningEntity(value: unknown): boolean {
       value.carryOverPolicy === 'move-incomplete' ||
       value.carryOverPolicy === 'keep-incomplete'
     ) &&
+    (value.automation === undefined || isCycleAutomation(value.automation)) &&
+    isOptionalString(value.nextCycleId) &&
     (
       value.goalFramework === undefined ||
       value.goalFramework === 'goal' ||
@@ -107,6 +109,13 @@ function isPlanningEntity(value: unknown): boolean {
     isOptionalString(value.teamId) &&
     isOptionalString(value.projectId) &&
     isOptionalString(value.archivedAt)
+}
+
+/** Returns whether a value is a Cycle automation setting. */
+function isCycleAutomation(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.createNext === 'boolean' &&
+    typeof value.rolloverAtEnd === 'boolean'
 }
 
 /** Returns whether an optional value is a valid Planning cadence. */
@@ -374,6 +383,8 @@ function isPlanningWorkItemLink(value: unknown): boolean {
     isOptionalString(value.cycleId) &&
     isOptionalString(value.milestoneId) &&
     isStringArray(value.goalIds) &&
+    isOptionalString(value.carriedOverFromCycleId) &&
+    isOptionalString(value.carriedOverAt) &&
     typeof value.createdAt === 'string'
 }
 

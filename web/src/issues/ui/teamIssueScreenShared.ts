@@ -30,7 +30,7 @@ export const emptyWorkspaceMembers: WorkspaceMember[] = []
 /**
  * TeamIssueScreen で切り替える Issue 表示モードです。
  */
-export type IssueViewMode = 'table' | 'board' | 'gantt'
+export type IssueViewMode = 'table' | 'board' | 'gantt' | 'calendar'
 
 /** DOM ID of the panel that hosts the Team Work Item table or board. */
 export const issueViewPanelId = 'team-issue-view-panel'
@@ -300,4 +300,8 @@ export type TeamIssueScreenProps = {
    * 選択中 Work Item の relation を解除する callback です。
    */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /**
+   * Archives (true) or restores (false) one Work Item from the detail pane.
+   */
+  onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
 }

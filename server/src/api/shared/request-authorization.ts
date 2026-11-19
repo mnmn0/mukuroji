@@ -310,6 +310,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/planning/work-item-dependencies*',
     permission: 'planning.manage',
   },
+  {
+    // Bulk Cycle membership is a link change; the route still checks each Cycle and Work Item.
+    method: 'POST',
+    pathPattern: '/api/planning/cycles/:cycleId/work-items',
+    permission: 'planning.write',
+  },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/saved', permission: 'planning.read' },
@@ -554,6 +560,17 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/archive',
     permission: 'projects.manage',
   },
+  // Restoring or renaming a Project is gated like archiving it.
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/restore',
+    permission: 'projects.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/projects/:projectId',
+    permission: 'projects.manage',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
@@ -577,6 +594,32 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PATCH',
     pathPattern: '/api/teams/:teamId/archive',
+    permission: 'teams.manage',
+  },
+  // Listing archived Teams, reordering, restoring, and renaming are gated like archiving.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/directory',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/order',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/restore',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/project-order',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId',
     permission: 'teams.manage',
   },
   {
@@ -619,6 +662,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PUT',
     pathPattern: '/api/ai-assistance/preferences/me',
+    permission: 'workspace.read',
+  },
+  // A member's own display preferences change no shared Workspace data.
+  {
+    method: '*',
+    pathPattern: '/api/me/preferences',
     permission: 'workspace.read',
   },
   // Push availability and the caller's own device registration change no shared Workspace data.
@@ -1489,6 +1538,18 @@ function requiresEnterpriseDirectGrant(path: string): boolean {
   return /^\/api\/collections(?:\/|$)/u.test(path)
 }
 
+/**
+ * Returns whether a path under `/api/teams/` addresses every Team rather than one Team.
+ *
+ * @param path - Request path.
+ * @returns Whether the path is a Workspace-wide Team collection route.
+ */
+function isWorkspaceTeamCollectionPath(path: string | undefined): boolean {
+  return path === '/api/teams/projects' ||
+    path === '/api/teams/directory' ||
+    path === '/api/teams/order'
+}
+
 /** Returns whether the notification list needs Enterprise content scopes for visibility checks. */
 function shouldEvaluateEnterpriseNotificationScopes(context?: Context): boolean {
   return context?.req.method === 'GET' && (
@@ -1689,7 +1750,7 @@ async function resolveEnterpriseAuthorizationResource(
       parentTeamId,
     }
   }
-  if (path === '/api/teams/projects') {
+  if (isWorkspaceTeamCollectionPath(path)) {
     return { workspaceId, kind: 'workspace' as const }
   }
   const pathTeamId = path?.match(/\/teams\/([^/]+)/u)?.[1]

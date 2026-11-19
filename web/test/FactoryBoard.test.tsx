@@ -233,6 +233,13 @@ describe('Factory board view', () => {
     expect(render({ selectedWorkItemId: 'flaky-test', onRelease: async () => undefined })).not.toContain('>Release<')
   })
 
+  test('marks a resumed run on its tile and in the detail', () => {
+    const html = render({ selectedWorkItemId: 'release-notes' })
+    expect(html.match(/data-factory-board-resumed/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(html).toContain('>Resumed<')
+    expect(render({ selectedWorkItemId: 'auth-flow' }).match(/data-factory-board-resumed/g)?.length).toBe(1)
+  })
+
   test('shows an error with retry instead of an empty board', () => {
     const html = render({ board: undefined, errorMessage: labels.loadError })
     expect(html).toContain('role="alert"')

@@ -71,6 +71,15 @@ export type AutomationScheduleEvent = {
 
 const RECURRING_ACTION_LEASE_MS = 5 * 60_000
 
+/**
+ * `skip` policy で occurrence を「定刻」とみなす wall-clock の遅れの上限です。
+ *
+ * Scheduler は `rate(1 minute)` で起動し、tick の秒位置は分境界と揃わず、Lambda の起動も遅れます。
+ * そのため分境界の occurrence を最初に観測する `now` は最大で約 1 tick 遅れます。
+ * 2 tick 分を許容し、それより古い occurrence だけを逃した slot として skip します。
+ */
+const SKIP_POLICY_ON_TIME_WINDOW_MS = 2 * 60_000
+
 /** EventBridge timestamp を検証し、runner lease 用の wall-clock 時刻を返します。 */
 export function resolveAutomationScheduleProcessingTime(
   event: AutomationScheduleEvent,
@@ -594,7 +603,12 @@ async function selectScheduledRuleDueOccurrences(
   }
   const firstOccurrence = occurrences[0]
   const onTimeOccurrences = selectOnTimeOccurrences(occurrences, now)
-  if (!firstOccurrence || firstOccurrence.getTime() === now.getTime()) return onTimeOccurrences
+  if (
+    !firstOccurrence ||
+    onTimeOccurrences.some((occurrence) => occurrence.getTime() === firstOccurrence.getTime())
+  ) {
+    return onTimeOccurrences
+  }
   const eventId = `scheduled-rule:${rule.id}:${firstOccurrence.toISOString()}`
   const executionId = createAutomationExecutionId(rule, eventId)
   const execution = await client.getExecution(rule.workspaceId, executionId)
@@ -625,8 +639,12 @@ async function selectRecurringDueOccurrences(
     : selected
 }
 
+/** `skip` policy で、tick の遅れを許容した定刻内の最新 occurrence だけを選びます。 */
 function selectOnTimeOccurrences(occurrences: readonly Date[], now: Date) {
-  return occurrences.filter((occurrence) => occurrence.getTime() === now.getTime()).slice(-1)
+  return occurrences.filter((occurrence) => {
+    const lagMs = now.getTime() - occurrence.getTime()
+    return lagMs >= 0 && lagMs < SKIP_POLICY_ON_TIME_WINDOW_MS
+  }).slice(-1)
 }
 
 function mergeOccurrences(firstOccurrence: Date, occurrences: readonly Date[]) {

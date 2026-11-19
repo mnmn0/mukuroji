@@ -7,8 +7,7 @@ import {
   transitionProjectLifecycleUseCase,
   updateProjectCharterUseCase,
   type ProjectCharterCallerAuthorization,
-  type ProjectDirectoryProjectResponse,
-  type ProjectDirectoryTeamResponse,
+  type ProjectSearchSource,
   type ResolvedProjectCharterPerson,
 } from '../../modules/directory'
 import {
@@ -36,7 +35,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-access'
+import { syncDirectorySearchDocumentBestEffort } from '../shared/search-access'
 
 /**
  * Registers the Project charter and lifecycle endpoints.
@@ -305,49 +304,51 @@ async function resolveCharterPerson(
  * Re-projects the Project search document so its charter text becomes searchable.
  *
  * @param workspaceId - Workspace that owns the Project.
- * @param state - Committed charter state.
+ * @param state - Committed charter state; only its Team and Project identify the document.
  */
-async function projectCharterSearchDocumentBestEffort(workspaceId: string, state: ProjectCharterState) {
-  let names: { name: string; englishName?: string; project: ProjectDirectoryProjectResponse } | undefined
-  try {
-    const [japanese, english] = await Promise.all([
-      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja'),
-      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'en'),
-    ])
-    const findProject = (teams: readonly ProjectDirectoryTeamResponse[]) => teams
-      .find((team) => team.id === state.teamId)
-      ?.projects.find((project) => project.id === state.projectId)
-    const project = findProject(japanese.teams)
-    if (project) {
-      const englishName = findProject(english.teams)?.name
-      names = {
-        name: project.name,
-        project,
-        ...(englishName && englishName !== project.name ? { englishName } : {}),
-      }
-    }
-  } catch (error) {
-    console.error('Workspace search projection failed after project charter update.', error)
-    return
-  }
-  if (!names) return
-  const resolved = names
-  // The charter revision fences the write, so a slower projection of an older charter cannot
-  // overwrite the document of a newer one.
-  const sourceRevision = state.revision > 0 ? state.revision : undefined
-  await projectWorkspaceSearchDocumentBestEffort(
-    () => createProjectSearchDocument(
-      workspaceId,
-      state.teamId,
-      resolved.project,
-      undefined,
-      resolved.englishName,
-      state.charter,
-      sourceRevision,
-    ),
+export async function projectCharterSearchDocumentBestEffort(workspaceId: string, state: ProjectCharterState) {
+  await projectProjectSearchDocumentBestEffort(
+    workspaceId,
+    state.teamId,
+    state.projectId,
     'project charter update',
-    // The Project row does not record its creator, so the creator projected at creation is kept.
-    { sourceRevision, preserveCreator: true },
+  )
+}
+
+/**
+ * Brings the Project search document in line with one strongly consistent read of the Project.
+ *
+ * The charter, the names, and the source revision come from the same snapshot. The source
+ * revision is the charter revision plus the rename count plus the archive and restore count, so
+ * a slower projection of an older state cannot overwrite the document of a newer one, and an
+ * archived Project's document is removed.
+ *
+ * @param workspaceId - Workspace that owns the Project.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project identifier.
+ * @param operation - Operation label used when logging a projection failure.
+ */
+export async function projectProjectSearchDocumentBestEffort(
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+  operation: string,
+) {
+  await syncDirectorySearchDocumentBestEffort(
+    workspaceId,
+    'project',
+    `team/${teamId}/project/${projectId}`,
+    () => workspaceDependencies.projectDirectory.getProjectSearchSource(workspaceId, teamId, projectId),
+    (source: ProjectSearchSource) => createProjectSearchDocument(
+      workspaceId,
+      teamId,
+      source.project,
+      source.creatorUserId,
+      source.englishName !== source.project.name ? source.englishName : undefined,
+      source.state.charter,
+      source.sourceRevision > 0 ? source.sourceRevision : undefined,
+    ),
+    operation,
   )
 }
 

@@ -1,5 +1,9 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import type { CanonicalWorkItem, PlanningUpdateTargetSummary } from '@mukuroji/contracts'
+import {
+  createDefaultDueDateWorkItemSchedule,
+  type CanonicalWorkItem,
+  type PlanningUpdateTargetSummary,
+} from '@mukuroji/contracts'
 import { useState, type ReactElement } from 'react'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
 import { expect, fn, userEvent, within } from 'storybook/test'
@@ -19,6 +23,7 @@ import { createWorkspaceSecurityScopeOptions } from '../../security/model/worksp
 import { EnterpriseSecurityPanel } from '../../security/ui/EnterpriseSecurityPanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { referoTaskFixtures } from '../../tasks/fixtures'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { inheritedWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
@@ -176,6 +181,9 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   onFontSizePreferenceChange: () => undefined,
   onThemePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
+  onTimeZoneChange: () => undefined,
+  onRetryMemberPreferencesSave: () => undefined,
+  isMemberPreferencesSaveFailed: false,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
   onOpenTask: () => undefined,
@@ -522,6 +530,35 @@ export const MyTasksMoveError: Story = {
       teams={projectDirectoryFixtures}
     />
   ),
+}
+
+/** The `/my-tasks` route as a monthly calendar; the Work Items are due in the current month. */
+export const MyTasksCalendar: Story = {
+  render: () => {
+    const month = getCurrentTaskMonth()
+    const tasks = storyTasks.map((task, index) => {
+      const dueDate = `${month}-${String(3 + index * 4).padStart(2, '0')}`
+      return { ...task, dueDate, schedule: createDefaultDueDateWorkItemSchedule(dueDate) }
+    })
+    return (
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={storyWorkItemConfigurations}
+        onOpenTask={onOpenMyTaskAction}
+        onViewModeChange={() => undefined}
+        t={t}
+        tasks={tasks}
+        teams={projectDirectoryFixtures}
+        viewMode="calendar"
+      />
+    )
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByTestId('my-tasks-view-calendar')).toHaveAttribute('aria-pressed', 'true')
+    await expect(canvas.getByTestId('task-calendar-month-navigation')).toBeVisible()
+  },
 }
 
 /** The `/inbox` route with attention Work Items and durable notifications. */

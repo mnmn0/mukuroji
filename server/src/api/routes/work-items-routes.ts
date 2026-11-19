@@ -47,11 +47,9 @@ import {
   createProjectQuickAccessIdentity,
   isProjectQuickAccessItems,
   ProjectDataError,
-  readLocalizedNames,
   type CreateProjectRequestBody,
   type CreateTeamRequestBody,
   type ProjectAccessEntry,
-  type ProjectDirectoryTeamResponse,
   type ProjectArchiveWorkItemRevisionGuard,
   type ProjectMemberResponseItem,
   type ProjectMembersResponse,
@@ -119,7 +117,6 @@ import {
 import {
   createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchBody,
-  createTeamWorkspaceSearchDocument,
 } from '../../modules/workspace-search/workspace-search'
 import {
   createFormTriageEntryId,
@@ -180,7 +177,6 @@ import {
 } from '../shared/constants'
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import {
-  createProjectSearchDocument,
   createWorkItemSearchDocument,
   projectWorkItemSearchDocumentBestEffort,
 } from '../shared/document-access'
@@ -307,6 +303,8 @@ import {
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
+import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
+import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
 /** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
 const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
@@ -2340,21 +2338,6 @@ async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId
   } satisfies WorkItemsResponse
 }
 
-function createTeamSearchDocument(
-  workspaceId: string,
-  team: ProjectDirectoryTeamResponse,
-  creatorUserId?: string,
-  subtitle?: string,
-) {
-  return createTeamWorkspaceSearchDocument({
-    workspaceId,
-    teamId: team.id,
-    title: team.name,
-    ...(subtitle ? { subtitle } : {}),
-    ...(creatorUserId ? { creatorUserId } : {}),
-  })
-}
-
 /** Mutation 後の Work Item と relation graph を強整合 read して search へ反映します。 */
 async function refreshWorkItemSearchDocumentBestEffort(
   workspaceId: string,
@@ -3458,19 +3441,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         principal.directoryId,
         body ?? {},
         createApiMutationContext(c, principal, body ?? {}),
+        principal.userKey,
       )
-      await projectWorkspaceSearchDocumentBestEffort(
-        () => {
-          const names = readLocalizedNames(body ?? {})
-          return createTeamSearchDocument(
-            principal.directoryId,
-            response.team,
-            principal.userKey,
-            names.nameEn === response.team.name ? undefined : names.nameEn,
-          )
-        },
-        'team creation',
-      )
+      // Projects from the stored row, fenced like renames, so a delayed creation projection
+      // cannot undo a rename or recreate the document of an archived Team.
+      await projectTeamSearchDocumentBestEffort(principal.directoryId, response.team.id, 'team creation')
       return c.json(response, 201)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
@@ -3512,20 +3487,13 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         },
         createApiMutationContext(c, principal, { teamId, ...body }),
       )
-      await projectWorkspaceSearchDocumentBestEffort(
-        () => {
-          const names = readLocalizedNames(body)
-          return createProjectSearchDocument(
-            principal.directoryId,
-            teamId,
-            response.project,
-            principal.userKey,
-            names.nameEn === response.project.name ? undefined : names.nameEn,
-          )
-        },
+      // Projects from the stored row, fenced like renames and charter edits, so a delayed creation
+      // projection cannot undo them or recreate the document of an archived Project.
+      await projectProjectSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        response.project.id,
         'project creation',
-        // A charter saved before this projection lands carries a revision; keep it.
-        { unrevisioned: true },
       )
       return c.json(response, 201)
     } catch (error) {
@@ -3566,12 +3534,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         createApiMutationContext(c, principal, { teamId }),
         expectedPlanningRevision,
       )
-      await deleteWorkspaceSearchDocumentBestEffort(
-        principal.directoryId,
-        'team',
-        `team/${teamId}`,
-        'team archive',
-      )
+      // Removes the search document unless a restore already projected a newer one.
+      await projectTeamSearchDocumentBestEffort(principal.directoryId, teamId, 'team archive')
       return c.json(response)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
@@ -3619,10 +3583,11 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         archiveGuard.expectedPlanningRevision,
         archiveGuard.workItemRevisionGuards,
       )
-      await deleteWorkspaceSearchDocumentBestEffort(
+      // Removes the search document unless a restore already projected a newer one.
+      await projectProjectSearchDocumentBestEffort(
         principal.directoryId,
-        'project',
-        `team/${teamId}/project/${projectId}`,
+        teamId,
+        projectId,
         'project archive',
       )
       return c.json(response)
@@ -3948,6 +3913,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               resolvedConfiguration,
             )
           : undefined,
+        {
+          context: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
+          actorMemberKey: principal.userKey,
+        },
       )
       await Promise.all([
         refreshWorkItemSearchDocumentBestEffort(
@@ -4004,6 +3973,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           targetExpectedRevision: endpoints.target.revision,
           sourceAssignedProjectId: endpoints.source.assignedProjectId,
           targetAssignedProjectId: endpoints.target.assignedProjectId,
+        },
+        {
+          context: createApiMutationContext(c, principal, {
+            teamId,
+            issueId,
+            targetWorkItemId,
+            relationType,
+            ...body,
+          }),
+          actorMemberKey: principal.userKey,
         },
       )
       await Promise.all([
@@ -4117,6 +4096,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               resolvedConfiguration,
             )
           : undefined,
+        {
+          context: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
+          actorMemberKey: principal.userKey,
+        },
       )
       if (response.previousParentWorkItemId !== response.parentWorkItemId) {
         await refreshWorkItemSearchDocumentBestEffort(

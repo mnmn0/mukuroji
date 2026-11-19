@@ -20,6 +20,8 @@ type TimeTrackingMockState = {
   idempotencyKeys: string[]
   /** Project scopes where the member may record time. */
   writableProjectIds: string[]
+  /** Day the Workspace week starts on, 0 (Sunday) to 6. */
+  weekStartDay: number
 }
 
 /**
@@ -29,7 +31,7 @@ type TimeTrackingMockState = {
  * @returns Mutable mock state.
  */
 async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
-  const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [], writableProjectIds: ['refero'] }
+  const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [], writableProjectIds: ['refero'], weekStartDay: 1 }
   await page.clock.setFixedTime(new Date('2026-11-10T01:00:00.000Z'))
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'time-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
@@ -57,6 +59,7 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
     writableProjectScopes: state.writableProjectIds.map((projectId) => ({ teamId: 'core-team', projectId })),
   } } }))
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
+  await page.route((url) => url.pathname === '/api/workspace/calendar-settings', (route) => route.fulfill({ json: { fiscalYearStartMonth: 4, weekStartDay: state.weekStartDay } }))
   await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') && !url.pathname.includes('/projects'), async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -211,6 +214,42 @@ test.describe('Time tracking', () => {
     await expect(page.getByRole('form', { name: 'Add time' }).getByLabel('Task')).toContainText('Update the pricing page')
   })
 
+  test('starts the week on the Workspace week start day', async ({ page }) => {
+    const state = await mockTimeTracking(page)
+    state.weekStartDay = 0
+    // 2026-11-10 is a Tuesday in Tokyo, so a Sunday-based week starts on 2026-11-08.
+    const entriesRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/teams/core-team/time-entries')
+    await page.goto('/teams/core-team/timesheet')
+    const from = new URL((await entriesRequest).url()).searchParams.get('from')
+    expect(from).toBe('2026-11-07T15:00:00.000Z')
+    await page.getByRole('button', { name: /next week/iu }).click()
+    await expect(page).toHaveURL(/week=2026-11-15/u)
+  })
+
+  test('waits for the week start and recovers when it fails to load', async ({ page }) => {
+    await mockTimeTracking(page)
+    let failures = 1
+    await page.route((url) => url.pathname === '/api/workspace/calendar-settings', async (route) => {
+      if (failures > 0) {
+        failures -= 1
+        await route.fulfill({ status: 503, json: { message: 'Unavailable' } })
+        return
+      }
+      await route.fallback()
+    })
+    await page.goto('/teams/core-team/timesheet')
+    const alert = page.getByRole('alert').filter({ hasText: 'The Workspace week start could not be loaded.' })
+    await expect(alert).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add manually' })).toHaveCount(0)
+    // Switching views before the week start is known keeps the URL free of a guessed week.
+    await page.getByRole('link', { name: 'Approvals' }).click()
+    await expect(page).toHaveURL(/\/timesheet\?view=approvals$/u)
+    await page.getByRole('link', { name: 'My timesheet' }).click()
+    await alert.getByRole('button', { name: 'Reload settings' }).click()
+    await expect(alert).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add manually' })).toBeVisible()
+  })
+
   test('does not offer manual entry to a Project viewer', async ({ page }) => {
     const state = await mockTimeTracking(page)
     state.writableProjectIds = []
@@ -230,5 +269,56 @@ test.describe('Time tracking', () => {
     await expect(page.getByTestId('timesheet-week-table')).toBeVisible()
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflow).toBeLessThanOrEqual(0)
+  })
+
+  test('drafts the member weekly report from their tasks and time and copies it as Markdown', async ({ page, context }) => {
+    const state = await mockTimeTracking(page)
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+    const schedule = (dueDate: string) => ({ mode: 'due-date', dueDate })
+    const myWorkItems = [
+      { ...workItems[0], key: 'CORE-12', statusCategory: 'completed', actualStartDate: '2026-11-04', actualEndDate: '2026-11-10', dueDate: '2026-11-12', schedule: schedule('2026-11-12') },
+      { ...workItems[1], key: 'CORE-15', statusCategory: 'started', actualStartDate: '2026-11-10', dueDate: '2026-11-18', schedule: schedule('2026-11-18') },
+    ]
+    const requestedFilters: (string | null)[] = []
+    await page.route((url) => url.pathname === '/api/work-items' && url.searchParams.get('involvement') === 'mine', (route) => {
+      requestedFilters.push(new URL(route.request().url()).searchParams.get('teamId'))
+      return route.fulfill({ json: { workItems: myWorkItems } })
+    })
+    state.entries.push({
+      schemaVersion: 1,
+      id: 'entry-1',
+      workspaceId: 'workspace-demo',
+      teamId: 'core-team',
+      projectId: 'refero',
+      workItemId: 'onboarding',
+      userId: 'demo@example.com',
+      startAt: '2026-11-10T00:00:00.000Z',
+      endAt: '2026-11-10T02:30:00.000Z',
+      durationMinutes: 150,
+      billable: false,
+      currency: 'USD',
+      status: 'draft',
+      source: 'manual',
+      revision: 1,
+      createdAt: '2026-11-10T02:30:00.000Z',
+      updatedAt: '2026-11-10T02:30:00.000Z',
+    })
+
+    await page.goto('/teams/core-team/timesheet')
+    await page.getByRole('link', { name: 'Weekly report' }).click()
+    await expect(page).toHaveURL(/view=weekly-report/u)
+    const report = page.getByTestId('personal-weekly-report')
+    await expect(report).toContainText('Reduce onboarding friction')
+    expect(requestedFilters).toContain('core-team')
+
+    await page.getByLabel('Reflection').fill('Onboarding shipped.')
+    const markdown = page.getByTestId('weekly-report-markdown')
+    await expect(markdown).toContainText('- CORE-12 Reduce onboarding friction (due 2026-11-12, recorded 2:30)')
+    await expect(markdown).toContainText('- CORE-15 Update the pricing page (due 2026-11-18)')
+    await expect(markdown).toContainText('Onboarding shipped.')
+
+    await page.getByRole('button', { name: 'Copy Markdown' }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Copied.' })).toBeVisible()
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('# Weekly report')
   })
 })

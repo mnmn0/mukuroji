@@ -6,6 +6,9 @@ import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
 import {
+  createWorkerSecretEnvironmentHydrator,
+} from '../app/composition/worker-secret-environment'
+import {
   type EnterpriseScimGroupJobWorkerHandler,
 } from '../modules/enterprise-identity/adapter-in/events/scim-group-job-worker'
 import {
@@ -15,6 +18,10 @@ import {
 const getDefaultProcessor = createLazySingleton(
   createEnterpriseScimGroupJobWorkerProcessor,
 )
+const hydrateSecrets = createWorkerSecretEnvironmentHydrator([
+  'ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET',
+  'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY',
+])
 
 /**
  * Processes one admitted Enterprise SCIM group job stream batch.
@@ -25,6 +32,7 @@ const getDefaultProcessor = createLazySingleton(
 const processEnterpriseScimGroupJob: EnterpriseScimGroupJobWorkerHandler = async (
   event,
 ) => {
+  await hydrateSecrets()
   return await processEnterpriseScimGroupJobBatch(
     event,
     getDefaultProcessor(),
