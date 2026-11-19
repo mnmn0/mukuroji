@@ -8,7 +8,6 @@ import {
   processTenantOperationExecutionBatch,
   readRequestedTenantOperation,
   readRunnableTenantOperation,
-  readTenantAuditRetentionEvent,
   readTenantRetentionWorkspace,
 } from './tenant-operation-execution'
 
@@ -88,7 +87,6 @@ test('dispatches each running operation revision to its current resource owner',
       jobs.push(job)
     },
     async reconcileAuditRetention() {},
-    async reconcileAuditEventRetention() {},
   })
 
   expect(result).toEqual({ batchItemFailures: [] })
@@ -130,53 +128,11 @@ test('fails closed when a running operation has no resource-owner dispatcher', a
   }, {
     async execute() {},
     async reconcileAuditRetention() {},
-    async reconcileAuditEventRetention() {},
   })
 
   expect(result).toEqual({
     batchItemFailures: [{ itemIdentifier: 'operation-undispatched-sequence' }],
   })
-})
-
-test('routes new audit events to current tenant retention enforcement', async () => {
-  const auditEvents: Array<{
-    workspaceId: string
-    eventId: string
-    occurredAt: string
-  }> = []
-  const record = {
-    eventName: 'INSERT',
-    dynamodb: {
-      SequenceNumber: 'audit-sequence-1',
-      NewImage: {
-        directoryId: { S: 'workspace-1' },
-        workspaceId: { S: 'workspace-1' },
-        eventId: { S: 'event-1' },
-        occurredAt: { S: '2026-08-02T00:00:00.000Z' },
-      },
-    },
-  }
-  const result = await processTenantOperationExecutionBatch({
-    Records: [record],
-  }, {
-    async execute() {},
-    async reconcileAuditRetention() {},
-    async reconcileAuditEventRetention(workspaceId, eventId, occurredAt) {
-      auditEvents.push({ workspaceId, eventId, occurredAt })
-    },
-  })
-
-  expect(readTenantAuditRetentionEvent(record)).toEqual({
-    workspaceId: 'workspace-1',
-    eventId: 'event-1',
-    occurredAt: '2026-08-02T00:00:00.000Z',
-  })
-  expect(result).toEqual({ batchItemFailures: [] })
-  expect(auditEvents).toEqual([{
-    workspaceId: 'workspace-1',
-    eventId: 'event-1',
-    occurredAt: '2026-08-02T00:00:00.000Z',
-  }])
 })
 
 test('routes active retention jobs to the bounded reconciliation processor', async () => {
@@ -202,7 +158,6 @@ test('routes active retention jobs to the bounded reconciliation processor', asy
     async reconcileAuditRetention(workspaceId) {
       retentionWorkspaces.push(workspaceId)
     },
-    async reconcileAuditEventRetention() {},
   })
 
   expect(result).toEqual({ batchItemFailures: [] })
@@ -236,7 +191,6 @@ test('returns the failed stream checkpoint when execution fails', async () => {
       throw new Error('temporary failure')
     },
     async reconcileAuditRetention() {},
-    async reconcileAuditEventRetention() {},
   })
 
   expect(result).toEqual({
@@ -264,7 +218,6 @@ test('fails closed instead of acknowledging a malformed operation row', async ()
       executions += 1
     },
     async reconcileAuditRetention() {},
-    async reconcileAuditEventRetention() {},
   })
 
   expect(executions).toBe(0)

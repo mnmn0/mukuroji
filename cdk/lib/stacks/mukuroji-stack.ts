@@ -120,6 +120,8 @@ export class MukurojiStack extends cdk.Stack {
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
+      enterpriseIdentityTokenHashSecret:
+        parameters.enterpriseIdentityTokenHashSecret,
       workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
     });
     const fileStorage = buildFileStorage(this, {
