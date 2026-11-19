@@ -5,6 +5,7 @@ import type {
   PlanningUpdateCadence,
   PlanningUpdateChange,
   PlanningUpdateEvidence,
+  PlanningUpdateReaction,
   PlanningUpdateScopeSnapshot,
   PlanningUpdateState,
   PlanningUpdateTarget,
@@ -308,6 +309,48 @@ export type PlanningUpdateCommentView = {
   createdAt: string
 }
 
+/**
+ * Reaction token that records a reviewer confirmation on an immutable update.
+ *
+ * The reviewer is the cadence escalation member, so the existing reaction API and its
+ * permission checks record the confirmation without a separate acknowledgement endpoint.
+ */
+export const PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION = '✅'
+
+/** Reviewer confirmation state displayed next to one published update. */
+export type PlanningUpdateAcknowledgementView = {
+  /** Workspace member key of the configured reviewer (the cadence escalation member). */
+  reviewerMemberKey: string
+  /** Confirmation time as an ISO 8601 timestamp, absent while the update is unconfirmed. */
+  acknowledgedAt?: string
+}
+
+/**
+ * Derives whether the configured reviewer has confirmed one immutable update version.
+ *
+ * @param reactions - Loaded member reactions, possibly spanning several update versions.
+ * @param updateVersion - Immutable update version to evaluate.
+ * @param reviewerMemberKey - Cadence escalation member treated as the reviewer, if configured.
+ * @returns Confirmation state, or undefined when no reviewer is configured.
+ */
+export function derivePlanningUpdateAcknowledgement(
+  reactions: readonly PlanningUpdateReaction[],
+  updateVersion: number,
+  reviewerMemberKey: string | undefined,
+): PlanningUpdateAcknowledgementView | undefined {
+  const reviewer = reviewerMemberKey?.trim()
+  if (!reviewer) return undefined
+  const normalizedReviewer = reviewer.toLowerCase()
+  const acknowledgement = reactions.find((reaction) =>
+    reaction.updateVersion === updateVersion &&
+    reaction.emoji === PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION &&
+    reaction.memberKey.trim().toLowerCase() === normalizedReviewer
+  )
+  return acknowledgement
+    ? { reviewerMemberKey: reviewer, acknowledgedAt: acknowledgement.createdAt }
+    : { reviewerMemberKey: reviewer }
+}
+
 /** Watcher state displayed in the selected update target header. */
 export type PlanningUpdateWatchView = {
   /** Whether the current viewer receives update notifications. */
@@ -324,6 +367,8 @@ export type PlanningUpdateCollaborationController = {
   commentsByUpdateId: Readonly<Record<string, readonly PlanningUpdateCommentView[]>>
   /** Reactions grouped by immutable update ID. */
   reactionsByUpdateId: Readonly<Record<string, readonly PlanningUpdateReactionView[]>>
+  /** Reviewer confirmation state grouped by immutable update ID when a reviewer is configured. */
+  acknowledgementsByUpdateId?: Readonly<Record<string, PlanningUpdateAcknowledgementView>>
   /** Whether a collaboration or export mutation is pending. */
   isPending: boolean
   /** Whether watcher and annotation state is loading. */

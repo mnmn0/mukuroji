@@ -54,8 +54,10 @@ import {
 import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
+  derivePlanningUpdateAcknowledgement,
   extractPlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
+  type PlanningUpdateAcknowledgementView,
   type PlanningUpdateTargetDetailView,
   type PlanningUpdateTargetSummaryView,
   type PlanningUpdateCollaborationController,
@@ -206,18 +208,26 @@ export function PlanningPage() {
     updateHistory.data?.updates,
     Boolean(user && !currentUserError),
   )
+  // Derive reviewer confirmation only from loaded reactions so loading never reads as unconfirmed.
+  const selectedUpdateReviewerMemberKey = selectedUpdateTarget && updateAnnotations.data
+    ? snapshot?.updateTargets.find((summary) =>
+        planningUpdateTargetsAreEqual(summary.target, selectedUpdateTarget)
+      )?.cadence?.escalationMemberKey
+    : undefined
   const updateAnnotationViews = useMemo(
     () => createPlanningUpdateAnnotationViews(
       updateHistory.data?.updates,
       updateAnnotations.data?.comments,
       updateAnnotations.data?.reactions,
       currentUserProjectKey,
+      selectedUpdateReviewerMemberKey,
     ),
     [
       updateAnnotations.data?.comments,
       updateAnnotations.data?.reactions,
       updateHistory.data?.updates,
       currentUserProjectKey,
+      selectedUpdateReviewerMemberKey,
     ],
   )
   const updateTargetDetails = useMemo(
@@ -556,6 +566,7 @@ export function PlanningPage() {
             ? togglePlanningUpdateWatch
             : undefined,
           reactionsByUpdateId: updateAnnotationViews.reactionsByUpdateId,
+          acknowledgementsByUpdateId: updateAnnotationViews.acknowledgementsByUpdateId,
           watch: updateWatch.data
             ? {
                 subscribed: updateWatch.data.subscribed,
@@ -1004,16 +1015,19 @@ function createPlanningUpdateTargetDetails(
  * @param comments - Loaded append-only comments across the visible versions.
  * @param reactions - Loaded member reactions across the visible versions.
  * @param currentMemberKey - Normalized Workspace member key for viewer-state projection.
- * @returns Comment and reaction maps keyed by immutable update ID.
+ * @param reviewerMemberKey - Cadence escalation member whose confirmation reaction marks an update reviewed.
+ * @returns Comment, reaction, and reviewer confirmation maps keyed by immutable update ID.
  */
 function createPlanningUpdateAnnotationViews(
   updates: readonly PlanningUpdate[] = [],
   comments: readonly PlanningUpdateComment[] = [],
   reactions: readonly PlanningUpdateReaction[] = [],
   currentMemberKey = '',
+  reviewerMemberKey?: string,
 ) {
   const commentsByUpdateId: Record<string, PlanningUpdateCommentView[]> = {}
   const reactionsByUpdateId: Record<string, PlanningUpdateReactionView[]> = {}
+  const acknowledgementsByUpdateId: Record<string, PlanningUpdateAcknowledgementView> = {}
 
   for (const update of updates) {
     commentsByUpdateId[update.id] = comments
@@ -1042,9 +1056,15 @@ function createPlanningUpdateAnnotationViews(
       reaction,
       reactedByViewer: aggregate.reactedByViewer,
     }))
+    const acknowledgement = derivePlanningUpdateAcknowledgement(
+      reactions,
+      update.version,
+      reviewerMemberKey,
+    )
+    if (acknowledgement) acknowledgementsByUpdateId[update.id] = acknowledgement
   }
 
-  return { commentsByUpdateId, reactionsByUpdateId }
+  return { acknowledgementsByUpdateId, commentsByUpdateId, reactionsByUpdateId }
 }
 
 /**
