@@ -6,6 +6,7 @@ import {
   projectRoleWeights,
   type ProjectAccessEntry,
   type ProjectDirectoryResponse,
+  type ProjectDirectoryTeamResponse,
   type ProjectRole,
 } from '../../modules/directory'
 import { type AuditActorKind, type MutationAuditContext } from '../../modules/audit/audit'
@@ -36,7 +37,9 @@ import { createRequestMutationContext } from './http'
 import { getEnv } from './runtime-config'
 import {
   createWorkspaceMutationContextForActor,
+  findTeamProjectAccess,
   projectAccessAllows,
+  projectAccessAppliesToTeam,
   type TeamPermissionContext,
   type TeamPermissionReadContext,
   toWorkspaceAccessErrorResponse,
@@ -1109,6 +1112,28 @@ export async function readLegacyProjectScopeAccesses(
 }
 
 /**
+ * Selects the Project access entries that apply to one Team's Projects.
+ *
+ * Pass entries from {@link getEffectiveProjectScopeAccessList}, which qualifies every entry it
+ * can resolve to one Team. A Team-qualified entry applies only to its own Team. An entry left
+ * unqualified there is a legacy ACL whose Project ID several Teams share; it keeps applying to
+ * each of them, as legacy Project membership has no Team to tell them apart.
+ *
+ * @param accesses - Team-qualified effective Project access entries.
+ * @param team - Team whose Projects are being authorized.
+ * @returns Entries for the Team's own Projects.
+ */
+export function selectTeamProjectScopeAccesses(
+  accesses: readonly ProjectAccessEntry[],
+  team: Pick<ProjectDirectoryTeamResponse, 'id' | 'projects'>,
+): ProjectAccessEntry[] {
+  const teamProjectIds = new Set(team.projects.map((project) => project.id))
+  return accesses.filter((access) =>
+    teamProjectIds.has(access.projectId) && projectAccessAppliesToTeam(access, team.id)
+  )
+}
+
+/**
  * Reads effective legacy Project roles collapsed by bare Project ID.
  *
  * @param principal - Authenticated principal whose direct and enterprise access is merged.
@@ -1178,9 +1203,10 @@ export async function requireTeamPermission(
     }
   }
 
-  const teamProjectIds = new Set(team.projects.map((project) => project.id))
-  const projectAccesses = (await (readContext?.readProjectAccesses() ?? getEffectiveProjectScopeAccessList(principal)))
-    .filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
+  const projectAccesses = selectTeamProjectScopeAccesses(
+    await (readContext?.readProjectAccesses() ?? getEffectiveProjectScopeAccessList(principal)),
+    team,
+  )
 
   for (const projectAccess of projectAccesses) {
     if (projectAccess && projectAccessAllows(projectAccess, minimumRole)) {
@@ -1213,7 +1239,7 @@ export function requireAssignedProjectPermission(
     return
   }
 
-  const projectAccess = context.projectAccesses?.find((access) => access.projectId === assignedProjectId)
+  const projectAccess = findTeamProjectAccess(context, assignedProjectId)
 
   if (!projectAccess || !projectAccessAllows(projectAccess, minimumRole)) {
     throw new ProjectDataError(
@@ -1243,7 +1269,7 @@ export function canAccessAssignedProject(
     return true
   }
 
-  const projectAccess = context.projectAccesses?.find((access) => access.projectId === assignedProjectId)
+  const projectAccess = findTeamProjectAccess(context, assignedProjectId)
 
   return projectAccess !== undefined && projectAccessAllows(projectAccess, minimumRole)
 }
