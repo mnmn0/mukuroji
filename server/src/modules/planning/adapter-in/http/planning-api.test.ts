@@ -3149,3 +3149,42 @@ test('accepts a Planning edit whose revision only Work Item writes advanced sinc
   expect(archived.status).toBe(409)
   expect(await archived.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
 })
+
+test('rejects a Work Item link when the Work Item changed after authorization', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  await planningClient.create(
+    'user#demo@example.com',
+    createCyclePlanningInput('cycle-link-race', 0),
+    { workItems: [] },
+  )
+  let putCalls = 0
+  const putWorkItemLink = planningClient.putWorkItemLink.bind(planningClient)
+  planningClient.putWorkItemLink = async (...input) => {
+    putCalls += 1
+    return putWorkItemLink(...input)
+  }
+  // Authorization reads revision 2, while the Planning projection still holds revision 1.
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    detailRevisions: { 'core-team\0onboarding-friction': 2 },
+  })
+  setTestAppDependencies({ planning: planningClient })
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-links/core-team/onboarding-friction',
+    'PUT',
+    {
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      projectId: 'refero',
+      cycleId: 'cycle-link-race',
+      goalIds: [],
+      expectedRevision: 1,
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'PlanningWorkItemChanged' })
+  expect(putCalls).toBe(0)
+})

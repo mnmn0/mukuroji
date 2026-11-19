@@ -464,6 +464,36 @@ async function requirePlanningRevisionUnchangedByPlanning(
   requirePlanningAuthorizationRevision(currentRevision, expectedRevision)
 }
 
+/**
+ * Requires the Work Item projection to hold the revision that was just authorized.
+ *
+ * The link mutation guards the projection revision in its transaction. Matching it to the
+ * authorized revision makes the commit fail if the Work Item changes (for example, moves to a
+ * Project the caller cannot access) after authorization, even when the Planning revision rebases.
+ *
+ * @param workItemState - Work Item projection passed to the Planning mutation.
+ * @param teamId - Owning Team of the authorized Work Item.
+ * @param workItemId - Authorized Work Item.
+ * @param authorizedRevision - Canonical revision read during authorization.
+ */
+function requireAuthorizedPlanningWorkItemRevision(
+  workItemState: PlanningWorkItemState,
+  teamId: string,
+  workItemId: string,
+  authorizedRevision: number,
+) {
+  const summary = workItemState.workItems.find((candidate) =>
+    candidate.teamId === teamId && candidate.id === workItemId
+  )
+  if (summary?.revision !== authorizedRevision) {
+    throw new PlanningError(
+      409,
+      'PlanningWorkItemChanged',
+      'A canonical Work Item changed. Reload Planning and try again.',
+    )
+  }
+}
+
 async function requirePlanningActiveOwner(
   principal: WorkspacePrincipal,
   ownerMemberKey: unknown,
@@ -4550,6 +4580,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         )
       }
       await requirePlanningLinkEntityPermissions(principal, snapshot.entities, input)
+      requireAuthorizedPlanningWorkItemRevision(
+        workItemState,
+        teamId,
+        workItemId,
+        detail.issue.revision,
+      )
       const response = await workItemDependencies.planning.putWorkItemLink(principal.directoryId, input, workItemState)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
@@ -4572,7 +4608,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<PlanningRevisionInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
       const current = snapshot.workItemLinks.find((link) =>
         link.teamId === teamId && link.workItemId === workItemId,
       )

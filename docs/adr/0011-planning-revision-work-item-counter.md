@@ -29,10 +29,11 @@ Canonical Work Item の作成・更新・削除も、roll-up の入力を 1 つ�
 - `revision - structureRevision == sourceRevisionCount - structureSourceRevisionCount` なら、最後の Planning
   commit 以降は Work Item だけが revision を進めている。counter を書かない writer が revision を進めると
   差が合わなくなり、Planning の変更として扱われる。counter がない `META` も同じく変更ありとみなす。
-- Work Item の状態に依存しない操作（entity の作成・更新・複製・移動、entity 間 dependency、Work Item link、
-  Cycle への一括追加・削除）だけが、呼び出し元の `expectedRevision` が `structureRevision` 以降で、そこから
-  Work Item だけが進めた場合を受け付ける。Work Item link と一括追加は対象 Work Item の revision を同じ
-  transaction で検査する。route は現在の snapshot で認可し、client は commit 直前に再検査し、Work Item の
+- Work Item の状態に依存しない操作（entity の作成・更新・複製・移動、entity 間 dependency、Work Item link の
+  作成・置換、Cycle への一括追加・削除）だけが、呼び出し元の `expectedRevision` が `structureRevision` 以降で、
+  そこから Work Item だけが進めた場合を受け付ける。これらの Work Item 側の操作は、認可に使った Work Item の
+  revision を同じ transaction で検査し、認可後に Work Item が別 Project へ移った場合などは失敗させる。
+  Work Item link の削除は Work Item の revision を検査しないため、完全一致のままにする。route は現在の snapshot で認可し、client は commit 直前に再検査し、Work Item の
   書き込みに追い越された commit は最大 3 回まで読み直して再試行する。
 - Archive・restore・rollover・次の Cycle・Work Item dependency・update の publish / cadence は、従来どおり
   revision の完全一致を要求する。

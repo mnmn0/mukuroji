@@ -2351,7 +2351,7 @@ abstract class BasePlanningClient implements PlanningClient {
           ),
         },
       }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+    })
   }
 
   /**
