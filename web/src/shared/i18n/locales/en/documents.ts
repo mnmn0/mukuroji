@@ -143,6 +143,7 @@ export const documentsMessages = {
   'documents.checklistWorkItem.submitting': 'Creating…',
   'documents.checklistWorkItem.required': 'Enter a title, Project, and assignee.',
   'documents.checklistWorkItem.error': 'Could not create the Work Item.',
+  'documents.checklistWorkItem.alreadyLinked': 'This item was already linked to a Work Item in another edit. Close the dialog to open it.',
   'documents.checklistWorkItem.linkError': 'The Work Item was created, but linking it to the item failed. Use Retry link to retry only the link.',
   'documents.checklistWorkItem.linkOnly': 'The Work Item already exists. Only the link to this item is retried.',
   'documents.checklistWorkItem.retryLink': 'Retry link',

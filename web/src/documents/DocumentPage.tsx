@@ -121,6 +121,7 @@ import type {
 import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
 import {
   createChecklistItemWorkItemRelation,
+  findChecklistItemWorkItemId,
   type ChecklistItemSource,
   type ChecklistWorkItemInput,
 } from './model/checklistWorkItems'
@@ -1724,9 +1725,19 @@ export function DocumentScreen({
     }
     const flushedRevision = await requireSavedDraft()
     const key = createChecklistWorkItemTargetKey(target)
+    const unlinkedWorkItemId = unlinkedChecklistWorkItems[key]
+    // Another editor may have converted the item while this dialog was open.
+    // Its link is kept rather than replaced by a second Work Item.
+    const linkedWorkItemId = findChecklistItemWorkItemId(
+      selectedDocument.relations,
+      target.blockId,
+      target.itemId,
+    )
+    if (linkedWorkItemId && linkedWorkItemId !== unlinkedWorkItemId) {
+      throw new Error(t('documents.checklistWorkItem.alreadyLinked'))
+    }
     const workItemId =
-      unlinkedChecklistWorkItems[key] ??
-      (await actions.createWorkItem(target, input))
+      unlinkedWorkItemId ?? (await actions.createWorkItem(target, input))
     try {
       await actions.applyOperations(
         selectedDocument.id,

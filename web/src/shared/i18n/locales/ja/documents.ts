@@ -143,6 +143,7 @@ export const documentsMessages = {
   'documents.checklistWorkItem.submitting': '作成中…',
   'documents.checklistWorkItem.required': 'タイトル、Project、担当者を入力してください。',
   'documents.checklistWorkItem.error': 'Work Item を作成できませんでした。',
+  'documents.checklistWorkItem.alreadyLinked': 'この項目は別の編集で Work Item にリンク済みです。ダイアログを閉じて開いてください。',
   'documents.checklistWorkItem.linkError': 'Work Item は作成しましたが、項目へのリンクに失敗しました。「リンクをやり直す」でリンクだけを再実行できます。',
   'documents.checklistWorkItem.linkOnly': 'Work Item は作成済みです。項目へのリンクだけをやり直します。',
   'documents.checklistWorkItem.retryLink': 'リンクをやり直す',
