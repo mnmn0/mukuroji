@@ -342,6 +342,27 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
   }
 }, 30_000)
 
+test('reuses a known server compatibility and retries an unknown one', async () => {
+  let healthRequests = 0
+  const api = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+    if (new URL(request.url).pathname !== '/api/health') return Response.json({}, { status: 404 })
+    healthRequests += 1
+    // The first read fails as a transient outage would; later reads report the range.
+    return healthRequests === 1 ? Response.json({}, { status: 503 })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 1, minimumApiRevision: 1 } })
+  } })
+  try {
+    const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
+      MUKUROJI_MCP_TEAM_ID: 'team', MUKUROJI_MCP_ASSIGNEE_ID: 'agent' })
+    expect((await factory.serverCompatibility()).status).toBe('unknown')
+    expect((await factory.serverCompatibility()).status).toBe('compatible')
+    expect((await factory.serverCompatibility()).status).toBe('compatible')
+    expect(healthRequests).toBe(2)
+  } finally {
+    await api.stop(true)
+  }
+})
+
 test('derives a stable instance ID without exposing host or account names', () => {
   const derived = deriveAgentInstanceId('codex', 'agent')
   expect(derived).toMatch(/^[0-9a-f]{64}$/u)

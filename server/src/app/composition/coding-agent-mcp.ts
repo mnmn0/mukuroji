@@ -60,7 +60,8 @@ export type CodingAgentMcpFactory = {
    */
   (): McpServer
   /**
-   * Compares this MCP build with the configured server, reading the server once per process.
+   * Compares this MCP build with the configured server. A known result is reused for the
+   * process; an unknown one is read again on the next call.
    *
    * @returns The compatibility status and message.
    */
@@ -80,10 +81,16 @@ export function composeCodingAgentMcp(environment: Record<string, string | undef
   const config = parsed.data
   const api = createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId: config.MUKUROJI_MCP_TEAM_ID })
   let compatibility: Promise<ServerCompatibility> | undefined
-  /** Reads the server's served MCP API revisions once and reuses the result. */
+  /** Reads the server's served MCP API revisions, reusing a known result and retrying an unknown one. */
   const serverCompatibility = () => {
-    compatibility ??= readServerCompatibility(config.MUKUROJI_MCP_URL).then((server) => assessServerCompatibility(server))
-    return compatibility
+    const pending = compatibility ?? readServerCompatibility(config.MUKUROJI_MCP_URL).then((server) => {
+      const assessed = assessServerCompatibility(server)
+      // A transient failure must not hide the server's range for the rest of the process.
+      if (assessed.status === 'unknown') compatibility = undefined
+      return assessed
+    })
+    compatibility = pending
+    return pending
   }
   const createServer = () => createCodingAgentMcpServer(api, {
     assigneeUserId: config.MUKUROJI_MCP_ASSIGNEE_ID,
