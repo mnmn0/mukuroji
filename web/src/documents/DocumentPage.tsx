@@ -1754,10 +1754,10 @@ export function DocumentScreen({
       }))
       throw new Error(t('documents.checklistWorkItem.linkError'))
     }
-    setUnlinkedChecklistWorkItems((current) => {
-      const { [key]: _linked, ...rest } = current
-      return rest
-    })
+    setUnlinkedChecklistWorkItems((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([entryKey]) => entryKey !== key),
+      ))
     setChecklistWorkItemTarget(undefined)
   }
 
