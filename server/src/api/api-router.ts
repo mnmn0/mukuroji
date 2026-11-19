@@ -17,6 +17,7 @@ import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerProjectCharterRoutes } from './routes/project-charter-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
+import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
 import { registerCollectionsRoutes } from './routes/collections-routes'
@@ -170,6 +171,7 @@ registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerProjectCharterRoutes(routeApp)
 registerScheduleBaselineRoutes(routeApp)
+registerDirectoryAdministrationRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
 registerCollectionsRoutes(routeApp)

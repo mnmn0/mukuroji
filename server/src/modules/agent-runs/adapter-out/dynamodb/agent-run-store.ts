@@ -19,6 +19,7 @@ import {
   calculateLeaseExpiry,
   createDefaultAgentSettings,
   createSavedAgentSettings,
+  isAgentRunId,
   type StoredAgentRun,
   type AgentRunRevocation,
   type StoredAgentRunClaim,
@@ -40,6 +41,12 @@ export const AGENT_RUN_WORK_ITEM_INDEX_NAME = 'WorkItemRunIndex'
 
 /** Sparse index that lists a Team's active runs by lease expiry. */
 export const AGENT_RUN_ACTIVE_INDEX_NAME = 'ActiveRunIndex'
+
+/**
+ * Sparse index that lists a Team's finished runs by finish time. Failed runs have their own
+ * partition, so the board reads every failure without reading the other finished runs.
+ */
+export const AGENT_RUN_FINISHED_INDEX_NAME = 'FinishedRunIndex'
 
 /**
  * Sparse index of the Teams that file runs to Triage and of failed runs waiting to be filed. Both
@@ -82,6 +89,29 @@ export type AgentRunDocumentClient = {
 export type AgentRunPage = {
   /** Runs in index order. */
   runs: StoredAgentRun[]
+  /** Continuation for the next page; absent on the last page. */
+  nextCursor?: string
+}
+
+/** Which finished runs a finished-run index query reads. */
+export type AgentRunFinishedGroup = 'failed' | 'other'
+
+/** A finished run as the finished-run index projects it. */
+export type AgentRunFinishedEntry = {
+  /** Run ID. */
+  runId: string
+  /** Work Item of the run. */
+  workItemId: string
+  /** How the run finished. */
+  outcome: AgentRunOutcome
+  /** Finish time. */
+  finishedAt: string
+}
+
+/** One page of the finished-run index and the opaque continuation for the next page. */
+export type AgentRunFinishedPage = {
+  /** Finished runs, newest finish first. */
+  runs: AgentRunFinishedEntry[]
   /** Continuation for the next page; absent on the last page. */
   nextCursor?: string
 }
@@ -214,6 +244,15 @@ export interface AgentRunStore {
    */
   getClaim(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunClaim | undefined>
   /**
+   * Strongly reads the ID of the newest run started on one Work Item. Every start, take over, and
+   * resume records it in the same transaction as the run, unlike the eventually consistent history index.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param workItemId - Work Item ID.
+   * @returns The run ID, or undefined when no run has been recorded since the record was introduced.
+   */
+  getLatestRunId(directoryId: string, teamId: string, workItemId: string): Promise<string | undefined>
+  /**
    * Strongly reads whether a person released, or another instance took over, a run of this member
    * and instance on the Work Item since the instance last started one there.
    * @param directoryId - Workspace ID.
@@ -279,12 +318,36 @@ export interface AgentRunStore {
    */
   listFinishedRuns(directoryId: string, teamId: string, cursor: string | undefined, limit: number): Promise<AgentRunPage>
   /**
-   * Builds the writes that create a run, claim its Work Item, and clear an earlier revocation of the
-   * same member and instance on it.
-   * @param run - New active run.
-   * @returns Run and claim puts that fail when either already exists, then the revocation delete.
+   * Lists a Team's finished runs from the finished-run index, newest finish first. The index is
+   * eventually consistent and projects only the run's identity, outcome, and finish time.
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param group - `failed` for failed runs, `other` for runs that finished any other way.
+   * @param since - When given, only runs that finished at or after this ISO time.
+   * @param cursor - Continuation from a previous page of the same query.
+   * @param limit - Page size from 1 to 100.
+   * @returns One page of finished runs.
    */
-  createStartItems(run: StoredAgentRun): AgentRunTransactItem[]
+  listFinishedRunsByTime(
+    directoryId: string,
+    teamId: string,
+    group: AgentRunFinishedGroup,
+    since: string | undefined,
+    cursor: string | undefined,
+    limit: number,
+  ): Promise<AgentRunFinishedPage>
+  /**
+   * Builds the writes that create a run, claim its Work Item, clear an earlier revocation of the
+   * same member and instance on it, and record the run as the Work Item's newest run.
+   * @param run - New active run.
+   * @param latest - When given, the newest run the caller read; the record must still name it, or be absent when undefined.
+   * @param latest.runId - Newest run ID the caller read, or undefined when it read none.
+   * @returns Run and claim puts that fail when either already exists, the revocation delete, then the newest-run put.
+   */
+  createStartItems(run: StoredAgentRun, latest?: {
+    /** Newest run ID the caller read, or undefined when it read none. */
+    runId: string | undefined
+  }): AgentRunTransactItem[]
   /**
    * Builds the checks that fence a Work Item mutation with the caller's claim and run. The lease is
    * extended after the mutation commits, so an older mutation never overwrites a newer heartbeat.
@@ -427,6 +490,25 @@ function runRecordKey(runId: string): string {
  */
 function claimRecordKey(workItemId: string): string {
   return `agent-run-claim#${workItemId}`
+}
+
+/**
+ * Builds the key of the row that names a Work Item's newest run.
+ *
+ * @param workItemId - Work Item ID.
+ * @returns Sort key.
+ */
+function latestRunRecordKey(workItemId: string): string {
+  return `agent-run-latest#${workItemId}`
+}
+
+/**
+ * Sort key of a run in the Work Item history index: start time, then run ID.
+ * @param run - Run to place.
+ * @returns The sort key.
+ */
+function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): string {
+  return `${run.startedAt}#${run.runId}`
 }
 
 /**
@@ -583,7 +665,23 @@ function parseRun(
     reportCount: storedInteger(item, 'reportCount'),
     ...readLastReport(item),
     ...(item.stallTriagedAt === undefined ? {} : { stallTriagedAt: storedTimestamp(item, 'stallTriagedAt') }),
+    ...readResumedFromRunId(item, runId),
   }
+}
+
+/**
+ * Reads the earlier run a resumed run links to.
+ *
+ * @param item - Stored run row.
+ * @param runId - ID of the run the row stores.
+ * @returns The linked run ID, or nothing when the run was not started by a resume.
+ */
+function readResumedFromRunId(item: Record<string, unknown>, runId: string): Pick<StoredAgentRun, 'resumedFromRunId'> {
+  if (item.resumedFromRunId === undefined) return {}
+  const resumedFromRunId = storedString(item, 'resumedFromRunId')
+  // A run resumes an earlier run of the same Work Item, never itself.
+  if (!isAgentRunId(resumedFromRunId) || resumedFromRunId === runId) throw createAgentRunIntegrityError()
+  return { resumedFromRunId }
 }
 
 /**
@@ -707,6 +805,71 @@ function parseReport(
 const storedOutcomes: readonly AgentRunOutcome[] = ['completed', 'paused', 'failed', 'released', 'superseded']
 
 /**
+ * Builds the finished-run index partition of a Team's runs in one group.
+ *
+ * @param partition - Team partition of the run table.
+ * @param group - Failed runs or the other finished runs.
+ * @returns Index partition.
+ */
+function finishedRunPartition(partition: string, group: AgentRunFinishedGroup): string {
+  return `${partition}#${group === 'failed' ? 'failed-run' : 'finished-run'}`
+}
+
+/**
+ * Builds the finished-run index keys of a finished run.
+ *
+ * @param run - Finished run with its outcome and finish time.
+ * @param run.directoryId - Workspace ID.
+ * @param run.teamId - Team ID.
+ * @param run.runId - Run ID.
+ * @param run.outcome - How the run finished.
+ * @param run.finishedAt - Finish time.
+ * @returns Index partition and sort key.
+ */
+function finishedRunIndexKeys(run: {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Run ID. */
+  runId: string
+  /** How the run finished. */
+  outcome: AgentRunOutcome
+  /** Finish time. */
+  finishedAt: string
+}): { finishedRunPartition: string; finishedRunSortKey: string } {
+  const partition = createAgentRunPartition(run.directoryId, run.teamId)
+  return {
+    finishedRunPartition: finishedRunPartition(partition, run.outcome === 'failed' ? 'failed' : 'other'),
+    finishedRunSortKey: `${run.finishedAt}#${run.runId}`,
+  }
+}
+
+/**
+ * Parses one finished-run index item and fails closed on any unexpected shape.
+ *
+ * @param item - Projected index item.
+ * @param partition - Index partition the query read.
+ * @param group - Group the partition holds.
+ * @returns Finished-run entry.
+ */
+function parseFinishedEntry(item: Record<string, unknown>, partition: string, group: AgentRunFinishedGroup): AgentRunFinishedEntry {
+  const runId = storedString(item, 'runId')
+  const finishedAt = storedTimestamp(item, 'finishedAt')
+  const outcome = storedOutcomes.find((candidate) => candidate === item.outcome)
+  if (
+    item.finishedRunPartition !== partition ||
+    item.finishedRunSortKey !== `${finishedAt}#${runId}` ||
+    item.recordKey !== runRecordKey(runId) ||
+    !outcome ||
+    (outcome === 'failed') !== (group === 'failed')
+  ) {
+    throw createAgentRunIntegrityError()
+  }
+  return { runId, workItemId: storedString(item, 'workItemId'), outcome, finishedAt }
+}
+
+/**
  * Serializes a run row with its index keys.
  *
  * @param run - Run to store.
@@ -722,9 +885,12 @@ function serializeRun(run: StoredAgentRun): Record<string, unknown> {
     workspaceId: directoryId,
     ...fields,
     workItemRunKey: `${partition}#${run.workItemId}`,
-    workItemRunSortKey: `${run.startedAt}#${run.runId}`,
+    workItemRunSortKey: workItemRunSortKey(run),
     ...(run.state === 'active'
       ? { activeRunPartition: partition, activeRunSortKey: `${run.leaseExpiresAt}#${run.runId}` }
+      : {}),
+    ...(run.state === 'finished' && run.outcome !== undefined && run.finishedAt !== undefined
+      ? finishedRunIndexKeys({ ...run, outcome: run.outcome, finishedAt: run.finishedAt })
       : {}),
   }
 }
@@ -782,6 +948,8 @@ export function isSameSettingsSave(saved: AgentSettings, update: ValidatedAgentS
     saved.allowTakeoverAfterLeaseExpiry === update.allowTakeoverAfterLeaseExpiry &&
     saved.readyStatusIds.length === update.readyStatusIds.length &&
     saved.readyStatusIds.every((id, index) => id === update.readyStatusIds[index]) &&
+    saved.resumableStatusIds.length === update.resumableStatusIds.length &&
+    saved.resumableStatusIds.every((id, index) => id === update.resumableStatusIds[index]) &&
     saved.requireAcceptanceCriteria === update.requireAcceptanceCriteria &&
     saved.fileFailedRunsToTriage === update.fileFailedRunsToTriage &&
     saved.fileStalledRunsToTriage === update.fileStalledRunsToTriage &&
@@ -852,10 +1020,13 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
   if (revision < 1 || leaseMinutes < 1) throw createAgentRunIntegrityError()
   // Rows saved before Ready statuses and briefs existed lack them; any other value, null included, is corrupt.
   const readyStatusIds = item.readyStatusIds === undefined ? [] : item.readyStatusIds
+  const resumableStatusIds = item.resumableStatusIds === undefined ? [] : item.resumableStatusIds
   const projectBriefs = item.projectBriefs === undefined ? {} : item.projectBriefs
   if (
     !Array.isArray(readyStatusIds) ||
     !readyStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
+    !Array.isArray(resumableStatusIds) ||
+    !resumableStatusIds.every((id): id is string => typeof id === 'string' && id !== '') ||
     (item.brief !== undefined && (typeof item.brief !== 'string' || item.brief === '')) ||
     (item.requireAcceptanceCriteria !== undefined && typeof item.requireAcceptanceCriteria !== 'boolean') ||
     (item.fileFailedRunsToTriage !== undefined && typeof item.fileFailedRunsToTriage !== 'boolean') ||
@@ -878,6 +1049,7 @@ function readStoredSettings(item: Record<string, unknown>, directoryId: string, 
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: item.allowTakeoverAfterLeaseExpiry,
     readyStatusIds,
+    resumableStatusIds,
     requireAcceptanceCriteria: item.requireAcceptanceCriteria === true,
     ...(typeof item.acceptanceCriteriaFieldId === 'string' ? { acceptanceCriteriaFieldId: item.acceptanceCriteriaFieldId } : {}),
     ...(typeof item.brief === 'string' ? { brief: item.brief } : {}),
@@ -935,6 +1107,25 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       instanceIdHash: storedString(item, 'instanceIdHash'),
       assigneeUserId: storedString(item, 'assigneeUserId'),
     }
+  }
+
+  /** @inheritdoc */
+  async getLatestRunId(directoryId: string, teamId: string, workItemId: string): Promise<string | undefined> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#tableName,
+      Key: { directoryTeamId: createAgentRunPartition(directoryId, teamId), recordKey: latestRunRecordKey(workItemId) },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (item === undefined) return undefined
+    const runId = item.runId
+    if (
+      item.entityType !== 'agent-run-latest' || item.workItemId !== workItemId || item.workspaceId !== directoryId ||
+      typeof runId !== 'string' || !isAgentRunId(runId)
+    ) {
+      throw createAgentRunIntegrityError()
+    }
+    return runId
   }
 
   /** @inheritdoc */
@@ -1083,7 +1274,30 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
         return current
       })))
     }
-    return this.#page(runs, response.LastEvaluatedKey)
+    if (cursor !== undefined) return this.#page(runs, response.LastEvaluatedKey)
+    // The index can still miss a run that just started, so the first page also reads the newest run
+    // strongly; readers such as the next-task selection judge the Work Item by that run.
+    const latestRunId = await this.getLatestRunId(directoryId, teamId, workItemId)
+    if (latestRunId === undefined || runs.some((run) => run.runId === latestRunId)) return this.#page(runs, response.LastEvaluatedKey)
+    const latest = await this.getRun(directoryId, teamId, latestRunId)
+    if (!latest || latest.workItemId !== workItemId) throw createAgentRunIntegrityError()
+    // The run takes its place in the index order, newest start first, so the page and its cursor agree
+    // with the pages after it. A resume starts after the run it resumes, so the newest run comes first.
+    const latestSortKey = workItemRunSortKey(latest)
+    const position = runs.findIndex((run) => workItemRunSortKey(run) < latestSortKey)
+    runs.splice(position === -1 ? runs.length : position, 0, latest)
+    if (runs.length <= readLimit(limit)) return this.#page(runs, response.LastEvaluatedKey)
+    // The page keeps its size; the next page continues after the last run kept, so the one dropped here
+    // is read there.
+    runs.pop()
+    const last = runs.at(-1)
+    if (!last) throw createAgentRunIntegrityError()
+    return this.#page(runs, {
+      directoryTeamId: createAgentRunPartition(directoryId, teamId),
+      recordKey: runRecordKey(last.runId),
+      workItemRunKey: key,
+      workItemRunSortKey: workItemRunSortKey(last),
+    })
   }
 
   /** @inheritdoc */
@@ -1340,6 +1554,37 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
+  async listFinishedRunsByTime(
+    directoryId: string,
+    teamId: string,
+    group: AgentRunFinishedGroup,
+    since: string | undefined,
+    cursor: string | undefined,
+    limit: number,
+  ): Promise<AgentRunFinishedPage> {
+    if (since !== undefined && !Number.isFinite(Date.parse(since))) {
+      throw new AgentRunError('validation_failed', 'since must be an ISO time.', { pointer: '/since' })
+    }
+    const partition = finishedRunPartition(createAgentRunPartition(directoryId, teamId), group)
+    const response = await this.#client.send(new QueryCommand({
+      TableName: this.#tableName,
+      IndexName: AGENT_RUN_FINISHED_INDEX_NAME,
+      KeyConditionExpression: '#finishedRunPartition = :partition' + (since === undefined ? '' : ' AND #finishedRunSortKey >= :since'),
+      ExpressionAttributeNames: {
+        '#finishedRunPartition': 'finishedRunPartition',
+        ...(since === undefined ? {} : { '#finishedRunSortKey': 'finishedRunSortKey' }),
+      },
+      ExpressionAttributeValues: { ':partition': partition, ...(since === undefined ? {} : { ':since': since }) },
+      ScanIndexForward: false,
+      Limit: readLimit(limit),
+      ExclusiveStartKey: decodeCursor(cursor, 'finishedRunPartition', partition),
+    }))
+    const runs = (response.Items ?? []).map((item) => parseFinishedEntry(item, partition, group))
+    const nextCursor = encodeCursor(response.LastEvaluatedKey)
+    return { runs, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
   async listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage> {
     const partition = createAgentRunPartition(directoryId, teamId)
     const prefix = reportRecordKeyPrefix(workItemId)
@@ -1440,8 +1685,20 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createStartItems(run: StoredAgentRun): AgentRunTransactItem[] {
+  createStartItems(run: StoredAgentRun, latest?: {
+    /** Newest run ID the caller read, or undefined when it read none. */
+    runId: string | undefined
+  }): AgentRunTransactItem[] {
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const latestCondition = latest === undefined
+      ? {}
+      : latest.runId === undefined
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: '#runId = :latestRunId',
+            ExpressionAttributeNames: { '#runId': 'runId' },
+            ExpressionAttributeValues: { ':latestRunId': latest.runId },
+          }
     return [
       {
         Put: {
@@ -1471,6 +1728,21 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
         Delete: {
           TableName: this.#tableName,
           Key: { directoryTeamId: partition, recordKey: revocationRecordKey(run) },
+        },
+      },
+      {
+        // The newest run is read strongly from here, so a resume links the run that really came last.
+        Put: {
+          TableName: this.#tableName,
+          Item: {
+            directoryTeamId: partition,
+            recordKey: latestRunRecordKey(run.workItemId),
+            entityType: 'agent-run-latest',
+            workspaceId: run.directoryId,
+            workItemId: run.workItemId,
+            runId: run.runId,
+          },
+          ...latestCondition,
         },
       },
     ]
@@ -1530,6 +1802,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
     }
     const partition = createAgentRunPartition(run.directoryId, run.teamId)
     const failed = run.outcome === 'failed'
+    const finishedIndexKeys = finishedRunIndexKeys({ ...run, outcome: run.outcome, finishedAt: run.finishedAt })
     const conditions = [
       '#state = :active',
       ...(expectedInstanceIdHash === undefined ? [] : ['#instanceIdHash = :instanceIdHash']),
@@ -1542,6 +1815,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
           Key: { directoryTeamId: partition, recordKey: runRecordKey(run.runId) },
           // A failed run joins the Triage outbox in the same write, so the worker never misses it.
           UpdateExpression: 'SET #state = :finished, #outcome = :outcome, #finishedAt = :finishedAt, #finishedBy = :finishedBy' +
+            ', #finishedRunPartition = :finishedRunPartition, #finishedRunSortKey = :finishedRunSortKey' +
             (failed ? ', #triageIndexPartition = :triageIndexPartition, #triageIndexSortKey = :triageIndexSortKey' : '') +
             ' REMOVE #activeRunPartition, #activeRunSortKey, #lastHeartbeatRequestAt',
           ConditionExpression: conditions.join(' AND '),
@@ -1555,6 +1829,8 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
             '#activeRunPartition': 'activeRunPartition',
             '#activeRunSortKey': 'activeRunSortKey',
             '#lastHeartbeatRequestAt': 'lastHeartbeatRequestAt',
+            '#finishedRunPartition': 'finishedRunPartition',
+            '#finishedRunSortKey': 'finishedRunSortKey',
             ...(failed ? { '#triageIndexPartition': 'triageIndexPartition', '#triageIndexSortKey': 'triageIndexSortKey' } : {}),
           },
           ExpressionAttributeValues: {
@@ -1565,6 +1841,8 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
             ':outcome': run.outcome,
             ':finishedAt': run.finishedAt,
             ':finishedBy': run.finishedBy,
+            ':finishedRunPartition': finishedIndexKeys.finishedRunPartition,
+            ':finishedRunSortKey': finishedIndexKeys.finishedRunSortKey,
             ':active': 'active',
             ...(expectedInstanceIdHash === undefined ? {} : { ':instanceIdHash': expectedInstanceIdHash }),
             ...(fenceProgress ? { ':reportCount': run.reportCount, ':lastHeartbeatAt': run.lastHeartbeatAt } : {}),
@@ -1612,18 +1890,20 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       throw new TypeError('createTakeOverItems requires a superseded run and an active successor of another instance.')
     }
     const [closeUpdate, , revocationPut] = this.createCloseItems(superseded, superseded.instanceIdHash)
-    const [runPut, claimPut, revocationDelete] = this.createStartItems(successor)
-    if (!closeUpdate?.Update || !revocationPut || !runPut || !claimPut?.Put || !revocationDelete) {
+    const [runPut, claimPut, revocationDelete, latestPut] = this.createStartItems(successor)
+    if (!closeUpdate?.Update || !revocationPut || !runPut || !claimPut?.Put || !revocationDelete || !latestPut) {
       throw new TypeError('The close and start builders returned unexpected items.')
     }
     return [
       {
         Update: {
           ...closeUpdate.Update,
-          // A heartbeat that renews the lease first wins; only a stalled run can be taken over.
+          // A heartbeat that renews the lease first wins; only a stalled run can be taken over. The lease is
+          // compared with the time of the take over, which the successor's first heartbeat records; its start
+          // time may be moved later to keep the history in order.
           ConditionExpression: `${closeUpdate.Update.ConditionExpression} AND #leaseExpiresAt < :takenOverAt`,
           ExpressionAttributeNames: { ...closeUpdate.Update.ExpressionAttributeNames, '#leaseExpiresAt': 'leaseExpiresAt' },
-          ExpressionAttributeValues: { ...closeUpdate.Update.ExpressionAttributeValues, ':takenOverAt': successor.startedAt },
+          ExpressionAttributeValues: { ...closeUpdate.Update.ExpressionAttributeValues, ':takenOverAt': successor.lastHeartbeatAt },
         },
       },
       {
@@ -1643,6 +1923,7 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       revocationPut,
       runPut,
       revocationDelete,
+      latestPut,
     ]
   }
 

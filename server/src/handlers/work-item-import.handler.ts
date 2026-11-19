@@ -4,9 +4,16 @@ import {
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
+import {
+  createWorkerSecretEnvironmentHydrator,
+} from '../app/composition/worker-secret-environment'
 import type {
   WorkItemImportSqsEvent,
 } from '../modules/work-items/work-item-import'
+
+const hydrateSecrets = createWorkerSecretEnvironmentHydrator([
+  'ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET',
+])
 
 let productionHandler:
   | ReturnType<typeof createProductionWorkItemImportHandler>
@@ -19,6 +26,7 @@ let productionHandler:
  * @returns The partial-batch response containing retryable record identifiers.
  */
 async function processWorkItemImport(event: WorkItemImportSqsEvent) {
+  await hydrateSecrets()
   productionHandler ??= createProductionWorkItemImportHandler()
   return await productionHandler(event)
 }

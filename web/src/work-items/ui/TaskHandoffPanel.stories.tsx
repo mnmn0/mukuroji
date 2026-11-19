@@ -3,8 +3,8 @@ import { createDefaultUnscheduledWorkItemSchedule } from '@mukuroji/contracts'
 import { useState } from 'react'
 import { expect, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
-import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
-import { referoTaskFixtures } from '../fixtures'
+import { referoTaskFixtures } from '../../tasks/fixtures'
+import { teamWorkItemConfigurationFixture } from '../fixtures'
 import { TaskHandoffPanel, type TaskHandoffPanelProps } from './TaskHandoffPanel'
 
 const task = {
@@ -14,7 +14,7 @@ const task = {
 }
 
 const meta = {
-  title: 'Application/Tasks/TaskHandoffPanel',
+  title: 'Application/Work Items/TaskHandoffPanel',
   component: TaskHandoffPanel,
   args: {
     configuration: teamWorkItemConfigurationFixture,

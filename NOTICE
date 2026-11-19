@@ -1,0 +1,7 @@
+mukuroji
+Copyright 2026 mnmn0
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The distributed coding agent MCP bundle (mcp.mjs) includes third-party packages;
+their licenses are listed in mcp.mjs.LICENSES.txt attached to each release.

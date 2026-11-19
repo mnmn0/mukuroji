@@ -4816,6 +4816,104 @@ test.describe('authenticated task page', () => {
     ).toBeVisible()
   })
 
+  test('Issue #379: Gantt の倍率・今日線・1 行表示・進捗線を切り替え、チャートだけを横向きで印刷する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const display = page.getByTestId('task-gantt-display')
+    const timeline = page.getByTestId('task-gantt-timeline-wireframe')
+    await expect(page.getByTestId('task-gantt-today-line')).toBeVisible()
+    await expect(page.getByTestId('task-gantt-today-column')).toHaveAttribute('aria-current', 'date')
+    await expect(page.getByTestId('task-gantt-today-column')).toHaveAccessibleName('2026-06-05')
+
+    await display.getByLabel('表示倍率').selectOption('week')
+    await expect(page.getByRole('columnheader', { name: '2026-06-01 – 2026-06-07', exact: true })).toBeVisible()
+    await expect(page.getByTestId('task-gantt-today-column')).toHaveAccessibleName('2026-06-01 – 2026-06-07')
+    await expect(page.getByTestId('task-gantt-today-line')).toBeVisible()
+
+    const standardHeight = (await timeline.boundingBox())?.height ?? 0
+    const compact = display.getByRole('button', { name: '1 行表示', exact: true })
+    await compact.click()
+    await expect(compact).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('select[id^="gantt-mode-"]')).toHaveCount(0)
+    await expect.poll(async () => (await timeline.boundingBox())?.height ?? 0).toBeLessThan(standardHeight / 2)
+    await expect(page.getByTestId('task-gantt-bar-wireframe')).toBeVisible()
+
+    const progressLine = display.getByRole('button', { name: '進捗線', exact: true })
+    await progressLine.click()
+    await expect(progressLine).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
+
+    // A three-day bar on the month scale is widened to stay visible, but its resize handle stays
+    // at the real end date instead of the widened edge.
+    await display.getByLabel('表示倍率').selectOption('month')
+    const barBox = await page.getByTestId('task-gantt-bar-wireframe').boundingBox()
+    const handleBox = await page.getByTestId('task-gantt-resize-wireframe').boundingBox()
+    expect(barBox).not.toBeNull()
+    expect(handleBox).not.toBeNull()
+    if (barBox && handleBox) {
+      expect(handleBox.x + handleBox.width / 2).toBeLessThan(barBox.x + barBox.width / 2)
+    }
+
+    await page.evaluate(() => {
+      window.print = () => {
+        const root = document.querySelector<HTMLElement>('[data-print-root="task-gantt"]')
+        document.body.dataset.e2ePrinted = [
+          document.documentElement.dataset.printTarget,
+          root?.dataset.printPaper,
+          root?.style.getPropertyValue('zoom') ? 'zoomed' : 'unzoomed',
+        ].join(',')
+      }
+    })
+    await display.getByRole('button', { name: 'A3 横で印刷', exact: true }).click()
+    await expect(page.locator('body')).toHaveAttribute('data-e2e-printed', 'task-gantt,a3,zoomed')
+
+    await page.emulateMedia({ media: 'print' })
+    await expect(page.getByTestId('task-gantt-bar-wireframe')).toBeVisible()
+    await expect(display).toBeHidden()
+    await expect(page.getByRole('tab', { name: '期限順', exact: true })).toBeHidden()
+
+    await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+    await expect(page.locator('html')).not.toHaveAttribute('data-print-target', /.*/)
+    await expect(page.getByRole('tab', { name: '期限順', exact: true })).toBeVisible()
+    await page.emulateMedia({ media: 'screen' })
+  })
+
+  test('Issue #379: Gantt の印刷は段階表示で隠れている行も含める', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    const fixture = referoTaskFixtures[0]!
+    const tasks = Array.from({ length: 210 }, (_, index) => ({
+      ...fixture,
+      id: `print-${index}`,
+      title: `Print task ${index}`,
+    }))
+    await mockAuthenticatedTaskPage(page, tasks)
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('task-row-print-0')).toBeVisible()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    await expect(page.getByRole('tab', { name: '期限順', exact: true })).toHaveAttribute('aria-selected', 'true')
+
+    const chartRows = page.getByTestId('task-gantt-scroll').locator('article[role="row"]')
+    await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
+    await expect(chartRows).toHaveCount(200)
+
+    await page.evaluate(() => {
+      window.print = () => {
+        document.body.dataset.e2ePrintedRows = String(
+          document.querySelectorAll('[data-testid="task-gantt-scroll"] article[role="row"]').length,
+        )
+      }
+    })
+    await page.getByTestId('task-gantt-display').getByRole('button', { name: 'A4 横で印刷', exact: true }).click()
+    await expect(page.locator('body')).toHaveAttribute('data-e2e-printed-rows', '210')
+
+    await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+    await expect(chartRows).toHaveCount(200)
+    await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
+  })
+
   test('Issue #463: 別 Project へ移ると、その Project の saved views が決まるまで一覧を読まない', async ({ page }) => {
     let releaseRoadmapViews: (() => void) | undefined
     const roadmapViewsGate = new Promise<void>((resolve) => {
@@ -11637,6 +11735,25 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => analyticsState.queryInputs.at(-1)?.widgets.map(
       (widget) => widget.id,
     )).toEqual(analyticsReportFixtures[0].widgets.map((widget) => widget.id))
+  })
+
+  test('Analyticsの集計上限を超えたときは対象の絞り込み方を表示する', async ({ page }) => {
+    await mockAnalyticsReportsPage(page)
+    await page.route('**/api/analytics/query', async (route) => {
+      await route.fulfill({
+        status: 413,
+        json: {
+          code: 'AnalyticsHistoryLimitExceeded',
+          message: 'Analytics history requires more than 500 entity timeline queries. Narrow the report scope.',
+        },
+      })
+    })
+
+    await page.goto('/reports')
+
+    await expect(page.getByRole('alert')).toContainText(
+      '集計対象が上限を超えました。期間を短くするか、Team や Project で絞り込んでください。',
+    )
   })
 
   test('Analyticsの非canonical queryは現行URLへ戻して表示を継続する', async ({ page }) => {

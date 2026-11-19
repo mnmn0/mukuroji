@@ -205,10 +205,13 @@ import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
+import type { TaskGanttOutline } from './TaskGanttView'
 import { CustomerImpactPanel } from '../../customers/ui'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
+import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
+import { listTaskGanttRowTasks } from '../model/taskGanttRows'
 
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
@@ -373,6 +376,8 @@ export type TaskScreenProps = {
   taskViewDefinition?: TaskViewDefinition
   /** Presentation settings rendered by table and board layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Hierarchy shown as an outline by the table and the Gantt chart. */
+  outline?: TaskGanttOutline
   /** Optional route-controlled task view state. */
   viewState?: TaskScreenViewState
   /** Persists one complete next route-controlled task view state. */
@@ -399,6 +404,8 @@ export type TaskScreenProps = {
   teams: ProjectDirectoryTeam[]
   /** Display name of the current Project. */
   projectName?: string
+  /** Opens the Project overview, when the Project's Team is known. */
+  onOpenProjectOverview?: () => void
   /** Display name of the current Project's selected Team. */
   teamName?: string
   /** Team through which the current Project was selected. */
@@ -509,6 +516,8 @@ export type TaskScreenProps = {
   detailErrorMessage?: string
   /** Changes the Work Item selected by the detail pane. */
   onSelectedIssueChange?: (task: CanonicalWorkItem) => void
+  /** Archives (true) or restores (false) one Work Item from the detail pane. */
+  onArchiveTask?: (task: CanonicalWorkItem, archived: boolean) => Promise<void>
   /** Adds or removes the displayed Project from quick access. */
   onProjectQuickAccessToggle?: () => void
   /** Updates editable fields on the selected Work Item; resolves cancelled when the person declines. */
@@ -607,6 +616,7 @@ export function TaskScreen({
   userInitial,
   currentUserProjectKey,
   teams,
+  onOpenProjectOverview,
   projectName,
   teamName,
   activeProjectTeamId,
@@ -660,6 +670,7 @@ export function TaskScreen({
   taskViewToolbar,
   taskViewDefinition,
   taskViewPresentation,
+  outline,
   planningErrorMessage,
   planningSnapshot,
   onLoadMoreProjectUsers,
@@ -667,6 +678,7 @@ export function TaskScreen({
   onDeleteRelation,
   onProjectUserQueryChange,
   onRemoveProjectMember,
+  onArchiveTask,
   onSelectedIssueChange,
   onProjectQuickAccessToggle,
   onCreateTask,
@@ -1244,17 +1256,32 @@ export function TaskScreen({
     () => selectedBulkItems.map((item) => item.selectionKey),
     [selectedBulkItems],
   )
+  // "Select visible" and keyboard moves cover only the rows shown, in their order: the Gantt
+  // chart's schedule and outline order, or the table's outline order. An outline leaves out the
+  // children of collapsed parents.
+  const shownTasks = useMemo(
+    () => activeTab === 'gantt'
+      ? listTaskGanttRowTasks(visibleTasks, outline ? { outline } : {})
+      : outline
+        ? createMultiTeamWorkItemOutlineRows(
+            visibleTasks,
+            outline.hierarchies,
+            outline.collapsedKeys,
+          ).map((row) => row.item)
+        : visibleTasks,
+    [activeTab, outline, visibleTasks],
+  )
   const visibleBulkItems = useMemo(
-    () => visibleTasks.map((task) => createBulkOperationSelection(task)),
-    [visibleTasks],
+    () => shownTasks.map((task) => createBulkOperationSelection(task)),
+    [shownTasks],
   )
   const visibleActionTargets = useMemo<WorkItemActionTarget[]>(
-    () => visibleTasks.map((task) => ({
+    () => shownTasks.map((task) => ({
       expectedRevision: task.revision,
       teamId: task.teamId,
       workItemId: task.id,
     })),
-    [visibleTasks],
+    [shownTasks],
   )
   const visibleTaskViewKeys = useMemo(
     () => visibleActionTargets.map((target) =>
@@ -3447,6 +3474,7 @@ export function TaskScreen({
             }
           } : undefined}
           onMobileSidebarOpen={openMobileSidebar}
+          onOpenProjectOverview={onOpenProjectOverview}
           onProjectQuickAccessToggle={onProjectQuickAccessToggle}
           onTabChange={(nextActiveTab) => {
             if (isAiOperationPendingRef.current) return false
@@ -3799,6 +3827,7 @@ export function TaskScreen({
                 taskErrorMessage={taskErrorMessage}
                 taskViewToolbar={taskViewToolbar}
                 taskViewPresentation={taskViewPresentation}
+                outline={outline}
                 tasks={visibleTasks}
                 visibleBulkItems={visibleBulkItems}
                 workspaceMembers={workspaceMembers}
@@ -3861,6 +3890,7 @@ export function TaskScreen({
                         () => onAddRelation(issueId, input),
                       )
                     : undefined}
+                  onArchiveIssue={canMutateDetailTask && !isRetainedDetail ? onArchiveTask : undefined}
                   onClose={handleCloseDetail}
                   onAiOperationPendingChange={reportAiOperationPending}
                   onCommentDraftDirtyChange={(isDirty) => {

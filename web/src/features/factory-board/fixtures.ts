@@ -45,7 +45,11 @@ export const factoryBoardFixtureItems: FactoryBoardItem[] = [
   },
   {
     workItem: { id: 'release-notes', title: 'リリースノートの下書きを作る', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'tanaka@example.com' },
-    run: createRun('release-notes', 2, { runtime: 'codex', agentName: 'Codex', assigneeUserId: 'tanaka@example.com', leaseExpiresAt: '2026-10-22T02:25:00.000Z' }),
+    // Resumed after an earlier paused run of the same Work Item.
+    run: createRun('release-notes', 2, {
+      runtime: 'codex', agentName: 'Codex', assigneeUserId: 'tanaka@example.com', leaseExpiresAt: '2026-10-22T02:25:00.000Z',
+      resumedFromRunId: 'run_00000000-0000-4000-8000-000000000099',
+    }),
   },
   {
     workItem: { id: 'manual-start', title: '人が開始した調査タスク', workflowStatusId: 'in-progress', statusCategory: 'started', assignedProjectId: 'refero', assigneeUserId: 'sato@example.com', assigneeName: '佐藤 花子', assigneeEmail: 'sato@example.com' },

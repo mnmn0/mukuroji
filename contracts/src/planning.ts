@@ -353,6 +353,21 @@ export type PlanningUpdateTargetSummary = {
 /** Cycle 終了時の未完了 Work Item の扱いです。 */
 export type CycleCarryOverPolicy = 'move-incomplete' | 'keep-incomplete'
 
+/**
+ * Cycle の自動化設定です。
+ *
+ * 日付は date-only なので、期日の判定は UTC の日付で行います。
+ */
+export type CycleAutomation = {
+  /** 終了日の {@link CYCLE_AUTO_CREATE_LEAD_DAYS} 日前から、cadence に従って次の Cycle を作ります。 */
+  createNext: boolean
+  /** 終了日の翌日に Cycle を完了し、carry-over policy に従って次の Cycle へ持ち越します。 */
+  rolloverAtEnd: boolean
+}
+
+/** 次の Cycle を自動で作る、終了日より前の日数です。 */
+export const CYCLE_AUTO_CREATE_LEAD_DAYS = 3
+
 /** Goal / OKR hierarchy での entity の役割です。 */
 export type PlanningGoalFramework = 'goal' | 'objective' | 'key-result'
 
@@ -400,6 +415,10 @@ export type PlanningEntity = {
   capacity?: number
   /** Cycle rollover 時の未完了 Work Item policy です。 */
   carryOverPolicy?: CycleCarryOverPolicy
+  /** Cycle の自動化設定です。Cycle だけが持てます。 */
+  automation?: CycleAutomation
+  /** この Cycle から作成した次の Cycle の ID です。server が設定します。 */
+  nextCycleId?: string
   /** Goal/OKR hierarchy 上の役割です。 */
   goalFramework?: PlanningGoalFramework
   /** Soft archive した日時の ISO 8601 timestamp です。 */
@@ -442,6 +461,10 @@ export type PlanningWorkItemLink = {
   milestoneId?: string
   /** Work Item が寄与する Goal / OKR entity ID 一覧です。 */
   goalIds: string[]
+  /** Rollover でこの Cycle へ持ち越した元の Cycle ID です。Cycle を手で変えると消えます。 */
+  carriedOverFromCycleId?: string
+  /** 直近の rollover で持ち越した日時の ISO 8601 timestamp です。 */
+  carriedOverAt?: string
   /** Link 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
 }
@@ -563,6 +586,8 @@ export type CreatePlanningEntityInput = {
   capacity?: number
   /** Cycle rollover policy です。 */
   carryOverPolicy?: CycleCarryOverPolicy
+  /** Cycle の自動化設定です。 */
+  automation?: CycleAutomation
   /** Goal/OKR hierarchy 上の役割です。 */
   goalFramework?: PlanningGoalFramework
   /** 読み込み時点の planning graph revision です。 */
@@ -597,6 +622,8 @@ export type PlanningEntityPatch = {
   capacity?: number
   /** 変更後の Cycle rollover policy です。 */
   carryOverPolicy?: CycleCarryOverPolicy
+  /** 変更後の Cycle の自動化設定です。null で解除します。 */
+  automation?: CycleAutomation | null
   /** 変更後の Goal/OKR hierarchy 上の役割です。 */
   goalFramework?: PlanningGoalFramework
 }
@@ -880,11 +907,50 @@ export type PlanningUpdatePublishResponse = {
 
 /** Cycle rollover API の入力です。 */
 export type CycleRolloverInput = {
-  /** 未完了 Work Item の移動先 Cycle ID です。一度に検証できる link は49件までです。 */
+  /**
+   * 未完了 Work Item の移動先 Cycle ID です。1回の呼び出しで移動する link は
+   * {@link CYCLE_ROLLOVER_BATCH_SIZE} 件までで、残りがあれば元の Cycle は完了せず
+   * `remainingWorkItemCount` に残数を返します。同じ呼び出しを繰り返すと続きを移動します。
+   */
   targetCycleId: string
   /** 読み込み時点の planning graph revision です。 */
   expectedRevision: number
 }
+
+/** 1回の rollover で移動する Work Item link の上限です。 */
+export const CYCLE_ROLLOVER_BATCH_SIZE = 49
+
+/** 次の Cycle 作成 API の入力です。 */
+export type CreateNextCycleInput = {
+  /** 読み込み時点の planning graph revision です。 */
+  expectedRevision: number
+}
+
+/** 次の Cycle 作成 API の response です。 */
+export type CreateNextCycleResponse = {
+  /** Mutation 後の snapshot です。 */
+  planning: PlanningSnapshot
+  /** 作成した次の Cycle の ID です。 */
+  cycleId: string
+}
+
+/** Cycle の Work Item 一括追加・除外 API の入力です。 */
+export type CycleWorkItemsInput = {
+  /** `add` は Cycle に入れ、`remove` は Cycle から外します。 */
+  action: 'add' | 'remove'
+  /** 対象の Work Item です。{@link CYCLE_WORK_ITEMS_BATCH_LIMIT} 件までです。 */
+  workItems: Array<{
+    /** Work Item を所有する Team ID です。 */
+    teamId: string
+    /** Team 内の Work Item ID です。 */
+    workItemId: string
+  }>
+  /** 読み込み時点の planning graph revision です。 */
+  expectedRevision: number
+}
+
+/** Cycle の Work Item 一括追加・除外で1回に扱える件数です。 */
+export const CYCLE_WORK_ITEMS_BATCH_LIMIT = 49
 
 /** Planning mutation の共通 response です。 */
 export type PlanningMutationResponse = {
@@ -894,6 +960,8 @@ export type PlanningMutationResponse = {
   movedWorkItemIds: string[]
   /** Cycle rollover で元 Cycle に残した Work Item ID 一覧です。 */
   retainedWorkItemIds: string[]
+  /** Cycle rollover でまだ移動していない未完了 Work Item の件数です。0 なら元 Cycle は完了済みです。 */
+  remainingWorkItemCount?: number
 }
 
 /** Live graph から退避した archive 済み Planning entity の一覧用 summary です。 */
