@@ -1071,7 +1071,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const fileId = createMutationResourceId('file', auditContext, scopeKey)
     const versionId = createMutationResourceId('version', auditContext, scopeKey)
     const target = resolveAttachmentTarget(scope)
-    const objectKey = createFileObjectKey(scope.workspaceId, fileId, versionId, normalized.fileName)
+    const objectKey = createFileObjectKey(scope.workspaceId, fileId, versionId)
     const version = createStoredVersion(
       versionId,
       1,
@@ -1170,7 +1170,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       normalized,
       actor.memberKey,
       now,
-      createFileObjectKey(scope.workspaceId, current.fileId, versionId, normalized.fileName),
+      createFileObjectKey(scope.workspaceId, current.fileId, versionId),
       auditContext?.requestFingerprint,
     )
     const next: StoredFileItem = {
@@ -1212,7 +1212,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     if (version.objectVersionId && version.verifiedAt) {
       return { file: toFileAttachment(current, actor), version: toFileVersion(version) }
     }
-    const promotesReplacement = current.currentVersionId !== versionId
+    const promotesReplacement = current.currentVersionId !== versionId &&
+      version.number > requireStoredVersion(current, current.currentVersionId).number
     if (promotesReplacement && current.pendingApprovalCount !== 0) {
       throw new FileProofingError(
         409,
@@ -1241,9 +1242,10 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         : verified.scanStatus,
       verifiedAt: auditContext?.occurredAt ?? new Date().toISOString(),
     }
+    // 先に採番された version の upload が後から完了しても、新しい番号の current は戻しません。
     const staged = {
       ...replaceStoredVersion(current, stagedVersion),
-      currentVersionId: versionId,
+      ...(promotesReplacement ? { currentVersionId: versionId } : {}),
     }
     await this.putFileWithAudit(staged, current.revision, auditContext, {
       eventType: 'file.upload-completed',
@@ -2936,12 +2938,16 @@ function createStoredVersion(
   }
 }
 
-/** File body の非推測 object key を作成します。 */
+/**
+ * File body の非推測 object key を作成します。
+ *
+ * 表示名は DynamoDB と download 時の Content-Disposition が持つため key には含めません。
+ * 日本語などの長い名前で S3 の key 上限 (1,024 byte) を超えないようにするためです。
+ */
 function createFileObjectKey(
   workspaceId: string,
   fileId: string,
   versionId: string,
-  fileName: string,
 ) {
   return [
     'workspaces',
@@ -2949,7 +2955,6 @@ function createFileObjectKey(
     'files',
     encodeURIComponent(fileId),
     encodeURIComponent(versionId),
-    encodeURIComponent(fileName),
   ].join('/')
 }
 

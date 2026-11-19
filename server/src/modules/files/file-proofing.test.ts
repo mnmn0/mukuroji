@@ -1034,6 +1034,80 @@ describe('file proofing domain', () => {
     )).rejects.toMatchObject({ code: 'FileThreatDetected', status: 423 })
   })
 
+  test('keeps long Japanese file names out of the S3 object key', async () => {
+    const { client, objectClient } = createClient()
+    const fileName = `${'設計レビュー資料'.repeat(30)}.pdf`
+    const session = await client.createUpload(
+      scope,
+      manager,
+      { contentType: 'application/pdf', fileName, sizeBytes: 1024 },
+      createAuditContext('long-japanese-name'),
+    )
+    const objectKey = objectClient.lastObjectKey!
+
+    expect(session.file.name).toBe(fileName)
+    expect(session.version.fileName).toBe(fileName)
+    expect(objectKey).toBe(
+      `workspaces/${scope.workspaceId}/files/${session.file.id}/${session.version.id}`,
+    )
+    expect(new TextEncoder().encode(objectKey).byteLength).toBeLessThanOrEqual(1024)
+  })
+
+  test('keeps the highest-numbered version current when uploads complete out of order', async () => {
+    const { client, objectClient, session } = await createAvailableFile()
+    const older = await client.createVersionUpload(
+      scope,
+      manager,
+      session.file.id,
+      { contentType: 'image/png', fileName: 'review-v2.png', sizeBytes: 2048 },
+      createAuditContext('slow-v2'),
+    )
+    const olderObjectKey = objectClient.lastObjectKey!
+    const newer = await client.createVersionUpload(
+      scope,
+      manager,
+      session.file.id,
+      { contentType: 'image/png', fileName: 'review-v3.png', sizeBytes: 3072 },
+      createAuditContext('fast-v3'),
+    )
+    const newerObjectKey = objectClient.lastObjectKey!
+    expect(older.version.number).toBe(2)
+    expect(newer.version.number).toBe(3)
+    objectClient.objects.set(newerObjectKey, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-object-version-3',
+      sizeBytes: 3072,
+      scanStatus: 'available',
+    })
+    objectClient.objects.set(olderObjectKey, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-object-version-2',
+      sizeBytes: 2048,
+      scanStatus: 'available',
+    })
+
+    const newerCompleted = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      newer.version.id,
+      createAuditContext('complete-v3'),
+    )
+    expect(newerCompleted.file.currentVersion.id).toBe(newer.version.id)
+
+    const olderCompleted = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      older.version.id,
+      createAuditContext('complete-v2'),
+    )
+    expect(olderCompleted.version.id).toBe(older.version.id)
+    expect(olderCompleted.version.scanStatus).toBe('available')
+    expect(olderCompleted.file.currentVersion.id).toBe(newer.version.id)
+    expect(olderCompleted.file.versions.map((version) => version.number)).toEqual([3, 2, 1])
+  })
+
   test('does not promote a replacement session while the current version has an approval', async () => {
     const { client, objectClient, session } = await createAvailableFile()
     const replacement = await client.createVersionUpload(

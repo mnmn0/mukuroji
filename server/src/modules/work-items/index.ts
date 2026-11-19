@@ -48,6 +48,7 @@ export {
   normalizeWorkItemScheduleOperation,
   previewWorkItemScheduleChange,
   workItemScheduleInstantToLocalDate,
+  workItemScheduleLocalDateToStartInstant,
 } from './domain/work-item-schedule'
 export {
   WORK_ITEM_SCHEDULE_CASCADE_LIMIT,

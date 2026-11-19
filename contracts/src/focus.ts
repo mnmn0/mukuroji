@@ -213,6 +213,17 @@ export type FocusSignalWeightOverrides = {
   cycle?: number
 }
 
+/**
+ * Moment from which the `sla` window of an unfinished owned Work Item is measured.
+ *
+ * - `created`: the Work Item creation time (the behavior before #403).
+ * - `planned-start`: the start of the planned start date in the schedule calendar timezone. Items
+ *   without a planned start date fall back to `started`.
+ * - `started`: the start of the local date on which the Work Item first entered `started`.
+ *   Items that have not started carry no `sla` signal.
+ */
+export type FocusSlaAnchor = 'created' | 'planned-start' | 'started'
+
 /** Fully resolved settings used to rank and section Focus items. */
 export type FocusPolicySettings = {
   /** Effective weight for every signal category. */
@@ -223,6 +234,15 @@ export type FocusPolicySettings = {
   cycleDueSoonDays: number
   /** Number of elapsed hours before an unfinished owned Work Item breaches its active SLA. */
   slaHours: number
+  /** Whether the `sla` signal is projected at all. */
+  slaEnabled: boolean
+  /** Moment from which the SLA window is measured. */
+  slaAnchor: FocusSlaAnchor
+  /**
+   * Sorted, deduplicated Work Item Type IDs that receive the `sla` signal. Empty means every Type.
+   * Work Items without a stored Type use the built-in `default` Type ID.
+   */
+  slaWorkItemTypeIds: string[]
   /** Inclusive score threshold that places an actionable item in Now. */
   nowScoreThreshold: number
 }
@@ -237,6 +257,12 @@ export type FocusPolicyOverrides = {
   cycleDueSoonDays?: number
   /** Optional unfinished Work Item SLA window replacement in elapsed hours. */
   slaHours?: number
+  /** Optional replacement that turns the `sla` signal on or off. */
+  slaEnabled?: boolean
+  /** Optional replacement of the moment the SLA window is measured from. */
+  slaAnchor?: FocusSlaAnchor
+  /** Optional replacement of the Work Item Types that receive the `sla` signal; empty means every Type. */
+  slaWorkItemTypeIds?: string[]
   /** Optional Now-section score threshold replacement. */
   nowScoreThreshold?: number
 }
@@ -366,6 +392,46 @@ export type FocusQueueMetrics = {
   blocked: number
 }
 
+/** How close a health update deadline is for its update owner. */
+export type FocusUpdateDeadlineState = 'due-soon' | 'overdue'
+
+/** Project or Initiative whose health update the current viewer owns. */
+export type FocusUpdateDeadlineTarget =
+  | {
+      /** Identifies a directory Project target. */
+      type: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Directory Project ID. */
+      projectId: string
+    }
+  | {
+      /** Identifies a Planning Initiative target. */
+      type: 'initiative'
+      /** Planning entity ID of the Initiative. */
+      entityId: string
+    }
+
+/**
+ * Health update whose submission deadline is near or past for the current viewer, who is the
+ * update owner. It disappears once an update covering the deadline is published, because publishing
+ * moves the cadence to its next deadline.
+ */
+export type FocusUpdateDeadline = {
+  /** Stable identifier made from the target and the deadline it covers. */
+  id: string
+  /** Project or Initiative that expects the update. */
+  target: FocusUpdateDeadlineTarget
+  /** Display title of the target when the server can resolve it. */
+  title?: string
+  /** Whether the deadline is near (inside the cadence reminder window) or already past. */
+  state: FocusUpdateDeadlineState
+  /** ISO 8601 deadline of the current cadence occurrence. */
+  dueAt: string
+  /** Authorized application-relative link to the target's update page. */
+  deepLink: string
+}
+
 /** Policy scopes the current viewer may update from the Focus queue. */
 export type FocusPolicyCapabilities = {
   /** Whether the current viewer may replace their personal policy layer. */
@@ -384,6 +450,11 @@ export type FocusQueueResponse = {
   viewerMemberKey: string
   /** Canonical signal metrics independent from recipient queue inclusion rules. */
   metrics: FocusQueueMetrics
+  /**
+   * Health update deadlines owned by the viewer, overdue first and then by deadline. Absent only in
+   * responses from servers that predate the field.
+   */
+  updateDeadlines?: FocusUpdateDeadline[]
   /** Effective policies referenced by the returned items. */
   effectivePolicies: FocusEffectivePolicy[]
   /** Accessible stored Team overrides used by the policy editor. */

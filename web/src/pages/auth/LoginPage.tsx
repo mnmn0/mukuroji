@@ -1093,6 +1093,10 @@ function resolveChallengeErrorKey(error: unknown): MessageKey {
       return 'login.challenge.errorPasswordPolicy'
     }
 
+    if (error.code === 'AuthenticationChallengeRateLimited' || error.status === 429) {
+      return 'login.mfa.errorRateLimited'
+    }
+
     if (error.status === 400 || error.status === 401) {
       return 'login.challenge.errorExpired'
     }
@@ -1110,7 +1114,12 @@ function shouldShowChallengeRecovery(error: unknown) {
     return true
   }
 
-  if (error.code === 'InvalidNewPassword' || error.status === 400 || error.status === 401) {
+  if (
+    error.code === 'InvalidNewPassword' ||
+    error.status === 400 ||
+    error.status === 401 ||
+    error.status === 429
+  ) {
     return false
   }
 

@@ -14,10 +14,35 @@ Focus は「今も解消していない注意事項」を利用者ごとに並�
 | `approval` | Work Item approval summary | pending approval の判断・取消 |
 | `review-request` | reviewer projection | 現在 reviewer の判断完了・取消 |
 | `mention` | permission-filtered notification event | source の削除、または対象 Work Item の完了 |
-| `sla` | Work Item 作成時刻と effective policy | Work Item の完了、または SLA window 内への復帰 |
+| `sla` | effective policy の起点（既定は開始予定日）と SLA 時間 | Work Item の完了。起点の変更（開始予定日を先へ動かす）、対象 Type から外す、Team が SLA を無効にする、のいずれでも消える |
 | `cycle` | Planning Work Item link と cycle forecast | cycle 変更、または Work Item の完了 |
 
 各 signal は source ID/event ID、原因が実際に生じた日時、再評価時刻、存在する場合は source revision、解消条件、source を開ける現在権限を返します。priority、期限、approval は aggregate 全体の汎用更新時刻ではなく、それぞれの causal timestamp を使います。移行前の Work Item に field-specific timestamp がない場合だけ、無関係な後続編集で原因を新しく見せないよう `createdAt` へ保守的に fallback します。relation/dependency、review request、mention、cycle は source 自身の作成時刻・event ID・revision を保持します。画面はこの情報から「なぜ入ったか」と「何をすれば消えるか」を表示し、独自の順位計算は行いません。
+
+### `sla` の起点と対象
+
+WBS の Work Item は着手の数週間前に作られるため、`sla` は作成時刻ではなく policy の `slaAnchor` を起点に `slaHours` を数えます（#403）。
+
+| `slaAnchor` | 起点 | 起点がない Work Item |
+| --- | --- | --- |
+| `planned-start`（既定） | schedule の開始予定日（date-range / milestone の `startDate`）の0時、schedule の timezone | 開始予定日がなければ `started` と同じ |
+| `started` | `actualStartDate`（最初に `started` へ入った日）の0時 | 着手前は `sla` を出さない |
+| `created` | `createdAt`（#403 より前の挙動） | なし |
+
+- 開始予定日が先の Work Item や、開始予定日のない未着手の Work Item には、既定では `sla` が付きません。
+- `slaWorkItemTypeIds` に Type ID を並べると、その Type だけに `sla` を出します。空の配列はすべての Type です。Type を持たない古い Work Item は `default` として扱います。
+- `slaEnabled: false` で `sla` を出しません。Team policy に設定すると Team 単位で無効にでき、個人 policy でさらに上書きできます。
+- これらは他の設定と同じく product default → Team → 個人の順に疎な override で合成し、effective policy の `settings` と fingerprint に含めます。
+
+### 進捗報告の提出期限
+
+response の `updateDeadlines` は、Project / Initiative の health update で現在の利用者が update owner（cadence の `updateOwnerMemberKey`）になっていて、提出期限が近い、または過ぎている対象の一覧です。Work Item に結び付かないため、Focus item や section には入れず、queue とは別に返します。
+
+- `overdue`: 現在時刻が cadence の `nextDueAt` 以降
+- `due-soon`: `nextDueAt` から cadence の `reminderHoursBefore` 時間前以降
+- archive 済みの対象と cadence 未設定の対象は出しません。並びは `overdue` が先、次に期限順です。
+- 対象を現在読めない場合は出しません。Enterprise の利用者は `planning.read` の scope、それ以外は Planning API と同じく Project ACL（Initiative は entity の Team / Project scope）で判定し、Work Item の有無には依存しません。
+- 解消条件は update の提出です。提出すると cadence が次の期限へ進むため、一覧から消えます。リンクは Inbox の reminder と同じ `/planning/portfolio?...` です。
 
 response の `metrics.blocked` は個人 queue への採否とは分け、現在の利用者が参照できる全 active Work Item の実 relation/dependency から算出します。priority を blocker の代用にはしません。
 
@@ -27,7 +52,7 @@ response の `metrics.blocked` は個人 queue への採否とは分け、現在
 
 | `involvement` | 条件 | 投影する signal |
 | --- | --- | --- |
-| `owner` | 利用者が `assigneeUserId`（単一の責任者） | Work Item 自身の `urgent`・期限・`blocker`・`sla`・`cycle`、approval の集約、review request、mention |
+| `owner` | 利用者が `assigneeUserId`（単一の責任者） | Work Item 自身の `urgent`・期限・`blocker`・`sla`（policy の起点と対象 Type による）・`cycle`、approval の集約、review request、mention |
 | `contributor` | 責任者ではなく、`contributorAssignments` に member として入っている | `urgent`・期限・`blocker`・`cycle`、review request、mention。`sla` と approval の集約は責任者の応答義務なので出さない |
 | `related` | 責任者でも Contributor でもない | review request と mention だけ |
 
