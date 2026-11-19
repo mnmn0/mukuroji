@@ -25,6 +25,11 @@ export type ChecklistWorkItemDialogProps = {
   onSubmit: (input: ChecklistWorkItemInput) => Promise<void>
   /** Closes the dialog without creating anything. */
   onClose: () => void
+  /**
+   * Whether the Work Item already exists and only the link to the item is
+   * retried; the creation fields are then locked.
+   */
+  linkOnly?: boolean
 }
 
 /**
@@ -50,6 +55,7 @@ export function ChecklistWorkItemDialog({
   currentUserKey,
   defaultProjectId,
   itemText,
+  linkOnly = false,
   onClose,
   onSubmit,
   t,
@@ -114,7 +120,7 @@ export function ChecklistWorkItemDialog({
     event.preventDefault()
     if (isSubmitting) return
     const trimmedTitle = title.trim()
-    if (!selectedOption || !trimmedTitle || !assigneeUserId) {
+    if (!linkOnly && (!selectedOption || !trimmedTitle || !assigneeUserId)) {
       setErrorMessage(t('documents.checklistWorkItem.required'))
       return
     }
@@ -123,8 +129,8 @@ export function ChecklistWorkItemDialog({
     try {
       await onSubmit({
         assigneeUserId,
-        projectId: selectedOption.projectId,
-        teamId: selectedOption.teamId,
+        projectId: selectedOption?.projectId ?? '',
+        teamId: selectedOption?.teamId ?? '',
         title: trimmedTitle,
         ...(dueDate ? { dueDate } : {}),
       })
@@ -167,7 +173,15 @@ export function ChecklistWorkItemDialog({
           {t('documents.checklistWorkItem.description')}
         </p>
         <form className="mt-5 grid gap-4" onSubmit={(event) => void handleSubmit(event)}>
-          <fieldset className="contents" disabled={isSubmitting}>
+          {linkOnly ? (
+            <p
+              className="m-0 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 text-sm font-semibold text-[var(--workbench-text)]"
+              role="status"
+            >
+              {t('documents.checklistWorkItem.linkOnly')}
+            </p>
+          ) : null}
+          <fieldset className="contents" disabled={isSubmitting || linkOnly}>
             <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
               {t('documents.checklistWorkItem.workItemTitle')}
               <input
@@ -242,6 +256,8 @@ export function ChecklistWorkItemDialog({
                 value={dueDate}
               />
             </label>
+          </fieldset>
+          <fieldset className="contents" disabled={isSubmitting}>
             {errorMessage ? (
               <p
                 className="m-0 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-800"
@@ -261,7 +277,9 @@ export function ChecklistWorkItemDialog({
               <button className="workbench-button-primary min-h-10 px-4" type="submit">
                 {isSubmitting
                   ? t('documents.checklistWorkItem.submitting')
-                  : t('documents.checklistWorkItem.submit')}
+                  : linkOnly
+                    ? t('documents.checklistWorkItem.retryLink')
+                    : t('documents.checklistWorkItem.submit')}
               </button>
             </div>
           </fieldset>

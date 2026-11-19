@@ -1571,7 +1571,9 @@ export function DocumentScreen({
   const [isPrinting, setIsPrinting] = useState(false)
   const [checklistWorkItemTarget, setChecklistWorkItemTarget] =
     useState<ChecklistWorkItemTarget>()
-  const createdChecklistWorkItemsRef = useRef(new Map<string, string>())
+  // Work Items created for an item whose link failed, keyed by source item.
+  const [unlinkedChecklistWorkItems, setUnlinkedChecklistWorkItems] =
+    useState<Readonly<Record<string, string>>>({})
   const selectedDocument = data.selectedDocument
   const printableDocument =
     selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template'
@@ -1729,11 +1731,10 @@ export function DocumentScreen({
       throw new Error(t('documents.checklistWorkItem.error'))
     }
     const flushedRevision = await requireSavedDraft()
-    const key = `${target.documentId}\0${target.blockId}\0${target.itemId}`
+    const key = createChecklistWorkItemTargetKey(target)
     const workItemId =
-      createdChecklistWorkItemsRef.current.get(key) ??
+      unlinkedChecklistWorkItems[key] ??
       (await actions.createWorkItem(target, input))
-    createdChecklistWorkItemsRef.current.set(key, workItemId)
     try {
       await actions.applyOperations(
         selectedDocument.id,
@@ -1753,9 +1754,18 @@ export function DocumentScreen({
         }],
       )
     } catch {
+      // Lock the dialog to a link-only retry so changed values are never
+      // silently dropped in favor of the Work Item that already exists.
+      setUnlinkedChecklistWorkItems((current) => ({
+        ...current,
+        [key]: workItemId,
+      }))
       throw new Error(t('documents.checklistWorkItem.linkError'))
     }
-    createdChecklistWorkItemsRef.current.delete(key)
+    setUnlinkedChecklistWorkItems((current) => {
+      const { [key]: _linked, ...rest } = current
+      return rest
+    })
     setChecklistWorkItemTarget(undefined)
   }
 
@@ -2308,6 +2318,11 @@ export function DocumentScreen({
               : undefined
           }
           itemText={checklistWorkItemTarget.text}
+          linkOnly={
+            unlinkedChecklistWorkItems[
+              createChecklistWorkItemTargetKey(checklistWorkItemTarget)
+            ] !== undefined
+          }
           t={t}
           teams={data.teams}
           onClose={() => setChecklistWorkItemTarget(undefined)}
@@ -2362,6 +2377,16 @@ type ChecklistWorkItemTarget = {
   itemId: string
   /** Item text used as the initial Work Item title. */
   text: string
+}
+
+/**
+ * Builds the key that identifies one checklist item across Documents.
+ *
+ * @param target - Checklist item the dialog is open for.
+ * @returns Key unique to the Document, block, and item.
+ */
+function createChecklistWorkItemTargetKey(target: ChecklistWorkItemTarget) {
+  return JSON.stringify([target.documentId, target.blockId, target.itemId])
 }
 
 /**
