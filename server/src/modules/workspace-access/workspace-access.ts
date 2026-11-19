@@ -457,18 +457,20 @@ export interface WorkspaceAccessClient {
   ): Promise<WorkspaceInvitation>
   /** 指定 invitation を取得します。 */
   getInvitation(workspaceId: string, invitationId: string): Promise<WorkspaceInvitation | undefined>
-  /** password challenge 前に invitation acceptance lock を取得します。 */
+  /**
+   * password challenge 前に invitation acceptance lock を取得します。
+   *
+   * caller はまだ challenge session を証明していないため、lock は監査 event を書きません。
+   */
   acquireInvitationAcceptanceLock(
     workspaceId: string,
     invitationId: string,
-    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation | undefined>
-  /** password challenge 終了後に invitation acceptance lock を解除します。 */
+  /** password challenge 終了後に invitation acceptance lock を監査 event なしで解除します。 */
   releaseInvitationAcceptanceLock(
     workspaceId: string,
     invitationId: string,
     expectedVersion: number,
-    auditContext?: MutationAuditContext,
   ): Promise<WorkspaceInvitation>
   /** Cognito mutation の開始を stable identity pair とともに write-ahead 記録します。 */
   markInvitationIdentityMutationStarted(
@@ -925,11 +927,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return response.Item ? toWorkspaceInvitation(response.Item, this.clock()) : undefined
   }
 
-  /** password challenge 前に invitation acceptance lock を取得します。 */
+  /**
+   * password challenge 前に invitation acceptance lock を取得します。
+   *
+   * caller はまだ challenge session を証明していないため、lock は監査 event を書きません。
+   */
   async acquireInvitationAcceptanceLock(
     workspaceId: string,
     invitationId: string,
-    auditContext?: MutationAuditContext,
   ) {
     const invitation = await this.getInvitation(workspaceId, invitationId)
 
@@ -965,19 +970,19 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         ).toISOString(),
       },
       ['pending', 'provisioning', 'delivery-failed'],
-      auditContext,
-      'invitation.acceptance-lock-acquired',
-      'acceptance-lock-acquired',
-      0,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'unaudited',
     )
   }
 
-  /** password challenge 終了後に invitation acceptance lock を解除します。 */
+  /** password challenge 終了後に invitation acceptance lock を監査 event なしで解除します。 */
   async releaseInvitationAcceptanceLock(
     workspaceId: string,
     invitationId: string,
     expectedVersion: number,
-    auditContext?: MutationAuditContext,
   ) {
     const invitation = await this.requireInvitation(workspaceId, invitationId)
 
@@ -991,10 +996,11 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       expectedVersion,
       { acceptanceLockExpiresAt: undefined },
       ['pending', 'provisioning', 'delivery-failed'],
-      auditContext,
-      'invitation.acceptance-lock-released',
-      'acceptance-lock-released',
-      3,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'unaudited',
     )
   }
 
@@ -3188,6 +3194,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     eventType = 'invitation.updated',
     action = 'updated',
     sequence = 0,
+    auditMode: 'audited' | 'unaudited' = 'audited',
   ) {
     const nextInvitation = applyInvitationChanges(invitation, changes, this.clock())
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
@@ -3212,15 +3219,18 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       ...(allowedStatuses?.length ? { ExpressionAttributeNames: { '#status': 'status' } } : {}),
       ExpressionAttributeValues: expressionAttributeValues,
     }
-    const auditPut = this.createInvitationAuditPut(
-      normalizedWorkspaceId,
-      invitation,
-      nextInvitation,
-      auditContext,
-      eventType,
-      action,
-      sequence,
-    )
+    // Only the unauthenticated acceptance lock opts out; every other invitation change is audited.
+    const auditPut = auditMode === 'unaudited'
+      ? undefined
+      : this.createInvitationAuditPut(
+          normalizedWorkspaceId,
+          invitation,
+          nextInvitation,
+          auditContext,
+          eventType,
+          action,
+          sequence,
+        )
 
     try {
       if (auditPut) {
