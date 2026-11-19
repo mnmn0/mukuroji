@@ -2054,7 +2054,8 @@ export function TaskPage() {
           />
           <ProjectRaidLogSection
             accessToken={accessToken}
-            canEdit={canMutateContent && canMutateProjectTasks}
+            canEdit={canMutateProjectTasks}
+            canMutate={canMutateContent}
             enabled={Boolean(user && !currentUserError)}
             projectId={projectId}
             t={t}

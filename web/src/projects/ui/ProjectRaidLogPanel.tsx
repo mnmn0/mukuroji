@@ -441,7 +441,13 @@ export function ProjectRaidLogPanel({
                       {overdue ? ` ${t('projects.raidLog.overdue')}` : null}
                     </p>
                   ) : null}
-                  {entry.response ? <p className="whitespace-pre-wrap text-sm text-fg-505967">{entry.response}</p> : null}
+                  {entry.description ? <p className="whitespace-pre-wrap text-sm text-fg-1c1d1f">{entry.description}</p> : null}
+                  {entry.response ? (
+                    <p className="whitespace-pre-wrap text-sm text-fg-505967">
+                      <span className="font-semibold">{t('projects.raidLog.field.response')}: </span>
+                      {entry.response}
+                    </p>
+                  ) : null}
                 </li>
               )
             })}

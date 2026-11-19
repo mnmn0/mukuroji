@@ -116,5 +116,8 @@ describe('parseProjectRaidLogResponse', () => {
       .toEqual({ teamId: 't', projectId: 'p', entries: [entry()] })
     expect(parseProjectRaidLogResponse({ teamId: 't', projectId: 'p', entries: [{ id: 'x' }] })).toBeUndefined()
     expect(parseProjectRaidEntryResponse({ teamId: 't', projectId: 'p', entry: entry() })?.entry).toEqual(entry())
+    expect(parseProjectRaidLogResponse({ teamId: 't', projectId: 'p', entries: [], viewer: { canEdit: false } })?.viewer)
+      .toEqual({ canEdit: false })
+    expect(parseProjectRaidLogResponse({ teamId: 't', projectId: 'p', entries: [], viewer: { canEdit: 'yes' } })).toBeUndefined()
   })
 })

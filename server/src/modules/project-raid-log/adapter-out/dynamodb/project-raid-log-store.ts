@@ -14,6 +14,7 @@ import { createAuditFieldChanges, createMutationAuditEventPut, type MutationAudi
 import { ProjectDataError } from '../../../directory'
 import type {
   CreateProjectRaidEntryStoreInput,
+  ProjectRaidEntryRecord,
   ProjectRaidLogScope,
   ProjectRaidLogStore as LogStore,
   UpdateProjectRaidEntryStoreInput,
@@ -115,11 +116,15 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
    *
    * @param scope - Team and Project.
    * @param entryId - Entry ID.
-   * @returns The validated entry, or `null`.
+   * @returns The validated entry and its last update receipt, or `null`.
    */
-  async get(scope: ProjectRaidLogScope, entryId: string): Promise<ProjectRaidEntry | null> {
+  async get(scope: ProjectRaidLogScope, entryId: string): Promise<ProjectRaidEntryRecord | null> {
     const row = await this.readRow(scope, entryId)
-    return row ? parseStoredEntry(row, scope) : null
+    if (!row) return null
+    const entry = parseStoredEntry(row, scope)
+    const receipt = row.lastUpdateReceipt
+    if (receipt !== undefined && typeof receipt !== 'string') throw corruptLog()
+    return { entry, ...(receipt === undefined ? {} : { lastUpdateReceipt: receipt }) }
   }
 
   /**
@@ -236,7 +241,12 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
           {
             Put: {
               TableName: this.tableName,
-              Item: { ...rowIdentity(input, input.next.id), creationFingerprint, ...input.next },
+              Item: {
+                ...rowIdentity(input, input.next.id),
+                creationFingerprint,
+                lastUpdateReceipt: input.updateReceipt,
+                ...input.next,
+              },
               ConditionExpression: '#type = :type AND #revision = :revision',
               ExpressionAttributeNames: { '#type': 'entryType', '#revision': 'revision' },
               ExpressionAttributeValues: { ':type': ENTRY_TYPE, ':revision': input.previous.revision },
@@ -273,8 +283,8 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
 
 /** Isolated store for route and application tests. */
 export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
-  /** Entries and their creation fingerprints keyed by Workspace, Team, Project, and entry. */
-  private readonly rows = new Map<string, { entry: ProjectRaidEntry; creationFingerprint: string }>()
+  /** Entries and their creation and update receipts keyed by Workspace, Team, Project, and entry. */
+  private readonly rows = new Map<string, { entry: ProjectRaidEntry; creationFingerprint: string; lastUpdateReceipt?: string }>()
 
   /**
    * Reads copies of every entry of a Project log.
@@ -294,10 +304,15 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
    *
    * @param scope - Team and Project.
    * @param entryId - Entry ID.
-   * @returns The entry, or `null`.
+   * @returns The entry and its last update receipt, or `null`.
    */
-  async get(scope: ProjectRaidLogScope, entryId: string): Promise<ProjectRaidEntry | null> {
-    return structuredClone(this.rows.get(memoryKey(scope, entryId))?.entry ?? null)
+  async get(scope: ProjectRaidLogScope, entryId: string): Promise<ProjectRaidEntryRecord | null> {
+    const row = this.rows.get(memoryKey(scope, entryId))
+    if (!row) return null
+    return {
+      entry: structuredClone(row.entry),
+      ...(row.lastUpdateReceipt === undefined ? {} : { lastUpdateReceipt: row.lastUpdateReceipt }),
+    }
   }
 
   /**
@@ -334,7 +349,11 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
     if (!existing || existing.entry.revision !== input.previous.revision) {
       throw new ProjectDataError(409, 'ProjectRaidEntryConflict', 'The log entry changed. Reload and try again.')
     }
-    this.rows.set(key, { entry: structuredClone(input.next), creationFingerprint: existing.creationFingerprint })
+    this.rows.set(key, {
+      entry: structuredClone(input.next),
+      creationFingerprint: existing.creationFingerprint,
+      lastUpdateReceipt: input.updateReceipt,
+    })
     return input.next
   }
 }

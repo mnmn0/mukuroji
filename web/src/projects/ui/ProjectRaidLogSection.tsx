@@ -1,6 +1,6 @@
 import type { ProjectRaidEntry, ProjectRaidEntryInput } from '@mukuroji/contracts'
-import { useCallback } from 'react'
-import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
+import { useCallback, useRef } from 'react'
+import { createMutationRequestContext, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProjectDirectoryApiError } from '../api/errors'
 import { createProjectRaidEntry, updateProjectRaidEntry } from '../api/raidLog'
@@ -17,7 +17,9 @@ export type ProjectRaidLogSectionProps = {
   projectId: string
   /** Whether loading is allowed for the current session. */
   enabled: boolean
-  /** Whether the viewer may add and change entries; the server checks again. */
+  /** Whether this session may change content at all, for example while online. */
+  canMutate: boolean
+  /** Fallback edit permission used until the server states the viewer's capabilities. */
   canEdit: boolean
   /** Translator for every label. */
   t: (key: MessageKey) => string
@@ -41,12 +43,27 @@ function toLocalDate(date: Date) {
  * @param props - Session, Project identity, and permission.
  * @returns The panel, or nothing while the owning Team is unknown.
  */
-export function ProjectRaidLogSection({ accessToken, teamId, projectId, enabled, canEdit, t }: ProjectRaidLogSectionProps) {
+export function ProjectRaidLogSection({
+  accessToken,
+  teamId,
+  projectId,
+  enabled,
+  canMutate,
+  canEdit,
+  t,
+}: ProjectRaidLogSectionProps) {
   const log = useProjectRaidLog(accessToken, teamId, projectId, enabled)
   const { mutate } = log
+  // A failed save keeps its request context, so trying the same save again reuses its
+  // Idempotency-Key and the server returns the result of an attempt whose response was lost.
+  const pendingSave = useRef<{ fingerprint: string; context: MutationRequestContext }>(undefined)
   const save = useCallback(async (entry: ProjectRaidEntry | undefined, input: ProjectRaidEntryInput) => {
     if (!accessToken || !teamId) return
-    const context = createMutationRequestContext()
+    const fingerprint = JSON.stringify([teamId, projectId, entry?.id ?? null, entry?.revision ?? null, input])
+    if (pendingSave.current?.fingerprint !== fingerprint) {
+      pendingSave.current = { fingerprint, context: createMutationRequestContext() }
+    }
+    const { context } = pendingSave.current
     try {
       if (entry) {
         await updateProjectRaidEntry(accessToken, teamId, projectId, entry.id, entry.revision, input, context)
@@ -55,9 +72,14 @@ export function ProjectRaidLogSection({ accessToken, teamId, projectId, enabled,
       }
     } catch (error) {
       // A conflict means the list is stale, so the latest entries are loaded for the next try.
-      if (error instanceof ProjectDirectoryApiError && error.status === 409) void mutate()
+      if (error instanceof ProjectDirectoryApiError && error.status < 500) {
+        // The server answered, so this attempt is settled and a later save is a new request.
+        pendingSave.current = undefined
+        if (error.status === 409) void mutate()
+      }
       throw error
     }
+    pendingSave.current = undefined
     await mutate()
   }, [accessToken, mutate, projectId, teamId])
 
@@ -65,7 +87,7 @@ export function ProjectRaidLogSection({ accessToken, teamId, projectId, enabled,
   return (
     <ProjectRaidLogPanel
       key={JSON.stringify([teamId, projectId])}
-      canEdit={canEdit}
+      canEdit={canMutate && (log.data?.viewer?.canEdit ?? canEdit)}
       entries={log.data?.entries}
       hasLoadError={Boolean(log.error)}
       isLoading={log.isLoading}

@@ -55,7 +55,7 @@ test('creates, edits, closes, and lists Project log entries', async () => {
 
   const empty = await request(path)
   expect(empty.status).toBe(200)
-  expect(await empty.json()).toEqual({ teamId: 'core-team', projectId, entries: [] })
+  expect(await empty.json()).toEqual({ teamId: 'core-team', projectId, entries: [], viewer: { canEdit: true } })
 
   const created = await request(`${path}/entries`, 'POST', {
     entry: { kind: 'risk', title: ' Vendor delay ', probability: 4, impact: 4, reviewDueDate: '2026-12-01', status: 'open' },
@@ -75,12 +75,17 @@ test('creates, edits, closes, and lists Project log entries', async () => {
   }, 'create-1')
   expect(reused.status).toBe(409)
 
-  const closed = await request(`${path}/entries/${createdEntry.id}`, 'PUT', {
+  const closeBody = {
     expectedRevision: 1,
     entry: { kind: 'risk', title: 'Vendor delay', probability: 2, impact: 4, response: 'Second vendor signed', status: 'closed' },
-  })
+  }
+  const closed = await request(`${path}/entries/${createdEntry.id}`, 'PUT', closeBody, 'close-1')
   expect(closed.status).toBe(200)
   const closedEntry = (await closed.json() as ProjectRaidEntryResponse).entry
+
+  const closeRetried = await request(`${path}/entries/${createdEntry.id}`, 'PUT', closeBody, 'close-1')
+  expect(closeRetried.status).toBe(200)
+  expect((await closeRetried.json() as ProjectRaidEntryResponse).entry).toEqual(closedEntry)
   expect(closedEntry).toMatchObject({ revision: 2, status: 'closed', response: 'Second vendor signed' })
   expect(closedEntry.reviewDueDate).toBeUndefined()
   expect(typeof closedEntry.closedAt).toBe('string')
@@ -126,7 +131,9 @@ test('answers 404 for a Project outside the Team', async () => {
 test('lets a Project viewer read the log but not change it', async () => {
   configureFakeProjectClients(true, { projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
   const path = '/api/teams/core-team/projects/refero/raid-log'
-  expect((await request(path)).status).toBe(200)
+  const read = await request(path)
+  expect(read.status).toBe(200)
+  expect(await read.json()).toMatchObject({ viewer: { canEdit: false } })
   const response = await request(`${path}/entries`, 'POST', {
     entry: { kind: 'issue', title: 'A', impact: 3, status: 'open' },
   })

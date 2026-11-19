@@ -42,7 +42,17 @@ export type UpdateProjectRaidEntryStoreInput<TCallerCheck, TAudit> = ProjectRaid
     previous: ProjectRaidEntry
     /** Entry to store. */
     next: ProjectRaidEntry
+    /** Receipt of this update request, stored with the entry so a retried request is recognized. */
+    updateReceipt: string
   }
+
+/** One stored entry with the receipt of the update that produced its current revision. */
+export type ProjectRaidEntryRecord = {
+  /** The entry. */
+  entry: ProjectRaidEntry
+  /** Receipt of the update that produced this revision; absent until the first update. */
+  lastUpdateReceipt?: string
+}
 
 /** Persistence port of Project risk, issue, and change request logs. */
 export type ProjectRaidLogStore<TCallerCheck, TAudit> = {
@@ -58,9 +68,9 @@ export type ProjectRaidLogStore<TCallerCheck, TAudit> = {
    *
    * @param scope - Team and Project.
    * @param entryId - Entry ID.
-   * @returns The entry, or `null` when it does not exist.
+   * @returns The entry and its last update receipt, or `null` when it does not exist.
    */
-  get(scope: ProjectRaidLogScope, entryId: string): Promise<ProjectRaidEntry | null>
+  get(scope: ProjectRaidLogScope, entryId: string): Promise<ProjectRaidEntryRecord | null>
   /**
    * Adds an entry, refusing it when the log is full.
    *
@@ -137,8 +147,8 @@ export async function createProjectRaidEntryUseCase<TCallerCheck, TAudit>(
  * @param scope - Authorized Team and Project.
  * @param entryId - Entry to change.
  * @param body - Untrusted request body.
- * @param mutation - Mutation time, caller fences, and audit context.
- * @returns The stored entry.
+ * @param mutation - Mutation time, caller fences, audit context, and the request's update receipt.
+ * @returns The stored entry, or the current entry when this same request was already applied.
  * @throws ProjectDataError 400 for an invalid body, 404 for an unknown entry, and 409 for a stale revision.
  */
 export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
@@ -146,16 +156,24 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   scope: ProjectRaidLogScope,
   entryId: string,
   body: unknown,
-  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit>,
+  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & { updateReceipt: string },
 ): Promise<ProjectRaidEntryResponse> {
   const expectedRevision = isRecord(body) ? body.expectedRevision : undefined
   if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
     throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'expectedRevision must be a positive integer.')
   }
   const input = readEntryInput(isRecord(body) ? body.entry : undefined)
-  const previous = await store.get(scope, entryId)
-  if (!previous) {
+  const record = await store.get(scope, entryId)
+  if (!record) {
     throw new ProjectDataError(404, 'ProjectRaidEntryNotFound', 'The log entry was not found.')
+  }
+  const previous = record.entry
+  if (
+    previous.revision === expectedRevision + 1 &&
+    record.lastUpdateReceipt === mutation.updateReceipt
+  ) {
+    // The same request already produced the current revision, and only its response was lost.
+    return { teamId: scope.teamId, projectId: scope.projectId, entry: previous }
   }
   if (previous.revision !== expectedRevision) {
     throw new ProjectDataError(409, 'ProjectRaidEntryConflict', 'The log entry changed. Reload and try again.')

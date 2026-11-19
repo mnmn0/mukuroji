@@ -73,3 +73,11 @@ describe('ProjectRaidLogPanel', () => {
     expect(render([])).toContain('まだ登録はありません。')
   })
 })
+
+describe('ProjectRaidLogPanel entry details', () => {
+  test('shows the description and response to readers', () => {
+    const markup = render([entry({ description: '主要部品の納期が未確定', response: '代替ベンダーと交渉' })], false)
+    expect(markup).toContain('主要部品の納期が未確定')
+    expect(markup).toContain('代替ベンダーと交渉')
+  })
+})

@@ -112,6 +112,14 @@ export type ProjectRaidLogResponse = {
   projectId: string
   /** Entries, newest first. */
   entries: ProjectRaidEntry[]
+  /** What the requesting member may do, decided by the server from the effective permissions. */
+  viewer?: ProjectRaidLogViewerCapabilities
+}
+
+/** Project log actions the requesting member may take. */
+export type ProjectRaidLogViewerCapabilities = {
+  /** Whether the member may add, edit, close, and reopen entries. */
+  canEdit: boolean
 }
 
 /** Response of the create and update endpoints. */
@@ -377,7 +385,14 @@ export function parseProjectRaidLogResponse(value: unknown): ProjectRaidLogRespo
     if (!entry) return undefined
     entries.push(entry)
   }
-  return { teamId: value.teamId, projectId: value.projectId, entries }
+  const { viewer } = value
+  if (viewer !== undefined && (!isRecord(viewer) || typeof viewer.canEdit !== 'boolean')) return undefined
+  return {
+    teamId: value.teamId,
+    projectId: value.projectId,
+    entries,
+    ...(isRecord(viewer) && typeof viewer.canEdit === 'boolean' ? { viewer: { canEdit: viewer.canEdit } } : {}),
+  }
 }
 
 /**

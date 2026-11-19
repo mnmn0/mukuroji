@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { ProjectRaidLogResponse } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
 import { ProjectDataError } from '../../modules/directory'
 import {
@@ -11,7 +12,9 @@ import { readBearerAccessToken, readJson } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
   canAccessAssignedProject,
+  canWorkspaceBusinessWrite,
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   requireTeamPermission,
   requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
@@ -40,10 +43,14 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessRead(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       requireProjectAccess(principal, context, projectId, 'viewer')
-      return c.json(await readProjectRaidLogUseCase(
+      const log = await readProjectRaidLogUseCase(
         workItemDependencies.projectRaidLogs,
         { workspaceId: principal.directoryId, teamId, projectId },
-      ))
+      )
+      return c.json({
+        ...log,
+        viewer: { canEdit: canEditProjectRaidLog(principal, context, teamId, projectId) },
+      } satisfies ProjectRaidLogResponse)
     } catch (error) {
       return toProjectRaidLogErrorResponse(c, error)
     }
@@ -92,6 +99,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       requireProjectAccess(principal, context, projectId, 'member')
       const body = await readJson<unknown>(c.req)
+      const auditContext = createApiMutationContext(c, principal, body)
       const response = await updateProjectRaidEntryUseCase(
         workItemDependencies.projectRaidLogs,
         { workspaceId: principal.directoryId, teamId, projectId },
@@ -100,7 +108,8 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         {
           now: new Date().toISOString(),
           callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
-          auditContext: createApiMutationContext(c, principal, body),
+          auditContext,
+          updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
         },
       )
       return c.json(response)
@@ -175,6 +184,49 @@ async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: 
     ),
     ...await projectDirectory.createActiveReferenceConditionChecks(principal.directoryId, teamId, projectId),
   ]
+}
+
+/**
+ * Derives the receipt of an update request, so a retry of the same request with the same
+ * Idempotency-Key is recognized after its first attempt committed.
+ *
+ * @param entryId - Entry being updated.
+ * @param actorId - Requesting actor.
+ * @param idempotencyKeyHash - Hash of the request's idempotency key.
+ * @param requestFingerprint - Fingerprint of the request method, path, and body.
+ * @returns A hexadecimal receipt.
+ */
+function createUpdateReceipt(entryId: string, actorId: string, idempotencyKeyHash: string, requestFingerprint: string) {
+  return createHash('sha256')
+    .update(JSON.stringify(['project-raid-entry-update', entryId, actorId, idempotencyKeyHash, requestFingerprint]))
+    .digest('hex')
+}
+
+/**
+ * Tells whether the principal may change a Project log, with the same rules the change
+ * endpoints apply: a writable Workspace session, member access to the Project, and, for an
+ * Enterprise principal, `projects.write` on the Project.
+ *
+ * @param principal - Authenticated principal.
+ * @param context - Team permission context.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns Whether the add and edit controls should be offered.
+ */
+function canEditProjectRaidLog(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  teamId: string,
+  projectId: string,
+) {
+  return canWorkspaceBusinessWrite(principal) &&
+    canAccessAssignedProject(principal, context, projectId, 'member') &&
+    (principal.enterprisePermissions === undefined || hasEnterprisePermissionAtResource(principal, 'projects.write', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    }))
 }
 
 /**
