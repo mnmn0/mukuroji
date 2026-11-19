@@ -412,6 +412,221 @@ describe('capacity planning mutations', () => {
     expect(assignment.projectId).toBe('project-a')
   })
 
+  test('changes a resource request and re-derives its fill status', async () => {
+    const service = new CapacityPlanningService(
+      new InMemoryCapacityPlanningRepository(),
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { now: () => new Date('2026-08-01T00:00:00.000Z'), createId: () => 'generated-id' },
+    )
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    })
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      title: 'Release support',
+      role: 'QA',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      requestedMinutes: 960,
+      confidential: false,
+      expectedTeamRevision: 1,
+      actorMemberId: 'member-1',
+    })
+    await service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+      confidential: false,
+      status: 'tentative',
+      expectedTeamRevision: 2,
+      actorMemberId: 'member-1',
+    })
+
+    await expect(service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      title: 'Stale',
+      expectedRevision: 1,
+      expectedTeamRevision: 3,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ code: 'ResourceRequestRevisionConflict', status: 409 })
+
+    const updated = await service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      title: '  Release hardening  ',
+      role: '',
+      skillIds: ['qa', 'qa', 'release'],
+      toDate: '2026-08-04',
+      requestedMinutes: 480,
+      expectedRevision: 2,
+      expectedTeamRevision: 3,
+      actorMemberId: 'member-1',
+    })
+
+    expect(updated).toMatchObject({
+      title: 'Release hardening',
+      skillIds: ['qa', 'release'],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-04',
+      requestedMinutes: 480,
+      status: 'filled',
+      revision: 4,
+    })
+    expect(updated.role).toBeUndefined()
+    await expect(service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      fromDate: '2026-08-05',
+      expectedRevision: 4,
+      expectedTeamRevision: 4,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ status: 400 })
+  })
+
+  test('cancels a resource request only after its assignments are canceled and keeps it canceled', async () => {
+    let sequence = 0
+    const service = new CapacityPlanningService(
+      new InMemoryCapacityPlanningRepository(),
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { now: () => new Date('2026-08-01T00:00:00.000Z'), createId: () => `generated-${++sequence}` },
+    )
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    })
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      title: 'Release support',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      requestedMinutes: 480,
+      confidential: false,
+      expectedTeamRevision: 1,
+      actorMemberId: 'member-1',
+    })
+    const assignment = await service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+      confidential: false,
+      status: 'confirmed',
+      expectedTeamRevision: 2,
+      actorMemberId: 'member-1',
+    })
+
+    await expect(service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      status: 'canceled',
+      expectedRevision: 2,
+      expectedTeamRevision: 3,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ code: 'ResourceRequestHasActiveAssignments', status: 409 })
+
+    await service.updateAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignmentId: assignment.id,
+      status: 'canceled',
+      expectedRevision: 1,
+      expectedTeamRevision: 3,
+      actorMemberId: 'member-1',
+    })
+    const canceled = await service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      status: 'canceled',
+      expectedRevision: 3,
+      expectedTeamRevision: 4,
+      actorMemberId: 'member-1',
+    })
+    expect(canceled).toMatchObject({ status: 'canceled', revision: 4 })
+
+    await expect(service.updateAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignmentId: assignment.id,
+      status: 'tentative',
+      expectedRevision: 2,
+      expectedTeamRevision: 5,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ code: 'ResourceRequestCanceled', status: 409 })
+    await expect(service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+      confidential: false,
+      status: 'tentative',
+      expectedTeamRevision: 5,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ code: 'ResourceRequestCanceled', status: 409 })
+    await expect(service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      title: 'Reopened',
+      expectedRevision: 4,
+      expectedTeamRevision: 5,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ code: 'ResourceRequestCanceled', status: 409 })
+
+    const snapshot = await service.getSnapshot({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      canViewConfidential: true,
+    })
+    expect(snapshot.requests[0]?.status).toBe('canceled')
+    expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
+  })
+
   test('rejects a state payload that would exceed the DynamoDB item safety budget', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     const service = new CapacityPlanningService(repository, {
